@@ -17,8 +17,8 @@ $ git config bay.check "true"
 ```console
 $ cd "$(git bay co fix-readme --no-workitem)"
 $ git bay status
-BAY   WORKITEM    STATE   AGE
-bay1  fix-readme  leased  {{age:/\d+[smhd]\s*/}}← you
+BAY   WORKITEM    STATE   AGE  IDLE
+bay1  fix-readme  leased  {{age:/\d+[smhd]\s+/}}{{idle:/\d+[smhd]\s*/}}← you
 ```
 
 ## Work with plain git, push to submit

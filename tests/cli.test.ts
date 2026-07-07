@@ -79,8 +79,8 @@ describe("git bay CLI — v0.1 happy path (process-level)", () => {
     expect(bayPath).toContain(".bay")
 
     const status = await must(["git", "bay", "status"], bayPath, env)
-    expect(status.stdout).toMatch(/BAY\s+WORKITEM\s+STATE\s+AGE/)
-    expect(status.stdout).toMatch(/bay1\s+fix-readme\s+leased\s+\d+s\s+← you/)
+    expect(status.stdout).toMatch(/BAY\s+WORKITEM\s+STATE\s+AGE\s+IDLE/)
+    expect(status.stdout).toMatch(/bay1\s+fix-readme\s+leased\s+\d+s\s+\d+s\s+← you/)
 
     await writeFile(join(bayPath, "README.md"), "hello\n", "utf8")
     await must(["git", "-C", bayPath, "add", "README.md"], bayPath, env)
@@ -186,6 +186,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became ch
     await chmod(shim, 0o755)
     env = {
       PATH: `${shimDir}:${process.env.PATH}`,
+      NO_COLOR: "1", // plain help/error text for assertions
       BAY_ACTOR: "tester",
       GIT_AUTHOR_NAME: "t",
       GIT_AUTHOR_EMAIL: "t@example.invalid",
@@ -204,16 +205,16 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became ch
     // No `git bay init` on purpose: help must never require (or create) state.
     const res = await run(["git", "bay", "enqueue", "--help"], demo, env)
     expect(res.code).toBe(0)
-    expect(res.stdout).toContain("usage: git bay")
+    expect(res.stdout).toContain("Usage: git bay enqueue")
     const { existsSync } = await import("node:fs")
     expect(existsSync(join(demo, ".bay"))).toBe(false)
   })
 
   it("`<verb> -h` works for every verb that reads a positional", async () => {
-    for (const verb of ["co", "status", "enqueue", "requeue", "drain", "abandon", "adopt", "ping"]) {
+    for (const verb of ["co", "status", "enqueue", "requeue", "drain", "abandon", "adopt", "refresh", "ping"]) {
       const res = await run(["git", "bay", verb, "-h"], demo, env)
       expect(res.code, `${verb} -h`).toBe(0)
-      expect(res.stdout, `${verb} -h`).toContain("usage: git bay")
+      expect(res.stdout, `${verb} -h`).toContain("Usage: git bay")
     }
   })
 
@@ -222,12 +223,13 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became ch
     // The silent-error case: a --watch typo must not fall through to a single drain.
     const drain = await run(["git", "bay", "drain", "--wach"], demo, env)
     expect(drain.code).toBe(1)
-    expect(drain.stderr).toContain("unknown flag '--wach'")
-    expect(drain.stderr).toContain("usage: git bay")
+    expect(drain.stderr).toContain("unknown option '--wach'")
+    expect(drain.stderr).toContain("(Did you mean --watch?)") // teaching: typo suggestion
+    expect(drain.stderr).toContain("Usage: git bay drain")
     // The positional case: a flag-shaped token must never become a merge target.
     const enq = await run(["git", "bay", "enqueue", "--halp"], demo, env)
     expect(enq.code).toBe(1)
-    expect(enq.stderr).toContain("unknown flag '--halp'")
+    expect(enq.stderr).toContain("unknown option '--halp'")
     const status = await must(["git", "bay", "status", "--json"], demo, env)
     expect(status.stdout).not.toContain("C-")
   })
@@ -236,7 +238,20 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became ch
     await must(["git", "bay", "init"], demo, env)
     const res = await run(["git", "bay", "enqueue"], demo, env)
     expect(res.code).toBe(1)
-    expect(res.stderr).toContain("a target (branch or SHA) is required")
+    expect(res.stderr).toContain("missing required argument 'target'")
+    expect(res.stderr).toContain("Usage: git bay enqueue") // showHelpAfterError keeps it teaching
+  })
+
+  it("unadvertised prefixes and aliases resolve — `st` is status, `ping` still works, ambiguity teaches", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    const st = await must(["git", "bay", "st"], demo, env)
+    expect(st.stdout).toContain("no open leases")
+    const amb = await run(["git", "bay", "a"], demo, env)
+    expect(amb.code).toBe(1)
+    expect(amb.stderr).toContain("'a' is ambiguous")
+    expect(amb.stderr).toContain("abandon, adopt, audit")
+    const ping = await run(["git", "bay", "ping"], demo, env) // legacy alias of refresh
+    expect(ping.stderr).toContain("missing required argument 'lease'")
   })
 })
 

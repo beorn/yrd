@@ -6,6 +6,8 @@
 // Hook modes (installed by init, not user-facing): receive-pre | receive-post
 
 import { existsSync } from "node:fs"
+import { Command } from "@silvery/commander/plain"
+import { colorizeHelp, shouldColorize } from "@silvery/commander"
 import { readFile, rename } from "node:fs/promises"
 import { join } from "node:path"
 import type { BayRuntime, BayState, Changeset, Lease } from "../src/types.ts"
@@ -109,17 +111,25 @@ function pad(text: string, width: number): string {
   return text.length >= width ? text : text + " ".repeat(width - text.length)
 }
 
-function bayTable(state: BayState, actor: string, now: number): string {
-  const slice = (state.slices["workspaces"] ?? { byBay: {} }) as { byBay: Record<number, string> }
+function bayTable(state: BayState, actor: string, now: number, ttlMs: number): string {
+  const slice = (state.slices["workspaces"] ?? { byBay: {} }) as {
+    byBay: Record<number, string>
+    lastActive?: Record<string, string>
+  }
   const rows: string[][] = []
   for (const [n, leaseId] of Object.entries(slice.byBay).sort(([a], [b]) => Number(a) - Number(b))) {
     const lease = state.leases[leaseId]
     if (!lease) continue
     const you = lease.actor === actor ? "← you" : ""
-    rows.push([`bay${n}`, lease.workitem ?? "—", "leased", age(lease.createdAt, now), you])
+    // AGE = since co (createdAt); IDLE = since the newest activity (what
+    // `refresh` resets and what gc measures); STATE flips to `stale` when
+    // idle exceeds the lease TTL — the same predicate gc uses.
+    const last = slice.lastActive?.[leaseId] ?? lease.createdAt
+    const st = now - Date.parse(last) > ttlMs ? "stale" : "leased"
+    rows.push([`bay${n}`, lease.workitem ?? "—", st, age(lease.createdAt, now), age(last, now), you])
   }
   if (rows.length === 0) return "no open leases — git bay co <workitem> opens one"
-  const header = ["BAY", "WORKITEM", "STATE", "AGE", ""]
+  const header = ["BAY", "WORKITEM", "STATE", "AGE", "IDLE", ""]
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
   const fmt = (r: string[]) =>
     r
@@ -196,13 +206,13 @@ async function verbStatus(ctx: Ctx, target: string | undefined, json: boolean): 
     console.log(JSON.stringify({ leases: state.leases, changesets: state.changesets }))
     return
   }
-  console.log(bayTable(state, ctx.actor, Date.now()))
+  console.log(bayTable(state, ctx.actor, Date.now(), ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS))
   // Stale-lease alerts (spec § lease lifecycle) — silent when none, so the
   // executable happy-path doc's expected output is unchanged.
   const ttl = ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS
   for (const lease of staleLeases(state, new Date().toISOString(), ttl)) {
     console.log(
-      `bay: stale lease ${lease.id} (${lease.workitem ?? lease.branch}) idle past ${Math.round(ttl / 60000)}m — git bay ping ${lease.id} to keep it, or git bay gc to expire`,
+      `bay: stale lease ${lease.id} (${lease.workitem ?? lease.branch}) idle past ${Math.round(ttl / 60000)}m — git bay refresh ${lease.id} to keep it, or git bay gc to expire`,
     )
   }
 }
@@ -370,20 +380,6 @@ async function hookPost(ctx: Ctx): Promise<void> {
 
 // ---------- dispatch ----------
 
-function flag(args: string[], name: string): boolean {
-  const i = args.indexOf(name)
-  if (i === -1) return false
-  args.splice(i, 1)
-  return true
-}
-
-function opt(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name)
-  if (i === -1) return undefined
-  const [, value] = args.splice(i, 2)
-  return value
-}
-
 /** Agent/newcomer onboarding: everything needed BEFORE the first action, in one
  *  deterministic printout. Errors-are-Teachers covers the moment of mistake;
  *  prime covers the moment before. Stateless on purpose (works pre-init), and
@@ -396,16 +392,17 @@ THE LOOP
   3. git push                         # push IS submit — checks run, then the merge; READ the remote: lines
   4. git bay status <changeset>       # re-read a verdict later (the C-xxxxxxxx id from the push output)
 RULES
-  - Work only inside your bay, never in the repository's main worktree.
+  - Work only inside your workspace, never in the repository's main worktree.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay requeue <changeset>.
-  - Abandoning? git bay abandon <lease> refuses while uncommitted work exists — commit or clean first; work is never deleted.
+  - Abandoning a workspace? git bay abandon <lease> refuses while uncommitted work exists — commit or clean first; work is never deleted.
   - Doors close at merge: a merged changeset ends that loan — start the next piece of work with a fresh git bay co.
 VOCABULARY
-  bay        your loaned workspace (an isolated git worktree)
+  bay        the system itself — this repository's merge queue (git bay init sets it up)
+  workspace  the isolated git worktree loaned to you (ids look like bay1)
   workitem   the name you gave co — a ticket id or any label
   changeset  the unit being merged (your pushed commits), id like C-5a7a2f95
-  lease      the loan of a bay to a workitem; abandon/ping/gc act on it
+  lease      the loan of a workspace to a workitem; abandon/refresh/gc act on it
 MACHINE-READABLE
   git bay status --json    full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
@@ -457,118 +454,163 @@ async function primeContext(): Promise<string> {
   return lines.join("\n")
 }
 
-const USAGE = `usage: git bay <verb>
-  prime                     onboarding for agents and newcomers — read this first
-  init                      set up .bay/ (store, bay-owned repo.git, hooks)
-  co <workitem>             loan a guarded bay; prints its path (cd-able)
-  status [changeset]        bay table, or one changeset's verdict  [--json]
-  enqueue <target>          queue a branch/SHA for the merge worker
-  requeue <changeset>       resume a merging/rejected changeset
-  drain [--watch]           run the merge worker  [--interval <sec>]
-  abandon <lease>           end a lease; WIP is preserved, never deleted
-  adopt <branch>            make a legacy branch a changeset  [--workitem <id>]
-  ping <lease>              refresh a lease's idle clock
-  gc                        expire idle leases (WIP snapshotted, never deleted)
-  audit                     strays, pins, refs without workitems  [--json]`
-
-/** After a verb's known flags are consumed, any remaining flag-shaped token is
- *  a teaching refusal, never a positional: on the first armed day,
- *  `git bay enqueue --help` queued a changeset whose merge target was the
- *  literal string '--help' (C-5f086e7b), and a `--watch` typo would silently
- *  drain once instead of looping. Flags never fall through. */
-function guardFlags(args: string[], verb: string): void {
-  const stray = args.find((a) => a.startsWith("-"))
-  if (stray !== undefined) throw new Error(`bay: ${verb}: unknown flag '${stray}'\n${USAGE}`)
-}
-
-async function main(): Promise<void> {
-  const args = process.argv.slice(2)
-  const verb = args.shift()
-  // Help never requires (or creates) state — intercept before resolveCtx.
-  if (args.includes("--help") || args.includes("-h")) {
-    console.log(USAGE)
-    return
-  }
-  // Prime is the pre-first-action onboarding — it must work anywhere, even
-  // outside a git repository, so it runs before any context resolution.
-  if (verb === "prime") {
-    guardFlags(args, "prime")
-    console.log(PRIME)
-    console.log("")
-    console.log(await primeContext())
-    return
-  }
-  const json = flag(args, "--json")
-  flag(args, "--no-workitem") // accepted for forward-compat; no provider in v0.1
+/** resolveCtx + the wiped-bay guard: a missing state dir must teach, not let
+ *  `status` impersonate a healthy empty bay (the silent-fallback failure mode
+ *  behind the 2026-07-07 .bay wipe). Every state-touching verb goes through
+ *  this; `init` uses bare resolveCtx and `prime` resolves no context at all. */
+async function requireBay(): Promise<Ctx> {
   const ctx = await resolveCtx()
-
-  // A wiped bay must teach, not impersonate an empty one: without this, a
-  // hygiene sweep that deleted the state dir leaves `status` reporting
-  // "no open leases" as if healthy (the silent-fallback failure mode).
-  // Only `init`, `prime`, and bare help may run stateless.
-  if (
-    verb !== undefined &&
-    verb !== "init" &&
-    verb !== "prime" &&
-    verb !== "help" &&
-    verb !== "--help" &&
-    !existsSync(ctx.bayDir)
-  ) {
+  if (!existsSync(ctx.bayDir)) {
     throw new Error(
       `bay: no bay state at ${ctx.bayDir} (never initialized, or wiped by a hygiene sweep) — run: git bay init`,
     )
   }
+  return ctx
+}
 
-  switch (verb) {
-    case "init":
-      guardFlags(args, "init")
-      return await verbInit(ctx)
-    case "co":
-    case "checkout":
-      guardFlags(args, "co")
-      return await verbCo(ctx, args[0])
-    case "status":
-      guardFlags(args, "status")
-      return await verbStatus(ctx, args[0], json)
-    case "enqueue": {
-      const workitem = opt(args, "--workitem") // consume BEFORE the positional read
-      guardFlags(args, "enqueue")
-      return await verbEnqueue(ctx, args[0], workitem)
-    }
-    case "requeue":
-      guardFlags(args, "requeue")
-      return await verbRequeue(ctx, args[0])
-    case "drain": {
-      const watch = flag(args, "--watch")
-      const interval = Number(opt(args, "--interval") ?? "15")
-      guardFlags(args, "drain")
-      return await verbDrain(ctx, watch, interval)
-    }
-    case "abandon":
-      guardFlags(args, "abandon")
-      return await verbAbandon(ctx, args[0])
-    case "adopt": {
-      const workitem = opt(args, "--workitem")
-      guardFlags(args, "adopt")
-      const branch = args[0]
-      if (!branch) throw new Error("bay: adopt: a branch name is required")
+/** Unadvertised git-style prefix resolution: any unambiguous prefix of a verb
+ *  (or alias) works — `git bay st` is `git bay status`. Ambiguity refuses and
+ *  lists the candidates; no match falls through to commander's own
+ *  unknown-command error (which suggests the closest verb). Exact names are
+ *  never rewritten, so hook modes and scripts stay stable. */
+function resolveVerbPrefix(program: Command, argv: string[]): void {
+  const token = argv[2]
+  if (token === undefined || token.startsWith("-")) return
+  const names = new Map<string, string>() // name-or-alias -> canonical
+  for (const cmd of program.commands) {
+    names.set(cmd.name(), cmd.name())
+    for (const a of cmd.aliases()) names.set(a, cmd.name())
+  }
+  if (names.has(token)) return // exact — never rewritten
+  const canonical = new Set<string>()
+  for (const [name, target] of names) if (name.startsWith(token)) canonical.add(target)
+  if (canonical.size === 1) argv[2] = [...canonical][0]!
+  if (canonical.size > 1) {
+    throw new Error(`bay: '${token}' is ambiguous — matches: ${[...canonical].sort().join(", ")}`)
+  }
+}
+
+async function main(): Promise<void> {
+  const program = new Command()
+  program
+    .name("git bay")
+    .description("a merge queue for your local repository — push is submit (new? run: git bay prime)")
+    .showHelpAfterError()
+    .showSuggestionAfterError()
+
+  program
+    .command("prime")
+    .helpGroup("Start here:")
+    .description("onboarding for agents and newcomers — the workflow, the rules, and this repo's live config")
+    .action(async () => {
+      // Pre-first-action onboarding: never refuses, resolves no context, works
+      // even outside a git repository.
+      console.log(PRIME)
+      console.log("")
+      console.log(await primeContext())
+    })
+
+  program
+    .command("init")
+    .helpGroup("Start here:")
+    .description("set up git bay for this repository (state in .git/bay/: store, journal, bay-owned repo.git + hooks)")
+    .action(async () => {
+      await verbInit(await resolveCtx())
+    })
+
+  program
+    .command("co <workitem>")
+    .alias("checkout")
+    .helpGroup("Your workspace:")
+    .description("loan a guarded workspace; prints its path (cd-able)")
+    .option("--no-workitem", "treat <workitem> as a plain label (no tracker lookup)")
+    .action(async (workitem: string) => {
+      await verbCo(await requireBay(), workitem)
+    })
+
+  program
+    .command("status [changeset]")
+    .helpGroup("The merge queue:")
+    .description("workspace table, or one changeset's verdict")
+    .addHelpText(
+      "after",
+      "\nColumns: AGE = time since co created the lease; IDLE = time since the last activity (refresh resets it).\nSTATE values: leased (active) | stale (idle past the lease TTL — gc will expire it; git bay refresh <lease> keeps it).",
+    )
+    .option("--json", "machine-readable output")
+    .action(async (changeset: string | undefined, opts: { json?: boolean }) => {
+      await verbStatus(await requireBay(), changeset, opts.json === true)
+    })
+
+  program
+    .command("enqueue <target>")
+    .helpGroup("The merge queue:")
+    .description("queue a branch/SHA for the merge worker")
+    .option("--workitem <id>", "associate the changeset with a work item")
+    .action(async (target: string, opts: { workitem?: string }) => {
+      await verbEnqueue(await requireBay(), target, opts.workitem)
+    })
+
+  program
+    .command("requeue <changeset>")
+    .helpGroup("The merge queue:")
+    .description("resume a merging/rejected changeset after fixing the cause")
+    .action(async (changeset: string) => {
+      await verbRequeue(await requireBay(), changeset)
+    })
+
+  program
+    .command("drain")
+    .helpGroup("The merge queue:")
+    .description("run the merge worker")
+    .option("--watch", "keep draining on an interval")
+    .option("--interval <sec>", "watch poll interval in seconds", "15")
+    .action(async (opts: { watch?: boolean; interval?: string }) => {
+      const interval = Number(opts.interval ?? '15')
+      if (!Number.isFinite(interval) || interval <= 0) {
+        throw new Error(`bay: drain: --interval must be a positive number of seconds, got '${opts.interval ?? ''}'`)
+      }
+      await verbDrain(await requireBay(), opts.watch === true, interval)
+    })
+
+  program
+    .command("abandon <lease>")
+    .helpGroup("Your workspace:")
+    .description("end a workspace lease; uncommitted work is preserved, never deleted")
+    .action(async (lease: string) => {
+      await verbAbandon(await requireBay(), lease)
+    })
+
+  program
+    .command("adopt <branch>")
+    .helpGroup("The merge queue:")
+    .description("bring a pre-existing branch in as a changeset")
+    .option("--workitem <id>", "associate the changeset with a work item")
+    .action(async (branch: string, opts: { workitem?: string }) => {
+      const ctx = await requireBay()
       await withWriteBay(ctx, async (bay) => {
-        const { events } = await bay.dispatch({ type: "adopt", args: { branch, workitem } })
+        const { events } = await bay.dispatch({ type: "adopt", args: { branch, workitem: opts.workitem } })
         console.log(events.find((e) => e.type === "changeset.enqueued")?.changeset ?? "")
       })
-      return
-    }
-    case "ping": {
-      guardFlags(args, "ping")
-      const lease = args[0]
-      if (!lease) throw new Error("bay: ping: a lease id is required (git bay status --json lists them)")
+    })
+
+  program
+    .command("refresh <lease>")
+    .alias("ping")
+    .helpGroup("Your workspace:")
+    .description("refresh a lease's idle clock")
+    .action(async (lease: string) => {
+      const ctx = await requireBay()
       await withWriteBay(ctx, async (bay) => {
         await bay.dispatch({ type: "ping", args: { lease } })
       })
-      return
-    }
-    case "gc":
-      guardFlags(args, "gc")
+    })
+
+  program
+    .command("gc")
+    .helpGroup("Your workspace:")
+    .description("expire idle leases (work is snapshotted first, never deleted)")
+    .action(async () => {
+      const ctx = await requireBay()
       await withWriteBay(ctx, async (bay) => {
         const { events } = await bay.dispatch({ type: "gc" })
         for (const e of events) {
@@ -579,22 +621,38 @@ async function main(): Promise<void> {
           if (e.type === "gc.clean") console.log("bay: gc clean — no idle leases past TTL")
         }
       })
-      return
-    case "audit":
-      guardFlags(args, "audit")
-      return await verbAudit(ctx, json)
-    case "receive-pre":
-      return await hookPre(ctx)
-    case "receive-post":
-      return await hookPost(ctx)
-    case undefined:
-    case "help":
-    case "--help":
-      console.log(USAGE)
-      return
-    default:
-      throw new Error(`bay: unknown verb '${verb}'\n${USAGE}`)
+    })
+
+  program
+    .command("audit")
+    .helpGroup("Repository health:")
+    .description("find strays, stale pins, and refs without work items")
+    .option("--json", "machine-readable output")
+    .action(async (opts: { json?: boolean }) => {
+      await verbAudit(await requireBay(), opts.json === true)
+    })
+
+  // Hook modes — installed by init inside the bay-owned repo, not user-facing.
+  program
+    .command("receive-pre", { hidden: true })
+    .description("pre-receive hook mode (reads git's ref updates on stdin)")
+    .action(async () => {
+      await hookPre(await requireBay())
+    })
+  program
+    .command("receive-post", { hidden: true })
+    .description("post-receive hook mode (reads git's ref updates on stdin)")
+    .action(async () => {
+      await hookPost(await requireBay())
+    })
+
+  if (shouldColorize()) colorizeHelp(program)
+  if (process.argv.length <= 2) {
+    program.outputHelp()
+    return
   }
+  resolveVerbPrefix(program, process.argv)
+  await program.parseAsync(process.argv)
 }
 
 main().catch((err) => {

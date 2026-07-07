@@ -71,7 +71,7 @@ $ git bay abandon "$LEASE"
 ! Commit or push it first; bay never deletes uncommitted work. The lease is still yours.
 [1]
 $ git bay status
-BAY   WORKITEM       STATE   AGE
+BAY   WORKITEM       STATE   AGE  IDLE
 bay1  dirty-abandon  leased  ...
 ```
 

@@ -15,16 +15,17 @@ THE LOOP
   3. git push                         # push IS submit — checks run, then the merge; READ the remote: lines
   4. git bay status <changeset>       # re-read a verdict later (the C-xxxxxxxx id from the push output)
 RULES
-  - Work only inside your bay, never in the repository's main worktree.
+  - Work only inside your workspace, never in the repository's main worktree.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay requeue <changeset>.
-  - Abandoning? git bay abandon <lease> refuses while uncommitted work exists — commit or clean first; work is never deleted.
+  - Abandoning a workspace? git bay abandon <lease> refuses while uncommitted work exists — commit or clean first; work is never deleted.
   - Doors close at merge: a merged changeset ends that loan — start the next piece of work with a fresh git bay co.
 VOCABULARY
-  bay        your loaned workspace (an isolated git worktree)
+  bay        the system itself — this repository's merge queue (git bay init sets it up)
+  workspace  the isolated git worktree loaned to you (ids look like bay1)
   workitem   the name you gave co — a ticket id or any label
   changeset  the unit being merged (your pushed commits), id like C-5a7a2f95
-  lease      the loan of a bay to a workitem; abandon/ping/gc act on it
+  lease      the loan of a workspace to a workitem; abandon/refresh/gc act on it
 MACHINE-READABLE
   git bay status --json    full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)

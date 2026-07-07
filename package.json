@@ -23,5 +23,8 @@
     "mdspec": "^0.4.0",
     "typescript": "^6.0.3",
     "vitest": "4.1.9"
+  },
+  "dependencies": {
+    "@silvery/commander": "^0.21.0"
   }
 }
