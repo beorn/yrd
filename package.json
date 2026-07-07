@@ -13,8 +13,15 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run",
+    "spec": "mdspec spec/happy-path.md"
+  },
   "devDependencies": {
     "@types/bun": "^1.3.14",
-    "typescript": "^6.0.3"
+    "mdspec": "^0.4.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }
