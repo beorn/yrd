@@ -11,7 +11,7 @@ including the remedy line — not paraphrased in prose above the fence.
 ```console
 $ git init -q demo && cd demo && git commit -qm init --allow-empty && export DEMO="$PWD"
 $ git bay init
-bay: initialized (store: sqlite, journal: .bay/journal.jsonl)
+bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
 $ git config bay.workitemProvider none
 ```
 

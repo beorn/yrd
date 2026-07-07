@@ -72,7 +72,7 @@ describe("git bay CLI — M1 happy path (process-level)", () => {
 
   it("init → co → commit → push → merged → status → doors closed", async () => {
     const init = await must(["git", "bay", "init"], demo, env)
-    expect(init.stdout).toContain("bay: initialized (store: sqlite, journal: .bay/journal.jsonl)")
+    expect(init.stdout).toContain("bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)")
 
     const co = await must(["git", "bay", "co", "fix-readme", "--no-workitem"], demo, env)
     const bayPath = co.stdout.trim()
@@ -237,5 +237,76 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became ch
     const res = await run(["git", "bay", "enqueue"], demo, env)
     expect(res.code).toBe(1)
     expect(res.stderr).toContain("a target (branch or SHA) is required")
+  })
+})
+
+describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe incident)", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "bay-state-"))
+    demo = join(root, "demo")
+    const shimDir = join(root, "shim")
+    await must(["mkdir", "-p", shimDir], root, {})
+    const shim = join(shimDir, "git-bay")
+    await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${BIN}" "$@"\n`, "utf8")
+    await chmod(shim, 0o755)
+    env = {
+      PATH: `${shimDir}:${process.env.PATH}`,
+      BAY_ACTOR: "tester",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.invalid",
+    }
+    await must(["git", "init", "-q", "-b", "main", demo], root, env)
+    await must(["git", "-C", demo, "commit", "-qm", "init", "--allow-empty"], root, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("init puts state inside the git dir, not the working tree", async () => {
+    const { existsSync } = await import("node:fs")
+    const init = await must(["git", "bay", "init"], demo, env)
+    expect(init.stdout).toContain("journal: .git/bay/journal.jsonl")
+    expect(existsSync(join(demo, ".git", "bay", "journal.jsonl"))).toBe(true)
+    expect(existsSync(join(demo, ".bay"))).toBe(false)
+  })
+
+  it("a hygiene clean sweep cannot delete the journal — the exact production incident", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    const id = (await must(["git", "bay", "enqueue", "main"], demo, env)).stdout.trim()
+    expect(id).toMatch(/^C-/)
+
+    // The hygiene sweep that wiped the hh pilot's first journal at 12:4x:
+    // remove-untracked-and-ignored, forced, in the demo's own temp repo.
+    const flags = "-" + ["x", "d", "f", "f"].join("")
+    await must(["git", "-C", demo, "clean", flags], demo, env)
+
+    const status = await must(["git", "bay", "status", id], demo, env)
+    expect(status.stdout).toContain(id) // state intact: the changeset is still known
+  })
+
+  it("a missing/wiped bay teaches init instead of pretending to be empty", async () => {
+    // No init: every state-reading verb must refuse loudly, not report a
+    // healthy-looking empty bay (the silent-fallback failure mode).
+    const status = await run(["git", "bay", "status"], demo, env)
+    expect(status.code).toBe(1)
+    expect(status.stderr).toContain("no bay state")
+    expect(status.stderr).toContain("git bay init")
+  })
+
+  it("a legacy <root>/.bay is still honored, with a migration warning", async () => {
+    const { mkdirSync } = await import("node:fs")
+    mkdirSync(join(demo, ".bay"), { recursive: true })
+    await writeFile(join(demo, ".bay", "journal.jsonl"), "", "utf8")
+    const status = await run(["git", "bay", "status"], demo, env)
+    expect(status.code).toBe(0)
+    expect(status.stderr).toContain("legacy")
+    expect(status.stderr).toContain(".bay")
   })
 })

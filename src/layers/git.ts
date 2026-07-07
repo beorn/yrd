@@ -6,6 +6,8 @@
 // silent fallback (principles § Fail Loud, Fail Now).
 
 import { spawn } from "node:child_process"
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import { repoScopedCleanEnv } from "../env.ts"
 
 export { repoScopedCleanEnv } from "../env.ts"
@@ -27,6 +29,21 @@ export async function git(args: string[], cwd?: string): Promise<GitResult> {
     child.on("error", (err) => reject(new Error(`bay: failed to spawn git ${args.join(" ")}: ${err.message}`)))
     child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }))
   })
+}
+
+/** Default bay state dir: `<git-common-dir>/bay` — INSIDE the git dir, so
+ *  `git clean -xdff`, checkout, and rebase can never delete the journal. The
+ *  journal IS the merge history; keeping it as an untracked dir in the
+ *  working tree proved fatal within the first armed hour (2026-07-07: a host
+ *  hygiene sweep wiped the hh pilot's `.bay/`). A pre-existing legacy
+ *  `<root>/.bay` wins for compatibility; callers surface `legacy: true` as a
+ *  migration warning. */
+export async function defaultBayDir(mainRepo: string): Promise<{ dir: string; legacy: boolean }> {
+  const legacy = join(mainRepo, ".bay")
+  if (existsSync(legacy)) return { dir: legacy, legacy: true }
+  const res = await git(["-C", mainRepo, "rev-parse", "--path-format=absolute", "--git-common-dir"], mainRepo)
+  if (res.code !== 0) throw new Error(`bay: not a git repository: ${mainRepo} (${res.stderr.trim()})`)
+  return { dir: join(res.stdout.trim(), "bay"), legacy: false }
 }
 
 /** origin/main if the ref exists, else HEAD (spec: bays branch off the current

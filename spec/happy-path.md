@@ -7,7 +7,7 @@ This document is the canonical showcase AND the M1 acceptance test: it runs unde
 ```console
 $ git init -q demo && cd demo && git commit -qm init --allow-empty
 $ git bay init
-bay: initialized (store: sqlite, journal: .bay/journal.jsonl)
+bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
 $ git config bay.workitemProvider none
 $ git config bay.check "true"
 ```

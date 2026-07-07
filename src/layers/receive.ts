@@ -16,7 +16,7 @@ import type {
 import { makeEvent } from "../core.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { changesetForTarget, enqueuedEvent, stateChangeEvent } from "./queue.ts"
-import { git, porcelainStatus, repoScopedCleanEnv } from "./git.ts"
+import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "./git.ts"
 
 /**
  * withReceive — the receiver (spec § Using it: "the remote is the API"; M1-b of
@@ -54,7 +54,7 @@ export async function resolveReceive(opts: ReceiveOptions): Promise<ResolvedRece
   const cwd = opts.mainRepo ?? process.cwd()
   const source = createGitConfigSource(cwd)
   const mainRepo = (await resolveOption(opts.mainRepo, "mainRepo", source, cwd))!
-  const bayDir = (await resolveOption(opts.bayDir, "dir", createGitConfigSource(mainRepo), join(mainRepo, ".bay")))!
+  const bayDir = (await resolveOption(opts.bayDir, "dir", createGitConfigSource(mainRepo), (await defaultBayDir(mainRepo)).dir))!
   return { mainRepo, bayDir, repoGit: join(bayDir, "repo.git") }
 }
 

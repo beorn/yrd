@@ -25,7 +25,7 @@ import {
   appendInboxReceipt,
 } from "../src/layers/receive.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
-import { git, porcelainStatus } from "../src/layers/git.ts"
+import { defaultBayDir, git, porcelainStatus } from "../src/layers/git.ts"
 
 // ---------- context ----------
 
@@ -44,7 +44,14 @@ async function resolveCtx(): Promise<Ctx> {
     mainRepo = commonDir.endsWith("/.git") ? commonDir.slice(0, -5) : commonDir
   }
   const source = createGitConfigSource(mainRepo)
-  const bayDir = (await resolveOption(process.env.BAY_DIR, "dir", source, join(mainRepo, ".bay")))!
+  const fallback = await defaultBayDir(mainRepo)
+  const bayDir = (await resolveOption(process.env.BAY_DIR, "dir", source, fallback.dir))!
+  if (bayDir === fallback.dir && fallback.legacy) {
+    console.error(
+      `bay: using legacy .bay/ state at ${bayDir} — a working-tree dir does not survive git clean -x sweeps. ` +
+        `Migrate: mv .bay .git/bay && git bay init (init refreshes hook paths).`,
+    )
+  }
   const actor =
     (await resolveOption(process.env.BAY_ACTOR, "actor", source)) ??
     (await source.get("user.name").catch(() => undefined)) ??
@@ -411,6 +418,16 @@ async function main(): Promise<void> {
   const json = flag(args, "--json")
   flag(args, "--no-workitem") // accepted for forward-compat; no provider in M1
   const ctx = await resolveCtx()
+
+  // A wiped bay must teach, not impersonate an empty one: without this, a
+  // hygiene sweep that deleted the state dir leaves `status` reporting
+  // "no open leases" as if healthy (the silent-fallback failure mode).
+  // Only `init` (and bare help) may run stateless.
+  if (verb !== undefined && verb !== "init" && verb !== "help" && verb !== "--help" && !existsSync(ctx.bayDir)) {
+    throw new Error(
+      `bay: no bay state at ${ctx.bayDir} (never initialized, or wiped by a hygiene sweep) — run: git bay init`,
+    )
+  }
 
   switch (verb) {
     case "init":
