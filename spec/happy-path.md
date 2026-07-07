@@ -1,3 +1,8 @@
+---
+mdspec:
+  plugin: ./pending-plugin.ts
+---
+
 # git bay — happy path (executable spec)
 
 This document is the canonical showcase AND the M1 acceptance test: it runs under mdspec (`bun mdspec spec/happy-path.md`), so the docs cannot drift from the behavior. Status: authored ahead of implementation — gates M1.

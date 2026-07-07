@@ -14,8 +14,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run",
-    "check": "tsc --noEmit && vitest run",
+    "test": "bun --bun x vitest run",
+    "check": "tsc --noEmit && bun --bun x vitest run",
     "spec": "mdspec spec/happy-path.md"
   },
   "devDependencies": {
