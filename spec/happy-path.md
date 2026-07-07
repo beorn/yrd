@@ -1,11 +1,6 @@
----
-mdspec:
-  plugin: ./pending-plugin.ts
----
-
 # git bay — happy path (executable spec)
 
-This document is the canonical showcase AND the M1 acceptance test: it runs under mdspec (`bun mdspec spec/happy-path.md`), so the docs cannot drift from the behavior. Status: authored ahead of implementation — gates M1.
+This document is the canonical showcase AND the M1 acceptance test: it runs under mdspec (`bun run spec`), so the docs cannot drift from the behavior. Status: authored ahead of implementation — gates M1.
 
 ## Setup: a repo, a mainline, a bay remote
 
@@ -22,8 +17,8 @@ $ git config bay.check "true"
 ```console
 $ cd "$(git bay co fix-readme --no-workitem)"
 $ git bay status
-BAY   WORKITEM     STATE   AGE
-bay1  fix-readme   leased  0s   ← you
+BAY   WORKITEM    STATE   AGE
+bay1  fix-readme  leased  {{age:/\d+[smhd]\s*/}}← you
 ```
 
 ## Work with plain git, push to submit
@@ -32,15 +27,18 @@ bay1  fix-readme   leased  0s   ← you
 $ echo hello > README.md && git add README.md
 $ git commit -qm "docs: add readme"
 $ git push -o wait
-remote: bay: changeset C-1 received — checks running
-remote: bay: C-1 merged onto main (checks ✓)
+! ...
+! remote: bay: changeset {{cid:/C-[0-9a-f]{8}/}} received — checks running
+! remote: bay: {{cid}} merged onto main (checks ✓)
+! ...
+$ export CID=$(git bay status --json | grep -oE 'C-[0-9a-f]{8}' | head -1)
 ```
 
 ## The loan is closed
 
 ```console
-$ git bay status C-1
-C-1 merged <sha> onto main (checks: ✓)
+$ git bay status "$CID"
+{{cid}} merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
 $ git bay audit
 bay: clean — no strays, no unreachable pins, no refs without a workitem
 ```
@@ -49,7 +47,17 @@ bay: clean — no strays, no unreachable pins, no refs without a workitem
 
 ```console
 $ git commit -qm wip --allow-empty && git push
-remote: bay: doors closed — <refusal with named remedy>
+! ...
+! remote: bay: doors closed — ...
+! ...
+[1]
 ```
 
-Assertions marked `<sha>`/`<refusal…>` are mdspec pattern-matches, not literals.
+Assertions above are mdspec pattern-matches, not literals: `{{name:/regex/}}` for
+a captured value (age, sha, changeset id) reused with bare `{{name}}` in later
+output, inline `...` for free-text remedy wording, and a leading/trailing
+`! ...` around each push's remote output to absorb git's own `To <dest>` /
+ref-update lines without pinning their exact wording. `{{name}}` only threads
+through *expected output* — it can't parameterize a later `$` command — so the
+changeset id also gets captured into a real shell variable (`$CID`) via
+`git bay status --json` for use as a command argument in the next block.

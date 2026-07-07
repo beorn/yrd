@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# PATH shim so `git bay <verb>` resolves inside mdspec's sandboxed shell
+# session (git dispatches an unrecognized `git <foo>` to a `git-<foo>`
+# executable on PATH). $ROOT is set by mdspec itself for every block
+# (docs/guide/persistent-context.md § Temp Directory) to the directory
+# mdspec was invoked from — the gitbay repo root — so this resolves
+# correctly regardless of the sandbox's current working directory.
+exec bun "$ROOT/bin/git-bay.ts" "$@"
