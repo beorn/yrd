@@ -5,7 +5,13 @@ export { createBay, makeEvent, definePlugin } from "./core.ts"
 export { pipe } from "./pipe.ts"
 export { createJsonlJournal } from "./journal.ts"
 export { createGitConfigSource, resolveOption } from "./config.ts"
-export { withWorkspaces, type WorkspacesOptions, type WorkspacesSlice } from "./layers/workspaces.ts"
+export {
+  withWorkspaces,
+  staleLeases,
+  DEFAULT_LEASE_TIMEOUT_MS,
+  type WorkspacesOptions,
+  type WorkspacesSlice,
+} from "./layers/workspaces.ts"
 export { withQueue, queuedChangesets, type QueueSlice } from "./layers/queue.ts"
 export { withMergeWorker, type MergeWorkerOptions } from "./layers/merge-worker.ts"
 export { withReceive, resolveReceive, leaseForBranch, type ReceiveOptions } from "./layers/receive.ts"

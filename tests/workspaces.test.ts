@@ -13,6 +13,7 @@ import {
 } from "../src/index.ts"
 import type { BayEvent, BayRuntime, BayState, BayStore, WorkspacesSlice } from "../src/index.ts"
 import { git } from "../src/layers/git.ts"
+import { staleLeases } from "../src/layers/workspaces.ts"
 
 // Fixed fake clock + actor — determinism comes from the injected clock and the
 // folded state, never from wall time or randomness (the reducer purity rule).
@@ -71,6 +72,34 @@ async function buildStubBay(path: string): Promise<BayRuntime> {
 
 function bays(state: BayState): Record<number, string> {
   return (state.slices.workspaces as WorkspacesSlice).byBay
+}
+
+function lastActive(state: BayState): Record<string, string> {
+  return (state.slices.workspaces as WorkspacesSlice).lastActive
+}
+
+// A settable clock: fixed within a dispatch, advanced between dispatches so a
+// lease can age past its TTL deterministically (no wall-clock, no sleeps).
+function makeClock(initial: string) {
+  let value = initial
+  return { clock: () => value, set: (iso: string) => (value = iso) }
+}
+
+/** ISO for T0 (2024-01-01T00:00:00Z) + `ms`. */
+function at(ms: number): string {
+  return new Date(Date.parse("2024-01-01T00:00:00.000Z") + ms).toISOString()
+}
+
+async function buildTtlBay(
+  path: string,
+  clock: () => string,
+  leaseTimeoutMs: number,
+): Promise<BayRuntime> {
+  return pipe(
+    createBay({ store: openStore(path), clock, actor: ACTOR }),
+    withStubGit, // registered first → its effect handlers shadow the real-git ones
+    withWorkspaces({ leaseTimeoutMs }),
+  )
 }
 
 describe("withWorkspaces — bay allocation (lowest free)", () => {
@@ -179,6 +208,132 @@ describe("withWorkspaces — replay", () => {
     expect(replayed.leases).toEqual(live.leases)
     expect(bays(replayed)).toEqual(bays(live))
     expect(bays(replayed)).toEqual({ 1: "L3", 2: "L2" })
+  })
+})
+
+describe("withWorkspaces — lease TTL (ping + gc)", () => {
+  const TTL = 1000
+
+  it("gc.clean (observable no-op) when nothing is stale", async () => {
+    const bay = await buildTtlBay(await tmpJournalPath(), () => at(0), TTL)
+    // no leases at all
+    const empty = await bay.dispatch({ type: "gc" })
+    expect(empty.events.map((e) => e.type)).toEqual(["gc.clean"])
+    expect(empty.events[0].data).toMatchObject({ checked: 0, expired: 0, ttlMs: TTL })
+
+    // a fresh (well-inside-TTL) lease is left untouched
+    const c = makeClock(at(0))
+    const bay2 = await buildTtlBay(await tmpJournalPath(), c.clock, TTL)
+    await bay2.dispatch({ type: "co", args: { workitem: "wi-a" } })
+    c.set(at(500)) // +500ms < TTL
+    const clean = await bay2.dispatch({ type: "gc" })
+    expect(clean.events.map((e) => e.type)).toEqual(["gc.clean"])
+    expect(clean.events[0].data).toMatchObject({ checked: 1, expired: 0 })
+    expect((await bay2.state()).leases.L1.endedAt).toBeUndefined()
+  })
+
+  it("gc expires a lease idle past the TTL: lease.ended{expired} + retire, bay freed", async () => {
+    const c = makeClock(at(0))
+    const bay = await buildTtlBay(await tmpJournalPath(), c.clock, TTL)
+    await bay.dispatch({ type: "co", args: { workitem: "wi-a" } }) // L1 created at T0
+
+    c.set(at(2000)) // +2000ms > TTL
+    const { events } = await bay.dispatch({ type: "gc" })
+    expect(events.map((e) => e.type)).toEqual(["lease.ended", "workspace.retired"])
+    const ended = events.find((e) => e.type === "lease.ended")!
+    expect(ended.lease).toBe("L1")
+    expect(ended.data!.endReason).toBe("expired")
+
+    const st = await bay.state()
+    expect(st.leases.L1.endedAt).toBe(at(2000))
+    expect(st.leases.L1.endReason).toBe("expired")
+    expect(bays(st)).toEqual({}) // bay 1 freed
+  })
+
+  it("expires several idle leases in one gc, freeing every bay", async () => {
+    const c = makeClock(at(0))
+    const bay = await buildTtlBay(await tmpJournalPath(), c.clock, TTL)
+    await bay.dispatch({ type: "co", args: { workitem: "wi-a" } }) // L1
+    await bay.dispatch({ type: "co", args: { workitem: "wi-b" } }) // L2
+
+    c.set(at(2000))
+    const { events } = await bay.dispatch({ type: "gc" })
+    expect(events.filter((e) => e.type === "lease.ended").map((e) => e.lease)).toEqual(["L1", "L2"])
+    expect(events.filter((e) => e.type === "workspace.retired").map((e) => e.lease)).toEqual(["L1", "L2"])
+
+    const st = await bay.state()
+    expect(st.leases.L1.endReason).toBe("expired")
+    expect(st.leases.L2.endReason).toBe("expired")
+    expect(bays(st)).toEqual({})
+  })
+
+  it("ping resets the idle window so gc leaves the lease alone until idle again", async () => {
+    const c = makeClock(at(0))
+    const bay = await buildTtlBay(await tmpJournalPath(), c.clock, TTL)
+    await bay.dispatch({ type: "co", args: { workitem: "wi-a" } }) // L1 at T0
+
+    c.set(at(800)) // still within TTL of T0
+    await bay.dispatch({ type: "ping", args: { lease: "L1" } }) // lastActive = T0+800
+    expect(lastActive(await bay.state()).L1).toBe(at(800))
+
+    c.set(at(1500)) // +1500 from T0 but only +700 from the ping → NOT stale
+    const survived = await bay.dispatch({ type: "gc" })
+    expect(survived.events.map((e) => e.type)).toEqual(["gc.clean"])
+    expect((await bay.state()).leases.L1.endedAt).toBeUndefined()
+
+    c.set(at(2000)) // +1200 from the ping → now stale
+    const expired = await bay.dispatch({ type: "gc" })
+    expect(expired.events.map((e) => e.type)).toEqual(["lease.ended", "workspace.retired"])
+    expect((await bay.state()).leases.L1.endReason).toBe("expired")
+  })
+
+  it("ping throws for an unknown or already-ended lease", async () => {
+    const bay = await buildStubBay(await tmpJournalPath())
+    await expect(bay.dispatch({ type: "ping", args: { lease: "L99" } })).rejects.toThrow(/no lease 'L99'/)
+    await bay.dispatch({ type: "co", args: { workitem: "wi-a" } })
+    await bay.dispatch({ type: "abandon", args: { lease: "L1" } })
+    await expect(bay.dispatch({ type: "ping", args: { lease: "L1" } })).rejects.toThrow(/already ended/)
+  })
+
+  it("staleLeases is a pure predicate over open leases + lastActive", async () => {
+    const c = makeClock(at(0))
+    const bay = await buildTtlBay(await tmpJournalPath(), c.clock, TTL)
+    await bay.dispatch({ type: "co", args: { workitem: "wi-a" } }) // L1
+    await bay.dispatch({ type: "co", args: { workitem: "wi-b" } }) // L2
+    c.set(at(500))
+    await bay.dispatch({ type: "ping", args: { lease: "L2" } }) // L2 refreshed at +500
+    const state = await bay.state()
+
+    // At +1200: L1 (created T0) idle 1200 > TTL → stale; L2 (pinged +500) idle 700 → fresh.
+    expect(staleLeases(state, at(1200), TTL).map((l) => l.id)).toEqual(["L1"])
+    // At +1600: both stale (L2 idle 1100 > TTL).
+    expect(staleLeases(state, at(1600), TTL).map((l) => l.id)).toEqual(["L1", "L2"])
+    // Wide TTL: nothing stale.
+    expect(staleLeases(state, at(9999), 60_000)).toEqual([])
+  })
+
+  it("replay reconstructs identical leases, bays, and lastActive after ping + gc", async () => {
+    const path = await tmpJournalPath()
+    const c = makeClock(at(0))
+    const first = await buildTtlBay(path, c.clock, TTL)
+    await first.dispatch({ type: "co", args: { workitem: "wi-a" } }) // L1
+    await first.dispatch({ type: "co", args: { workitem: "wi-b" } }) // L2
+    c.set(at(800))
+    await first.dispatch({ type: "ping", args: { lease: "L1" } }) // L1 refreshed
+    c.set(at(1500)) // L1 idle 700 (fresh); L2 idle 1500 (stale)
+    await first.dispatch({ type: "gc" }) // expires L2 only
+    const live = await first.state()
+
+    expect(live.leases.L1.endedAt).toBeUndefined()
+    expect(live.leases.L2.endReason).toBe("expired")
+    expect(bays(live)).toEqual({ 1: "L1" }) // bay 2 freed, bay 1 held
+
+    // Fresh bay over the same journal — clock is irrelevant to replay (fold reads
+    // event ts from the journal), so any clock proves the point.
+    const replayed = await (await buildTtlBay(path, () => at(0), TTL)).state()
+    expect(replayed.leases).toEqual(live.leases)
+    expect(bays(replayed)).toEqual(bays(live))
+    expect(lastActive(replayed)).toEqual(lastActive(live))
   })
 })
 

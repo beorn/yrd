@@ -7,6 +7,7 @@ import type {
   ChangeId,
   Effect,
   Layer,
+  Lease,
   LeaseId,
   TransitionResult,
 } from "../types.ts"
@@ -51,32 +52,45 @@ export type WorkspacesOptions = {
    *  push defaults wired so plain `git push` inside the bay submits (spec § the
    *  hot loop is plain git). Omitted → bays are provisioned without a remote. */
   bayRemote?: string
+  /** Idle timeout for a lease before `gc` may expire it (spec § the lease
+   *  lifecycle). Precedence: this inline value > BAY_LEASE_TIMEOUT_MS env >
+   *  (host-resolved) git config bay.leaseTimeoutMs > 45m default. Resolved once
+   *  at build (never per-reduce) so the gc reducer stays pure. */
+  leaseTimeoutMs?: number
 }
 
 /** Per-open-lease bay bookkeeping. Leases carry no bay number in the core type,
  *  so this slice is the authoritative bay↔lease index. Only OPEN leases appear
- *  in `byBay` — a lease frees its bay the moment it ends. */
+ *  in `byBay` — a lease frees its bay the moment it ends. `lastActive` records
+ *  the newest ping per lease so gc measures idleness against activity, not just
+ *  the checkout time (spec § the lease lifecycle — TTL is policy-at-check-time,
+ *  so it lives here, not on the lease). */
 export type WorkspacesSlice = {
   byBay: Record<number, LeaseId>
   heads: Record<LeaseId, string> // provisioned HEAD sha, keyed by lease
+  lastActive: Record<LeaseId, string> // newest ping ts, keyed by lease
 }
+
+/** Default lease idle timeout: 45 minutes (spec § the lease lifecycle). */
+export const DEFAULT_LEASE_TIMEOUT_MS = 2_700_000
 
 const LAYER = "workspaces"
 const EV_OPENED = "lease.opened"
 const EV_ENDED = "lease.ended"
 const EV_PROVISIONED = "workspace.provisioned"
 const EV_RETIRED = "workspace.retired"
+const EV_PINGED = "lease.pinged"
+const EV_GC_CLEAN = "gc.clean"
 const FX_PROVISION = "workspace.provision"
 const FX_RETIRE = "workspace.retire"
 
 // ---------- pure helpers ----------
 
-function emptySlice(): WorkspacesSlice {
-  return { byBay: {}, heads: {} }
-}
-
+/** Read the layer slice, normalized so every field is always present — an old
+ *  journal (pre-`lastActive`) or a partial write can never surface `undefined`. */
 function sliceOf(state: BayState): WorkspacesSlice {
-  return (state.slices[LAYER] as WorkspacesSlice | undefined) ?? emptySlice()
+  const raw = state.slices[LAYER] as Partial<WorkspacesSlice> | undefined
+  return { byBay: raw?.byBay ?? {}, heads: raw?.heads ?? {}, lastActive: raw?.lastActive ?? {} }
 }
 
 /** Lowest bay number ≥ 1 not held by an open lease. */
@@ -102,6 +116,50 @@ function fnv1a(input: string): string {
  *  clock when a bay number is reused after an abandon. */
 function mintChangeId(ts: string, actor: string, bay: number, seq: number): ChangeId {
   return `C-${fnv1a(`${ts}:${actor}:${bay}:${seq}`)}`
+}
+
+/** Validate a millisecond timeout — a set-but-garbage value fails loud, never
+ *  silently defaults (principles § Fail Loud). Unset (undefined) returns undefined
+ *  so the next precedence tier applies. */
+function parseTimeoutMs(raw: number | string | undefined, source: string): number | undefined {
+  if (raw === undefined || raw === "") return undefined
+  const ms = typeof raw === "number" ? raw : Number(raw)
+  if (!Number.isFinite(ms) || !Number.isInteger(ms) || ms <= 0) {
+    throw new Error(`bay: ${source} must be a positive integer of milliseconds; got '${raw}'`)
+  }
+  return ms
+}
+
+/** Resolve the lease timeout at BUILD time (host/setup context, not the reducer):
+ *  inline option > BAY_LEASE_TIMEOUT_MS env > default. The git config tier
+ *  (bay.leaseTimeoutMs) is async, so a host resolves it via resolveOption and
+ *  passes it inline — the same boundary every other bay config is resolved at.
+ *  Keeping this synchronous is what lets the gc reducer stay pure. */
+function resolveLeaseTimeoutMs(opts: WorkspacesOptions): number {
+  return (
+    parseTimeoutMs(opts.leaseTimeoutMs, "leaseTimeoutMs option") ??
+    parseTimeoutMs(process.env.BAY_LEASE_TIMEOUT_MS, "BAY_LEASE_TIMEOUT_MS") ??
+    DEFAULT_LEASE_TIMEOUT_MS
+  )
+}
+
+/**
+ * Open leases whose idle age exceeds `ttlMs` at `nowIso` — the pure predicate
+ * behind both the `gc` reducer and the CLI's stale surfacing (spec § the lease
+ * lifecycle). Idleness is measured from the newest ping (`lastActive`) or, if
+ * never pinged, the checkout time (`createdAt`). Returned in lease-creation
+ * order (Object.values insertion order over string keys) — deterministic.
+ */
+export function staleLeases(state: BayState, nowIso: string, ttlMs: number): Lease[] {
+  const now = Date.parse(nowIso)
+  const slice = sliceOf(state)
+  const out: Lease[] = []
+  for (const lease of Object.values(state.leases)) {
+    if (lease.endedAt !== undefined) continue // only open leases can go stale
+    const last = slice.lastActive[lease.id] ?? lease.createdAt
+    if (now - Date.parse(last) > ttlMs) out.push(lease)
+  }
+  return out
 }
 
 // ---------- the reducer (pure) ----------
@@ -168,6 +226,79 @@ function reduceAbandon(bay: BayRuntime, state: BayState, command: BayCommand): T
   return { state, events: [ended], effects: [effect] }
 }
 
+/** ping {lease}: refresh a lease's liveness so gc measures idleness from now.
+ *  The explicit primitive; commit/push-driven refresh integrates later via the
+ *  receiver. Fail-loud on an unknown or already-ended lease. */
+function reducePing(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
+  const leaseId = command.args?.lease
+  if (typeof leaseId !== "string" || leaseId === "") {
+    throw new Error("bay: ping: 'lease' (a lease id) is required")
+  }
+  const lease = state.leases[leaseId]
+  if (!lease) {
+    throw new Error(`bay: ping: no lease '${leaseId}' — nothing to refresh`)
+  }
+  if (lease.endedAt !== undefined) {
+    throw new Error(
+      `bay: ping: lease '${leaseId}' already ended (${lease.endReason ?? "ended"}) — cannot refresh`,
+    )
+  }
+
+  const pinged: BayEvent = {
+    v: 1,
+    ts: bay.clock(),
+    actor: bay.actor,
+    type: EV_PINGED,
+    lease: leaseId,
+    changeset: lease.changeId,
+    data: { lease: leaseId },
+  }
+  return { state, events: [pinged], effects: [] }
+}
+
+/** gc {}: expire every open lease idle longer than the TTL, ending it
+ *  (endReason "expired") and retiring its bay through the SAME retire effect the
+ *  abandon path uses — so the WIP-snapshot ref and dirty-refuse custodian logic
+ *  run unchanged. A never-provisioned lease (empty path) is expired but has no
+ *  worktree to retire. Zero expired → an observable `gc.clean` no-op event. */
+function reduceGc(bay: BayRuntime, state: BayState, ttlMs: number): TransitionResult {
+  const now = bay.clock()
+  const stale = staleLeases(state, now, ttlMs)
+
+  if (stale.length === 0) {
+    const openCount = Object.values(state.leases).filter((l) => l.endedAt === undefined).length
+    const clean: BayEvent = {
+      v: 1,
+      ts: now,
+      actor: bay.actor,
+      type: EV_GC_CLEAN,
+      data: { checked: openCount, expired: 0, ttlMs },
+    }
+    return { state, events: [clean], effects: [] }
+  }
+
+  const events: BayEvent[] = []
+  const effects: Effect[] = []
+  for (const lease of stale) {
+    events.push({
+      v: 1,
+      ts: now,
+      actor: bay.actor,
+      type: EV_ENDED,
+      lease: lease.id,
+      changeset: lease.changeId,
+      data: { lease: lease.id, endReason: "expired" },
+    })
+    if (lease.path !== "") {
+      effects.push({
+        type: FX_RETIRE,
+        data: { lease: lease.id, path: lease.path, branch: lease.branch, changeId: lease.changeId },
+      })
+    }
+  }
+  return { state, events, effects }
+}
+
 // ---------- apply (pure fold; runs on live dispatch AND replay) ----------
 
 function apply(state: BayState, event: BayEvent): BayState {
@@ -219,6 +350,19 @@ function apply(state: BayState, event: BayEvent): BayState {
             ...slice,
             heads: d.headSha ? { ...slice.heads, [d.lease]: d.headSha } : slice.heads,
           },
+        },
+      }
+    }
+
+    case EV_PINGED: {
+      const d = event.data as { lease: LeaseId }
+      if (!state.leases[d.lease]) return state // ping for an unknown lease: ignore
+      const slice = sliceOf(state)
+      return {
+        ...state,
+        slices: {
+          ...state.slices,
+          [LAYER]: { ...slice, lastActive: { ...slice.lastActive, [d.lease]: event.ts } },
         },
       }
     }
@@ -359,6 +503,9 @@ function makeRetireHandler(opts: WorkspacesOptions) {
  * `bay.use(layer)`; we inline it because the layer must close over `bay`.
  */
 export function withWorkspaces(opts: WorkspacesOptions = {}): BayPlugin {
+  // Resolved ONCE here (build/setup context), never per-reduce, so the gc
+  // reducer reads a closed-over constant and stays pure + deterministic.
+  const leaseTimeoutMs = resolveLeaseTimeoutMs(opts)
   return (bay) => {
     const layer: Layer = {
       name: LAYER,
@@ -366,6 +513,8 @@ export function withWorkspaces(opts: WorkspacesOptions = {}): BayPlugin {
       reduce(state, command, next) {
         if (command.type === "co") return reduceCo(bay, state, command)
         if (command.type === "abandon") return reduceAbandon(bay, state, command)
+        if (command.type === "ping") return reducePing(bay, state, command)
+        if (command.type === "gc") return reduceGc(bay, state, leaseTimeoutMs)
         return next(state, command)
       },
       effects: {

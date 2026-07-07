@@ -14,7 +14,7 @@ import { pipe } from "../src/pipe.ts"
 import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
-import { withWorkspaces } from "../src/layers/workspaces.ts"
+import { withWorkspaces, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/workspaces.ts"
 import { withQueue } from "../src/layers/queue.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
@@ -29,7 +29,7 @@ import { git } from "../src/layers/git.ts"
 
 // ---------- context ----------
 
-type Ctx = { mainRepo: string; bayDir: string; repoGit: string; actor: string }
+type Ctx = { mainRepo: string; bayDir: string; repoGit: string; actor: string; leaseTimeoutMs?: number }
 
 async function resolveCtx(): Promise<Ctx> {
   // Hooks run inside the bare repo with BAY_MAIN_REPO pinned; interactive runs
@@ -50,13 +50,23 @@ async function resolveCtx(): Promise<Ctx> {
     (await source.get("user.name").catch(() => undefined)) ??
     process.env.USER ??
     "bay"
-  return { mainRepo, bayDir, repoGit: join(bayDir, "repo.git"), actor }
+  // TTL git-config tier resolved here at the host boundary (the layer itself
+  // only reads inline > env > default, keeping its reducers spawn-free).
+  const ttlRaw = await source.get("leaseTimeoutMs")
+  let leaseTimeoutMs: number | undefined
+  if (ttlRaw !== undefined) {
+    leaseTimeoutMs = Number(ttlRaw)
+    if (!Number.isFinite(leaseTimeoutMs) || leaseTimeoutMs <= 0) {
+      throw new Error(`bay: bay.leaseTimeoutMs is set to '${ttlRaw}' — not a positive number of milliseconds`)
+    }
+  }
+  return { mainRepo, bayDir, repoGit: join(bayDir, "repo.git"), actor, leaseTimeoutMs }
 }
 
 function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRuntime {
   return pipe(
     createBay({ store, actor: ctx.actor }),
-    withWorkspaces({ mainRepo: ctx.mainRepo, bayRemote: ctx.repoGit }),
+    withWorkspaces({ mainRepo: ctx.mainRepo, bayRemote: ctx.repoGit, leaseTimeoutMs: ctx.leaseTimeoutMs }),
     withQueue(),
     withMergeWorker({ configCwd: ctx.mainRepo }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
@@ -180,6 +190,14 @@ async function verbStatus(ctx: Ctx, target: string | undefined, json: boolean): 
     return
   }
   console.log(bayTable(state, ctx.actor, Date.now()))
+  // Stale-lease alerts (spec § lease lifecycle) — silent when none, so the
+  // executable happy-path doc's expected output is unchanged.
+  const ttl = ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS
+  for (const lease of staleLeases(state, new Date().toISOString(), ttl)) {
+    console.log(
+      `bay: stale lease ${lease.id} (${lease.workitem ?? lease.branch}) idle past ${Math.round(ttl / 60000)}m — git bay ping ${lease.id} to keep it, or git bay gc to expire`,
+    )
+  }
 }
 
 async function verbEnqueue(ctx: Ctx, target: string | undefined, workitem: string | undefined): Promise<void> {
@@ -347,6 +365,8 @@ const USAGE = `usage: git bay <verb>
   drain [--watch]           run the merge worker  [--interval <sec>]
   abandon <lease>           end a lease; WIP is preserved, never deleted
   adopt <branch>            make a legacy branch a changeset  [--workitem <id>]
+  ping <lease>              refresh a lease's idle clock
+  gc                        expire idle leases (WIP snapshotted, never deleted)
   audit                     strays, pins, refs without workitems  [--json]`
 
 async function main(): Promise<void> {
@@ -382,6 +402,26 @@ async function main(): Promise<void> {
       })
       return
     }
+    case "ping": {
+      const lease = args[0]
+      if (!lease) throw new Error("bay: ping: a lease id is required (git bay status --json lists them)")
+      await withWriteBay(ctx, async (bay) => {
+        await bay.dispatch({ type: "ping", args: { lease } })
+      })
+      return
+    }
+    case "gc":
+      await withWriteBay(ctx, async (bay) => {
+        const { events } = await bay.dispatch({ type: "gc" })
+        for (const e of events) {
+          if (e.type === "lease.ended") {
+            const d = e.data as { lease: string }
+            console.log(`bay: lease ${d.lease} expired — WIP preserved; bay reclaimable`)
+          }
+          if (e.type === "gc.clean") console.log("bay: gc clean — no idle leases past TTL")
+        }
+      })
+      return
     case "audit":
       return await verbAudit(ctx, json)
     case "receive-pre":
