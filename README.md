@@ -1,30 +1,17 @@
 # git bay
 
-**git bay** is a merge queue for your own machine. It gives each piece of work an isolated git workspace, accepts finished work through plain `git push`, and merges changes onto your main branch one at a time — each one checked before it lands.
+**git bay** is a merge queue for your local repository. You work in an isolated workspace, submit by running plain `git push`, and the bay checks and merges each change onto `main` one at a time — so `main` never receives an untested merge. No server, no pull requests, no daemon.
 
-## The problem
+It was built for machines that run fleets of coding agents against one repository, but the safety it adds — *nothing lands on main unchecked* — is just as useful for a single developer who has tests and would rather not break their own main branch.
 
-When several people — or, increasingly, several coding agents — work in one repository at the same time, the main branch becomes a hazard zone:
+## How it works, in 30 seconds
 
-- Two changes that each pass tests on their own can break the build when merged together, and pushing straight to main means nobody checked the *combination*.
-- Agents step on each other: one force-pushes over another's work, or merges a branch that was never tested against the main branch as it looks *now*.
-- In repositories with submodules it gets worse: a merge can silently move a submodule pointer *backwards*, undoing someone's landed work without anyone noticing.
-- When something does go wrong, there is often no record of what was merged, when, by whom, and what the checks said.
+`git bay init` stores a small amount of state inside your repository's `.git/` directory: a queue database, an event journal, and a miniature bay-owned git repository whose *hooks* are the whole trick.
 
-Hosted services solve this for pull requests — GitHub's merge queue, GitLab's merge trains. But those live in the cloud, attached to a PR workflow. A fleet of local coding agents working directly against a local repository has none of that discipline — and needs it more, because agents merge far more often than people do.
-
-## The solution
-
-git bay runs the merge-queue idea locally, next to your repository:
-
-1. **Start work with one command.** `git bay co <name>` loans you a **bay** — a guarded git worktree tied to a named piece of work. You get a ready workspace; `cd` in and start.
-2. **Work with ordinary git.** Edit, commit, pull, push — nothing new to learn in the middle.
-3. **Pushing is submitting.** When you `git push`, the bay takes over: it runs your checks, and only if they pass does it merge your change — one **changeset** at a time — onto main. The verdict appears right in your push output. If something is wrong, the push is refused with a message that names the problem *and the exact command that fixes it*.
-
-There is no separate submit/land/finish command to remember, and no way to skip the checks by accident.
+`git bay co <name>` loans you a **bay**: an isolated checkout — a git *worktree*, an extra working directory sharing the same repository — already wired so that its `git push` goes to that bay-owned repo. When you push, the hooks fire: your checks run, and only if they pass does the bay merge your change onto `main`. The verdict prints right in the push output. (git labels hook output `remote:`, even though everything here is on your machine.)
 
 ```console
-$ cd "$(git bay co fix-readme)"                   # loan a workspace for your work item
+$ cd "$(git bay co fix-readme)"                   # get a workspace for this piece of work
 $ ...edit...
 $ git commit -am "docs: fix readme"               # plain git from here on
 $ git push                                        # push IS submit
@@ -36,16 +23,29 @@ C-5a7a2f95 merged d2eb46f5 onto main (checks: ✓)
 
 That is real output from a live run, lightly edited for length: the SHA is shortened to 8 characters (`git bay status` prints all 40), and git's own push chatter (the `To <dest>` and ref-update lines) is left out.
 
+There is no separate submit/land/finish command to remember, and no way to skip the checks by accident.
+
+## The problem
+
+In any busy repository, the main branch is a zone of contention:
+
+- **Broken combinations.** Two changes each pass tests on their own, then break the build when merged — because nobody checked the *combination*. Pushing straight to main means nobody ever does.
+- **Stale merges.** A branch was tested against last week's main. By the time it merges, main has moved, and the result is untested again.
+- **Submodule regressions.** In repositories with submodules, a careless merge can move a submodule pointer *backwards* — silently undoing work that had already landed.
+- **No record.** When something does go wrong, there is often no answer to "what was merged, when, by whom, and what did the checks say?"
+
+All of this is familiar on human teams. It becomes acute when coding agents work the same repository: agents merge far more often than people, at all hours, with nobody watching. Hosted merge queues — GitHub's merge queue, GitLab's merge trains — solve this for cloud pull-request workflows. git bay gives the same discipline to a local-first workflow, with no server and no PRs.
+
 ## What you get
 
-- **A real merge queue, locally** — changes are checked and merged one at a time, so main never receives an untested merge. Batching compatible changes together is on the roadmap below.
-- **Ordinary git in the middle** — after `git bay co`, everything is `git pull` / `git commit` / `git push`. Refusals and verdicts arrive as `remote:` lines in the push output, where git users already look.
+- **Main is always checked** — changes merge one at a time, each verified against main *as it is now*, so an untested combination can never land.
+- **Your workflow doesn't change** — after `git bay co`, it's ordinary `git pull` / `git commit` / `git push`. The verdicts appear as `remote:` lines in the push output, where git users already look.
+- **Errors that teach** — a refused push names what failed *and the exact command that fixes it*. The error messages are part of the product.
 - **Safe with submodules** — a parent-repo commit and its submodule commits land together or not at all, and a submodule pointer that would move backwards is refused.
-- **Guarded at commit time, too** — the workspace's git hooks refuse a stale submodule pointer or a branch with no work item at `git commit`, so broken states are caught before they are even pushed.
-- **Errors that teach** — every refusal says what failed and the exact command to fix it. The error messages are part of the product.
-- **Plug in your own tools by running commands** — the issue tracker, the checks, review, notifications: each is just an external command the bay calls. No SDK required.
-- **A complete record** — every event is appended to one JSONL journal: what was merged, when, by whom, and what the checks said. Replayable, resumable, greppable.
-- **No daemon required** — the plain CLI gives the same guarantees; a background service is optional (roadmap).
+- **Guarded at commit time, too** — the workspace's git hooks refuse a stale submodule pointer or a branch with no work item at `git commit`, before a push is even attempted.
+- **Plug in your own tools by running commands** — checks, issue tracker, review, notifications: each is an external command the bay calls. No SDK.
+- **A complete record** — every event is appended to one JSONL journal: what was queued, what the checks said, what merged. Replayable, resumable, greppable.
+- **No daemon** — the plain CLI gives all of the above; a background service is optional (roadmap).
 
 ## Try it
 
@@ -67,7 +67,21 @@ $ git bay audit
 bay: clean — no strays, no unreachable pins, no refs without a workitem
 ```
 
-Every line above is a real command against the current build, run in a scratch repo. `git bay init` stores the bay's state inside `.git/bay/` — a queue database, the event journal, and a small bay-owned git repo whose hooks make push-is-submit work. Putting the state inside `.git/` means repository cleanup tools (like `git clean`) can never delete the merge history. Same small edit as before: git's own push chatter is left out between the two `remote:` lines.
+Every line above is a real command against the current build, run in a scratch repo. Putting the bay's state inside `.git/` means repository cleanup tools (like `git clean`) can never delete the merge history. Same small edit as before: git's own push chatter is left out between the two `remote:` lines.
+
+## Common questions
+
+**How do I tell it what checks to run?** `git config bay.check '<command>'`. The bay runs that command before merging; exit 0 means pass. Repositories with their own landing process can also route the merge itself through a command: `git config bay.mergeCommand '<command with {target}>'`, used by the queue's merge worker.
+
+**What happens when a check fails?** The push is refused and the message says why. If the fix needs new commits, just `git push` again. If the fix changed no commits (a config or environment fix), `git bay requeue <changeset>` re-runs the pipeline.
+
+**What exactly is a changeset? A lease? A work item?** A **changeset** is the unit being merged — the commits you pushed, tracked under an id like `C-5a7a2f95`. A **lease** is the loan of a workspace to a piece of work; `abandon`, `ping`, and `gc` act on leases. The **work item** is just the name you gave `git bay co` — a ticket id or any label.
+
+**Can it lose my work?** Abandoning a workspace with uncommitted changes is refused (commit or clean first — the workspace stays yours). When `gc` retires an idle workspace, it snapshots the branch tip to a findability ref first. Nothing is ever deleted.
+
+**What if two agents push at the same time?** Merges are strictly serial: submissions are ordered by the queue and recorded in the journal — they never race each other onto main.
+
+**Does this replace GitHub or GitLab?** No. git bay manages your *local* main branch. Publishing that branch to a remote stays whatever it is today — many setups have the merge command itself push on success.
 
 ## Status
 
@@ -92,8 +106,6 @@ Also in v0.1: a merge command's exit code is never taken on faith — a change o
 - **v0.2 — batching**: merge several compatible changes as one checked candidate instead of strictly one at a time (the compatibility check is already on main); tolerate honestly rebased branches by comparing patch content rather than commit ids.
 - **v0.3 — native promotion**: the bay performs the merge in its own staging area instead of merging in your main worktree.
 - **v0.4 — background service**: an optional daemon for watch-mode and async operation, with the same guarantees as the bare CLI.
-
-Development is tracked in the hh workspace (bead `@hab/20926-gitbay`).
 
 ## The docs are tests
 
