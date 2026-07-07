@@ -7,6 +7,14 @@
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/gitbay",
   "type": "module",
-  "bin": { "git-bay": "bin/git-bay.ts" },
-  "exports": { ".": "./src/index.ts" }
+  "bin": {
+    "git-bay": "bin/git-bay.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^6.0.3"
+  }
 }
