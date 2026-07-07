@@ -15,7 +15,7 @@ import type {
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
-import { enqueuedEvent, stateChangeEvent } from "./queue.ts"
+import { changesetForTarget, enqueuedEvent, stateChangeEvent } from "./queue.ts"
 import { git, porcelainStatus, repoScopedCleanEnv } from "./git.ts"
 
 /**
@@ -89,8 +89,13 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
   if (typeof branch !== "string" || branch === "") throw new Error("bay: submit: 'branch' is required")
   if (typeof sha !== "string" || sha === "") throw new Error("bay: submit: 'sha' is required")
 
+  // Correlation order: the loan wins (lease → change-id), then an ADOPTED
+  // changeset tracking this branch (push = a revision of it, never a
+  // duplicate), then a fresh deterministic per-branch mint for orphan pushes.
   const lease = leaseForBranch(state, branch)
-  const changeId: ChangeId = lease?.changeId ?? `C-adopt-${branch.replace(/[^A-Za-z0-9._-]/g, "_")}`
+  const tracked = changesetForTarget(state, branch)
+  const changeId: ChangeId =
+    lease?.changeId ?? tracked ?? `C-adopt-${branch.replace(/[^A-Za-z0-9._-]/g, "_")}`
   const existing = state.changesets[changeId]
 
   const events: BayEvent[] = []

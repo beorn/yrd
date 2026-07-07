@@ -102,6 +102,16 @@ export function queuedChangesets(state: BayState): Changeset[] {
   return out
 }
 
+/** The change-id already tracking `target` (a branch), if any — the reverse of
+ *  queueTarget. The receiver's submit path uses this so an adopted branch's
+ *  push becomes a revision of the adopted changeset, never a duplicate. */
+export function changesetForTarget(state: BayState, target: string): ChangeId | undefined {
+  for (const [id, t] of Object.entries(sliceOf(state).targets)) {
+    if (t === target) return id
+  }
+  return undefined
+}
+
 /** The merge target (branch/SHA) recorded for a changeset at enqueue. Throws if
  *  unknown — a changeset with no target is a bug, not an empty default
  *  (principles § Fail Loud, Fail Now). */
