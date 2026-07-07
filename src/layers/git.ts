@@ -6,6 +6,9 @@
 // silent fallback (principles § Fail Loud, Fail Now).
 
 import { spawn } from "node:child_process"
+import { repoScopedCleanEnv } from "../env.ts"
+
+export { repoScopedCleanEnv } from "../env.ts"
 
 export type GitResult = { code: number; stdout: string; stderr: string }
 
@@ -16,7 +19,7 @@ export type GitResult = { code: number; stdout: string; stderr: string }
  *  runs under the Bun binary and the Node-based test harness alike. */
 export async function git(args: string[], cwd?: string): Promise<GitResult> {
   return await new Promise<GitResult>((resolve, reject) => {
-    const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: repoScopedCleanEnv() })
     let stdout = ""
     let stderr = ""
     child.stdout!.on("data", (chunk) => (stdout += chunk))
@@ -74,5 +77,50 @@ export async function worktreeRemove(repo: string, path: string): Promise<void> 
   const res = await git(["-C", repo, "worktree", "remove", "--force", path], repo)
   if (res.code !== 0) {
     throw new Error(`bay: git worktree remove failed (exit ${res.code}):\n${res.stderr.trim()}`)
+  }
+}
+
+/** Resolve a ref to its commit sha (fail-loud). Used for the lease baseSha
+ *  (the resolved base ref) and the abandon snapshot (a branch tip). */
+export async function revParse(repo: string, ref: string): Promise<string> {
+  const res = await git(["-C", repo, "rev-parse", ref], repo)
+  if (res.code !== 0) {
+    throw new Error(`bay: git rev-parse ${ref} failed at ${repo} (exit ${res.code}):\n${res.stderr.trim()}`)
+  }
+  return res.stdout.trim()
+}
+
+/** `git update-ref <ref> <sha>` — writes a findability ref (fail-loud). Abandon
+ *  snapshots the branch tip here so the work is discoverable after the worktree
+ *  is gone; the branch itself is never deleted. */
+export async function updateRef(repo: string, ref: string, sha: string): Promise<void> {
+  const res = await git(["-C", repo, "update-ref", ref, sha], repo)
+  if (res.code !== 0) {
+    throw new Error(`bay: git update-ref ${ref} failed (exit ${res.code}):\n${res.stderr.trim()}`)
+  }
+}
+
+/** Point remote <name> at <url>, creating it if missing. `remote add` is tried
+ *  first; an "already exists" failure falls back to `remote set-url` (both
+ *  fail-loud on any other error). Idempotent by design — re-provisioning or a
+ *  second worktree sharing the repo config both land on the same url. */
+export async function ensureRemote(repo: string, name: string, url: string): Promise<void> {
+  const add = await git(["-C", repo, "remote", "add", name, url], repo)
+  if (add.code === 0) return
+  if (/already exists/i.test(add.stderr)) {
+    const setUrl = await git(["-C", repo, "remote", "set-url", name, url], repo)
+    if (setUrl.code !== 0) {
+      throw new Error(`bay: git remote set-url ${name} failed (exit ${setUrl.code}):\n${setUrl.stderr.trim()}`)
+    }
+    return
+  }
+  throw new Error(`bay: git remote add ${name} failed (exit ${add.code}):\n${add.stderr.trim()}`)
+}
+
+/** `git config <key> <value>` in a repo/worktree (fail-loud). */
+export async function setConfig(repo: string, key: string, value: string): Promise<void> {
+  const res = await git(["-C", repo, "config", key, value], repo)
+  if (res.code !== 0) {
+    throw new Error(`bay: git config ${key} failed (exit ${res.code}):\n${res.stderr.trim()}`)
   }
 }

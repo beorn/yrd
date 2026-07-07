@@ -1,4 +1,5 @@
 import type { ConfigSource } from "./types.ts"
+import { repoScopedCleanEnv } from "./env.ts"
 
 /**
  * Config resolution — inline > BAY_* env > git config bay.* > default
@@ -17,6 +18,7 @@ export function createGitConfigSource(cwd: string = process.cwd()): ConfigSource
         cwd,
         stdout: "pipe",
         stderr: "pipe",
+        env: repoScopedCleanEnv(), // hooks export GIT_DIR=. — never let it repoint this read
       })
       const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
       if (code === 0) return out.trim()

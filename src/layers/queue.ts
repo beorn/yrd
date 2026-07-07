@@ -154,6 +154,20 @@ export function stateChangeEvent(
   return makeEvent(bay, EV_STATE_CHANGED, data, { changeset })
 }
 
+/** Build a `changeset.enqueued` event for layers ABOVE the queue (e.g. the
+ *  receiver's submit pipeline) — events are the composition contract: a higher
+ *  layer emits them, this layer folds them, exactly like stateChangeEvent.
+ *  Callers must have checked uniqueness against state.changesets (fail-loud
+ *  duplicate-id rule lives in reduceEnqueue; builders don't see state). */
+export function enqueuedEvent(
+  bay: BayRuntime,
+  changeset: ChangeId,
+  target: string,
+  workitem: WorkitemId | null,
+): BayEvent {
+  return makeEvent(bay, EV_ENQUEUED, { changeset, target, workitem }, { changeset })
+}
+
 // ---------- reducers (pure) ----------
 
 function reduceEnqueue(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
