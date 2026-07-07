@@ -1,46 +1,46 @@
 # git bay — happy path (executable spec)
 
-This document is the canonical showcase AND the v0.1 acceptance test: it runs under mdspec (`bun run spec`), so the docs cannot drift from the behavior. Status: authored ahead of implementation — gates v0.1.
+This document is the canonical showcase AND the acceptance test: it runs under mdspec (`bun run spec`), so the docs cannot drift from the behavior.
 
-## Setup: a repo, a mainline, a bay remote
+## Setup: a repo, a mainline, a bay
 
 ```console
 $ git init -q demo && cd demo && git commit -qm init --allow-empty
 $ git bay init
 bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
-$ git config bay.workitemProvider none
 $ git config bay.check "true"
 ```
 
-## Check out a bay for a workitem
+## Open a worktree for a named piece of work
+
+PR numbers are sequential per repository, so the first worktree's PR is PR1 — the doc can assert it literally.
 
 ```console
-$ cd "$(git bay co fix-readme --no-workitem)"
-$ git bay status
-BAY   WORKITEM    STATE   AGE  IDLE
-bay1  fix-readme  leased  {{age:/\d+[smhd]\s+/}}{{idle:/\d+[smhd]\s*/}}← you
+$ cd "$(git bay new fix-readme)"
+$ git bay ls
+WORKTREE  NAME        STATE  AGE  IDLE
+wt1       fix-readme  open   {{age:/\d+[smhd]\s+/}}{{idle:/\d+[smhd]\s*/}}← you
 ```
 
-## Work with plain git, push to submit
+## Work with plain git — the push opens the PR
 
 ```console
 $ echo hello > README.md && git add README.md
 $ git commit -qm "docs: add readme"
 $ git push -o wait
 ! ...
-! remote: bay: changeset {{cid:/C-[0-9a-f]{8}/}} received — checks running
-! remote: bay: {{cid}} merged onto main (checks ✓)
+! remote: bay: PR1 received — checks running
+! remote: bay: PR1 merged onto main (checks ✓)
 ! ...
-$ export CID=$(git bay status --json | grep -oE 'C-[0-9a-f]{8}' | head -1)
 ```
 
-## The loan is closed
+## The PR landed, the worktree closed
 
 ```console
-$ git bay status "$CID"
-{{cid}} merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
+$ git bay ls PR1
+PR1 merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
 $ git bay audit
-bay: clean — no strays, no unreachable pins, no refs without a workitem
+bay: clean — no strays, no unreachable pins, no refs without a name
 ```
 
 ## And a refusal teaches (unhappy path, one example)
@@ -54,10 +54,8 @@ $ git commit -qm wip --allow-empty && git push
 ```
 
 Assertions above are mdspec pattern-matches, not literals: `{{name:/regex/}}` for
-a captured value (age, sha, changeset id) reused with bare `{{name}}` in later
-output, inline `...` for free-text remedy wording, and a leading/trailing
-`! ...` around each push's remote output to absorb git's own `To <dest>` /
-ref-update lines without pinning their exact wording. `{{name}}` only threads
-through *expected output* — it can't parameterize a later `$` command — so the
-changeset id also gets captured into a real shell variable (`$CID`) via
-`git bay status --json` for use as a command argument in the next block.
+a captured value (age, sha) reused with bare `{{name}}` in later output, inline
+`...` for free-text remedy wording, and a leading/trailing `! ...` around each
+push's remote output to absorb git's own `To <dest>` / ref-update lines without
+pinning their exact wording. The PR number itself needs no capture: the mint is
+sequential per repository, so a fresh demo repo's first PR is always `PR1`.
