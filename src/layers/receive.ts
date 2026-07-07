@@ -324,16 +324,80 @@ export async function preReceiveCheck(
       }
       const anc = await git(["-C", subRepo, "merge-base", "--is-ancestor", oldPin!, newPin!])
       if (anc.code !== 0) {
+        // Patch-id rewrite tolerance (/pro A5): a rebase/amend rewrite carries
+        // the same patches under new SHAs — that is not a lineage jump. Allow
+        // it (journaled via the accepted message); refuse genuine rewinds.
+        const verdict = await patchIdRewriteVerdict(subRepo, oldPin!, newPin!)
+        if (verdict.rewrite) {
+          messages.push(
+            `bay: note — gitlink '${path}' pin move is a history rewrite ` +
+              `(${verdict.matched}/${verdict.oldCount} old patches present under new SHAs; base ${verdict.base.slice(0, 12)}) — allowed`,
+          )
+          continue
+        }
         throw new Error(
-          `bay: pin refusal — gitlink '${path}' moves ${oldPin!.slice(0, 12)} → ${newPin!.slice(0, 12)} ` +
-            `and the new pin does not descend from the old one. Rebase the submodule forward or merge it; ` +
-            `history rewrites gain patch-id tolerance in M2 (@hab/20926-gitbay).`,
+          `bay: pin refusal — gitlink '${path}' moves ${oldPin!.slice(0, 12)} → ${newPin!.slice(0, 12)}: ` +
+            `not a descendant and not a recognizable rewrite (${verdict.reason}). ` +
+            `Rebase the submodule forward or merge it; a genuine history replacement needs an explicit override (M3 evidence token).`,
         )
       }
     }
     messages.push(`bay: ref ${branch} accepted for intake`)
   }
   return messages
+}
+
+/** Rewrite-vs-rewind verdict for a non-descendant pin move (/pro A5).
+ *  Mechanism: patches, not SHAs. From the merge-base of the two pins, collect
+ *  `git patch-id --stable` for each side's range; the move is a REWRITE when
+ *  every old patch is present under the new history (subset — additions on top
+ *  are fine, that is exactly what a rebase-plus-new-work looks like). A missing
+ *  old patch means history was dropped or replaced → rewind → refuse upstream.
+ *  Cost note: runs only on the already-exceptional refusal path. */
+export async function patchIdRewriteVerdict(
+  subRepo: string,
+  oldPin: string,
+  newPin: string,
+): Promise<{ rewrite: boolean; matched: number; oldCount: number; base: string; reason: string }> {
+  const baseRes = await git(["-C", subRepo, "merge-base", oldPin, newPin])
+  if (baseRes.code !== 0) {
+    return { rewrite: false, matched: 0, oldCount: 0, base: "", reason: "no common ancestor (unrelated histories)" }
+  }
+  const base = baseRes.stdout.trim()
+
+  const ids = async (pin: string): Promise<string[]> => {
+    const proc = Bun.spawn(
+      ["sh", "-c", `git -C "${subRepo}" log -p --full-index ${base}..${pin} | git patch-id --stable`],
+      { stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() },
+    )
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    if (code !== 0) throw new Error(`bay: patch-id over ${base.slice(0, 12)}..${pin.slice(0, 12)} failed: ${err.trim()}`)
+    return out
+      .split("\n")
+      .map((l) => l.split(/\s+/)[0])
+      .filter((id): id is string => !!id)
+  }
+
+  const oldIds = await ids(oldPin)
+  const newIds = new Set(await ids(newPin))
+  const matched = oldIds.filter((id) => newIds.has(id)).length
+  if (oldIds.length === 0) {
+    return { rewrite: false, matched: 0, oldCount: 0, base, reason: "old pin contributes no patches over the base" }
+  }
+  if (matched === oldIds.length) {
+    return { rewrite: true, matched, oldCount: oldIds.length, base, reason: "all old patches present" }
+  }
+  return {
+    rewrite: false,
+    matched,
+    oldCount: oldIds.length,
+    base,
+    reason: `${oldIds.length - matched} of ${oldIds.length} old patches missing from the new history`,
+  }
 }
 
 /** Inbox receipt for the daemon path: when the writer lock is held, the hook
