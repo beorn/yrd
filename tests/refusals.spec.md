@@ -6,121 +6,117 @@ runs both. This doc is the acceptance artifact for epic AC7: every refusal
 names the failed check AND the exact fixing command, asserted verbatim
 including the remedy line — not paraphrased in prose above the fence.
 
-## Setup: a repo, a mainline, a bay remote
+## Setup: a repo, a mainline, a bay
 
 ```console
 $ git init -q demo && cd demo && git commit -qm init --allow-empty && export DEMO="$PWD"
 $ git bay init
 bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
-$ git config bay.workitemProvider none
 ```
 
 ## A red check teaches
 
 `bay.check` is the ONE project check (spec § Check provider). A failing check
-never touches the mainline — it rejects the changeset and names the exact
-command that failed, with its exit code and output.
+never touches the mainline — it rejects the PR and names the exact command
+that failed, with its exit code and output.
 
 ```console
 $ git config bay.check "false"
-$ cd "$(git bay co red-check --no-workitem)"
+$ cd "$(git bay new red-check)"
 $ echo hello > README.md && git add README.md
 $ git commit -qm "docs: add readme"
 $ git push -o wait
 ! ...
-! remote: bay: changeset {{cid:/C-[0-9a-f]{8}/}} received — checks running
-! remote: bay: {{cid}} rejected — check 'false' failed (exit 1):
+! remote: bay: PR1 received — checks running
+! remote: bay: PR1 rejected — check 'false' failed (exit 1):
 ! ...
-$ export CID=$(git bay status --json | grep -oE 'C-[0-9a-f]{8}' | head -1)
-$ git bay status "$CID"
-{{cid:/C-[0-9a-f]{8}/}} rejected — check 'false' failed (exit 1):
+$ git bay ls PR1
+PR1 rejected — check 'false' failed (exit 1):
 ```
 
 The push itself succeeds (checks run post-receive, asynchronously to the ref
 update) — the rejection is a domain verdict, not a transport failure. Nothing
-merged; the branch and the changeset both survive for the next section.
+merged; the branch and the PR both survive for the next section.
 
 ## Resume without a new commit
 
-No new commit, so there is nothing to push — `requeue` is the resume verb: it
+No new commit, so there is nothing to push — `retry` is the resume verb: it
 resubmits the SAME sha through the SAME pipeline once the fix (here: the check
-itself) is in place.
+itself) is in place. The PR keeps its number across the retry.
 
 ```console
 $ git config bay.check "true"
-$ git bay requeue "$CID"
-bay: changeset {{cid}} received — checks running
-bay: {{cid}} merged onto main (checks ✓)
-$ git bay status "$CID"
-{{cid}} merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
+$ git bay retry PR1
+bay: PR1 received — checks running
+bay: PR1 merged onto main (checks ✓)
+$ git bay ls PR1
+PR1 merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
 ```
 
-## Dirty abandon refuses
+## Dirty close refuses
 
-`abandon` ends a lease, but it never destroys uncommitted work — the reason
+`close` ends a worktree, but it never destroys uncommitted work — the reason
 this project exists (spec § Design laws #5, "the loan closes at submit"). The
-refusal happens at the door, BEFORE anything journals: the lease stays yours.
+refusal happens at the door, BEFORE anything journals: the worktree stays
+yours. Note the dual addressing: the argument is the NAME given at `new`; the
+refusal answers with the worktree id (`wt1`), and either form works.
 
 ```console
-$ cd "$DEMO" && cd "$(git bay co dirty-abandon --no-workitem)"
+$ cd "$DEMO" && cd "$(git bay new dirty-close)"
 $ echo "uncommitted change" > scratch.txt
-$ export LEASE=$(git bay status --json | grep -oE '"L[0-9]+":' | tail -1 | tr -d '":')
-$ git bay abandon "$LEASE"
-! bay: refusing to abandon ... — bay at ... has uncommitted work:
+$ git bay close dirty-close
+! bay: refusing to close wt1 — the worktree at ... has uncommitted work:
 ! ?? scratch.txt
-! Commit or push it first; bay never deletes uncommitted work. The lease is still yours.
+! Commit or push it first; bay never deletes uncommitted work. The worktree is still yours.
 [1]
-$ git bay status
-BAY   WORKITEM       STATE   AGE  IDLE
-bay1  dirty-abandon  leased  ...
+$ git bay ls
+WORKTREE  NAME         STATE  AGE  IDLE
+wt1       dirty-close  open   ...
 ```
 
-State and disk never diverge: the bay table still lists the lease because
+State and disk never diverge: the table still lists the worktree because
 nothing was journaled. Clean up (a real user would commit or push instead) and
-the SAME abandon retires the bay — worktree removed, branch tip preserved under
-`refs/bay/abandoned/<changeId>`.
+the SAME close retires it — worktree removed, branch tip preserved under
+`refs/bay/abandoned/<PR>`.
 
 ```console
 $ rm scratch.txt
 $ cd "$DEMO"
-$ git bay abandon "$LEASE"
-$ git bay status
-no open leases — git bay co <workitem> opens one
+$ git bay close dirty-close
+$ git bay ls
+no open worktrees — git bay new <name> opens one
 ```
 
-(The `cd` out first matters: a successful abandon removes the bay worktree, and
-a shell left standing in the removed directory can't run anything git after.)
+(The `cd` out first matters: a successful close removes the worktree directory,
+and a shell left standing in a removed directory can't run anything git after.)
 
 ## Doors closed
 
-The signature refusal, from a fresh loan: once a changeset is merged, its
-branch is a closed door — re-pushing it (even a new, unrelated commit) is
-refused before it ever reaches a check.
+The signature refusal, from a fresh worktree: once a PR is merged, its branch
+is a closed door — re-pushing it (even a new, unrelated commit) is refused
+before it ever reaches a check. Note the PR number: `dirty-close` above burned
+PR2 (a worktree pre-mints its number at `new`, and a number is never reused),
+so this worktree's PR is PR3.
 
 ```console
-$ cd "$DEMO" && cd "$(git bay co doors-closed --no-workitem)"
+$ cd "$DEMO" && cd "$(git bay new doors-closed)"
 $ echo hello > doors-closed.md && git add doors-closed.md
 $ git commit -qm "docs: doors closed demo"
 $ git push -o wait
 ! ...
-! remote: bay: changeset {{cid2:/C-[0-9a-f]{8}/}} received — checks running
-! remote: bay: {{cid2}} merged onto main (checks ✓)
+! remote: bay: PR3 received — checks running
+! remote: bay: PR3 merged onto main (checks ✓)
 ! ...
 $ git commit -qm wip --allow-empty && git push
 ! ...
-! remote: bay: doors closed — changeset {{cid2}} for 'task/doors-closed' is already merged. Open a new loan: git bay co <workitem>
+! remote: bay: doors closed — PR3 for 'task/doors-closed' is already merged. Start the next piece of work in a fresh worktree: git bay new <name>
 ! ...
 [1]
 ```
 
 Assertions above follow the same mdspec idioms as gitbay.spec.md (see its
-closing note): `{{name:/regex/}}` captures a value on first use and every bare
-`{{name}}` after it must match the same text; a leading/trailing `! ...`
-absorbs git's own transport lines around each push's remote output; inline
-`...` absorbs free-text remedy wording mid-line. stdout and stderr captures
-live in separate namespaces, so `{{cid}}` (defined on stderr in the push
-block, then again on stdout in the `status` block) is two independent
-captures of the same value, not one shared variable — mdspec has no
-cross-stream backreference. `{{cid2}}` is a distinct name because it is a
-different changeset than `{{cid}}`, defined fresh so it is never checked for
-equality against it.
+closing note): a leading/trailing `! ...` absorbs git's own transport lines
+around each push's remote output; inline `...` absorbs free-text (the absolute
+worktree path in the dirty-close refusal, the AGE/IDLE cells in the table).
+PR numbers are asserted literally — the sequential mint makes them
+deterministic in a fresh demo repo, burned numbers included.

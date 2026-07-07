@@ -2,7 +2,7 @@
   "name": "git-bay",
   "version": "0.0.1",
   "private": true,
-  "description": "git bay — a local merge server for agent fleets",
+  "description": "git bay — local pull requests for your repository: plain git push opens the PR, and it lands itself when the checks pass",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/gitbay",
@@ -16,7 +16,7 @@
   "scripts": {
     "test": "bun --bun x vitest run",
     "check": "tsc --noEmit && bun --bun x vitest run",
-    "spec": "PATH=\"$PWD/tests/bin:$PATH\" bun --bun x mdspec tests/gitbay.spec.md tests/refusals.spec.md tests/prime.spec.md"
+    "spec": "PATH=\"$PWD/tests/bin:$PATH\" bun --bun x mdspec tests/gitbay.spec.md tests/refusals.spec.md tests/guide.spec.md"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

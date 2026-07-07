@@ -23,7 +23,7 @@ async function tmpJournalPath(): Promise<string> {
 describe("formatAudit", () => {
   it("renders the exact clean line the happy-path doc asserts", () => {
     expect(formatAudit([])).toBe(
-      "bay: clean — no strays, no unreachable pins, no refs without a workitem",
+      "bay: clean — no strays, no unreachable pins, no refs without a name",
     )
   })
 
@@ -31,13 +31,13 @@ describe("formatAudit", () => {
     const findings: AuditFinding[] = [
       { kind: "stray", subject: "task/x", detail: "d1", remedy: "r1" },
       { kind: "unreachable-pin", subject: "vendor/s", detail: "d2", remedy: "r2" },
-      { kind: "no-workitem-ref", subject: "bay/y", detail: "d3", remedy: "r3" },
+      { kind: "unnamed-ref", subject: "bay/y", detail: "d3", remedy: "r3" },
     ]
     expect(formatAudit(findings)).toBe(
       [
         "bay: stray: task/x — d1. Fix: r1",
         "bay: unreachable-pin: vendor/s — d2. Fix: r2",
-        "bay: no-workitem-ref: bay/y — d3. Fix: r3",
+        "bay: unnamed-ref: bay/y — d3. Fix: r3",
       ].join("\n"),
     )
   })
@@ -111,11 +111,11 @@ async function appendEndedLease(
 ): Promise<void> {
   const journal = createJsonlJournal(journalPath)
   await journal.append({
-    v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", changeset: "C-x",
+    v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", pr: "C-x",
     data: { lease: "L1", bay: 1, workitem: "wi-x", changeId: "C-x", branch },
   })
   await journal.append({
-    v: 1, ts: TS, actor: ACTOR, type: "lease.ended", lease: "L1", changeset: "C-x",
+    v: 1, ts: TS, actor: ACTOR, type: "lease.ended", lease: "L1", pr: "C-x",
     data: { lease: "L1", endReason },
   })
 }
@@ -139,14 +139,14 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withAudit — real git", () => {
       expect(done.data!.clean).toBe(true)
       expect(done.data!.findings).toEqual([])
       expect(formatAudit(done.data!.findings as AuditFinding[])).toBe(
-        "bay: clean — no strays, no unreachable pins, no refs without a workitem",
+        "bay: clean — no strays, no unreachable pins, no refs without a name",
       )
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
   })
 
-  it("flags a stray abandoned branch AND an orphan task/* ref (no lease)", async () => {
+  it("flags a stray abandoned branch AND an orphan task/* ref (no worktree)", async () => {
     const repo = await initRepo()
     try {
       const base = (await git(["-C", repo, "symbolic-ref", "--short", "HEAD"])).stdout.trim()
@@ -158,7 +158,7 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withAudit — real git", () => {
       expect((await git(["-C", repo, "commit", "-q", "-m", "stray work"])).code).toBe(0)
       expect((await git(["-C", repo, "checkout", "-q", base])).code).toBe(0)
 
-      // A task/* branch with NO backing lease → no-workitem-ref.
+      // A task/* branch with NO backing worktree → unnamed-ref.
       expect((await git(["-C", repo, "branch", "task/orphan-y"])).code).toBe(0)
 
       const journalPath = join(repo, "journal.jsonl")
@@ -173,7 +173,7 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withAudit — real git", () => {
       const findings = events.find((e) => e.type === "audit.completed")!.data!.findings as AuditFinding[]
 
       expect(findings.find((f) => f.kind === "stray")?.subject).toBe("task/stray-x")
-      expect(findings.find((f) => f.kind === "no-workitem-ref")?.subject).toBe("task/orphan-y")
+      expect(findings.find((f) => f.kind === "unnamed-ref")?.subject).toBe("task/orphan-y")
       // task/stray-x is a task/* branch too, but it is backed by lease L1 → not double-flagged.
       expect(findings.filter((f) => f.subject === "task/stray-x")).toHaveLength(1)
       expect(findings.every((f) => f.remedy.length > 0)).toBe(true) // law 7

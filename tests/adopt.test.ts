@@ -6,12 +6,12 @@ import {
   createBay,
   createJsonlJournal,
   pipe,
-  queuedChangesets,
+  queuedPrs,
   withMergeWorker,
   withQueue,
   withWorkspaces,
 } from "../src/index.ts"
-import type { BayRuntime, BayState, BayStore, ChangeId } from "../src/index.ts"
+import type { BayRuntime, BayState, BayStore, PrId } from "../src/index.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
 
 const TS = "2024-01-01T00:00:00.000Z"
@@ -35,51 +35,51 @@ function queueSlice(state: BayState): unknown {
   return state.slices.queue
 }
 
-describe("withAdopt — mint + enqueue", () => {
-  it("mints a C-adopt-<hash> id, records the adoption, and enqueues FIFO behind existing entries", async () => {
+describe("withAdopt — mint + enqueue (the submit-a-branch reducer)", () => {
+  it("mints the next sequential PR id, records the adoption, and enqueues FIFO behind existing entries", async () => {
     const bay = await buildAdoptBay(await tmpJournalPath())
-    await bay.dispatch({ type: "enqueue", args: { target: "first-branch", changeId: "C-first" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "first-branch" } }) // PR1
 
-    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-x", workitem: "wi-x" } })
+    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-x", name: "wi-x" } })
 
-    const enqueued = events.find((e) => e.type === "changeset.enqueued")!
-    const changeId = enqueued.data!.changeset as ChangeId
-    expect(changeId).toMatch(/^C-adopt-[0-9a-f]{8}$/)
-    expect(enqueued.data!.target).toBe("legacy-x")
+    const opened = events.find((e) => e.type === "pr.opened")!
+    const prId = opened.data!.pr as PrId
+    expect(prId).toBe("PR2") // sequential behind the enqueued PR1
+    expect(opened.data!.target).toBe("legacy-x")
 
     const recorded = events.find((e) => e.type === "adopt.recorded")!
-    expect(recorded.data).toMatchObject({ branch: "legacy-x", changeId, workitem: "wi-x" })
+    expect(recorded.data).toMatchObject({ branch: "legacy-x", pr: prId, name: "wi-x" })
 
     const state = await bay.state()
-    expect(queuedChangesets(state).map((c) => c.id)).toEqual(["C-first", changeId]) // FIFO behind existing
-    expect(state.changesets[changeId]).toMatchObject({ id: changeId, workitem: "wi-x", state: "queued" })
+    expect(queuedPrs(state).map((c) => c.id)).toEqual(["PR1", prId]) // FIFO behind existing
+    expect(state.prs[prId]).toMatchObject({ id: prId, name: "wi-x", state: "queued" })
   })
 
-  it("adopts without a workitem (records workitem: null)", async () => {
+  it("submits without a name (records name: null)", async () => {
     const bay = await buildAdoptBay(await tmpJournalPath())
     const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-y" } })
-    const changeId = events.find((e) => e.type === "changeset.enqueued")!.data!.changeset as ChangeId
-    expect(events.find((e) => e.type === "adopt.recorded")!.data).toMatchObject({ workitem: null })
-    expect((await bay.state()).changesets[changeId]!.workitem).toBeNull()
+    const prId = events.find((e) => e.type === "pr.opened")!.data!.pr as PrId
+    expect(events.find((e) => e.type === "adopt.recorded")!.data).toMatchObject({ name: null })
+    expect((await bay.state()).prs[prId]!.name).toBeNull()
   })
 })
 
 describe("withAdopt — refusals", () => {
-  it("throws on a double-adopt, naming the tracking changeset", async () => {
+  it("throws on a double-submit, naming the tracking PR", async () => {
     const bay = await buildAdoptBay(await tmpJournalPath())
     await bay.dispatch({ type: "adopt", args: { branch: "legacy-x" } })
     await expect(bay.dispatch({ type: "adopt", args: { branch: "legacy-x" } })).rejects.toThrow(
-      /already tracked by changeset C-adopt-/,
+      /already tracked by PR1/,
     )
   })
 
-  it("throws adopting a branch that an OPEN lease already owns", async () => {
+  it("throws submitting a branch that an OPEN worktree already owns", async () => {
     const path = await tmpJournalPath()
     // Seed an open lease (lease.opened, no lease.ended) for task/loaned.
     const journal = createJsonlJournal(path)
     await journal.append({
-      v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", changeset: "C-x",
-      data: { lease: "L1", bay: 1, workitem: "wi-x", changeId: "C-x", branch: "task/loaned" },
+      v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", pr: "PR1",
+      data: { lease: "L1", bay: 1, workitem: "wi-x", changeId: "PR1", branch: "task/loaned" },
     })
     const bay = pipe(
       createBay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
@@ -88,19 +88,19 @@ describe("withAdopt — refusals", () => {
       withAdopt(),
     )
     await expect(bay.dispatch({ type: "adopt", args: { branch: "task/loaned" } })).rejects.toThrow(
-      /already loaned \(lease L1/,
+      /already open in worktree wt1.*git push from that worktree submits it/s,
     )
   })
 
-  it("adopts a branch whose lease already ENDED (recovers a stray)", async () => {
+  it("submits a branch whose worktree already CLOSED (recovers a stray)", async () => {
     const path = await tmpJournalPath()
     const journal = createJsonlJournal(path)
     await journal.append({
-      v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", changeset: "C-x",
-      data: { lease: "L1", bay: 1, workitem: "wi-x", changeId: "C-x", branch: "task/abandoned" },
+      v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", pr: "PR1",
+      data: { lease: "L1", bay: 1, workitem: "wi-x", changeId: "PR1", branch: "task/abandoned" },
     })
     await journal.append({
-      v: 1, ts: TS, actor: ACTOR, type: "lease.ended", lease: "L1", changeset: "C-x",
+      v: 1, ts: TS, actor: ACTOR, type: "lease.ended", lease: "L1", pr: "PR1",
       data: { lease: "L1", endReason: "abandoned" },
     })
     const bay = pipe(
@@ -109,8 +109,11 @@ describe("withAdopt — refusals", () => {
       withQueue(),
       withAdopt(),
     )
-    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "task/abandoned", workitem: "wi-x" } })
-    expect(events.find((e) => e.type === "changeset.enqueued")).toBeDefined()
+    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "task/abandoned", name: "wi-x" } })
+    const opened = events.find((e) => e.type === "pr.opened")!
+    expect(opened).toBeDefined()
+    // The closed worktree's pre-minted PR1 is burned: the recovered branch gets PR2.
+    expect(opened.data!.pr).toBe("PR2")
   })
 
   it("throws on a missing branch", async () => {
@@ -119,50 +122,48 @@ describe("withAdopt — refusals", () => {
   })
 })
 
-describe("withAdopt — determinism", () => {
-  it("same (clock, actor, branch) → same id; different branch → different id", async () => {
-    const idFor = async (branch: string): Promise<string> => {
-      const bay = await buildAdoptBay(await tmpJournalPath())
-      const { events } = await bay.dispatch({ type: "adopt", args: { branch } })
-      return events.find((e) => e.type === "changeset.enqueued")!.data!.changeset as string
-    }
-    expect(await idFor("legacy-x")).toBe(await idFor("legacy-x"))
-    expect(await idFor("legacy-x")).not.toBe(await idFor("legacy-y"))
+describe("withAdopt — sequential ids", () => {
+  it("mints PR1 in a fresh repo and the next number after existing PRs", async () => {
+    const fresh = await buildAdoptBay(await tmpJournalPath())
+    const first = await fresh.dispatch({ type: "adopt", args: { branch: "legacy-x" } })
+    expect(first.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR1")
+    const second = await fresh.dispatch({ type: "adopt", args: { branch: "legacy-y" } })
+    expect(second.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR2")
   })
 })
 
 describe("withAdopt — replay", () => {
-  it("a fresh bay over the same journal folds identical changesets + queue slice", async () => {
+  it("a fresh bay over the same journal folds identical PRs + queue slice", async () => {
     const path = await tmpJournalPath()
     const first = await buildAdoptBay(path)
-    await first.dispatch({ type: "enqueue", args: { target: "e1", changeId: "C-e1" } })
-    await first.dispatch({ type: "adopt", args: { branch: "legacy-x", workitem: "wi-x" } })
+    await first.dispatch({ type: "enqueue", args: { target: "e1" } })
+    await first.dispatch({ type: "adopt", args: { branch: "legacy-x", name: "wi-x" } })
     const live = await first.state()
 
     const replayed = await (await buildAdoptBay(path)).state()
-    expect(replayed.changesets).toEqual(live.changesets)
+    expect(replayed.prs).toEqual(live.prs)
     expect(queueSlice(replayed)).toEqual(queueSlice(live))
   })
 })
 
 describe("withAdopt — pipeline acceptance", () => {
-  it("an adopted changeset drains through the merge worker to merged", async () => {
+  it("a submitted branch drains through the merge worker to merged", async () => {
     const bay = pipe(
       createBay({ store: openStore(await tmpJournalPath()), clock: CLOCK, actor: ACTOR }),
       withQueue(),
       withMergeWorker({ mergeCommand: "true" }), // trivial real command → exit 0 → merged
       withAdopt(),
     )
-    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-x", workitem: "wi-x" } })
-    const changeId = events.find((e) => e.type === "changeset.enqueued")!.data!.changeset as ChangeId
+    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-x", name: "wi-x" } })
+    const prId = events.find((e) => e.type === "pr.opened")!.data!.pr as PrId
 
     await bay.dispatch({ type: "drain" })
-    expect((await bay.state()).changesets[changeId]!.state).toBe("merged")
+    expect((await bay.state()).prs[prId]!.state).toBe("merged")
   })
 })
 
-describe("withAdopt — receiver seam (adopt-then-push, no duplicate changeset)", () => {
-  it("submit of an adopted branch reuses the adopted changeset id", async () => {
+describe("withAdopt — receiver seam (submit-then-push, no duplicate PR)", () => {
+  it("a push of a submitted branch reuses the PR id — the retry-keeps-number contract", async () => {
     const { withReceive } = await import("../src/layers/receive.ts")
     const stubSubmit = (bay0: ReturnType<typeof createBay>) =>
       bay0.use({ name: "stub-submit", effects: { "submit.run": async () => [] } })
@@ -173,12 +174,12 @@ describe("withAdopt — receiver seam (adopt-then-push, no duplicate changeset)"
       withAdopt(),
       withReceive(),
     )
-    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-y", workitem: "wi-y" } })
-    const adoptedId = events.find((e) => e.type === "changeset.enqueued")!.data!.changeset
+    const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-y", name: "wi-y" } })
+    const adoptedId = events.find((e) => e.type === "pr.opened")!.data!.pr
 
     await bay.dispatch({ type: "submit", args: { branch: "legacy-y", sha: "f".repeat(40) } })
     const state = await bay.state()
-    expect(Object.keys(state.changesets)).toEqual([adoptedId]) // ONE changeset, the adopted one
-    expect(state.changesets[adoptedId as string]!.state).toBe("checking")
+    expect(Object.keys(state.prs)).toEqual([adoptedId]) // ONE PR, the submitted one
+    expect(state.prs[adoptedId as string]!.state).toBe("checking")
   })
 })

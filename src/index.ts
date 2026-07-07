@@ -3,6 +3,7 @@
 export * from "./types.ts"
 export { createBay, makeEvent, definePlugin } from "./core.ts"
 export { pipe } from "./pipe.ts"
+export { nextPrId } from "./ids.ts"
 export { createJsonlJournal } from "./journal.ts"
 export { createGitConfigSource, resolveOption } from "./config.ts"
 export {
@@ -12,7 +13,7 @@ export {
   type WorkspacesOptions,
   type WorkspacesSlice,
 } from "./layers/workspaces.ts"
-export { withQueue, queuedChangesets, type QueueSlice } from "./layers/queue.ts"
+export { withQueue, queuedPrs, type QueueSlice } from "./layers/queue.ts"
 export { overlap, composeBatch, type Overlap, type SkippedTarget, type BatchResult } from "./batch-compat.ts"
 export { changedPaths } from "./layers/git.ts"
 export { withMergeWorker, type MergeWorkerOptions } from "./layers/merge-worker.ts"

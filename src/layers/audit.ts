@@ -16,7 +16,7 @@ import { git, resolveBaseRef } from "./git.ts"
 
 /**
  * withAudit — the `git bay audit` verb (spec § The verbs: "strays, pin
- * reachability, refs with no workitem — read-only, exit 1 if findings"; v0.1 slice
+ * reachability, refs with no name — read-only, exit 1 if findings"; v0.1 slice
  * of @hab/20926-gitbay). It is a strictly READ-ONLY layer: the reducer emits an
  * `audit.run` effect and no events; the effect handler only reads (git rev-parse
  * / merge-base --is-ancestor / ls-tree / cat-file -e / for-each-ref) and reports
@@ -38,7 +38,7 @@ const EV_COMPLETED = "audit.completed"
 const FX_RUN = "audit.run"
 
 export type AuditFinding = {
-  kind: "stray" | "unreachable-pin" | "no-workitem-ref"
+  kind: "stray" | "unreachable-pin" | "unnamed-ref"
   subject: string
   detail: string
   remedy: string
@@ -51,7 +51,7 @@ export type AuditFinding = {
  *  finding. Pure — the CLI prints this and sets its exit code from `clean`. */
 export function formatAudit(findings: AuditFinding[]): string {
   if (findings.length === 0) {
-    return "bay: clean — no strays, no unreachable pins, no refs without a workitem"
+    return "bay: clean — no strays, no unreachable pins, no refs without a name"
   }
   return findings.map((f) => `bay: ${f.kind}: ${f.subject} — ${f.detail}. Fix: ${f.remedy}`).join("\n")
 }
@@ -103,8 +103,8 @@ async function findStrays(mainRepo: string, leases: Lease[]): Promise<AuditFindi
     findings.push({
       kind: "stray",
       subject: lease.branch,
-      detail: `${lease.endReason} lease ${lease.id} tip ${tip.slice(0, 12)} is not reachable from ${mainlineRef} and has no refs/bay/abandoned/${lease.changeId} backup`,
-      remedy: `git bay adopt ${lease.branch} (or archive the tip to refs/bay/abandoned/${lease.changeId}) before it is GC'd, then review manually`,
+      detail: `tip ${tip.slice(0, 12)} of ${lease.endReason} work is not reachable from ${mainlineRef} and has no refs/bay/abandoned/${lease.changeId} backup`,
+      remedy: `git bay submit ${lease.branch} (or archive the tip to refs/bay/abandoned/${lease.changeId}) before it is GC'd, then review manually`,
     })
   }
   return findings
@@ -146,9 +146,9 @@ async function findUnreachablePins(mainRepo: string): Promise<AuditFinding[]> {
   return findings
 }
 
-/** Local task/* or bay/* branches that no lease or queued changeset accounts
- *  for — the no-branch-without-workitem doctrine, checked after the fact. */
-async function findNoWorkitemRefs(mainRepo: string, state: BayState): Promise<AuditFinding[]> {
+/** Local task/* or bay/* branches that no worktree or PR accounts for — the
+ *  no-branch-without-a-name doctrine, checked after the fact. */
+async function findUnnamedRefs(mainRepo: string, state: BayState): Promise<AuditFinding[]> {
   const known = new Set<string>()
   for (const lease of Object.values(state.leases)) known.add(lease.branch)
   // Queue targets may be branch names; read the slice loosely so audit does not
@@ -167,10 +167,10 @@ async function findNoWorkitemRefs(mainRepo: string, state: BayState): Promise<Au
     if (!branch.startsWith("task/") && !branch.startsWith("bay/")) continue
     if (known.has(branch)) continue
     findings.push({
-      kind: "no-workitem-ref",
+      kind: "unnamed-ref",
       subject: branch,
-      detail: `local branch matches task/*|bay/* but no lease or changeset references it`,
-      remedy: `git bay co <workitem> to adopt it, or git branch -D ${branch} if it is abandoned`,
+      detail: `local branch matches task/*|bay/* but no worktree or PR references it`,
+      remedy: `git bay submit ${branch} to open a PR for it, or git branch -D ${branch} if it is abandoned`,
     })
   }
   return findings
@@ -185,7 +185,7 @@ const auditRunHandler: EffectHandler = async (effect: Effect, bay: BayRuntime): 
   const findings: AuditFinding[] = [
     ...(await findStrays(mainRepo, Object.values(state.leases))),
     ...(await findUnreachablePins(mainRepo)),
-    ...(await findNoWorkitemRefs(mainRepo, state)),
+    ...(await findUnnamedRefs(mainRepo, state)),
   ]
 
   return [makeEvent(bay, EV_COMPLETED, { findings, clean: findings.length === 0 })]

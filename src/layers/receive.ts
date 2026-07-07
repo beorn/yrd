@@ -7,15 +7,16 @@ import type {
   BayPlugin,
   BayRuntime,
   BayState,
-  ChangeId,
   Effect,
   Layer,
   Lease,
+  PrId,
   TransitionResult,
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
+import { nextPrId } from "../ids.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
-import { changesetForTarget, enqueuedEvent, stateChangeEvent } from "./queue.ts"
+import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "./git.ts"
 
 /**
@@ -26,12 +27,12 @@ import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "./git.t
  *
  * v0.1 scope notes (documented cuts, each tied to the bead):
  * - Staging-refs promotion (spec § Changesets, /pro A1) arrives with v0.3 when
- *   the merge is owned natively; v0.1 merges a single-repo changeset directly
- *   onto the mainline working tree under clean-tree preconditions.
+ *   the merge is owned natively; v0.1 merges a single-repo PR directly onto
+ *   the mainline working tree under clean-tree preconditions.
  * - Pin refusal handles the descendant + ADD cases; the patch-id rewrite
  *   tolerance (/pro A5) lands with the v0.2 receiver hardening.
- * - Crash mid-submit leaves the changeset in `checking` (reducer events are
- *   journaled before the effect runs); `requeue` resumes it. No duplicate
+ * - Crash mid-submit leaves the PR in `checking` (reducer events are
+ *   journaled before the effect runs); `retry` resumes it. No duplicate
  *   merge is possible because the merge only runs inside the effect.
  */
 
@@ -78,49 +79,51 @@ function reduceInit(bay: BayRuntime, state: BayState, opts: ReceiveOptions): Tra
   return { state, events: [], effects: [effect] }
 }
 
-/** submit {branch, sha}: correlate to a lease/changeset, enqueue (or requeue a
- *  rejected revision), transition queued→checking, and hand the pipeline to the
- *  submit.run effect. Doors-closed (already merged) is refused HERE too — the
- *  pre-receive hook refuses earlier for UX, but the reducer is the layer that
- *  must hold without the hook (law 4: the receiver refuses last). */
+/** submit {branch, sha}: correlate to a lease/PR, open the PR (or re-queue a
+ *  rejected one as its next revision), transition queued→checking, and hand the
+ *  pipeline to the submit.run effect. Doors-closed (already merged) is refused
+ *  HERE too — the pre-receive hook refuses earlier for UX, but the reducer is
+ *  the layer that must hold without the hook (law 4: the receiver refuses last). */
 function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const branch = command.args?.branch
   const sha = command.args?.sha
   if (typeof branch !== "string" || branch === "") throw new Error("bay: submit: 'branch' is required")
   if (typeof sha !== "string" || sha === "") throw new Error("bay: submit: 'sha' is required")
 
-  // Correlation order: the loan wins (lease → change-id), then an ADOPTED
-  // changeset tracking this branch (push = a revision of it, never a
-  // duplicate), then a fresh deterministic per-branch mint for orphan pushes.
+  // Correlation order: the worktree wins (lease → PR number), then a PR already
+  // tracking this branch (push = a revision of it, never a duplicate), then a
+  // fresh sequential mint for orphan pushes.
   const lease = leaseForBranch(state, branch)
-  const tracked = changesetForTarget(state, branch)
-  const changeId: ChangeId =
-    lease?.changeId ?? tracked ?? `C-adopt-${branch.replace(/[^A-Za-z0-9._-]/g, "_")}`
-  const existing = state.changesets[changeId]
+  const tracked = prForTarget(state, branch)
+  const prId: PrId = lease?.changeId ?? tracked ?? nextPrId(state)
+  const existing = state.prs[prId]
 
   const events: BayEvent[] = []
   if (existing) {
     if (existing.state === "merged") {
       throw new Error(
-        `bay: doors closed — changeset ${changeId} for '${branch}' is already merged. ` +
-          `Open a new loan: git bay co <workitem>`,
+        `bay: doors closed — ${prId} for '${branch}' is already merged. ` +
+          `Start the next piece of work in a fresh worktree: git bay new <name>`,
       )
     }
     if (existing.state === "rejected") {
-      events.push(stateChangeEvent(bay, changeId, "rejected", "queued", `re-push of ${branch}`))
+      // Re-push after rejection: same PR number, next revision.
+      events.push(
+        stateChangeEvent(bay, prId, "rejected", "queued", `re-push of ${branch}`, existing.revision + 1),
+      )
     } else if (existing.state !== "queued") {
       throw new Error(
-        `bay: changeset ${changeId} is ${existing.state} — wait for the verdict (git bay status ${changeId})`,
+        `bay: ${prId} is ${existing.state} — wait for the verdict (git bay ls ${prId})`,
       )
     }
   } else {
-    events.push(enqueuedEvent(bay, changeId, branch, lease?.workitem ?? null))
+    events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null))
   }
-  events.push(stateChangeEvent(bay, changeId, "queued", "checking"))
+  events.push(stateChangeEvent(bay, prId, "queued", "checking"))
 
   const effect: Effect = {
     type: FX_SUBMIT,
-    data: { changeset: changeId, branch, sha, bayPath: lease?.path ?? null, lease: lease?.id ?? null },
+    data: { pr: prId, branch, sha, bayPath: lease?.path ?? null, lease: lease?.id ?? null },
   }
   return { state, events, effects: [effect] }
 }
@@ -192,7 +195,7 @@ async function resolveCheck(opts: ReceiveOptions, mainRepo: string): Promise<str
 function makeSubmitHandler(opts: ReceiveOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const d = effect.data as {
-      changeset: ChangeId
+      pr: PrId
       branch: string
       sha: string
       bayPath: string | null
@@ -214,7 +217,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       ])
       if (code !== 0) {
         const detail = `check '${check}' failed (exit ${code}): ${tail(err || out)}`
-        events.push(stateChangeEvent(bay, d.changeset, "checking", "rejected", detail))
+        events.push(stateChangeEvent(bay, d.pr, "checking", "rejected", detail))
         return events
       }
     }
@@ -231,15 +234,15 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       events.push(
         stateChangeEvent(
           bay,
-          d.changeset,
+          d.pr,
           "checking",
           "rejected",
-          `mainline working tree at ${mainRepo} is dirty — commit or clean it, then git bay requeue ${d.changeset}`,
+          `mainline working tree at ${mainRepo} is dirty — commit or clean it, then git bay retry ${d.pr}`,
         ),
       )
       return events
     }
-    events.push(stateChangeEvent(bay, d.changeset, "checking", "merging"))
+    events.push(stateChangeEvent(bay, d.pr, "checking", "merging"))
 
     const headRes = await git(["-C", mainRepo, "symbolic-ref", "--short", "HEAD"])
     const mainline = headRes.code === 0 ? headRes.stdout.trim() : "main"
@@ -249,13 +252,13 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       "merge",
       "--no-ff",
       "-m",
-      `bay: merge ${d.changeset} (${d.branch})`,
+      `bay: merge ${d.pr} (${d.branch})`,
       d.sha,
     ])
     if (merge.code !== 0) {
       await git(["-C", mainRepo, "merge", "--abort"]) // best-effort restore; a failed abort surfaces below
       const detail = `merge of ${d.branch} onto ${mainline} failed (exit ${merge.code}): ${tail(merge.stderr || merge.stdout)}`
-      events.push(stateChangeEvent(bay, d.changeset, "merging", "rejected", detail))
+      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", detail))
       return events
     }
     const mergeSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"])).stdout.trim()
@@ -264,9 +267,9 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     //    merge-base sees reality.
     await git(["-C", repoGit, "fetch", "--quiet", mainRepo, `+refs/heads/${mainline}:refs/heads/${mainline}`])
 
-    events.push(stateChangeEvent(bay, d.changeset, "merging", "merged", `merged ${mergeSha} onto ${mainline}`))
+    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", `merged ${mergeSha} onto ${mainline}`))
     if (d.lease) {
-      events.push(makeEvent(bay, "lease.ended", { lease: d.lease, endReason: "merged" }, { lease: d.lease, changeset: d.changeset }))
+      events.push(makeEvent(bay, "lease.ended", { lease: d.lease, endReason: "merged" }, { lease: d.lease, pr: d.pr }))
     }
     return events
   }
@@ -290,7 +293,7 @@ export function parseReceiveStdin(input: string): RefUpdate[] {
 
 const ZERO_SHA = /^0+$/
 
-/** Pre-receive verdict: doors-closed on merged changesets + gitlink pin rules.
+/** Pre-receive verdict: doors-closed on merged PRs + gitlink pin rules.
  *  Read-only (fold via a read store); refusals throw with the remedy. */
 export async function preReceiveCheck(
   state: BayState,
@@ -301,11 +304,11 @@ export async function preReceiveCheck(
   for (const u of updates) {
     const branch = u.ref.replace(/^refs\/heads\//, "")
     const lease = leaseForBranch(state, branch)
-    const changeset = lease ? state.changesets[lease.changeId] : undefined
-    if (changeset?.state === "merged") {
+    const pr = lease ? state.prs[lease.changeId] : undefined
+    if (pr?.state === "merged") {
       throw new Error(
-        `bay: doors closed — changeset ${changeset.id} for '${branch}' is already merged. ` +
-          `Open a new loan: git bay co <workitem>`,
+        `bay: doors closed — ${pr.id} for '${branch}' is already merged. ` +
+          `Start the next piece of work in a fresh worktree: git bay new <name>`,
       )
     }
 

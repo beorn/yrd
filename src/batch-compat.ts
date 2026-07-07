@@ -1,6 +1,6 @@
-// Batch compatibility precheck: which queued changesets may share ONE batch.
+// Batch compatibility precheck: which queued PRs may share ONE batch.
 //
-// Two changesets are batch-compatible iff they touch no REAL (non-generated)
+// Two PRs are batch-compatible iff they touch no REAL (non-generated)
 // path in common. Path overlap is the deliberately conservative, cheap superset
 // of textual conflict — a `merge-tree --write-tree` candidate-manufacture check
 // belongs to the composer stage, NOT here. Generated paths are factored out

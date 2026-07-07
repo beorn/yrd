@@ -4,72 +4,63 @@ import type {
   BayPlugin,
   BayRuntime,
   BayState,
-  ChangeId,
   Layer,
+  PrId,
   TransitionResult,
   WorkitemId,
 } from "../types.ts"
-import { enqueuedEvent } from "./queue.ts"
+import { nextPrId } from "../ids.ts"
+import { prOpenedEvent } from "./queue.ts"
 import { leaseForBranch } from "./receive.ts"
 
 /**
- * withAdopt — the `git bay adopt <branch>` verb (bead v0.2: "mint a change-id for
- * an existing branch + force workitem reconciliation — the migration path for
- * the no-trace branch backlog"; @hab/20926-gitbay). It is pure bookkeeping over
- * the queue: no effects, no git. It correlates a legacy branch (created outside
- * a bay loan) to a fresh change-id and enqueues it as a first-class changeset.
+ * withAdopt — the reducer behind `git bay submit <branch|name>` (v0.2: the old
+ * `adopt` verb's code, folded into the one advertised submit verb; the CLI
+ * aliases `enqueue` and `adopt` land here too). It is pure bookkeeping over the
+ * queue: no effects, no git. It correlates a branch created outside a worktree
+ * to a fresh PR number and enqueues it as a first-class PR.
  *
- * Design note — what adopt buys and its audit contract:
- *   Adopt makes a legacy branch a first-class changeset so the merge worker /
+ * Design note — what submit-of-a-branch buys and its audit contract:
+ *   Submitting a legacy branch makes it a first-class PR so the merge worker /
  *   receiver submit pipeline can process it, and so `git bay audit` stops
- *   flagging it as a no-workitem-ref — ONCE a workitem is provided. A
- *   `--no-workitem` adopt (workitem = null) still enters the queue but stays
- *   audit-warned until v0.3's hard refusal (spec/bead policy: no branch without a
- *   workitem at the front door; adopt is the reconciliation ramp, not a bypass).
- *   Enforcing the "no-workitem adopt stays warned" nuance is the audit layer's
- *   job (it can see the changeset's null workitem); adopt only records intent.
+ *   flagging it as an unnamed ref — ONCE a name is provided. A nameless submit
+ *   (name = null) still enters the queue but stays audit-warned until v0.3's
+ *   hard refusal (spec/bead policy: no branch without a name at the front door;
+ *   submit is the reconciliation ramp, not a bypass). Enforcing the "nameless
+ *   submit stays warned" nuance is the audit layer's job (it can see the PR's
+ *   null name); this reducer only records intent.
  *
- * Interlock rule (spec): adopt consumes only lower layers' STATE — leases from
- * withWorkspaces/receive (via leaseForBranch) and the queue slice — and emits
- * events the queue folds (enqueuedEvent). It never reaches into their internals.
+ * Interlock rule (spec): this layer consumes only lower layers' STATE — leases
+ * from withWorkspaces/receive (via leaseForBranch) and the queue slice — and
+ * emits events the queue folds (prOpenedEvent). It never reaches into their
+ * internals.
  */
 
 const LAYER = "adopt"
 const EV_RECORDED = "adopt.recorded"
 
-// ---------- deterministic adopt-id mint ----------
-
-// NOTE: fnv1a duplicates queue.ts / workspaces.ts. Adopt is now the THIRD
-// consumer, so the shared `ids.ts` extraction the earlier NOTEs deferred is due
-// next wave (chief owns it — this slice may only create adopt.ts). Copied
-// verbatim so behavior is identical across the three mints.
-function fnv1a(input: string): string {
-  let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
-    h = Math.imul(h, 0x01000193)
-  }
-  return (h >>> 0).toString(16).padStart(8, "0")
-}
-
-/** Deterministic given (clock, actor, branch): re-adopting the same branch at
- *  the same tick mints the same id (and is then refused by the guards below).
- *  The `C-adopt-` prefix marks provenance in the journal and the trailer — the
- *  same shape the receiver's submit path mints for lease-less pushes. */
-function mintAdoptId(ts: string, actor: string, branch: string): ChangeId {
-  return `C-adopt-${fnv1a(`${ts}:${actor}:${branch}`)}`
-}
-
 // ---------- pure lookups ----------
 
-/** The change-id already tracking `branch`, if any — scans the queue slice's
- *  target map (target == branch for a bay-tracked changeset). Loose read so
- *  adopt does not hard-depend on withQueue's slice type. */
-function changesetTrackingBranch(state: BayState, branch: string): ChangeId | undefined {
-  const queue = state.slices.queue as { targets?: Record<ChangeId, string> } | undefined
+/** The PR already tracking `branch`, if any — scans the queue slice's target
+ *  map (target == branch for a bay-tracked PR). Loose read so this layer does
+ *  not hard-depend on withQueue's slice type. */
+function prTrackingBranch(state: BayState, branch: string): PrId | undefined {
+  const queue = state.slices.queue as { targets?: Record<PrId, string> } | undefined
   if (!queue?.targets) return undefined
   for (const [id, target] of Object.entries(queue.targets)) {
     if (target === branch) return id
+  }
+  return undefined
+}
+
+/** The wt-label for an open lease, read loosely from the workspaces slice so
+ *  this layer does not hard-depend on withWorkspaces being registered. Falls
+ *  back to the lease's name/branch when the slice is absent. */
+function worktreeLabel(state: BayState, leaseId: string): string | undefined {
+  const ws = state.slices.workspaces as { byBay?: Record<number, string> } | undefined
+  if (!ws?.byBay) return undefined
+  for (const [num, held] of Object.entries(ws.byBay)) {
+    if (held === leaseId) return `wt${num}`
   }
   return undefined
 }
@@ -79,63 +70,65 @@ function changesetTrackingBranch(state: BayState, branch: string): ChangeId | un
 function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const rawBranch = command.args?.branch
   if (typeof rawBranch !== "string" || rawBranch.trim() === "") {
-    throw new Error("bay: adopt: 'branch' (an existing branch name) is required")
+    throw new Error("bay: submit: 'branch' (an existing branch name) is required")
   }
   const branch = rawBranch
 
-  const rawWorkitem = command.args?.workitem
-  if (rawWorkitem !== undefined && (typeof rawWorkitem !== "string" || rawWorkitem.trim() === "")) {
-    throw new Error("bay: adopt: 'workitem' must be a non-empty string when provided")
+  const rawName = command.args?.name
+  if (rawName !== undefined && (typeof rawName !== "string" || rawName.trim() === "")) {
+    throw new Error("bay: submit: 'name' must be a non-empty string when provided")
   }
-  const workitem: WorkitemId | null = typeof rawWorkitem === "string" ? rawWorkitem : null
+  const name: WorkitemId | null = typeof rawName === "string" ? rawName : null
 
-  // An OPEN lease already owns this branch — it is loaned, not a stray to adopt.
-  // (An ended lease is fine: adopting recovers an abandoned/legacy branch.)
+  // An OPEN worktree already owns this branch — plain `git push` from inside it
+  // is the submit path (there is no `git bay push`). An ended lease is fine:
+  // submitting recovers closed-out or legacy work.
   const lease = leaseForBranch(state, branch)
   if (lease && lease.endedAt === undefined) {
+    const wt = worktreeLabel(state, lease.id) ?? `'${lease.workitem ?? lease.branch}'`
     throw new Error(
-      `bay: adopt: '${branch}' is already loaned (lease ${lease.id}, changeset ${lease.changeId}) — ` +
-        `nothing to adopt; push it, or git bay abandon ${lease.id} first`,
+      `bay: submit: '${branch}' is already open in worktree ${wt} — ` +
+        `plain git push from that worktree submits it, or close it first: git bay close ${wt}`,
     )
   }
 
-  // Already a first-class changeset — refuse the double-adopt, naming it.
-  const tracked = changesetTrackingBranch(state, branch)
+  // Already a first-class PR — refuse the double-submit, naming it.
+  const tracked = prTrackingBranch(state, branch)
   if (tracked) {
-    const cs = state.changesets[tracked]
+    const pr = state.prs[tracked]
     throw new Error(
-      `bay: adopt: '${branch}' is already tracked by changeset ${tracked} (${cs?.state ?? "queued"}) — ` +
-        `git bay status ${tracked}`,
+      `bay: submit: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "queued"}) — ` +
+        `git bay ls ${tracked}`,
     )
   }
 
   const ts = bay.clock()
-  const changeId = mintAdoptId(ts, bay.actor, branch)
-  // Belt-and-suspenders: enqueuedEvent (the builder) does not see state, so the
-  // duplicate-id fail-loud lives here. changesetTrackingBranch already catches
-  // same-branch re-adopts; this catches a bare id collision.
-  if (state.changesets[changeId]) {
-    throw new Error(`bay: adopt: changeset '${changeId}' already exists — '${branch}' was adopted before`)
+  const prId = nextPrId(state)
+  // Belt-and-suspenders: prOpenedEvent (the builder) does not see state, so the
+  // duplicate-id fail-loud lives here. prTrackingBranch already catches
+  // same-branch re-submits; this catches a bare id collision.
+  if (state.prs[prId]) {
+    throw new Error(`bay: submit: PR '${prId}' already exists — '${branch}' was submitted before`)
   }
 
-  const enqueued = enqueuedEvent(bay, changeId, branch, workitem)
+  const opened = prOpenedEvent(bay, prId, branch, name)
   const recorded: BayEvent = {
     v: 1,
     ts,
     actor: bay.actor,
     type: EV_RECORDED,
-    changeset: changeId,
-    data: { branch, changeId, workitem },
+    pr: prId,
+    data: { branch, pr: prId, name },
   }
-  return { state, events: [enqueued, recorded], effects: [] }
+  return { state, events: [opened, recorded], effects: [] }
 }
 
 // ---------- the plugin ----------
 
 /** Built inside the plugin closure (house style): the reducer needs the
- *  runtime's clock/actor to mint deterministically and stamp events, but the
- *  Reducer contract passes no runtime. No apply — the enqueued event is folded
- *  by the queue; `adopt.recorded` is a journal-only audit-trail row. */
+ *  runtime's clock/actor to stamp events, but the Reducer contract passes no
+ *  runtime. No apply — the pr.opened event is folded by the queue;
+ *  `adopt.recorded` is a journal-only audit-trail row. */
 export function withAdopt(): BayPlugin {
   return (bay) => {
     const layer: Layer = {

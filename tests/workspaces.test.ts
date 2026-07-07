@@ -46,7 +46,7 @@ const withStubGit = definePlugin({
           "workspace.provisioned",
           {
             lease: d.lease,
-            path: `/fake/bays/bay${d.bay}`,
+            path: `/fake/bays/wt${d.bay}`,
             branch: d.branch,
             baseSha: `base-sha-${d.bay}`,
             headSha: "0".repeat(40),
@@ -110,7 +110,7 @@ describe("withWorkspaces — bay allocation (lowest free)", () => {
     expect(bays(await bay.state())).toEqual({ 1: "L1" })
     const l1 = (await bay.state()).leases.L1!
     expect(l1.branch).toBe("task/wi-a")
-    expect(l1.path).toBe("/fake/bays/bay1") // filled by provisioned
+    expect(l1.path).toBe("/fake/bays/wt1") // filled by provisioned
     expect(l1.baseSha).toBe("base-sha-1") // folded from the provisioned event
     expect(l1.actor).toBe(ACTOR) // folded from the lease.opened event envelope
 
@@ -129,14 +129,29 @@ describe("withWorkspaces — bay allocation (lowest free)", () => {
     expect(reused.leases.L3!.branch).toBe("task/wi-c")
   })
 
-  it("mints a bay/<changeId> branch when no workitem is supplied", async () => {
+  it("mints a bay/<PrId> branch when no workitem is supplied", async () => {
     const bay = await buildStubBay(await tmpJournalPath())
     const { events } = await bay.dispatch({ type: "co" })
     const opened = events.find((e) => e.type === "lease.opened")!
     const changeId = opened.data!.changeId as string
-    expect(changeId).toMatch(/^C-[0-9a-f]{8}$/)
+    expect(changeId).toBe("PR1") // pre-minted at `new`, sequential per repo
     expect(opened.data!.branch).toBe(`bay/${changeId}`)
     expect((await bay.state()).leases.L1!.workitem).toBeNull()
+  })
+
+  it("pre-mints sequential PR ids across leases; a closed worktree burns its number", async () => {
+    const bay = await buildStubBay(await tmpJournalPath())
+    await bay.dispatch({ type: "co", args: { workitem: "wi-a" } }) // L1 → PR1
+    await bay.dispatch({ type: "co", args: { workitem: "wi-b" } }) // L2 → PR2
+    let st = await bay.state()
+    expect(st.leases.L1!.changeId).toBe("PR1")
+    expect(st.leases.L2!.changeId).toBe("PR2")
+
+    // Close L1 before any push: PR1 is burned, never reused.
+    await bay.dispatch({ type: "abandon", args: { lease: "L1" } })
+    await bay.dispatch({ type: "co", args: { workitem: "wi-c" } }) // L3 → PR3
+    st = await bay.state()
+    expect(st.leases.L3!.changeId).toBe("PR3")
   })
 })
 
@@ -368,7 +383,7 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorkspaces — real git", () =>
 
       await bay.dispatch({ type: "co", args: { workitem: "demo-1" } })
       const lease = (await bay.state()).leases.L1!
-      const bayPath = join(baysRoot, "bay1")
+      const bayPath = join(baysRoot, "wt1")
       const repoHead = (await git(["-C", repo, "rev-parse", "HEAD"])).stdout.trim()
 
       expect(lease.path).toBe(bayPath)
@@ -412,16 +427,16 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorkspaces — real git", () =>
         expect((await git(["-C", bayPath, "config", "push.default"])).stdout.trim()).toBe("current")
       }
 
-      // First bay: `remote add bay` path. `upstream: "bay"` in the event.
+      // First worktree: `remote add bay` path. `upstream: "bay"` in the event.
       const r1 = await bay.dispatch({ type: "co", args: { workitem: "wi-1" } })
       expect(r1.events.find((e) => e.type === "workspace.provisioned")!.data!.upstream).toBe("bay")
-      await assertWired(join(baysRoot, "bay1"))
+      await assertWired(join(baysRoot, "wt1"))
 
-      // Second bay shares the repo config, so `remote add bay` now fails
+      // Second worktree shares the repo config, so `remote add bay` now fails
       // "already exists" → the set-url fallback must keep it green.
       const r2 = await bay.dispatch({ type: "co", args: { workitem: "wi-2" } })
       expect(r2.events.find((e) => e.type === "workspace.provisioned")!.data!.upstream).toBe("bay")
-      await assertWired(join(baysRoot, "bay2"))
+      await assertWired(join(baysRoot, "wt2"))
     } finally {
       await rm(remoteDir, { recursive: true, force: true })
       await rm(repo, { recursive: true, force: true })

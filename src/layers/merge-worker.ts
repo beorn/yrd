@@ -1,34 +1,35 @@
 import type {
+  BayCommand,
   BayEvent,
   BayPlugin,
   BayRuntime,
   BayState,
-  ChangeId,
   Effect,
   EffectHandler,
   Layer,
+  PrId,
   TransitionResult,
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { git, resolveBaseRef } from "./git.ts"
-import { queuedChangesets, queueTarget, stateChangeEvent } from "./queue.ts"
+import { queuedPrs, queueTarget, stateChangeEvent } from "./queue.ts"
 
 /**
  * withMergeWorker — the serial merge driver (v0.1-a of @hab/20926-gitbay: "drain
  * the queue serially by invoking the merge command per target; journal every
  * transition; resume-on-restart via replay"). It builds ON withQueue: it reads
- * the queue's published state (queuedChangesets/queueTarget) and drives the
+ * the queue's published state (queuedPrs/queueTarget) and drives the
  * merging transitions the queue folds. Per the interlock rule it never reaches
  * into the queue's internals — only its state and the shared event builder.
  *
  * Resume-on-restart falls out of the journal-first core (core.ts dispatch
  * journals events BEFORE running effects): the queued→merging event is durable
- * before `merge.run` ever spawns, so a crash mid-merge leaves the changeset in
+ * before `merge.run` ever spawns, so a crash mid-merge leaves the PR in
  * `merging` in the replayed state — nothing is lost or double-counted. drain()
- * deliberately picks ONLY `queued` changesets (never a stray `merging` one) so a
- * crash can't cause a double-merge on the next drain; the stuck changeset is
- * resumed by an explicit `requeue` (merging→queued) once the operator/host has
+ * deliberately picks ONLY `queued` PRs (never a stray `merging` one) so a
+ * crash can't cause a double-merge on the next drain; the stuck PR is
+ * resumed by an explicit `retry` (merging→queued) once the operator/host has
  * confirmed the interrupted merge left nothing half-applied. Journal-first +
  * drain-only-queued is why the "Nothing to integrate" false-success class after
  * a killed submit is structurally impossible.
@@ -41,7 +42,8 @@ const LAYER = "merge-worker"
 export type MergeWorkerOptions = {
   /** Inline override; else `BAY_MERGE_COMMAND`, else `git config bay.mergeCommand`.
    *  No default — a missing merge command is a loud error naming the config key.
-   *  Run via `sh -c` with `{target}` and `{changeset}` substituted. */
+   *  Run via `sh -c` with `{target}` and `{pr}` substituted (`{changeset}` still
+   *  substitutes too, so existing configs keep working). */
   mergeCommand?: string
   /** cwd for ambient (gitconfig) resolution of `bay.mergeCommand`. Defaults to
    *  process.cwd(). Not consulted at all when `mergeCommand` is inline. */
@@ -60,19 +62,42 @@ export type MergeWorkerOptions = {
 
 // ---------- drain reducer (pure) ----------
 
-function reduceDrain(bay: BayRuntime, state: BayState): TransitionResult {
-  const queued = queuedChangesets(state)
-  if (queued.length === 0) {
-    // Observable no-op: this event lets a drain loop see "nothing to do" from the
-    // dispatch return value without polling state. No layer folds it (it changes
-    // nothing) — it exists purely as a progress marker in the journal + return.
-    return { state, events: [makeEvent(bay, EV_QUEUE_EMPTY)], effects: [] }
+/** No arg: land the OLDEST queued PR (one step). With args.pr: land exactly
+ *  that PR — refusing with a teaching message when it is not queued, because
+ *  landing something in another state either needs `retry` first (rejected/
+ *  merging) or is meaningless (merged). */
+function reduceDrain(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
+  const rawPr = command.args?.pr
+  if (rawPr !== undefined && (typeof rawPr !== "string" || rawPr.trim() === "")) {
+    throw new Error("bay: land: 'pr' must be a non-empty string when provided")
   }
-  const oldest = queued[0]!
-  const target = queueTarget(state, oldest.id)
+
+  let next
+  if (typeof rawPr === "string") {
+    const pr = state.prs[rawPr]
+    if (!pr) throw new Error(`bay: land: no PR '${rawPr}' — git bay ls lists them`)
+    if (pr.state === "merged") throw new Error(`bay: land: ${rawPr} is already merged — nothing to land`)
+    if (pr.state !== "queued") {
+      throw new Error(
+        `bay: land: ${rawPr} is ${pr.state} — put it back in the queue first: git bay retry ${rawPr}`,
+      )
+    }
+    next = pr
+  } else {
+    const queued = queuedPrs(state)
+    if (queued.length === 0) {
+      // Observable no-op: this event lets a land loop see "nothing to do" from the
+      // dispatch return value without polling state. No layer folds it (it changes
+      // nothing) — it exists purely as a progress marker in the journal + return.
+      return { state, events: [makeEvent(bay, EV_QUEUE_EMPTY)], effects: [] }
+    }
+    next = queued[0]!
+  }
+
+  const target = queueTarget(state, next.id)
   // queued → merging (validated); the effect carries exactly what the command needs.
-  const event = stateChangeEvent(bay, oldest.id, "queued", "merging")
-  const effect: Effect = { type: FX_MERGE_RUN, data: { changeset: oldest.id, target } }
+  const event = stateChangeEvent(bay, next.id, "queued", "merging")
+  const effect: Effect = { type: FX_MERGE_RUN, data: { pr: next.id, target } }
   return { state, events: [event], effects: [effect] }
 }
 
@@ -103,14 +128,14 @@ function tail(text: string, max = 2000): string {
 
 function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
-    const d = effect.data as { changeset: ChangeId; target: string }
+    const d = effect.data as { pr: PrId; target: string }
 
-    // Read the changeset's CURRENT state as the transition source. drain just set
-    // it to `merging`; reading it (vs hardcoding) means a broken caller trips
+    // Read the PR's CURRENT state as the transition source. drain just set it
+    // to `merging`; reading it (vs hardcoding) means a broken caller trips
     // assertTransition instead of silently mis-recording the outcome.
-    const cs = (await bay.state()).changesets[d.changeset]
-    if (!cs) throw new Error(`bay: merge.run: no changeset '${d.changeset}' in state`)
-    const from = cs.state
+    const pr = (await bay.state()).prs[d.pr]
+    if (!pr) throw new Error(`bay: merge.run: no PR '${d.pr}' in state`)
+    const from = pr.state
 
     // Lying-merge guard, step 1 (G1.1): pin the target's SHA BEFORE the merge
     // command runs, so the post-merge ancestry question is about the exact
@@ -122,11 +147,11 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
         return [
           stateChangeEvent(
             bay,
-            d.changeset,
+            d.pr,
             from,
             "rejected",
             `target '${d.target}' does not resolve in ${opts.mainRepo} — cannot verify a landing, refusing to run the merge. ` +
-              `Fix the target (branch deleted? typo?) and requeue: git bay requeue ${d.changeset}`,
+              `Fix the target (branch deleted? typo?) and retry: git bay retry ${d.pr}`,
           ),
         ]
       }
@@ -134,7 +159,10 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     }
 
     const mergeCommand = await resolveMergeCommand(opts)
-    const cmd = mergeCommand.replaceAll("{target}", d.target).replaceAll("{changeset}", d.changeset)
+    const cmd = mergeCommand
+      .replaceAll("{target}", d.target)
+      .replaceAll("{pr}", d.pr)
+      .replaceAll("{changeset}", d.pr)
 
     // sh -c so the operator's own quoting works; never split on spaces. A spawn
     // failure (no `sh`) throws — that is a broken host, not a merge verdict.
@@ -157,24 +185,24 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
           return [
             stateChangeEvent(
               bay,
-              d.changeset,
+              d.pr,
               from,
               "rejected",
               `merge command exited 0 but ${d.target}@${targetSha.slice(0, 8)} is not an ancestor of ${baseRef} — ` +
                 `refusing to record merged (lying-merge guard). If the landing is real but unpushed, push it and ` +
-                `requeue: git bay requeue ${d.changeset}. If the command lands by rebase/squash, use a merge-based ` +
+                `retry: git bay retry ${d.pr}. If the command lands by rebase/squash, use a merge-based ` +
                 `landing — ancestry is the proof this guard accepts.`,
             ),
           ]
         }
       }
-      return [stateChangeEvent(bay, d.changeset, from, "merged", tail(stdout))]
+      return [stateChangeEvent(bay, d.pr, from, "merged", tail(stdout))]
     }
     // A non-zero merge command is a DOMAIN outcome (rejected), never a crash — do
     // not throw. The detail names the exit code and the stderr tail (law 7).
     const errTail = tail(stderr)
     const detail = errTail === "" ? `exit ${code}` : `exit ${code}: ${errTail}`
-    return [stateChangeEvent(bay, d.changeset, from, "rejected", detail)]
+    return [stateChangeEvent(bay, d.pr, from, "rejected", detail)]
   }
 }
 
@@ -184,10 +212,10 @@ export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
   return (bay) => {
     const layer: Layer = {
       name: LAYER,
-      // No apply: the merge worker emits changeset.state-changed events that the
+      // No apply: the merge worker emits pr.state-changed events that the
       // queue layer folds; it owns no state slice of its own.
       reduce(state, command, next) {
-        if (command.type === "drain") return reduceDrain(bay, state)
+        if (command.type === "drain") return reduceDrain(bay, state, command)
         return next(state, command)
       },
       effects: {
