@@ -24,6 +24,7 @@ import {
   preReceiveCheck,
   appendInboxReceipt,
 } from "../src/layers/receive.ts"
+import { withAdopt } from "../src/layers/adopt.ts"
 import { git } from "../src/layers/git.ts"
 
 // ---------- context ----------
@@ -59,6 +60,7 @@ function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRunti
     withQueue(),
     withMergeWorker({ configCwd: ctx.mainRepo }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
+    withAdopt(),
   )
 }
 
@@ -344,6 +346,7 @@ const USAGE = `usage: git bay <verb>
   requeue <changeset>       resume a merging/rejected changeset
   drain [--watch]           run the merge worker  [--interval <sec>]
   abandon <lease>           end a lease; WIP is preserved, never deleted
+  adopt <branch>            make a legacy branch a changeset  [--workitem <id>]
   audit                     strays, pins, refs without workitems  [--json]`
 
 async function main(): Promise<void> {
@@ -369,6 +372,16 @@ async function main(): Promise<void> {
       return await verbDrain(ctx, flag(args, "--watch"), Number(opt(args, "--interval") ?? "15"))
     case "abandon":
       return await verbAbandon(ctx, args[0])
+    case "adopt": {
+      const branch = args[0]
+      if (!branch) throw new Error("bay: adopt: a branch name is required")
+      const workitem = opt(args, "--workitem")
+      await withWriteBay(ctx, async (bay) => {
+        const { events } = await bay.dispatch({ type: "adopt", args: { branch, workitem } })
+        console.log(events.find((e) => e.type === "changeset.enqueued")?.changeset ?? "")
+      })
+      return
+    }
     case "audit":
       return await verbAudit(ctx, json)
     case "receive-pre":
