@@ -13,7 +13,7 @@ import { enqueuedEvent } from "./queue.ts"
 import { leaseForBranch } from "./receive.ts"
 
 /**
- * withAdopt — the `git bay adopt <branch>` verb (bead M2: "mint a change-id for
+ * withAdopt — the `git bay adopt <branch>` verb (bead v0.2: "mint a change-id for
  * an existing branch + force workitem reconciliation — the migration path for
  * the no-trace branch backlog"; @hab/20926-gitbay). It is pure bookkeeping over
  * the queue: no effects, no git. It correlates a legacy branch (created outside
@@ -24,7 +24,7 @@ import { leaseForBranch } from "./receive.ts"
  *   receiver submit pipeline can process it, and so `git bay audit` stops
  *   flagging it as a no-workitem-ref — ONCE a workitem is provided. A
  *   `--no-workitem` adopt (workitem = null) still enters the queue but stays
- *   audit-warned until M3's hard refusal (spec/bead policy: no branch without a
+ *   audit-warned until v0.3's hard refusal (spec/bead policy: no branch without a
  *   workitem at the front door; adopt is the reconciliation ramp, not a bypass).
  *   Enforcing the "no-workitem adopt stays warned" nuance is the audit layer's
  *   job (it can see the changeset's null workitem); adopt only records intent.

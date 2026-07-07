@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { spawn } from "node:child_process"
 
 /**
- * The M1 exit criterion, end to end at the process level (bead:
+ * The v0.1 exit criterion, end to end at the process level (bead:
  * "one worker runs co → commit → push → merged with zero integration balls"):
  * a real repo, the real CLI via a `git-bay` PATH shim (so `git bay` works),
  * a real push through the bay-owned repo's pre/post-receive hooks.
@@ -36,7 +36,7 @@ async function must(cmd: string[], cwd: string, env: Record<string, string>): Pr
   return res
 }
 
-describe("git bay CLI — M1 happy path (process-level)", () => {
+describe("git bay CLI — v0.1 happy path (process-level)", () => {
   let root: string
   let demo: string
   let env: Record<string, string>

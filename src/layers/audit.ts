@@ -16,7 +16,7 @@ import { git, resolveBaseRef } from "./git.ts"
 
 /**
  * withAudit — the `git bay audit` verb (spec § The verbs: "strays, pin
- * reachability, refs with no workitem — read-only, exit 1 if findings"; M1 slice
+ * reachability, refs with no workitem — read-only, exit 1 if findings"; v0.1 slice
  * of @hab/20926-gitbay). It is a strictly READ-ONLY layer: the reducer emits an
  * `audit.run` effect and no events; the effect handler only reads (git rev-parse
  * / merge-base --is-ancestor / ls-tree / cat-file -e / for-each-ref) and reports

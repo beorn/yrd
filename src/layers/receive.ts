@@ -19,17 +19,17 @@ import { changesetForTarget, enqueuedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "./git.ts"
 
 /**
- * withReceive — the receiver (spec § Using it: "the remote is the API"; M1-b of
+ * withReceive — the receiver (spec § Using it: "the remote is the API"; v0.1-b of
  * @hab/20926-gitbay). It owns the bay-owned local repo (`<bayDir>/repo.git`),
  * its pre/post-receive hooks (written self-locating at `init`, law 8), and the
  * synchronous submit pipeline behind `git push -o wait`.
  *
- * M1 scope notes (documented cuts, each tied to the bead):
- * - Staging-refs promotion (spec § Changesets, /pro A1) arrives with M3 when
- *   the merge is owned natively; M1 merges a single-repo changeset directly
+ * v0.1 scope notes (documented cuts, each tied to the bead):
+ * - Staging-refs promotion (spec § Changesets, /pro A1) arrives with v0.3 when
+ *   the merge is owned natively; v0.1 merges a single-repo changeset directly
  *   onto the mainline working tree under clean-tree preconditions.
  * - Pin refusal handles the descendant + ADD cases; the patch-id rewrite
- *   tolerance (/pro A5) lands with the M2 receiver hardening.
+ *   tolerance (/pro A5) lands with the v0.2 receiver hardening.
  * - Crash mid-submit leaves the changeset in `checking` (reducer events are
  *   journaled before the effect runs); `requeue` resumes it. No duplicate
  *   merge is possible because the merge only runs inside the effect.
@@ -201,7 +201,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     const { mainRepo, repoGit } = await resolveReceive(opts)
     const events: BayEvent[] = []
 
-    // 1. The ONE project check, on the submitter's own bay (M1 form of
+    // 1. The ONE project check, on the submitter's own bay (v0.1 form of
     //    "speculative checks on the submitter's bay").
     const check = await resolveCheck(opts, mainRepo)
     if (check !== undefined && check.trim() !== "") {
@@ -343,7 +343,7 @@ export async function preReceiveCheck(
         throw new Error(
           `bay: pin refusal — gitlink '${path}' moves ${oldPin!.slice(0, 12)} → ${newPin!.slice(0, 12)}: ` +
             `not a descendant and not a recognizable rewrite (${verdict.reason}). ` +
-            `Rebase the submodule forward or merge it; a genuine history replacement needs an explicit override (M3 evidence token).`,
+            `Rebase the submodule forward or merge it; a genuine history replacement needs an explicit override (v0.3 evidence token).`,
         )
       }
     }

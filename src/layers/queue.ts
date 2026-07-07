@@ -15,7 +15,7 @@ import { makeEvent } from "../core.ts"
 
 /**
  * withQueue — the changeset queue layer (spec § How it's built, the withReceive
- * row's queue slice; M1-a slice of @hab/20926-gitbay). It is pure bookkeeping
+ * row's queue slice; v0.1-a slice of @hab/20926-gitbay). It is pure bookkeeping
  * over the core journal: it owns the changeset state machine and the FIFO order,
  * and it emits NO effects — enqueue/requeue only append events. The merge worker
  * (a layer above) drives the merging transitions and the I/O.
@@ -34,10 +34,10 @@ import { makeEvent } from "../core.ts"
 // ---------- the changeset state machine ----------
 
 /** Legal transitions. Exhaustive over ChangesetState so a new state can't be
- *  added without deciding its edges. queued→merging is direct in M1 (no checks
+ *  added without deciding its edges. queued→merging is direct in v0.1 (no checks
  *  layer yet); checking/reviewing are the guarded rungs a later with*() adds.
  *  merging/rejected → queued is the requeue/resume edge (crash recovery). abandon
- *  (merging/... → abandoned) lands in M2 with withWorkspaces' abandon, so no M1-a
+ *  (merging/... → abandoned) lands in v0.2 with withWorkspaces' abandon, so no v0.1-a
  *  path produces `abandoned` yet — it is a terminal state with no producer here. */
 const TRANSITIONS: Record<ChangesetState, ChangesetState[]> = {
   queued: ["checking", "merging"],
@@ -127,7 +127,7 @@ export function queueTarget(state: BayState, changeset: ChangeId): string {
 
 // NOTE: fnv1a/mintChangeId duplicate withWorkspaces' private helpers. They are a
 // second consumer, so the house rule ("extract on the second consumer") applies —
-// but this slice may only edit queue.ts (workspaces.ts is frozen for M1-a), so the
+// but this slice may only edit queue.ts (workspaces.ts is frozen for v0.1-a), so the
 // shared `ids.ts` extraction is deferred to when workspaces can be touched.
 function fnv1a(input: string): string {
   let h = 0x811c9dc5
@@ -245,9 +245,9 @@ function apply(state: BayState, event: BayEvent): BayState {
       const changeset: Changeset = {
         id: d.changeset,
         workitem: d.workitem,
-        lease: "", // M1-a: enqueued targets are not necessarily bound to a lease
+        lease: "", // v0.1-a: enqueued targets are not necessarily bound to a lease
         revision: 1,
-        repos: [], // M1-a: cross-repo structure resolved later; `target` is the merge locator
+        repos: [], // v0.1-a: cross-repo structure resolved later; `target` is the merge locator
         state: "queued",
       }
       return {

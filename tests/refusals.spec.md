@@ -1,6 +1,6 @@
 # git bay — refusals (executable spec)
 
-Sibling to [spec/happy-path.md](happy-path.md) (spec § Testing: "Unhappy paths
+Sibling to [tests/gitbay.spec.md](gitbay.spec.md) (spec § Testing: "Unhappy paths
 get sibling mdspec docs as they land"). Same idiom, same gate — `bun run spec`
 runs both. This doc is the acceptance artifact for epic AC7: every refusal
 names the failed check AND the exact fixing command, asserted verbatim
@@ -113,7 +113,7 @@ $ git commit -qm wip --allow-empty && git push
 [1]
 ```
 
-Assertions above follow the same mdspec idioms as happy-path.md (see its
+Assertions above follow the same mdspec idioms as gitbay.spec.md (see its
 closing note): `{{name:/regex/}}` captures a value on first use and every bare
 `{{name}}` after it must match the same text; a leading/trailing `! ...`
 absorbs git's own transport lines around each push's remote output; inline

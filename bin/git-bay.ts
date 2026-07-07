@@ -320,7 +320,7 @@ async function verbAudit(ctx: Ctx, json: boolean): Promise<void> {
   try {
     mod = await import("../src/layers/audit.ts")
   } catch {
-    throw new Error("bay: audit is landing (src/layers/audit.ts not present yet) — see @hab/20926-gitbay M1-c")
+    throw new Error("bay: audit is landing (src/layers/audit.ts not present yet) — see @hab/20926-gitbay v0.1-c")
   }
   const findings = await withWriteBay(ctx, async (bay) => {
     const audited = mod.withAudit()(bay)
@@ -416,7 +416,7 @@ async function main(): Promise<void> {
     return
   }
   const json = flag(args, "--json")
-  flag(args, "--no-workitem") // accepted for forward-compat; no provider in M1
+  flag(args, "--no-workitem") // accepted for forward-compat; no provider in v0.1
   const ctx = await resolveCtx()
 
   // A wiped bay must teach, not impersonate an empty one: without this, a

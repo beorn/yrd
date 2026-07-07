@@ -1,6 +1,6 @@
 # git bay — happy path (executable spec)
 
-This document is the canonical showcase AND the M1 acceptance test: it runs under mdspec (`bun run spec`), so the docs cannot drift from the behavior. Status: authored ahead of implementation — gates M1.
+This document is the canonical showcase AND the v0.1 acceptance test: it runs under mdspec (`bun run spec`), so the docs cannot drift from the behavior. Status: authored ahead of implementation — gates v0.1.
 
 ## Setup: a repo, a mainline, a bay remote
 

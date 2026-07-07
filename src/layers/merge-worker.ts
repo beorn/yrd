@@ -15,7 +15,7 @@ import { git, resolveBaseRef } from "./git.ts"
 import { queuedChangesets, queueTarget, stateChangeEvent } from "./queue.ts"
 
 /**
- * withMergeWorker — the serial merge driver (M1-a of @hab/20926-gitbay: "drain
+ * withMergeWorker — the serial merge driver (v0.1-a of @hab/20926-gitbay: "drain
  * the queue serially by invoking the merge command per target; journal every
  * transition; resume-on-restart via replay"). It builds ON withQueue: it reads
  * the queue's published state (queuedChangesets/queueTarget) and drives the
