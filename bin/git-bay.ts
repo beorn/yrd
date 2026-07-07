@@ -68,7 +68,7 @@ function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRunti
     createBay({ store, actor: ctx.actor }),
     withWorkspaces({ mainRepo: ctx.mainRepo, bayRemote: ctx.repoGit, leaseTimeoutMs: ctx.leaseTimeoutMs }),
     withQueue(),
-    withMergeWorker({ configCwd: ctx.mainRepo }),
+    withMergeWorker({ configCwd: ctx.mainRepo, mainRepo: ctx.mainRepo }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
     withAdopt(),
   )

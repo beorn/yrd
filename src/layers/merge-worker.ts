@@ -11,6 +11,7 @@ import type {
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
+import { git, resolveBaseRef } from "./git.ts"
 import { queuedChangesets, queueTarget, stateChangeEvent } from "./queue.ts"
 
 /**
@@ -45,6 +46,16 @@ export type MergeWorkerOptions = {
   /** cwd for ambient (gitconfig) resolution of `bay.mergeCommand`. Defaults to
    *  process.cwd(). Not consulted at all when `mergeCommand` is inline. */
   configCwd?: string
+  /** The mainline repo for the post-merge ancestry verify (the lying-merge
+   *  guard, epic AC4 / fable24 G1.1): when set, a merge command's exit 0 is
+   *  NOT trusted — the target must actually be an ancestor of the refreshed
+   *  mainline (origin/main if it exists, else HEAD) or the changeset is
+   *  journaled `rejected` with a teaching detail. Catches both a lying merge
+   *  command and the merged-locally-but-push-failed class (the verify reads
+   *  origin/main, so an unpushed landing is not a landing). Unset = legacy
+   *  trust-exit-0 (library callers with non-git merge commands); the CLI host
+   *  ALWAYS sets it. */
+  mainRepo?: string
 }
 
 // ---------- drain reducer (pure) ----------
@@ -101,6 +112,27 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     if (!cs) throw new Error(`bay: merge.run: no changeset '${d.changeset}' in state`)
     const from = cs.state
 
+    // Lying-merge guard, step 1 (G1.1): pin the target's SHA BEFORE the merge
+    // command runs, so the post-merge ancestry question is about the exact
+    // commit we asked to land — not whatever the branch points at afterwards.
+    let targetSha: string | undefined
+    if (opts.mainRepo) {
+      const r = await git(["-C", opts.mainRepo, "rev-parse", "--verify", "--quiet", `${d.target}^{commit}`], opts.mainRepo)
+      if (r.code !== 0) {
+        return [
+          stateChangeEvent(
+            bay,
+            d.changeset,
+            from,
+            "rejected",
+            `target '${d.target}' does not resolve in ${opts.mainRepo} — cannot verify a landing, refusing to run the merge. ` +
+              `Fix the target (branch deleted? typo?) and requeue: git bay requeue ${d.changeset}`,
+          ),
+        ]
+      }
+      targetSha = r.stdout.trim()
+    }
+
     const mergeCommand = await resolveMergeCommand(opts)
     const cmd = mergeCommand.replaceAll("{target}", d.target).replaceAll("{changeset}", d.changeset)
 
@@ -114,6 +146,28 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     ])
 
     if (code === 0) {
+      // Lying-merge guard, step 2 (G1.1/G1.2): exit 0 is a CLAIM, not a landing.
+      // Verify the pinned target is now an ancestor of the refreshed mainline;
+      // otherwise journal rejected — a false `merged` is the exact class the
+      // epic's AC4 promises is structurally impossible.
+      if (opts.mainRepo && targetSha) {
+        const baseRef = await resolveBaseRef(opts.mainRepo)
+        const anc = await git(["-C", opts.mainRepo, "merge-base", "--is-ancestor", targetSha, baseRef], opts.mainRepo)
+        if (anc.code !== 0) {
+          return [
+            stateChangeEvent(
+              bay,
+              d.changeset,
+              from,
+              "rejected",
+              `merge command exited 0 but ${d.target}@${targetSha.slice(0, 8)} is not an ancestor of ${baseRef} — ` +
+                `refusing to record merged (lying-merge guard). If the landing is real but unpushed, push it and ` +
+                `requeue: git bay requeue ${d.changeset}. If the command lands by rebase/squash, use a merge-based ` +
+                `landing — ancestry is the proof this guard accepts.`,
+            ),
+          ]
+        }
+      }
       return [stateChangeEvent(bay, d.changeset, from, "merged", tail(stdout))]
     }
     // A non-zero merge command is a DOMAIN outcome (rejected), never a crash — do

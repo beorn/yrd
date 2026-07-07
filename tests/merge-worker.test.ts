@@ -11,6 +11,7 @@ import {
   withQueue,
 } from "../src/index.ts"
 import type { BayEvent, BayRuntime, BayState, BayStore, ChangeId, MergeWorkerOptions } from "../src/index.ts"
+import { git } from "../src/layers/git.ts"
 
 const CLOCK = () => "2024-01-01T00:00:00.000Z"
 const ACTOR = "tester"
@@ -77,6 +78,59 @@ describe("withMergeWorker — drain → rejected (non-zero is a domain outcome, 
     const { events } = await bay.dispatch({ type: "drain" })
     expect(detailOf(events, "rejected")).toBe("exit 3: boom")
     expect(stateOf(await bay.state(), "C-e")).toBe("rejected")
+  })
+})
+
+describe("withMergeWorker — post-merge ancestry verify (the lying-merge guard, G1.1/G1.2)", () => {
+  // A REAL repo: main at an init commit, task/x one commit ahead. The guard's
+  // question is exactly "did the merge command's exit 0 actually land task/x
+  // on the mainline?" — so these tests need true git ancestry, not stubs.
+  async function makeVerifyRepo(): Promise<string> {
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-verify-repo-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await g(["commit", "-qm", "init", "--allow-empty"])
+    await g(["switch", "-qc", "task/x"])
+    await g(["commit", "-qm", "feat: x", "--allow-empty"])
+    await g(["switch", "-q", "main"])
+    return repo
+  }
+
+  it("a merge command that exits 0 WITHOUT landing the target is journaled rejected, never merged", async () => {
+    const repo = await makeVerifyRepo()
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true", mainRepo: repo })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/x", changeId: "C-lie" } })
+
+    const { events } = await bay.dispatch({ type: "drain" })
+    expect(stateOf(await bay.state(), "C-lie")).toBe("rejected")
+    expect(detailOf(events, "rejected")).toMatch(/lying-merge guard/)
+    expect(detailOf(events, "rejected")).toMatch(/not an ancestor/)
+  })
+
+  it("a merge command that actually lands the target passes the verify and records merged", async () => {
+    const repo = await makeVerifyRepo()
+    const bay = await buildMergeBay(await tmpJournalPath(), {
+      mergeCommand: `git -C ${repo} -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
+      mainRepo: repo,
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/x", changeId: "C-honest" } })
+
+    await bay.dispatch({ type: "drain" })
+    expect(stateOf(await bay.state(), "C-honest")).toBe("merged")
+  })
+
+  it("an unresolvable target with mainRepo set rejects with a teaching detail (never crashes, never merges)", async () => {
+    const repo = await makeVerifyRepo()
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true", mainRepo: repo })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/ghost", changeId: "C-ghost" } })
+
+    const { events } = await bay.dispatch({ type: "drain" })
+    expect(stateOf(await bay.state(), "C-ghost")).toBe("rejected")
+    expect(detailOf(events, "rejected")).toMatch(/does not resolve/)
   })
 })
 
