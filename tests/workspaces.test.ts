@@ -108,7 +108,7 @@ describe("withWorkspaces — bay allocation (lowest free)", () => {
 
     await bay.dispatch({ type: "co", args: { workitem: "wi-a" } })
     expect(bays(await bay.state())).toEqual({ 1: "L1" })
-    const l1 = (await bay.state()).leases.L1
+    const l1 = (await bay.state()).leases.L1!
     expect(l1.branch).toBe("task/wi-a")
     expect(l1.path).toBe("/fake/bays/bay1") // filled by provisioned
     expect(l1.baseSha).toBe("base-sha-1") // folded from the provisioned event
@@ -120,13 +120,13 @@ describe("withWorkspaces — bay allocation (lowest free)", () => {
     await bay.dispatch({ type: "abandon", args: { lease: "L1" } })
     const afterAbandon = await bay.state()
     expect(bays(afterAbandon)).toEqual({ 2: "L2" }) // bay 1 freed
-    expect(afterAbandon.leases.L1.endedAt).toBe("2024-01-01T00:00:00.000Z")
-    expect(afterAbandon.leases.L1.endReason).toBe("abandoned")
+    expect(afterAbandon.leases.L1!.endedAt).toBe("2024-01-01T00:00:00.000Z")
+    expect(afterAbandon.leases.L1!.endReason).toBe("abandoned")
 
     await bay.dispatch({ type: "co", args: { workitem: "wi-c" } })
     const reused = await bay.state()
     expect(bays(reused)).toEqual({ 1: "L3", 2: "L2" }) // lowest free (1) reused, new lease L3
-    expect(reused.leases.L3.branch).toBe("task/wi-c")
+    expect(reused.leases.L3!.branch).toBe("task/wi-c")
   })
 
   it("mints a bay/<changeId> branch when no workitem is supplied", async () => {
@@ -136,7 +136,7 @@ describe("withWorkspaces — bay allocation (lowest free)", () => {
     const changeId = opened.data!.changeId as string
     expect(changeId).toMatch(/^C-[0-9a-f]{8}$/)
     expect(opened.data!.branch).toBe(`bay/${changeId}`)
-    expect((await bay.state()).leases.L1.workitem).toBeNull()
+    expect((await bay.state()).leases.L1!.workitem).toBeNull()
   })
 })
 
@@ -219,7 +219,7 @@ describe("withWorkspaces — lease TTL (ping + gc)", () => {
     // no leases at all
     const empty = await bay.dispatch({ type: "gc" })
     expect(empty.events.map((e) => e.type)).toEqual(["gc.clean"])
-    expect(empty.events[0].data).toMatchObject({ checked: 0, expired: 0, ttlMs: TTL })
+    expect(empty.events[0]!.data).toMatchObject({ checked: 0, expired: 0, ttlMs: TTL })
 
     // a fresh (well-inside-TTL) lease is left untouched
     const c = makeClock(at(0))
@@ -228,8 +228,8 @@ describe("withWorkspaces — lease TTL (ping + gc)", () => {
     c.set(at(500)) // +500ms < TTL
     const clean = await bay2.dispatch({ type: "gc" })
     expect(clean.events.map((e) => e.type)).toEqual(["gc.clean"])
-    expect(clean.events[0].data).toMatchObject({ checked: 1, expired: 0 })
-    expect((await bay2.state()).leases.L1.endedAt).toBeUndefined()
+    expect(clean.events[0]!.data).toMatchObject({ checked: 1, expired: 0 })
+    expect((await bay2.state()).leases.L1!.endedAt).toBeUndefined()
   })
 
   it("gc expires a lease idle past the TTL: lease.ended{expired} + retire, bay freed", async () => {
@@ -245,8 +245,8 @@ describe("withWorkspaces — lease TTL (ping + gc)", () => {
     expect(ended.data!.endReason).toBe("expired")
 
     const st = await bay.state()
-    expect(st.leases.L1.endedAt).toBe(at(2000))
-    expect(st.leases.L1.endReason).toBe("expired")
+    expect(st.leases.L1!.endedAt).toBe(at(2000))
+    expect(st.leases.L1!.endReason).toBe("expired")
     expect(bays(st)).toEqual({}) // bay 1 freed
   })
 
@@ -262,8 +262,8 @@ describe("withWorkspaces — lease TTL (ping + gc)", () => {
     expect(events.filter((e) => e.type === "workspace.retired").map((e) => e.lease)).toEqual(["L1", "L2"])
 
     const st = await bay.state()
-    expect(st.leases.L1.endReason).toBe("expired")
-    expect(st.leases.L2.endReason).toBe("expired")
+    expect(st.leases.L1!.endReason).toBe("expired")
+    expect(st.leases.L2!.endReason).toBe("expired")
     expect(bays(st)).toEqual({})
   })
 
@@ -279,12 +279,12 @@ describe("withWorkspaces — lease TTL (ping + gc)", () => {
     c.set(at(1500)) // +1500 from T0 but only +700 from the ping → NOT stale
     const survived = await bay.dispatch({ type: "gc" })
     expect(survived.events.map((e) => e.type)).toEqual(["gc.clean"])
-    expect((await bay.state()).leases.L1.endedAt).toBeUndefined()
+    expect((await bay.state()).leases.L1!.endedAt).toBeUndefined()
 
     c.set(at(2000)) // +1200 from the ping → now stale
     const expired = await bay.dispatch({ type: "gc" })
     expect(expired.events.map((e) => e.type)).toEqual(["lease.ended", "workspace.retired"])
-    expect((await bay.state()).leases.L1.endReason).toBe("expired")
+    expect((await bay.state()).leases.L1!.endReason).toBe("expired")
   })
 
   it("ping throws for an unknown or already-ended lease", async () => {
@@ -324,8 +324,8 @@ describe("withWorkspaces — lease TTL (ping + gc)", () => {
     await first.dispatch({ type: "gc" }) // expires L2 only
     const live = await first.state()
 
-    expect(live.leases.L1.endedAt).toBeUndefined()
-    expect(live.leases.L2.endReason).toBe("expired")
+    expect(live.leases.L1!.endedAt).toBeUndefined()
+    expect(live.leases.L2!.endReason).toBe("expired")
     expect(bays(live)).toEqual({ 1: "L1" }) // bay 2 freed, bay 1 held
 
     // Fresh bay over the same journal — clock is irrelevant to replay (fold reads
@@ -367,7 +367,7 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorkspaces — real git", () =>
       )
 
       await bay.dispatch({ type: "co", args: { workitem: "demo-1" } })
-      const lease = (await bay.state()).leases.L1
+      const lease = (await bay.state()).leases.L1!
       const bayPath = join(baysRoot, "bay1")
       const repoHead = (await git(["-C", repo, "rev-parse", "HEAD"])).stdout.trim()
 
@@ -388,7 +388,7 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorkspaces — real git", () =>
       expect((await git(["-C", repo, "rev-parse", abandonedRef])).stdout.trim()).toBe(repoHead)
       expect((await git(["-C", repo, "rev-parse", "--verify", "task/demo-1"])).code).toBe(0) // branch survives
       expect(existsSync(bayPath)).toBe(false)
-      expect((await bay.state()).leases.L1.endReason).toBe("abandoned")
+      expect((await bay.state()).leases.L1!.endReason).toBe("abandoned")
     } finally {
       await rm(repo, { recursive: true, force: true })
     }
