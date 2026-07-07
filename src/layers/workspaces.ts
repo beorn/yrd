@@ -10,9 +10,20 @@ import type {
   LeaseId,
   TransitionResult,
 } from "../types.ts"
+import { existsSync } from "node:fs"
 import { makeEvent } from "../core.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
-import { headSha, porcelainStatus, resolveBaseRef, worktreeAdd, worktreeRemove } from "./git.ts"
+import {
+  ensureRemote,
+  headSha,
+  porcelainStatus,
+  resolveBaseRef,
+  revParse,
+  setConfig,
+  updateRef,
+  worktreeAdd,
+  worktreeRemove,
+} from "./git.ts"
 
 /**
  * withWorkspaces — the "bays" layer (spec § How it's built, the withWorkspaces
@@ -36,6 +47,10 @@ import { headSha, porcelainStatus, resolveBaseRef, worktreeAdd, worktreeRemove }
 export type WorkspacesOptions = {
   baysRoot?: string
   mainRepo?: string
+  /** When set, each provisioned bay gets a `bay` remote pointing here, with
+   *  push defaults wired so plain `git push` inside the bay submits (spec § the
+   *  hot loop is plain git). Omitted → bays are provisioned without a remote. */
+  bayRemote?: string
 }
 
 /** Per-open-lease bay bookkeeping. Leases carry no bay number in the core type,
@@ -148,7 +163,7 @@ function reduceAbandon(bay: BayRuntime, state: BayState, command: BayCommand): T
   }
   const effect: Effect = {
     type: FX_RETIRE,
-    data: { lease: leaseId, path: lease.path, branch: lease.branch },
+    data: { lease: leaseId, path: lease.path, branch: lease.branch, changeId: lease.changeId },
   }
   return { state, events: [ended], effects: [effect] }
 }
@@ -177,6 +192,7 @@ function apply(state: BayState, event: BayEvent): BayState {
             branch: d.branch,
             changeId: d.changeId,
             createdAt: event.ts,
+            actor: event.actor, // who holds the loan (event envelope)
           },
         },
         slices: {
@@ -187,13 +203,16 @@ function apply(state: BayState, event: BayEvent): BayState {
     }
 
     case EV_PROVISIONED: {
-      const d = event.data as { lease: LeaseId; path: string; headSha?: string }
+      const d = event.data as { lease: LeaseId; path: string; headSha?: string; baseSha?: string }
       const existing = state.leases[d.lease]
       if (!existing) return state // provisioned for an unknown lease: ignore, don't fabricate
       const slice = sliceOf(state)
       return {
         ...state,
-        leases: { ...state.leases, [d.lease]: { ...existing, path: d.path } },
+        leases: {
+          ...state.leases,
+          [d.lease]: { ...existing, path: d.path, ...(d.baseSha ? { baseSha: d.baseSha } : {}) },
+        },
         slices: {
           ...state.slices,
           [LAYER]: {
@@ -240,33 +259,72 @@ function freeBay(slice: WorkspacesSlice, leaseId: LeaseId): WorkspacesSlice {
 
 // ---------- effect handlers (async; the only I/O) ----------
 
-async function resolveConfig(opts: WorkspacesOptions): Promise<{ mainRepo: string; baysRoot: string }> {
+async function resolveConfig(
+  opts: WorkspacesOptions,
+): Promise<{ mainRepo: string; baysRoot: string; bayRemote: string | undefined }> {
   // Lazy, per spec § Plugin config: inline > BAY_* env > git config bay.* > default.
   // Resolved here (async) not at module load; the config source reads the repo.
   const rootSource = createGitConfigSource(opts.mainRepo ?? process.cwd())
   const mainRepo = (await resolveOption(opts.mainRepo, "mainRepo", rootSource, process.cwd()))!
   const repoSource = createGitConfigSource(mainRepo)
   const baysRoot = (await resolveOption(opts.baysRoot, "baysRoot", repoSource, `${mainRepo}/.bays`))!
-  return { mainRepo, baysRoot }
+  const bayRemote = await resolveOption(opts.bayRemote, "bayRemote", repoSource, undefined)
+  return { mainRepo, baysRoot, bayRemote }
 }
 
 function makeProvisionHandler(opts: WorkspacesOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const d = effect.data as { lease: LeaseId; bay: number; branch: string; changeId: ChangeId }
-    const { mainRepo, baysRoot } = await resolveConfig(opts)
+    const { mainRepo, baysRoot, bayRemote } = await resolveConfig(opts)
     const path = `${baysRoot}/bay${d.bay}`
     const baseRef = await resolveBaseRef(mainRepo)
+    const baseSha = await revParse(mainRepo, baseRef) // pin the base commit before the worktree exists
+
+    // Lazy custodian reclaim (spec § lease lifecycle): the bay NUMBER was freed
+    // in state when its lease ended, but the worktree stays on disk until the
+    // slot is needed again — the holder may still be cd'd inside post-merge.
+    // Reclaim iff zero-change: no open lease at the path, porcelain-clean.
+    // Anything else refuses loudly; work is preserved by branch/abandoned refs.
+    if (existsSync(path)) {
+      const state = await bay.state()
+      const open = Object.values(state.leases).find((l) => l.path === path && l.endedAt === undefined)
+      if (open) {
+        throw new Error(
+          `bay: cannot provision bay${d.bay} — ${path} is held by open lease ${open.id} (${open.workitem ?? open.branch}). ` +
+            `Abandon it first: git bay abandon ${open.id}`,
+        )
+      }
+      const leftover = await porcelainStatus(path)
+      if (leftover !== "") {
+        throw new Error(
+          `bay: reclaim of ${path} refused — leftover working tree is dirty:\n${leftover}\n` +
+            `Commit or preserve that work, then retry; bay never deletes uncommitted work.`,
+        )
+      }
+      await worktreeRemove(mainRepo, path) // committed work stays on its branch
+    }
+
     await worktreeAdd(mainRepo, d.branch, path, baseRef) // throws literal git stderr on failure
     const sha = await headSha(path)
-    return [
-      makeEvent(bay, EV_PROVISIONED, { lease: d.lease, path, branch: d.branch, headSha: sha }, { lease: d.lease }),
-    ]
+
+    const data: BayEvent["data"] = { lease: d.lease, path, branch: d.branch, baseSha, headSha: sha }
+
+    if (bayRemote) {
+      // The remote IS the API: plain `git push` inside the bay submits (spec §
+      // hot loop). Wire the `bay` remote + push defaults; fail-loud on git error.
+      await ensureRemote(path, "bay", bayRemote)
+      await setConfig(path, "remote.pushdefault", "bay")
+      await setConfig(path, "push.default", "current")
+      data.upstream = "bay"
+    }
+
+    return [makeEvent(bay, EV_PROVISIONED, data, { lease: d.lease })]
   }
 }
 
 function makeRetireHandler(opts: WorkspacesOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
-    const d = effect.data as { lease: LeaseId; path: string }
+    const d = effect.data as { lease: LeaseId; path: string; branch: string; changeId: ChangeId }
     const { mainRepo } = await resolveConfig(opts)
     const dirty = await porcelainStatus(d.path)
     if (dirty !== "") {
@@ -276,8 +334,17 @@ function makeRetireHandler(opts: WorkspacesOptions) {
           `Commit or push your work, then abandon; bay never deletes uncommitted work.`,
       )
     }
+
+    // Snapshot the branch tip to a findability ref BEFORE removing the worktree,
+    // so abandoned work stays discoverable even though the branch is untouched
+    // (spec § the loan never deletes work). Records the tip even if it equals
+    // base (no commits made) — the ref proves the bay existed.
+    const branchTip = await revParse(mainRepo, d.branch)
+    const abandonedRef = `refs/bay/abandoned/${d.changeId}`
+    await updateRef(mainRepo, abandonedRef, branchTip)
+
     await worktreeRemove(mainRepo, d.path) // throws literal git stderr on failure
-    return [makeEvent(bay, EV_RETIRED, { lease: d.lease, path: d.path }, { lease: d.lease })]
+    return [makeEvent(bay, EV_RETIRED, { lease: d.lease, path: d.path, abandonedRef }, { lease: d.lease })]
   }
 }
 

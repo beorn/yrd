@@ -16,6 +16,8 @@ export type Lease = {
   branch: string
   changeId: ChangeId
   createdAt: string // ISO; injected clock — never Date.now() in core
+  actor?: string // who holds the loan (from the lease.opened event envelope)
+  baseSha?: string // recorded at provision from the resolved base ref (spec § lease lifecycle)
   endedAt?: string
   endReason?: "merged" | "abandoned" | "expired"
 }

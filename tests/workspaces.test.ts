@@ -43,7 +43,13 @@ const withStubGit = definePlugin({
         makeEvent(
           bay,
           "workspace.provisioned",
-          { lease: d.lease, path: `/fake/bays/bay${d.bay}`, branch: d.branch, headSha: "0".repeat(40) },
+          {
+            lease: d.lease,
+            path: `/fake/bays/bay${d.bay}`,
+            branch: d.branch,
+            baseSha: `base-sha-${d.bay}`,
+            headSha: "0".repeat(40),
+          },
           { lease: d.lease },
         ),
       ]
@@ -73,8 +79,11 @@ describe("withWorkspaces — bay allocation (lowest free)", () => {
 
     await bay.dispatch({ type: "co", args: { workitem: "wi-a" } })
     expect(bays(await bay.state())).toEqual({ 1: "L1" })
-    expect((await bay.state()).leases.L1.branch).toBe("task/wi-a")
-    expect((await bay.state()).leases.L1.path).toBe("/fake/bays/bay1") // filled by provisioned
+    const l1 = (await bay.state()).leases.L1
+    expect(l1.branch).toBe("task/wi-a")
+    expect(l1.path).toBe("/fake/bays/bay1") // filled by provisioned
+    expect(l1.baseSha).toBe("base-sha-1") // folded from the provisioned event
+    expect(l1.actor).toBe(ACTOR) // folded from the lease.opened event envelope
 
     await bay.dispatch({ type: "co", args: { workitem: "wi-b" } })
     expect(bays(await bay.state())).toEqual({ 1: "L1", 2: "L2" })
@@ -173,47 +182,93 @@ describe("withWorkspaces — replay", () => {
   })
 })
 
-// One real-git integration test, gated so the default suite stays hermetic.
+// Real-git integration tests, gated so the default suite stays hermetic.
 // Enable with BAY_GIT_TESTS=1.
-describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorkspaces — real git", () => {
-  it("co provisions a real worktree; abandon retires a clean one", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "gitbay-realgit-"))
-    try {
-      for (const args of [
-        ["-C", repo, "init", "-q"],
-        ["-C", repo, "config", "user.email", "test@example.com"],
-        ["-C", repo, "config", "user.name", "test"],
-        ["-C", repo, "config", "commit.gpgsign", "false"],
-      ]) {
-        const r = await git(args)
-        expect(r.code).toBe(0)
-      }
-      await writeFile(join(repo, "README.md"), "hi\n")
-      expect((await git(["-C", repo, "add", "-A"])).code).toBe(0)
-      expect((await git(["-C", repo, "commit", "-q", "-m", "init"])).code).toBe(0)
+async function initGitRepo(): Promise<string> {
+  const repo = await mkdtemp(join(tmpdir(), "gitbay-realgit-"))
+  for (const args of [
+    ["-C", repo, "init", "-q"],
+    ["-C", repo, "config", "user.email", "test@example.com"],
+    ["-C", repo, "config", "user.name", "test"],
+    ["-C", repo, "config", "commit.gpgsign", "false"],
+  ]) {
+    const r = await git(args)
+    if (r.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`)
+  }
+  await writeFile(join(repo, "README.md"), "hi\n")
+  if ((await git(["-C", repo, "add", "-A"])).code !== 0) throw new Error("git add failed")
+  if ((await git(["-C", repo, "commit", "-q", "-m", "init"])).code !== 0) throw new Error("git commit failed")
+  return repo
+}
 
+describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorkspaces — real git", () => {
+  it("co provisions a real worktree, pins baseSha; abandon snapshots a findability ref and retires", async () => {
+    const repo = await initGitRepo()
+    try {
       const baysRoot = join(repo, ".bays")
-      const journalPath = join(repo, "journal.jsonl")
       const bay = pipe(
-        createBay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
+        createBay({ store: openStore(join(repo, "journal.jsonl")), clock: CLOCK, actor: ACTOR }),
         withWorkspaces({ mainRepo: repo, baysRoot }),
       )
 
       await bay.dispatch({ type: "co", args: { workitem: "demo-1" } })
       const lease = (await bay.state()).leases.L1
       const bayPath = join(baysRoot, "bay1")
+      const repoHead = (await git(["-C", repo, "rev-parse", "HEAD"])).stdout.trim()
+
       expect(lease.path).toBe(bayPath)
       expect(lease.branch).toBe("task/demo-1")
+      expect(lease.baseSha).toBe(repoHead) // pinned from the resolved base ref (HEAD; no origin/main)
       expect(existsSync(bayPath)).toBe(true)
       expect((await git(["-C", bayPath, "rev-parse", "--is-inside-work-tree"])).stdout.trim()).toBe("true")
-      // headSha recorded matches the worktree HEAD
       const head = (await git(["-C", bayPath, "rev-parse", "HEAD"])).stdout.trim()
       expect((await bay.state()).slices.workspaces as WorkspacesSlice).toMatchObject({ heads: { L1: head } })
 
-      await bay.dispatch({ type: "abandon", args: { lease: "L1" } })
+      // Abandon: findability ref created at the branch tip, worktree removed,
+      // branch itself untouched.
+      const { events } = await bay.dispatch({ type: "abandon", args: { lease: "L1" } })
+      const abandonedRef = `refs/bay/abandoned/${lease.changeId}`
+      const retired = events.find((e) => e.type === "workspace.retired")!
+      expect(retired.data!.abandonedRef).toBe(abandonedRef)
+      expect((await git(["-C", repo, "rev-parse", abandonedRef])).stdout.trim()).toBe(repoHead)
+      expect((await git(["-C", repo, "rev-parse", "--verify", "task/demo-1"])).code).toBe(0) // branch survives
       expect(existsSync(bayPath)).toBe(false)
       expect((await bay.state()).leases.L1.endReason).toBe("abandoned")
     } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("wires the bay remote + push defaults; the second bay hits the set-url fallback", async () => {
+    const repo = await initGitRepo()
+    const remoteDir = await mkdtemp(join(tmpdir(), "gitbay-bare-"))
+    try {
+      expect((await git(["init", "--bare", "-q", remoteDir])).code).toBe(0)
+
+      const baysRoot = join(repo, ".bays")
+      const bay = pipe(
+        createBay({ store: openStore(join(repo, "journal.jsonl")), clock: CLOCK, actor: ACTOR }),
+        withWorkspaces({ mainRepo: repo, baysRoot, bayRemote: remoteDir }),
+      )
+
+      const assertWired = async (bayPath: string): Promise<void> => {
+        expect((await git(["-C", bayPath, "config", "remote.bay.url"])).stdout.trim()).toBe(remoteDir)
+        expect((await git(["-C", bayPath, "config", "remote.pushdefault"])).stdout.trim()).toBe("bay")
+        expect((await git(["-C", bayPath, "config", "push.default"])).stdout.trim()).toBe("current")
+      }
+
+      // First bay: `remote add bay` path. `upstream: "bay"` in the event.
+      const r1 = await bay.dispatch({ type: "co", args: { workitem: "wi-1" } })
+      expect(r1.events.find((e) => e.type === "workspace.provisioned")!.data!.upstream).toBe("bay")
+      await assertWired(join(baysRoot, "bay1"))
+
+      // Second bay shares the repo config, so `remote add bay` now fails
+      // "already exists" → the set-url fallback must keep it green.
+      const r2 = await bay.dispatch({ type: "co", args: { workitem: "wi-2" } })
+      expect(r2.events.find((e) => e.type === "workspace.provisioned")!.data!.upstream).toBe("bay")
+      await assertWired(join(baysRoot, "bay2"))
+    } finally {
+      await rm(remoteDir, { recursive: true, force: true })
       await rm(repo, { recursive: true, force: true })
     }
   })
