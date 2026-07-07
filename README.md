@@ -71,6 +71,8 @@ Every line above is a real command against the current build, run in a scratch r
 
 ## Common questions
 
+**How do I onboard a coding agent (or a new teammate)?** `git bay prime` prints everything needed before the first action — the loop, the rules, the vocabulary — followed by a live "as of right now" snapshot of this repository's bay: is it initialized, which check and merge commands are configured, how busy it is. It works anywhere, even outside a git repository. Put `git bay prime` in your agent's startup instructions and the tool onboards the agent itself.
+
 **How do I tell it what checks to run?** `git config bay.check '<command>'`. The bay runs that command before merging; exit 0 means pass. Repositories with their own landing process can also route the merge itself through a command: `git config bay.mergeCommand '<command with {target}>'`, used by the queue's merge worker.
 
 **What happens when a check fails?** The push is refused and the message says why. If the fix needs new commits, just `git push` again. If the fix changed no commits (a config or environment fix), `git bay requeue <changeset>` re-runs the pipeline.
@@ -87,6 +89,7 @@ Every line above is a real command against the current build, run in a scratch r
 
 **v0.1 — shipped.** Every verb below works today (`git bay help` for the live list):
 
+- `prime` — onboarding for agents and newcomers: the workflow, the rules, the vocabulary, plus a live snapshot of this repository's bay config
 - `init` — set up the bay (state in `.git/bay/`: store, journal, bay-owned `repo.git` + hooks)
 - `co <workitem>` — loan a guarded workspace; prints its path (cd-able)
 - `status [changeset]` — workspace table, or one changeset's verdict (`--json`)
@@ -109,7 +112,7 @@ Also in v0.1: a merge command's exit code is never taken on faith — a change o
 
 ## The docs are tests
 
-Two documents in [tests/](tests/) — [gitbay.spec.md](tests/gitbay.spec.md) (the normal workflow, the same console blocks shown above) and [refusals.spec.md](tests/refusals.spec.md) (every refusal and its fix) — are executable specifications: [mdspec](https://mdspec.org/) runs every console block in them and checks the output character for character (`bun run spec`). If the docs drift from the real behavior, the test suite fails.
+Three documents in [tests/](tests/) — [gitbay.spec.md](tests/gitbay.spec.md) (the normal workflow, the same console blocks shown above), [refusals.spec.md](tests/refusals.spec.md) (every refusal and its fix), and [prime.spec.md](tests/prime.spec.md) (the agent-onboarding printout) — are executable specifications: [mdspec](https://mdspec.org/) runs every console block in them and checks the output character for character (`bun run spec`). If the docs drift from the real behavior, the test suite fails.
 
 ## License
 

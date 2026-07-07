@@ -15,7 +15,7 @@ import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
 import { withWorkspaces, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/workspaces.ts"
-import { withQueue } from "../src/layers/queue.ts"
+import { withQueue, queuedChangesets } from "../src/layers/queue.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
   withReceive,
@@ -384,7 +384,81 @@ function opt(args: string[], name: string): string | undefined {
   return value
 }
 
+/** Agent/newcomer onboarding: everything needed BEFORE the first action, in one
+ *  deterministic printout. Errors-are-Teachers covers the moment of mistake;
+ *  prime covers the moment before. Stateless on purpose (works pre-init), and
+ *  asserted verbatim by tests/prime.spec.md so it can never drift from the
+ *  shipped behavior. */
+const PRIME = `git bay — a merge queue for this repository. You submit by pushing; the bay checks and merges each change onto main, one at a time.
+THE LOOP
+  1. cd "$(git bay co <workitem>)"    # your own workspace (a git worktree); <workitem> = ticket id or any label
+  2. edit, git add, git commit        # plain git; commit hooks guard submodule pins + identity
+  3. git push                         # push IS submit — checks run, then the merge; READ the remote: lines
+  4. git bay status <changeset>       # re-read a verdict later (the C-xxxxxxxx id from the push output)
+RULES
+  - Work only inside your bay, never in the repository's main worktree.
+  - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
+  - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay requeue <changeset>.
+  - Abandoning? git bay abandon <lease> refuses while uncommitted work exists — commit or clean first; work is never deleted.
+  - Doors close at merge: a merged changeset ends that loan — start the next piece of work with a fresh git bay co.
+VOCABULARY
+  bay        your loaned workspace (an isolated git worktree)
+  workitem   the name you gave co — a ticket id or any label
+  changeset  the unit being merged (your pushed commits), id like C-5a7a2f95
+  lease      the loan of a bay to a workitem; abandon/ping/gc act on it
+MACHINE-READABLE
+  git bay status --json    full state as JSON
+  .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
+Primed. Start: cd "$(git bay co <workitem>)"   (all verbs: git bay help)`
+
+/** The live half of `git bay prime`: what THIS repository's bay looks like —
+ *  initialized or not, which check/merge commands are configured, how busy it
+ *  is. Best-effort and read-only; outside a git repo it says so and teaches
+ *  the first step instead of erroring (prime must never refuse). */
+async function primeContext(): Promise<string> {
+  const res = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+  if (res.code !== 0) {
+    return "THIS DIRECTORY\n  not a git repository — cd into your repo first, then: git bay init"
+  }
+  const commonDir = res.stdout.trim()
+  const mainRepo = commonDir.endsWith("/.git") ? commonDir.slice(0, -5) : commonDir
+  const source = createGitConfigSource(mainRepo)
+  const fallback = await defaultBayDir(mainRepo)
+  const bayDir = (await resolveOption(process.env.BAY_DIR, "dir", source, fallback.dir))!
+  const rel = bayDir.startsWith(mainRepo + "/") ? bayDir.slice(mainRepo.length + 1) : bayDir
+  const lines = [
+    "THIS REPOSITORY — a snapshot as of right now; re-run git bay prime for current state",
+    `  repo          ${mainRepo}`,
+  ]
+  if (!existsSync(bayDir)) {
+    lines.push("  state         not initialized — run: git bay init")
+  } else {
+    lines.push(`  state         ${rel} (initialized)`)
+  }
+  const check = process.env.BAY_CHECK ?? (await source.get("check").catch(() => undefined))
+  lines.push(
+    check !== undefined && check.trim() !== ""
+      ? `  check         ${check}`
+      : "  check         (not set — pushes merge without a project check; set: git config bay.check '<command>')",
+  )
+  const mergeCommand = process.env.BAY_MERGE_COMMAND ?? (await source.get("mergeCommand").catch(() => undefined))
+  lines.push(
+    mergeCommand !== undefined && mergeCommand.trim() !== ""
+      ? `  mergeCommand  ${mergeCommand}`
+      : "  mergeCommand  (not set — the queue's drain refuses until: git config bay.mergeCommand '<command with {target}>')",
+  )
+  if (existsSync(bayDir)) {
+    const ctx: Ctx = { mainRepo, bayDir, repoGit: join(bayDir, "repo.git"), actor: "prime" }
+    const state = await readBay(ctx).state()
+    const open = Object.values(state.leases).filter((l) => l.endedAt === undefined).length
+    lines.push(`  open leases   ${open}`)
+    lines.push(`  queued        ${queuedChangesets(state).length}`)
+  }
+  return lines.join("\n")
+}
+
 const USAGE = `usage: git bay <verb>
+  prime                     onboarding for agents and newcomers — read this first
   init                      set up .bay/ (store, bay-owned repo.git, hooks)
   co <workitem>             loan a guarded bay; prints its path (cd-able)
   status [changeset]        bay table, or one changeset's verdict  [--json]
@@ -415,6 +489,15 @@ async function main(): Promise<void> {
     console.log(USAGE)
     return
   }
+  // Prime is the pre-first-action onboarding — it must work anywhere, even
+  // outside a git repository, so it runs before any context resolution.
+  if (verb === "prime") {
+    guardFlags(args, "prime")
+    console.log(PRIME)
+    console.log("")
+    console.log(await primeContext())
+    return
+  }
   const json = flag(args, "--json")
   flag(args, "--no-workitem") // accepted for forward-compat; no provider in v0.1
   const ctx = await resolveCtx()
@@ -422,8 +505,15 @@ async function main(): Promise<void> {
   // A wiped bay must teach, not impersonate an empty one: without this, a
   // hygiene sweep that deleted the state dir leaves `status` reporting
   // "no open leases" as if healthy (the silent-fallback failure mode).
-  // Only `init` (and bare help) may run stateless.
-  if (verb !== undefined && verb !== "init" && verb !== "help" && verb !== "--help" && !existsSync(ctx.bayDir)) {
+  // Only `init`, `prime`, and bare help may run stateless.
+  if (
+    verb !== undefined &&
+    verb !== "init" &&
+    verb !== "prime" &&
+    verb !== "help" &&
+    verb !== "--help" &&
+    !existsSync(ctx.bayDir)
+  ) {
     throw new Error(
       `bay: no bay state at ${ctx.bayDir} (never initialized, or wiped by a hygiene sweep) — run: git bay init`,
     )
