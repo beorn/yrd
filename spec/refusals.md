@@ -58,28 +58,38 @@ $ git bay status "$CID"
 ## Dirty abandon refuses
 
 `abandon` ends a lease, but it never destroys uncommitted work — the reason
-this project exists (spec § Design laws #5, "the loan closes at submit").
+this project exists (spec § Design laws #5, "the loan closes at submit"). The
+refusal happens at the door, BEFORE anything journals: the lease stays yours.
 
 ```console
 $ cd "$DEMO" && cd "$(git bay co dirty-abandon --no-workitem)"
 $ echo "uncommitted change" > scratch.txt
 $ export LEASE=$(git bay status --json | grep -oE '"L[0-9]+":' | tail -1 | tr -d '":')
 $ git bay abandon "$LEASE"
-! bay: refusing to retire bay at ... — working tree is dirty:
+! bay: refusing to abandon ... — bay at ... has uncommitted work:
 ! ?? scratch.txt
-! Commit or push your work, then abandon; bay never deletes uncommitted work.
+! Commit or push it first; bay never deletes uncommitted work. The lease is still yours.
 [1]
+$ git bay status
+BAY   WORKITEM       STATE   AGE
+bay1  dirty-abandon  leased  ...
 ```
 
-The lease itself is marked ended (crash-safe bookkeeping: the event journals
-before the retire effect runs and can refuse), but the worktree — and
-`scratch.txt` inside it — is untouched on disk. Clean it up so the next
-section's `co` can reclaim the bay slot; a real user would commit or push
-instead.
+State and disk never diverge: the bay table still lists the lease because
+nothing was journaled. Clean up (a real user would commit or push instead) and
+the SAME abandon retires the bay — worktree removed, branch tip preserved under
+`refs/bay/abandoned/<changeId>`.
 
 ```console
 $ rm scratch.txt
+$ cd "$DEMO"
+$ git bay abandon "$LEASE"
+$ git bay status
+no open leases — git bay co <workitem> opens one
 ```
+
+(The `cd` out first matters: a successful abandon removes the bay worktree, and
+a shell left standing in the removed directory can't run anything git after.)
 
 ## Doors closed
 

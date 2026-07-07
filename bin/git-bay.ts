@@ -25,7 +25,7 @@ import {
   appendInboxReceipt,
 } from "../src/layers/receive.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
-import { git } from "../src/layers/git.ts"
+import { git, porcelainStatus } from "../src/layers/git.ts"
 
 // ---------- context ----------
 
@@ -248,6 +248,27 @@ async function verbRequeue(ctx: Ctx, changeset: string | undefined): Promise<voi
 async function verbAbandon(ctx: Ctx, lease: string | undefined): Promise<void> {
   if (!lease) throw new Error("bay: abandon: a lease id is required (git bay status --json lists them)")
   await withWriteBay(ctx, async (bay) => {
+    // Host-boundary dirty preflight, BEFORE dispatch: the reducer is pure and
+    // the core is journal-first, so once it emits lease.ended the state says
+    // "ended" even if the retire effect then refuses on dirt — state and disk
+    // diverge and the bay table stops showing a lease whose worktree is still
+    // occupied. Refusing here keeps the lease live, so the fix path is simply
+    // "commit or clean, then abandon again". The retire handler keeps its own
+    // dirty check as the race floor; unknown/ended leases fall through to the
+    // reducer's fail-loud errors. gc expiry deliberately skips this preflight —
+    // a TTL sweep must end idle leases regardless; the custodian reclaim in
+    // provision covers any dirty worktree it leaves behind.
+    const state = await bay.state()
+    const held = state.leases[lease]
+    if (held && held.endedAt === undefined && held.path !== "" && existsSync(held.path)) {
+      const dirty = await porcelainStatus(held.path)
+      if (dirty !== "") {
+        throw new Error(
+          `bay: refusing to abandon ${lease} — bay at ${held.path} has uncommitted work:\n${dirty}\n` +
+            `Commit or push it first; bay never deletes uncommitted work. The lease is still yours.`,
+        )
+      }
+    }
     await bay.dispatch({ type: "abandon", args: { lease } })
   })
 }

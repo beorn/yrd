@@ -141,4 +141,32 @@ describe("git bay CLI — M1 happy path (process-level)", () => {
     const green = await must(["git", "-C", bay2, "push", "-o", "wait"], bay2, env)
     expect(green.stderr).toMatch(/remote: bay: C-\S+ merged onto main \(checks ✓\)/)
   })
+
+  it("abandon on a dirty bay refuses at the door — lease stays live, then succeeds after cleanup", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    const co = await must(["git", "bay", "co", "dirty-abandon", "--no-workitem"], demo, env)
+    const bayPath = co.stdout.trim()
+    await writeFile(join(bayPath, "scratch.txt"), "uncommitted\n", "utf8")
+
+    const status = await must(["git", "bay", "status", "--json"], demo, env)
+    const lease = [...status.stdout.matchAll(/"(L\d+)":/g)].at(-1)![1]!
+
+    const refuse = await run(["git", "bay", "abandon", lease], demo, env)
+    expect(refuse.code).toBe(1)
+    expect(refuse.stderr).toContain("scratch.txt")
+    expect(refuse.stderr).toContain("bay never deletes uncommitted work")
+
+    // The refusal must happen BEFORE anything journals: the lease is still
+    // open and the bay table still shows it (journal-first would otherwise
+    // record lease.ended and leave state and disk divergent).
+    const after = await must(["git", "bay", "status"], demo, env)
+    expect(after.stdout).toContain("dirty-abandon")
+    expect(after.stdout).toContain("leased")
+
+    // Clean up the scratch file — the SAME abandon now retires the bay.
+    await must(["rm", join(bayPath, "scratch.txt")], demo, env)
+    await must(["git", "bay", "abandon", lease], demo, env)
+    const final = await must(["git", "bay", "status"], demo, env)
+    expect(final.stdout).not.toContain("dirty-abandon")
+  })
 })
