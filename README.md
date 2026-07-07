@@ -20,7 +20,7 @@ One bay verb in, plain git in the middle, zero verbs out.
 - **One-verb workspaces** — `git bay co <item>` → a guarded bay leased to a tracked work item
 - **Plain-git hot loop** — `git pull` / `git commit` / `git push`; refusals teach on git's own `remote:` channel
 - **A real merge queue, locally** — candidates checked speculatively, merged serially; main never receives an untested merge
-- **Cross-repo changesets** — superproject + submodule commits + gitlink bumps merge atomically; non-descendant pins refused
+- **Cross-repo changesets** — superproject + submodule commits + gitlink bumps promote together or not at all (staged, verified, promoted); non-descendant pins refused, honest rewrites tolerated by patch-id
 - **Hooks floor** — stale pins and itemless branches can't even be committed, daemon up or down
 - **Pluggable = run a command** — item tracker, checks, review, notifications: all external executables
 - **Event-sourced jsonl journal** — replayable, resumable, greppable
