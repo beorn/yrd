@@ -134,6 +134,49 @@ describe("withMergeWorker — post-merge ancestry verify (the lying-merge guard,
   })
 })
 
+describe("withMergeWorker — merge command spawn cwd", () => {
+  // Both sides resolve through `pwd -P` so a symlinked tmpdir (macOS mounts
+  // TMPDIR under /var, itself a symlink to /private/var) can't produce a
+  // false negative — a spawned shell's plain `pwd` reports the canonicalized
+  // path, which would not string-equal the pre-canonicalization JS value.
+  async function makeCwdRepo(): Promise<string> {
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-cwd-repo-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await g(["commit", "-qm", "init", "--allow-empty"])
+    return repo
+  }
+
+  it("runs the merge command with cwd set to mainRepo", async () => {
+    const repo = await makeCwdRepo()
+    const bay = await buildMergeBay(await tmpJournalPath(), {
+      mergeCommand: `[ "$(pwd -P)" = "$(cd ${JSON.stringify(repo)} && pwd -P)" ]`,
+      mainRepo: repo,
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "main", pr: "C-cwd" } })
+
+    await bay.dispatch({ type: "drain" })
+    // main is trivially an ancestor of itself, so a correct cwd lands merged;
+    // a wrong cwd fails the test command (exit 1) and rejects instead.
+    expect(stateOf(await bay.state(), "C-cwd")).toBe("merged")
+  })
+
+  it("falls back to process.cwd() when mainRepo is unset", async () => {
+    const expectedCwd = process.cwd()
+    const bay = await buildMergeBay(await tmpJournalPath(), {
+      mergeCommand: `[ "$(pwd -P)" = "$(cd ${JSON.stringify(expectedCwd)} && pwd -P)" ]`,
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-cwd-fallback" } })
+
+    await bay.dispatch({ type: "drain" })
+    expect(stateOf(await bay.state(), "C-cwd-fallback")).toBe("merged")
+  })
+})
+
 describe("withMergeWorker — serial FIFO drain", () => {
   it("each drain merges exactly the oldest queued PR", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })

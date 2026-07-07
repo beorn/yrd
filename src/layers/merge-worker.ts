@@ -56,7 +56,11 @@ export type MergeWorkerOptions = {
    *  command and the merged-locally-but-push-failed class (the verify reads
    *  origin/main, so an unpushed landing is not a landing). Unset = legacy
    *  trust-exit-0 (library callers with non-git merge commands); the CLI host
-   *  ALWAYS sets it. */
+   *  ALWAYS sets it.
+   *
+   *  Also the merge command's spawn cwd: `mergeCommand` runs with this as its
+   *  working directory (falling back to process.cwd() when unset), so a
+   *  `{target}`-landing command doesn't need to hardcode `cd <path> &&`. */
   mainRepo?: string
 }
 
@@ -164,9 +168,11 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
       .replaceAll("{pr}", d.pr)
       .replaceAll("{changeset}", d.pr)
 
-    // sh -c so the operator's own quoting works; never split on spaces. A spawn
-    // failure (no `sh`) throws — that is a broken host, not a merge verdict.
-    const proc = Bun.spawn(["sh", "-c", cmd], { stdout: "pipe", stderr: "pipe" })
+    // sh -c so the operator's own quoting works; never split on spaces. cwd is
+    // mainRepo (Bun.spawn falls back to process.cwd() when it's undefined) so
+    // mergeCommand doesn't need to hardcode `cd <path> &&`. A spawn failure
+    // (no `sh`) throws — that is a broken host, not a merge verdict.
+    const proc = Bun.spawn(["sh", "-c", cmd], { cwd: opts.mainRepo, stdout: "pipe", stderr: "pipe" })
     const [stdout, stderr, code] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
