@@ -207,6 +207,21 @@ async function verbStatus(ctx: Ctx, target: string | undefined, json: boolean): 
     return
   }
   console.log(bayTable(state, ctx.actor, Date.now(), ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS))
+  // The queue is part of bare status: anything not yet merged is live state
+  // the operator must see (dogfood find: a rejected changeset was invisible
+  // unless you already knew its id). Merged history stays in the journal and
+  // `status <changeset>`; silent when the queue is empty, so the executable
+  // happy-path doc's expected output is unchanged.
+  const active = Object.values(state.changesets).filter((cs) => cs.state !== "merged")
+  if (active.length > 0) {
+    console.log("")
+    for (const cs of active) {
+      const detail = await lastDetail(bay, cs.id)
+      const firstLine = detail?.split("\n")[0] ?? ""
+      const brief = firstLine.length > 100 ? firstLine.slice(0, 99) + "…" : firstLine
+      console.log(`${cs.id}  ${cs.state}${brief ? ` — ${brief}` : ""}`)
+    }
+  }
   // Stale-lease alerts (spec § lease lifecycle) — silent when none, so the
   // executable happy-path doc's expected output is unchanged.
   const ttl = ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS
@@ -219,6 +234,27 @@ async function verbStatus(ctx: Ctx, target: string | undefined, json: boolean): 
 
 async function verbEnqueue(ctx: Ctx, target: string | undefined, workitem: string | undefined): Promise<void> {
   if (!target) throw new Error("bay: enqueue: a target (branch or SHA) is required")
+  // Refuse at the door, not at drain time: an unresolvable target used to be
+  // accepted here and rejected minutes later by the merge worker's guard
+  // (dogfood find: a user enqueued their WORKITEM name; the branch was
+  // task/<workitem>). Suggest the near-miss branches while refusing. The
+  // drain-time guard stays as defense in depth.
+  const resolved = await git(["-C", ctx.mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], ctx.mainRepo)
+  if (resolved.code !== 0) {
+    const refs = await git(
+      ["-C", ctx.mainRepo, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"],
+      ctx.mainRepo,
+    )
+    const near = refs.stdout
+      .split("\n")
+      .filter((r) => r !== "" && r.toLowerCase().includes(target.toLowerCase()))
+      .slice(0, 3)
+    const hint = near.length > 0 ? ` Did you mean: ${near.join(", ")}?` : ""
+    throw new Error(
+      `bay: enqueue: target '${target}' does not resolve to a commit — a target is a branch or SHA` +
+        ` (a workitem name is not automatically a branch).${hint}`,
+    )
+  }
   await withWriteBay(ctx, async (bay) => {
     const { events } = await bay.dispatch({ type: "enqueue", args: { target, workitem } })
     const id = events.find((e) => e.type === "changeset.enqueued")?.changeset

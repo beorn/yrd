@@ -324,4 +324,30 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
     expect(status.stderr).toContain("legacy")
     expect(status.stderr).toContain(".bay")
   })
+
+  it("enqueue refuses an unresolvable target at the door and suggests the near-miss branch", async () => {
+    // The live-demo confusion: the user enqueued their WORKITEM name; the
+    // real branch was task/<workitem>. The old behavior queued it happily and
+    // let drain reject it minutes later.
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "branch", "task/demo-readme2"], demo, env)
+    const res = await run(["git", "bay", "enqueue", "demo-readme2"], demo, env)
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("does not resolve to a commit")
+    expect(res.stderr).toContain("a workitem name is not automatically a branch")
+    expect(res.stderr).toContain("Did you mean: task/demo-readme2")
+    const status = await must(["git", "bay", "status", "--json"], demo, env)
+    expect(status.stdout).not.toContain("C-") // nothing was queued
+  })
+
+  it("bare status shows every non-merged changeset — a rejected one is never invisible", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "branch", "task/x"], demo, env)
+    const id = (await must(["git", "bay", "enqueue", "task/x"], demo, env)).stdout.trim()
+    await run(["git", "bay", "drain"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    const status = await must(["git", "bay", "status"], demo, env)
+    expect(status.stdout).toContain(id)
+    expect(status.stdout).toContain("rejected")
+    expect(status.stdout).toContain("exit 1")
+  })
 })
