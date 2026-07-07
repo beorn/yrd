@@ -4,15 +4,16 @@ import type {
   BayPlugin,
   BayRuntime,
   BayState,
-  ChangeId,
   Effect,
   Layer,
   Lease,
   LeaseId,
+  PrId,
   TransitionResult,
 } from "../types.ts"
 import { existsSync } from "node:fs"
 import { makeEvent } from "../core.ts"
+import { nextPrId } from "../ids.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import {
   ensureRemote,
@@ -40,8 +41,8 @@ import {
  *
  * Purity: the reducer is a pure (state, command) → [events, effects] function.
  * It NEVER touches git, the filesystem, config, Math.random, or Date.now. The
- * bay number is allocated from folded state; the change-id is a deterministic
- * hash of (clock, actor, bay, sequence). All I/O lives in the async effect
+ * worktree number is allocated from folded state; the PR id is the sequential
+ * mint in ids.ts, derived from folded state. All I/O lives in the async effect
  * handlers, which resolve config lazily and journal their outcome as events.
  */
 
@@ -98,24 +99,6 @@ function lowestFreeBay(slice: WorkspacesSlice): number {
   let n = 1
   while (slice.byBay[n] !== undefined) n++
   return n
-}
-
-/** Deterministic 32-bit FNV-1a → 8 hex chars. Pure and synchronous, so it is
- *  safe inside the reducer (crypto/Date/random are not). */
-function fnv1a(input: string): string {
-  let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
-    h = Math.imul(h, 0x01000193)
-  }
-  return (h >>> 0).toString(16).padStart(8, "0")
-}
-
-/** Change-id minted at `co` — deterministic given (clock, actor, bay, seq).
- *  `seq` (total leases ever opened) guarantees uniqueness even under a fixed
- *  clock when a bay number is reused after an abandon. */
-function mintChangeId(ts: string, actor: string, bay: number, seq: number): ChangeId {
-  return `C-${fnv1a(`${ts}:${actor}:${bay}:${seq}`)}`
 }
 
 /** Validate a millisecond timeout — a set-but-garbage value fails loud, never
@@ -176,7 +159,10 @@ function reduceCo(bay: BayRuntime, state: BayState, command: BayCommand): Transi
   const n = lowestFreeBay(slice)
   const leaseId: LeaseId = `L${seq}`
   const ts = bay.clock()
-  const changeId = mintChangeId(ts, bay.actor, n, seq)
+  // The worktree pre-mints its PR number at `new`, so the push output, the
+  // branch fallback, and the abandoned-work ref all agree on one id. A worktree
+  // closed before its first push burns its number (numbers are never reused).
+  const changeId = nextPrId(state)
   const branch = workitem ? `task/${workitem}` : `bay/${changeId}`
 
   const opened: BayEvent = {
@@ -185,7 +171,7 @@ function reduceCo(bay: BayRuntime, state: BayState, command: BayCommand): Transi
     actor: bay.actor,
     type: EV_OPENED,
     lease: leaseId,
-    changeset: changeId,
+    pr: changeId,
     data: { lease: leaseId, bay: n, workitem, changeId, branch },
   }
   const effect: Effect = {
@@ -216,7 +202,7 @@ function reduceAbandon(bay: BayRuntime, state: BayState, command: BayCommand): T
     actor: bay.actor,
     type: EV_ENDED,
     lease: leaseId,
-    changeset: lease.changeId,
+    pr: lease.changeId,
     data: { lease: leaseId, endReason: "abandoned" },
   }
   const effect: Effect = {
@@ -250,7 +236,7 @@ function reducePing(bay: BayRuntime, state: BayState, command: BayCommand): Tran
     actor: bay.actor,
     type: EV_PINGED,
     lease: leaseId,
-    changeset: lease.changeId,
+    pr: lease.changeId,
     data: { lease: leaseId },
   }
   return { state, events: [pinged], effects: [] }
@@ -277,6 +263,10 @@ function reduceGc(bay: BayRuntime, state: BayState, ttlMs: number): TransitionRe
     return { state, events: [clean], effects: [] }
   }
 
+  const slice = sliceOf(state)
+  const byLease = new Map<LeaseId, number>()
+  for (const [num, held] of Object.entries(slice.byBay)) byLease.set(held, Number(num))
+
   const events: BayEvent[] = []
   const effects: Effect[] = []
   for (const lease of stale) {
@@ -286,8 +276,14 @@ function reduceGc(bay: BayRuntime, state: BayState, ttlMs: number): TransitionRe
       actor: bay.actor,
       type: EV_ENDED,
       lease: lease.id,
-      changeset: lease.changeId,
-      data: { lease: lease.id, endReason: "expired" },
+      pr: lease.changeId,
+      data: {
+        lease: lease.id,
+        endReason: "expired",
+        // Display context for the CLI (users see wt-ids and names, never L-ids).
+        bay: byLease.get(lease.id) ?? null,
+        workitem: lease.workitem,
+      },
     })
     if (lease.path !== "") {
       effects.push({
@@ -308,7 +304,7 @@ function apply(state: BayState, event: BayEvent): BayState {
         lease: LeaseId
         bay: number
         workitem: string | null
-        changeId: ChangeId
+        changeId: PrId
         branch: string
       }
       const slice = sliceOf(state)
@@ -418,15 +414,15 @@ async function resolveConfig(
 
 function makeProvisionHandler(opts: WorkspacesOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
-    const d = effect.data as { lease: LeaseId; bay: number; branch: string; changeId: ChangeId }
+    const d = effect.data as { lease: LeaseId; bay: number; branch: string; changeId: PrId }
     const { mainRepo, baysRoot, bayRemote } = await resolveConfig(opts)
-    const path = `${baysRoot}/bay${d.bay}`
+    const path = `${baysRoot}/wt${d.bay}`
     const baseRef = await resolveBaseRef(mainRepo)
     const baseSha = await revParse(mainRepo, baseRef) // pin the base commit before the worktree exists
 
-    // Lazy custodian reclaim (spec § lease lifecycle): the bay NUMBER was freed
-    // in state when its lease ended, but the worktree stays on disk until the
-    // slot is needed again — the holder may still be cd'd inside post-merge.
+    // Lazy custodian reclaim (spec § lease lifecycle): the worktree NUMBER was
+    // freed in state when its lease ended, but the directory stays on disk until
+    // the slot is needed again — the holder may still be cd'd inside post-merge.
     // Reclaim iff zero-change: no open lease at the path, porcelain-clean.
     // Anything else refuses loudly; work is preserved by branch/abandoned refs.
     if (existsSync(path)) {
@@ -434,8 +430,8 @@ function makeProvisionHandler(opts: WorkspacesOptions) {
       const open = Object.values(state.leases).find((l) => l.path === path && l.endedAt === undefined)
       if (open) {
         throw new Error(
-          `bay: cannot provision bay${d.bay} — ${path} is held by open lease ${open.id} (${open.workitem ?? open.branch}). ` +
-            `Abandon it first: git bay abandon ${open.id}`,
+          `bay: cannot provision wt${d.bay} — ${path} is held by '${open.workitem ?? open.branch}'. ` +
+            `Close it first: git bay close wt${d.bay}`,
         )
       }
       const leftover = await porcelainStatus(path)
@@ -468,21 +464,21 @@ function makeProvisionHandler(opts: WorkspacesOptions) {
 
 function makeRetireHandler(opts: WorkspacesOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
-    const d = effect.data as { lease: LeaseId; path: string; branch: string; changeId: ChangeId }
+    const d = effect.data as { lease: LeaseId; path: string; branch: string; changeId: PrId }
     const { mainRepo } = await resolveConfig(opts)
     const dirty = await porcelainStatus(d.path)
     if (dirty !== "") {
       // Never destroy uncommitted work — the reason this project exists.
       throw new Error(
-        `bay: refusing to retire bay at ${d.path} — working tree is dirty:\n${dirty}\n` +
-          `Commit or push your work, then abandon; bay never deletes uncommitted work.`,
+        `bay: refusing to retire the worktree at ${d.path} — it has uncommitted work:\n${dirty}\n` +
+          `Commit or push your work, then close it; bay never deletes uncommitted work.`,
       )
     }
 
     // Snapshot the branch tip to a findability ref BEFORE removing the worktree,
-    // so abandoned work stays discoverable even though the branch is untouched
+    // so closed-out work stays discoverable even though the branch is untouched
     // (spec § the loan never deletes work). Records the tip even if it equals
-    // base (no commits made) — the ref proves the bay existed.
+    // base (no commits made) — the ref proves the worktree existed.
     const branchTip = await revParse(mainRepo, d.branch)
     const abandonedRef = `refs/bay/abandoned/${d.changeId}`
     await updateRef(mainRepo, abandonedRef, branchTip)

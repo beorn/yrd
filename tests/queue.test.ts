@@ -2,8 +2,8 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBay, createJsonlJournal, pipe, queuedChangesets, withQueue } from "../src/index.ts"
-import type { BayRuntime, BayState, BayStore, ChangeId, QueueSlice } from "../src/index.ts"
+import { createBay, createJsonlJournal, pipe, queuedPrs, withQueue } from "../src/index.ts"
+import type { BayRuntime, BayState, BayStore, PrId, QueueSlice } from "../src/index.ts"
 
 // Fixed fake clock + actor — determinism comes from the injected clock and the
 // folded state, never from wall time or randomness (the reducer purity rule).
@@ -27,32 +27,46 @@ function slice(state: BayState): QueueSlice {
   return state.slices.queue as QueueSlice
 }
 
-function stateOf(state: BayState, id: ChangeId): string {
-  return state.changesets[id]!.state
+function stateOf(state: BayState, id: PrId): string {
+  return state.prs[id]!.state
 }
 
 describe("withQueue — enqueue", () => {
-  it("mints a deterministic C-<hash> id and records a queued changeset + target", async () => {
+  it("mints sequential PR ids (PR1, PR2) and records a queued PR + target", async () => {
     const bay = await buildQueueBay(await tmpJournalPath())
-    const { events } = await bay.dispatch({ type: "enqueue", args: { target: "task/wi-a", workitem: "wi-a" } })
+    const { events } = await bay.dispatch({ type: "enqueue", args: { target: "task/wi-a", name: "wi-a" } })
 
-    const enqueued = events.find((e) => e.type === "changeset.enqueued")!
-    const id = enqueued.data!.changeset as string
-    expect(id).toMatch(/^C-[0-9a-f]{8}$/)
-    expect(enqueued.data!.target).toBe("task/wi-a")
+    const opened = events.find((e) => e.type === "pr.opened")!
+    const id = opened.data!.pr as string
+    expect(id).toBe("PR1")
+    expect(opened.data!.target).toBe("task/wi-a")
 
     const state = await bay.state()
-    expect(state.changesets[id]).toMatchObject({ id, workitem: "wi-a", revision: 1, repos: [], state: "queued" })
+    expect(state.prs[id]).toMatchObject({ id, name: "wi-a", revision: 1, repos: [], state: "queued" })
     expect(slice(state).order).toEqual([id])
     expect(slice(state).targets[id]).toBe("task/wi-a")
+
+    // Sequential per repo: the next submit gets the next number.
+    const second = await bay.dispatch({ type: "enqueue", args: { target: "task/wi-b" } })
+    expect(second.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR2")
   })
 
-  it("uses an explicit changeId when supplied; workitem defaults to null", async () => {
+  it("uses an explicit pr id when supplied; name defaults to null", async () => {
     const bay = await buildQueueBay(await tmpJournalPath())
-    await bay.dispatch({ type: "enqueue", args: { target: "deadbeef", changeId: "C-explicit" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "deadbeef", pr: "X-explicit" } })
     const state = await bay.state()
-    expect(state.changesets["C-explicit"]).toMatchObject({ id: "C-explicit", workitem: null, state: "queued" })
-    expect(slice(state).targets["C-explicit"]).toBe("deadbeef")
+    expect(state.prs["X-explicit"]).toMatchObject({ id: "X-explicit", name: null, state: "queued" })
+    expect(slice(state).targets["X-explicit"]).toBe("deadbeef")
+  })
+
+  it("an explicit non-PRn id never disturbs the sequence; an explicit PRn advances it", async () => {
+    const bay = await buildQueueBay(await tmpJournalPath())
+    await bay.dispatch({ type: "enqueue", args: { target: "t1", pr: "X-legacy" } })
+    const a = await bay.dispatch({ type: "enqueue", args: { target: "t2" } })
+    expect(a.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR1")
+    await bay.dispatch({ type: "enqueue", args: { target: "t3", pr: "PR9" } })
+    const b = await bay.dispatch({ type: "enqueue", args: { target: "t4" } })
+    expect(b.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR10")
   })
 
   it("throws on a missing/blank target", async () => {
@@ -61,61 +75,61 @@ describe("withQueue — enqueue", () => {
     await expect(bay.dispatch({ type: "enqueue", args: { target: "  " } })).rejects.toThrow(/'target'.*required/)
   })
 
-  it("throws on a duplicate changeId (ids are unique)", async () => {
+  it("throws on a duplicate pr id (PR numbers are unique)", async () => {
     const bay = await buildQueueBay(await tmpJournalPath())
-    await bay.dispatch({ type: "enqueue", args: { target: "t1", changeId: "C-dup" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "t1", pr: "PR7" } })
     await expect(
-      bay.dispatch({ type: "enqueue", args: { target: "t2", changeId: "C-dup" } }),
-    ).rejects.toThrow(/'C-dup' already exists/)
+      bay.dispatch({ type: "enqueue", args: { target: "t2", pr: "PR7" } }),
+    ).rejects.toThrow(/'PR7' already exists/)
   })
 })
 
 describe("withQueue — FIFO ordering", () => {
-  it("queuedChangesets returns queued changesets in enqueue order across 3", async () => {
+  it("queuedPrs returns queued PRs in enqueue order across 3", async () => {
     const bay = await buildQueueBay(await tmpJournalPath())
     for (const t of ["A", "B", "C"]) {
-      await bay.dispatch({ type: "enqueue", args: { target: t, changeId: `C-${t}` } })
+      await bay.dispatch({ type: "enqueue", args: { target: t } })
     }
-    const queued = queuedChangesets(await bay.state())
-    expect(queued.map((c) => c.id)).toEqual(["C-A", "C-B", "C-C"])
+    const queued = queuedPrs(await bay.state())
+    expect(queued.map((c) => c.id)).toEqual(["PR1", "PR2", "PR3"])
     // and the slice order matches
-    expect(slice(await bay.state()).order).toEqual(["C-A", "C-B", "C-C"])
+    expect(slice(await bay.state()).order).toEqual(["PR1", "PR2", "PR3"])
   })
 })
 
 describe("withQueue — requeue validation (illegal transition throws)", () => {
-  it("throws requeueing an unknown changeset", async () => {
+  it("throws requeueing an unknown PR", async () => {
     const bay = await buildQueueBay(await tmpJournalPath())
-    await expect(bay.dispatch({ type: "requeue", args: { changeset: "C-nope" } })).rejects.toThrow(
-      /no changeset 'C-nope'/,
+    await expect(bay.dispatch({ type: "requeue", args: { pr: "PR99" } })).rejects.toThrow(
+      /no PR 'PR99'/,
     )
   })
 
-  it("throws requeueing a still-queued changeset (queued → queued is illegal)", async () => {
+  it("throws requeueing a still-queued PR (queued → queued is illegal)", async () => {
     const bay = await buildQueueBay(await tmpJournalPath())
-    await bay.dispatch({ type: "enqueue", args: { target: "t1", changeId: "C-q" } })
-    await expect(bay.dispatch({ type: "requeue", args: { changeset: "C-q" } })).rejects.toThrow(
-      /illegal changeset transition queued → queued/,
+    await bay.dispatch({ type: "enqueue", args: { target: "t1", pr: "PR1" } })
+    await expect(bay.dispatch({ type: "requeue", args: { pr: "PR1" } })).rejects.toThrow(
+      /illegal PR transition queued → queued/,
     )
     // the illegal op left state untouched — no silent overwrite
-    expect(stateOf(await bay.state(), "C-q")).toBe("queued")
+    expect(stateOf(await bay.state(), "PR1")).toBe("queued")
   })
 })
 
 describe("withQueue — replay", () => {
-  it("a fresh bay over the same journal folds to identical changesets + slice", async () => {
+  it("a fresh bay over the same journal folds to identical PRs + slice", async () => {
     const path = await tmpJournalPath()
     const first = await buildQueueBay(path)
-    await first.dispatch({ type: "enqueue", args: { target: "A", changeId: "C-A" } })
-    await first.dispatch({ type: "enqueue", args: { target: "B", changeId: "C-B" } })
+    await first.dispatch({ type: "enqueue", args: { target: "A" } })
+    await first.dispatch({ type: "enqueue", args: { target: "B" } })
     const live = await first.state()
 
     // Fresh createBay + fresh store handle over the SAME journal file — proves
     // replay (not the live fold cache) reconstructs identical state.
     const replayed = await (await buildQueueBay(path)).state()
 
-    expect(replayed.changesets).toEqual(live.changesets)
+    expect(replayed.prs).toEqual(live.prs)
     expect(slice(replayed)).toEqual(slice(live))
-    expect(slice(replayed).order).toEqual(["C-A", "C-B"])
+    expect(slice(replayed).order).toEqual(["PR1", "PR2"])
   })
 })

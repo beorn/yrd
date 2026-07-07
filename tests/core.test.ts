@@ -27,7 +27,7 @@ function openStore(path: string): BayStore {
 describe("createBay — zero-plugin core", () => {
   it("state() folds to the empty shape with no layers registered", async () => {
     const bay = createBay({ store: openStore(await tmpJournalPath()), clock: CLOCK })
-    expect(await bay.state()).toEqual({ leases: {}, changesets: {}, slices: {} })
+    expect(await bay.state()).toEqual({ leases: {}, prs: {}, slices: {} })
   })
 
   it("dispatching an unregistered verb throws, naming the command and the registered layers", async () => {

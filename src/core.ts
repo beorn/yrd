@@ -33,7 +33,7 @@ export function createBay(opts: {
   let folded: BayState | null = null // lazy replay cache; invalidated never (append-only)
 
   function emptyState(): BayState {
-    return { leases: {}, changesets: {}, slices: {} }
+    return { leases: {}, prs: {}, slices: {} }
   }
 
   function applyEvent(state: BayState, event: BayEvent): BayState {
@@ -125,7 +125,7 @@ export function makeEvent(
   bay: BayRuntime,
   type: string,
   data?: BayEvent["data"],
-  refs?: { changeset?: string; lease?: string },
+  refs?: { pr?: string; lease?: string },
 ): BayEvent {
   return { v: 1, ts: bay.clock(), actor: bay.actor, type, data, ...refs }
 }

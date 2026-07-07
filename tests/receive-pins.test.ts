@@ -20,7 +20,7 @@ async function must(args: string[], cwd: string): Promise<string> {
   return res.stdout.trim()
 }
 
-const EMPTY: BayState = { leases: {}, changesets: {}, slices: {} }
+const EMPTY: BayState = { leases: {}, prs: {}, slices: {} }
 
 describe("preReceiveCheck — gitlink pin verdicts", () => {
   let root: string

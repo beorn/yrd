@@ -3,18 +3,18 @@
 
 // ---------- identifiers ----------
 
-export type ChangeId = string // minted at co; stamped as Bay-Change trailer
+export type PrId = string // sequential per repo (PR1, PR2, …); minted from folded state
 export type LeaseId = string
-export type WorkitemId = string // e.g. "@km/cli/20123-list-flag"; provider-validated
+export type WorkitemId = string // the NAME given at `new` — a ticket id or any label
 
 // ---------- domain data ----------
 
 export type Lease = {
   id: LeaseId
   workitem: WorkitemId | null
-  path: string // workspace (bay) absolute path
+  path: string // worktree absolute path
   branch: string
-  changeId: ChangeId
+  changeId: PrId
   createdAt: string // ISO; injected clock — never Date.now() in core
   actor?: string // who holds the loan (from the lease.opened event envelope)
   baseSha?: string // recorded at provision from the resolved base ref (spec § lease lifecycle)
@@ -29,7 +29,7 @@ export type RepoEntry = {
   gitlink?: { from: string; to: string }
 }
 
-export type ChangesetState =
+export type PrState =
   | "queued"
   | "checking"
   | "reviewing"
@@ -38,13 +38,13 @@ export type ChangesetState =
   | "rejected"
   | "abandoned"
 
-export type Changeset = {
-  id: ChangeId
-  workitem: WorkitemId | null
+export type PullRequest = {
+  id: PrId
+  name: WorkitemId | null
   lease: LeaseId
-  revision: number // re-push after refresh = same id, next revision
+  revision: number // re-push after rejection = same id, next revision
   repos: RepoEntry[]
-  state: ChangesetState
+  state: PrState
 }
 
 // ---------- events (journal rows; additive-only, versioned) ----------
@@ -54,7 +54,7 @@ export type BayEvent = {
   ts: string
   actor: string
   type: string // layer-registered; consumers ignore unknown types
-  changeset?: ChangeId
+  pr?: PrId
   lease?: LeaseId
   data?: Record<string, unknown>
 }
@@ -75,7 +75,7 @@ export type Effect = {
 
 export type BayState = {
   leases: Record<LeaseId, Lease>
-  changesets: Record<ChangeId, Changeset>
+  prs: Record<PrId, PullRequest>
   // layers may hang additional slices here, namespaced by layer name
   slices: Record<string, unknown>
 }
