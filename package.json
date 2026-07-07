@@ -2,7 +2,7 @@
   "name": "git-bay",
   "version": "0.0.1",
   "private": true,
-  "description": "git bay — a local merge server for agent fleets",
+  "description": "git bay — local pull requests for your repository: plain git push opens the PR, and it lands itself when the checks pass",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/gitbay",
