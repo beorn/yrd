@@ -170,3 +170,72 @@ describe("git bay CLI — M1 happy path (process-level)", () => {
     expect(final.stdout).not.toContain("dirty-abandon")
   })
 })
+
+describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became changeset C-5f086e7b)", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "bay-flags-"))
+    demo = join(root, "demo")
+    const shimDir = join(root, "shim")
+    await must(["mkdir", "-p", shimDir], root, {})
+    const shim = join(shimDir, "git-bay")
+    await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${BIN}" "$@"\n`, "utf8")
+    await chmod(shim, 0o755)
+    env = {
+      PATH: `${shimDir}:${process.env.PATH}`,
+      BAY_ACTOR: "tester",
+      GIT_AUTHOR_NAME: "t",
+      GIT_AUTHOR_EMAIL: "t@example.invalid",
+      GIT_COMMITTER_NAME: "t",
+      GIT_COMMITTER_EMAIL: "t@example.invalid",
+    }
+    await must(["git", "init", "-q", "-b", "main", demo], root, env)
+    await must(["git", "-C", demo, "commit", "-qm", "init", "--allow-empty"], root, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("`enqueue --help` prints usage, exits 0, and enqueues NOTHING — even in an uninitialized repo", async () => {
+    // No `git bay init` on purpose: help must never require (or create) state.
+    const res = await run(["git", "bay", "enqueue", "--help"], demo, env)
+    expect(res.code).toBe(0)
+    expect(res.stdout).toContain("usage: git bay")
+    const { existsSync } = await import("node:fs")
+    expect(existsSync(join(demo, ".bay"))).toBe(false)
+  })
+
+  it("`<verb> -h` works for every verb that reads a positional", async () => {
+    for (const verb of ["co", "status", "enqueue", "requeue", "drain", "abandon", "adopt", "ping"]) {
+      const res = await run(["git", "bay", verb, "-h"], demo, env)
+      expect(res.code, `${verb} -h`).toBe(0)
+      expect(res.stdout, `${verb} -h`).toContain("usage: git bay")
+    }
+  })
+
+  it("an unknown flag is a teaching refusal, never a silent no-op or a positional", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    // The silent-error case: a --watch typo must not fall through to a single drain.
+    const drain = await run(["git", "bay", "drain", "--wach"], demo, env)
+    expect(drain.code).toBe(1)
+    expect(drain.stderr).toContain("unknown flag '--wach'")
+    expect(drain.stderr).toContain("usage: git bay")
+    // The positional case: a flag-shaped token must never become a merge target.
+    const enq = await run(["git", "bay", "enqueue", "--halp"], demo, env)
+    expect(enq.code).toBe(1)
+    expect(enq.stderr).toContain("unknown flag '--halp'")
+    const status = await must(["git", "bay", "status", "--json"], demo, env)
+    expect(status.stdout).not.toContain("C-")
+  })
+
+  it("regression: bare `enqueue` still teaches that a target is required", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    const res = await run(["git", "bay", "enqueue"], demo, env)
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("a target (branch or SHA) is required")
+  })
+})

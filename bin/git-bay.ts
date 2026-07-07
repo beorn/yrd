@@ -390,33 +390,61 @@ const USAGE = `usage: git bay <verb>
   gc                        expire idle leases (WIP snapshotted, never deleted)
   audit                     strays, pins, refs without workitems  [--json]`
 
+/** After a verb's known flags are consumed, any remaining flag-shaped token is
+ *  a teaching refusal, never a positional: on the first armed day,
+ *  `git bay enqueue --help` queued a changeset whose merge target was the
+ *  literal string '--help' (C-5f086e7b), and a `--watch` typo would silently
+ *  drain once instead of looping. Flags never fall through. */
+function guardFlags(args: string[], verb: string): void {
+  const stray = args.find((a) => a.startsWith("-"))
+  if (stray !== undefined) throw new Error(`bay: ${verb}: unknown flag '${stray}'\n${USAGE}`)
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
   const verb = args.shift()
+  // Help never requires (or creates) state — intercept before resolveCtx.
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(USAGE)
+    return
+  }
   const json = flag(args, "--json")
   flag(args, "--no-workitem") // accepted for forward-compat; no provider in M1
   const ctx = await resolveCtx()
 
   switch (verb) {
     case "init":
+      guardFlags(args, "init")
       return await verbInit(ctx)
     case "co":
     case "checkout":
+      guardFlags(args, "co")
       return await verbCo(ctx, args[0])
     case "status":
+      guardFlags(args, "status")
       return await verbStatus(ctx, args[0], json)
-    case "enqueue":
-      return await verbEnqueue(ctx, args[0], opt(args, "--workitem"))
+    case "enqueue": {
+      const workitem = opt(args, "--workitem") // consume BEFORE the positional read
+      guardFlags(args, "enqueue")
+      return await verbEnqueue(ctx, args[0], workitem)
+    }
     case "requeue":
+      guardFlags(args, "requeue")
       return await verbRequeue(ctx, args[0])
-    case "drain":
-      return await verbDrain(ctx, flag(args, "--watch"), Number(opt(args, "--interval") ?? "15"))
+    case "drain": {
+      const watch = flag(args, "--watch")
+      const interval = Number(opt(args, "--interval") ?? "15")
+      guardFlags(args, "drain")
+      return await verbDrain(ctx, watch, interval)
+    }
     case "abandon":
+      guardFlags(args, "abandon")
       return await verbAbandon(ctx, args[0])
     case "adopt": {
+      const workitem = opt(args, "--workitem")
+      guardFlags(args, "adopt")
       const branch = args[0]
       if (!branch) throw new Error("bay: adopt: a branch name is required")
-      const workitem = opt(args, "--workitem")
       await withWriteBay(ctx, async (bay) => {
         const { events } = await bay.dispatch({ type: "adopt", args: { branch, workitem } })
         console.log(events.find((e) => e.type === "changeset.enqueued")?.changeset ?? "")
@@ -424,6 +452,7 @@ async function main(): Promise<void> {
       return
     }
     case "ping": {
+      guardFlags(args, "ping")
       const lease = args[0]
       if (!lease) throw new Error("bay: ping: a lease id is required (git bay status --json lists them)")
       await withWriteBay(ctx, async (bay) => {
@@ -432,6 +461,7 @@ async function main(): Promise<void> {
       return
     }
     case "gc":
+      guardFlags(args, "gc")
       await withWriteBay(ctx, async (bay) => {
         const { events } = await bay.dispatch({ type: "gc" })
         for (const e of events) {
@@ -444,6 +474,7 @@ async function main(): Promise<void> {
       })
       return
     case "audit":
+      guardFlags(args, "audit")
       return await verbAudit(ctx, json)
     case "receive-pre":
       return await hookPre(ctx)
