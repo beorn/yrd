@@ -53,6 +53,20 @@ export async function resolveBaseRef(repo: string): Promise<string> {
   return res.code === 0 ? "origin/main" : "HEAD"
 }
 
+/** Paths changed on `target`'s side since it forked from `base` (the batch
+ *  compatibility precheck's input). Three-dot `base...target` so base drift since
+ *  the fork point does not pollute the set; `-z` for NUL-separated names (exotic
+ *  filenames stay intact); `--no-renames` so BOTH sides of a rename count as
+ *  touched (rename detection would hide the old path from an overlap check).
+ *  Fail-loud on a nonzero exit. */
+export async function changedPaths(repo: string, base: string, target: string): Promise<string[]> {
+  const res = await git(["-C", repo, "diff", "--name-only", "-z", "--no-renames", `${base}...${target}`], repo)
+  if (res.code !== 0) {
+    throw new Error(`bay: git diff ${base}...${target} failed at ${repo} (exit ${res.code}):\n${res.stderr.trim()}`)
+  }
+  return res.stdout.split("\0").filter((p) => p.length > 0)
+}
+
 /** `git worktree add -b <branch> <path> <baseRef>` — throws the literal git
  *  stderr on failure (a stale gitlink, an existing path, a taken branch all
  *  surface verbatim, per design law 7 "name the remedy"). */
