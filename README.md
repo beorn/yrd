@@ -2,7 +2,17 @@
 
 **git bay** is a merge queue for your local repository. You work in an isolated workspace, submit by running plain `git push`, and the bay checks and merges each change onto `main` one at a time — so `main` never receives an untested merge. No server, no pull requests, no daemon.
 
-It was built for machines that run fleets of coding agents against one repository, but the safety it adds — *nothing lands on main unchecked* — is just as useful for a single developer who has tests and would rather not break their own main branch.
+## Why you'd want it
+
+**You want git bay if…**
+
+- you run a team of coding agents that produce more merges than a human can referee
+- you want merge-queue safety (like GitHub's merge queue or GitLab's merge trains) with no hosted service, no PRs, no daemon
+- you have a superproject full of submodules and want changes across them to merge as one unit — like a monorepo
+- you want workspaces and merging in one self-contained tool that lives entirely inside your repo
+- you expect merge volume that needs batching — several changes checked as one candidate (shipping in v0.2)
+
+In any busy repository, the main branch is a zone of contention: two changes can each pass tests on their own and still break main when merged together, a branch can be tested against last week's main and land untested against today's, and a submodule pointer can silently move backwards, undoing work that already landed — with no record afterward of what merged, when, or why. Hosted merge queues, like GitHub's merge queue or GitLab's merge trains, solve this in the cloud for pull-request workflows. It becomes acute with agent fleets, since agents merge far more often than people do.
 
 ## How it works, in 30 seconds
 
@@ -24,17 +34,6 @@ C-5a7a2f95 merged d2eb46f5 onto main (checks: ✓)
 That is real output from a live run, lightly edited for length: the SHA is shortened to 8 characters (`git bay status` prints all 40), and git's own push chatter (the `To <dest>` and ref-update lines) is left out.
 
 There is no separate submit/land/finish command to remember, and no way to skip the checks by accident.
-
-## The problem
-
-In any busy repository, the main branch is a zone of contention:
-
-- **Broken combinations.** Two changes each pass tests on their own, then break the build when merged — because nobody checked the *combination*. Pushing straight to main means nobody ever does.
-- **Stale merges.** A branch was tested against last week's main. By the time it merges, main has moved, and the result is untested again.
-- **Submodule regressions.** In repositories with submodules, a careless merge can move a submodule pointer *backwards* — silently undoing work that had already landed.
-- **No record.** When something does go wrong, there is often no answer to "what was merged, when, by whom, and what did the checks say?"
-
-All of this is familiar on human teams. It becomes acute when coding agents work the same repository: agents merge far more often than people, at all hours, with nobody watching. Hosted merge queues — GitHub's merge queue, GitLab's merge trains — solve this for cloud pull-request workflows. git bay gives the same discipline to a local-first workflow, with no server and no PRs.
 
 ## What you get
 
