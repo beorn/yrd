@@ -450,11 +450,14 @@ async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | un
 }
 
 /** `submit <PR|name>` — "ask to merge": moves an existing PR from `pushed` to
- *  `submitted`. Lazy, like `adopt` always has been: this only submits it —
- *  it never merges (docs/model.md § Verbs: "Never merges") — `git bay
- *  integrate` (or a fused `-o submit`/`-o wait`/`bay.autoQueue` push) is what
- *  actually runs the check/merge pipeline. A token that resolves to no known
- *  PR/bay redirects to `adopt`, since that is what creates one. */
+ *  `submitted`. The VERB itself is intrinsically lazy, like `adopt` always
+ *  has been — it only submits (docs/model.md § The auto-flow: "submit stays
+ *  intrinsically lazy"). Whether the PR keeps going from there is a SYSTEM
+ *  behavior, not a verb change: `bay.autoMerge` (default true) auto-runs
+ *  `integrate` right after, so a plain `git bay submit <PR>` reaches `merged`
+ *  by default; set `bay.autoMerge false` to rest at `submitted` for a manual
+ *  `check`/`merge`/`integrate`. A token that resolves to no known PR/bay
+ *  redirects to `adopt`, since that is what creates one. */
 async function verbQueue(ctx: Ctx, target: string | undefined): Promise<void> {
   if (!target) throw new Error("bay: submit: a PR number or name is required — git bay ls lists them")
   await withWriteBay(ctx, async (bay) => {
@@ -474,7 +477,13 @@ async function verbQueue(ctx: Ctx, target: string | undefined): Promise<void> {
     }
     prOrTeach(state, prId, "submit") // "has no PR yet" teaches instead of a reducer miss
     await bay.dispatch({ type: "queue", args: { pr: prId } })
-    console.log(`bay: ${prId} submitted — git bay integrate ${prId} to land it`)
+    const { autoMerge } = await resolveAutoFlow(ctx)
+    if (!autoMerge) {
+      console.log(`bay: ${prId} submitted — git bay integrate ${prId} to land it`)
+      return
+    }
+    const { events } = await bay.dispatch({ type: "integrate", args: { pr: prId } })
+    printTransitions(events)
   })
 }
 
@@ -535,9 +544,10 @@ async function verbRetry(ctx: Ctx, target: string | undefined): Promise<void> {
     if (!branch) throw new Error(`bay: retry: no merge target recorded for ${prId} — cannot resubmit`)
     const sha = (await git(["-C", ctx.mainRepo, "rev-parse", branch])).stdout.trim()
     if (!sha) throw new Error(`bay: retry: branch '${branch}' does not resolve in ${ctx.mainRepo}`)
-    // retry always re-runs the full pipeline, regardless of bay.autoQueue —
-    // that IS the point of retrying.
-    const { events } = await bay.dispatch({ type: "submit", args: { branch, sha, queued: true } })
+    // retry always re-runs the full pipeline, regardless of bay.autoSubmit/
+    // bay.autoMerge — that IS the point of retrying, so both flags are forced
+    // true at the call site rather than left to config.
+    const { events } = await bay.dispatch({ type: "submit", args: { branch, sha, queued: true, autoMerge: true } })
     printVerdict(events)
   })
 }
@@ -705,18 +715,41 @@ function readPushOptions(): string[] {
   return opts
 }
 
-/** §6 addendum: a push queues immediately (create AND ask-to-merge, fused)
- *  iff `-o submit`/`-o wait` was passed, or `bay.autoQueue` is set. In this
- *  synchronous-hook implementation `-o submit` and `-o wait` are equivalent
- *  triggers — the post-receive hook always runs to completion before git
- *  returns to the client, so "blocks for the verdict" is already true either
- *  way; `-o wait`'s stronger phrasing will earn a real distinction once an
- *  async execution path exists. */
-async function resolveAutoQueue(ctx: Ctx, pushOptions: string[]): Promise<boolean> {
-  if (pushOptions.includes("submit") || pushOptions.includes("wait")) return true
-  const raw = await createGitConfigSource(ctx.mainRepo).get("autoQueue")
-  const v = raw?.trim().toLowerCase()
-  return v !== undefined && v !== "" && v !== "false" && v !== "0"
+/** docs/model.md § The auto-flow — two independent toggles, resolved once per
+ *  push (or once per `submit` verb call, via the `pushOptions: []` default):
+ *  `bay.autoSubmit` (default false) decides whether a push fuses creation
+ *  with the ask-to-merge; `bay.autoMerge` (default true) decides whether a
+ *  submitted PR immediately runs check-then-merge. Back-compat: if
+ *  `bay.autoQueue` is explicitly set, it wins over both new keys and pins
+ *  autoSubmit = autoMerge = its value (the pre-v0.3 bundled toggle). Push
+ *  options force autoSubmit/autoMerge for THIS push only, on top of whatever
+ *  config says: `-o submit` forces autoSubmit true; `-o wait` forces BOTH
+ *  true (create, submit, and integrate, blocking for the verdict — in this
+ *  synchronous-hook implementation `-o submit` and `-o wait` differ only in
+ *  autoMerge, since the post-receive hook always runs to completion before
+ *  git returns to the client either way; `-o wait`'s stronger "blocks"
+ *  phrasing will earn a real distinction once an async execution path
+ *  exists). */
+async function resolveAutoFlow(ctx: Ctx, pushOptions: string[] = []): Promise<{ autoSubmit: boolean; autoMerge: boolean }> {
+  if (pushOptions.includes("wait")) return { autoSubmit: true, autoMerge: true }
+
+  const source = createGitConfigSource(ctx.mainRepo)
+  const parseBool = (raw: string | undefined): boolean | undefined => {
+    if (raw === undefined) return undefined
+    const v = raw.trim().toLowerCase()
+    if (v === "") return undefined
+    return v !== "false" && v !== "0"
+  }
+
+  const legacy = parseBool(await source.get("autoQueue"))
+  let autoSubmit = legacy ?? false
+  let autoMerge = legacy ?? true
+  if (legacy === undefined) {
+    autoSubmit = parseBool(await source.get("autoSubmit")) ?? autoSubmit
+    autoMerge = parseBool(await source.get("autoMerge")) ?? autoMerge
+  }
+  if (pushOptions.includes("submit")) autoSubmit = true
+  return { autoSubmit, autoMerge }
 }
 
 async function hookPre(ctx: Ctx): Promise<void> {
@@ -729,12 +762,15 @@ async function hookPre(ctx: Ctx): Promise<void> {
 
 async function hookPost(ctx: Ctx): Promise<void> {
   const updates = parseReceiveStdin(await readStdin())
-  const queued = await resolveAutoQueue(ctx, readPushOptions())
+  const { autoSubmit, autoMerge } = await resolveAutoFlow(ctx, readPushOptions())
   for (const u of updates) {
     const branch = u.ref.replace(/^refs\/heads\//, "")
     try {
       await withWriteBay(ctx, async (bay) => {
-        const { events } = await bay.dispatch({ type: "submit", args: { branch, sha: u.newSha, queued } })
+        const { events } = await bay.dispatch({
+          type: "submit",
+          args: { branch, sha: u.newSha, queued: autoSubmit, autoMerge },
+        })
         printVerdict(events)
       })
     } catch (err) {
@@ -761,13 +797,12 @@ THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
   3. git push                          # opens your PR (state: pushed) — nothing runs yet
-  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — queues it, does NOT merge
-  5. git bay integrate <PR>            # runs checks, then lands it (submitted -> ... -> merged); READ the remote:/output lines
-  6. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
+  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — auto-integrates to merged by default; READ the remote:/output lines
+  5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
-  - In a hurry? git push -o submit fuses steps 3-5 (git config bay.autoQueue true makes every push do this).
+  - Manual control? git config bay.autoMerge false rests submit at submitted — then git bay check/merge or integrate <PR> yourself; git config bay.autoSubmit true makes a bare push submit too (and, with autoMerge still on, ship all the way).
   - No git config bay.mergeCommand needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.mergeCommand only to override it.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
   - Done with a worktree? git bay close <bay|wt> refuses while its PR is still open — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
@@ -777,7 +812,7 @@ VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it (submitted)
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it and, by default, lands it (submitted -> ... -> merged)
   check      git bay check <PR> runs the ONE project check alone (submitted -> checked); git config bay.check '<command>'; exit 0 means pass
   merge      git bay merge <PR> lands a CHECKED PR onto main alone (checked -> merged); git bay integrate <PR> runs check then merge together
 ADDRESSING
@@ -998,7 +1033,7 @@ async function main(): Promise<void> {
     .command("submit <PR|name>")
     .alias("queue")
     .helpGroup("PRs:")
-    .description("ask to merge — queues a pushed PR for integration (pushed → submitted); never merges")
+    .description("ask to merge (pushed → submitted); auto-integrates to merged by default — bay.autoMerge false rests it at submitted")
     .action(async (target: string) => {
       await verbQueue(await requireBay(), target)
     })
