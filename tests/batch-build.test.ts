@@ -39,12 +39,17 @@ async function tmpJournalPath(): Promise<string> {
   return join(dir, "journal.jsonl")
 }
 
-async function buildBatchBay(repo: string, path?: string, mergeCommand?: string): Promise<BayRuntime> {
+async function buildBatchBay(
+  repo: string,
+  path?: string,
+  mergeCommand?: string,
+  batchOpts?: { provisionCommand?: string },
+): Promise<BayRuntime> {
   const journalPath = path ?? (await tmpJournalPath())
   return pipe(
     createGitbay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
     withQueue(),
-    withBatchBuild({ mainRepo: repo, generatedGlobs: [] }),
+    withBatchBuild({ mainRepo: repo, generatedGlobs: [], ...batchOpts }),
     withMergeWorker({
       mainRepo: repo,
       mergeCommand: mergeCommand ?? `git -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
@@ -210,7 +215,7 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
     expect(subjects.split("\n")).toEqual(["bay: batch PR5 member PR3", "bay: batch PR5 member PR1"])
   })
 
-  it("refuses to rebuild when the per-prefix gate lies green for a rejected batch", async () => {
+  it("journals a bisect-refused verdict when the per-prefix gate lies green — walk evidence kept, nobody ejected", async () => {
     const repo = await makeRepo()
     await branch(repo, "task/a", { "a.ts": "a\n" })
     await branch(repo, "task/b", { "b.ts": "b\n" })
@@ -221,19 +226,165 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
     await bay.dispatch({ type: "batch-build" })
     await bay.dispatch({ type: "integrate", args: { pr: "PR3" } })
 
-    await expect(
-      bay.dispatch({
-        type: "batch-bisect",
-        args: {
-          pr: "PR3",
-          gateCommand: "true",
-        },
-      }),
-    ).rejects.toThrow(/per-member gate is lying/)
+    const { events } = await bay.dispatch({
+      type: "batch-bisect",
+      args: { pr: "PR3", gateCommand: "true" },
+    })
+
+    // The per-prefix walk stays durable — this evidence used to be discarded by a throw.
+    expect(eventsOf(events, "batch/bisect-checked")).toHaveLength(2)
+    const refused = eventsOf(events, "batch/bisect-refused")
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.data).toMatchObject({ batch: "PR3", reason: "all-green" })
+    expect(String(refused[0]!.data!.detail)).toContain("per-member gate is lying")
+    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
 
     const state = await bay.state()
     expect(state.prs.PR4).toBeUndefined()
     expect(stateOf(state, "PR1")).toBe("checking")
     expect(stateOf(state, "PR2")).toBe("checking")
+  })
+
+  it("refuses bisect with a journaled baseline verdict when the gate is red on the batch base itself", async () => {
+    const repo = await makeRepo()
+    await branch(repo, "task/a", { "a.ts": "a\n" })
+    await branch(repo, "task/b", { "b.ts": "b\n" })
+
+    const bay = await buildBatchBay(repo, undefined, "false")
+    await bay.dispatch({ type: "enqueue", args: { target: "task/a", pr: "PR1" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/b", pr: "PR2" } })
+    await bay.dispatch({ type: "batch-build" })
+    await bay.dispatch({ type: "integrate", args: { pr: "PR3" } })
+
+    // A gate that is red EVERYWHERE — including on the untouched batch base —
+    // is an environment/mainline fault. Nobody gets ejected for it.
+    const { events } = await bay.dispatch({
+      type: "batch-bisect",
+      args: { pr: "PR3", gateCommand: "false" },
+    })
+
+    const refused = eventsOf(events, "batch/bisect-refused")
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.data).toMatchObject({ batch: "PR3", reason: "baseline-red" })
+    expect(String(refused[0]!.data!.detail)).toContain("git bay retry PR3")
+    expect(eventsOf(events, "batch/bisect-checked")).toEqual([]) // the walk never started
+    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
+
+    const state = await bay.state()
+    expect(state.prs.PR4).toBeUndefined()
+    expect(stateOf(state, "PR1")).toBe("checking")
+    expect(stateOf(state, "PR2")).toBe("checking")
+  })
+
+  it("runs the provision command in every gate scratch before the gate", async () => {
+    const repo = await makeRepo()
+    await branch(repo, "task/good-a", { "a.ts": "a\n" })
+    await branch(repo, "task/bad", { "bad.txt": "breaks the batch\n" })
+    await branch(repo, "task/good-c", { "c.ts": "c\n" })
+
+    const bay = await buildBatchBay(repo, undefined, "false", { provisionCommand: "touch provisioned.marker" })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/good-a", pr: "PR1" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/bad", pr: "PR2" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/good-c", pr: "PR3" } })
+    await bay.dispatch({ type: "batch-build" })
+    await bay.dispatch({ type: "integrate", args: { pr: "PR4" } })
+
+    // The gate depends on the provision marker: without provisioning it would
+    // be red on the baseline and every prefix (env-fault refusal), so a correct
+    // ejection of task/bad proves provisioning ran in each scratch.
+    const { events } = await bay.dispatch({
+      type: "batch-bisect",
+      args: { pr: "PR4", gateCommand: "test -f provisioned.marker && test ! -f bad.txt" },
+    })
+
+    expect(eventsOf(events, "batch/bisect-refused")).toEqual([])
+    const ejected = eventsOf(events, "batch/member-ejected")
+    expect(ejected).toHaveLength(1)
+    expect(ejected[0]!.data).toMatchObject({ batch: "PR4", pr: "PR2" })
+    expect(eventsOf(events, "batch/built")).toHaveLength(1)
+  })
+
+  it("classifies a failing provision command as an infrastructure fault, never a member ejection", async () => {
+    const repo = await makeRepo()
+    await branch(repo, "task/a", { "a.ts": "a\n" })
+    await branch(repo, "task/b", { "b.ts": "b\n" })
+
+    const bay = await buildBatchBay(repo, undefined, "false", {
+      provisionCommand: "echo provision boom >&2; exit 7",
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/a", pr: "PR1" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/b", pr: "PR2" } })
+    await bay.dispatch({ type: "batch-build" })
+    await bay.dispatch({ type: "integrate", args: { pr: "PR3" } })
+
+    const { events } = await bay.dispatch({
+      type: "batch-bisect",
+      args: { pr: "PR3", gateCommand: "true" },
+    })
+
+    const refused = eventsOf(events, "batch/bisect-refused")
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.data).toMatchObject({ batch: "PR3", reason: "provision-failed" })
+    expect(String(refused[0]!.data!.detail)).toContain("exit 7")
+    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
+
+    const state = await bay.state()
+    expect(stateOf(state, "PR1")).toBe("checking")
+    expect(stateOf(state, "PR2")).toBe("checking")
+  })
+})
+
+describe("withBatchBuild — per-member journal truth when the candidate lands (LE-5)", () => {
+  it("journals per-member merged events with compose-time member tips, plus one batch/settled", async () => {
+    const repo = await makeRepo()
+    await branch(repo, "task/a", { "a.ts": "a\n" })
+    await branch(repo, "task/b", { "b.ts": "b\n" })
+    const tipA = await must(["-C", repo, "rev-parse", "task/a"], repo)
+    const tipB = await must(["-C", repo, "rev-parse", "task/b"], repo)
+
+    const journalPath = await tmpJournalPath()
+    const bay = await buildBatchBay(repo, journalPath)
+    await bay.dispatch({ type: "enqueue", args: { target: "task/a", pr: "PR1" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/b", pr: "PR2" } })
+    await bay.dispatch({ type: "batch-build" })
+
+    const { events } = await bay.dispatch({ type: "integrate", args: { pr: "PR3" } })
+
+    const memberMerged = events.filter(
+      (e) => e.name === "pr/changed" && e.data!.to === "merged" && e.data!.pr !== "PR3",
+    )
+    expect(memberMerged.map((e) => e.data)).toMatchObject([
+      { pr: "PR1", from: "checking", to: "merged", sha: tipA },
+      { pr: "PR2", from: "checking", to: "merged", sha: tipB },
+    ])
+    expect(String(memberMerged[0]!.data!.detail)).toContain("batch PR3")
+
+    const settled = eventsOf(events, "batch/settled")
+    expect(settled).toHaveLength(1)
+    expect(settled[0]!.data).toMatchObject({
+      batch: "PR3",
+      members: [
+        { pr: "PR1", target: "task/a", tip: tipA },
+        { pr: "PR2", target: "task/b", tip: tipB },
+      ],
+    })
+
+    // The journal itself carries the member outcomes — replay consumers
+    // (bay-stats) must not need the batch layer's fold to infer them.
+    const journaled: BayEvent[] = []
+    for await (const evt of createJsonlJournal(journalPath).replay()) journaled.push(evt)
+    const journaledMemberMerged = journaled.filter(
+      (e) => e.name === "pr/changed" && e.data!.to === "merged" && e.data!.pr !== "PR3",
+    )
+    expect(journaledMemberMerged.map((e) => e.data!.pr)).toEqual(["PR1", "PR2"])
+
+    // Settle is idempotent: the recovery verb finds nothing left to do.
+    const again = await bay.dispatch({ type: "batch-settle", args: { pr: "PR3" } })
+    expect(again.events).toEqual([])
+
+    const state = await bay.state()
+    expect(stateOf(state, "PR1")).toBe("merged")
+    expect(stateOf(state, "PR2")).toBe("merged")
+    expect(stateOf(state, "PR3")).toBe("merged")
   })
 })

@@ -8,6 +8,13 @@ export { createJsonlJournal } from "./journal.ts"
 export { createGitConfigSource, resolveOption } from "./config.ts"
 export { migrateJournal } from "./migrate.ts"
 export {
+  createScratchWorkspaces,
+  ProvisionError,
+  type ScratchLease,
+  type ScratchOptions,
+  type ScratchWorkspaces,
+} from "./scratch.ts"
+export {
   withWorktrees,
   staleLeases,
   DEFAULT_LEASE_TIMEOUT_MS,

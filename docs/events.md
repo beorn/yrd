@@ -10,11 +10,13 @@ worktree/…    the directories   provisioned · deprovisioned {via}
 bay/…         the loans         opened {worktree, recycled} · refreshed · closed {via}
 pr/…          the work          opened {via, queued} · changed {from, to, revision?, code?, sha?} — sha rides merged transitions: the verified landed tip
 queue/…       the order         reordered {order, detail?} — partial order; omitted PRs keep their relative place after the listed ids
-batch/…       the candidates    composed {members, skipped} · built {target, members, ejected, prefixes} · bisect-checked {ok} · member-ejected {detail}
+batch/…       the candidates    composed {members, skipped} · built {target, members, ejected, prefixes} · bisect-checked {ok} · member-ejected {detail} · bisect-refused {reason, detail} · settled {members, landedSha?}
 issues/…      the tracker       notified {name, on, command, code, detail?} — the configured bay.issues.on-<state> ran for a named PR; code is ITS exit (a failed notify journals too — it must not vanish)
 ```
 
 An empty batch compose (no submitted PRs at all) is a non-event, exactly like the empty integrate run below — the CLI derives "nothing to batch" from the silent dispatch.
+
+Batch member outcomes are journal truth, not fold inference: when a candidate lands, settle emits one `pr/changed {from: "checking", to: "merged", sha: <compose-time member tip>}` per member plus one `batch/settled` summary — replay consumers (stats) never have to infer member fates from the candidate's event. `batch/bisect-refused` is the journaled verdict when red-batch recovery stops WITHOUT ejecting anyone: `baseline-red` (the gate fails on the untouched batch base — an environment/mainline fault; the walk never starts), `all-green` (the per-member gate contradicts the red batch gate), or `provision-failed` (a gate scratch could not be provisioned via `bay.provision`). Refusals used to be throws that discarded the walk evidence; now the walk's `bisect-checked` rows and the refusal survive in the journal.
 
 A PR is born `pushed` (a push, or `git bay adopt <branch>`) and moves to `submitted` only when asked to merge — `git bay submit <PR>`, or a push fused with `bay.autoSubmit`, a forcing `-o submit`/`-o wait`, or legacy `bay.autoQueue`. `pr/opened`'s `queued` field (a literal boolean, its name predates the phase rename) says which: true for a fused creation (the fold plants it straight into `submitted`, no separate transition event); false for a bare creation, in which case a later `pr/changed {from: "pushed", to: "submitted"}` records the explicit ask. Whether a submitted PR then ALSO auto-integrates to `merged` is the separate `bay.autoMerge` decision (docs/model.md § The auto-flow) — not recorded on `queued`.
 

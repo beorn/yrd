@@ -114,6 +114,52 @@ describe("createGitbay — layer dispatch, journal durability, replay", () => {
   })
 })
 
+// Two effects from one dispatch: the SECOND handler must observe the FIRST
+// handler's events already journaled and folded (incremental per-effect fold).
+// This is what lets a follow-up effect (e.g. batch settle) read the outcome an
+// earlier effect (the merge) just journaled, inside the same dispatch.
+function withTwoEffects(seen: string[]) {
+  return definePlugin({
+    name: "two-effects",
+    reduce(state, command, next) {
+      if (command.type !== "run") return next(state, command)
+      return { state, events: [], effects: [{ type: "first" }, { type: "second" }] }
+    },
+    apply(state, evt) {
+      if (evt.name !== "first-done") return state
+      return { ...state, slices: { ...state.slices, twoFx: "first-done" } }
+    },
+    effects: {
+      async first(effect) {
+        return [event("first-done", {}, effect.cause!)]
+      },
+      async second(effect, bay) {
+        const state = await bay.state()
+        seen.push((state.slices.twoFx as string | undefined) ?? "(first effect not folded)")
+        return [event("second-done", {}, effect.cause!)]
+      },
+    },
+  })
+}
+
+describe("createGitbay — effects observe earlier effects' events (incremental fold)", () => {
+  it("the second effect's handler sees the first effect's journaled event in state()", async () => {
+    const path = await tmpJournalPath()
+    const seen: string[] = []
+    const bay = pipe(createGitbay({ store: openStore(path), clock: CLOCK }), withTwoEffects(seen))
+
+    const { events } = await bay.dispatch({ type: "run" })
+
+    expect(seen).toEqual(["first-done"])
+    expect(events.map((e) => e.name)).toEqual(["first-done", "second-done"])
+
+    // Journal order is unchanged by the incremental fold: production order.
+    const journaled: BayEvent[] = []
+    for await (const evt of createJsonlJournal(path).replay()) journaled.push(evt)
+    expect(journaled.map((e) => e.name)).toEqual(["first-done", "second-done"])
+  })
+})
+
 // A layer whose effect handler always throws — proves journal-first
 // ordering: the verb's event is appended to the journal (and folded into
 // the in-memory state) BEFORE runEffects() executes, so a crash inside an

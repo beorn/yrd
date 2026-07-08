@@ -852,10 +852,15 @@ git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$target"
 
     const integrated = await must(["git", "bay", "integrate"], demo, env)
     expect(integrated.stdout).toContain("bay: batch PR3 built — members: PR1, PR2")
-    expect(integrated.stdout).toContain("bay: PR3 merging → rejected — exit 7: bad batch")
+    // The candidate's check runs against the CANDIDATE's tree (bad.txt aboard),
+    // so the batch goes red at the check stage — the merge command's exit-7
+    // belt never needs to catch it.
+    expect(integrated.stdout).toContain("bay: PR3 checking → rejected — check")
     expect(integrated.stdout).toContain("bay: PR2 ejected from batch PR3 — first red batch prefix")
     expect(integrated.stdout).toContain("bay: batch PR4 built — members: PR1")
     expect(integrated.stdout).toContain("bay: PR4 merging → merged")
+    // Settle journals the member's own outcome (LE-5) and the drain prints it.
+    expect(integrated.stdout).toContain("bay: PR1 checking → merged — merged via batch PR4")
 
     const json = await must(["git", "bay", "ls", "--json"], demo, env)
     const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }

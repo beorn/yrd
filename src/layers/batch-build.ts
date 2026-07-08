@@ -1,9 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
 import { composeBatch, type SkippedTarget } from "../batch-compat.ts"
 import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
+import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import type {
   BayCommand,
   BayEvent,
@@ -25,10 +23,13 @@ const LAYER = "batch-build"
 // journal vocabulary and follow the slash grammar (docs/events.md).
 const FX_BATCH_BUILD = "batch.build"
 const FX_BATCH_BISECT = "batch.bisect"
+const FX_BATCH_SETTLE = "batch.settle"
 const EV_BATCH_COMPOSED = "batch/composed"
 const EV_BATCH_BUILT = "batch/built"
 const EV_BATCH_BISECT_CHECKED = "batch/bisect-checked"
+const EV_BATCH_BISECT_REFUSED = "batch/bisect-refused"
 const EV_MEMBER_EJECTED = "batch/member-ejected"
+const EV_BATCH_SETTLED = "batch/settled"
 const DEFAULT_CANDIDATE_PREFIX = "bay/batch/"
 
 export type BatchBuildOptions = {
@@ -44,11 +45,21 @@ export type BatchBuildOptions = {
   candidatePrefix?: string
   /** Read-only prefix gate for `batch-bisect`; may be overridden by command args. */
   gateCommand?: string
+  /** Command that makes a gate scratch runnable (submodules, installs, hooks) —
+   *  `git config bay.provision` at the CLI host. Its failure is an environment
+   *  fault (`batch/bisect-refused` reason `provision-failed`), never an ejection. */
+  provisionCommand?: string
+  /** Injectable workspace seam (tests); default is built from mainRepo +
+   *  scratchParent + provisionCommand. */
+  scratch?: ScratchWorkspaces
 }
 
 type BatchMember = {
   pr: PrId
   target: string
+  /** The target's commit at compose time — the exact content aboard the
+   *  candidate; settle stamps it as the member's merged `sha`. */
+  tip?: string
 }
 
 type BatchEjection = BatchMember & {
@@ -68,6 +79,10 @@ type BatchRecord = {
   ejected: BatchEjection[]
   prefixes: BatchPrefix[]
   state: "built" | "merged" | "rejected"
+  /** The candidate's verified landed tip (from its merged `pr/changed`). */
+  landedSha?: string
+  /** Set once `batch/settled` is journaled — makes re-settling a non-event. */
+  settled?: boolean
 }
 
 type BatchSlice = {
@@ -82,8 +97,8 @@ function sliceOf(state: BayState): BatchSlice {
   return (state.slices[LAYER] as BatchSlice | undefined) ?? emptySlice()
 }
 
-function memberSummary(member: BatchMember): { pr: PrId; target: string } {
-  return { pr: member.pr, target: member.target }
+function memberSummary(member: BatchMember): { pr: PrId; target: string; tip?: string } {
+  return { pr: member.pr, target: member.target, ...(member.tip !== undefined ? { tip: member.tip } : {}) }
 }
 
 function parsePositiveInt(value: unknown, label: string): number | undefined {
@@ -196,16 +211,6 @@ function failGit(action: string, res: { code: number; stderr: string }): never {
   throw new Error(`bay: batch-build: ${action} failed (exit ${res.code}):\n${res.stderr.trim()}`)
 }
 
-async function addScratchWorktree(repo: string, scratch: string, base: string): Promise<void> {
-  const res = await git(["-C", repo, "worktree", "add", "--detach", scratch, base], repo)
-  if (res.code !== 0) failGit("scratch worktree add", res)
-}
-
-async function removeScratchWorktree(repo: string, scratch: string): Promise<void> {
-  const removed = await git(["-C", repo, "worktree", "remove", "--force", scratch], repo)
-  if (removed.code !== 0) await rm(scratch, { recursive: true, force: true })
-}
-
 function mergeConflictDetail(batch: PrId, member: BatchMember, stderr: string): string {
   const tail = stderr.replace(/\s+$/u, "").slice(-1200)
   const suffix = tail === "" ? "" : `\n${tail}`
@@ -249,35 +254,39 @@ type CandidateBuild = {
 }
 
 async function buildCandidate(
+  scratch: ScratchWorkspaces,
   opts: BatchBuildOptions,
   batch: PrId,
   base: string,
   members: readonly BatchMember[],
 ): Promise<CandidateBuild> {
-  const scratch = await mkdtemp(join(opts.scratchParent ?? tmpdir(), "gitbay-batch-build-"))
+  // Compose runs git plumbing only (merge, branch, rev-parse) — a bare
+  // checkout suffices, so this acquisition never provisions.
+  const lease = await scratch.acquire(base)
   const built: BatchMember[] = []
   const ejected: BatchEjection[] = []
   const prefixes: BatchPrefix[] = []
   try {
-    await addScratchWorktree(opts.mainRepo, scratch, base)
     for (const member of members) {
-      const ejection = await mergeMember(scratch, batch, member)
+      const ejection = await mergeMember(lease.path, batch, member)
       if (ejection) {
         ejected.push(ejection)
         continue
       }
-      built.push(member)
+      const resolved = await git(["-C", lease.path, "rev-parse", "--verify", `${member.target}^{commit}`], lease.path)
+      const aboard: BatchMember = resolved.code === 0 ? { ...member, tip: resolved.stdout.trim() } : { ...member }
+      built.push(aboard)
       const prefix = {
-        ...member,
+        ...aboard,
         index: built.length,
-        prefixTarget: prefixBranch(opts, batch, built.length, member),
+        prefixTarget: prefixBranch(opts, batch, built.length, aboard),
       }
-      await publishCandidate(scratch, prefix.prefixTarget)
+      await publishCandidate(lease.path, prefix.prefixTarget)
       prefixes.push(prefix)
     }
-    if (built.length > 0) await publishCandidate(scratch, candidateBranch(opts, batch))
+    if (built.length > 0) await publishCandidate(lease.path, candidateBranch(opts, batch))
   } finally {
-    await removeScratchWorktree(opts.mainRepo, scratch)
+    await lease.dispose()
   }
   return { built, ejected, prefixes }
 }
@@ -306,7 +315,7 @@ function candidateFirstOrder(order: readonly PrId[], batch: PrId, members: reado
   return [...withoutBatch.slice(0, insertAt), batch, ...withoutBatch.slice(insertAt)]
 }
 
-function makeBatchBuildHandler(opts: BatchBuildOptions): EffectHandler {
+function makeBatchBuildHandler(opts: BatchBuildOptions, scratch: ScratchWorkspaces): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     if (opts.mainRepo.trim() === "") {
       throw new Error("bay: batch-build: mainRepo is required")
@@ -345,7 +354,7 @@ function makeBatchBuildHandler(opts: BatchBuildOptions): EffectHandler {
 
     if (composed.length === 0) return events
 
-    const { built, ejected, prefixes } = await buildCandidate(opts, d.batch, base, composed)
+    const { built, ejected, prefixes } = await buildCandidate(scratch, opts, d.batch, base, composed)
 
     // Members ride the candidate through ITS check/merge — their own state is
     // `checking` while aboard (v0.3 model: only the candidate ever merges;
@@ -413,24 +422,22 @@ function tail(text: string, max = 1200): string {
 
 async function runGateCommand(
   gateCommand: string,
-  scratch: string,
+  cwd: string,
   batch: PrId,
-  prefix: BatchPrefix,
+  subst: { pr?: PrId; target: string; memberTarget?: string },
 ): Promise<{ code: number; stdout: string; stderr: string }> {
-  const cmd = gateCommand
-    .replaceAll("{batch}", batch)
-    .replaceAll("{pr}", prefix.pr)
-    .replaceAll("{member}", prefix.pr)
-    .replaceAll("{target}", prefix.prefixTarget)
+  let cmd = gateCommand.replaceAll("{batch}", batch).replaceAll("{target}", subst.target)
+  if (subst.pr !== undefined) {
+    cmd = cmd.replaceAll("{pr}", subst.pr).replaceAll("{member}", subst.pr)
+  }
   const env = {
     ...repoScopedCleanEnv(),
     BAY_BATCH: batch,
-    BAY_BATCH_PR: prefix.pr,
-    BAY_BATCH_MEMBER: prefix.pr,
-    BAY_BATCH_TARGET: prefix.prefixTarget,
-    BAY_BATCH_MEMBER_TARGET: prefix.target,
+    BAY_BATCH_TARGET: subst.target,
+    ...(subst.pr !== undefined ? { BAY_BATCH_PR: subst.pr, BAY_BATCH_MEMBER: subst.pr } : {}),
+    ...(subst.memberTarget !== undefined ? { BAY_BATCH_MEMBER_TARGET: subst.memberTarget } : {}),
   }
-  const proc = Bun.spawn(["sh", "-c", cmd], { cwd: scratch, stdout: "pipe", stderr: "pipe", env })
+  const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe", env })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -439,21 +446,49 @@ async function runGateCommand(
   return { code, stdout, stderr }
 }
 
+type GateVerdict = { ok: boolean; detail?: string }
+
+function gateVerdict(res: { code: number; stdout: string; stderr: string }): GateVerdict {
+  if (res.code === 0) return { ok: true }
+  const out = tail([res.stderr, res.stdout].filter((s) => s.trim() !== "").join("\n"))
+  return { ok: false, detail: out === "" ? `exit ${res.code}` : `exit ${res.code}: ${out}` }
+}
+
 async function checkPrefix(
-  opts: BatchBuildOptions,
+  scratch: ScratchWorkspaces,
   gateCommand: string,
   batch: PrId,
   prefix: BatchPrefix,
-): Promise<{ ok: boolean; detail?: string }> {
-  const scratch = await mkdtemp(join(opts.scratchParent ?? tmpdir(), "gitbay-batch-bisect-"))
+): Promise<GateVerdict> {
+  const lease = await scratch.acquire(prefix.prefixTarget, { provision: true })
   try {
-    await addScratchWorktree(opts.mainRepo, scratch, prefix.prefixTarget)
-    const res = await runGateCommand(gateCommand, scratch, batch, prefix)
-    if (res.code === 0) return { ok: true }
-    const out = tail([res.stderr, res.stdout].filter((s) => s.trim() !== "").join("\n"))
-    return { ok: false, detail: out === "" ? `exit ${res.code}` : `exit ${res.code}: ${out}` }
+    return gateVerdict(
+      await runGateCommand(gateCommand, lease.path, batch, {
+        pr: prefix.pr,
+        target: prefix.prefixTarget,
+        memberTarget: prefix.target,
+      }),
+    )
   } finally {
-    await removeScratchWorktree(opts.mainRepo, scratch)
+    await lease.dispose()
+  }
+}
+
+/** The all-red-env guard's other half: gate the UNTOUCHED batch base first. A
+ *  red baseline means the environment, the gate command, or the mainline
+ *  itself is at fault — walking prefixes would eject the first member for a
+ *  failure it did not cause. */
+async function checkBaseline(
+  scratch: ScratchWorkspaces,
+  gateCommand: string,
+  batch: PrId,
+  base: string,
+): Promise<GateVerdict> {
+  const lease = await scratch.acquire(base, { provision: true })
+  try {
+    return gateVerdict(await runGateCommand(gateCommand, lease.path, batch, { target: base }))
+  } finally {
+    await lease.dispose()
   }
 }
 
@@ -488,7 +523,7 @@ function rejectMemberEvents(
   throw new Error(`bay: batch recovery: cannot reject ${member.pr} from state ${pr.state}`)
 }
 
-function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
+function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspaces): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     if (opts.mainRepo.trim() === "") {
       throw new Error("bay: batch recovery: mainRepo is required")
@@ -503,11 +538,58 @@ function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
     }
 
     const cause = effect.cause!
+    // Refusals are journaled domain verdicts, never throws — a throw here
+    // would discard the walk evidence already collected (the old all-green
+    // behavior) and leave stats blind to why recovery stopped.
+    const refused = (reason: "baseline-red" | "all-green" | "provision-failed", detail: string): BayEvent =>
+      makeEvent(bay, EV_BATCH_BISECT_REFUSED, { batch: d.batch, reason, detail }, cause)
+
+    let baseline: GateVerdict
+    try {
+      baseline = await checkBaseline(scratch, d.gateCommand, d.batch, record.base)
+    } catch (err) {
+      if (err instanceof ProvisionError) {
+        return [
+          refused(
+            "provision-failed",
+            `${err.message}\nAn environment fault — no member was ejected. Fix the provision command ` +
+              `(git config bay.provision), then: git bay retry ${d.batch}.`,
+          ),
+        ]
+      }
+      throw err
+    }
+    if (!baseline.ok) {
+      return [
+        refused(
+          "baseline-red",
+          `gate '${d.gateCommand}' is red on the batch base itself (${record.base}) — an environment or ` +
+            `mainline fault, not a member fault; no member was ejected. Fix the gate/environment (or the base), ` +
+            `then: git bay retry ${d.batch}.${baseline.detail === undefined ? "" : `\n${baseline.detail}`}`,
+        ),
+      ]
+    }
+
     const events: BayEvent[] = []
     let faulting: BatchPrefix | undefined
     let faultingDetail: string | undefined
     for (const prefix of record.prefixes) {
-      const checked = await checkPrefix(opts, d.gateCommand, d.batch, prefix)
+      let checked: GateVerdict
+      try {
+        checked = await checkPrefix(scratch, d.gateCommand, d.batch, prefix)
+      } catch (err) {
+        if (err instanceof ProvisionError) {
+          return [
+            ...events,
+            refused(
+              "provision-failed",
+              `${err.message}\nAn environment fault — no member was ejected. Fix the provision command ` +
+                `(git config bay.provision), then: git bay retry ${d.batch}.`,
+            ),
+          ]
+        }
+        throw err
+      }
       events.push(
         makeEvent(
           bay,
@@ -532,10 +614,15 @@ function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
     }
 
     if (!faulting) {
-      throw new Error(
-        `bay: batch recovery: gate command passed every prefix for rejected batch ${d.batch}; ` +
-          `refusing to rebuild because the per-member gate is lying or does not match the red batch gate`,
-      )
+      return [
+        ...events,
+        refused(
+          "all-green",
+          `gate command passed every prefix for rejected batch ${d.batch} — the per-member gate is lying or ` +
+            `does not match the red batch gate; no member was ejected. Fix the gate to reproduce the batch's ` +
+            `red verdict, then: git bay retry ${d.batch}.`,
+        ),
+      ]
     }
 
     const detail = redPrefixDetail(d.batch, d.gateCommand, faulting, faultingDetail)
@@ -556,7 +643,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
     const remainder = record.members.filter((member) => member.pr !== faulting.pr)
     if (remainder.length === 0) return events
 
-    const rebuilt = await buildCandidate(opts, d.rebuiltBatch, record.base, remainder)
+    const rebuilt = await buildCandidate(scratch, opts, d.rebuiltBatch, record.base, remainder)
     for (const member of rebuilt.ejected) {
       events.push(
         makeEvent(
@@ -610,31 +697,76 @@ function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
   }
 }
 
-function applyCandidateResultToMembers(state: BayState, batch: PrId, to: unknown): BayState {
+/** Fold the CANDIDATE's terminal outcome onto its batch record. Member
+ *  outcomes are deliberately NOT inferred here anymore (LE-5): settle journals
+ *  a real `pr/changed` per member (plus `batch/settled`), so replay consumers
+ *  read member truth from the journal, not from a fold-only flip. */
+function applyCandidateOutcome(state: BayState, batch: PrId, to: unknown, sha: string | undefined): BayState {
   if (to !== "merged" && to !== "rejected") return state
-  const record = sliceOf(state).batches[batch]
-  if (!record) return state
-  const prs = { ...state.prs }
-  if (to === "merged") {
-    for (const member of record.members) {
-      const existing = prs[member.pr]
-      if (existing) prs[member.pr] = { ...existing, state: to }
-    }
-  }
   const slice = sliceOf(state)
+  const record = slice.batches[batch]
+  if (!record) return state
   return {
     ...state,
-    prs,
     slices: {
       ...state.slices,
       [LAYER]: {
         batches: {
           ...slice.batches,
-          [batch]: { ...record, state: to },
+          [batch]: { ...record, state: to, ...(to === "merged" && sha !== undefined ? { landedSha: sha } : {}) },
         },
       },
     },
   }
+}
+
+/** The settle events for a landed candidate: one `pr/changed` → merged per
+ *  member still aboard (sha = the compose-time tip; the lying-merge guard
+ *  proved the candidate — hence every tip — an ancestor of the mainline),
+ *  plus one `batch/settled` summary. Idempotent: a settled record, a
+ *  non-merged record, or an unknown batch derives nothing. Shared by the
+ *  automatic post-integrate effect and the `batch-settle` recovery command
+ *  (the crash window between the candidate's merged event and these events). */
+function deriveSettleEvents(bay: BayRuntime, state: BayState, batch: PrId, cause: Cause): BayEvent[] {
+  const record = sliceOf(state).batches[batch]
+  if (!record || record.state !== "merged" || record.settled === true) return []
+  const events: BayEvent[] = []
+  for (const member of record.members) {
+    const pr = state.prs[member.pr]
+    if (!pr || pr.state !== "checking") continue
+    events.push(
+      stateChangeEvent(bay, member.pr, "checking", "merged", cause, {
+        ...(member.tip !== undefined ? { sha: member.tip } : {}),
+        detail: `merged via batch ${batch}${record.landedSha === undefined ? "" : ` (candidate ${record.landedSha.slice(0, 8)})`}`,
+      }),
+    )
+  }
+  events.push(
+    makeEvent(
+      bay,
+      EV_BATCH_SETTLED,
+      {
+        batch,
+        ...(record.landedSha !== undefined ? { landedSha: record.landedSha } : {}),
+        members: record.members.map(memberSummary),
+      },
+      cause,
+    ),
+  )
+  return events
+}
+
+/** `batch-settle <PR>` — the recovery spelling of the automatic settle effect,
+ *  for a journal whose candidate landed but whose settle events never wrote
+ *  (crash between the two). Re-running it after a successful settle is a
+ *  non-event. */
+function reduceBatchSettle(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
+  const batch = parseRequiredPr(command.args?.pr, "batch-settle")
+  const record = sliceOf(state).batches[batch]
+  if (!record) {
+    throw new Error(`bay: batch-settle: no batch '${batch}' — git bay ls lists PRs and batches`)
+  }
+  return { state, events: deriveSettleEvents(bay, state, batch, command.cause!), effects: [] }
 }
 
 function apply(state: BayState, event: BayEvent): BayState {
@@ -695,15 +827,43 @@ function apply(state: BayState, event: BayEvent): BayState {
     }
   }
 
+  if (event.name === EV_BATCH_SETTLED) {
+    const d = event.data as { batch?: PrId }
+    if (!d.batch) return state
+    const slice = sliceOf(state)
+    const record = slice.batches[d.batch]
+    if (!record) return state
+    return {
+      ...state,
+      slices: {
+        ...state.slices,
+        [LAYER]: {
+          batches: {
+            ...slice.batches,
+            [d.batch]: { ...record, settled: true },
+          },
+        },
+      },
+    }
+  }
+
   if (event.name === "pr/changed") {
-    const d = event.data as { pr?: PrId; to?: unknown }
-    if (d.pr) return applyCandidateResultToMembers(state, d.pr, d.to)
+    const d = event.data as { pr?: PrId; to?: unknown; sha?: string }
+    if (d.pr) return applyCandidateOutcome(state, d.pr, d.to, d.sha)
   }
 
   return state
 }
 
 export function withBatchBuild(opts: BatchBuildOptions): BayPlugin {
+  const scratch =
+    opts.scratch ??
+    createScratchWorkspaces({
+      mainRepo: opts.mainRepo,
+      scratchParent: opts.scratchParent,
+      provisionCommand: opts.provisionCommand,
+      prefix: "gitbay-batch-",
+    })
   return (bay) => {
     const layer: Layer = {
       name: LAYER,
@@ -711,11 +871,35 @@ export function withBatchBuild(opts: BatchBuildOptions): BayPlugin {
       reduce(state, command, next) {
         if (command.type === "batch-build") return reduceBatchBuild(opts, bay, state, command)
         if (command.type === "batch-bisect") return reduceBatchBisect(opts, state, command)
-        return next(state, command)
+        if (command.type === "batch-settle") return reduceBatchSettle(bay, state, command)
+        const result = next(state, command)
+        if (command.type !== "integrate" && command.type !== "merge") return result
+        // A landing verb touched a batch CANDIDATE (the reducer's own
+        // pr/changed names it) — append a settle effect so the members'
+        // outcomes become journal truth in the SAME dispatch, right after the
+        // merge effect journals the candidate's verdict (the core folds each
+        // effect's events before the next effect runs).
+        const batches = sliceOf(state).batches
+        const touched = new Set<PrId>()
+        for (const e of result.events) {
+          if (e.name !== "pr/changed") continue
+          const pr = (e.data as { pr?: PrId }).pr
+          if (pr !== undefined && batches[pr] && batches[pr].settled !== true) touched.add(pr)
+        }
+        if (touched.size === 0) return result
+        return {
+          ...result,
+          effects: [...result.effects, ...[...touched].map((batch) => ({ type: FX_BATCH_SETTLE, data: { batch } }))],
+        }
       },
       effects: {
-        [FX_BATCH_BUILD]: makeBatchBuildHandler(opts),
-        [FX_BATCH_BISECT]: makeBatchBisectHandler(opts),
+        [FX_BATCH_BUILD]: makeBatchBuildHandler(opts, scratch),
+        [FX_BATCH_BISECT]: makeBatchBisectHandler(opts, scratch),
+        [FX_BATCH_SETTLE]: async (effect: Effect, bayRt: BayRuntime): Promise<BayEvent[]> => {
+          const d = effect.data as { batch: PrId }
+          const state = await bayRt.state()
+          return deriveSettleEvents(bayRt, state, d.batch, effect.cause!)
+        },
       },
     }
     return bay.use(layer)

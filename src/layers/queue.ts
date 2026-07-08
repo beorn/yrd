@@ -56,7 +56,13 @@ import { nextPrId } from "../ids.ts"
 const TRANSITIONS: Record<PrState, PrState[]> = {
   pushed: ["submitted", "closed"],
   submitted: ["checking", "closed"],
-  checking: ["checked", "rejected"],
+  // `checking → merged` is the batch-member landing (docs/model.md § batches):
+  // a member rides its candidate through the candidate's check AND merge while
+  // staying `checking` itself, so when the candidate lands, the member's own
+  // journaled transition is checking → merged (emitted by batch settle, with
+  // the compose-time tip as `sha`). Members never individually pass through
+  // checked/merging.
+  checking: ["checked", "rejected", "merged"],
   checked: ["merging", "closed"],
   reviewing: ["merging", "rejected", "closed"],
   merging: ["merged", "rejected", "submitted"],

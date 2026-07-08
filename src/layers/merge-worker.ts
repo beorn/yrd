@@ -12,8 +12,9 @@ import type {
   TransitionResult,
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
+import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
-import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
+import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 
 /**
  * withMergeWorker — the pipeline layer (docs/model.md § Verbs): `check`,
@@ -69,6 +70,13 @@ export type MergeWorkerOptions = {
    *  non-git mergeCommand and no ancestry interest); the CLI host ALWAYS
    *  sets it. */
   mainRepo?: string
+  /** Command that makes a check scratch runnable (submodules, installs) —
+   *  `git config bay.provision` at the CLI host; its failure rejects with
+   *  code `provision-failed`, never `check-failed`. */
+  provisionCommand?: string
+  /** Injectable workspace seam (tests); default built from mainRepo +
+   *  provisionCommand when mainRepo is set. */
+  scratch?: ScratchWorkspaces
 }
 
 // ---------- shared lookups ----------
@@ -81,14 +89,13 @@ function requirePrArg(command: BayCommand, verb: string): PrId {
   return raw
 }
 
-/** Where to run the check for `pr`'s target branch: its still-open bay, if it
- *  has one, else the mainline repo (mirrors the push-triggered check's cwd —
- *  the PR's own worktree when the push came from one). */
-function checkCwd(state: BayState, branch: string, mainRepo: string): string {
+/** The PR's still-open bay, if it has one — a check runs against the live bay
+ *  tree there (the speculative check on the submitter's workspace). */
+function openBayPath(state: BayState, branch: string): string | undefined {
   for (const lease of Object.values(state.leases)) {
     if (lease.branch === branch && lease.endedAt === undefined) return lease.path
   }
-  return mainRepo
+  return undefined
 }
 
 function resolveMainRepo(opts: MergeWorkerOptions): string {
@@ -124,22 +131,55 @@ function reduceCheck(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   return { state, events: [event], effects: [effect] }
 }
 
-async function runCheckStep(state: BayState, pr: PrId, opts: MergeWorkerOptions): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const target = queueTarget(state, pr)
+/** Run the check step in the right TREE. A live bay = the submitter's own
+ *  worktree (unchanged). A bayless PR (a branch-intake submission, a batch
+ *  candidate) gets a scratch workspace checked out at ITS target — running the
+ *  check in the mainline working tree would gate whatever main happens to have
+ *  checked out, a false verdict in both directions (the SG-4/wrong-tree class).
+ *  No check configured = pass-through before any workspace work. */
+async function runCheckStep(
+  state: BayState,
+  pr: PrId,
+  opts: MergeWorkerOptions,
+  scratch: ScratchWorkspaces | undefined,
+): Promise<CheckOutcome> {
   const mainRepo = resolveMainRepo(opts)
-  const cwd = checkCwd(state, target, mainRepo)
   const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
-  return await runProjectCheck(check, cwd)
+  if (check === undefined || check.trim() === "") return { ok: true }
+  const target = queueTarget(state, pr)
+  const bayPath = openBayPath(state, target)
+  if (bayPath !== undefined) return await runProjectCheck(check, bayPath)
+  if (scratch !== undefined) {
+    let lease: Awaited<ReturnType<ScratchWorkspaces["acquire"]>>
+    try {
+      lease = await scratch.acquire(target, { provision: true })
+    } catch (err) {
+      if (err instanceof ProvisionError) return { ok: false, code: "provision-failed", detail: err.message }
+      throw err
+    }
+    try {
+      return await runProjectCheck(check, lease.path)
+    } finally {
+      await lease.dispose()
+    }
+  }
+  // Library path with no mainRepo (no repo to scratch from): the legacy cwd
+  // fallback. CLI hosts always set mainRepo, so bayless PRs get true-tree
+  // checks there.
+  return await runProjectCheck(check, mainRepo)
 }
 
-function makeCheckRunHandler(opts: MergeWorkerOptions): EffectHandler {
+function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspaces | undefined): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const d = effect.data as { pr: PrId }
     const state = await bay.state()
-    const outcome = await runCheckStep(state, d.pr, opts)
+    const outcome = await runCheckStep(state, d.pr, opts, scratch)
     if (!outcome.ok) {
       return [
-        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: outcome.detail }),
+        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
+          code: outcome.code ?? "check-failed",
+          detail: outcome.detail,
+        }),
       ]
     }
     return [stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!)]
@@ -269,7 +309,7 @@ function reduceIntegrate(bay: BayRuntime, state: BayState, command: BayCommand):
  *  runs the merge only. Reads state.prs fresh rather than trusting effect
  *  data, same reason merge-worker's original single-step handler did: a
  *  broken caller trips assertTransition instead of silently mis-recording. */
-function makeIntegrateRunHandler(opts: MergeWorkerOptions): EffectHandler {
+function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspaces | undefined): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const d = effect.data as { pr: PrId }
     const events: BayEvent[] = []
@@ -278,11 +318,11 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions): EffectHandler {
 
     if (pr.state === "checking") {
       const checkState = await bay.state()
-      const outcome = await runCheckStep(checkState, d.pr, opts)
+      const outcome = await runCheckStep(checkState, d.pr, opts, scratch)
       if (!outcome.ok) {
         events.push(
           stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
-            code: "check-failed",
+            code: outcome.code ?? "check-failed",
             detail: outcome.detail,
           }),
         )
@@ -309,6 +349,15 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions): EffectHandler {
 // ---------- the plugin ----------
 
 export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
+  const scratch =
+    opts.scratch ??
+    (opts.mainRepo !== undefined && opts.mainRepo.trim() !== ""
+      ? createScratchWorkspaces({
+          mainRepo: opts.mainRepo,
+          provisionCommand: opts.provisionCommand,
+          prefix: "gitbay-check-",
+        })
+      : undefined)
   return (bay) => {
     const layer: Layer = {
       name: LAYER,
@@ -321,9 +370,9 @@ export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
         return next(state, command)
       },
       effects: {
-        [FX_CHECK_RUN]: makeCheckRunHandler(opts),
+        [FX_CHECK_RUN]: makeCheckRunHandler(opts, scratch),
         [FX_MERGE_RUN]: makeMergeRunHandler(opts),
-        [FX_INTEGRATE_RUN]: makeIntegrateRunHandler(opts),
+        [FX_INTEGRATE_RUN]: makeIntegrateRunHandler(opts, scratch),
       },
     }
     return bay.use(layer)

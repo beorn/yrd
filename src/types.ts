@@ -101,6 +101,7 @@ export type RejectionCode =
   | "lying-merge" // merge command exited 0 but target is not an ancestor (pipeline.ts's runMerge)
   | "merge-command-failed" // the configured merge command itself exited nonzero (pipeline.ts's runMerge)
   | "pin-rewind" // a gitlink pin move that is a genuine history rewind (checkSubmitPins — the authoritative post-quarantine judge, 21002)
+  | "provision-failed" // the scratch workspace's provision command failed — an environment fault, not a verdict about the PR (scratch.ts, 21000)
   | "queue-full" // reserved: v0.4 WIP limit
   | "poison-retry" // reserved: a PR retried past a failure-count ceiling
 
@@ -274,7 +275,11 @@ export type GitbayEvent =
         batch: PrId
         target: string
         base: string
-        members: { pr: PrId; target: string }[]
+        // `tip` is the member target's commit at compose time — the exact
+        // content that rode the candidate. Settle stamps it as the member's
+        // merged `sha` (machine-truth for issue trackers), since the candidate
+        // the lying-merge guard verified contains precisely these tips.
+        members: { pr: PrId; target: string; tip?: string }[]
         ejected: { pr: PrId; target: string; detail: string }[]
         prefixes: { pr: PrId; target: string; index: number; prefixTarget: string }[]
         sourceBatch?: PrId
@@ -295,6 +300,29 @@ export type GitbayEvent =
       }
     }
   | { name: "batch/member-ejected"; data: { batch: PrId; pr: PrId; target: string; detail: string } }
+  | {
+      name: "batch/bisect-refused"
+      // Red-batch recovery stopped WITHOUT ejecting anyone, and the verdict is
+      // journal truth (it used to be a throw that discarded the walk evidence):
+      // `baseline-red` = the gate fails on the untouched batch base — an
+      // environment/mainline fault; `all-green` = the per-member gate
+      // contradicts the red batch gate (lying or mismatched); `provision-failed`
+      // = a gate scratch could not be provisioned. `detail` names the remedy.
+      data: { batch: PrId; reason: "baseline-red" | "all-green" | "provision-failed"; detail: string }
+    }
+  | {
+      name: "batch/settled"
+      // The candidate landed and each member's outcome is now journal truth
+      // (LE-5): every member also gets its own `pr/changed` → merged carrying
+      // its compose-time tip as `sha`. Emitted once per batch — the record's
+      // settled flag makes re-settling (crash recovery via `batch-settle`) a
+      // non-event.
+      data: {
+        batch: PrId
+        landedSha?: string
+        members: { pr: PrId; target: string; tip?: string }[]
+      }
+    }
 
 /** Why a bay (and its worktree) closed — unifies the old `endReason` +
  *  `via` split into one field: "close" (voluntary, `close`/`close --withdraw`),

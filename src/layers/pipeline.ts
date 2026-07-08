@@ -22,7 +22,10 @@ export function tail(text: string, max = 2000): string {
 
 // ---------- check ----------
 
-export type CheckOutcome = { ok: true } | { ok: false; detail: string }
+/** `code` refines a failed check's rejection: default `check-failed`; a
+ *  scratch workspace that could not be provisioned is `provision-failed` —
+ *  an environment fault, not a verdict about the PR. */
+export type CheckOutcome = { ok: true } | { ok: false; detail: string; code?: RejectionCode }
 
 /** Resolve the ONE project check command: inline > BAY_CHECK > git config
  *  bay.check > none (unset — checks are opt-in). */

@@ -94,18 +94,14 @@ export function createGitbay(opts: {
     return chain(state, command)
   }
 
-  async function runEffects(effects: Effect[]): Promise<BayEvent[]> {
-    const produced: BayEvent[] = []
-    for (const effect of effects) {
-      const handler = layers.map((l) => l.effects?.[effect.type]).find(Boolean)
-      if (!handler) {
-        throw new Error(
-          `bay: no handler for effect '${effect.type}' — a layer emitted it but none executes it.`,
-        )
-      }
-      produced.push(...(await handler(effect, runtime)))
+  function handlerFor(effect: Effect) {
+    const handler = layers.map((l) => l.effects?.[effect.type]).find(Boolean)
+    if (!handler) {
+      throw new Error(
+        `bay: no handler for effect '${effect.type}' — a layer emitted it but none executes it.`,
+      )
     }
-    return produced
+    return handler
   }
 
   const runtime: BayRuntime = {
@@ -142,9 +138,19 @@ export function createGitbay(opts: {
       // Journal-first: events are durable before effects run (crash-safe resume).
       for (const event of events) await runtime.store.journal.append(event)
       folded = events.reduce(applyEvent, nextState)
-      const effectEvents = await runEffects(causedEffects)
-      for (const event of effectEvents) await runtime.store.journal.append(event)
-      folded = effectEvents.reduce(applyEvent, folded)
+      // Each effect's events are journaled AND folded before the next effect
+      // runs, so a later effect observes an earlier effect's facts through
+      // state() — e.g. batch settle reading the merge effect's landed verdict
+      // in the same dispatch. Journal order is unchanged (production order),
+      // and crash safety is unchanged: everything already produced is durable
+      // before the next step executes.
+      const effectEvents: BayEvent[] = []
+      for (const effect of causedEffects) {
+        const produced = await handlerFor(effect)(effect, runtime)
+        for (const event of produced) await runtime.store.journal.append(event)
+        folded = produced.reduce(applyEvent, folded)
+        effectEvents.push(...produced)
+      }
       return { events: [...events, ...effectEvents] }
     },
   }

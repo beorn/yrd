@@ -48,6 +48,8 @@ type Ctx = {
   batchSize: number
   batchGeneratedGlobs: string[]
   batchGateCommand?: string
+  /** bay.provision — makes a gate/check scratch runnable (submodules, installs). */
+  provisionCommand?: string
 }
 
 function parsePositiveConfigInt(raw: string | undefined, key: string, fallback: number): number {
@@ -107,6 +109,8 @@ async function resolveCtx(): Promise<Ctx> {
   const batchGeneratedGlobs = parseConfigList(await source.get("queue.regen-paths"))
   const rawGate = await source.get("check")
   const batchGateCommand = rawGate !== undefined && rawGate.trim() !== "" ? rawGate : undefined
+  const rawProvision = await source.get("provision")
+  const provisionCommand = rawProvision !== undefined && rawProvision.trim() !== "" ? rawProvision : undefined
   return {
     mainRepo,
     bayDir,
@@ -116,6 +120,7 @@ async function resolveCtx(): Promise<Ctx> {
     batchSize,
     batchGeneratedGlobs,
     batchGateCommand,
+    provisionCommand,
   }
 }
 
@@ -129,8 +134,9 @@ function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRunti
       generatedGlobs: ctx.batchGeneratedGlobs,
       max: ctx.batchSize > 1 ? ctx.batchSize : undefined,
       gateCommand: ctx.batchGateCommand,
+      provisionCommand: ctx.provisionCommand,
     }),
-    withMergeWorker({ configCwd: ctx.mainRepo, mainRepo: ctx.mainRepo }),
+    withMergeWorker({ configCwd: ctx.mainRepo, mainRepo: ctx.mainRepo, provisionCommand: ctx.provisionCommand }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
     withAdopt(),
     withIssueTracking({ mainRepo: ctx.mainRepo }),
@@ -459,6 +465,13 @@ function printBatchAwareEvents(events: readonly BayEvent[]): void {
       if (line) console.log(line)
       continue
     }
+    if (e.name === "batch/bisect-refused") {
+      // A refusal that ejects nobody must be LOUD — full detail, every line
+      // (it names the fault class and the exact remedy).
+      const d = e.data as { batch?: PrId; reason?: string; detail?: string }
+      console.log(`bay: batch ${d.batch ?? "?"} bisect refused (${d.reason ?? "unknown"}) — ${d.detail ?? ""}`)
+      continue
+    }
     if (e.name === "batch/built") {
       const d = e.data as { batch?: PrId; members?: BatchSummaryMember[]; ejected?: BatchSummaryMember[] }
       if (!d.batch) continue
@@ -704,6 +717,22 @@ function printVerdict(events: { name: string; data: Record<string, unknown> }[],
     }
     if (d.to === "rejected") console.log(`bay: ${d.pr} rejected — ${d.detail ?? "see git bay ls"}`)
   }
+}
+
+/** batch-settle <PR>: journal a landed candidate's member outcomes. The drain
+ *  does this automatically in the landing dispatch; this verb exists for the
+ *  crash window between the candidate's merged event and the settle events. */
+async function verbBatchSettle(ctx: Ctx, target: string): Promise<void> {
+  await withWriteBay(ctx, async (bay) => {
+    const state = await bay.state()
+    const prId = resolvePr(state, target)
+    const { events } = await bay.dispatch({ type: "batch-settle", args: { pr: prId } })
+    if (events.length === 0) {
+      console.log(`bay: nothing to settle for ${prId} — already settled, or not a landed batch candidate`)
+      return
+    }
+    printBatchAwareEvents(events)
+  })
 }
 
 /** retry re-runs the pipeline synchronously (law 1, CLI-first): a fix that
@@ -1355,6 +1384,16 @@ async function main(): Promise<void> {
     .description("put a rejected or stuck PR back in the queue and re-run its pipeline")
     .action(async (target: string) => {
       await verbRetry(await requireBay(), target)
+    })
+
+  // Crash-recovery spelling of the automatic settle: a candidate landed but
+  // the per-member events never wrote (crash between the two). Hidden — the
+  // drain settles in the same dispatch; nobody runs this on a healthy bay.
+  program
+    .command("batch-settle <PR>", { hidden: true })
+    .description("journal a landed batch candidate's member outcomes (normally automatic; re-running is a no-op)")
+    .action(async (target: string) => {
+      await verbBatchSettle(await requireBay(), target)
     })
 
   program

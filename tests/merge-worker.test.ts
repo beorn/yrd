@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -95,6 +95,38 @@ describe("withMergeWorker — check: submitted → checking → checked | reject
   it("throws checking an unknown PR", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), {})
     await expect(bay.dispatch({ type: "check", args: { pr: "C-none" } })).rejects.toThrow(/no PR 'C-none'/)
+  })
+
+  it("a bayless PR's check runs against the PR's target tree, not the mainline working tree", async () => {
+    // main has README only; task/x adds only-on-x.txt. A check for that file
+    // can only pass if it runs against task/x's tree — running it in the
+    // mainline working tree (main checked out) would reject a good PR.
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-check-tree-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await writeFile(join(repo, "README"), "base\n")
+    await g(["add", "-A"])
+    await g(["commit", "-qm", "base"])
+    await g(["switch", "-qc", "task/x"])
+    await writeFile(join(repo, "only-on-x.txt"), "x\n")
+    await g(["add", "-A"])
+    await g(["commit", "-qm", "feat: x"])
+    await g(["switch", "-q", "main"])
+
+    const bay = await buildMergeBay(await tmpJournalPath(), {
+      mainRepo: repo,
+      check: "test -f only-on-x.txt",
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/x", pr: "C-tree" } })
+
+    const { events } = await bay.dispatch({ type: "check", args: { pr: "C-tree" } })
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["submitted→checking", "checking→checked"])
+    expect(stateOf(await bay.state(), "C-tree")).toBe("checked")
   })
 })
 
