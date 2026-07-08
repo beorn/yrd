@@ -8,7 +8,7 @@ The static half must be complete with no repository present (an agent can read i
 
 ```console
 $ git bay guide
-git bay — local pull requests for this repository: you work in a disposable worktree, plain git push opens the PR, and it lands itself when the checks pass — one at a time, so main is never broken.
+git bay is a small continuous-integration server for this repository: you work in a disposable worktree, plain git push opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken.
 THE LOOP
   1. cd "$(git bay new <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit        # plain git; commit hooks guard submodule pins + identity
@@ -26,10 +26,10 @@ VOCABULARY
   worktree   the directory you work in (ids look like wt1); disposable, yours alone
   name       what you called the work at new — any label, or a ticket id your tracker knows
   PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository
-  queue      submitted PRs waiting to land; they merge one at a time, in order
-  checks     the command git bay runs before landing a PR (git config bay.check '<command>'); exit 0 means pass
+  queue      submitted PRs waiting to be integrated; they merge one at a time, in order
+  checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
 ADDRESSING
-  Worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, land, retry) take a PR number or a name; ls takes either kind.
+  Worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
@@ -53,7 +53,7 @@ THIS REPOSITORY — a snapshot as of right now; re-run git bay guide for current
   repo            {{repo:/.+/}}
   state           .git/bay (initialized)
   check           (not set — pushes merge without a project check; set: git config bay.check '<command>')
-  mergeCommand    (not set — git bay land refuses until: git config bay.mergeCommand '<command with {target}>')
+  mergeCommand    (not set — git bay integrate refuses until: git config bay.mergeCommand '<command with {target}>')
   tracker         (not set — names are not checked against a tracker; set: git config bay.tracker '<command with {name}>')
   open worktrees  0
   queued PRs      0
@@ -66,6 +66,6 @@ $ git config bay.check "bun test"
 $ git bay guide
 ...
   check           bun test
-  mergeCommand    (not set — git bay land refuses until: git config bay.mergeCommand '<command with {target}>')
+  mergeCommand    (not set — git bay integrate refuses until: git config bay.mergeCommand '<command with {target}>')
 ...
 ```

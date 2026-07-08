@@ -2,7 +2,7 @@
 // git bay — the CLI host over the era2 library (spec § The verbs; law 2: quiet
 // on success, meaningful exit codes, --json everywhere it matters).
 //
-// Advertised verbs: guide | init | new | close | gc | ls | submit | land |
+// Advertised verbs: guide | init | new | close | gc | ls | submit | integrate |
 // retry | audit. Every pre-v0.2 verb name still works as a hidden alias
 // (co, checkout, abandon, return, refresh, ping, status, enqueue, adopt,
 // merge, drain, requeue, prime) — nothing breaks, nothing is advertised twice.
@@ -384,7 +384,7 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
 
 async function verbSubmit(ctx: Ctx, target: string | undefined, name: string | undefined): Promise<void> {
   if (!target) throw new Error("bay: submit: a branch, SHA, or worktree name is required")
-  // Refuse at the door, not at land time: an unresolvable target used to be
+  // Refuse at the door, not at integrate time: an unresolvable target used to be
   // accepted here and rejected minutes later by the merge worker's guard
   // (dogfood find: a user submitted a NAME; the branch was task/<name>).
   // Dual addressing: a token that is no commit may be the name of an existing
@@ -517,30 +517,30 @@ async function ingestInbox(ctx: Ctx, bay: BayRuntime): Promise<void> {
   }
 }
 
-async function verbLand(ctx: Ctx, target: string | undefined, watch: boolean, intervalSec: number): Promise<void> {
+async function verbIntegrate(ctx: Ctx, target: string | undefined, watch: boolean, intervalSec: number): Promise<void> {
   await withWriteBay(ctx, async (bay) => {
     let prId: PrId | undefined
     if (target) {
       const state = await bay.state()
       prId = resolvePr(state, target)
-      prOrTeach(state, prId, "land") // "no push yet" teaches instead of a reducer miss
+      prOrTeach(state, prId, "integrate") // "no push yet" teaches instead of a reducer miss
     }
     for (;;) {
       await ingestInbox(ctx, bay)
       const { events } = await bay.dispatch({ type: "drain", args: prId ? { pr: prId } : undefined })
-      let landed = false
+      let integrated = false
       for (const e of events) {
         if (e.type === "pr.state-changed") {
           const d = e.data as { pr: string; from: string; to: string; detail?: string }
           console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
-          landed = true
+          integrated = true
         }
       }
       if (!watch) {
-        if (!landed) console.log("bay: queue empty — nothing to land")
+        if (!integrated) console.log("bay: queue empty — nothing to integrate")
         break
       }
-      prId = undefined // a targeted land is one step; --watch keeps landing the queue
+      prId = undefined // a targeted integrate is one step; --watch keeps integrating the queue
       await new Promise((r) => setTimeout(r, intervalSec * 1000))
     }
   })
@@ -593,7 +593,7 @@ async function hookPost(ctx: Ctx): Promise<void> {
       const msg = (err as Error).message
       if (msg.includes("another bay writer is running")) {
         await appendInboxReceipt(ctx.bayDir, { branch, sha: u.newSha, ts: new Date().toISOString() })
-        console.log(`bay: writer busy — ${branch} queued to inbox; git bay land will ingest it`)
+        console.log(`bay: writer busy — ${branch} queued to inbox; git bay integrate will ingest it`)
       } else {
         console.log(msg.startsWith("bay:") ? msg : `bay: ${msg}`)
       }
@@ -608,7 +608,7 @@ async function hookPost(ctx: Ctx): Promise<void> {
  *  guide covers the moment before. Stateless on purpose (works pre-init), and
  *  asserted verbatim by tests/guide.spec.md so it can never drift from the
  *  shipped behavior. */
-const GUIDE = `git bay — local pull requests for this repository: you work in a disposable worktree, plain git push opens the PR, and it lands itself when the checks pass — one at a time, so main is never broken.
+const GUIDE = `git bay is a small continuous-integration server for this repository: you work in a disposable worktree, plain git push opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken.
 THE LOOP
   1. cd "$(git bay new <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit        # plain git; commit hooks guard submodule pins + identity
@@ -626,10 +626,10 @@ VOCABULARY
   worktree   the directory you work in (ids look like wt1); disposable, yours alone
   name       what you called the work at new — any label, or a ticket id your tracker knows
   PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository
-  queue      submitted PRs waiting to land; they merge one at a time, in order
-  checks     the command git bay runs before landing a PR (git config bay.check '<command>'); exit 0 means pass
+  queue      submitted PRs waiting to be integrated; they merge one at a time, in order
+  checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
 ADDRESSING
-  Worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, land, retry) take a PR number or a name; ls takes either kind.
+  Worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
@@ -669,7 +669,7 @@ async function guideContext(): Promise<string> {
   lines.push(
     mergeCommand !== undefined && mergeCommand.trim() !== ""
       ? `  mergeCommand    ${mergeCommand}`
-      : "  mergeCommand    (not set — git bay land refuses until: git config bay.mergeCommand '<command with {target}>')",
+      : "  mergeCommand    (not set — git bay integrate refuses until: git config bay.mergeCommand '<command with {target}>')",
   )
   const tracker = process.env.BAY_TRACKER ?? (await source.get("tracker").catch(() => undefined))
   lines.push(
@@ -819,7 +819,7 @@ async function main(): Promise<void> {
       "after",
       "\nColumns: AGE = time since new opened the worktree; IDLE = time since its last activity.\n" +
         "STATE values: open (active) | stale (idle past the timeout — gc will expire it; git bay refresh <wt|name> keeps it).\n" +
-        "Addressing: worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, land, retry) take a PR number or a name; ls takes either kind.",
+        "Addressing: worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.",
     )
     .option("--json", "machine-readable output")
     .action(async (target: string | undefined, opts: { json?: boolean }) => {
@@ -837,18 +837,18 @@ async function main(): Promise<void> {
   hiddenOption(cmdSubmit, "--workitem <name>", "legacy spelling: name the PR")
 
   program
-    .command("land [PR|name]")
-    .aliases(["merge", "drain"])
+    .command("integrate [PR|name]")
+    .aliases(["in", "int", "land", "merge", "drain"])
     .helpGroup("PRs:")
-    .description("land the next queued PR onto main (or the named one); --watch keeps landing")
-    .option("--watch", "keep landing on an interval")
+    .description("integrate the next queued PR into main (or the named one); --watch keeps integrating")
+    .option("--watch", "keep integrating on an interval")
     .option("--interval <sec>", "watch poll interval in seconds", "15")
     .action(async (target: string | undefined, opts: { watch?: boolean; interval?: string }) => {
       const interval = Number(opts.interval ?? "15")
       if (!Number.isFinite(interval) || interval <= 0) {
-        throw new Error(`bay: land: --interval must be a positive number of seconds, got '${opts.interval ?? ""}'`)
+        throw new Error(`bay: integrate: --interval must be a positive number of seconds, got '${opts.interval ?? ""}'`)
       }
-      await verbLand(await requireBay(), target, opts.watch === true, interval)
+      await verbIntegrate(await requireBay(), target, opts.watch === true, interval)
     })
 
   program
