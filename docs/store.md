@@ -1,6 +1,6 @@
 # The store — a core seam, not a layer
 
-PRs live in exactly one store. Every layer's records live in it, so it can't be middleware among the layers — it's the constructor seam: `createBay({ store })`. Switching stores is one config line; there is no mirroring or projection between stores, by design (two representations with neither authoritative is the worst outcome).
+PRs live in exactly one store. Every layer's records live in it, so it can't be middleware among the layers — it's the constructor seam: `createGitbay({ store })`. Switching stores is one config line; there is no mirroring or projection between stores, by design (two representations with neither authoritative is the worst outcome).
 
 ```yaml
 store: sqlite   # default — records in .git/bay/bay.db, zero dependencies

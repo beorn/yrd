@@ -1,6 +1,6 @@
 # Events, requests, and telemetry
 
-One naming grammar covers the journal, the future RPC surface, and telemetry: **imperative = request, past tense = event.** `bay/open` is the call; `bay/opened` is the fact. Slash namespacing throughout (the LSP/ACP/MCP convention family). These are target names (v0.3) — today's journal still uses the older dotted names.
+One naming grammar covers the journal, the future RPC surface, and telemetry: **imperative = request, past tense = event.** `bay/open` is the call; `bay/opened` is the fact. Slash namespacing throughout (the LSP/ACP/MCP convention family). Shipped in v0.3 — a pre-v0.3 journal (dotted names — `lease.opened`, `pr.state-changed`, …) needs the one-shot migration (`git bay migrate-journal`) before anything reads it; there is no dual-read shim.
 
 ## The event families
 
