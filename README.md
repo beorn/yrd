@@ -1,6 +1,6 @@
 # git bay
 
-**git bay** is local pull requests for your repository: you work in a disposable worktree, plain `git push` opens the PR, and it lands itself when the checks pass — one at a time, so main is never broken. No server, no daemon.
+**git bay** is a small continuous-integration server that lives inside your git repository: you work in a disposable worktree, plain `git push` opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken. No hosted service, no background daemon — it's a plain CLI.
 
 ## Why you'd want it
 
@@ -92,11 +92,11 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 **Is this a GitHub PR?** Same idea, local: a PR is your commits traveling to main as one unit, numbered per repository (PR1, PR2, …), and it lands itself when the checks pass — like auto-merge. Review is an optional command gate (roadmap). A bay PR is local — GitHub does not see it and `gh` commands do not apply.
 
-**How do I tell it what checks to run?** `git config bay.check '<command>'`. The bay runs that command before merging; exit 0 means pass. Repositories with their own landing process can also route the merge itself through a command: `git config bay.mergeCommand '<command with {target}>'`, used by `git bay land`.
+**How do I tell it what checks to run?** `git config bay.check '<command>'`. The bay runs that command before merging; exit 0 means pass. Repositories with their own merge process can also route the merge itself through a command: `git config bay.mergeCommand '<command with {target}>'`, used by `git bay integrate`.
 
 **What happens when a check fails?** The push is refused and the message says why. If the fix needs new commits, just `git push` again — the PR keeps its number. If the fix changed no commits (a config or environment fix), `git bay retry <PR>` re-runs the pipeline.
 
-**What exactly is a worktree? A name?** A **worktree** is the directory you work in — ids look like `wt1`; it is disposable and yours alone. The **name** is what you called the work at `git bay new` — any label, or a ticket id your tracker knows. Worktree verbs (`close`, `refresh`, `gc`) act on worktrees; PR verbs (`ls`, `submit`, `land`, `retry`) act on PRs — and every argument accepts an id or a name.
+**What exactly is a worktree? A name?** A **worktree** is the directory you work in — ids look like `wt1`; it is disposable and yours alone. The **name** is what you called the work at `git bay new` — any label, or a ticket id your tracker knows. Worktree verbs (`close`, `refresh`, `gc`) act on worktrees; PR verbs (`ls`, `submit`, `integrate`, `retry`) act on PRs — and every argument accepts an id or a name.
 
 **Can it lose my work?** Closing a worktree with uncommitted changes is refused (commit or clean first — the worktree stays yours). When `gc` retires an idle worktree, it snapshots the branch tip to a findability ref first. Nothing is ever deleted.
 
@@ -122,13 +122,13 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 *PRs*
 - `ls [PR|name]` — worktree table + every unmerged PR, or one PR's verdict (`--json`)
 - `submit <branch|name>` — open a PR for an existing branch (from inside a worktree, plain `git push` does this)
-- `land [PR|name]` — land the next queued PR onto main, or the named one (`--watch` keeps landing)
+- `integrate [PR|name]` — integrate the next queued PR into main, or the named one (`--watch` keeps integrating)
 - `retry <PR|name>` — put a rejected or stuck PR back in the queue and re-run its pipeline
 
 *Repository health*
 - `audit` — find strays, stale pins, and refs without a name (`--json`)
 
-Addressing is uniform: worktree verbs take a wt-id or a name; PR verbs take a PR number or a name; `ls` takes either kind. Unambiguous prefixes work (`git bay au` is `audit`), and every pre-rename verb (`co`, `status`, `enqueue`, `requeue`, `drain`, `abandon`, `adopt`, `merge`, `refresh`, `prime`, …) still works as an unadvertised alias — nothing breaks.
+Addressing is uniform: worktree verbs take a wt-id or a name; PR verbs take a PR number or a name; `ls` takes either kind. Unambiguous prefixes work (`git bay au` is `audit`), and every pre-rename verb (`co`, `status`, `enqueue`, `requeue`, `land`, `drain`, `abandon`, `adopt`, `merge`, `refresh`, `prime`, …) still works as an unadvertised alias — nothing breaks. `git bay in` and `git bay int` are shorthand aliases for `integrate`.
 
 Also shipped: a merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch — and the compatibility check that the batching roadmap below builds on.
 

@@ -217,7 +217,7 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     expect(second.stdout.trim()).toBe("PR2")
   })
 
-  it("land by unique name resolves; land by ambiguous name refuses listing the candidates", async () => {
+  it("integrate by unique name resolves; integrate by ambiguous name refuses listing the candidates", async () => {
     await must(["git", "-C", demo, "branch", "b1"], demo, env)
     await must(["git", "-C", demo, "branch", "b2"], demo, env)
     await must(["git", "-C", demo, "branch", "b3"], demo, env)
@@ -225,26 +225,26 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     await must(["git", "bay", "submit", "b2", "--workitem", "dup"], demo, env) // PR2
     await must(["git", "bay", "submit", "b3", "--workitem", "uniq"], demo, env) // PR3
 
-    const ambiguous = await run(["git", "bay", "land", "dup"], demo, env)
+    const ambiguous = await run(["git", "bay", "integrate", "dup"], demo, env)
     expect(ambiguous.code).toBe(1)
     expect(ambiguous.stderr).toContain("'dup' is ambiguous")
     expect(ambiguous.stderr).toContain("PR1 (queued)")
     expect(ambiguous.stderr).toContain("PR2 (queued)")
 
-    // Unique name lands exactly that PR (a red merge command still proves the
-    // name resolved to PR3 — the verdict lines carry the number).
-    const landed = await run(["git", "bay", "land", "uniq"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
-    expect(landed.stdout).toContain("bay: PR3 queued → merging")
-    expect(landed.stdout).toContain("bay: PR3 merging → rejected — exit 1")
+    // Unique name integrates exactly that PR (a red merge command still proves
+    // the name resolved to PR3 — the verdict lines carry the number).
+    const integrated = await run(["git", "bay", "integrate", "uniq"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    expect(integrated.stdout).toContain("bay: PR3 queued → merging")
+    expect(integrated.stdout).toContain("bay: PR3 merging → rejected — exit 1")
 
-    const absent = await run(["git", "bay", "land", "no-such-name"], demo, env)
+    const absent = await run(["git", "bay", "integrate", "no-such-name"], demo, env)
     expect(absent.code).toBe(1)
     expect(absent.stderr).toContain("bay: no PR or worktree named 'no-such-name'")
   })
 
-  it("bare land with an empty queue says so instead of exiting silently", async () => {
-    const res = await must(["git", "bay", "land"], demo, env)
-    expect(res.stdout).toContain("bay: queue empty — nothing to land")
+  it("bare integrate with an empty queue says so instead of exiting silently", async () => {
+    const res = await must(["git", "bay", "integrate"], demo, env)
+    expect(res.stdout).toContain("bay: queue empty — nothing to integrate")
   })
 })
 
@@ -327,29 +327,30 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     const requeue = await run(["git", "bay", "requeue", "PR99"], demo, env)
     expect(requeue.code).toBe(1)
     expect(requeue.stderr).toContain("bay: no PR or worktree named 'PR99'")
-    // drain / merge → land
+    // drain / merge / land → integrate
     const drain = await run(["git", "bay", "drain", "PR2"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
     expect(drain.stdout).toContain("bay: PR2 queued → merging")
     const merge = await run(["git", "bay", "merge"], demo, env)
-    expect(merge.stdout).toContain("bay: queue empty — nothing to land")
+    expect(merge.stdout).toContain("bay: queue empty — nothing to integrate")
     // prime → guide
     const prime = await must(["git", "bay", "prime"], demo, env)
-    expect(prime.stdout).toContain("git bay — local pull requests for this repository")
+    expect(prime.stdout).toContain("git bay is a small continuous-integration server for this repository")
   })
 
   it("help advertises exactly one spelling per verb — no aliases anywhere", async () => {
     const help = await run(["git", "bay"], demo, env) // bare invocation prints help
     expect(help.code).toBe(0)
-    for (const advertised of ["guide", "init", "new <name>", "close <wt|name>", "gc", "ls", "submit <branch|name>", "land", "retry <PR|name>", "audit"]) {
+    for (const advertised of ["guide", "init", "new <name>", "close <wt|name>", "gc", "ls", "submit <branch|name>", "integrate", "retry <PR|name>", "audit"]) {
       expect(help.stdout, advertised).toContain(advertised)
     }
-    for (const hidden of ["prime", "co", "checkout", "abandon", "return", "refresh", "ping", "status", "enqueue", "adopt", "merge", "drain", "requeue", "receive-pre", "receive-post"]) {
+    for (const hidden of ["prime", "co", "checkout", "abandon", "return", "refresh", "ping", "status", "enqueue", "adopt", "in", "int", "land", "merge", "drain", "requeue", "receive-pre", "receive-post"]) {
       expect(help.stdout, hidden).not.toMatch(new RegExp(`^\\s*${hidden}\\b`, "m"))
     }
-    // and the per-command usage line advertises one spelling too
-    const landHelp = await run(["git", "bay", "land", "-h"], demo, env)
-    expect(landHelp.stdout).toContain("Usage: git bay land [options] [PR|name]")
-    expect(landHelp.stdout).not.toContain("land|merge")
+    // and the per-command usage line advertises one spelling too, even when
+    // invoked through a legacy alias
+    const integrateHelp = await run(["git", "bay", "land", "-h"], demo, env)
+    expect(integrateHelp.stdout).toContain("Usage: git bay integrate [options] [PR|name]")
+    expect(integrateHelp.stdout).not.toContain("integrate|merge")
   })
 })
 
@@ -376,7 +377,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
   })
 
   it("`<verb> -h` works for every verb that reads a positional — new names and old aliases", async () => {
-    for (const verb of ["new", "ls", "submit", "land", "retry", "close", "refresh", "co", "status", "enqueue", "requeue", "drain", "abandon", "ping"]) {
+    for (const verb of ["new", "ls", "submit", "integrate", "retry", "close", "refresh", "co", "status", "enqueue", "requeue", "drain", "abandon", "ping"]) {
       const res = await run(["git", "bay", verb, "-h"], demo, env)
       expect(res.code, `${verb} -h`).toBe(0)
       expect(res.stdout, `${verb} -h`).toContain("Usage: git bay")
@@ -385,12 +386,12 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
 
   it("an unknown flag is a teaching refusal, never a silent no-op or a positional", async () => {
     await must(["git", "bay", "init"], demo, env)
-    // The silent-error case: a --watch typo must not fall through to a single land.
-    const land = await run(["git", "bay", "land", "--wach"], demo, env)
-    expect(land.code).toBe(1)
-    expect(land.stderr).toContain("unknown option '--wach'")
-    expect(land.stderr).toContain("(Did you mean --watch?)") // teaching: typo suggestion
-    expect(land.stderr).toContain("Usage: git bay land")
+    // The silent-error case: a --watch typo must not fall through to a single integrate.
+    const integrate = await run(["git", "bay", "integrate", "--wach"], demo, env)
+    expect(integrate.code).toBe(1)
+    expect(integrate.stderr).toContain("unknown option '--wach'")
+    expect(integrate.stderr).toContain("(Did you mean --watch?)") // teaching: typo suggestion
+    expect(integrate.stderr).toContain("Usage: git bay integrate")
     // The positional case: a flag-shaped token must never become a merge target.
     const sub = await run(["git", "bay", "submit", "--halp"], demo, env)
     expect(sub.code).toBe(1)
@@ -414,7 +415,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     const amb = await run(["git", "bay", "l"], demo, env)
     expect(amb.code).toBe(1)
     expect(amb.stderr).toContain("'l' is ambiguous")
-    expect(amb.stderr).toContain("land, ls")
+    expect(amb.stderr).toContain("integrate, ls") // "land" (alias) resolves to canonical "integrate"
     // `st` (old status muscle memory) still resolves: status is a hidden alias
     // of ls and no other verb starts with "st".
     const st = await must(["git", "bay", "st"], demo, env)
@@ -425,6 +426,38 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     expect(s.code).toBe(1)
     expect(s.stderr).toContain("'s' is ambiguous")
     expect(s.stderr).toContain("ls, submit")
+  })
+
+  it("`in`/`int` are exact aliases of integrate (never ambiguity refusals); `i` alone stays genuinely ambiguous with init; `init` itself always resolves as the exact name", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "branch", "task/x"], demo, env)
+    const id1 = (await must(["git", "bay", "submit", "task/x"], demo, env)).stdout.trim()
+
+    // Exact alias match wins BEFORE prefix matching — `in` is never treated as
+    // an ambiguous prefix of `init`, even though it IS one character short of it.
+    const inRun = await run(["git", "bay", "in", id1], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    expect(inRun.code).toBe(0)
+    expect(inRun.stdout).toContain(`bay: ${id1} queued → merging`)
+
+    // `int` is likewise an exact alias, not a prefix.
+    await must(["git", "-C", demo, "branch", "task/y"], demo, env)
+    const id2 = (await must(["git", "bay", "submit", "task/y"], demo, env)).stdout.trim()
+    const intRun = await run(["git", "bay", "int", id2], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    expect(intRun.code).toBe(0)
+    expect(intRun.stdout).toContain(`bay: ${id2} queued → merging`)
+
+    // `i` alone matches no exact name/alias — it's a genuine prefix collision
+    // between `init` (exact name) and `integrate` (via the `in`/`int` aliases).
+    const i = await run(["git", "bay", "i"], demo, env)
+    expect(i.code).toBe(1)
+    expect(i.stderr).toContain("'i' is ambiguous")
+    expect(i.stderr).toContain("init, integrate")
+
+    // `init` itself is an exact name match — never rewritten by the prefix
+    // resolver, and safe to run again (init is idempotent).
+    const initAgain = await run(["git", "bay", "init"], demo, env)
+    expect(initAgain.code).toBe(0)
+    expect(initAgain.stdout).toContain("bay: initialized")
   })
 })
 
@@ -500,7 +533,7 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "branch", "task/x"], demo, env)
     const id = (await must(["git", "bay", "submit", "task/x"], demo, env)).stdout.trim()
-    await run(["git", "bay", "land"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    await run(["git", "bay", "integrate"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
     const ls = await must(["git", "bay", "ls"], demo, env)
     expect(ls.stdout).toContain(id)
     expect(ls.stdout).toContain("rejected")
