@@ -12,7 +12,7 @@
 import { existsSync } from "node:fs"
 import { Command } from "@silvery/commander/plain"
 import { colorizeHelp, shouldColorize } from "@silvery/commander"
-import { readFile, rename } from "node:fs/promises"
+import { readFile, readdir, rename, rm } from "node:fs/promises"
 import { join } from "node:path"
 import type { BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
 import { isOpen } from "../src/types.ts"
@@ -723,12 +723,10 @@ async function verbRefresh(ctx: Ctx, target: string | undefined): Promise<void> 
   })
 }
 
-async function ingestInbox(ctx: Ctx, bay: BayRuntime): Promise<void> {
-  const inbox = join(ctx.bayDir, "inbox.jsonl")
-  if (!existsSync(inbox)) return
-  const processed = inbox + `.processing`
-  await rename(inbox, processed) // claim the batch; a racing writer starts a fresh inbox
-  const lines = (await readFile(processed, "utf8")).split("\n").filter((l) => l.trim())
+/** Dispatch every receipt in a claimed inbox file, then delete it. A receipt
+ *  whose submit throws is taught loudly and does not block the rest. */
+async function drainReceiptFile(bay: BayRuntime, path: string): Promise<void> {
+  const lines = (await readFile(path, "utf8")).split("\n").filter((l) => l.trim())
   for (const line of lines) {
     const receipt = JSON.parse(line) as { branch: string; sha: string }
     try {
@@ -737,6 +735,39 @@ async function ingestInbox(ctx: Ctx, bay: BayRuntime): Promise<void> {
       console.error(`bay: inbox receipt ${receipt.branch}@${receipt.sha.slice(0, 8)}: ${(err as Error).message}`)
     }
   }
+  await rm(path, { force: true })
+}
+
+/** Claim `source` by renaming it to a unique name; null when a racing ingest
+ *  won (source gone), rethrow when the source still exists (a real FS error
+ *  must not read as a lost race — NO SILENT ERRORS). */
+async function claimReceiptFile(source: string, claimTag: string): Promise<string | null> {
+  const claimed = `${source}.${claimTag}-${process.pid}-${Date.now()}`
+  try {
+    await rename(source, claimed)
+    return claimed
+  } catch (err) {
+    if (existsSync(source)) throw err
+    return null
+  }
+}
+
+async function ingestInbox(ctx: Ctx, bay: BayRuntime): Promise<void> {
+  // LE-3 (21002): the old fixed `.processing` claim name meant a SECOND
+  // ingest's rename silently overwrote a crashed ingest's still-unprocessed
+  // batch, and an orphaned claim was never re-read — a submitter told
+  // "queued to inbox" could be silently dropped. Claims are unique-named and
+  // orphans are recovered first, re-claimed so racing ingests process a file
+  // at most once.
+  const inbox = join(ctx.bayDir, "inbox.jsonl")
+  const orphans = (await readdir(ctx.bayDir)).filter((f) => f.startsWith("inbox.jsonl.processing")).sort()
+  for (const f of orphans) {
+    const claimed = await claimReceiptFile(join(ctx.bayDir, f), "recovered")
+    if (claimed) await drainReceiptFile(bay, claimed)
+  }
+  if (!existsSync(inbox)) return
+  const claimed = await claimReceiptFile(inbox, "processing")
+  if (claimed) await drainReceiptFile(bay, claimed)
 }
 
 /** One line per `pr/changed` event ("bay: PR1 submitted → checking"), shared

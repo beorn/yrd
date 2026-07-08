@@ -174,6 +174,22 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
   // guard makes structurally impossible.
   if (mainRepo && targetSha) {
     const baseRef = await resolveBaseRef(mainRepo)
+    if (baseRef === "origin/main") {
+      // LE-2 (the 20969 false-reject root cause): when the merge command lands
+      // from a SEPARATE clean clone (the hh integrator shape), this repo's
+      // tracking ref is stale — a REAL landing then reads as not-an-ancestor
+      // and journals `rejected`. Refresh the mainline before judging. A fetch
+      // failure is a broken host (no remote/network), not a domain verdict —
+      // fail loud per this function's contract, never judge against a ref we
+      // could not refresh.
+      const fetched = await git(["-C", mainRepo, "fetch", "origin", "main"], mainRepo)
+      if (fetched.code !== 0) {
+        throw new Error(
+          `bay: 'git fetch origin main' failed at ${mainRepo} (exit ${fetched.code}) — the lying-merge guard ` +
+            `refuses to verify a landing against a possibly-stale origin/main:\n${tail(fetched.stderr)}`,
+        )
+      }
+    }
     const anc = await git(["-C", mainRepo, "merge-base", "--is-ancestor", targetSha, baseRef], mainRepo)
     if (anc.code !== 0) {
       return {

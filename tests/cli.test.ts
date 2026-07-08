@@ -1038,3 +1038,76 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     expect(res.stderr).toContain(`${id} is already submitted`)
   })
 })
+
+describe("git bay CLI — one merge seam (21002): retry re-runs the gates, never bypasses them", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("bay-seam-"))
+    await must(["git", "bay", "init"], demo, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("PR4 shape: a merge-command refusal STANDS on retry — the command re-runs, mainline never moves", async () => {
+    const calls = join(root, "gate-calls.log")
+    const refuse = join(root, "refuse.sh")
+    await writeFile(refuse, `#!/bin/sh\necho run >> ${calls}\necho "reviewer-not-author gate: refused" >&2\nexit 1\n`, "utf8")
+    await chmod(refuse, 0o755)
+    await must(["git", "-C", demo, "config", "bay.mergeCommand", refuse], demo, env)
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+
+    await branchWithFiles(demo, env, "task/a", { "a.txt": "a\n" })
+    const headBefore = (await must(["git", "-C", demo, "rev-parse", "HEAD"], demo, env)).stdout.trim()
+    await must(["git", "bay", "adopt", "task/a"], demo, env)
+    await must(["git", "bay", "submit", "PR1"], demo, env)
+
+    const first = await must(["git", "bay", "integrate", "PR1"], demo, env)
+    expect(first.stdout).toContain("merging → rejected")
+
+    // The documented recovery verb: it must RE-RUN the pipeline (the merge
+    // command fires again) and the refusal must stand — the LE-1 production
+    // incident was retry raw-merging past the exact gate that had refused.
+    const retried = await run(["git", "bay", "retry", "PR1"], demo, env)
+    expect(retried.code).toBe(0)
+
+    const log = (await import("node:fs")).readFileSync(calls, "utf8").trim().split("\n")
+    expect(log).toHaveLength(2) // once per attempt — the gate ran BOTH times
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs.PR1!.state).toBe("rejected")
+
+    const headAfter = (await must(["git", "-C", demo, "rev-parse", "HEAD"], demo, env)).stdout.trim()
+    expect(headAfter).toBe(headBefore) // no ungated merge ever touched the mainline
+  })
+
+  it("recovers orphaned inbox claims and never overwrites them (LE-3)", async () => {
+    await branchWithFiles(demo, env, "task/a", { "a.txt": "a\n" })
+    await branchWithFiles(demo, env, "task/b", { "b.txt": "b\n" })
+    const shaA = (await must(["git", "-C", demo, "rev-parse", "task/a"], demo, env)).stdout.trim()
+    const shaB = (await must(["git", "-C", demo, "rev-parse", "task/b"], demo, env)).stdout.trim()
+    const bayDir = join(demo, ".git", "bay")
+    // A crashed ingest's orphaned claim + a fresh inbox — BOTH must be drained.
+    await writeFile(join(bayDir, "inbox.jsonl.processing-99999-1"), JSON.stringify({ branch: "task/a", sha: shaA }) + "\n", "utf8")
+    await writeFile(join(bayDir, "inbox.jsonl"), JSON.stringify({ branch: "task/b", sha: shaB }) + "\n", "utf8")
+
+    await must(["git", "bay", "integrate"], demo, env)
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    // v0.3 default: push CREATES (`pushed`) — the LE-3 guarantee is that no
+    // receipt is ever dropped, not that receipts auto-merge.
+    const states = Object.values(state.prs).map((p) => p.state)
+    expect(states).toHaveLength(2)
+    for (const s of states) expect(s).toBe("pushed")
+
+    const { readdirSync } = await import("node:fs")
+    const leftovers = readdirSync(bayDir).filter((f) => f.startsWith("inbox.jsonl"))
+    expect(leftovers).toEqual([]) // claims are consumed, never accumulated
+  })
+})

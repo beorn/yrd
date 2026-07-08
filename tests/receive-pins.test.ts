@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { BayState } from "../src/types.ts"
-import { preReceiveCheck, patchIdRewriteVerdict } from "../src/layers/receive.ts"
+import { checkSubmitPins, preReceiveCheck, patchIdRewriteVerdict } from "../src/layers/receive.ts"
 import { git } from "../src/layers/git.ts"
 
 /**
@@ -120,5 +120,27 @@ describe("preReceiveCheck — gitlink pin verdicts", () => {
     const v = await patchIdRewriteVerdict(sub, shas.B, Z)
     expect(v.rewrite).toBe(false)
     expect(v.reason).toContain("no common ancestor")
+  })
+
+  describe("checkSubmitPins — the authoritative post-quarantine judge (SG-2, 21002)", () => {
+    it("refuses a NEW-BRANCH push whose pin rewinds — the shape pre-receive cannot judge (zero-base range)", async () => {
+      // superRepo becomes its own mainline: main at s1 (pin B), a NEW branch
+      // at sRewind (pin A). Pre-receive sees a zero old SHA and defers; the
+      // submit re-check judges from the mainline merge-base and refuses.
+      await must(["-C", superRepo, "update-ref", "refs/heads/main", supers.s1], superRepo)
+      await must(["-C", superRepo, "update-ref", "refs/heads/task/rewind", supers.sRewind], superRepo)
+      await must(["clone", "-q", sub, join(superRepo, "sub")], root)
+      const verdict = await checkSubmitPins(superRepo, "task/rewind")
+      expect(verdict.refusal).toMatch(/pin refusal.*not a descendant/s)
+    })
+
+    it("passes a new branch whose pin moves forward, with no note", async () => {
+      await must(["-C", superRepo, "update-ref", "refs/heads/main", supers.s1], superRepo)
+      await must(["-C", superRepo, "update-ref", "refs/heads/task/fwd", supers.sDesc], superRepo)
+      await must(["clone", "-q", sub, join(superRepo, "sub")], root)
+      const verdict = await checkSubmitPins(superRepo, "task/fwd")
+      expect(verdict.refusal).toBeNull()
+      expect(verdict.notes).toEqual([])
+    })
   })
 })

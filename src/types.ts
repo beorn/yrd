@@ -100,7 +100,7 @@ export type RejectionCode =
   | "unresolvable-target" // the merge target does not resolve to a commit (pipeline.ts's runMerge)
   | "lying-merge" // merge command exited 0 but target is not an ancestor (pipeline.ts's runMerge)
   | "merge-command-failed" // the configured merge command itself exited nonzero (pipeline.ts's runMerge)
-  | "pin-rewind" // reserved: a gitlink pin move that is a genuine history rewind
+  | "pin-rewind" // a gitlink pin move that is a genuine history rewind (checkSubmitPins — the authoritative post-quarantine judge, 21002)
   | "queue-full" // reserved: v0.4 WIP limit
   | "poison-retry" // reserved: a PR retried past a failure-count ceiling
 

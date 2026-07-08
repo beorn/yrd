@@ -12,6 +12,7 @@ import {
 } from "../src/index.ts"
 import type { BayEvent, BayRuntime, BayState, BayStore, MergeWorkerOptions, PrId } from "../src/index.ts"
 import { git } from "../src/layers/git.ts"
+import { runMerge } from "../src/layers/pipeline.ts"
 
 const CLOCK = () => "2024-01-01T00:00:00.000Z"
 const ACTOR = "tester"
@@ -442,5 +443,54 @@ describe("withMergeWorker — resume-on-restart via replay + requeue", () => {
     } finally {
       if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
     }
+  })
+})
+
+describe("runMerge — LE-2: the lying-merge guard verifies against a FRESH mainline (21002)", () => {
+  const IDENT = ["-c", "user.name=t", "-c", "user.email=t@e"]
+
+  async function must(args: string[], cwd: string): Promise<string> {
+    const res = await git(args, cwd)
+    if (res.code !== 0) throw new Error(`git ${args.join(" ")} failed (${res.code}): ${res.stderr}`)
+    return res.stdout.trim()
+  }
+
+  /** bare origin (main @ S0, task/x @ X) + two clones: A is the caller's
+   *  mainRepo with a STALE origin/main; B is the "separate clean clone" the
+   *  merge command lands + pushes from — the hh integrator shape (20969). */
+  async function makeStaleFixture(): Promise<{ cloneA: string; cloneB: string }> {
+    const root = await mkdtemp(join(tmpdir(), "gitbay-le2-"))
+    const origin = join(root, "origin.git")
+    await must(["init", "-q", "--bare", "-b", "main", origin], root)
+    const seed = join(root, "seed")
+    await must(["clone", "-q", origin, seed], root)
+    await must(["-C", seed, ...IDENT, "commit", "-qm", "S0", "--allow-empty"], seed)
+    await must(["-C", seed, "push", "-q", "origin", "main"], seed)
+    await must(["-C", seed, "switch", "-qc", "task/x"], seed)
+    await must(["-C", seed, ...IDENT, "commit", "-qm", "X", "--allow-empty"], seed)
+    await must(["-C", seed, "push", "-q", "origin", "task/x"], seed)
+    const cloneA = join(root, "cloneA")
+    const cloneB = join(root, "cloneB")
+    await must(["clone", "-q", origin, cloneA], root)
+    await must(["clone", "-q", origin, cloneB], root)
+    return { cloneA, cloneB }
+  }
+
+  it("accepts a REAL landing made from a separate clone (stale tracking ref would have false-rejected)", async () => {
+    const { cloneA, cloneB } = await makeStaleFixture()
+    // The merge command lands task/x onto main in clone B and pushes — clone
+    // A's refs/remotes/origin/main knows nothing about it until a fetch.
+    const cmd = `git -C ${cloneB} -c user.name=t -c user.email=t@e merge --no-ff -q -m landed origin/task/x && git -C ${cloneB} push -q origin main && echo "merged $(git -C ${cloneB} rev-parse HEAD) onto main"`
+    const outcome = await runMerge({ mainRepo: cloneA, pr: "PR3", target: "origin/task/x", mergeCommand: cmd })
+    expect(outcome.ok).toBe(true)
+    if (outcome.ok) expect(outcome.detail).toContain("merged")
+  })
+
+  it("fails LOUD when the mainline cannot be fetched — never judges against a possibly-stale ref", async () => {
+    const { cloneA } = await makeStaleFixture()
+    await must(["-C", cloneA, "remote", "set-url", "origin", join(cloneA, "does-not-exist.git")], cloneA)
+    await expect(
+      runMerge({ mainRepo: cloneA, pr: "PR3", target: "origin/task/x", mergeCommand: "true" }),
+    ).rejects.toThrow(/fetch origin main.*failed|refuses to verify/s)
   })
 })

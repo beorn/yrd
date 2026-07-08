@@ -17,7 +17,7 @@ import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
-import { defaultBayDir, git, repoScopedCleanEnv } from "./git.ts"
+import { defaultBayDir, git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 
 /**
@@ -252,6 +252,21 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     const { mainRepo, repoGit } = await resolveReceive(opts)
     const events: BayEvent[] = []
 
+    // 0. Pin rules, authoritatively (LE-4/SG-2, 21002): post-quarantine,
+    //    against the mainline merge-base — covers thin-pack diff-tree skips
+    //    and new-branch pushes the pre-receive hook could not judge. Same
+    //    provider (judgePinMoves) as the hook: one verdict, every door.
+    const pins = await checkSubmitPins(mainRepo, d.branch)
+    if (pins.refusal) {
+      events.push(
+        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
+          code: "pin-rewind",
+          detail: pins.refusal,
+        }),
+      )
+      return events
+    }
+
     // 1. The ONE project check, on the submitter's own bay (spec § Check
     //    provider: "speculative checks on the submitter's bay").
     const check = await resolveCheck(opts.check, mainRepo)
@@ -332,47 +347,96 @@ export async function preReceiveCheck(
       )
     }
 
-    // Gitlink pin rules over the pushed range (skip for branch deletes/creates
-    // with no base — the ADD case is allowed by design).
+    // Gitlink pin rules over the pushed range — best-effort at this hook:
+    // a create/delete has no base range and thin pre-quarantine objects can
+    // fail diff-tree; BOTH cases are covered authoritatively by the submit
+    // continuation's checkSubmitPins (mainline merge-base → target), so a
+    // skip here is a deferral, never an acceptance (LE-4/SG-2, 21002).
     if (ZERO_SHA.test(u.oldSha) || ZERO_SHA.test(u.newSha)) continue
     const diff = await git(["-C", ctx.repoGit, "diff-tree", "-r", u.oldSha, u.newSha])
-    if (diff.code !== 0) continue // objects may be thin pre-quarantine; the reducer re-checks
-    for (const line of diff.stdout.split("\n")) {
-      // :160000 160000 <old> <new> M\t<path> — diff-tree emits FULL shas (never --raw abbrev)
-      const m = line.match(/^:(\d{6}) (\d{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) [A-Z]\t(.+)$/)
-      if (!m) continue
-      const [, oldMode, newMode, oldPin, newPin, path] = m
-      if (newMode !== "160000") continue
-      if (oldMode !== "160000") continue // gitlink ADD/typechange: allowed
-      if (oldPin === newPin) continue
-      const subRepo = join(ctx.mainRepo, path!)
-      if (!existsSync(subRepo)) {
-        messages.push(`bay: note — submodule '${path}' not present at ${ctx.mainRepo}; pin move accepted unverified`)
-        continue
-      }
-      const anc = await git(["-C", subRepo, "merge-base", "--is-ancestor", oldPin!, newPin!])
-      if (anc.code !== 0) {
-        // Patch-id rewrite tolerance (/pro A5): a rebase/amend rewrite carries
-        // the same patches under new SHAs — that is not a lineage jump. Allow
-        // it (journaled via the accepted message); refuse genuine rewinds.
-        const verdict = await patchIdRewriteVerdict(subRepo, oldPin!, newPin!)
-        if (verdict.rewrite) {
-          messages.push(
-            `bay: note — gitlink '${path}' pin move is a history rewrite ` +
-              `(${verdict.matched}/${verdict.oldCount} old patches present under new SHAs; base ${verdict.base.slice(0, 12)}) — allowed`,
-          )
-          continue
-        }
-        throw new Error(
-          `bay: pin refusal — gitlink '${path}' moves ${oldPin!.slice(0, 12)} → ${newPin!.slice(0, 12)}: ` +
-            `not a descendant and not a recognizable rewrite (${verdict.reason}). ` +
-            `Rebase the submodule forward or merge it; a genuine history replacement needs an explicit override (v0.3 evidence token).`,
-        )
-      }
-    }
+    if (diff.code !== 0) continue
+    const scan = await judgePinMoves(diff.stdout, ctx.mainRepo)
+    messages.push(...scan.notes)
+    if (scan.refusal) throw new Error(scan.refusal)
     messages.push(`bay: ref ${branch} accepted for intake`)
   }
   return messages
+}
+
+export type PinScanResult = { notes: string[]; refusal: string | null }
+
+/**
+ * THE gitlink pin-verdict scan (SG-3, /pro A5): judge every gitlink move in a
+ * diff-tree output — a descendant move passes, a patch-id rewrite passes with
+ * a note, a genuine rewind refuses. ONE provider for every door: the
+ * pre-receive hook (best-effort over the pushed range) and the submit
+ * continuation (authoritative, post-quarantine, against the mainline
+ * merge-base) both judge with exactly this function.
+ */
+export async function judgePinMoves(diffText: string, mainRepo: string): Promise<PinScanResult> {
+  const notes: string[] = []
+  for (const line of diffText.split("\n")) {
+    // :160000 160000 <old> <new> M\t<path> — diff-tree emits FULL shas (never --raw abbrev)
+    const m = line.match(/^:(\d{6}) (\d{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) [A-Z]\t(.+)$/)
+    if (!m) continue
+    const [, oldMode, newMode, oldPin, newPin, path] = m
+    if (newMode !== "160000") continue
+    if (oldMode !== "160000") continue // gitlink ADD/typechange: allowed
+    if (oldPin === newPin) continue
+    const subRepo = join(mainRepo, path!)
+    if (!existsSync(subRepo)) {
+      notes.push(`bay: note — submodule '${path}' not present at ${mainRepo}; pin move accepted unverified`)
+      continue
+    }
+    const anc = await git(["-C", subRepo, "merge-base", "--is-ancestor", oldPin!, newPin!])
+    if (anc.code !== 0) {
+      // Patch-id rewrite tolerance (/pro A5): a rebase/amend rewrite carries
+      // the same patches under new SHAs — that is not a lineage jump. Allow
+      // it (journaled via the accepted message); refuse genuine rewinds.
+      const verdict = await patchIdRewriteVerdict(subRepo, oldPin!, newPin!)
+      if (verdict.rewrite) {
+        notes.push(
+          `bay: note — gitlink '${path}' pin move is a history rewrite ` +
+            `(${verdict.matched}/${verdict.oldCount} old patches present under new SHAs; base ${verdict.base.slice(0, 12)}) — allowed`,
+        )
+        continue
+      }
+      return {
+        notes,
+        refusal:
+          `bay: pin refusal — gitlink '${path}' moves ${oldPin!.slice(0, 12)} → ${newPin!.slice(0, 12)}: ` +
+          `not a descendant and not a recognizable rewrite (${verdict.reason}). ` +
+          `Rebase the submodule forward or merge it; a genuine history replacement needs an explicit override (v0.3 evidence token).`,
+      }
+    }
+  }
+  return { notes, refusal: null }
+}
+
+/**
+ * Authoritative post-quarantine pin check for a submit continuation: judge
+ * every gitlink move from the mainline merge-base to the target. This is the
+ * re-check the pre-receive hook defers to — it covers thin-pack diff-tree
+ * failures AND new-branch pushes whose pushed range has no base (SG-2). An
+ * unresolvable target or disjoint history returns clean here on purpose:
+ * runMerge refuses those moments later with its own teaching code, so the
+ * refusal is loud either way.
+ */
+export async function checkSubmitPins(mainRepo: string, target: string): Promise<PinScanResult> {
+  const sha = await git(["-C", mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], mainRepo)
+  if (sha.code !== 0) return { notes: [], refusal: null }
+  const targetSha = sha.stdout.trim()
+  const baseRef = await resolveBaseRef(mainRepo)
+  const base = await git(["-C", mainRepo, "merge-base", baseRef, targetSha], mainRepo)
+  if (base.code !== 0) return { notes: [], refusal: null }
+  const diff = await git(["-C", mainRepo, "diff-tree", "-r", base.stdout.trim(), targetSha], mainRepo)
+  if (diff.code !== 0) {
+    throw new Error(
+      `bay: diff-tree ${base.stdout.trim().slice(0, 12)}..${targetSha.slice(0, 12)} failed in ${mainRepo} ` +
+        `during the pin re-check (exit ${diff.code}) — refusing to merge unjudged gitlink moves:\n${diff.stderr.trim()}`,
+    )
+  }
+  return judgePinMoves(diff.stdout, mainRepo)
 }
 
 /** Rewrite-vs-rewind verdict for a non-descendant pin move (/pro A5).
