@@ -16,6 +16,7 @@ export {
 export { withQueue, queuedPrs, type QueueSlice } from "./layers/queue.ts"
 export { overlap, composeBatch, type Overlap, type SkippedTarget, type BatchResult } from "./batch-compat.ts"
 export { changedPaths } from "./layers/git.ts"
+export { withBatchBuild, type BatchBuildOptions } from "./layers/batch-build.ts"
 export { withMergeWorker, type MergeWorkerOptions } from "./layers/merge-worker.ts"
 export { withReceive, resolveReceive, leaseForBranch, type ReceiveOptions } from "./layers/receive.ts"
 export { withAudit, formatAudit, type AuditFinding } from "./layers/audit.ts"

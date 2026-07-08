@@ -71,6 +71,7 @@ export function assertTransition(from: PrState, to: PrState): void {
 const LAYER = "queue"
 const EV_OPENED = "pr.opened"
 const EV_STATE_CHANGED = "pr.state-changed"
+const EV_REORDERED = "queue.reordered"
 
 /** FIFO order (append on enqueue) + the merge target per PR. The target (a
  *  branch name or SHA to merge) has no home on the core PullRequest type, so
@@ -101,6 +102,13 @@ export function queuedPrs(state: BayState): PullRequest[] {
     if (pr && pr.state === "queued") out.push(pr)
   }
   return out
+}
+
+/** Full queue order, including PRs that are not currently queued. Higher layers
+ *  use this when they need to preserve queue-relative placement while emitting
+ *  queue-owned reorder events. */
+export function queueOrder(state: BayState): PrId[] {
+  return [...sliceOf(state).order]
 }
 
 /** The PR already tracking `target` (a branch), if any — the reverse of
@@ -158,6 +166,13 @@ export function prOpenedEvent(
   name: WorkitemId | null,
 ): BayEvent {
   return makeEvent(bay, EV_OPENED, { pr, target, name }, { pr })
+}
+
+/** Reorder the queue slice without changing PR states or targets. The event
+ *  intentionally carries a partial order: omitted existing PRs keep their
+ *  relative order after the listed ids. */
+export function queueReorderedEvent(bay: BayRuntime, order: readonly PrId[], detail?: string): BayEvent {
+  return makeEvent(bay, EV_REORDERED, { order: [...order], ...(detail !== undefined ? { detail } : {}) })
 }
 
 // ---------- reducers (pure) ----------
@@ -247,6 +262,22 @@ function apply(state: BayState, event: BayEvent): BayState {
             ...existing,
             state: d.to,
             ...(d.revision !== undefined ? { revision: d.revision } : {}),
+          },
+        },
+      }
+    }
+
+    case EV_REORDERED: {
+      const d = event.data as { order: PrId[] }
+      const slice = sliceOf(state)
+      const seen = new Set(d.order)
+      return {
+        ...state,
+        slices: {
+          ...state.slices,
+          [LAYER]: {
+            ...slice,
+            order: [...d.order, ...slice.order.filter((id) => !seen.has(id))],
           },
         },
       }
