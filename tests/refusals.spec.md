@@ -116,12 +116,12 @@ $ git commit -qm wip --allow-empty && git push
 
 ## Close refuses a bay whose PR is still live — withdraw it explicitly
 
-v0.3: `close` refuses when the bay's own PR hasn't reached a terminal
-disposition (queued, checking, merging, reviewing, or rejected-but-not-yet-
-retried) — closing silently while a PR could still land is exactly the class
-of surprise this project exists to prevent. The refusal names all three ways
-out: integrate it, retry it, or `close --withdraw` it (which moves the PR to
-`abandoned` and then closes).
+`close` refuses when the bay's own PR hasn't reached a terminal disposition
+(pushed, submitted, checking, checked, merging, reviewing, or
+rejected-but-not-yet-retried) — closing silently while a PR could still land
+is exactly the class of surprise this project exists to prevent. The refusal
+names all three ways out: integrate it, retry it, or `close --withdraw` it
+(which moves the PR to `closed` and then closes the bay).
 
 ```console
 $ cd "$DEMO" && git config bay.check "false"
@@ -139,14 +139,14 @@ $ git bay close flaky
 $ cd "$DEMO"
 $ git bay close --withdraw flaky
 $ git bay ls PR4
-PR4 abandoned
+PR4 closed
 ```
 
 ## Submit redirects to adopt
 
-§6 addendum: `submit` now means "ask to merge" (`open` → `queued`) — it takes
-a PR or bay name, not a branch. A branch that isn't a known PR or bay name
-gets a redirect to the verb that actually creates one.
+`submit` means "ask to merge" (`pushed` → `submitted`) — it takes a PR or bay
+name, not a branch. A branch that isn't a known PR or bay name gets a
+redirect to the verb that actually creates one.
 
 ```console
 $ cd "$DEMO" && git branch task/legacy-thing
