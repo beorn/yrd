@@ -13,13 +13,12 @@ THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
   3. git push                          # opens your PR (state: pushed) — nothing runs yet
-  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — queues it, does NOT merge
-  5. git bay integrate <PR>            # runs checks, then lands it (submitted -> ... -> merged); READ the remote:/output lines
-  6. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
+  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — auto-integrates to merged by default; READ the remote:/output lines
+  5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
-  - In a hurry? git push -o submit fuses steps 3-5 (git config bay.autoQueue true makes every push do this).
+  - Manual control? git config bay.autoMerge false rests submit at submitted — then git bay check/merge or integrate <PR> yourself; git config bay.autoSubmit true makes a bare push submit too (and, with autoMerge still on, ship all the way).
   - No git config bay.mergeCommand needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.mergeCommand only to override it.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
   - Done with a worktree? git bay close <bay|wt> refuses while its PR is still open — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
@@ -29,7 +28,7 @@ VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it (submitted)
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it and, by default, lands it (submitted -> ... -> merged)
   check      git bay check <PR> runs the ONE project check alone (submitted -> checked); git config bay.check '<command>'; exit 0 means pass
   merge      git bay merge <PR> lands a CHECKED PR onto main alone (checked -> merged); git bay integrate <PR> runs check then merge together
 ADDRESSING
