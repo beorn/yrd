@@ -27,6 +27,17 @@ import type { DeprovisionVia, RejectionCode } from "./types.ts"
  * Absorbed, not replayed (adopt.recorded added no field pr/opened doesn't
  * already carry once `via` exists):
  *   adopt.recorded
+ *
+ * PR state vocabulary (docs/model.md — the pre-v0.3 AND v0.3-through-v0.6
+ * journals share the SAME three renamed names, so one pass covers both;
+ * this is effectively v1→v3 for `pr/changed`'s `from`/`to`, even though the
+ * envelope shape itself is still v2):
+ *   open      → pushed
+ *   queued    → submitted
+ *   abandoned → closed
+ * `checking`/`merging`/`merged`/`rejected` are unchanged; `checked` is a
+ * BRAND NEW resting state no v1/v2 journal ever produced, so no migrated row
+ * ever needs to become it — see renamePrState().
  */
 
 type LegacyEvent = {
@@ -64,6 +75,18 @@ function classifyRejectionDetail(detail: string | undefined): RejectionCode {
   if (/does not resolve in .* — cannot verify a landing/.test(d)) return "unresolvable-target"
   if (/lying-merge guard/.test(d)) return "lying-merge"
   return "merge-command-failed"
+}
+
+/** open/queued/abandoned (the pre-model.md PR state vocabulary) → their
+ *  current names; every other state string round-trips unchanged. Applied to
+ *  every `pr.state-changed` row's `from`/`to` — a straight rename, not a
+ *  re-derivation, so a migrated journal never carries a state name the
+ *  current PrState union doesn't have. */
+function renamePrState(state: string): string {
+  if (state === "open") return "pushed"
+  if (state === "queued") return "submitted"
+  if (state === "abandoned") return "closed"
+  return state
 }
 
 /** endReason (v1, on the lease record) → via (v2, on bay/closed and
@@ -218,8 +241,9 @@ export async function migrateJournal(dir: string): Promise<{ migrated: number; d
         break
       }
       case "pr.state-changed": {
-        const to = d.to as string
-        const data: Record<string, unknown> = { pr: d.pr, from: d.from, to }
+        const from = renamePrState(d.from as string)
+        const to = renamePrState(d.to as string)
+        const data: Record<string, unknown> = { pr: d.pr, from, to }
         if (d.revision !== undefined) data.revision = d.revision
         if (to === "rejected") data.code = classifyRejectionDetail(d.detail as string | undefined)
         if (d.detail !== undefined) data.detail = d.detail

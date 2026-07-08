@@ -3,7 +3,7 @@ import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createGitbay, createJsonlJournal, pipe, queuedPrs, withQueue, withWorktrees } from "../src/index.ts"
+import { createGitbay, createJsonlJournal, pipe, submittedPrs, withQueue, withWorktrees } from "../src/index.ts"
 import { migrateJournal } from "../src/migrate.ts"
 
 /**
@@ -181,6 +181,30 @@ describe("migrateJournal — v1 → v2", () => {
     expect(alphaClosed.data.via).toBe("merged")
   })
 
+  it("renames the pre-model.md PR state vocabulary: queued→submitted, checking/merging/merged/rejected unchanged", async () => {
+    // The blind spot this closes: PR1's and PR3's FINAL states (merged,
+    // rejected) happen to be unrenamed names, so a bug that let old "queued"/
+    // "open"/"abandoned" leak through unrenamed would still pass every OTHER
+    // assertion in this file — only the INTERMEDIATE from/to values prove the
+    // rename actually ran.
+    const dir = await makeV1Dir()
+    await migrateJournal(dir)
+    const journal = createJsonlJournal(join(dir, "journal.jsonl"))
+    const transitions: string[] = []
+    for await (const e of journal.replay()) {
+      if (e.name !== "pr/changed") continue
+      const d = e.data as { pr: string; from: string; to: string }
+      transitions.push(`${d.pr}: ${d.from}→${d.to}`)
+    }
+    expect(transitions).toEqual([
+      "PR1: submitted→checking", // was queued→checking
+      "PR1: checking→merging",
+      "PR1: merging→merged",
+      "PR3: submitted→merging", // was queued→merging
+      "PR3: merging→rejected",
+    ])
+  })
+
   it("replay of the migrated journal through the REAL v2 layers reconstructs the fixture's ground truth", async () => {
     const dir = await makeV1Dir()
     await migrateJournal(dir)
@@ -213,6 +237,6 @@ describe("migrateJournal — v1 → v2", () => {
 
     // The queue slice still knows PR3's target — modulo the NEW `via` field
     // nothing about the queue-facing shape regressed.
-    expect(queuedPrs(state)).toEqual([]) // PR3 is rejected, not queued
+    expect(submittedPrs(state)).toEqual([]) // PR3 is rejected, not submitted
   })
 })
