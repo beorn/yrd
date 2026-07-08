@@ -1,45 +1,73 @@
 # git bay
 
-**git bay** is a local merge queue for git repositories. It gives each piece of
-work an isolated worktree, receives it as a local PR, runs checks, and lands PRs
-onto the base branch one at a time through an integration line.
+**git bay** is a local PR intake and merge line for git repositories: you work
+in an isolated bay, plain `git push` opens or updates a local PR, and git bay
+checks and lands that PR onto a base branch one at a time.
 
 No hosted service is required. The interface is plain git plus one small CLI.
 
-## Why
+The idea in one sentence more: anyone working in a local clone, human or agent,
+should get the integration safety a good team gets from GitHub: workspaces, PRs,
+checks, review, a merge queue, and a full record, with plain git as the
+interface.
 
-Busy local repos have the same integration problem as busy remote repos:
+## Why You'd Want It
 
-- two changes can pass alone and break when combined
-- branches can be tested against stale main and then land untested
-- submodule pointers can move backward and orphan landed work
-- agent fleets produce more merge pressure than one human can referee
+You want git bay when:
 
-git bay brings the core safety of PRs, checks, review, deployment steps, and a
-serial integration line into the local clone.
+- agent fleets produce more merges than a human can referee
+- you want merge-queue safety without a hosted service or daemon
+- branches need to be tested against the base branch as it is now, not as it was
+  when the branch forked
+- a superproject and its submodules need to land as one unit
+- you want worktrees, PR intake, checks, review, deployment, and cleanup in one
+  self-contained local tool
 
-The goal is not "no WIP"; active work is normal. The goal is no unmanaged WIP:
-every surviving branch, ref, or worktree should be an active bay, submitted PR,
-waiting step, rejected PR, blocked exception, merged result, or prunable relic.
+Busy local repos have the same integration problem as busy remote repos. Two
+changes can each pass alone and still break when combined. A branch can be
+tested against stale main and then land untested. A submodule pointer can move
+backward and orphan work that already landed. Those problems become acute when
+agents produce changes faster than people can inspect, order, and merge them.
 
-Typical raw WIP becomes explicit git bay state:
+## How It Works
 
-| Raw WIP | Git bay state |
-| --- | --- |
-| dirty worktree | active bay with owner/name |
-| ahead branch | PR at `pushed` or `submitted` |
-| branch needing repair | `open <name> --from <branch>` |
-| failed tests | `rejected` with check verdict |
-| merge conflict | blocked/rejected with conflict evidence |
-| missing work item | audit exception, not queued |
-| already ancestor of base | terminal/prunable |
-| preserve/archive ref | closed/prunable or named exception |
+`git bay init` stores state under `.git/bay/`: an event log, a query index, and
+a bay-owned bare Git repo whose receive hook is the intake door.
 
-git bay can safely auto-advance landed refs, clean inactive bays, hook/config
-repairs, serial submission of clean branches, and whitelisted mechanical fixes.
-It should not auto-fix semantic conflicts, unclear ownership, red tests with
-product meaning, vendor gitlink ambiguity, or "which version wins" decisions.
-Those become visible exceptions with evidence.
+`git bay open <name>` opens a **bay**: a named loan of an isolated worktree,
+already wired so its `git push` goes to the local PR intake. Pushing fills the
+PR with commits. Submitting hands it to the line. The line runs configured
+steps, proves the result against the refreshed base branch, and records the
+verdict.
+
+```console
+$ git bay init
+$ cd "$(git bay open fix-readme)"
+$ ...edit...
+$ git commit -am "docs: fix readme"
+$ git push
+remote: bay: PR1 opened — git bay submit PR1 when ready
+
+$ git bay submit PR1
+bay: PR1 submitted
+
+$ git bay line integrate PR1
+bay: PR1 checking → checked
+bay: PR1 merging → merged — merged onto main
+
+$ git bay ls PR1
+PR1 merged onto main (checks: ✓)
+```
+
+That is the whole loop: **open** a bay, **push** commits, **submit** the PR,
+**integrate** it through the line, then **close** the bay. Repositories that want
+the shortest path can let `submit` run the default line steps; repositories that
+want an explicit operator keep `submit` as handoff and run `git bay line
+integrate`.
+
+Branches created outside a bay still enter through the same model:
+`git bay submit <branch>` opens a local PR without provisioning a worktree, and
+`git bay open <name> --from <branch>` opens a bay when that branch needs repair.
 
 ## Concepts
 
@@ -94,45 +122,6 @@ normal bay cleanup: `git bay close` changes PR state only when `--withdraw` is
 used on a live PR. Deployment is a configured step over landed state; a failure
 records a deploy verdict and may stop the line, but cannot revoke `merged`.
 
-## Quick Start
-
-### Default Path
-
-```bash
-git bay init
-# open prints the worktree path to stdout, so this is shell-safe
-cd "$(git bay open fix-readme)"
-
-# edit, then use normal git
-git add README.md
-git commit -m "docs: fix readme"
-
-git push
-
-# submit hands the active bay's PR to the line; by default it checks and merges
-git bay submit
-git bay ls
-```
-
-### Explicit Line Run
-
-Use explicit line control when you want `submit` to stop before integration:
-
-```bash
-git config bay.autoMerge false
-
-git bay submit
-git bay line status
-git bay line integrate --steps check,merge
-git bay ls
-```
-
-Add deployment to the same run when configured:
-
-```bash
-git bay line integrate --steps check,merge,deploy
-```
-
 ## Workflow
 
 ```text
@@ -163,6 +152,29 @@ Selector rules:
 With no selector inside a bay, the active bay's PR is used. With no selector
 outside a bay, list/audit commands operate on all visible items and
 `line integrate` operates on the next eligible line item.
+
+## No Unmanaged WIP
+
+Active work is normal. The target is that no surviving branch, ref, or worktree
+is unexplained. Every piece of work should be an active bay, submitted PR,
+waiting step, rejected PR, blocked exception, merged result, or prunable relic.
+
+| Raw WIP | Git bay state |
+| --- | --- |
+| dirty worktree | active bay with owner/name |
+| ahead branch | PR at `pushed` or `submitted` |
+| branch needing repair | `open <name> --from <branch>` |
+| failed tests | `rejected` with check verdict |
+| merge conflict | blocked/rejected with conflict evidence |
+| missing work item | audit exception, not queued |
+| already ancestor of base | terminal/prunable |
+| preserve/archive ref | closed/prunable or named exception |
+
+git bay can safely auto-advance landed refs, clean inactive bays, hook/config
+repairs, serial submission of clean branches, and whitelisted mechanical fixes.
+It should not auto-fix semantic conflicts, unclear ownership, red tests with
+product meaning, vendor gitlink ambiguity, or "which version wins" decisions.
+Those become visible exceptions with evidence.
 
 ## Commands
 
