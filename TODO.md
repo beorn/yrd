@@ -25,7 +25,7 @@ Project-local notes for gitbay only.
 - [ ] Add cwd-as-identifier, variadic targets, and branch resolution for
   `submit <branch>`.
 - [ ] Hide/remove the old branch-intake public verb. Branch-backed workspace
-  provisioning is `open --branch`; branch intake without a bay is
+  provisioning is `open --from`; branch intake without a bay is
   `submit <branch>`.
 - [ ] Add `submit --wait` as the verb-side mirror of `git push -o wait`; it
   returns on terminal verdict or parked waiting state with distinct output.

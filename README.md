@@ -176,7 +176,7 @@ The `status` alias resolves to `ls`; line state uses `line status`.
 
 | Command | Input | Output | State / Exit |
 | --- | --- | --- | --- |
-| `git bay open <name> [--branch <branch>] [--base <branch>]` | work name, source branch defaulting to name, optional base branch | worktree path to stdout; PR/base/branch details to stderr | opens a bay and reserves a PR; refuses invalid names |
+| `git bay open <name> [--from <branch>] [--base <branch>]` | work name, source branch defaulting to name, optional base branch | worktree path to stdout; PR/base/branch details to stderr | opens a bay and reserves a PR; refuses invalid names |
 | `git bay refresh [bay...]` | zero or more bay ids/names | refreshed bay ids | resets idle clock so live work is not pruned; missing bay exits `1` |
 | `git bay submit [selector...] [--wait] [--base <branch>]` | active bay, PR, name, or source branch | PR transition and line verdicts | moves to `submitted`; may run default line steps; `--wait` returns on terminal verdict or parked waiting state |
 | `git bay close [bay...] [--withdraw]` | zero or more bays | closed bay summary | refuses dirty work; live PRs require `--withdraw`; merged/closed PRs are safe |
@@ -282,7 +282,7 @@ the PR source is `branch`, and its destination is `base`.
 
 ```bash
 git bay open fix-release --base release/2.0
-git bay open --branch task/fix-release --base release/2.0
+git bay open fix-release --from task/fix-release --base release/2.0
 git bay submit PR7 --base release/2.0
 git bay line status release/2.0
 ```
