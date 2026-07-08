@@ -25,8 +25,8 @@ import { nextPrId } from "../ids.ts"
  *
  * Interlock rule (spec): this layer consumes only core state (state.prs) and
  * its own slice; it never reaches into a layer above. withMergeWorker builds ON
- * this layer — it reads queuedPrs()/queueTarget() and emits transitions this
- * layer folds — but this layer knows nothing of it.
+ * this layer — it reads submittedPrs()/integratablePrs()/queueTarget() and
+ * emits transitions this layer folds — but this layer knows nothing of it.
  *
  * Purity: the reducer is a pure (state, command) → [events, effects] function.
  * It NEVER touches git, the filesystem, config, Math.random, or Date.now. The
@@ -36,25 +36,33 @@ import { nextPrId } from "../ids.ts"
 
 // ---------- the PR state machine ----------
 
-/** Legal transitions. Exhaustive over PrState so a new state can't be added
- *  without deciding its edges. `open` is where every PR is born (§6 addendum);
- *  `open → queued` is `submit`/`queue` (or a fused push). queued→merging is
- *  direct in v0.1 (no checks layer yet); checking/reviewing are the guarded
- *  rungs a later with*() adds. merging/rejected → queued is the retry/resume
- *  edge (crash recovery). open|queued|rejected|reviewing → abandoned is
- *  `close --withdraw` (v0.3 § verbs): a bay's PR can be withdrawn from any of
- *  those "still live" states; `checking`/`merging` are NOT withdrawable (an
- *  effect may already be in flight for them — wait for the verdict, then
- *  retry or withdraw). */
+/** Legal transitions (docs/model.md § Phases). Exhaustive over PrState so a
+ *  new state can't be added without deciding its edges. `pushed` is where
+ *  every PR is born (a plain `git push`); `pushed → submitted` is `submit`
+ *  (or a fused push). `submitted → checking → checked | rejected` is `check`;
+ *  `checked → merging → merged | rejected` is `merge`; `integrate` walks both
+ *  in one dispatch. `rejected → submitted` is `retry` (re-run from the top —
+ *  a stale `checked` verdict is not trusted after a fix). `merging →
+ *  submitted` is the crash-resume edge (`retry` after a restart finds a PR
+ *  stuck `merging`; re-run the whole pipeline rather than trust a half-landed
+ *  merge). `pushed|submitted|checked|rejected → closed` is `close --withdraw`
+ *  (docs/model.md § Phases: "pushed/submitted/checked → closed", and
+ *  `rejected` joins them — see the verbs table's `retry <PR>: rejected → …,
+ *  or close gives up"). `checking`/`merging` are NOT withdrawable — an effect
+ *  may already be in flight for them; wait for the verdict, then retry or
+ *  withdraw. `reviewing` is reserved for the v0.5 review gate (unreachable
+ *  today; shaped like `checking` so the gate slots in without a TRANSITIONS
+ *  rework). */
 const TRANSITIONS: Record<PrState, PrState[]> = {
-  open: ["queued", "abandoned"],
-  queued: ["checking", "merging", "abandoned"],
-  checking: ["merging", "rejected"],
-  reviewing: ["merging", "rejected", "abandoned"],
-  merging: ["merged", "rejected", "queued"],
-  rejected: ["queued", "abandoned"],
+  pushed: ["submitted", "closed"],
+  submitted: ["checking", "closed"],
+  checking: ["checked", "rejected"],
+  checked: ["merging", "closed"],
+  reviewing: ["merging", "rejected", "closed"],
+  merging: ["merged", "rejected", "submitted"],
+  rejected: ["submitted", "closed"],
   merged: [],
-  abandoned: [],
+  closed: [],
 }
 
 /** Fail-loud transition guard. Called in the REDUCER path (before any event is
@@ -97,15 +105,32 @@ function sliceOf(state: BayState): QueueSlice {
 
 // ---------- pure query helpers (the layer's published read API) ----------
 
-/** PRs currently in `queued` state, FIFO by enqueue order. The merge worker
- *  drains queued[0] (the oldest). A retried PR keeps its original order
- *  position → resume-first fairness (finish the interrupted one first). */
-export function queuedPrs(state: BayState): PullRequest[] {
+/** PRs currently in `submitted` state, FIFO by enqueue order — the ones
+ *  waiting for `check` (or `integrate`) to pick them up. A retried PR keeps
+ *  its original order position → resume-first fairness (finish the
+ *  interrupted one first). */
+export function submittedPrs(state: BayState): PullRequest[] {
   const slice = sliceOf(state)
   const out: PullRequest[] = []
   for (const id of slice.order) {
     const pr = state.prs[id]
-    if (pr && pr.state === "queued") out.push(pr)
+    if (pr && pr.state === "submitted") out.push(pr)
+  }
+  return out
+}
+
+/** PRs `integrate` can act on with no explicit target — `submitted` (needs
+ *  check then merge) or `checked` (needs merge only, e.g. resuming after a
+ *  standalone `check` stopped there) — FIFO by enqueue order, the two states
+ *  interleaved in original order. `integrate` (no PR named) auto-picks the
+ *  oldest of these; anything else (checking, merging, rejected, merged,
+ *  closed) needs `retry`, `merge`, or a named `integrate`/`check` first. */
+export function integratablePrs(state: BayState): PullRequest[] {
+  const slice = sliceOf(state)
+  const out: PullRequest[] = []
+  for (const id of slice.order) {
+    const pr = state.prs[id]
+    if (pr && (pr.state === "submitted" || pr.state === "checked")) out.push(pr)
   }
   return out
 }
@@ -172,11 +197,11 @@ export function stateChangeEvent(
  *  them, this layer folds them, exactly like stateChangeEvent. `via` records
  *  where the PR came from: "push" (a worktree's plain git push, correlated to
  *  a bay) or "submit" (the explicit `adopt <branch>` verb — this absorbs what
- *  v0.2 recorded as a separate `adopt.recorded` row). `queued` (§6 addendum):
- *  true iff this creation is FUSED with an immediate ask-to-merge (a
- *  `-o submit`/`-o wait` push, or `bay.autoQueue`) — the fold plants the PR
- *  straight into `queued` rather than `open` when true. Callers must have
- *  checked uniqueness against state.prs (fail-loud duplicate-id rule lives in
+ *  v0.2 recorded as a separate `adopt.recorded` row). `queued`: true iff this
+ *  creation is FUSED with an immediate ask-to-merge (a `-o submit`/`-o wait`
+ *  push, or `bay.autoQueue`) — the fold plants the PR straight into
+ *  `submitted` rather than `pushed` when true. Callers must have checked
+ *  uniqueness against state.prs (fail-loud duplicate-id rule lives in
  *  reduceEnqueue; builders don't see state). */
 export function prOpenedEvent(
   bay: BayRuntime,
@@ -217,11 +242,17 @@ function reduceEnqueue(bay: BayRuntime, state: BayState, command: BayCommand): T
   }
 
   // `enqueue` is the raw low-level "put it directly in the queue" primitive
-  // (distinct from the user-facing `adopt`, which lands in `open`) — always
-  // queued:true, so it keeps creating PRs directly in `queued`.
+  // (distinct from the user-facing `adopt`, which lands in `pushed`) — always
+  // queued:true, so it keeps creating PRs directly in `submitted`.
   return { state, events: [prOpenedEvent(bay, prId, target, name, "submit", true, command.cause!)], effects: [] }
 }
 
+/** The crash-resume primitive behind `retry` on a PR stuck `merging` (a
+ *  restart found the merge effect never finished — see TRANSITIONS' comment
+ *  on the `merging → submitted` edge): back to `submitted` so `integrate`
+ *  re-runs the WHOLE pipeline rather than trust a half-landed merge.
+ *  stateChangeEvent validates existing.state → submitted: legal only from
+ *  merging (resume) or rejected (retry); anything else throws. */
 function reduceRequeue(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const pr = command.args?.pr
   if (typeof pr !== "string" || pr === "") {
@@ -231,20 +262,18 @@ function reduceRequeue(bay: BayRuntime, state: BayState, command: BayCommand): T
   if (!existing) {
     throw new Error(`bay: retry: no PR '${pr}' — nothing to retry`)
   }
-  // stateChangeEvent validates existing.state → queued: legal only from merging
-  // (resume) or rejected (retry); anything else (open/queued/checking/merged) throws.
-  const event = stateChangeEvent(bay, pr, existing.state, "queued", command.cause!)
+  const event = stateChangeEvent(bay, pr, existing.state, "submitted", command.cause!)
   return { state, events: [event], effects: [] }
 }
 
-/** `submit`/`queue` (§6 addendum, "ask to merge"): open → queued on an
- *  ALREADY-existing PR. Refuses with a teaching message naming the right verb
- *  for every other state (merged/abandoned are terminal; queued/checking/
- *  merging are already in flight; rejected wants `retry`, not `submit`). The
- *  CLI follows this with a `drain` targeted at the same PR — queuing is what
- *  starts the check/merge pipeline (spec § event schema v2: "the pipeline now
- *  only starts when a PR is queued"), so both this verb and a fused
- *  `-o submit` push converge on the identical downstream behavior. */
+/** `submit` (ask to merge): pushed → submitted on an ALREADY-existing PR.
+ *  Refuses with a teaching message naming the right verb for every other
+ *  state (merged/closed are terminal; submitted/checking/checked/merging are
+ *  already in flight; rejected wants `retry`, not `submit`). The CLI follows
+ *  this with an `integrate` targeted at the same PR — submitting is what
+ *  starts the check/merge pipeline (docs/model.md § Verbs: "submit … Never
+ *  merges"), so both this verb and a fused `-o submit` push converge on the
+ *  identical downstream behavior. */
 function reduceQueue(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const pr = command.args?.pr
   if (typeof pr !== "string" || pr === "") {
@@ -254,7 +283,12 @@ function reduceQueue(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   if (!existing) {
     throw new Error(`bay: submit: no PR '${pr}' — git bay ls lists them`)
   }
-  if (existing.state === "queued" || existing.state === "checking" || existing.state === "merging") {
+  if (
+    existing.state === "submitted" ||
+    existing.state === "checking" ||
+    existing.state === "checked" ||
+    existing.state === "merging"
+  ) {
     throw new Error(`bay: submit: ${pr} is already ${existing.state} — git bay ls ${pr}`)
   }
   if (existing.state === "merged") {
@@ -263,18 +297,18 @@ function reduceQueue(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   if (existing.state === "rejected") {
     throw new Error(`bay: submit: ${pr} was rejected — put it back in the queue with git bay retry ${pr}`)
   }
-  if (existing.state === "abandoned") {
+  if (existing.state === "closed") {
     throw new Error(`bay: submit: ${pr} was withdrawn — start the next piece of work: git bay open <name>`)
   }
-  if (existing.state !== "open") {
+  if (existing.state !== "pushed") {
     // "reviewing" — legal per the type, unreachable today (review-gate is v0.5).
     // stateChangeEvent's assertTransition throws the generic illegal-transition
     // error rather than a hand-written teaching message for a state nothing
     // can produce yet.
-    const event = stateChangeEvent(bay, pr, existing.state, "queued", command.cause!)
+    const event = stateChangeEvent(bay, pr, existing.state, "submitted", command.cause!)
     return { state, events: [event], effects: [] }
   }
-  const event = stateChangeEvent(bay, pr, "open", "queued", command.cause!)
+  const event = stateChangeEvent(bay, pr, "pushed", "submitted", command.cause!)
   return { state, events: [event], effects: [] }
 }
 
@@ -291,7 +325,7 @@ function apply(state: BayState, event: BayEvent): BayState {
         lease: "", // enqueued targets are not necessarily bound to a lease
         revision: 1,
         repos: [], // cross-repo structure resolved later; `target` is the merge locator
-        state: d.queued ? "queued" : "open", // §6 addendum: born `open` unless fused with an immediate queue
+        state: d.queued ? "submitted" : "pushed", // born `pushed` unless fused with an immediate submit
       }
       return {
         ...state,

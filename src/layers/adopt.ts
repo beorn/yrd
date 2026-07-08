@@ -4,14 +4,14 @@ import { prOpenedEvent } from "./queue.ts"
 import { leaseForBranch } from "./receive.ts"
 
 /**
- * withAdopt — the reducer behind `git bay adopt <branch>` (§6 addendum:
- * `adopt` is now its OWN advertised verb — "create a PR for an existing
- * branch, landing in `open`" — after `submit` was repurposed to mean "ask to
- * merge" (open → queued; see queue.ts's reduceQueue). `enqueue` remains a
- * hidden CLI alias of `adopt`, preserving its historical behavior). It is
- * pure bookkeeping over the queue: no effects, no git. It correlates a branch
- * created outside a worktree to a fresh PR number and lands it as a
- * first-class PR in `open` — never auto-queued (that is `submit`'s job now).
+ * withAdopt — the reducer behind `git bay adopt <branch>` — its own
+ * advertised verb: "create a PR for an existing branch, landing in `pushed`"
+ * — distinct from `submit`, which means "ask to merge" (pushed → submitted;
+ * see queue.ts's reduceQueue). `enqueue` remains a hidden CLI alias of
+ * `adopt`, preserving its historical behavior. It is pure bookkeeping over
+ * the queue: no effects, no git. It correlates a branch created outside a
+ * worktree to a fresh PR number and lands it as a first-class PR in `pushed`
+ * — never auto-submitted (that is `submit`'s job).
  *
  * Design note — what adopting a branch buys and its audit contract:
  *   Adopting a legacy branch makes it a first-class PR so the merge worker /
@@ -96,7 +96,7 @@ function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   if (tracked) {
     const pr = state.prs[tracked]
     throw new Error(
-      `bay: adopt: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "open"}) — ` +
+      `bay: adopt: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "pushed"}) — ` +
         `git bay ls ${tracked}`,
     )
   }
@@ -109,8 +109,8 @@ function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): Tra
     throw new Error(`bay: adopt: PR '${prId}' already exists — '${branch}' was adopted before`)
   }
 
-  // queued: false — adopt only ever lands in `open`; `git bay submit <PR>`
-  // (or `queue`) is the separate ask-to-merge step (§6 addendum).
+  // queued: false — adopt only ever lands in `pushed`; `git bay submit <PR>`
+  // is the separate ask-to-merge step.
   const opened = prOpenedEvent(bay, prId, branch, name, "submit", false, command.cause!)
   return { state, events: [opened], effects: [] }
 }

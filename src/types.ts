@@ -30,22 +30,37 @@ export type RepoEntry = {
 }
 
 /**
- * §6 addendum: creation and the ask-to-land are separate acts, like a real
- * GitHub PR. `open` is where every PR is born — a push creates one and stops
- * there by default. `submit`/`queue` (or a fused push: `-o submit`/`-o wait`/
- * `bay.autoQueue`) is what moves it to `queued`, which is what starts the
- * check/merge pipeline (queued → checking → merging → …, unchanged). `open`
- * and `queued` both accept `close --withdraw` (→ abandoned).
+ * The model (docs/model.md): creation, the ask-to-land, checking, and merging
+ * are four separate acts, like a real GitHub PR. `pushed` is where every PR is
+ * born — a plain `git push` creates one and stops there by default. `submit`
+ * (or a fused push: `-o submit`/`-o wait`/`bay.autoQueue`) moves it to
+ * `submitted`, which is what starts the pipeline: `check` runs `submitted →
+ * checking → checked | rejected`; `merge` runs `checked → merging → merged`;
+ * `integrate` is the umbrella that walks a PR through both, one dispatch,
+ * start to finish (docs/model.md § Verbs — only `integrate` auto-flows).
+ * `open` is DERIVED, never stored: `isOpen(pr) = phase not in {merged,
+ * closed}` — see `isOpen()` below. `pushed`/`submitted`/`checked`/`rejected`
+ * all accept `close --withdraw` (→ closed).
  */
 export type PrState =
-  | "open"
-  | "queued"
+  | "pushed"
+  | "submitted"
   | "checking"
-  | "reviewing"
+  | "checked"
+  | "reviewing" // reserved: slots between `checked` and `merging` when the v0.5 review gate lands; unreachable today
   | "merging"
   | "merged"
   | "rejected"
-  | "abandoned"
+  | "closed"
+
+/** Status: open · merged · closed (docs/model.md § Status). `open` has no
+ *  stored representation — a PR is open whenever it is neither merged nor
+ *  closed, so this is the ONLY place "is this PR still in flight" is decided;
+ *  every caller (`ls`, `close`'s withdrawable check, …) reads through here
+ *  rather than re-deriving its own state list. */
+export function isOpen(state: PrState): boolean {
+  return state !== "merged" && state !== "closed"
+}
 
 export type PullRequest = {
   id: PrId
@@ -65,20 +80,22 @@ export type AuditFinding = {
 
 // ---------- rejection/refusal codes (closed unions; docs/events.md § event families) ----------
 
-/** Machine-readable reason a queued PR was rejected (`pr/changed {to: "rejected", code}`).
+/** Machine-readable reason a submitted PR was rejected (`pr/changed {to: "rejected", code}`).
  *  Closed on purpose — `stats` (a later slice) counts by code, so a new failure
  *  mode must be named here before it can reject anything. Anchor set covers
- *  every `stateChangeEvent(..., "rejected", ...)` call site in receive.ts
- *  (the submitter's checking pipeline) and merge-worker.ts (the integrate
- *  pipeline); `pin-rewind`, `queue-full`, `poison-retry` are reserved for the
- *  submodule guard and the v0.4 WIP-limit / retry-storm slices. */
+ *  every `stateChangeEvent(..., "rejected", ...)` call site in pipeline.ts
+ *  (the shared check/merge runners behind the `check`/`merge`/`integrate`
+ *  verbs AND a fused push's continuation — one implementation, every path
+ *  rejects with the same codes); `pin-rewind`, `queue-full`, `poison-retry`
+ *  are reserved for the submodule guard and the v0.4 WIP-limit / retry-storm
+ *  slices. */
 export type RejectionCode =
-  | "check-failed" // bay.check exited nonzero (receive.ts)
-  | "dirty-mainline" // mainline working tree was dirty at merge time (receive.ts)
-  | "merge-conflict" // git merge --no-ff onto mainline failed (receive.ts)
-  | "unresolvable-target" // integrate's target does not resolve to a commit (merge-worker.ts)
-  | "lying-merge" // merge command exited 0 but target is not an ancestor (merge-worker.ts)
-  | "merge-command-failed" // the configured merge command itself exited nonzero (merge-worker.ts)
+  | "check-failed" // bay.check exited nonzero (pipeline.ts's runProjectCheck)
+  | "dirty-mainline" // mainline working tree was dirty at merge time (pipeline.ts's runMerge, native path)
+  | "merge-conflict" // git merge --no-ff onto mainline failed (pipeline.ts's runMerge, native path)
+  | "unresolvable-target" // the merge target does not resolve to a commit (pipeline.ts's runMerge)
+  | "lying-merge" // merge command exited 0 but target is not an ancestor (pipeline.ts's runMerge)
+  | "merge-command-failed" // the configured merge command itself exited nonzero (pipeline.ts's runMerge)
   | "pin-rewind" // reserved: a gitlink pin move that is a genuine history rewind
   | "queue-full" // reserved: v0.4 WIP limit
   | "poison-retry" // reserved: a PR retried past a failure-count ceiling
@@ -92,14 +109,13 @@ export type RejectionCode =
 export type RefusalCode =
   | "pr-still-queued" // close refused: the bay's PR is still live — use --withdraw
   | "doors-closed" // submit/push refused: the PR is already merged or was withdrawn
-  | "pr-not-open" // reserved: submit/queue refused — the PR isn't in `open` (§6 addendum)
+  | "pr-not-pushed" // reserved: submit refused — the PR isn't in `pushed`
   | "tracker-unknown" // reserved: open refused, the tracker doesn't know the name
   | "pool-exhausted" // reserved: v0.4 pooling, no worktree available
   | "unknown-bay" // reserved: refresh/close addressed a bay that doesn't exist
   | "bay-dirty" // reserved: close refused, uncommitted work in the worktree
   | "pin-rewind" // reserved: the submodule guard's pin-rewind refusal
   | "queue-full" // reserved: v0.4 WIP limit
-  | "mergecommand-unset" // reserved: integrate refused, no merge command configured
   | "poison-retry" // reserved: retry refused past a failure-count ceiling
   | "not-in-review" // reserved: v0.5 review gate, approve/reject on a PR not in review
 
@@ -180,12 +196,14 @@ export type GitbayEvent =
   | { name: "bay/closed"; data: { bay: LeaseId; via: DeprovisionVia } }
   | {
       name: "pr/opened"
-      // `queued` (§6 addendum): true iff this creation was FUSED with an
-      // immediate ask-to-merge (`-o submit`/`-o wait` push, or `bay.autoQueue`)
-      // — the fold plants the PR straight into `queued` instead of `open`
-      // when true, so no separate pr/changed{open→queued} is needed for the
-      // fused case (only the explicit `submit`/`queue` verb on an ALREADY-open
-      // PR emits that transition as its own event).
+      // `queued`: true iff this creation was FUSED with an immediate
+      // ask-to-merge (`-o submit`/`-o wait` push, or `bay.autoQueue`) — the
+      // fold plants the PR straight into `submitted` instead of `pushed` when
+      // true, so no separate pr/changed{pushed→submitted} is needed for the
+      // fused case (only the explicit `submit` verb on an already-`pushed`
+      // PR emits that transition as its own event). The field keeps its
+      // pre-model.md name — it is the fused signal, not a literal echo of the
+      // `submitted` state name.
       data: { pr: PrId; target: string; workName: WorkitemId | null; via: "push" | "submit"; queued: boolean }
     }
   | {

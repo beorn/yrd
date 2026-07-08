@@ -12,6 +12,7 @@ import type {
   PrId,
   TransitionResult,
 } from "../types.ts"
+import { isOpen } from "../types.ts"
 import { existsSync } from "node:fs"
 import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
@@ -213,11 +214,16 @@ function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   // never advertised as something to type.
   const addressedAs = typeof command.args?.wt === "string" ? command.args.wt : leaseId
 
-  if (pr && pr.state !== "merged" && pr.state !== "abandoned") {
-    // §6 addendum: `open` joined the withdrawable set — a PR born by a bare
-    // push (never submitted) is exactly as "still live" as a queued one.
+  if (pr && isOpen(pr.state)) {
+    // docs/model.md § Phases: pushed/submitted/checked/rejected → closed —
+    // a PR born by a bare push (never submitted) is exactly as "still live"
+    // as a submitted one.
     const withdrawable =
-      pr.state === "open" || pr.state === "queued" || pr.state === "rejected" || pr.state === "reviewing"
+      pr.state === "pushed" ||
+      pr.state === "submitted" ||
+      pr.state === "checked" ||
+      pr.state === "rejected" ||
+      pr.state === "reviewing"
     if (!withdraw) {
       const detail =
         `${pr.id} is ${pr.state} — integrate it (git bay integrate ${pr.id}), ` +
@@ -236,7 +242,7 @@ function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): Tra
       )
     }
     events.push(
-      stateChangeEvent(bay, pr.id, pr.state, "abandoned", command.cause!, { detail: "withdrawn by close --withdraw" }),
+      stateChangeEvent(bay, pr.id, pr.state, "closed", command.cause!, { detail: "withdrawn by close --withdraw" }),
     )
   }
 

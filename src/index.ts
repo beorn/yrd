@@ -14,7 +14,7 @@ export {
   type WorktreesOptions,
   type WorktreesSlice,
 } from "./layers/worktrees.ts"
-export { withQueue, queuedPrs, type QueueSlice } from "./layers/queue.ts"
+export { withQueue, submittedPrs, integratablePrs, type QueueSlice } from "./layers/queue.ts"
 export { overlap, composeBatch, type Overlap, type SkippedTarget, type BatchResult } from "./batch-compat.ts"
 export { changedPaths } from "./layers/git.ts"
 export { withMergeWorker, type MergeWorkerOptions } from "./layers/merge-worker.ts"
