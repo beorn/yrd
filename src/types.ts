@@ -29,7 +29,16 @@ export type RepoEntry = {
   gitlink?: { from: string; to: string }
 }
 
+/**
+ * §6 addendum: creation and the ask-to-land are separate acts, like a real
+ * GitHub PR. `open` is where every PR is born — a push creates one and stops
+ * there by default. `submit`/`queue` (or a fused push: `-o submit`/`-o wait`/
+ * `bay.autoQueue`) is what moves it to `queued`, which is what starts the
+ * check/merge pipeline (queued → checking → merging → …, unchanged). `open`
+ * and `queued` both accept `close --withdraw` (→ abandoned).
+ */
 export type PrState =
+  | "open"
   | "queued"
   | "checking"
   | "reviewing"
@@ -170,7 +179,13 @@ export type GitbayEvent =
   | { name: "bay/closed"; data: { bay: LeaseId; via: DeprovisionVia } }
   | {
       name: "pr/opened"
-      data: { pr: PrId; target: string; workName: WorkitemId | null; via: "push" | "submit" }
+      // `queued` (§6 addendum): true iff this creation was FUSED with an
+      // immediate ask-to-merge (`-o submit`/`-o wait` push, or `bay.autoQueue`)
+      // — the fold plants the PR straight into `queued` instead of `open`
+      // when true, so no separate pr/changed{open→queued} is needed for the
+      // fused case (only the explicit `submit`/`queue` verb on an ALREADY-open
+      // PR emits that transition as its own event).
+      data: { pr: PrId; target: string; workName: WorkitemId | null; via: "push" | "submit"; queued: boolean }
     }
   | {
       name: "pr/changed"
