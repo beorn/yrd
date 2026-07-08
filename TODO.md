@@ -19,9 +19,9 @@ Project-local notes for gitbay only.
 
 ## Next Model Refinements
 
-- [ ] Add per-PR base storage and `--base`/`--line` aliases, while keeping the
-  initial queue serial per base. The line sits on a base branch; there is no
-  separate queue id/object.
+- [ ] Add per-PR source/base storage and `--from`/`--head` plus `--base`/`--line`
+  aliases, while keeping the initial queue serial per base. The line sits on a
+  base branch; there is no separate queue id/object.
 - [ ] Add cwd-as-identifier, variadic targets, and branch resolution for
   `submit <branch>`.
 - [ ] Hide/remove the old branch-intake public verb. Branch-backed workspace

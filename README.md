@@ -287,9 +287,8 @@ git bay submit PR7 --base release/2.0
 git bay line status release/2.0
 ```
 
-`--base` is the canonical Git/PR spelling. `--line` is an exact alias when the
-caller wants to think in git bay's line vocabulary. Both set the PR's `base`
-field.
+`--from` and `--base` are the canonical flags. `--head` aliases `--from` for
+GitHub PR vocabulary; `--line` aliases `--base` for git bay's line vocabulary.
 
 The default line sits on the repository default branch. There is no separate line
 object to create: selecting another base branch uses the line sitting on that
