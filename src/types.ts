@@ -223,6 +223,58 @@ export type GitbayEvent =
         detail?: string
       }
     }
+  | {
+      name: "queue/reordered"
+      // Partial order on purpose: PRs omitted from `order` keep their relative
+      // order AFTER the listed ids (the fold appends them). Emitted by layers
+      // above the queue (batch-build's candidate-first placement), folded by
+      // the queue — same composition contract as pr/opened.
+      data: { order: PrId[]; detail?: string }
+    }
+  | {
+      name: "batch/composed"
+      // The compatibility fold's verdict BEFORE any git work: which submitted
+      // PRs ride this candidate and which were held back (path-overlap /
+      // batch-full). An empty compose (no submitted PRs at all) is a
+      // non-event and never journaled (docs/events.md § event families).
+      data: {
+        batch: PrId
+        base: string
+        members: { pr: PrId; target: string }[]
+        skipped: { target: string; reason: "path-overlap" | "batch-full"; overlapWith: string; paths: string[] }[]
+      }
+    }
+  | {
+      name: "batch/built"
+      // The scratch candidate exists: its branch, its base, who is aboard,
+      // who was ejected on a scratch-merge conflict, and the per-member
+      // prefix tips bisect walks on a red gate. `sourceBatch` marks a rebuild
+      // after an ejection (batch/bisect-checked found the red member there).
+      data: {
+        batch: PrId
+        target: string
+        base: string
+        members: { pr: PrId; target: string }[]
+        ejected: { pr: PrId; target: string; detail: string }[]
+        prefixes: { pr: PrId; target: string; index: number; prefixTarget: string }[]
+        sourceBatch?: PrId
+      }
+    }
+  | {
+      name: "batch/bisect-checked"
+      // One gate run against one prefix tip during red-batch recovery —
+      // `ok: false` names the first faulting member (walk stops there).
+      data: {
+        batch: PrId
+        pr: PrId
+        target: string
+        memberTarget: string
+        index: number
+        ok: boolean
+        detail?: string
+      }
+    }
+  | { name: "batch/member-ejected"; data: { batch: PrId; pr: PrId; target: string; detail: string } }
 
 /** Why a bay (and its worktree) closed — unifies the old `endReason` +
  *  `via` split into one field: "close" (voluntary, `close`/`close --withdraw`),

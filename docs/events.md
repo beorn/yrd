@@ -9,7 +9,11 @@ gitbay/…      the system        initialized · refused {code, detail} · audit
 worktree/…    the directories   provisioned · deprovisioned {via}
 bay/…         the loans         opened {worktree, recycled} · refreshed · closed {via}
 pr/…          the work          opened {via, queued} · changed {from, to, revision?, code?}
+queue/…       the order         reordered {order, detail?} — partial order; omitted PRs keep their relative place after the listed ids
+batch/…       the candidates    composed {members, skipped} · built {target, members, ejected, prefixes} · bisect-checked {ok} · member-ejected {detail}
 ```
+
+An empty batch compose (no submitted PRs at all) is a non-event, exactly like the empty integrate run below — the CLI derives "nothing to batch" from the silent dispatch.
 
 A PR is born `pushed` (a push, or `git bay adopt <branch>`) and moves to `submitted` only when asked to merge — `git bay submit <PR>`, or a push fused with `bay.autoSubmit`, a forcing `-o submit`/`-o wait`, or legacy `bay.autoQueue`. `pr/opened`'s `queued` field (a literal boolean, its name predates the phase rename) says which: true for a fused creation (the fold plants it straight into `submitted`, no separate transition event); false for a bare creation, in which case a later `pr/changed {from: "pushed", to: "submitted"}` records the explicit ask. Whether a submitted PR then ALSO auto-integrates to `merged` is the separate `bay.autoMerge` decision (docs/model.md § The auto-flow) — not recorded on `queued`.
 

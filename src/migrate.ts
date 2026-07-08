@@ -21,9 +21,14 @@ import type { DeprovisionVia, RejectionCode } from "./types.ts"
  *   workspace.retired     → worktree/deprovisioned (via inherited from the lease's last bay/closed)
  *   pr.opened             → pr/opened             (via inferred: "push" iff a lease pre-minted this PR)
  *   pr.state-changed       → pr/changed            (rejected rows get a code inferred from `detail`)
+ *   queue.reordered        → queue/reordered       (payload 1:1)
+ *   batch.composed         → batch/composed        (payload 1:1; the 20955-20957 batch dialect)
+ *   batch.built            → batch/built           (payload 1:1)
+ *   batch.bisect.checked   → batch/bisect-checked  (payload 1:1)
+ *   batch.member.ejected   → batch/member-ejected  (payload 1:1)
  * Dropped (non-events; docs/events.md § event families: "an empty integrate
  * run, a prune that removed nothing" are deliberately never journaled):
- *   queue.empty, gc.clean
+ *   queue.empty, gc.clean, batch.empty
  * Absorbed, not replayed (adopt.recorded added no field pr/opened doesn't
  * already carry once `via` exists):
  *   adopt.recorded
@@ -250,9 +255,33 @@ export async function migrateJournal(dir: string): Promise<{ migrated: number; d
         out.push({ id: nextId(), ts: event.ts, name: "pr/changed", cause, data })
         break
       }
+      case "queue.reordered": {
+        out.push({ id: nextId(), ts: event.ts, name: "queue/reordered", cause, data: d })
+        break
+      }
+      // The 20955-20957 batch dialect (pre-v0.3 journals from repos that ran
+      // batch integration) — payloads carry over 1:1; only the names move to
+      // the slash grammar.
+      case "batch.composed": {
+        out.push({ id: nextId(), ts: event.ts, name: "batch/composed", cause, data: d })
+        break
+      }
+      case "batch.built": {
+        out.push({ id: nextId(), ts: event.ts, name: "batch/built", cause, data: d })
+        break
+      }
+      case "batch.bisect.checked": {
+        out.push({ id: nextId(), ts: event.ts, name: "batch/bisect-checked", cause, data: d })
+        break
+      }
+      case "batch.member.ejected": {
+        out.push({ id: nextId(), ts: event.ts, name: "batch/member-ejected", cause, data: d })
+        break
+      }
       case "adopt.recorded":
       case "queue.empty":
       case "gc.clean":
+      case "batch.empty":
         dropped++
         break
       default:

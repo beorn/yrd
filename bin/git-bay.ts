@@ -14,7 +14,7 @@ import { Command } from "@silvery/commander/plain"
 import { colorizeHelp, shouldColorize } from "@silvery/commander"
 import { readFile, rename } from "node:fs/promises"
 import { join } from "node:path"
-import type { BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
+import type { BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
 import { isOpen } from "../src/types.ts"
 import { createGitbay } from "../src/core.ts"
 import { pipe } from "../src/pipe.ts"
@@ -23,6 +23,7 @@ import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
 import { withWorktrees, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/worktrees.ts"
 import { withQueue, submittedPrs } from "../src/layers/queue.ts"
+import { withBatchBuild } from "../src/layers/batch-build.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
   withReceive,
@@ -37,7 +38,33 @@ import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
 
 // ---------- context ----------
 
-type Ctx = { mainRepo: string; bayDir: string; repoGit: string; actor: string; leaseTimeoutMs?: number }
+type Ctx = {
+  mainRepo: string
+  bayDir: string
+  repoGit: string
+  actor: string
+  leaseTimeoutMs?: number
+  batchSize: number
+  batchGeneratedGlobs: string[]
+  batchGateCommand?: string
+}
+
+function parsePositiveConfigInt(raw: string | undefined, key: string, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`bay: bay.${key} is set to '${raw}' — expected a positive integer`)
+  }
+  return value
+}
+
+function parseConfigList(raw: string | undefined): string[] {
+  if (raw === undefined) return []
+  return raw
+    .split(/[\n,]/u)
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+}
 
 async function resolveCtx(): Promise<Ctx> {
   // Hooks run inside the bare repo with BAY_MAIN_REPO pinned; interactive runs
@@ -75,7 +102,20 @@ async function resolveCtx(): Promise<Ctx> {
       throw new Error(`bay: bay.leaseTimeoutMs is set to '${ttlRaw}' — not a positive number of milliseconds`)
     }
   }
-  return { mainRepo, bayDir, repoGit: join(bayDir, "repo.git"), actor, leaseTimeoutMs }
+  const batchSize = parsePositiveConfigInt(await source.get("queue.batch-size"), "queue.batch-size", 1)
+  const batchGeneratedGlobs = parseConfigList(await source.get("queue.regen-paths"))
+  const rawGate = await source.get("check")
+  const batchGateCommand = rawGate !== undefined && rawGate.trim() !== "" ? rawGate : undefined
+  return {
+    mainRepo,
+    bayDir,
+    repoGit: join(bayDir, "repo.git"),
+    actor,
+    leaseTimeoutMs,
+    batchSize,
+    batchGeneratedGlobs,
+    batchGateCommand,
+  }
 }
 
 function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRuntime {
@@ -83,6 +123,12 @@ function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRunti
     createGitbay({ store, actor: ctx.actor }),
     withWorktrees({ mainRepo: ctx.mainRepo, bayRemote: ctx.repoGit, leaseTimeoutMs: ctx.leaseTimeoutMs }),
     withQueue(),
+    withBatchBuild({
+      mainRepo: ctx.mainRepo,
+      generatedGlobs: ctx.batchGeneratedGlobs,
+      max: ctx.batchSize > 1 ? ctx.batchSize : undefined,
+      gateCommand: ctx.batchGateCommand,
+    }),
     withMergeWorker({ configCwd: ctx.mainRepo, mainRepo: ctx.mainRepo }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
     withAdopt(),
@@ -187,7 +233,9 @@ function prOrTeach(state: BayState, prId: PrId, verb: string): PullRequest {
   const pr = state.prs[prId]
   if (pr) return pr
   const lease = Object.values(state.leases).find((l) => l.changeId === prId && l.endedAt === undefined)
-  const where = lease ? `${wtLabelFor(state, lease.id) ?? "its worktree"} (${lease.workitem ?? lease.branch})` : "its worktree"
+  const where = lease
+    ? `${wtLabelFor(state, lease.id) ?? "its worktree"} (${lease.workitem ?? lease.branch})`
+    : "its worktree"
   throw new Error(
     `bay: ${verb}: ${prId} has no PR yet — nothing has been pushed from ${where}; plain git push opens it`,
   )
@@ -283,7 +331,7 @@ function prLine(pr: PullRequest, detail: string | undefined): string {
     if (m) return `${pr.id} merged ${m[1]} onto ${m[2]} (checks: ✓)`
     return `${pr.id} merged (checks: ✓)`
   }
-  if (pr.state === "rejected") return `${pr.id} rejected — ${detail ?? "see journal"}`
+  if (pr.state === "rejected") return `${pr.id} rejected — ${firstDetailLine(detail) ?? "see journal"}`
   return `${pr.id} ${pr.state}`
 }
 
@@ -296,6 +344,78 @@ async function lastDetail(bay: BayRuntime, id: PrId): Promise<string | undefined
     if (d.pr === id && d.detail !== undefined) detail = d.detail
   }
   return detail
+}
+
+type BatchSummaryMember = {
+  pr: PrId
+  target: string
+  detail?: string
+}
+
+type BatchSummaryRecord = {
+  batch: PrId
+  target: string
+  members: BatchSummaryMember[]
+  ejected: BatchSummaryMember[]
+  state: string
+}
+
+function batchSlice(state: BayState): Record<PrId, BatchSummaryRecord> {
+  const slice = state.slices["batch-build"] as { batches?: Record<PrId, BatchSummaryRecord> } | undefined
+  return slice?.batches ?? {}
+}
+
+function batchRecord(state: BayState, pr: PrId): BatchSummaryRecord | undefined {
+  return batchSlice(state)[pr]
+}
+
+function memberList(members: readonly BatchSummaryMember[]): string {
+  return members.map((member) => member.pr).join(", ")
+}
+
+function batchStatusLine(batch: BatchSummaryRecord): string {
+  const ejected = batch.ejected.length > 0 ? `; ejected: ${memberList(batch.ejected)}` : ""
+  const members = batch.members.length > 0 ? memberList(batch.members) : "(none)"
+  return `batch ${batch.batch} ${batch.state} — members: ${members}${ejected}`
+}
+
+function firstDetailLine(detail: unknown): string | undefined {
+  if (typeof detail !== "string" || detail.trim() === "") return undefined
+  return detail.split("\n")[0]
+}
+
+function printBatchAwareEvents(events: readonly BayEvent[]): void {
+  for (const e of events) {
+    if (e.name === "batch/composed") {
+      const d = e.data as { batch?: PrId; members?: BatchSummaryMember[]; skipped?: unknown[] }
+      if (!d.batch) continue
+      const skipped = Array.isArray(d.skipped) && d.skipped.length > 0 ? `; skipped: ${d.skipped.length}` : ""
+      console.log(`bay: batch ${d.batch} composed — members: ${memberList(d.members ?? [])}${skipped}`)
+      continue
+    }
+    if (e.name === "batch/member-ejected") {
+      const line = firstDetailLine((e.data as { detail?: unknown })?.detail)
+      if (line) console.log(line)
+      continue
+    }
+    if (e.name === "batch/built") {
+      const d = e.data as { batch?: PrId; members?: BatchSummaryMember[]; ejected?: BatchSummaryMember[] }
+      if (!d.batch) continue
+      const ejected = d.ejected && d.ejected.length > 0 ? `; ejected: ${memberList(d.ejected)}` : ""
+      console.log(`bay: batch ${d.batch} built — members: ${memberList(d.members ?? [])}${ejected}`)
+      continue
+    }
+    if (e.name !== "pr/changed") continue
+    const d = e.data as { pr: string; from: string; to: string; detail?: string }
+    if (
+      d.detail?.startsWith("batched in ") ||
+      d.detail?.startsWith("build attempted") ||
+      d.detail?.includes(" ejected from batch ")
+    ) {
+      continue
+    }
+    console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
+  }
 }
 
 // ---------- verbs ----------
@@ -366,14 +486,16 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
     const prId = resolvePr(state, target)
     const pr = prOrTeach(state, prId, "ls")
     if (json) {
-      console.log(JSON.stringify({ pr, detail: await lastDetail(bay, prId) }))
+      console.log(JSON.stringify({ pr, detail: await lastDetail(bay, prId), batch: batchRecord(state, prId) }))
       return
     }
     console.log(prLine(pr, await lastDetail(bay, prId)))
+    const batch = batchRecord(state, prId)
+    if (batch) console.log(batchStatusLine(batch))
     return
   }
   if (json) {
-    console.log(JSON.stringify({ leases: state.leases, prs: state.prs }))
+    console.log(JSON.stringify({ leases: state.leases, prs: state.prs, batches: batchSlice(state) }))
     return
   }
   console.log(worktreeTable(state, ctx.actor, Date.now(), ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS))
@@ -388,7 +510,9 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
     for (const pr of active) {
       const detail = await lastDetail(bay, pr.id)
       const firstLine = detail?.split("\n")[0] ?? ""
-      const brief = firstLine.length > 100 ? firstLine.slice(0, 99) + "…" : firstLine
+      const batch = batchRecord(state, pr.id)
+      const briefSource = batch ? batchStatusLine(batch) : firstLine
+      const brief = briefSource.length > 100 ? briefSource.slice(0, 99) + "…" : briefSource
       console.log(`${pr.id}  ${pr.state}${brief ? ` — ${brief}` : ""}`)
     }
   }
@@ -416,7 +540,10 @@ async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | un
   // worktree — resolve it to that worktree's branch and let the reducer's
   // guards teach (an OPEN worktree's branch opens its PR by plain git push).
   let branch = target
-  const resolved = await git(["-C", ctx.mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], ctx.mainRepo)
+  const resolved = await git(
+    ["-C", ctx.mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`],
+    ctx.mainRepo,
+  )
   if (resolved.code !== 0) {
     const state = await readBay(ctx).state()
     const named = Object.values(state.leases)
@@ -654,6 +781,45 @@ async function verbMerge(ctx: Ctx, target: string | undefined): Promise<void> {
   })
 }
 
+function queuedBatchAlreadyBuilt(state: BayState): boolean {
+  const queued = submittedPrs(state)
+  if (queued.length === 0) return false
+  return batchRecord(state, queued[0]!.id) !== undefined
+}
+
+async function maybeBuildBatch(ctx: Ctx, bay: BayRuntime, target: PrId | undefined): Promise<boolean> {
+  if (target !== undefined || ctx.batchSize <= 1) return false
+  const state = await bay.state()
+  if (queuedBatchAlreadyBuilt(state)) return false
+  if (submittedPrs(state).length < 2) return false
+  const { events } = await bay.dispatch({ type: "batch-build", args: { max: ctx.batchSize } })
+  printBatchAwareEvents(events)
+  return events.some((e) => e.name === "batch/built" || e.name === "batch/member-ejected")
+}
+
+function rejectedBatchFrom(events: readonly BayEvent[], state: BayState): PrId | undefined {
+  for (const e of events) {
+    if (e.name !== "pr/changed") continue
+    const d = e.data as { pr?: string; to?: string }
+    if (d.to === "rejected" && d.pr && batchRecord(state, d.pr)) return d.pr
+  }
+  return undefined
+}
+
+async function bisectAndDrainRebuiltBatch(bay: BayRuntime, batch: PrId): Promise<boolean> {
+  const { events } = await bay.dispatch({ type: "batch-bisect", args: { pr: batch } })
+  printBatchAwareEvents(events)
+  const rebuilt = events.find((e) => e.name === "batch/built")?.data as { batch?: PrId } | undefined
+  if (!rebuilt?.batch) return events.length > 0
+
+  const drained = await bay.dispatch({ type: "integrate", args: { pr: rebuilt.batch } })
+  printBatchAwareEvents(drained.events)
+  const state = await bay.state()
+  const rejected = rejectedBatchFrom(drained.events, state)
+  if (rejected) await bisectAndDrainRebuiltBatch(bay, rejected)
+  return true
+}
+
 async function verbIntegrate(ctx: Ctx, target: string | undefined, watch: boolean, intervalSec: number): Promise<void> {
   await withWriteBay(ctx, async (bay) => {
     let prId: PrId | undefined
@@ -664,8 +830,13 @@ async function verbIntegrate(ctx: Ctx, target: string | undefined, watch: boolea
     }
     for (;;) {
       await ingestInbox(ctx, bay)
+      let integrated = await maybeBuildBatch(ctx, bay, prId)
       const { events } = await bay.dispatch({ type: "integrate", args: prId ? { pr: prId } : undefined })
-      const integrated = printTransitions(events)
+      printBatchAwareEvents(events)
+      integrated = integrated || events.some((e) => e.name === "pr/changed")
+      const state = await bay.state()
+      const rejected = prId === undefined ? rejectedBatchFrom(events, state) : undefined
+      if (rejected) integrated = (await bisectAndDrainRebuiltBatch(bay, rejected)) || integrated
       if (!watch) {
         if (!integrated) console.log("bay: queue empty — nothing to integrate")
         break
@@ -865,7 +1036,14 @@ async function guideContext(): Promise<string> {
       : "  tracker         (not set — names are not checked against a tracker; set: git config bay.tracker '<command with {name}>')",
   )
   if (existsSync(bayDir)) {
-    const ctx: Ctx = { mainRepo, bayDir, repoGit: join(bayDir, "repo.git"), actor: "guide" }
+    const ctx: Ctx = {
+      mainRepo,
+      bayDir,
+      repoGit: join(bayDir, "repo.git"),
+      actor: "guide",
+      batchSize: 1,
+      batchGeneratedGlobs: [],
+    }
     const state = await readBay(ctx).state()
     const open = Object.values(state.leases).filter((l) => l.endedAt === undefined).length
     lines.push(`  open worktrees  ${open}`)
@@ -1124,9 +1302,7 @@ async function main(): Promise<void> {
   // at creation), so merge over whatever colorizeHelp installed, everywhere.
   const oneSpelling = {
     subcommandTerm: (cmd: Command) => {
-      const args = cmd.registeredArguments
-        .map((a) => (a.required ? `<${a.name()}>` : `[${a.name()}]`))
-        .join(" ")
+      const args = cmd.registeredArguments.map((a) => (a.required ? `<${a.name()}>` : `[${a.name()}]`)).join(" ")
       const options = cmd.options.some((o) => !o.hidden) ? " [options]" : ""
       return cmd.name() + options + (args ? " " + args : "")
     },

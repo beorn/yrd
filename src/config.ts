@@ -10,7 +10,13 @@ import { repoScopedCleanEnv } from "./env.ts"
 export function createGitConfigSource(cwd: string = process.cwd()): ConfigSource {
   return {
     async get(key: string): Promise<string | undefined> {
-      const envKey = "BAY_" + key.replace(/[A-Z]/g, (c) => "_" + c).toUpperCase()
+      const envKey =
+        "BAY_" +
+        key
+          .replace(/[A-Z]/g, (c) => "_" + c)
+          .replace(/[^a-zA-Z0-9]+/g, "_")
+          .replace(/_+/g, "_")
+          .toUpperCase()
       const fromEnv = process.env[envKey]
       if (fromEnv !== undefined && fromEnv !== "") return fromEnv
 
