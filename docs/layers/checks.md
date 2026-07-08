@@ -4,7 +4,7 @@ Runs your configured commands at lifecycle points and journals each verdict. The
 
 ## Shipped today
 
-Two git-config commands: `bay.check` (the ONE project check — runs on the submitter's bay when a PR is submitted for merge, whether by `git bay submit` + `check`/`integrate`, or a push fused with `-o submit`/`-o wait`/`bay.autoQueue`; exit 0 = pass, carrying the PR from `checking` to `checked`) and `bay.mergeCommand` (an override for repositories with their own merge process — routes the merge itself through a command; used by `merge`/`integrate`). Zero-config native merge: unset, `merge`/`integrate` land with a native `git merge --no-ff` by default — `bay.mergeCommand` is never a requirement. A merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch.
+Two git-config commands: `bay.check` (the ONE project check — runs on the submitter's bay when a PR is submitted for merge, whether by `git bay submit` (which auto-integrates by default — `bay.autoMerge`) + `check`/`integrate`, or a push fused with `-o submit`/`-o wait`/`bay.autoSubmit`+`bay.autoMerge`/legacy `bay.autoQueue`; exit 0 = pass, carrying the PR from `checking` to `checked`) and `bay.mergeCommand` (an override for repositories with their own merge process — routes the merge itself through a command; used by `merge`/`integrate`). Zero-config native merge: unset, `merge`/`integrate` land with a native `git merge --no-ff` by default — `bay.mergeCommand` is never a requirement. A merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch.
 
 ## Planned: checks on lifecycle events
 

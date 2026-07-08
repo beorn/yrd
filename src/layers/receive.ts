@@ -80,25 +80,32 @@ function reduceInit(bay: BayRuntime, state: BayState, opts: ReceiveOptions): Tra
   return { state, events: [], effects: [effect] }
 }
 
-/** submit {branch, sha, queued?}: correlate to a lease/PR, create the PR (or
- *  resume a rejected one as its next revision), and — only when `queued` is
- *  true (a fused push: `-o submit`/`-o wait`/`bay.autoQueue`, computed by the
- *  CLI host before dispatch) — move it into `submitted` and hand the pipeline
- *  to the submit.run effect. A bare push (queued: false/undefined) creates
- *  the PR in `pushed` and stops there: no check runs, nothing merges, until
- *  `git bay submit <PR>` (or a later fused push) asks to land it. Doors-closed
- *  (already merged/closed) is refused HERE too — the pre-receive hook
- *  refuses earlier for UX, but the reducer is the layer that must hold
- *  without the hook (law 4: the receiver refuses last). `sha` is validated
- *  but not threaded into the effect — the merge step re-resolves `branch` to
- *  a commit itself (pipeline.ts's runMerge), the same way every other merge
- *  path does, so a push and a standalone `merge`/`integrate` pin identically. */
+/** submit {branch, sha, queued?, autoMerge?}: correlate to a lease/PR, create
+ *  the PR (or resume a rejected one as its next revision), and drive it
+ *  through the two independent auto-flow toggles the CLI host resolves before
+ *  dispatch (docs/model.md § The auto-flow): `queued` is `bay.autoSubmit` (or
+ *  a forcing push option, `-o submit`/`-o wait`, or legacy `bay.autoQueue`) —
+ *  true fuses this push's creation/transition straight into `submitted`;
+ *  false stops at `pushed`. `autoMerge` is `bay.autoMerge` (or legacy
+ *  `bay.autoQueue`) — true additionally hands a submitted PR straight to the
+ *  submit.run effect (check then merge, inline); false rests it at
+ *  `submitted` for a manual `check`/`merge`/`integrate`. A bare push that
+ *  neither flag turns on (queued: false/undefined) creates the PR in `pushed`
+ *  and stops there: nothing runs until `git bay submit <PR>` (or a later
+ *  fused push) asks to land it. Doors-closed (already merged/closed) is
+ *  refused HERE too — the pre-receive hook refuses earlier for UX, but the
+ *  reducer is the layer that must hold without the hook (law 4: the receiver
+ *  refuses last). `sha` is validated but not threaded into the effect — the
+ *  merge step re-resolves `branch` to a commit itself (pipeline.ts's
+ *  runMerge), the same way every other merge path does, so a push and a
+ *  standalone `merge`/`integrate` pin identically. */
 function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const branch = command.args?.branch
   const sha = command.args?.sha
   if (typeof branch !== "string" || branch === "") throw new Error("bay: submit: 'branch' is required")
   if (typeof sha !== "string" || sha === "") throw new Error("bay: submit: 'sha' is required")
   const queued = command.args?.queued === true
+  const autoMerge = command.args?.autoMerge === true
 
   // Correlation order: the worktree wins (lease → PR number), then a PR already
   // tracking this branch (push = a revision of it, never a duplicate), then a
@@ -132,15 +139,18 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
       )
     }
     if (existing.state === "rejected") {
-      // Re-push after rejection: same PR number, next revision — a retry-by-push
-      // always re-runs the pipeline, regardless of the queued flag.
+      // Re-push after rejection: same PR number, next revision — always
+      // resubmitted regardless of the autoSubmit flag (the PR already asked
+      // to merge once; a bare fix-up push is a retry, not a fresh ask), but
+      // the pipeline only runs again if autoMerge says so — same rule as
+      // every other submitted PR.
       events.push(
         stateChangeEvent(bay, prId, "rejected", "submitted", command.cause!, {
           detail: `re-push of ${branch}`,
           revision: existing.revision + 1,
         }),
       )
-      return runPipeline()
+      return autoMerge ? runPipeline() : { state, events, effects: [] }
     }
     if (existing.state === "pushed") {
       if (!queued) {
@@ -149,13 +159,17 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
         return { state, events: [], effects: [] }
       }
       events.push(stateChangeEvent(bay, prId, "pushed", "submitted", command.cause!))
-      return runPipeline()
+      return autoMerge ? runPipeline() : { state, events, effects: [] }
     }
     if (existing.state === "submitted") {
       // Already submitted (e.g. `retry`'s own requeue-then-resubmit dance
       // already moved it here in an earlier dispatch this same command
-      // sequence) — just run the pipeline; nothing new to transition into.
-      return runPipeline()
+      // sequence, always passing autoMerge: true — retry always resumes
+      // regardless of config) — run the pipeline only if autoMerge says so;
+      // otherwise this is just new commits landing on a PR that is
+      // deliberately resting at `submitted` (bay.autoMerge false) — a
+      // non-event, nothing new to transition into.
+      return autoMerge ? runPipeline() : { state, events: [], effects: [] }
     }
     throw new Error(`bay: ${prId} is ${existing.state} — wait for the verdict (git bay ls ${prId})`)
   }
@@ -164,6 +178,9 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
   events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null, "push", queued, command.cause!))
   if (!queued) {
     return { state, events, effects: [] } // created, stops at `pushed` — no pipeline yet
+  }
+  if (!autoMerge) {
+    return { state, events, effects: [] } // fused into `submitted` — rests there for a manual check/merge/integrate
   }
   return runPipeline()
 }

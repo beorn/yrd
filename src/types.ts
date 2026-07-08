@@ -32,12 +32,16 @@ export type RepoEntry = {
 /**
  * The model (docs/model.md): creation, the ask-to-land, checking, and merging
  * are four separate acts, like a real GitHub PR. `pushed` is where every PR is
- * born — a plain `git push` creates one and stops there by default. `submit`
- * (or a fused push: `-o submit`/`-o wait`/`bay.autoQueue`) moves it to
- * `submitted`, which is what starts the pipeline: `check` runs `submitted →
- * checking → checked | rejected`; `merge` runs `checked → merging → merged`;
- * `integrate` is the umbrella that walks a PR through both, one dispatch,
- * start to finish (docs/model.md § Verbs — only `integrate` auto-flows).
+ * born — a plain `git push` creates one and stops there by default
+ * (`bay.autoSubmit` false, the default). `submit` (or a push that fuses
+ * creation with the ask — `bay.autoSubmit true`, a forcing `-o submit`/`-o
+ * wait`, or legacy `bay.autoQueue`) moves it to `submitted`, which is what
+ * starts the pipeline: `check` runs `submitted → checking → checked |
+ * rejected`; `merge` runs `checked → merging → merged`; `integrate` is the
+ * umbrella that walks a PR through both, one dispatch, start to finish
+ * (docs/model.md § Verbs — only `integrate` auto-flows). A submitted PR
+ * auto-integrates by default (`bay.autoMerge` true, the default) — set it
+ * false to rest at `submitted` for a manual `check`/`merge`/`integrate`.
  * `open` is DERIVED, never stored: `isOpen(pr) = phase not in {merged,
  * closed}` — see `isOpen()` below. `pushed`/`submitted`/`checked`/`rejected`
  * all accept `close --withdraw` (→ closed).
@@ -197,13 +201,15 @@ export type GitbayEvent =
   | {
       name: "pr/opened"
       // `queued`: true iff this creation was FUSED with an immediate
-      // ask-to-merge (`-o submit`/`-o wait` push, or `bay.autoQueue`) — the
-      // fold plants the PR straight into `submitted` instead of `pushed` when
-      // true, so no separate pr/changed{pushed→submitted} is needed for the
-      // fused case (only the explicit `submit` verb on an already-`pushed`
-      // PR emits that transition as its own event). The field keeps its
-      // pre-model.md name — it is the fused signal, not a literal echo of the
-      // `submitted` state name.
+      // ask-to-merge (`bay.autoSubmit`, a forcing `-o submit`/`-o wait` push,
+      // or legacy `bay.autoQueue`) — the fold plants the PR straight into
+      // `submitted` instead of `pushed` when true, so no separate
+      // pr/changed{pushed→submitted} is needed for the fused case (only the
+      // explicit `submit` verb on an already-`pushed` PR emits that
+      // transition as its own event). The field keeps its pre-model.md name —
+      // it is the fused-submit signal, not a literal echo of the `submitted`
+      // state name; whether the PR ALSO auto-integrates from there is the
+      // separate `bay.autoMerge` decision, not recorded here.
       data: { pr: PrId; target: string; workName: WorkitemId | null; via: "push" | "submit"; queued: boolean }
     }
   | {

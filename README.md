@@ -25,16 +25,20 @@ In any busy repository, the main branch is a zone of contention: two changes can
 $ cd "$(git bay open fix-readme)"                 # a bay for this piece of work
 $ ...edit...
 $ git commit -am "docs: fix readme"               # plain git from here on
-$ git push -o submit                              # opens PR1 AND asks to merge it, in one step
-remote: bay: PR1 received — checks running
-remote: bay: PR1 merged onto main (checks ✓)
+$ git push                                        # opens PR1 — nothing runs yet
+remote: bay: PR1 opened — git bay submit PR1 when ready
+$ git bay submit PR1                              # ask to merge — lands it too, by default
+bay: PR1 submitted → checking
+bay: PR1 checking → checked
+bay: PR1 checked → merging
+bay: PR1 merging → merged — merged 7739dd05897d5f7729ec64b6293576f1bf37177e onto main
 $ git bay ls PR1
-PR1 merged cb36968319faf267025138c1fb1321da7289dd50 onto main (checks: ✓)
+PR1 merged 7739dd05897d5f7729ec64b6293576f1bf37177e onto main (checks: ✓)
 ```
 
-That is real output from a live run. Opening a PR and asking to merge it are two separate acts, like a real GitHub PR — `-o submit` above fuses them into one push (`git config bay.autoQueue true` makes every push do this by default). Without the flag, a plain `git push` only opens PR1 (phase: `pushed`) and stops there; `git bay submit PR1` is the separate ask — it moves the PR to `submitted`, and `git bay integrate PR1` is the step that actually runs the checks and lands it (`git bay check`/`git bay merge` run either half alone). Either way, there's no way to skip the checks by accident.
+That is real output from a live run, with no `bay.autoSubmit`/`bay.autoMerge` config set at all. Opening a PR and asking to merge it are two separate acts, like a real GitHub PR — but by default `submit` doesn't stop at "asked", it lands the PR too (`bay.autoMerge`, on by default): checks, then a zero-config native merge. Set `git config bay.autoMerge false` to make `submit` lazy again — it rests at `submitted`, and `git bay integrate PR1` (or `git bay check`/`git bay merge` for either half alone) is the separate step that lands it. Set `git config bay.autoSubmit true` to go the other way — a bare `git push` submits too, so (with `autoMerge` still on) push alone ships the PR, no `submit` needed. `git push -o submit`/`-o wait` do the equivalent for one push at a time, without a config change. Whichever knobs are set, there's no way to skip the checks by accident.
 
-The lifecycle, end to end: **open** a bay → **push** (fills the PR with commits) → **submit** (ask to merge) → **integrate** (checks, then lands) → **close**. See [docs/model.md](docs/model.md) for the full states-and-verbs picture this is a projection of.
+The lifecycle, end to end: **open** a bay → **push** (fills the PR with commits) → **submit** (ask to merge — and, by default, land it) → **close**. See [docs/model.md](docs/model.md) for the full states-and-verbs picture this is a projection of.
 
 Two things worth knowing that don't show up in the demo above:
 
@@ -127,7 +131,7 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 **How do I onboard a coding agent (or a new teammate)?** `git bay guide` prints everything needed before the first action — the loop, the rules, the vocabulary — followed by a live "as of right now" snapshot of this repository's bay. Put `git bay guide` in your agent's startup instructions and the tool onboards the agent itself.
 
-**Is this a GitHub PR?** Same idea, local: a PR is your commits traveling to main as one unit, numbered per repository (PR1, PR2, …). A push opens it (phase: `pushed`); `git bay submit` is the "ask to merge" step (`pushed → submitted`), and `git bay integrate` (or a fused push) is the separate step that actually runs the checks and lands it. A bay PR is local — GitHub does not see it and `gh` commands do not apply.
+**Is this a GitHub PR?** Same idea, local: a PR is your commits traveling to main as one unit, numbered per repository (PR1, PR2, …). A push opens it (phase: `pushed`); `git bay submit` is the "ask to merge" step (`pushed → submitted`), and by default it doesn't stop there — it auto-integrates, running the checks and landing it too (`bay.autoMerge`; set it `false` for a `submit` that only asks, with `git bay integrate` as the separate landing step). A bay PR is local — GitHub does not see it and `gh` commands do not apply.
 
 **How do I tell it what checks to run?** `git config bay.check '<command>'` — the bay runs it before merging; exit 0 means pass. Repositories with their own merge process route the merge through `git config bay.mergeCommand '<command with {target}>'`, used by `git bay merge`/`integrate`.
 
@@ -149,7 +153,7 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 *Your bay*: `open <name>` (open a bay; prints a cd-able worktree path) · `close <wt|name>` (refuses if the bay's PR hasn't reached a terminal phase or the worktree is dirty; `--withdraw` closes the PR too) · `gc` (expire idle bays, snapshot first)
 
-*PRs*: `ls [PR|name]` (BAY + WORKTREE table, plus every unmerged PR, `--json`) · `adopt <branch>` (create a PR for an existing branch — no bay needed; lands in `pushed`) · `submit <PR|name>` (ask to merge — `pushed → submitted`; never merges) · `check <PR|name>` (run the project check alone — `submitted → checked`; never merges) · `merge <PR|name>` (land a checked PR — `checked → merged`; refuses one that isn't checked) · `integrate [PR|name]` (the umbrella — check then merge, `--watch` keeps draining) · `retry <PR|name>` (put a rejected PR back through the pipeline)
+*PRs*: `ls [PR|name]` (BAY + WORKTREE table, plus every unmerged PR, `--json`) · `adopt <branch>` (create a PR for an existing branch — no bay needed; lands in `pushed`) · `submit <PR|name>` (ask to merge — `pushed → submitted`; auto-integrates to `merged` by default, `bay.autoMerge false` rests it at `submitted`) · `check <PR|name>` (run the project check alone — `submitted → checked`; never merges) · `merge <PR|name>` (land a checked PR — `checked → merged`; refuses one that isn't checked) · `integrate [PR|name]` (the umbrella — check then merge, `--watch` keeps draining) · `retry <PR|name>` (put a rejected PR back through the pipeline)
 
 *Repository health*: `audit` (strays, stale pins, refs without a name, `--json`)
 

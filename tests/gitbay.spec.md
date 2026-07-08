@@ -22,29 +22,35 @@ WORKTREE  BAY         STATE   AGE  IDLE
 wt1       fix-readme  active  {{age:/\d+[smhd]\s+/}}{{idle:/\d+[smhd]\s*/}}← you
 ```
 
-## Work with plain git — the push opens the PR, `-o wait` also asks it to merge
+## Work with plain git — push opens the PR, submit lands it (zero config, both by default)
 
 A plain `git push` only opens the PR (state: `pushed`) and stops there —
-nothing runs yet. `-o wait` fuses the separate ask-to-merge step (check, then
-a zero-config native merge) into the same push (so does `-o submit`, without
-blocking for the verdict; `git config bay.autoQueue true` makes every push
-behave this way by default).
+nothing runs yet (`bay.autoSubmit`, off by default). `git bay submit <PR>` is
+the separate ask-to-merge step, and by default it doesn't stop at
+`submitted` either — it auto-integrates all the way to `merged`
+(`bay.autoMerge`, on by default): check, then a zero-config native merge.
+Nothing below sets `bay.autoSubmit`/`bay.autoMerge` — this is what you get
+with no config at all.
 
 ```console
 $ echo hello > README.md && git add README.md
 $ git commit -qm "docs: add readme"
-$ git push -o wait
+$ git push
 ! ...
-! remote: bay: PR1 received — checks running
-! remote: bay: PR1 merged onto main (checks ✓)
+! remote: bay: PR1 opened — git bay submit PR1 when ready
 ! ...
+$ git bay submit PR1
+bay: PR1 submitted → checking
+bay: PR1 checking → checked
+bay: PR1 checked → merging
+bay: PR1 merging → merged — merged {{sha:/[0-9a-f]{40}/}} onto main
 ```
 
 ## The PR landed, the bay closed
 
 ```console
 $ git bay ls PR1
-PR1 merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
+PR1 merged {{sha}} onto main (checks: ✓)
 $ git bay audit
 bay: clean — no strays, no unreachable pins, no refs without a name
 ```
@@ -59,18 +65,20 @@ $ git commit -qm wip --allow-empty && git push
 [1]
 ```
 
-## The pieces, one step at a time: submit, check, merge
+## Manual control: `bay.autoMerge false` rests submit at `submitted`
 
-`-o wait` above fused every step into one push. Each piece is also its own
-verb — `submit` only asks to merge (never merges), `check` only runs the
-project check (submitted → checked, never merges), and `merge` only lands a
-checked PR (checked → merged, never checks). `integrate` is the umbrella that
-ties check + merge together in one dispatch; these atomic verbs are how you
-run — or resume — one step alone.
+The default above is "push creates, submit ships." Set `bay.autoMerge false`
+and `submit` goes back to being lazy — it only asks to merge, and stops there
+— so the pipeline is yours to run one step at a time (or resume) with `check`,
+`merge`, or `integrate`. `check` only runs the project check (submitted →
+checked, never merges); `merge` only lands a checked PR (checked → merged,
+never checks); `integrate` is the umbrella that ties both together in one
+dispatch.
 
 ```console
 $ cd "$DEMO"
 $ cd "$(git bay open second-feature)"
+$ git config bay.autoMerge false
 $ echo world > NOTES.md && git add NOTES.md
 $ git commit -qm "docs: notes"
 $ git push
@@ -92,7 +100,10 @@ PR2 merged {{sha2}} onto main (checks: ✓)
 No `git config bay.mergeCommand` was ever set above — `merge`/`integrate` land
 with a native `git merge --no-ff` by default (§4: zero-config native merge);
 `bay.mergeCommand` remains available as an override for a project that needs
-one.
+one. Nor did any of this need `-o submit`/`-o wait` — those push options (and
+legacy `bay.autoQueue`) still work exactly as before, fusing the *push* itself
+with the ask-to-merge; see [refusals.spec.md](refusals.spec.md) for `-o wait`
+in action.
 
 Assertions above are mdspec pattern-matches, not literals: `{{name:/regex/}}` for
 a captured value (age, sha) reused with bare `{{name}}` in later output, inline
