@@ -16,21 +16,16 @@ import type {
   PrId,
   TransitionResult,
 } from "../types.ts"
-import { git, resolveBaseRef } from "./git.ts"
-import {
-  prOpenedEvent,
-  queuedPrs,
-  queueOrder,
-  queueReorderedEvent,
-  queueTarget,
-  stateChangeEvent,
-} from "./queue.ts"
+import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
+import { prOpenedEvent, queuedPrs, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent } from "./queue.ts"
 
 const LAYER = "batch-build"
 const FX_BATCH_BUILD = "batch.build"
+const FX_BATCH_BISECT = "batch.bisect"
 const EV_BATCH_EMPTY = "batch.empty"
 const EV_BATCH_COMPOSED = "batch.composed"
 const EV_BATCH_BUILT = "batch.built"
+const EV_BATCH_BISECT_CHECKED = "batch.bisect.checked"
 const EV_MEMBER_EJECTED = "batch.member.ejected"
 const DEFAULT_CANDIDATE_PREFIX = "bay/batch/"
 
@@ -45,6 +40,8 @@ export type BatchBuildOptions = {
   scratchParent?: string
   /** Candidate branch prefix; default `bay/batch/`, yielding e.g. `bay/batch/PR4`. */
   candidatePrefix?: string
+  /** Read-only prefix gate for `batch-bisect`; may be overridden by command args. */
+  gateCommand?: string
 }
 
 type BatchMember = {
@@ -56,12 +53,18 @@ type BatchEjection = BatchMember & {
   detail: string
 }
 
+type BatchPrefix = BatchMember & {
+  index: number
+  prefixTarget: string
+}
+
 type BatchRecord = {
   batch: PrId
   target: string
   base: string
   members: BatchMember[]
   ejected: BatchEjection[]
+  prefixes: BatchPrefix[]
   state: "built" | "merged" | "rejected"
 }
 
@@ -97,6 +100,21 @@ function parseCandidatePr(value: unknown): PrId | undefined {
   return value
 }
 
+function parseRequiredPr(value: unknown, command: string): PrId {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`bay: ${command}: 'pr' must be a non-empty string`)
+  }
+  return value
+}
+
+function parseGateCommand(value: unknown, fallback: string | undefined): string | undefined {
+  if (value === undefined) return fallback
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error("bay: batch-bisect: 'gateCommand' must be a non-empty string when provided")
+  }
+  return value
+}
+
 function reduceBatchBuild(
   opts: BatchBuildOptions,
   bay: BayRuntime,
@@ -128,8 +146,45 @@ function reduceBatchBuild(
   return { state, events: [], effects: [effect] }
 }
 
+function reduceBatchBisect(opts: BatchBuildOptions, state: BayState, command: BayCommand): TransitionResult {
+  const batch = parseRequiredPr(command.args?.pr, "batch-bisect")
+  const record = sliceOf(state).batches[batch]
+  if (!record) {
+    throw new Error(`bay: batch-bisect: no batch '${batch}' — run batch-build first`)
+  }
+  if (record.state !== "rejected") {
+    throw new Error(`bay: batch-bisect: ${batch} is ${record.state} — bisect only runs after a red train gate`)
+  }
+  if (record.prefixes.length === 0) {
+    throw new Error(`bay: batch-bisect: ${batch} has no prefix tips — rebuild the batch before bisecting`)
+  }
+
+  const gateCommand = parseGateCommand(command.args?.gateCommand, opts.gateCommand)
+  if (gateCommand === undefined) {
+    throw new Error(
+      "bay: batch-bisect: no gate command configured — pass gateCommand or set withBatchBuild({ gateCommand })",
+    )
+  }
+
+  const rebuiltBatch = parseCandidatePr(command.args?.rebuildPr) ?? nextPrId(state)
+  if (state.prs[rebuiltBatch]) {
+    throw new Error(`bay: batch-bisect: rebuild PR '${rebuiltBatch}' already exists — candidate ids must be unique`)
+  }
+
+  return {
+    state,
+    events: [],
+    effects: [{ type: FX_BATCH_BISECT, data: { batch, rebuiltBatch, gateCommand } }],
+  }
+}
+
 function candidateBranch(opts: BatchBuildOptions, batch: PrId): string {
   return `${opts.candidatePrefix ?? DEFAULT_CANDIDATE_PREFIX}${batch}`
+}
+
+function prefixBranch(opts: BatchBuildOptions, batch: PrId, index: number, member: BatchMember): string {
+  const root = opts.candidatePrefix ?? DEFAULT_CANDIDATE_PREFIX
+  return `${root.replace(/\/$/u, "")}-prefix/${batch}/${index}-${member.pr}`
 }
 
 function failGit(action: string, res: { code: number; stderr: string }): never {
@@ -180,6 +235,46 @@ async function mergeMember(scratch: string, batch: PrId, member: BatchMember): P
 async function publishCandidate(scratch: string, branch: string): Promise<void> {
   const res = await git(["-C", scratch, "branch", "-f", branch, "HEAD"], scratch)
   if (res.code !== 0) failGit(`publish candidate ${branch}`, res)
+}
+
+type CandidateBuild = {
+  built: BatchMember[]
+  ejected: BatchEjection[]
+  prefixes: BatchPrefix[]
+}
+
+async function buildCandidate(
+  opts: BatchBuildOptions,
+  batch: PrId,
+  base: string,
+  members: readonly BatchMember[],
+): Promise<CandidateBuild> {
+  const scratch = await mkdtemp(join(opts.scratchParent ?? tmpdir(), "gitbay-batch-build-"))
+  const built: BatchMember[] = []
+  const ejected: BatchEjection[] = []
+  const prefixes: BatchPrefix[] = []
+  try {
+    await addScratchWorktree(opts.mainRepo, scratch, base)
+    for (const member of members) {
+      const ejection = await mergeMember(scratch, batch, member)
+      if (ejection) {
+        ejected.push(ejection)
+        continue
+      }
+      built.push(member)
+      const prefix = {
+        ...member,
+        index: built.length,
+        prefixTarget: prefixBranch(opts, batch, built.length, member),
+      }
+      await publishCandidate(scratch, prefix.prefixTarget)
+      prefixes.push(prefix)
+    }
+    if (built.length > 0) await publishCandidate(scratch, candidateBranch(opts, batch))
+  } finally {
+    await removeScratchWorktree(opts.mainRepo, scratch)
+  }
+  return { built, ejected, prefixes }
 }
 
 function byTarget(members: readonly BatchMember[]): Map<string, BatchMember> {
@@ -242,20 +337,7 @@ function makeBatchBuildHandler(opts: BatchBuildOptions): EffectHandler {
 
     if (composed.length === 0) return events
 
-    const scratch = await mkdtemp(join(opts.scratchParent ?? tmpdir(), "gitbay-batch-build-"))
-    const built: BatchMember[] = []
-    const ejected: BatchEjection[] = []
-    try {
-      await addScratchWorktree(opts.mainRepo, scratch, base)
-      for (const member of composed) {
-        const ejection = await mergeMember(scratch, d.batch, member)
-        if (ejection) ejected.push(ejection)
-        else built.push(member)
-      }
-      if (built.length > 0) await publishCandidate(scratch, candidateBranch(opts, d.batch))
-    } finally {
-      await removeScratchWorktree(opts.mainRepo, scratch)
-    }
+    const { built, ejected, prefixes } = await buildCandidate(opts, d.batch, base, composed)
 
     for (const member of built) {
       events.push(stateChangeEvent(bay, member.pr, "queued", "merging", `batched in ${d.batch}`))
@@ -291,8 +373,206 @@ function makeBatchBuildHandler(opts: BatchBuildOptions): EffectHandler {
             base,
             members: built.map(memberSummary),
             ejected: ejected.map((member) => ({ ...memberSummary(member), detail: member.detail })),
+            prefixes: prefixes.map((prefix) => ({
+              ...memberSummary(prefix),
+              index: prefix.index,
+              prefixTarget: prefix.prefixTarget,
+            })),
           },
           { pr: d.batch },
+        ),
+      )
+    }
+
+    return events
+  }
+}
+
+function tail(text: string, max = 1200): string {
+  const trimmed = text.replace(/\s+$/u, "")
+  return trimmed.length <= max ? trimmed : `…${trimmed.slice(-max)}`
+}
+
+async function runGateCommand(
+  gateCommand: string,
+  scratch: string,
+  batch: PrId,
+  prefix: BatchPrefix,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const cmd = gateCommand
+    .replaceAll("{batch}", batch)
+    .replaceAll("{pr}", prefix.pr)
+    .replaceAll("{member}", prefix.pr)
+    .replaceAll("{target}", prefix.prefixTarget)
+  const env = {
+    ...repoScopedCleanEnv(),
+    BAY_BATCH: batch,
+    BAY_BATCH_PR: prefix.pr,
+    BAY_BATCH_MEMBER: prefix.pr,
+    BAY_BATCH_TARGET: prefix.prefixTarget,
+    BAY_BATCH_MEMBER_TARGET: prefix.target,
+  }
+  const proc = Bun.spawn(["sh", "-c", cmd], { cwd: scratch, stdout: "pipe", stderr: "pipe", env })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  return { code, stdout, stderr }
+}
+
+async function checkPrefix(
+  opts: BatchBuildOptions,
+  gateCommand: string,
+  batch: PrId,
+  prefix: BatchPrefix,
+): Promise<{ ok: boolean; detail?: string }> {
+  const scratch = await mkdtemp(join(opts.scratchParent ?? tmpdir(), "gitbay-batch-bisect-"))
+  try {
+    await addScratchWorktree(opts.mainRepo, scratch, prefix.prefixTarget)
+    const res = await runGateCommand(gateCommand, scratch, batch, prefix)
+    if (res.code === 0) return { ok: true }
+    const out = tail([res.stderr, res.stdout].filter((s) => s.trim() !== "").join("\n"))
+    return { ok: false, detail: out === "" ? `exit ${res.code}` : `exit ${res.code}: ${out}` }
+  } finally {
+    await removeScratchWorktree(opts.mainRepo, scratch)
+  }
+}
+
+function redPrefixDetail(batch: PrId, gateCommand: string, prefix: BatchPrefix, detail: string | undefined): string {
+  const suffix = detail === undefined || detail === "" ? "" : `\n${detail}`
+  return (
+    `bay: ${prefix.pr} ejected from batch ${batch} — first red train prefix ${prefix.prefixTarget} ` +
+    `failed gate '${gateCommand}'. Rebuilding batch without it; remainder will land. ` +
+    `Fix and retry: git bay retry ${prefix.pr}.${suffix}`
+  )
+}
+
+function rejectMemberEvents(bay: BayRuntime, state: BayState, member: BatchMember, detail: string): BayEvent[] {
+  const pr = state.prs[member.pr]
+  if (!pr || pr.state === "rejected") return []
+  if (pr.state === "queued") {
+    return [
+      stateChangeEvent(bay, member.pr, "queued", "merging", "build attempted before ejection"),
+      stateChangeEvent(bay, member.pr, "merging", "rejected", detail),
+    ]
+  }
+  if (pr.state === "merging") return [stateChangeEvent(bay, member.pr, "merging", "rejected", detail)]
+  throw new Error(`bay: batch-bisect: cannot reject ${member.pr} from state ${pr.state}`)
+}
+
+function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
+  return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
+    if (opts.mainRepo.trim() === "") {
+      throw new Error("bay: batch-bisect: mainRepo is required")
+    }
+
+    const d = effect.data as { batch: PrId; rebuiltBatch: PrId; gateCommand: string }
+    const state = await bay.state()
+    const record = sliceOf(state).batches[d.batch]
+    if (!record) throw new Error(`bay: batch-bisect: no batch '${d.batch}'`)
+    if (record.state !== "rejected") {
+      throw new Error(`bay: batch-bisect: ${d.batch} is ${record.state} — bisect only runs after rejection`)
+    }
+
+    const events: BayEvent[] = []
+    let culprit: BatchPrefix | undefined
+    let culpritDetail: string | undefined
+    for (const prefix of record.prefixes) {
+      const checked = await checkPrefix(opts, d.gateCommand, d.batch, prefix)
+      events.push(
+        makeEvent(
+          bay,
+          EV_BATCH_BISECT_CHECKED,
+          {
+            batch: d.batch,
+            pr: prefix.pr,
+            target: prefix.prefixTarget,
+            memberTarget: prefix.target,
+            index: prefix.index,
+            ok: checked.ok,
+            ...(checked.detail !== undefined ? { detail: checked.detail } : {}),
+          },
+          { pr: d.batch },
+        ),
+      )
+      if (!checked.ok) {
+        culprit = prefix
+        culpritDetail = checked.detail
+        break
+      }
+    }
+
+    if (!culprit) {
+      throw new Error(
+        `bay: batch-bisect: gate command passed every prefix for rejected batch ${d.batch}; ` +
+          `refusing to rebuild because the per-member gate is lying or does not match the red train gate`,
+      )
+    }
+
+    const detail = redPrefixDetail(d.batch, d.gateCommand, culprit, culpritDetail)
+    events.push(
+      makeEvent(
+        bay,
+        EV_MEMBER_EJECTED,
+        {
+          batch: d.batch,
+          ...memberSummary(culprit),
+          detail,
+        },
+        { pr: culprit.pr },
+      ),
+    )
+    events.push(...rejectMemberEvents(bay, state, culprit, detail))
+
+    const remainder = record.members.filter((member) => member.pr !== culprit!.pr)
+    if (remainder.length === 0) return events
+
+    const rebuilt = await buildCandidate(opts, d.rebuiltBatch, record.base, remainder)
+    for (const member of rebuilt.ejected) {
+      events.push(
+        makeEvent(
+          bay,
+          EV_MEMBER_EJECTED,
+          {
+            batch: d.rebuiltBatch,
+            ...memberSummary(member),
+            detail: member.detail,
+          },
+          { pr: member.pr },
+        ),
+      )
+      events.push(...rejectMemberEvents(bay, state, member, member.detail))
+    }
+
+    if (rebuilt.built.length > 0) {
+      const target = candidateBranch(opts, d.rebuiltBatch)
+      events.push(prOpenedEvent(bay, d.rebuiltBatch, target, `batch:${d.rebuiltBatch}`))
+      events.push(
+        queueReorderedEvent(
+          bay,
+          candidateFirstOrder(queueOrder(state), d.rebuiltBatch, rebuilt.built),
+          `batch ${d.rebuiltBatch} after ejecting ${culprit.pr} from ${d.batch}`,
+        ),
+      )
+      events.push(
+        makeEvent(
+          bay,
+          EV_BATCH_BUILT,
+          {
+            batch: d.rebuiltBatch,
+            target,
+            base: record.base,
+            members: rebuilt.built.map(memberSummary),
+            ejected: rebuilt.ejected.map((member) => ({ ...memberSummary(member), detail: member.detail })),
+            prefixes: rebuilt.prefixes.map((prefix) => ({
+              ...memberSummary(prefix),
+              index: prefix.index,
+              prefixTarget: prefix.prefixTarget,
+            })),
+            sourceBatch: d.batch,
+          },
+          { pr: d.rebuiltBatch },
         ),
       )
     }
@@ -306,9 +586,11 @@ function applyCandidateResultToMembers(state: BayState, batch: PrId, to: unknown
   const record = sliceOf(state).batches[batch]
   if (!record) return state
   const prs = { ...state.prs }
-  for (const member of record.members) {
-    const existing = prs[member.pr]
-    if (existing) prs[member.pr] = { ...existing, state: to }
+  if (to === "merged") {
+    for (const member of record.members) {
+      const existing = prs[member.pr]
+      if (existing) prs[member.pr] = { ...existing, state: to }
+    }
   }
   const slice = sliceOf(state)
   return {
@@ -334,6 +616,7 @@ function apply(state: BayState, event: BayEvent): BayState {
       base: string
       members: BatchMember[]
       ejected: BatchEjection[]
+      prefixes?: BatchPrefix[]
     }
     const slice = sliceOf(state)
     return {
@@ -349,7 +632,33 @@ function apply(state: BayState, event: BayEvent): BayState {
               base: d.base,
               members: d.members,
               ejected: d.ejected,
+              prefixes: d.prefixes ?? [],
               state: "built",
+            },
+          },
+        },
+      },
+    }
+  }
+
+  if (event.type === EV_MEMBER_EJECTED) {
+    const d = event.data as { batch?: PrId; pr?: PrId; target?: string; detail?: string }
+    if (!d.batch || !d.pr || !d.target || d.detail === undefined) return state
+    const slice = sliceOf(state)
+    const record = slice.batches[d.batch]
+    if (!record) return state
+    const already = record.ejected.some((member) => member.pr === d.pr)
+    if (already) return state
+    return {
+      ...state,
+      slices: {
+        ...state.slices,
+        [LAYER]: {
+          batches: {
+            ...slice.batches,
+            [d.batch]: {
+              ...record,
+              ejected: [...record.ejected, { pr: d.pr, target: d.target, detail: d.detail }],
             },
           },
         },
@@ -372,10 +681,12 @@ export function withBatchBuild(opts: BatchBuildOptions): BayPlugin {
       apply,
       reduce(state, command, next) {
         if (command.type === "batch-build") return reduceBatchBuild(opts, bay, state, command)
+        if (command.type === "batch-bisect") return reduceBatchBisect(opts, state, command)
         return next(state, command)
       },
       effects: {
         [FX_BATCH_BUILD]: makeBatchBuildHandler(opts),
+        [FX_BATCH_BISECT]: makeBatchBisectHandler(opts),
       },
     }
     return bay.use(layer)

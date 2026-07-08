@@ -39,7 +39,7 @@ async function tmpJournalPath(): Promise<string> {
   return join(dir, "journal.jsonl")
 }
 
-async function buildBatchBay(repo: string, path?: string): Promise<BayRuntime> {
+async function buildBatchBay(repo: string, path?: string, mergeCommand?: string): Promise<BayRuntime> {
   const journalPath = path ?? (await tmpJournalPath())
   return pipe(
     createBay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
@@ -47,7 +47,7 @@ async function buildBatchBay(repo: string, path?: string): Promise<BayRuntime> {
     withBatchBuild({ mainRepo: repo, generatedGlobs: [] }),
     withMergeWorker({
       mainRepo: repo,
-      mergeCommand: `git -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
+      mergeCommand: mergeCommand ?? `git -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
     }),
   )
 }
@@ -126,7 +126,7 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
 
   it("ejects a build-conflict member with a teaching detail and rebuilds the candidate without it", async () => {
     const repo = await makeRepo()
-    await branch(repo, "task/file", { "dir": "file blocks directory\n" })
+    await branch(repo, "task/file", { dir: "file blocks directory\n" })
     await branch(repo, "task/nested", { "dir/file.ts": "nested file\n" })
 
     const bay = await buildBatchBay(repo)
@@ -149,5 +149,91 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
     const candidate = queueTarget(state, "PR3")
     const subjects = await must(["-C", repo, "log", "--first-parent", "--format=%s", `main..${candidate}`], repo)
     expect(subjects.split("\n")).toEqual(["bay: batch PR3 member PR1"])
+  })
+
+  it("bisects a red train gate to the first bad prefix and queues a rebuilt clean remainder", async () => {
+    const repo = await makeRepo()
+    await branch(repo, "task/good-a", { "a.ts": "a\n" })
+    await branch(repo, "task/bad", { "bad.txt": "breaks the train\n" })
+    await branch(repo, "task/good-c", { "c.ts": "c\n" })
+
+    const bay = await buildBatchBay(repo, undefined, "false")
+    await bay.dispatch({ type: "enqueue", args: { target: "task/good-a", pr: "PR1" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/bad", pr: "PR2" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/good-c", pr: "PR3" } })
+
+    await bay.dispatch({ type: "batch-build" })
+    await bay.dispatch({ type: "drain", args: { pr: "PR4" } })
+
+    const red = await bay.state()
+    expect(stateOf(red, "PR4")).toBe("rejected")
+    expect(stateOf(red, "PR1")).toBe("merging")
+    expect(stateOf(red, "PR2")).toBe("merging")
+    expect(stateOf(red, "PR3")).toBe("merging")
+
+    const { events } = await bay.dispatch({
+      type: "batch-bisect",
+      args: {
+        pr: "PR4",
+        gateCommand: "test ! -f bad.txt",
+      },
+    })
+
+    expect(eventsOf(events, "batch.bisect.checked").map((e) => e.data)).toMatchObject([
+      { batch: "PR4", pr: "PR1", target: "bay/batch-prefix/PR4/1-PR1", ok: true },
+      { batch: "PR4", pr: "PR2", target: "bay/batch-prefix/PR4/2-PR2", ok: false },
+    ])
+    const ejected = eventsOf(events, "batch.member.ejected")
+    expect(ejected).toHaveLength(1)
+    expect(ejected[0]!.data).toMatchObject({ batch: "PR4", pr: "PR2", target: "task/bad" })
+    expect(String(ejected[0]!.data!.detail)).toContain("first red train prefix")
+
+    const rebuilt = eventsOf(events, "batch.built")
+    expect(rebuilt).toHaveLength(1)
+    expect(rebuilt[0]!.data).toMatchObject({
+      batch: "PR5",
+      target: "bay/batch/PR5",
+      members: [
+        { pr: "PR1", target: "task/good-a" },
+        { pr: "PR3", target: "task/good-c" },
+      ],
+    })
+
+    const state = await bay.state()
+    expect(stateOf(state, "PR1")).toBe("merging")
+    expect(stateOf(state, "PR2")).toBe("rejected")
+    expect(stateOf(state, "PR3")).toBe("merging")
+    expect(queuedPrs(state).map((pr) => pr.id)).toEqual(["PR5"])
+
+    const candidate = queueTarget(state, "PR5")
+    const subjects = await must(["-C", repo, "log", "--first-parent", "--format=%s", `main..${candidate}`], repo)
+    expect(subjects.split("\n")).toEqual(["bay: batch PR5 member PR3", "bay: batch PR5 member PR1"])
+  })
+
+  it("refuses to rebuild when the per-prefix gate lies green for a rejected batch", async () => {
+    const repo = await makeRepo()
+    await branch(repo, "task/a", { "a.ts": "a\n" })
+    await branch(repo, "task/b", { "b.ts": "b\n" })
+
+    const bay = await buildBatchBay(repo, undefined, "false")
+    await bay.dispatch({ type: "enqueue", args: { target: "task/a", pr: "PR1" } })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/b", pr: "PR2" } })
+    await bay.dispatch({ type: "batch-build" })
+    await bay.dispatch({ type: "drain", args: { pr: "PR3" } })
+
+    await expect(
+      bay.dispatch({
+        type: "batch-bisect",
+        args: {
+          pr: "PR3",
+          gateCommand: "true",
+        },
+      }),
+    ).rejects.toThrow(/per-member gate is lying/)
+
+    const state = await bay.state()
+    expect(state.prs.PR4).toBeUndefined()
+    expect(stateOf(state, "PR1")).toBe("merging")
+    expect(stateOf(state, "PR2")).toBe("merging")
   })
 })
