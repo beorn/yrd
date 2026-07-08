@@ -70,8 +70,8 @@ $ git bay close dirty-close
 ! Commit or push it first; bay never deletes uncommitted work. The worktree is still yours.
 [1]
 $ git bay ls
-WORKTREE  BAY          STATE  AGE  IDLE
-wt1       dirty-close  open   ...
+WORKTREE  BAY          STATE   AGE  IDLE
+wt1       dirty-close  active  ...
 ```
 
 State and disk never diverge: the table still lists the worktree because
@@ -109,7 +109,7 @@ $ git push -o wait
 ! ...
 $ git commit -qm wip --allow-empty && git push
 ! ...
-! remote: bay: doors closed — PR3 for 'task/doors-closed' is already merged. Start the next piece of work in a fresh worktree: git bay open <name>
+! remote: bay: doors closed — PR3 for 'task/doors-closed' is already merged. Start the next piece of work in a fresh bay: git bay open <name>
 ! ...
 [1]
 ```
@@ -140,6 +140,19 @@ $ cd "$DEMO"
 $ git bay close --withdraw flaky
 $ git bay ls PR4
 PR4 abandoned
+```
+
+## Submit redirects to adopt
+
+§6 addendum: `submit` now means "ask to merge" (`open` → `queued`) — it takes
+a PR or bay name, not a branch. A branch that isn't a known PR or bay name
+gets a redirect to the verb that actually creates one.
+
+```console
+$ cd "$DEMO" && git branch task/legacy-thing
+$ git bay submit task/legacy-thing
+! bay: submit: 'task/legacy-thing' is not a known PR or bay name — to create one from an existing branch: git bay adopt task/legacy-thing
+[1]
 ```
 
 Assertions above follow the same mdspec idioms as gitbay.spec.md (see its

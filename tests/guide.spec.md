@@ -12,11 +12,13 @@ git bay is a small continuous-integration server for this repository: you work i
 THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
-  3. git push                          # the push opens your PR — checks run, then the merge; READ the remote: lines
-  4. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
+  3. git push                          # opens your PR (state: open) — nothing runs yet
+  4. git bay submit <PR>               # ask to merge (open -> queued) — checks run, then the merge; READ the remote:/output lines
+  5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
+  - In a hurry? git push -o submit fuses steps 3+4 (git config bay.autoQueue true makes every push do this).
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
   - Done with a worktree? git bay close <bay|wt> refuses while its PR is still queued — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
   - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
@@ -25,8 +27,8 @@ VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository
-  queue      submitted PRs waiting to be integrated; they merge one at a time, in order
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (open), git bay submit asks to merge it (queued)
+  queue      queued PRs waiting to be integrated; they merge one at a time, in order
   checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
 ADDRESSING
   Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
