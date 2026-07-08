@@ -16,6 +16,14 @@ Project-local notes for gitbay only.
   `isLanded`, `refresh`, optional authoring guards/components).
 - [ ] Keep nameless branch-intake PRs audit-visible when `submit <branch>`
   opens a PR without provisioning a bay.
+- [ ] Add branch/worktree intake buckets for preserved-WIP drain:
+  safe-prune, submit-clean, open-for-repair, blocked-conflict, missing-workitem,
+  owner-blocked, and manual-review.
+- [ ] Add whitelisted auto-fix policy only for mechanical fixes: formatting,
+  lockfile refresh, generated manifest regeneration, hook/config repair,
+  descendant-safe submodule pin sync, and trivial import/path updates when
+  test-proven. Semantic conflicts, unclear ownership, vendor gitlinks, and red
+  product tests must become exceptions.
 
 ## Next Model Refinements
 

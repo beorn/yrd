@@ -18,6 +18,29 @@ Busy local repos have the same integration problem as busy remote repos:
 git bay brings the core safety of PRs, checks, review, deployment steps, and a
 serial integration line into the local clone.
 
+The goal is not "no WIP"; active work is normal. The goal is no unmanaged WIP:
+every surviving branch, ref, or worktree should be an active bay, submitted PR,
+waiting step, rejected PR, blocked exception, merged result, or prunable relic.
+
+Typical raw WIP becomes explicit git bay state:
+
+| Raw WIP | Git bay state |
+| --- | --- |
+| dirty worktree | active bay with owner/name |
+| ahead branch | PR at `pushed` or `submitted` |
+| branch needing repair | `open <name> --from <branch>` |
+| failed tests | `rejected` with check verdict |
+| merge conflict | blocked/rejected with conflict evidence |
+| missing work item | audit exception, not queued |
+| already ancestor of base | terminal/prunable |
+| preserve/archive ref | closed/prunable or named exception |
+
+git bay can safely auto-advance landed refs, clean inactive bays, hook/config
+repairs, serial submission of clean branches, and whitelisted mechanical fixes.
+It should not auto-fix semantic conflicts, unclear ownership, red tests with
+product meaning, vendor gitlink ambiguity, or "which version wins" decisions.
+Those become visible exceptions with evidence.
+
 ## Concepts
 
 - **Bay**: a named worktree assigned to one piece of work for its duration.
