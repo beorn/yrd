@@ -2,7 +2,7 @@
   "name": "git-bay",
   "version": "0.0.1",
   "private": true,
-  "description": "git bay — a small continuous-integration server inside your repository: plain git push opens a local pull request, and git bay integrates it when the checks pass",
+  "description": "git bay — a local PR intake and merge line for git repositories",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/gitbay",
@@ -14,6 +14,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "bay": "bun ./bin/git-bay.ts",
     "test": "bun --bun x vitest run",
     "check": "tsc --noEmit && bun --bun x vitest run",
     "spec": "PATH=\"$PWD/tests/bin:$PATH\" bun --bun x mdspec tests/gitbay.spec.md tests/refusals.spec.md tests/guide.spec.md"
