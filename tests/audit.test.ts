@@ -2,14 +2,15 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBay, createJsonlJournal, definePlugin, makeEvent, pipe, withWorkspaces } from "../src/index.ts"
-import type { BayRuntime, BayStore } from "../src/index.ts"
+import { createGitbay, createJsonlJournal, definePlugin, pipe, withWorktrees } from "../src/index.ts"
+import type { BayRuntime, BayStore, Cause } from "../src/index.ts"
 import { formatAudit, withAudit, type AuditFinding } from "../src/layers/audit.ts"
 import { git } from "../src/layers/git.ts"
 
 const TS = "2024-01-01T00:00:00.000Z"
 const CLOCK = () => TS
 const ACTOR = "tester"
+const CAUSE: Cause = { commandId: "seed" }
 
 function openStore(path: string): BayStore {
   return { journal: createJsonlJournal(path), close: async () => {} }
@@ -45,38 +46,48 @@ describe("formatAudit", () => {
 
 // Stub audit.run shadows the real (git-touching) handler — registered FIRST so
 // core's `.find(Boolean)` over layers in registration order picks it. Lets the
-// reducer→effect→event flow be tested with no git at all.
+// reducer→effect→event flow be tested with no git at all. Builds the raw
+// envelope directly (not the typed makeEvent helper) so it can carry an extra
+// `echoed` debug field the real gitbay/audited payload doesn't have.
 const withStubAudit = definePlugin({
   name: "stub-audit",
   effects: {
     "audit.run": async (effect, bay) => {
       const mainRepo = (effect.data as { mainRepo: string | null }).mainRepo
-      return [makeEvent(bay, "audit.completed", { findings: [], clean: true, echoed: mainRepo })]
+      return [
+        {
+          id: bay.idGen(),
+          ts: bay.clock(),
+          name: "gitbay/audited",
+          cause: effect.cause!,
+          data: { findings: [], clean: true, echoed: mainRepo },
+        },
+      ]
     },
   },
 })
 
 async function buildStubAuditBay(path: string): Promise<BayRuntime> {
   return pipe(
-    createBay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
+    createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
     withStubAudit, // first → shadows the real audit.run
     withAudit(),
   )
 }
 
 describe("withAudit — reducer emits a read-only audit.run effect", () => {
-  it("passes an inline mainRepo through to the effect (no events, one completed row)", async () => {
+  it("passes an inline mainRepo through to the effect (no events, one audited row)", async () => {
     const bay = await buildStubAuditBay(await tmpJournalPath())
     const { events } = await bay.dispatch({ type: "audit", args: { mainRepo: "/repo/x" } })
-    const done = events.find((e) => e.type === "audit.completed")!
-    expect(done.data!.echoed).toBe("/repo/x")
-    expect(done.data!.clean).toBe(true)
+    const done = events.find((e) => e.name === "gitbay/audited")!
+    expect(done.data.echoed).toBe("/repo/x")
+    expect(done.data.clean).toBe(true)
   })
 
   it("defaults mainRepo to null when omitted (handler resolves it ambiently)", async () => {
     const bay = await buildStubAuditBay(await tmpJournalPath())
     const { events } = await bay.dispatch({ type: "audit" })
-    expect(events.find((e) => e.type === "audit.completed")!.data!.echoed).toBeNull()
+    expect(events.find((e) => e.name === "gitbay/audited")!.data.echoed).toBeNull()
   })
 
   it("throws on a blank mainRepo", async () => {
@@ -111,12 +122,18 @@ async function appendEndedLease(
 ): Promise<void> {
   const journal = createJsonlJournal(journalPath)
   await journal.append({
-    v: 1, ts: TS, actor: ACTOR, type: "lease.opened", lease: "L1", pr: "C-x",
-    data: { lease: "L1", bay: 1, workitem: "wi-x", changeId: "C-x", branch },
+    id: "e1",
+    ts: TS,
+    name: "bay/opened",
+    cause: CAUSE,
+    data: { bay: "L1", worktree: "wt1", workName: "wi-x", pr: "C-x", branch, recycled: false, actor: ACTOR },
   })
   await journal.append({
-    v: 1, ts: TS, actor: ACTOR, type: "lease.ended", lease: "L1", pr: "C-x",
-    data: { lease: "L1", endReason },
+    id: "e2",
+    ts: TS,
+    name: "bay/closed",
+    cause: CAUSE,
+    data: { bay: "L1", via: endReason === "merged" ? "merged" : "close" },
   })
 }
 
@@ -130,15 +147,15 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withAudit — real git", () => {
       await appendEndedLease(journalPath, "task/merged-x", "merged")
 
       const bay = pipe(
-        createBay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
-        withWorkspaces(),
+        createGitbay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
+        withWorktrees(),
         withAudit(),
       )
       const { events } = await bay.dispatch({ type: "audit", args: { mainRepo: repo } })
-      const done = events.find((e) => e.type === "audit.completed")!
-      expect(done.data!.clean).toBe(true)
-      expect(done.data!.findings).toEqual([])
-      expect(formatAudit(done.data!.findings as AuditFinding[])).toBe(
+      const done = events.find((e) => e.name === "gitbay/audited")!
+      expect(done.data.clean).toBe(true)
+      expect(done.data.findings).toEqual([])
+      expect(formatAudit(done.data.findings as AuditFinding[])).toBe(
         "bay: clean — no strays, no unreachable pins, no refs without a name",
       )
     } finally {
@@ -165,12 +182,12 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withAudit — real git", () => {
       await appendEndedLease(journalPath, "task/stray-x", "abandoned")
 
       const bay = pipe(
-        createBay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
-        withWorkspaces(),
+        createGitbay({ store: openStore(journalPath), clock: CLOCK, actor: ACTOR }),
+        withWorktrees(),
         withAudit(),
       )
       const { events } = await bay.dispatch({ type: "audit", args: { mainRepo: repo } })
-      const findings = events.find((e) => e.type === "audit.completed")!.data!.findings as AuditFinding[]
+      const findings = events.find((e) => e.name === "gitbay/audited")!.data.findings as AuditFinding[]
 
       expect(findings.find((f) => f.kind === "stray")?.subject).toBe("task/stray-x")
       expect(findings.find((f) => f.kind === "unnamed-ref")?.subject).toBe("task/orphan-y")

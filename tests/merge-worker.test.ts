@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-  createBay,
+  createGitbay,
   createJsonlJournal,
   pipe,
   queuedPrs,
@@ -30,7 +30,7 @@ function openStore(path: string): BayStore {
 // sh -c spawn, exit-code→state mapping, and detail capture all execute for real.
 async function buildMergeBay(path: string, opts: MergeWorkerOptions): Promise<BayRuntime> {
   return pipe(
-    createBay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
+    createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
     withQueue(),
     withMergeWorker(opts),
   )
@@ -41,7 +41,7 @@ function stateOf(state: BayState, id: PrId): string {
 }
 
 function detailOf(events: BayEvent[], to: string): string | undefined {
-  const ev = events.find((e) => e.type === "pr.state-changed" && e.data!.to === to)
+  const ev = events.find((e) => e.name === "pr/changed" && e.data!.to === to)
   return ev?.data!.detail as string | undefined
 }
 
@@ -53,7 +53,7 @@ describe("withMergeWorker — drain → merged (happy path)", () => {
     const { events } = await bay.dispatch({ type: "drain" })
 
     const transitions = events
-      .filter((e) => e.type === "pr.state-changed")
+      .filter((e) => e.name === "pr/changed")
       .map((e) => `${e.data!.from}→${e.data!.to}`)
     expect(transitions).toEqual(["queued→merging", "merging→merged"])
     expect(detailOf(events, "merged")).toBe("C-x task/x") // {pr} {target} both substituted
@@ -200,10 +200,10 @@ describe("withMergeWorker — serial FIFO drain", () => {
 })
 
 describe("withMergeWorker — empty drain", () => {
-  it("emits a queue.empty event and mutates no state", async () => {
+  it("is a non-event — no queue.empty marker, just an empty events array (docs/events.md § event families)", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
     const { events } = await bay.dispatch({ type: "drain" })
-    expect(events.map((e) => e.type)).toEqual(["queue.empty"])
+    expect(events).toEqual([])
     expect(Object.keys((await bay.state()).prs)).toEqual([])
   })
 })

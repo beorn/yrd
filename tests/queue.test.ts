@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBay, createJsonlJournal, pipe, queuedPrs, withQueue } from "../src/index.ts"
+import { createGitbay, createJsonlJournal, pipe, queuedPrs, withQueue } from "../src/index.ts"
 import type { BayRuntime, BayState, BayStore, PrId, QueueSlice } from "../src/index.ts"
 
 // Fixed fake clock + actor — determinism comes from the injected clock and the
@@ -20,7 +20,7 @@ function openStore(path: string): BayStore {
 }
 
 async function buildQueueBay(path: string): Promise<BayRuntime> {
-  return pipe(createBay({ store: openStore(path), clock: CLOCK, actor: ACTOR }), withQueue())
+  return pipe(createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }), withQueue())
 }
 
 function slice(state: BayState): QueueSlice {
@@ -36,7 +36,7 @@ describe("withQueue — enqueue", () => {
     const bay = await buildQueueBay(await tmpJournalPath())
     const { events } = await bay.dispatch({ type: "enqueue", args: { target: "task/wi-a", name: "wi-a" } })
 
-    const opened = events.find((e) => e.type === "pr.opened")!
+    const opened = events.find((e) => e.name === "pr/opened")!
     const id = opened.data!.pr as string
     expect(id).toBe("PR1")
     expect(opened.data!.target).toBe("task/wi-a")
@@ -48,7 +48,7 @@ describe("withQueue — enqueue", () => {
 
     // Sequential per repo: the next submit gets the next number.
     const second = await bay.dispatch({ type: "enqueue", args: { target: "task/wi-b" } })
-    expect(second.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR2")
+    expect(second.events.find((e) => e.name === "pr/opened")!.data!.pr).toBe("PR2")
   })
 
   it("uses an explicit pr id when supplied; name defaults to null", async () => {
@@ -63,10 +63,10 @@ describe("withQueue — enqueue", () => {
     const bay = await buildQueueBay(await tmpJournalPath())
     await bay.dispatch({ type: "enqueue", args: { target: "t1", pr: "X-legacy" } })
     const a = await bay.dispatch({ type: "enqueue", args: { target: "t2" } })
-    expect(a.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR1")
+    expect(a.events.find((e) => e.name === "pr/opened")!.data!.pr).toBe("PR1")
     await bay.dispatch({ type: "enqueue", args: { target: "t3", pr: "PR9" } })
     const b = await bay.dispatch({ type: "enqueue", args: { target: "t4" } })
-    expect(b.events.find((e) => e.type === "pr.opened")!.data!.pr).toBe("PR10")
+    expect(b.events.find((e) => e.name === "pr/opened")!.data!.pr).toBe("PR10")
   })
 
   it("throws on a missing/blank target", async () => {
@@ -124,7 +124,7 @@ describe("withQueue — replay", () => {
     await first.dispatch({ type: "enqueue", args: { target: "B" } })
     const live = await first.state()
 
-    // Fresh createBay + fresh store handle over the SAME journal file — proves
+    // Fresh createGitbay + fresh store handle over the SAME journal file — proves
     // replay (not the live fold cache) reconstructs identical state.
     const replayed = await (await buildQueueBay(path)).state()
 
