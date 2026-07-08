@@ -110,7 +110,7 @@ function parseRequiredPr(value: unknown, command: string): PrId {
 function parseGateCommand(value: unknown, fallback: string | undefined): string | undefined {
   if (value === undefined) return fallback
   if (typeof value !== "string" || value.trim() === "") {
-    throw new Error("bay: batch-bisect: 'gateCommand' must be a non-empty string when provided")
+    throw new Error("bay: batch recovery: 'gateCommand' must be a non-empty string when provided")
   }
   return value
 }
@@ -150,25 +150,25 @@ function reduceBatchBisect(opts: BatchBuildOptions, state: BayState, command: Ba
   const batch = parseRequiredPr(command.args?.pr, "batch-bisect")
   const record = sliceOf(state).batches[batch]
   if (!record) {
-    throw new Error(`bay: batch-bisect: no batch '${batch}' — run batch-build first`)
+    throw new Error(`bay: batch recovery: no batch '${batch}' — build a batch first`)
   }
   if (record.state !== "rejected") {
-    throw new Error(`bay: batch-bisect: ${batch} is ${record.state} — bisect only runs after a red train gate`)
+    throw new Error(`bay: batch recovery: ${batch} is ${record.state} — recovery only runs after a red batch gate`)
   }
   if (record.prefixes.length === 0) {
-    throw new Error(`bay: batch-bisect: ${batch} has no prefix tips — rebuild the batch before bisecting`)
+    throw new Error(`bay: batch recovery: ${batch} has no prefix tips — rebuild the batch first`)
   }
 
   const gateCommand = parseGateCommand(command.args?.gateCommand, opts.gateCommand)
   if (gateCommand === undefined) {
     throw new Error(
-      "bay: batch-bisect: no gate command configured — pass gateCommand or set withBatchBuild({ gateCommand })",
+      "bay: batch recovery: no gate command configured — set bay.check so git bay can find the faulting member",
     )
   }
 
   const rebuiltBatch = parseCandidatePr(command.args?.rebuildPr) ?? nextPrId(state)
   if (state.prs[rebuiltBatch]) {
-    throw new Error(`bay: batch-bisect: rebuild PR '${rebuiltBatch}' already exists — candidate ids must be unique`)
+    throw new Error(`bay: batch recovery: rebuild PR '${rebuiltBatch}' already exists — candidate ids must be unique`)
   }
 
   return {
@@ -442,7 +442,7 @@ async function checkPrefix(
 function redPrefixDetail(batch: PrId, gateCommand: string, prefix: BatchPrefix, detail: string | undefined): string {
   const suffix = detail === undefined || detail === "" ? "" : `\n${detail}`
   return (
-    `bay: ${prefix.pr} ejected from batch ${batch} — first red train prefix ${prefix.prefixTarget} ` +
+    `bay: ${prefix.pr} ejected from batch ${batch} — first red batch prefix ${prefix.prefixTarget} ` +
     `failed gate '${gateCommand}'. Rebuilding batch without it; remainder will land. ` +
     `Fix and retry: git bay retry ${prefix.pr}.${suffix}`
   )
@@ -458,26 +458,26 @@ function rejectMemberEvents(bay: BayRuntime, state: BayState, member: BatchMembe
     ]
   }
   if (pr.state === "merging") return [stateChangeEvent(bay, member.pr, "merging", "rejected", detail)]
-  throw new Error(`bay: batch-bisect: cannot reject ${member.pr} from state ${pr.state}`)
+  throw new Error(`bay: batch recovery: cannot reject ${member.pr} from state ${pr.state}`)
 }
 
 function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     if (opts.mainRepo.trim() === "") {
-      throw new Error("bay: batch-bisect: mainRepo is required")
+      throw new Error("bay: batch recovery: mainRepo is required")
     }
 
     const d = effect.data as { batch: PrId; rebuiltBatch: PrId; gateCommand: string }
     const state = await bay.state()
     const record = sliceOf(state).batches[d.batch]
-    if (!record) throw new Error(`bay: batch-bisect: no batch '${d.batch}'`)
+    if (!record) throw new Error(`bay: batch recovery: no batch '${d.batch}'`)
     if (record.state !== "rejected") {
-      throw new Error(`bay: batch-bisect: ${d.batch} is ${record.state} — bisect only runs after rejection`)
+      throw new Error(`bay: batch recovery: ${d.batch} is ${record.state} — recovery only runs after rejection`)
     }
 
     const events: BayEvent[] = []
-    let culprit: BatchPrefix | undefined
-    let culpritDetail: string | undefined
+    let faulting: BatchPrefix | undefined
+    let faultingDetail: string | undefined
     for (const prefix of record.prefixes) {
       const checked = await checkPrefix(opts, d.gateCommand, d.batch, prefix)
       events.push(
@@ -497,35 +497,35 @@ function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
         ),
       )
       if (!checked.ok) {
-        culprit = prefix
-        culpritDetail = checked.detail
+        faulting = prefix
+        faultingDetail = checked.detail
         break
       }
     }
 
-    if (!culprit) {
+    if (!faulting) {
       throw new Error(
-        `bay: batch-bisect: gate command passed every prefix for rejected batch ${d.batch}; ` +
-          `refusing to rebuild because the per-member gate is lying or does not match the red train gate`,
+        `bay: batch recovery: gate command passed every prefix for rejected batch ${d.batch}; ` +
+          `refusing to rebuild because the per-member gate is lying or does not match the red batch gate`,
       )
     }
 
-    const detail = redPrefixDetail(d.batch, d.gateCommand, culprit, culpritDetail)
+    const detail = redPrefixDetail(d.batch, d.gateCommand, faulting, faultingDetail)
     events.push(
       makeEvent(
         bay,
         EV_MEMBER_EJECTED,
         {
           batch: d.batch,
-          ...memberSummary(culprit),
+          ...memberSummary(faulting),
           detail,
         },
-        { pr: culprit.pr },
+        { pr: faulting.pr },
       ),
     )
-    events.push(...rejectMemberEvents(bay, state, culprit, detail))
+    events.push(...rejectMemberEvents(bay, state, faulting, detail))
 
-    const remainder = record.members.filter((member) => member.pr !== culprit!.pr)
+    const remainder = record.members.filter((member) => member.pr !== faulting.pr)
     if (remainder.length === 0) return events
 
     const rebuilt = await buildCandidate(opts, d.rebuiltBatch, record.base, remainder)
@@ -552,7 +552,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions): EffectHandler {
         queueReorderedEvent(
           bay,
           candidateFirstOrder(queueOrder(state), d.rebuiltBatch, rebuilt.built),
-          `batch ${d.rebuiltBatch} after ejecting ${culprit.pr} from ${d.batch}`,
+          `batch ${d.rebuiltBatch} after ejecting ${faulting.pr} from ${d.batch}`,
         ),
       )
       events.push(

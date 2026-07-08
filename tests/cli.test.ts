@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { spawn } from "node:child_process"
 
 /**
@@ -59,6 +59,23 @@ async function makeFixture(prefix: string): Promise<{ root: string; demo: string
   await must(["git", "init", "-q", "-b", "main", demo], root, env)
   await must(["git", "-C", demo, "commit", "-qm", "init", "--allow-empty"], root, env)
   return { root, demo, env }
+}
+
+async function branchWithFiles(
+  repo: string,
+  env: Record<string, string>,
+  branch: string,
+  files: Record<string, string>,
+): Promise<void> {
+  await must(["git", "-C", repo, "switch", "-qc", branch, "main"], repo, env)
+  for (const [path, body] of Object.entries(files)) {
+    const full = join(repo, path)
+    await mkdir(dirname(full), { recursive: true })
+    await writeFile(full, body, "utf8")
+  }
+  await must(["git", "-C", repo, "add", "-A"], repo, env)
+  await must(["git", "-C", repo, "commit", "-qm", branch], repo, env)
+  await must(["git", "-C", repo, "switch", "-q", "main"], repo, env)
 }
 
 describe("git bay CLI — happy path (process-level)", () => {
@@ -340,10 +357,40 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
   it("help advertises exactly one spelling per verb — no aliases anywhere", async () => {
     const help = await run(["git", "bay"], demo, env) // bare invocation prints help
     expect(help.code).toBe(0)
-    for (const advertised of ["guide", "init", "new <name>", "close <wt|name>", "gc", "ls", "submit <branch|name>", "integrate", "retry <PR|name>", "audit"]) {
+    for (const advertised of [
+      "guide",
+      "init",
+      "new <name>",
+      "close <wt|name>",
+      "gc",
+      "ls",
+      "submit <branch|name>",
+      "integrate",
+      "retry <PR|name>",
+      "audit",
+    ]) {
       expect(help.stdout, advertised).toContain(advertised)
     }
-    for (const hidden of ["prime", "co", "checkout", "abandon", "return", "refresh", "ping", "status", "enqueue", "adopt", "in", "int", "land", "merge", "drain", "requeue", "receive-pre", "receive-post"]) {
+    for (const hidden of [
+      "prime",
+      "co",
+      "checkout",
+      "abandon",
+      "return",
+      "refresh",
+      "ping",
+      "status",
+      "enqueue",
+      "adopt",
+      "in",
+      "int",
+      "land",
+      "merge",
+      "drain",
+      "requeue",
+      "receive-pre",
+      "receive-post",
+    ]) {
       expect(help.stdout, hidden).not.toMatch(new RegExp(`^\\s*${hidden}\\b`, "m"))
     }
     // and the per-command usage line advertises one spelling too, even when
@@ -377,7 +424,22 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
   })
 
   it("`<verb> -h` works for every verb that reads a positional — new names and old aliases", async () => {
-    for (const verb of ["new", "ls", "submit", "integrate", "retry", "close", "refresh", "co", "status", "enqueue", "requeue", "drain", "abandon", "ping"]) {
+    for (const verb of [
+      "new",
+      "ls",
+      "submit",
+      "integrate",
+      "retry",
+      "close",
+      "refresh",
+      "co",
+      "status",
+      "enqueue",
+      "requeue",
+      "drain",
+      "abandon",
+      "ping",
+    ]) {
       const res = await run(["git", "bay", verb, "-h"], demo, env)
       expect(res.code, `${verb} -h`).toBe(0)
       expect(res.stdout, `${verb} -h`).toContain("Usage: git bay")
@@ -458,6 +520,124 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     const initAgain = await run(["git", "bay", "init"], demo, env)
     expect(initAgain.code).toBe(0)
     expect(initAgain.stdout).toContain("bay: initialized")
+  })
+})
+
+describe("git bay CLI — batch integration from queue.batch-size", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("bay-batch-cli-"))
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.queue.batch-size", "2"], demo, env)
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.mergeCommand",
+        "git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}",
+      ],
+      demo,
+      env,
+    )
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("composes compatible queued PRs into one batch candidate and lands the member PRs together", async () => {
+    await branchWithFiles(demo, env, "task/a", { "a.txt": "a\n" })
+    await branchWithFiles(demo, env, "task/b", { "b.txt": "b\n" })
+    expect((await must(["git", "bay", "submit", "task/a"], demo, env)).stdout.trim()).toBe("PR1")
+    expect((await must(["git", "bay", "submit", "task/b"], demo, env)).stdout.trim()).toBe("PR2")
+
+    const integrated = await must(["git", "bay", "integrate"], demo, env)
+    expect(integrated.stdout).toContain("bay: batch PR3 composed — members: PR1, PR2")
+    expect(integrated.stdout).toContain("bay: batch PR3 built — members: PR1, PR2")
+    expect(integrated.stdout).toContain("bay: PR3 queued → merging")
+    expect(integrated.stdout).toContain("bay: PR3 merging → merged")
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs.PR1!.state).toBe("merged")
+    expect(state.prs.PR2!.state).toBe("merged")
+    expect(state.prs.PR3!.state).toBe("merged")
+
+    const batchStatus = await must(["git", "bay", "ls", "PR3"], demo, env)
+    expect(batchStatus.stdout).toContain("batch PR3 merged — members: PR1, PR2")
+  })
+
+  it("ejects a build-conflict member, lands the clean remainder, and surfaces the ejection in status", async () => {
+    await branchWithFiles(demo, env, "task/file", { dir: "file blocks directory\n" })
+    await branchWithFiles(demo, env, "task/nested", { "dir/file.txt": "nested\n" })
+    await must(["git", "bay", "submit", "task/file"], demo, env)
+    await must(["git", "bay", "submit", "task/nested"], demo, env)
+
+    const integrated = await must(["git", "bay", "integrate"], demo, env)
+    expect(integrated.stdout).toContain("bay: batch PR3 composed — members: PR1, PR2")
+    expect(integrated.stdout).toContain("bay: PR2 ejected from batch PR3")
+    expect(integrated.stdout).toContain("bay: batch PR3 built — members: PR1; ejected: PR2")
+    expect(integrated.stdout).toContain("bay: PR3 merging → merged")
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs.PR1!.state).toBe("merged")
+    expect(state.prs.PR2!.state).toBe("rejected")
+    expect(state.prs.PR3!.state).toBe("merged")
+
+    const ejected = await must(["git", "bay", "ls", "PR2"], demo, env)
+    expect(ejected.stdout).toContain("PR2 rejected — bay: PR2 ejected from batch PR3")
+    expect(ejected.stdout).not.toContain("train")
+  })
+
+  it("bisects a red batch gate, ejects the faulting member, rebuilds, and lands the remainder", async () => {
+    const merge = join(root, "merge-if-clean.sh")
+    const gate = join(root, "gate-no-bad.sh")
+    await writeFile(
+      merge,
+      `#!/bin/sh
+target="$1"
+if git cat-file -e "$target:bad.txt" 2>/dev/null; then
+  echo "bad batch" >&2
+  exit 7
+fi
+git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$target"
+`,
+      "utf8",
+    )
+    await writeFile(gate, `#!/bin/sh\ntest ! -f bad.txt\n`, "utf8")
+    await chmod(merge, 0o755)
+    await chmod(gate, 0o755)
+    await must(["git", "-C", demo, "config", "bay.mergeCommand", `${merge} {target}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.check", gate], demo, env)
+
+    await branchWithFiles(demo, env, "task/good", { "good.txt": "ok\n" })
+    await branchWithFiles(demo, env, "task/bad", { "bad.txt": "breaks batch\n" })
+    await must(["git", "bay", "submit", "task/good"], demo, env)
+    await must(["git", "bay", "submit", "task/bad"], demo, env)
+
+    const integrated = await must(["git", "bay", "integrate"], demo, env)
+    expect(integrated.stdout).toContain("bay: batch PR3 built — members: PR1, PR2")
+    expect(integrated.stdout).toContain("bay: PR3 merging → rejected — exit 7: bad batch")
+    expect(integrated.stdout).toContain("bay: PR2 ejected from batch PR3 — first red batch prefix")
+    expect(integrated.stdout).toContain("bay: batch PR4 built — members: PR1")
+    expect(integrated.stdout).toContain("bay: PR4 merging → merged")
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs.PR1!.state).toBe("merged")
+    expect(state.prs.PR2!.state).toBe("rejected")
+    expect(state.prs.PR3!.state).toBe("rejected")
+    expect(state.prs.PR4!.state).toBe("merged")
+
+    const ejected = await must(["git", "bay", "ls", "PR2"], demo, env)
+    expect(ejected.stdout).toContain("first red batch prefix")
+    expect(ejected.stdout).not.toMatch(/\b(train|culprit|bisect)\b/u)
   })
 })
 

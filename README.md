@@ -9,7 +9,7 @@ The idea in one sentence more: anyone working in a local clone — human or agen
 **You want git bay if…**
 
 - you run a team of coding agents that produce more merges than a human can referee
-- you want merge-queue safety (like GitHub's merge queue or GitLab's merge trains) with no hosted service and no daemon
+- you want merge-queue safety with no hosted service and no daemon
 - you have a superproject full of submodules and want changes across them to merge as one unit — like a monorepo
 - you want worktrees and merging in one self-contained tool that lives entirely inside your repo
 
@@ -48,6 +48,7 @@ That is real output from a live run, lightly edited for length. From a worktree 
 - **Your workflow doesn't change** — after `git bay new`, it's ordinary `git pull` / `git commit` / `git push`; verdicts appear as `remote:` lines in the push output, where git users already look.
 - **Errors that teach** — a refused push names what failed *and the exact command that fixes it*. The error messages are part of the product.
 - **Safe with submodules** — a parent commit and its submodule commits land together or not at all; a pointer that would move backwards is refused, at commit time and again at the door.
+- **Batches when it is safe** — set `bay.queue.batch-size` above `1` and `integrate` composes compatible queued PRs into one checked candidate; conflicting or red members are ejected and the clean remainder lands.
 - **Names connect to your issue tracker** — every worktree is opened for a named piece of work; validation and lifecycle callbacks are each one configured command.
 - **Plug in your own tools by running commands** — checks, review, tracker, notifications: each is an external command the bay calls. No SDK.
 - **A complete record** — every event appends to one JSONL journal: what was queued, what the checks said, what merged. Replayable, resumable, greppable.
@@ -62,6 +63,7 @@ git bay is built as an event-sourced core plus `with*()` layers — each layer r
 | core (`createBay`) | — | journal · fold · dispatch · typed events · the [store seam](docs/store.md) (sqlite default; adapters are ~a page) |
 | [`withWorktrees`](docs/layers/worktrees.md) | core | bays: named loans of pooled, numbered worktrees; pooling is an option of this layer |
 | `withQueue` / `withReceive` / `withIntegrate` | core | the PR queue, the push door, the serial verified merge |
+| `withBatchBuild` | core | optional batching: compatible queued PRs become one candidate; conflict/red members are ejected and the remainder is rebuilt |
 | [`withSubmodules`](docs/layers/submodules.md) | core, auto-armed | pin-rewind refusal, atomic super-repo landings, pin audit |
 | [`withIssueTracking`](docs/layers/issue-tracking.md) | optional | validate names at open; auto-close/comment issues on PR outcomes |
 | [`withChecks`](docs/layers/checks.md) | optional | your commands at lifecycle points (provision, push, submit, integrate, merged) |
@@ -83,7 +85,7 @@ pipe(
 )
 ```
 
-Configuration is unifying into one committed file whose sections mirror the layer names (today it's a few `git config bay.*` keys — `bay.check`, `bay.mergeCommand`, `bay.tracker`; those retire when this lands):
+Configuration is unifying into one committed file whose sections mirror the layer names (today it's a few `git config bay.*` keys — `bay.check`, `bay.mergeCommand`, `bay.tracker`, `bay.queue.batch-size`, `bay.queue.regen-paths`; those retire when this lands):
 
 ```yaml
 store: sqlite                        # or: km — PRs as nodes, queue order = tree order
@@ -95,7 +97,7 @@ checks:
   submit: bun run lint
   integrate: bun run test
 review: { required: false }
-queue: { limit: 10 }                 # WIP limit: refuse new PRs past N queued
+queue: { limit: 10, batch-size: 4 }  # WIP limit + optional batch size
 ```
 
 Two name systems, deliberately: config sections are nouns matching layers (settings); slash names like `bay/open` → `bay/opened` are actions and facts (requests and events — see [docs/events.md](docs/events.md)).
@@ -124,6 +126,8 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 **How do I tell it what checks to run?** `git config bay.check '<command>'` — the bay runs it before merging; exit 0 means pass. Repositories with their own merge process route the merge through `git config bay.mergeCommand '<command with {target}>'`, used by `git bay integrate`.
 
+**How do batches work?** `git config bay.queue.batch-size 4` lets `git bay integrate` compose up to four compatible queued PRs into one `bay/batch/<PR>` candidate. Build conflicts eject the faulting PR immediately. If the candidate fails the configured `bay.check`, git bay checks the saved prefix refs, ejects the first red member, rebuilds the remainder, and lands it.
+
 **What happens when a check fails?** The push is refused and the message says why. If the fix needs new commits, just `git push` again — the PR keeps its number. If the fix changed no commits, `git bay retry <PR>` re-runs the pipeline.
 
 **What exactly is a worktree? A name?** A **worktree** is the directory you work in — ids look like `wt1`; it is disposable and yours alone. The **name** is what you called the work at `git bay new` — any label, or a ticket id your tracker knows. Worktree verbs (`close`, `refresh`, `gc`) act on worktrees; PR verbs (`ls`, `submit`, `integrate`, `retry`) act on PRs — and every argument accepts an id or a name.
@@ -142,7 +146,7 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 *Your worktree*: `new <name>` (open a worktree; prints a cd-able path) · `close <wt|name>` (uncommitted work always preserved) · `gc` (expire idle worktrees, snapshot first)
 
-*PRs*: `ls [PR|name]` (worktree table + unmerged PRs, `--json`) · `submit <branch|name>` (PR for an existing branch) · `integrate [PR|name]` (integrate the next queued PR, `--watch`) · `retry <PR|name>` (re-queue a rejected PR)
+*PRs*: `ls [PR|name]` (worktree table + unmerged PRs, batch summaries, `--json`) · `submit <branch|name>` (PR for an existing branch) · `integrate [PR|name]` (integrate the next queued PR or configured batch, `--watch`) · `retry <PR|name>` (re-queue a rejected PR)
 
 *Repository health*: `audit` (strays, stale pins, refs without a name, `--json`)
 
@@ -153,11 +157,11 @@ Unambiguous prefixes work (`git bay au` is `audit`); every pre-rename verb (`co`
 - **v0.3 — vocabulary completion**: `open`/`close` as the advertised workspace verbs; worktree/bay split in `ls`; the event schema in [docs/events.md](docs/events.md) (typed union, envelope with cause/trace ids); `close --withdraw`.
 - **v0.4 — checks + pooling + config**: checks on lifecycle events; worktree pooling on by default; WIP limits; `bay.*` git-config keys unify into `.gitbay.yml`.
 - **v0.5 — review gate + RPC**: the approval state with `approve`/`reject`; a JSON-RPC adapter over the same core (ships when a real subscriber exists).
-- **Horizon**: batching (several compatible changes checked as one candidate — the compatibility check is already on main), native promotion (merge in a staging area instead of your main worktree), optional background service.
+- **Horizon**: native promotion (merge in a staging area instead of your main worktree), optional background service.
 
 ## The docs are tests
 
-Three documents in [tests/](tests/) — [gitbay.spec.md](tests/gitbay.spec.md) (the normal workflow), [refusals.spec.md](tests/refusals.spec.md) (every refusal and its fix), and [guide.spec.md](tests/guide.spec.md) (the agent-onboarding printout) — are executable specifications: [mdspec](https://mdspec.org/) runs every console block and checks the output character for character (`bun run spec`). If the docs drift from real behavior, the test suite fails.
+Four documents in [tests/](tests/) — [gitbay.spec.md](tests/gitbay.spec.md) (the normal workflow), [batch.spec.md](tests/batch.spec.md) (batch happy/eject paths), [refusals.spec.md](tests/refusals.spec.md) (every refusal and its fix), and [guide.spec.md](tests/guide.spec.md) (the agent-onboarding printout) — are executable specifications: [mdspec](https://mdspec.org/) runs every console block and checks the output character for character (`bun run spec`). If the docs drift from real behavior, the test suite fails.
 
 ## License
 

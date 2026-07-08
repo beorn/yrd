@@ -151,10 +151,10 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
     expect(subjects.split("\n")).toEqual(["bay: batch PR3 member PR1"])
   })
 
-  it("bisects a red train gate to the first bad prefix and queues a rebuilt clean remainder", async () => {
+  it("bisects a red batch gate to the first bad prefix and queues a rebuilt clean remainder", async () => {
     const repo = await makeRepo()
     await branch(repo, "task/good-a", { "a.ts": "a\n" })
-    await branch(repo, "task/bad", { "bad.txt": "breaks the train\n" })
+    await branch(repo, "task/bad", { "bad.txt": "breaks the batch\n" })
     await branch(repo, "task/good-c", { "c.ts": "c\n" })
 
     const bay = await buildBatchBay(repo, undefined, "false")
@@ -186,7 +186,7 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
     const ejected = eventsOf(events, "batch.member.ejected")
     expect(ejected).toHaveLength(1)
     expect(ejected[0]!.data).toMatchObject({ batch: "PR4", pr: "PR2", target: "task/bad" })
-    expect(String(ejected[0]!.data!.detail)).toContain("first red train prefix")
+    expect(String(ejected[0]!.data!.detail)).toContain("first red batch prefix")
 
     const rebuilt = eventsOf(events, "batch.built")
     expect(rebuilt).toHaveLength(1)
