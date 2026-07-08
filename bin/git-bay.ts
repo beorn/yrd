@@ -180,14 +180,17 @@ function resolvePr(state: BayState, token: string): PrId {
 }
 
 /** The PR record for a resolved id, or the "no push yet" teaching refusal —
- *  the id can come from a worktree's pre-minted number before any push. */
+ *  the id can come from a worktree's pre-minted number before any push. Says
+ *  "no PR yet" rather than "not open yet" on purpose: `open` is now a real PR
+ *  state (§6 addendum), so "not open yet" would misleadingly suggest one
+ *  exists in some OTHER state. */
 function prOrTeach(state: BayState, prId: PrId, verb: string): PullRequest {
   const pr = state.prs[prId]
   if (pr) return pr
   const lease = Object.values(state.leases).find((l) => l.changeId === prId && l.endedAt === undefined)
   const where = lease ? `${wtLabelFor(state, lease.id) ?? "its worktree"} (${lease.workitem ?? lease.branch})` : "its worktree"
   throw new Error(
-    `bay: ${verb}: ${prId} is not open yet — nothing has been pushed from ${where}; plain git push opens it`,
+    `bay: ${verb}: ${prId} has no PR yet — nothing has been pushed from ${where}; plain git push opens it`,
   )
 }
 
@@ -255,9 +258,11 @@ function worktreeTable(state: BayState, actor: string, now: number, ttlMs: numbe
     const you = lease.actor === actor ? "← you" : ""
     // AGE = since `open` (createdAt); IDLE = since the newest activity (what
     // `refresh` resets and what gc measures); STATE flips to `stale` when
-    // idle exceeds the timeout — the same predicate gc uses.
+    // idle exceeds the timeout — the same predicate gc uses. "active", never
+    // "open" — `open` is now a PR lifecycle state (§6 addendum) and this is a
+    // worktree's activity, a different axis entirely; never interchange them.
     const last = slice.lastActive?.[leaseId] ?? lease.createdAt
-    const st = now - Date.parse(last) > ttlMs ? "stale" : "open"
+    const st = now - Date.parse(last) > ttlMs ? "stale" : "active"
     rows.push([`wt${n}`, lease.workitem ?? "—", st, age(lease.createdAt, now), age(last, now), you])
   }
   if (rows.length === 0) return "no open worktrees — git bay open <name> opens one"
@@ -399,14 +404,17 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
   }
 }
 
-async function verbSubmit(ctx: Ctx, target: string | undefined, name: string | undefined): Promise<void> {
-  if (!target) throw new Error("bay: submit: a branch, SHA, or worktree name is required")
+/** `adopt <branch>` (§6 addendum: took over submit's OLD meaning) — creates a
+ *  PR for an existing branch, landing in `open` (never auto-queued; `submit`/
+ *  `queue` is the separate ask-to-merge step). */
+async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | undefined): Promise<void> {
+  if (!target) throw new Error("bay: adopt: a branch, SHA, or worktree name is required")
   // Refuse at the door, not at integrate time: an unresolvable target used to be
   // accepted here and rejected minutes later by the merge worker's guard
-  // (dogfood find: a user submitted a NAME; the branch was task/<name>).
+  // (dogfood find: a user adopted a NAME; the branch was task/<name>).
   // Dual addressing: a token that is no commit may be the name of an existing
   // worktree — resolve it to that worktree's branch and let the reducer's
-  // guards teach (an OPEN worktree's branch submits by plain git push).
+  // guards teach (an OPEN worktree's branch opens its PR by plain git push).
   let branch = target
   const resolved = await git(["-C", ctx.mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], ctx.mainRepo)
   if (resolved.code !== 0) {
@@ -428,8 +436,8 @@ async function verbSubmit(ctx: Ctx, target: string | undefined, name: string | u
         .slice(0, 3)
       const hint = near.length > 0 ? ` Did you mean: ${near.join(", ")}?` : ""
       throw new Error(
-        `bay: submit: '${target}' does not resolve to a commit and no worktree carries that name — ` +
-          `submit takes a branch, a SHA, or the name of an existing worktree.${hint}`,
+        `bay: adopt: '${target}' does not resolve to a commit and no worktree carries that name — ` +
+          `adopt takes a branch, a SHA, or the name of an existing worktree.${hint}`,
       )
     }
   }
@@ -441,12 +449,52 @@ async function verbSubmit(ctx: Ctx, target: string | undefined, name: string | u
   })
 }
 
-/** Verdict lines shared by the post-receive hook and synchronous retry. */
-function printVerdict(events: { name: string; data: Record<string, unknown> }[]): void {
+/** `submit <PR|name>` / alias `queue` (§6 addendum: submit's NEW meaning) —
+ *  "ask to merge": moves an existing PR from `open` to `queued`. Lazy, like
+ *  `adopt` always has been: this only queues it — `git bay integrate` (or a
+ *  fused `-o submit`/`-o wait`/`bay.autoQueue` push) is what actually runs the
+ *  check/merge pipeline. A token that resolves to no known PR/bay redirects
+ *  to `adopt`, since that is what creates one. */
+async function verbQueue(ctx: Ctx, target: string | undefined): Promise<void> {
+  if (!target) throw new Error("bay: submit: a PR number or name is required — git bay ls lists them")
+  await withWriteBay(ctx, async (bay) => {
+    const state = await bay.state()
+    let prId: PrId
+    try {
+      prId = resolvePr(state, target)
+    } catch (err) {
+      const msg = (err as Error).message
+      if (msg.includes("no PR or worktree named")) {
+        throw new Error(
+          `bay: submit: '${target}' is not a known PR or bay name — to create one from an existing branch: ` +
+            `git bay adopt ${target}`,
+        )
+      }
+      throw err
+    }
+    prOrTeach(state, prId, "submit") // "has no PR yet" teaches instead of a reducer miss
+    await bay.dispatch({ type: "queue", args: { pr: prId } })
+    console.log(`bay: ${prId} queued — git bay integrate ${prId} to land it`)
+  })
+}
+
+/** Verdict lines shared by the post-receive hook, retry, and submit/queue.
+ *  A bare push that only creates (no auto-queue) has no pr/changed event at
+ *  all — that's the "opened, not queued" case, printed distinctly. An empty
+ *  events array (a repeat push to an already-`open` PR, still not queuing) is
+ *  a non-event: quiet on success, nothing to print. */
+function printVerdict(events: { name: string; data: Record<string, unknown> }[], opts: { label?: string } = {}): void {
+  if (events.length === 0) return
+  const opened = events.find((e) => e.name === "pr/opened")
+  const changes = events.filter((e) => e.name === "pr/changed")
+  if (opened && changes.length === 0) {
+    const id = (opened.data as { pr: string }).pr
+    console.log(`bay: ${id} opened — git bay submit ${id} when ready`)
+    return
+  }
   const id = (events.find((e) => "pr" in e.data)?.data as { pr?: string } | undefined)?.pr ?? "?"
-  console.log(`bay: ${id} received — checks running`)
-  for (const e of events) {
-    if (e.name !== "pr/changed") continue
+  console.log(`bay: ${id} ${opts.label ?? "received — checks running"}`)
+  for (const e of changes) {
     const d = e.data as { pr: string; to: string; detail?: string }
     if (d.to === "merged") {
       const m = d.detail?.match(/^merged [0-9a-f]+ onto (\S+)$/)
@@ -466,8 +514,14 @@ async function verbRetry(ctx: Ctx, target: string | undefined): Promise<void> {
     const state = await bay.state()
     const prId = resolvePr(state, target)
     const pr = prOrTeach(state, prId, "retry")
+    if (pr.state === "open") {
+      throw new Error(`bay: retry: ${prId} hasn't been submitted yet — git bay submit ${prId}`)
+    }
     if (pr.state === "merged") {
       throw new Error(`bay: retry: ${prId} is already merged — start the next piece of work: git bay open <name>`)
+    }
+    if (pr.state === "abandoned") {
+      throw new Error(`bay: retry: ${prId} was withdrawn — start the next piece of work: git bay open <name>`)
     }
     if (pr.state === "checking" || pr.state === "reviewing") {
       throw new Error(`bay: retry: ${prId} is ${pr.state} — wait for the verdict (git bay ls ${prId})`)
@@ -478,7 +532,9 @@ async function verbRetry(ctx: Ctx, target: string | undefined): Promise<void> {
     if (!branch) throw new Error(`bay: retry: no merge target recorded for ${prId} — cannot resubmit`)
     const sha = (await git(["-C", ctx.mainRepo, "rev-parse", branch])).stdout.trim()
     if (!sha) throw new Error(`bay: retry: branch '${branch}' does not resolve in ${ctx.mainRepo}`)
-    const { events } = await bay.dispatch({ type: "submit", args: { branch, sha } })
+    // retry always re-runs the full pipeline, regardless of bay.autoQueue —
+    // that IS the point of retrying.
+    const { events } = await bay.dispatch({ type: "submit", args: { branch, sha, queued: true } })
     printVerdict(events)
   })
 }
@@ -598,6 +654,33 @@ async function readStdin(): Promise<string> {
   return await new Response(Bun.stdin.stream()).text()
 }
 
+/** Push options the client passed via `git push -o <value>` — git exports
+ *  these to both hooks as `GIT_PUSH_OPTION_COUNT` + `GIT_PUSH_OPTION_<i>` when
+ *  the server has `receive.advertisePushOptions` set (init always sets it). */
+function readPushOptions(): string[] {
+  const count = Number(process.env.GIT_PUSH_OPTION_COUNT ?? "0")
+  const opts: string[] = []
+  for (let i = 0; i < count; i++) {
+    const v = process.env[`GIT_PUSH_OPTION_${i}`]
+    if (v !== undefined) opts.push(v)
+  }
+  return opts
+}
+
+/** §6 addendum: a push queues immediately (create AND ask-to-merge, fused)
+ *  iff `-o submit`/`-o wait` was passed, or `bay.autoQueue` is set. In this
+ *  synchronous-hook implementation `-o submit` and `-o wait` are equivalent
+ *  triggers — the post-receive hook always runs to completion before git
+ *  returns to the client, so "blocks for the verdict" is already true either
+ *  way; `-o wait`'s stronger phrasing will earn a real distinction once an
+ *  async execution path exists. */
+async function resolveAutoQueue(ctx: Ctx, pushOptions: string[]): Promise<boolean> {
+  if (pushOptions.includes("submit") || pushOptions.includes("wait")) return true
+  const raw = await createGitConfigSource(ctx.mainRepo).get("autoQueue")
+  const v = raw?.trim().toLowerCase()
+  return v !== undefined && v !== "" && v !== "false" && v !== "0"
+}
+
 async function hookPre(ctx: Ctx): Promise<void> {
   const updates = parseReceiveStdin(await readStdin())
   const bay = readBay(ctx)
@@ -608,11 +691,12 @@ async function hookPre(ctx: Ctx): Promise<void> {
 
 async function hookPost(ctx: Ctx): Promise<void> {
   const updates = parseReceiveStdin(await readStdin())
+  const queued = await resolveAutoQueue(ctx, readPushOptions())
   for (const u of updates) {
     const branch = u.ref.replace(/^refs\/heads\//, "")
     try {
       await withWriteBay(ctx, async (bay) => {
-        const { events } = await bay.dispatch({ type: "submit", args: { branch, sha: u.newSha } })
+        const { events } = await bay.dispatch({ type: "submit", args: { branch, sha: u.newSha, queued } })
         printVerdict(events)
       })
     } catch (err) {
@@ -638,11 +722,13 @@ const GUIDE = `git bay is a small continuous-integration server for this reposit
 THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
-  3. git push                          # the push opens your PR — checks run, then the merge; READ the remote: lines
-  4. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
+  3. git push                          # opens your PR (state: open) — nothing runs yet
+  4. git bay submit <PR>               # ask to merge (open -> queued) — checks run, then the merge; READ the remote:/output lines
+  5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
+  - In a hurry? git push -o submit fuses steps 3+4 (git config bay.autoQueue true makes every push do this).
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
   - Done with a worktree? git bay close <bay|wt> refuses while its PR is still queued — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
   - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
@@ -651,8 +737,8 @@ VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository
-  queue      submitted PRs waiting to be integrated; they merge one at a time, in order
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (open), git bay submit asks to merge it (queued)
+  queue      queued PRs waiting to be integrated; they merge one at a time, in order
   checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
 ADDRESSING
   Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
@@ -850,7 +936,7 @@ async function main(): Promise<void> {
     .addHelpText(
       "after",
       "\nColumns: BAY = the name given at open; WORKTREE = its wt-id. AGE = time since open; IDLE = time since last activity.\n" +
-        "STATE values: open (active) | stale (idle past the timeout — gc will expire it; git bay refresh <bay|wt> keeps it).\n" +
+        "STATE values: active | stale (idle past the timeout — gc will expire it; git bay refresh <bay|wt> keeps it). This is the WORKTREE's activity, distinct from a PR's own state (open, queued, checking, …).\n" +
         "Addressing: bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.",
     )
     .option("--json", "machine-readable output")
@@ -858,15 +944,24 @@ async function main(): Promise<void> {
       await verbLs(await requireBay(), target, opts.json === true)
     })
 
-  const cmdSubmit = program
-    .command("submit <branch|name>")
-    .aliases(["enqueue", "adopt"])
+  const cmdAdopt = program
+    .command("adopt <branch>")
+    .alias("enqueue")
     .helpGroup("PRs:")
-    .description("open a PR for an existing branch (from inside a worktree, plain git push does this)")
+    .description("create a PR for an existing branch (from inside a worktree, plain git push does this); lands in `open`")
     .action(async (target: string, opts: { workitem?: string }) => {
-      await verbSubmit(await requireBay(), target, opts.workitem)
+      await verbAdopt(await requireBay(), target, opts.workitem)
     })
-  hiddenOption(cmdSubmit, "--workitem <name>", "legacy spelling: name the PR")
+  hiddenOption(cmdAdopt, "--workitem <name>", "legacy spelling: name the PR")
+
+  program
+    .command("submit <PR|name>")
+    .alias("queue")
+    .helpGroup("PRs:")
+    .description("ask to merge — queues an open PR for integration (open → queued)")
+    .action(async (target: string) => {
+      await verbQueue(await requireBay(), target)
+    })
 
   program
     .command("integrate [PR|name]")
