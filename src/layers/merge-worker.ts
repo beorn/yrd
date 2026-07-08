@@ -15,6 +15,7 @@ import { makeEvent } from "../core.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
 import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
+import { stepFinished, stepStarted } from "./steps.ts"
 
 /**
  * withMergeWorker — the pipeline layer (docs/model.md § Verbs): `check`,
@@ -137,15 +138,20 @@ function reduceCheck(bay: BayRuntime, state: BayState, command: BayCommand): Tra
  *  check in the mainline working tree would gate whatever main happens to have
  *  checked out, a false verdict in both directions (the SG-4/wrong-tree class).
  *  No check configured = pass-through before any workspace work. */
+/** `skipped: true` = no check is configured (nothing ran, nothing to journal
+ *  as a step run); a real run — pass, fail, or provision fault — is never
+ *  skipped. */
+type CheckStepOutcome = CheckOutcome & { skipped?: boolean }
+
 async function runCheckStep(
   state: BayState,
   pr: PrId,
   opts: MergeWorkerOptions,
   scratch: ScratchWorkspaces | undefined,
-): Promise<CheckOutcome> {
+): Promise<CheckStepOutcome> {
   const mainRepo = resolveMainRepo(opts)
   const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
-  if (check === undefined || check.trim() === "") return { ok: true }
+  if (check === undefined || check.trim() === "") return { ok: true, skipped: true }
   const target = queueTarget(state, pr)
   const bayPath = openBayPath(state, target)
   if (bayPath !== undefined) return await runProjectCheck(check, bayPath)
@@ -174,15 +180,23 @@ function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspace
     const d = effect.data as { pr: PrId }
     const state = await bay.state()
     const outcome = await runCheckStep(state, d.pr, opts, scratch)
+    const events: BayEvent[] = []
+    if (outcome.skipped !== true) {
+      const run = { step: "check" as const, pr: d.pr, target: queueTarget(state, d.pr) }
+      events.push(stepStarted(bay, run, effect.cause!))
+      events.push(stepFinished(bay, run, outcome.ok, outcome.ok ? undefined : outcome.detail, effect.cause!))
+    }
     if (!outcome.ok) {
-      return [
+      events.push(
         stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
           code: outcome.code ?? "check-failed",
           detail: outcome.detail,
         }),
-      ]
+      )
+      return events
     }
-    return [stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!)]
+    events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
+    return events
   }
 }
 
@@ -244,10 +258,14 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     const d = effect.data as { pr: PrId }
     const state = await bay.state()
     const { target, outcome } = await runMergeStep(state, d.pr, opts)
+    const run = { step: "merge" as const, pr: d.pr, target }
+    const events: BayEvent[] = [stepStarted(bay, run, effect.cause!)]
+    events.push(stepFinished(bay, run, outcome.ok, outcome.detail, effect.cause!))
     if (!outcome.ok) {
-      return [stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail })]
+      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail }))
+      return events
     }
-    const events = [stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha })]
+    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }))
     events.push(...closeMergedBay(bay, state, target, effect.cause!))
     return events
   }
@@ -319,6 +337,11 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
     if (pr.state === "checking") {
       const checkState = await bay.state()
       const outcome = await runCheckStep(checkState, d.pr, opts, scratch)
+      if (outcome.skipped !== true) {
+        const run = { step: "check" as const, pr: d.pr, target: queueTarget(checkState, d.pr) }
+        events.push(stepStarted(bay, run, effect.cause!))
+        events.push(stepFinished(bay, run, outcome.ok, outcome.ok ? undefined : outcome.detail, effect.cause!))
+      }
       if (!outcome.ok) {
         events.push(
           stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
@@ -336,6 +359,9 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
 
     const mergeState = await bay.state()
     const { target, outcome } = await runMergeStep(mergeState, d.pr, opts)
+    const mergeRun = { step: "merge" as const, pr: d.pr, target }
+    events.push(stepStarted(bay, mergeRun, effect.cause!))
+    events.push(stepFinished(bay, mergeRun, outcome.ok, outcome.detail, effect.cause!))
     if (!outcome.ok) {
       events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail }))
       return events

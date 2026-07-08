@@ -782,7 +782,6 @@ describe("git bay CLI — batch integration from queue.batch-size", () => {
     await must(["git", "bay", "submit", "PR2"], demo, env)
 
     const integrated = await must(["git", "bay", "integrate"], demo, env)
-    expect(integrated.stdout).toContain("bay: batch PR3 composed — members: PR1, PR2")
     expect(integrated.stdout).toContain("bay: batch PR3 built — members: PR1, PR2")
     expect(integrated.stdout).toContain("bay: PR3 submitted → checking")
     expect(integrated.stdout).toContain("bay: PR3 merging → merged")
@@ -806,7 +805,6 @@ describe("git bay CLI — batch integration from queue.batch-size", () => {
     await must(["git", "bay", "submit", "PR2"], demo, env)
 
     const integrated = await must(["git", "bay", "integrate"], demo, env)
-    expect(integrated.stdout).toContain("bay: batch PR3 composed — members: PR1, PR2")
     expect(integrated.stdout).toContain("bay: PR2 ejected from batch PR3")
     expect(integrated.stdout).toContain("bay: batch PR3 built — members: PR1; ejected: PR2")
     expect(integrated.stdout).toContain("bay: PR3 merging → merged")

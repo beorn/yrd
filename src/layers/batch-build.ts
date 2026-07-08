@@ -17,6 +17,7 @@ import type {
 } from "../types.ts"
 import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { prOpenedEvent, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent, submittedPrs } from "./queue.ts"
+import { stepFinished, stepStarted } from "./steps.ts"
 
 const LAYER = "batch-build"
 // Effect types are internal wiring (never journaled) — only EV_* names are
@@ -24,12 +25,9 @@ const LAYER = "batch-build"
 const FX_BATCH_BUILD = "batch.build"
 const FX_BATCH_BISECT = "batch.bisect"
 const FX_BATCH_SETTLE = "batch.settle"
-const EV_BATCH_COMPOSED = "batch/composed"
-const EV_BATCH_BUILT = "batch/built"
-const EV_BATCH_BISECT_CHECKED = "batch/bisect-checked"
-const EV_BATCH_BISECT_REFUSED = "batch/bisect-refused"
-const EV_MEMBER_EJECTED = "batch/member-ejected"
-const EV_BATCH_SETTLED = "batch/settled"
+const EV_BATCH_STARTED = "line/batch/started"
+const EV_BATCH_ISOLATED = "line/batch/isolated"
+const EV_BATCH_FINISHED = "line/batch/finished"
 const DEFAULT_CANDIDATE_PREFIX = "bay/batch/"
 
 export type BatchBuildOptions = {
@@ -47,7 +45,7 @@ export type BatchBuildOptions = {
   gateCommand?: string
   /** Command that makes a gate scratch runnable (submodules, installs, hooks) —
    *  `git config bay.provision` at the CLI host. Its failure is an environment
-   *  fault (`batch/bisect-refused` reason `provision-failed`), never an ejection. */
+   *  fault (`line/batch/isolated` refused `provision-failed`), never an ejection. */
   provisionCommand?: string
   /** Injectable workspace seam (tests); default is built from mainRepo +
    *  scratchParent + provisionCommand. */
@@ -81,7 +79,7 @@ type BatchRecord = {
   state: "built" | "merged" | "rejected"
   /** The candidate's verified landed tip (from its merged `pr/changed`). */
   landedSha?: string
-  /** Set once `batch/settled` is journaled — makes re-settling a non-event. */
+  /** Set once `line/batch/finished` is journaled — makes re-settling a non-event. */
   settled?: boolean
 }
 
@@ -338,27 +336,46 @@ function makeBatchBuildHandler(opts: BatchBuildOptions, scratch: ScratchWorkspac
     )
     const composed = compat.members.map((target) => targetToMember.get(target)!).filter(Boolean)
     const cause = effect.cause!
+
+    if (composed.length === 0) {
+      // Everything was skipped by the compatibility fold — no scratch work
+      // happened, but the skip verdict is still a journaled fact.
+      return [
+        makeEvent(
+          bay,
+          EV_BATCH_STARTED,
+          { batch: d.batch, base, members: [], ejected: [], prefixes: [], skipped: skippedSummary(compat.skipped) },
+          cause,
+        ),
+      ]
+    }
+
+    const { built, ejected, prefixes } = await buildCandidate(scratch, opts, d.batch, base, composed)
+    const target = built.length > 0 ? candidateBranch(opts, d.batch) : undefined
     const events: BayEvent[] = [
       makeEvent(
         bay,
-        EV_BATCH_COMPOSED,
+        EV_BATCH_STARTED,
         {
           batch: d.batch,
+          ...(target !== undefined ? { target } : {}),
           base,
-          members: composed.map(memberSummary),
+          members: built.map(memberSummary),
+          ejected: ejected.map((member) => ({ pr: member.pr, target: member.target, detail: member.detail })),
+          prefixes: prefixes.map((prefix) => ({
+            ...memberSummary(prefix),
+            index: prefix.index,
+            prefixTarget: prefix.prefixTarget,
+          })),
           skipped: skippedSummary(compat.skipped),
         },
         cause,
       ),
     ]
 
-    if (composed.length === 0) return events
-
-    const { built, ejected, prefixes } = await buildCandidate(scratch, opts, d.batch, base, composed)
-
     // Members ride the candidate through ITS check/merge — their own state is
-    // `checking` while aboard (v0.3 model: only the candidate ever merges;
-    // the fold flips members to merged when the candidate lands).
+    // `checking` while aboard (only the candidate ever merges; settle journals
+    // the members' own outcomes when the candidate lands).
     for (const member of built) {
       events.push(stateChangeEvent(bay, member.pr, "submitted", "checking", cause, { detail: `batched in ${d.batch}` }))
     }
@@ -369,10 +386,13 @@ function makeBatchBuildHandler(opts: BatchBuildOptions, scratch: ScratchWorkspac
       events.push(
         makeEvent(
           bay,
-          EV_MEMBER_EJECTED,
+          EV_BATCH_ISOLATED,
           {
             batch: d.batch,
-            ...memberSummary(member),
+            outcome: "ejected",
+            reason: "build-conflict",
+            pr: member.pr,
+            target: member.target,
             detail: member.detail,
           },
           cause,
@@ -386,29 +406,9 @@ function makeBatchBuildHandler(opts: BatchBuildOptions, scratch: ScratchWorkspac
       )
     }
 
-    if (built.length > 0) {
-      const target = candidateBranch(opts, d.batch)
+    if (built.length > 0 && target !== undefined) {
       events.push(prOpenedEvent(bay, d.batch, target, `batch:${d.batch}`, "submit", true, cause))
       events.push(queueReorderedEvent(bay, candidateFirstOrder(d.queueOrder, d.batch, built), cause, `batch ${d.batch}`))
-      events.push(
-        makeEvent(
-          bay,
-          EV_BATCH_BUILT,
-          {
-            batch: d.batch,
-            target,
-            base,
-            members: built.map(memberSummary),
-            ejected: ejected.map((member) => ({ ...memberSummary(member), detail: member.detail })),
-            prefixes: prefixes.map((prefix) => ({
-              ...memberSummary(prefix),
-              index: prefix.index,
-              prefixTarget: prefix.prefixTarget,
-            })),
-          },
-          cause,
-        ),
-      )
     }
 
     return events
@@ -542,25 +542,30 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
     // would discard the walk evidence already collected (the old all-green
     // behavior) and leave stats blind to why recovery stopped.
     const refused = (reason: "baseline-red" | "all-green" | "provision-failed", detail: string): BayEvent =>
-      makeEvent(bay, EV_BATCH_BISECT_REFUSED, { batch: d.batch, reason, detail }, cause)
+      makeEvent(bay, EV_BATCH_ISOLATED, { batch: d.batch, outcome: "refused", reason, detail }, cause)
+    const provisionRefusal = (err: ProvisionError): string =>
+      `${err.message}\nAn environment fault — no member was ejected. Fix the provision command ` +
+      `(git config bay.provision), then: git bay retry ${d.batch}.`
 
+    const events: BayEvent[] = []
+
+    // The all-red-env guard's other half: gate the UNTOUCHED batch base first.
+    const baselineRun = { step: "check" as const, batch: d.batch, target: record.base, role: "baseline" as const }
+    events.push(stepStarted(bay, baselineRun, cause))
     let baseline: GateVerdict
     try {
       baseline = await checkBaseline(scratch, d.gateCommand, d.batch, record.base)
     } catch (err) {
       if (err instanceof ProvisionError) {
-        return [
-          refused(
-            "provision-failed",
-            `${err.message}\nAn environment fault — no member was ejected. Fix the provision command ` +
-              `(git config bay.provision), then: git bay retry ${d.batch}.`,
-          ),
-        ]
+        events.push(stepFinished(bay, baselineRun, false, err.message, cause))
+        return [...events, refused("provision-failed", provisionRefusal(err))]
       }
       throw err
     }
+    events.push(stepFinished(bay, baselineRun, baseline.ok, baseline.detail, cause))
     if (!baseline.ok) {
       return [
+        ...events,
         refused(
           "baseline-red",
           `gate '${d.gateCommand}' is red on the batch base itself (${record.base}) — an environment or ` +
@@ -570,42 +575,30 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       ]
     }
 
-    const events: BayEvent[] = []
     let faulting: BatchPrefix | undefined
     let faultingDetail: string | undefined
     for (const prefix of record.prefixes) {
+      const prefixRun = {
+        step: "check" as const,
+        batch: d.batch,
+        pr: prefix.pr,
+        target: prefix.prefixTarget,
+        memberTarget: prefix.target,
+        index: prefix.index,
+        role: "prefix" as const,
+      }
+      events.push(stepStarted(bay, prefixRun, cause))
       let checked: GateVerdict
       try {
         checked = await checkPrefix(scratch, d.gateCommand, d.batch, prefix)
       } catch (err) {
         if (err instanceof ProvisionError) {
-          return [
-            ...events,
-            refused(
-              "provision-failed",
-              `${err.message}\nAn environment fault — no member was ejected. Fix the provision command ` +
-                `(git config bay.provision), then: git bay retry ${d.batch}.`,
-            ),
-          ]
+          events.push(stepFinished(bay, prefixRun, false, err.message, cause))
+          return [...events, refused("provision-failed", provisionRefusal(err))]
         }
         throw err
       }
-      events.push(
-        makeEvent(
-          bay,
-          EV_BATCH_BISECT_CHECKED,
-          {
-            batch: d.batch,
-            pr: prefix.pr,
-            target: prefix.prefixTarget,
-            memberTarget: prefix.target,
-            index: prefix.index,
-            ok: checked.ok,
-            ...(checked.detail !== undefined ? { detail: checked.detail } : {}),
-          },
-          cause,
-        ),
-      )
+      events.push(stepFinished(bay, prefixRun, checked.ok, checked.detail, cause))
       if (!checked.ok) {
         faulting = prefix
         faultingDetail = checked.detail
@@ -629,10 +622,13 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
     events.push(
       makeEvent(
         bay,
-        EV_MEMBER_EJECTED,
+        EV_BATCH_ISOLATED,
         {
           batch: d.batch,
-          ...memberSummary(faulting),
+          outcome: "ejected",
+          reason: "gate-red",
+          pr: faulting.pr,
+          target: faulting.target,
           detail,
         },
         cause,
@@ -644,14 +640,39 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
     if (remainder.length === 0) return events
 
     const rebuilt = await buildCandidate(scratch, opts, d.rebuiltBatch, record.base, remainder)
+    const rebuiltTarget = rebuilt.built.length > 0 ? candidateBranch(opts, d.rebuiltBatch) : undefined
+    events.push(
+      makeEvent(
+        bay,
+        EV_BATCH_STARTED,
+        {
+          batch: d.rebuiltBatch,
+          ...(rebuiltTarget !== undefined ? { target: rebuiltTarget } : {}),
+          base: record.base,
+          members: rebuilt.built.map(memberSummary),
+          ejected: rebuilt.ejected.map((member) => ({ pr: member.pr, target: member.target, detail: member.detail })),
+          prefixes: rebuilt.prefixes.map((prefix) => ({
+            ...memberSummary(prefix),
+            index: prefix.index,
+            prefixTarget: prefix.prefixTarget,
+          })),
+          skipped: [],
+          sourceBatch: d.batch,
+        },
+        cause,
+      ),
+    )
     for (const member of rebuilt.ejected) {
       events.push(
         makeEvent(
           bay,
-          EV_MEMBER_EJECTED,
+          EV_BATCH_ISOLATED,
           {
             batch: d.rebuiltBatch,
-            ...memberSummary(member),
+            outcome: "ejected",
+            reason: "build-conflict",
+            pr: member.pr,
+            target: member.target,
             detail: member.detail,
           },
           cause,
@@ -660,35 +681,14 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       events.push(...rejectMemberEvents(bay, state, member, member.detail, cause, "merge-conflict"))
     }
 
-    if (rebuilt.built.length > 0) {
-      const target = candidateBranch(opts, d.rebuiltBatch)
-      events.push(prOpenedEvent(bay, d.rebuiltBatch, target, `batch:${d.rebuiltBatch}`, "submit", true, cause))
+    if (rebuilt.built.length > 0 && rebuiltTarget !== undefined) {
+      events.push(prOpenedEvent(bay, d.rebuiltBatch, rebuiltTarget, `batch:${d.rebuiltBatch}`, "submit", true, cause))
       events.push(
         queueReorderedEvent(
           bay,
           candidateFirstOrder(queueOrder(state), d.rebuiltBatch, rebuilt.built),
           cause,
           `batch ${d.rebuiltBatch} after ejecting ${faulting.pr} from ${d.batch}`,
-        ),
-      )
-      events.push(
-        makeEvent(
-          bay,
-          EV_BATCH_BUILT,
-          {
-            batch: d.rebuiltBatch,
-            target,
-            base: record.base,
-            members: rebuilt.built.map(memberSummary),
-            ejected: rebuilt.ejected.map((member) => ({ ...memberSummary(member), detail: member.detail })),
-            prefixes: rebuilt.prefixes.map((prefix) => ({
-              ...memberSummary(prefix),
-              index: prefix.index,
-              prefixTarget: prefix.prefixTarget,
-            })),
-            sourceBatch: d.batch,
-          },
-          cause,
         ),
       )
     }
@@ -744,7 +744,7 @@ function deriveSettleEvents(bay: BayRuntime, state: BayState, batch: PrId, cause
   events.push(
     makeEvent(
       bay,
-      EV_BATCH_SETTLED,
+      EV_BATCH_FINISHED,
       {
         batch,
         ...(record.landedSha !== undefined ? { landedSha: record.landedSha } : {}),
@@ -770,15 +770,18 @@ function reduceBatchSettle(bay: BayRuntime, state: BayState, command: BayCommand
 }
 
 function apply(state: BayState, event: BayEvent): BayState {
-  if (event.name === EV_BATCH_BUILT) {
+  if (event.name === EV_BATCH_STARTED) {
     const d = event.data as {
       batch: PrId
-      target: string
+      target?: string
       base: string
       members: BatchMember[]
       ejected: BatchEjection[]
       prefixes?: BatchPrefix[]
     }
+    // No published candidate (every member ejected at build) = no record: the
+    // batch PR does not exist, so there is nothing for drain/settle to track.
+    if (d.target === undefined) return state
     const slice = sliceOf(state)
     return {
       ...state,
@@ -802,9 +805,9 @@ function apply(state: BayState, event: BayEvent): BayState {
     }
   }
 
-  if (event.name === EV_MEMBER_EJECTED) {
-    const d = event.data as { batch?: PrId; pr?: PrId; target?: string; detail?: string }
-    if (!d.batch || !d.pr || !d.target || d.detail === undefined) return state
+  if (event.name === EV_BATCH_ISOLATED) {
+    const d = event.data as { batch?: PrId; outcome?: string; pr?: PrId; target?: string; detail?: string }
+    if (d.outcome !== "ejected" || !d.batch || !d.pr || !d.target || d.detail === undefined) return state
     const slice = sliceOf(state)
     const record = slice.batches[d.batch]
     if (!record) return state
@@ -827,7 +830,7 @@ function apply(state: BayState, event: BayEvent): BayState {
     }
   }
 
-  if (event.name === EV_BATCH_SETTLED) {
+  if (event.name === EV_BATCH_FINISHED) {
     const d = event.data as { batch?: PrId }
     if (!d.batch) return state
     const slice = sliceOf(state)

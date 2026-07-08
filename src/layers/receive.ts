@@ -19,6 +19,7 @@ import { createGitConfigSource, resolveOption } from "../config.ts"
 import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
+import { stepFinished, stepStarted } from "./steps.ts"
 
 /**
  * withReceive — the receiver (spec § Using it: "the remote is the API"; v0.1-b of
@@ -268,15 +269,22 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     }
 
     // 1. The ONE project check, on the submitter's own bay (spec § Check
-    //    provider: "speculative checks on the submitter's bay").
+    //    provider: "speculative checks on the submitter's bay"). A fused push
+    //    always comes from a bay; the mainRepo fallback is the no-bay library
+    //    edge, kept as-is.
     const check = await resolveCheck(opts.check, mainRepo)
     const cwd = d.bayPath ?? mainRepo
-    const checked = await runProjectCheck(check, cwd)
-    if (!checked.ok) {
-      events.push(
-        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
-      )
-      return events
+    if (check !== undefined && check.trim() !== "") {
+      const run = { step: "check" as const, pr: d.pr, target: d.branch }
+      events.push(stepStarted(bay, run, effect.cause!))
+      const checked = await runProjectCheck(check, cwd)
+      events.push(stepFinished(bay, run, checked.ok, checked.ok ? undefined : checked.detail, effect.cause!))
+      if (!checked.ok) {
+        events.push(
+          stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
+        )
+        return events
+      }
     }
     events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
 
@@ -284,7 +292,10 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     //    zero-config native default; bay.mergeCommand remains the override,
     //    resolved identically for every path).
     events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))
+    const mergeRun = { step: "merge" as const, pr: d.pr, target: d.branch }
+    events.push(stepStarted(bay, mergeRun, effect.cause!))
     const merged = await runMerge({ mainRepo, pr: d.pr, target: d.branch, configCwd: mainRepo })
+    events.push(stepFinished(bay, mergeRun, merged.ok, merged.detail, effect.cause!))
     if (!merged.ok) {
       events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }))
       return events

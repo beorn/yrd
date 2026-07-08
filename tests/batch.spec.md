@@ -1,6 +1,6 @@
 # git bay batches — executable spec
 
-Batching is automatic when `bay.queue.batch-size` is greater than one: `git bay integrate` composes compatible submitted PRs into a batch candidate, lands that candidate through the pipeline (check, then the merge command), and records the batch in the journal-backed status output. A configured check runs against the tree it judges: a bayless PR — including every batch candidate — gets a scratch workspace at its own target, never the mainline working tree. When the candidate lands, each member's outcome becomes journal truth: a `pr/changed` → merged per member (its compose-time tip as `sha`) plus one `batch/settled` summary. These specs rest submitted PRs with `bay.autoMerge false` so a queue can form; with the default auto-flow each submit would land individually before a batch could compose.
+Batching is automatic when `bay.queue.batch-size` is greater than one: `git bay integrate` composes compatible submitted PRs into a batch candidate, lands that candidate through the pipeline (check, then the merge command), and records the batch in the journal-backed status output. A configured check runs against the tree it judges: a bayless PR — including every batch candidate — gets a scratch workspace at its own target, never the mainline working tree. When the candidate lands, each member's outcome becomes journal truth: a `pr/changed` → merged per member (its compose-time tip as `sha`) plus one `line/batch/finished` summary. Every check/merge run also journals a `line/step/started`/`finished` pair — serial and batch alike. These specs rest submitted PRs with `bay.autoMerge false` so a queue can form; with the default auto-flow each submit would land individually before a batch could compose.
 
 ## Happy batch
 
@@ -22,7 +22,6 @@ bay: PR1 submitted — git bay integrate PR1 to land it
 $ git bay submit PR2
 bay: PR2 submitted — git bay integrate PR2 to land it
 $ git bay integrate
-bay: batch PR3 composed — members: PR1, PR2
 bay: batch PR3 built — members: PR1, PR2
 bay: PR3 submitted → checking
 bay: PR3 checking → checked
@@ -56,9 +55,8 @@ bay: PR1 submitted — git bay integrate PR1 to land it
 $ git bay submit PR2
 bay: PR2 submitted — git bay integrate PR2 to land it
 $ git bay integrate
-bay: batch PR3 composed — members: PR1, PR2
-bay: PR2 ejected from batch PR3 — scratch merge of task/nested failed. Rebuilding batch without it; remainder will land. Fix and retry: git bay retry PR2.{{conflict_detail:/.*$/}}
 bay: batch PR3 built — members: PR1; ejected: PR2
+bay: PR2 ejected from batch PR3 — scratch merge of task/nested failed. Rebuilding batch without it; remainder will land. Fix and retry: git bay retry PR2.{{conflict_detail:/.*$/}}
 bay: PR3 submitted → checking
 bay: PR3 checking → checked
 bay: PR3 checked → merging
@@ -100,7 +98,6 @@ bay: PR1 submitted — git bay integrate PR1 to land it
 $ git bay submit PR2
 bay: PR2 submitted — git bay integrate PR2 to land it
 $ git bay integrate
-bay: batch PR3 composed — members: PR1, PR2
 bay: batch PR3 built — members: PR1, PR2
 bay: PR3 submitted → checking
 bay: PR3 checking → rejected — check 'test ! -f bad.txt' failed (exit 1):{{red_check_tail:/.*$/}}

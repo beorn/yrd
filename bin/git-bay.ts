@@ -192,6 +192,10 @@ function withIssueNotifyHost(ctx: Ctx, runtime: BayRuntime): BayRuntime {
         if (key === undefined || !(await hasCommand(key))) continue
         const name = (await runtime.state()).prs[d.pr]?.name
         if (!name) continue // unnamed PR — no issue to notify (adopt's audit-warned ramp)
+        // Synthetic batch-candidate name — not a real workitem. Members carry
+        // the real names and notify individually via their settle-journaled
+        // pr/changed events in this same dispatch.
+        if (name.startsWith("batch:")) continue
         const { events: notified } = await runtime.dispatch({
           type: "issues-notify",
           args: { pr: d.pr, to: d.to, name, sha: d.sha, code: d.code, detail: d.detail },
@@ -453,30 +457,24 @@ function firstDetailLine(detail: unknown): string | undefined {
 
 function printBatchAwareEvents(events: readonly BayEvent[]): void {
   for (const e of events) {
-    if (e.name === "batch/composed") {
-      const d = e.data as { batch?: PrId; members?: BatchSummaryMember[]; skipped?: unknown[] }
-      if (!d.batch) continue
-      const skipped = Array.isArray(d.skipped) && d.skipped.length > 0 ? `; skipped: ${d.skipped.length}` : ""
-      console.log(`bay: batch ${d.batch} composed — members: ${memberList(d.members ?? [])}${skipped}`)
-      continue
-    }
-    if (e.name === "batch/member-ejected") {
-      const line = firstDetailLine((e.data as { detail?: unknown })?.detail)
-      if (line) console.log(line)
-      continue
-    }
-    if (e.name === "batch/bisect-refused") {
-      // A refusal that ejects nobody must be LOUD — full detail, every line
-      // (it names the fault class and the exact remedy).
-      const d = e.data as { batch?: PrId; reason?: string; detail?: string }
-      console.log(`bay: batch ${d.batch ?? "?"} bisect refused (${d.reason ?? "unknown"}) — ${d.detail ?? ""}`)
-      continue
-    }
-    if (e.name === "batch/built") {
-      const d = e.data as { batch?: PrId; members?: BatchSummaryMember[]; ejected?: BatchSummaryMember[] }
+    if (e.name === "line/batch/started") {
+      const d = e.data as { batch?: PrId; members?: BatchSummaryMember[]; ejected?: BatchSummaryMember[]; skipped?: unknown[] }
       if (!d.batch) continue
       const ejected = d.ejected && d.ejected.length > 0 ? `; ejected: ${memberList(d.ejected)}` : ""
-      console.log(`bay: batch ${d.batch} built — members: ${memberList(d.members ?? [])}${ejected}`)
+      const skipped = Array.isArray(d.skipped) && d.skipped.length > 0 ? `; skipped: ${d.skipped.length}` : ""
+      console.log(`bay: batch ${d.batch} built — members: ${memberList(d.members ?? [])}${ejected}${skipped}`)
+      continue
+    }
+    if (e.name === "line/batch/isolated") {
+      const d = e.data as { batch?: PrId; outcome?: string; reason?: string; detail?: string }
+      if (d.outcome === "refused") {
+        // A refusal that ejects nobody must be LOUD — full detail, every line
+        // (it names the fault class and the exact remedy).
+        console.log(`bay: batch ${d.batch ?? "?"} bisect refused (${d.reason ?? "unknown"}) — ${d.detail ?? ""}`)
+        continue
+      }
+      const line = firstDetailLine(d.detail)
+      if (line) console.log(line)
       continue
     }
     if (e.name !== "pr/changed") continue
@@ -920,7 +918,7 @@ async function maybeBuildBatch(ctx: Ctx, bay: BayRuntime, target: PrId | undefin
   if (submittedPrs(state).length < 2) return false
   const { events } = await bay.dispatch({ type: "batch-build", args: { max: ctx.batchSize } })
   printBatchAwareEvents(events)
-  return events.some((e) => e.name === "batch/built" || e.name === "batch/member-ejected")
+  return events.some((e) => e.name === "line/batch/started")
 }
 
 function rejectedBatchFrom(events: readonly BayEvent[], state: BayState): PrId | undefined {
@@ -935,7 +933,7 @@ function rejectedBatchFrom(events: readonly BayEvent[], state: BayState): PrId |
 async function bisectAndDrainRebuiltBatch(bay: BayRuntime, batch: PrId): Promise<boolean> {
   const { events } = await bay.dispatch({ type: "batch-bisect", args: { pr: batch } })
   printBatchAwareEvents(events)
-  const rebuilt = events.find((e) => e.name === "batch/built")?.data as { batch?: PrId } | undefined
+  const rebuilt = events.find((e) => e.name === "line/batch/started")?.data as { batch?: PrId } | undefined
   if (!rebuilt?.batch) return events.length > 0
 
   const drained = await bay.dispatch({ type: "integrate", args: { pr: rebuilt.batch } })

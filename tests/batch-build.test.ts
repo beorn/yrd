@@ -106,9 +106,8 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
 
     const { events } = await bay.dispatch({ type: "batch-build" })
 
-    expect(eventsOf(events, "batch/composed")).toHaveLength(1)
-    expect(eventsOf(events, "batch/built")).toHaveLength(1)
-    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
+    expect(eventsOf(events, "line/batch/started")).toHaveLength(1)
+    expect(eventsOf(events, "line/batch/isolated")).toEqual([])
 
     const state = await bay.state()
     expect(stateOf(state, "PR1")).toBe("checking")
@@ -140,9 +139,15 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
 
     const { events } = await bay.dispatch({ type: "batch-build" })
 
-    const ejected = eventsOf(events, "batch/member-ejected")
+    const ejected = eventsOf(events, "line/batch/isolated")
     expect(ejected).toHaveLength(1)
-    expect(ejected[0]!.data).toMatchObject({ batch: "PR3", pr: "PR2", target: "task/nested" })
+    expect(ejected[0]!.data).toMatchObject({
+      batch: "PR3",
+      outcome: "ejected",
+      reason: "build-conflict",
+      pr: "PR2",
+      target: "task/nested",
+    })
     expect(String(ejected[0]!.data!.detail)).toContain("ejected from batch PR3")
     expect(String(ejected[0]!.data!.detail)).toContain("Fix and retry: git bay retry PR2")
 
@@ -184,20 +189,30 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
       },
     })
 
-    expect(eventsOf(events, "batch/bisect-checked").map((e) => e.data)).toMatchObject([
-      { batch: "PR4", pr: "PR1", target: "bay/batch-prefix/PR4/1-PR1", ok: true },
-      { batch: "PR4", pr: "PR2", target: "bay/batch-prefix/PR4/2-PR2", ok: false },
+    // The bisect walk is line/step pairs: the baseline first (role "baseline",
+    // no pr — it gates the untouched batch base), then each prefix until red.
+    expect(eventsOf(events, "line/step/finished").map((e) => e.data)).toMatchObject([
+      { step: "check", batch: "PR4", target: "HEAD", role: "baseline", ok: true },
+      { batch: "PR4", pr: "PR1", target: "bay/batch-prefix/PR4/1-PR1", role: "prefix", ok: true },
+      { batch: "PR4", pr: "PR2", target: "bay/batch-prefix/PR4/2-PR2", role: "prefix", ok: false },
     ])
-    const ejected = eventsOf(events, "batch/member-ejected")
+    const ejected = eventsOf(events, "line/batch/isolated")
     expect(ejected).toHaveLength(1)
-    expect(ejected[0]!.data).toMatchObject({ batch: "PR4", pr: "PR2", target: "task/bad" })
+    expect(ejected[0]!.data).toMatchObject({
+      batch: "PR4",
+      outcome: "ejected",
+      reason: "gate-red",
+      pr: "PR2",
+      target: "task/bad",
+    })
     expect(String(ejected[0]!.data!.detail)).toContain("first red batch prefix")
 
-    const rebuilt = eventsOf(events, "batch/built")
+    const rebuilt = eventsOf(events, "line/batch/started")
     expect(rebuilt).toHaveLength(1)
     expect(rebuilt[0]!.data).toMatchObject({
       batch: "PR5",
       target: "bay/batch/PR5",
+      sourceBatch: "PR4",
       members: [
         { pr: "PR1", target: "task/good-a" },
         { pr: "PR3", target: "task/good-c" },
@@ -231,13 +246,14 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
       args: { pr: "PR3", gateCommand: "true" },
     })
 
-    // The per-prefix walk stays durable — this evidence used to be discarded by a throw.
-    expect(eventsOf(events, "batch/bisect-checked")).toHaveLength(2)
-    const refused = eventsOf(events, "batch/bisect-refused")
+    // The per-prefix walk stays durable — this evidence used to be discarded
+    // by a throw. Finished rows: baseline + both prefixes, all green.
+    const finished = eventsOf(events, "line/step/finished").map((e) => e.data)
+    expect(finished.filter((d) => d!.role === "prefix")).toHaveLength(2)
+    const refused = eventsOf(events, "line/batch/isolated")
     expect(refused).toHaveLength(1)
-    expect(refused[0]!.data).toMatchObject({ batch: "PR3", reason: "all-green" })
+    expect(refused[0]!.data).toMatchObject({ batch: "PR3", outcome: "refused", reason: "all-green" })
     expect(String(refused[0]!.data!.detail)).toContain("per-member gate is lying")
-    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
 
     const state = await bay.state()
     expect(state.prs.PR4).toBeUndefined()
@@ -263,12 +279,14 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
       args: { pr: "PR3", gateCommand: "false" },
     })
 
-    const refused = eventsOf(events, "batch/bisect-refused")
+    const refused = eventsOf(events, "line/batch/isolated")
     expect(refused).toHaveLength(1)
-    expect(refused[0]!.data).toMatchObject({ batch: "PR3", reason: "baseline-red" })
+    expect(refused[0]!.data).toMatchObject({ batch: "PR3", outcome: "refused", reason: "baseline-red" })
     expect(String(refused[0]!.data!.detail)).toContain("git bay retry PR3")
-    expect(eventsOf(events, "batch/bisect-checked")).toEqual([]) // the walk never started
-    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
+    // The prefix walk never started — only the baseline pair was journaled.
+    const finished = eventsOf(events, "line/step/finished").map((e) => e.data)
+    expect(finished.filter((d) => d!.role === "prefix")).toEqual([])
+    expect(finished.filter((d) => d!.role === "baseline")).toHaveLength(1)
 
     const state = await bay.state()
     expect(state.prs.PR4).toBeUndefined()
@@ -297,11 +315,10 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
       args: { pr: "PR4", gateCommand: "test -f provisioned.marker && test ! -f bad.txt" },
     })
 
-    expect(eventsOf(events, "batch/bisect-refused")).toEqual([])
-    const ejected = eventsOf(events, "batch/member-ejected")
-    expect(ejected).toHaveLength(1)
-    expect(ejected[0]!.data).toMatchObject({ batch: "PR4", pr: "PR2" })
-    expect(eventsOf(events, "batch/built")).toHaveLength(1)
+    const isolated = eventsOf(events, "line/batch/isolated")
+    expect(isolated).toHaveLength(1)
+    expect(isolated[0]!.data).toMatchObject({ batch: "PR4", outcome: "ejected", reason: "gate-red", pr: "PR2" })
+    expect(eventsOf(events, "line/batch/started")).toHaveLength(1)
   })
 
   it("classifies a failing provision command as an infrastructure fault, never a member ejection", async () => {
@@ -322,11 +339,10 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
       args: { pr: "PR3", gateCommand: "true" },
     })
 
-    const refused = eventsOf(events, "batch/bisect-refused")
+    const refused = eventsOf(events, "line/batch/isolated")
     expect(refused).toHaveLength(1)
-    expect(refused[0]!.data).toMatchObject({ batch: "PR3", reason: "provision-failed" })
+    expect(refused[0]!.data).toMatchObject({ batch: "PR3", outcome: "refused", reason: "provision-failed" })
     expect(String(refused[0]!.data!.detail)).toContain("exit 7")
-    expect(eventsOf(events, "batch/member-ejected")).toEqual([])
 
     const state = await bay.state()
     expect(stateOf(state, "PR1")).toBe("checking")
@@ -335,7 +351,7 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
 })
 
 describe("withBatchBuild — per-member journal truth when the candidate lands (LE-5)", () => {
-  it("journals per-member merged events with compose-time member tips, plus one batch/settled", async () => {
+  it("journals per-member merged events with compose-time member tips, plus one line/batch/finished", async () => {
     const repo = await makeRepo()
     await branch(repo, "task/a", { "a.ts": "a\n" })
     await branch(repo, "task/b", { "b.ts": "b\n" })
@@ -359,7 +375,7 @@ describe("withBatchBuild — per-member journal truth when the candidate lands (
     ])
     expect(String(memberMerged[0]!.data!.detail)).toContain("batch PR3")
 
-    const settled = eventsOf(events, "batch/settled")
+    const settled = eventsOf(events, "line/batch/finished")
     expect(settled).toHaveLength(1)
     expect(settled[0]!.data).toMatchObject({
       batch: "PR3",

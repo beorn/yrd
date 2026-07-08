@@ -22,10 +22,15 @@ import type { DeprovisionVia, RejectionCode } from "./types.ts"
  *   pr.opened             → pr/opened             (via inferred: "push" iff a lease pre-minted this PR)
  *   pr.state-changed       → pr/changed            (rejected rows get a code inferred from `detail`)
  *   queue.reordered        → queue/reordered       (payload 1:1)
- *   batch.composed         → batch/composed        (payload 1:1; the 20955-20957 batch dialect)
- *   batch.built            → batch/built           (payload 1:1)
- *   batch.bisect.checked   → batch/bisect-checked  (payload 1:1)
- *   batch.member.ejected   → batch/member-ejected  (payload 1:1)
+ *   batch.composed         → line/batch/started    (the 20955-20957 batch dialect; compose-only rows gain
+ *                                                    empty ejected/prefixes — a later built row completes the fold)
+ *   batch.built            → line/batch/started    (payload 1:1 + empty skipped)
+ *   batch.bisect.checked   → line/step/finished    (step "check", role "prefix")
+ *   batch.member.ejected   → line/batch/isolated   (outcome "ejected"; reason inferred from detail)
+ * (The interim batch/* slash names — composed/built/bisect-checked/
+ * member-ejected/bisect-refused/settled — existed only between 20955 and the
+ * 21000 line/* migration and never reached any surviving journal; verified
+ * zero rows in the one production journal, so nothing reads or migrates them.)
  * Dropped (non-events; docs/events.md § event families: "an empty integrate
  * run, a prune that removed nothing" are deliberately never journaled):
  *   queue.empty, gc.clean, batch.empty
@@ -260,22 +265,53 @@ export async function migrateJournal(dir: string): Promise<{ migrated: number; d
         break
       }
       // The 20955-20957 batch dialect (pre-v0.3 journals from repos that ran
-      // batch integration) — payloads carry over 1:1; only the names move to
-      // the slash grammar.
+      // batch integration) — retargeted straight to the canonical line/*
+      // vocabulary (the interim batch/* slash names never reached a journal).
       case "batch.composed": {
-        out.push({ id: nextId(), ts: event.ts, name: "batch/composed", cause, data: d })
+        // Compose-only fact: no candidate/prefixes yet; a later batch.built
+        // row (mapped below) carries the full record and completes the fold.
+        out.push({
+          id: nextId(),
+          ts: event.ts,
+          name: "line/batch/started",
+          cause,
+          data: { ejected: [], prefixes: [], skipped: [], ...d },
+        })
         break
       }
       case "batch.built": {
-        out.push({ id: nextId(), ts: event.ts, name: "batch/built", cause, data: d })
+        out.push({
+          id: nextId(),
+          ts: event.ts,
+          name: "line/batch/started",
+          cause,
+          data: { skipped: [], ...d },
+        })
         break
       }
       case "batch.bisect.checked": {
-        out.push({ id: nextId(), ts: event.ts, name: "batch/bisect-checked", cause, data: d })
+        out.push({
+          id: nextId(),
+          ts: event.ts,
+          name: "line/step/finished",
+          cause,
+          data: { step: "check", role: "prefix", ...d },
+        })
         break
       }
       case "batch.member.ejected": {
-        out.push({ id: nextId(), ts: event.ts, name: "batch/member-ejected", cause, data: d })
+        const detail = typeof d.detail === "string" ? d.detail : ""
+        out.push({
+          id: nextId(),
+          ts: event.ts,
+          name: "line/batch/isolated",
+          cause,
+          data: {
+            outcome: "ejected",
+            reason: detail.includes("first red batch prefix") ? "gate-red" : "build-conflict",
+            ...d,
+          },
+        })
         break
       }
       case "adopt.recorded":

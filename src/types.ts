@@ -253,66 +253,62 @@ export type GitbayEvent =
       data: { order: PrId[]; detail?: string }
     }
   | {
-      name: "batch/composed"
-      // The compatibility fold's verdict BEFORE any git work: which submitted
-      // PRs ride this candidate and which were held back (path-overlap /
-      // batch-full). An empty compose (no submitted PRs at all) is a
-      // non-event and never journaled (docs/events.md § event families).
-      data: {
-        batch: PrId
-        base: string
-        members: { pr: PrId; target: string }[]
-        skipped: { target: string; reason: "path-overlap" | "batch-full"; overlapWith: string; paths: string[] }[]
-      }
+      name: "line/step/started"
+      // One step RUN is starting against one target tree: the serial check or
+      // merge for a PR, a batch candidate's check/merge (pr = the candidate),
+      // a bisect prefix gate (role "prefix", pr = the member under test), or
+      // the bisect baseline gate (role "baseline", no pr — it tests the batch
+      // base itself). The started/finished pair is a run-record, not a crash
+      // marker: both journal when the running effect returns; a crash mid-step
+      // still shows as the PR stuck checking/merging. `line/step/waiting` is
+      // reserved for async steps (review, remote runners) and is not emitted
+      // yet.
+      data: StepRunData
     }
+  | { name: "line/step/finished"; data: StepRunData & { ok: boolean; detail?: string } }
   | {
-      name: "batch/built"
-      // The scratch candidate exists: its branch, its base, who is aboard,
-      // who was ejected on a scratch-merge conflict, and the per-member
-      // prefix tips bisect walks on a red gate. `sourceBatch` marks a rebuild
-      // after an ejection (batch/bisect-checked found the red member there).
+      name: "line/batch/started"
+      // The batch candidate exists — the compose verdict and the scratch build
+      // as ONE fact (both were always emitted by the same effect): who rode,
+      // who the compatibility fold skipped, who was ejected on a scratch-merge
+      // conflict, and the per-member prefix tips bisect walks on a red gate.
+      // `target` is absent when every member was ejected (no candidate branch
+      // was published). `tip` is the member target's commit at compose time —
+      // settle stamps it as the member's merged `sha` (machine-truth for issue
+      // trackers), since the candidate the lying-merge guard verified contains
+      // precisely these tips. `sourceBatch` marks a rebuild after an isolation.
+      // An empty compose (no submitted PRs at all) is a non-event and never
+      // journaled (docs/events.md § event families).
       data: {
         batch: PrId
-        target: string
+        target?: string
         base: string
-        // `tip` is the member target's commit at compose time — the exact
-        // content that rode the candidate. Settle stamps it as the member's
-        // merged `sha` (machine-truth for issue trackers), since the candidate
-        // the lying-merge guard verified contains precisely these tips.
         members: { pr: PrId; target: string; tip?: string }[]
         ejected: { pr: PrId; target: string; detail: string }[]
         prefixes: { pr: PrId; target: string; index: number; prefixTarget: string }[]
+        skipped: { target: string; reason: "path-overlap" | "batch-full"; overlapWith: string; paths: string[] }[]
         sourceBatch?: PrId
       }
     }
   | {
-      name: "batch/bisect-checked"
-      // One gate run against one prefix tip during red-batch recovery —
-      // `ok: false` names the first faulting member (walk stops there).
-      data: {
-        batch: PrId
-        pr: PrId
-        target: string
-        memberTarget: string
-        index: number
-        ok: boolean
-        detail?: string
-      }
-    }
-  | { name: "batch/member-ejected"; data: { batch: PrId; pr: PrId; target: string; detail: string } }
-  | {
-      name: "batch/bisect-refused"
-      // Red-batch recovery stopped WITHOUT ejecting anyone, and the verdict is
-      // journal truth (it used to be a throw that discarded the walk evidence):
-      // `baseline-red` = the gate fails on the untouched batch base — an
-      // environment/mainline fault; `all-green` = the per-member gate
-      // contradicts the red batch gate (lying or mismatched); `provision-failed`
-      // = a gate scratch could not be provisioned. `detail` names the remedy.
-      data: { batch: PrId; reason: "baseline-red" | "all-green" | "provision-failed"; detail: string }
+      name: "line/batch/isolated"
+      // The isolation attempt concluded. outcome "ejected": one member was
+      // removed with evidence — a scratch-merge conflict at build
+      // ("build-conflict") or the first red prefix gate at bisect ("gate-red").
+      // outcome "refused": recovery stopped WITHOUT ejecting anyone and the
+      // verdict says why — "baseline-red" (the gate fails on the untouched
+      // batch base: an environment/mainline fault), "all-green" (the
+      // per-member gate contradicts the red batch gate), "provision-failed"
+      // (a gate scratch could not be provisioned). `detail` names the remedy.
+      // Refusals used to be throws that discarded the walk evidence; now the
+      // walk's line/step rows and the verdict survive in the journal.
+      data:
+        | { batch: PrId; outcome: "ejected"; reason: "build-conflict" | "gate-red"; pr: PrId; target: string; detail: string }
+        | { batch: PrId; outcome: "refused"; reason: "baseline-red" | "all-green" | "provision-failed"; detail: string }
     }
   | {
-      name: "batch/settled"
-      // The candidate landed and each member's outcome is now journal truth
+      name: "line/batch/finished"
+      // The candidate landed and each member's outcome is journal truth
       // (LE-5): every member also gets its own `pr/changed` → merged carrying
       // its compose-time tip as `sha`. Emitted once per batch — the record's
       // settled flag makes re-settling (crash recovery via `batch-settle`) a
@@ -323,6 +319,19 @@ export type GitbayEvent =
         members: { pr: PrId; target: string; tip?: string }[]
       }
     }
+
+/** One step run's identity — shared by line/step/started and line/step/finished.
+ *  `step` stays a payload field (not a name segment) so the union stays closed
+ *  and exhaustively foldable while steps become pluggable (withStep). */
+export type StepRunData = {
+  step: "check" | "merge"
+  target: string
+  pr?: PrId
+  batch?: PrId
+  role?: "baseline" | "prefix"
+  index?: number
+  memberTarget?: string
+}
 
 /** Why a bay (and its worktree) closed — unifies the old `endReason` +
  *  `via` split into one field: "close" (voluntary, `close`/`close --withdraw`),
