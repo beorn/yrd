@@ -14,8 +14,8 @@ Project-local notes for gitbay only.
   `createGitbay({ state, scm })`. Keep the interface intent-level
   (`openWorkspace`, `receiveSubmission`, `changedPaths`, `integrate`,
   `isLanded`, `refresh`, optional authoring guards/components).
-- [ ] Keep nameless adopted branches audit-visible when branch-as-argument
-  submit folds in.
+- [ ] Keep nameless branch-intake PRs audit-visible when `submit <branch>`
+  opens a PR without provisioning a bay.
 
 ## Next Model Refinements
 
@@ -23,6 +23,9 @@ Project-local notes for gitbay only.
   initial queue serial per base. The line sits on a base branch; there is no
   separate queue id/object.
 - [ ] Add cwd-as-identifier, variadic targets, and branch resolution for
+  `submit <branch>`.
+- [ ] Hide/remove the old branch-intake public verb. Branch-backed workspace
+  provisioning is `open --branch`; branch intake without a bay is
   `submit <branch>`.
 - [ ] Add `submit --wait` as the verb-side mirror of `git push -o wait`; it
   returns on terminal verdict or parked waiting state with distinct output.
