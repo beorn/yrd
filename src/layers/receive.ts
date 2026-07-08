@@ -17,7 +17,8 @@ import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
-import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "./git.ts"
+import { defaultBayDir, git, repoScopedCleanEnv } from "./git.ts"
+import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 
 /**
  * withReceive — the receiver (spec § Using it: "the remote is the API"; v0.1-b of
@@ -81,14 +82,17 @@ function reduceInit(bay: BayRuntime, state: BayState, opts: ReceiveOptions): Tra
 
 /** submit {branch, sha, queued?}: correlate to a lease/PR, create the PR (or
  *  resume a rejected one as its next revision), and — only when `queued` is
- *  true (§6 addendum: `-o submit`/`-o wait`/`bay.autoQueue`, computed by the
- *  CLI host before dispatch) — move it into `queued` and hand the pipeline to
- *  the submit.run effect. A bare push (queued: false/undefined) creates the
- *  PR in `open` and stops there: no check runs, nothing merges, until
+ *  true (a fused push: `-o submit`/`-o wait`/`bay.autoQueue`, computed by the
+ *  CLI host before dispatch) — move it into `submitted` and hand the pipeline
+ *  to the submit.run effect. A bare push (queued: false/undefined) creates
+ *  the PR in `pushed` and stops there: no check runs, nothing merges, until
  *  `git bay submit <PR>` (or a later fused push) asks to land it. Doors-closed
- *  (already merged/abandoned) is refused HERE too — the pre-receive hook
+ *  (already merged/closed) is refused HERE too — the pre-receive hook
  *  refuses earlier for UX, but the reducer is the layer that must hold
- *  without the hook (law 4: the receiver refuses last). */
+ *  without the hook (law 4: the receiver refuses last). `sha` is validated
+ *  but not threaded into the effect — the merge step re-resolves `branch` to
+ *  a commit itself (pipeline.ts's runMerge), the same way every other merge
+ *  path does, so a push and a standalone `merge`/`integrate` pin identically. */
 function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const branch = command.args?.branch
   const sha = command.args?.sha
@@ -106,10 +110,10 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
 
   const events: BayEvent[] = []
   const runPipeline = (): TransitionResult => {
-    events.push(stateChangeEvent(bay, prId, "queued", "checking", command.cause!))
+    events.push(stateChangeEvent(bay, prId, "submitted", "checking", command.cause!))
     const effect: Effect = {
       type: FX_SUBMIT,
-      data: { pr: prId, branch, sha, bayPath: lease?.path ?? null, lease: lease?.id ?? null },
+      data: { pr: prId, branch, bayPath: lease?.path ?? null, lease: lease?.id ?? null },
     }
     return { state, events, effects: [effect] }
   }
@@ -121,7 +125,7 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
           `Start the next piece of work in a fresh bay: git bay open <name>`,
       )
     }
-    if (existing.state === "abandoned") {
+    if (existing.state === "closed") {
       throw new Error(
         `bay: doors closed — ${prId} for '${branch}' was withdrawn. ` +
           `Start the next piece of work in a fresh bay: git bay open <name>`,
@@ -131,26 +135,26 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
       // Re-push after rejection: same PR number, next revision — a retry-by-push
       // always re-runs the pipeline, regardless of the queued flag.
       events.push(
-        stateChangeEvent(bay, prId, "rejected", "queued", command.cause!, {
+        stateChangeEvent(bay, prId, "rejected", "submitted", command.cause!, {
           detail: `re-push of ${branch}`,
           revision: existing.revision + 1,
         }),
       )
       return runPipeline()
     }
-    if (existing.state === "open") {
+    if (existing.state === "pushed") {
       if (!queued) {
         // Still just iterating before asking to land — nothing changed PR-wise
         // (git already reports the new commits); non-event, nothing to journal.
         return { state, events: [], effects: [] }
       }
-      events.push(stateChangeEvent(bay, prId, "open", "queued", command.cause!))
+      events.push(stateChangeEvent(bay, prId, "pushed", "submitted", command.cause!))
       return runPipeline()
     }
-    if (existing.state === "queued") {
-      // Already queued (e.g. `retry`'s own requeue-then-resubmit dance already
-      // moved it here in an earlier dispatch this same command sequence) —
-      // just run the pipeline; nothing new to transition into.
+    if (existing.state === "submitted") {
+      // Already submitted (e.g. `retry`'s own requeue-then-resubmit dance
+      // already moved it here in an earlier dispatch this same command
+      // sequence) — just run the pipeline; nothing new to transition into.
       return runPipeline()
     }
     throw new Error(`bay: ${prId} is ${existing.state} — wait for the verdict (git bay ls ${prId})`)
@@ -159,17 +163,12 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
   // Brand new PR from this push.
   events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null, "push", queued, command.cause!))
   if (!queued) {
-    return { state, events, effects: [] } // created, stops at `open` — no pipeline yet
+    return { state, events, effects: [] } // created, stops at `pushed` — no pipeline yet
   }
   return runPipeline()
 }
 
 // ---------- effect handlers (async; the only I/O) ----------
-
-function tail(text: string, max = 2000): string {
-  const trimmed = text.replace(/\s+$/, "")
-  return trimmed.length <= max ? trimmed : `…${trimmed.slice(-max)}`
-}
 
 /** The hook shim: dependency-free sh that execs this repo's bun + bin with the
  *  bay dir pinned. Version-stamped so law-8 preflights can detect staleness. */
@@ -224,86 +223,48 @@ function makeInitHandler(opts: ReceiveOptions) {
   }
 }
 
-async function resolveCheck(opts: ReceiveOptions, mainRepo: string): Promise<string | undefined> {
-  const source = createGitConfigSource(mainRepo)
-  return await resolveOption(opts.check, "check", source)
-}
-
+/** A fused push's continuation: check then merge, in one effect call — the
+ *  SAME two runners (pipeline.ts) the standalone `check`/`merge`/`integrate`
+ *  verbs use, so a push and those verbs check and merge identically (§4).
+ *  Crash mid-effect leaves the PR durably `checking` or `merging` (the
+ *  reducer's transition into each was journaled before this ran); `retry`
+ *  resumes it exactly as `integrate` would. */
 function makeSubmitHandler(opts: ReceiveOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
-    const d = effect.data as {
-      pr: PrId
-      branch: string
-      sha: string
-      bayPath: string | null
-      lease: string | null
-    }
+    const d = effect.data as { pr: PrId; branch: string; bayPath: string | null; lease: string | null }
     const { mainRepo, repoGit } = await resolveReceive(opts)
     const events: BayEvent[] = []
 
-    // 1. The ONE project check, on the submitter's own bay (v0.1 form of
-    //    "speculative checks on the submitter's bay").
-    const check = await resolveCheck(opts, mainRepo)
-    if (check !== undefined && check.trim() !== "") {
-      const cwd = d.bayPath ?? mainRepo
-      const proc = Bun.spawn(["sh", "-c", check], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
-      const [out, err, code] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ])
-      if (code !== 0) {
-        const detail = `check '${check}' failed (exit ${code}): ${tail(err || out)}`
-        events.push(stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { detail, code: "check-failed" }))
-        return events
-      }
-    }
-
-    // 2. Merge onto the mainline — clean-tree precondition first (/pro A1's
-    //    clean-checkout assertion; refuse rather than merge into someone's WIP).
-    //    Untracked files don't block: git merge itself refuses to overwrite
-    //    them, and blocking on them would make every stray note a merge outage.
-    const dirty = (await porcelainStatus(mainRepo))
-      .split("\n")
-      .filter((l) => l.trim() !== "" && !l.startsWith("??"))
-      .join("\n")
-    if (dirty !== "") {
+    // 1. The ONE project check, on the submitter's own bay (spec § Check
+    //    provider: "speculative checks on the submitter's bay").
+    const check = await resolveCheck(opts.check, mainRepo)
+    const cwd = d.bayPath ?? mainRepo
+    const checked = await runProjectCheck(check, cwd)
+    if (!checked.ok) {
       events.push(
-        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
-          detail: `mainline working tree at ${mainRepo} is dirty — commit or clean it, then git bay retry ${d.pr}`,
-          code: "dirty-mainline",
-        }),
+        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
       )
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "checking", "merging", effect.cause!))
+    events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
 
-    const headRes = await git(["-C", mainRepo, "symbolic-ref", "--short", "HEAD"])
-    const mainline = headRes.code === 0 ? headRes.stdout.trim() : "main"
-    const merge = await git([
-      "-C",
-      mainRepo,
-      "merge",
-      "--no-ff",
-      "-m",
-      `bay: merge ${d.pr} (${d.branch})`,
-      d.sha,
-    ])
-    if (merge.code !== 0) {
-      await git(["-C", mainRepo, "merge", "--abort"]) // best-effort restore; a failed abort surfaces below
-      const detail = `merge of ${d.branch} onto ${mainline} failed (exit ${merge.code}): ${tail(merge.stderr || merge.stdout)}`
-      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { detail, code: "merge-conflict" }))
+    // 2. Merge onto the mainline — the SAME runner integrate/merge use (§4:
+    //    zero-config native default; bay.mergeCommand remains the override,
+    //    resolved identically for every path).
+    events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))
+    const merged = await runMerge({ mainRepo, pr: d.pr, target: d.branch, configCwd: mainRepo })
+    if (!merged.ok) {
+      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }))
       return events
     }
-    const mergeSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"])).stdout.trim()
+    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: merged.detail }))
 
     // 3. Keep the bay-owned repo's mainline current so the next push's
     //    merge-base sees reality.
+    const headRes = await git(["-C", mainRepo, "symbolic-ref", "--short", "HEAD"])
+    const mainline = headRes.code === 0 ? headRes.stdout.trim() : "main"
     await git(["-C", repoGit, "fetch", "--quiet", mainRepo, `+refs/heads/${mainline}:refs/heads/${mainline}`])
 
-    events.push(
-      stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: `merged ${mergeSha} onto ${mainline}` }),
-    )
     if (d.lease) {
       events.push(makeEvent(bay, "bay/closed", { bay: d.lease, via: "merged" }, effect.cause!))
     }
@@ -347,7 +308,7 @@ export async function preReceiveCheck(
           `Start the next piece of work in a fresh bay: git bay open <name>`,
       )
     }
-    if (pr?.state === "abandoned") {
+    if (pr?.state === "closed") {
       throw new Error(
         `bay: doors closed — ${pr.id} for '${branch}' was withdrawn. ` +
           `Start the next piece of work in a fresh bay: git bay open <name>`,
