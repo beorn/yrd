@@ -45,9 +45,9 @@ export function createJsonlJournal(path: string): Journal {
           )
         }
         const event = parsed as BayEvent
-        if (typeof event.type !== "string" || typeof event.ts !== "string") {
+        if (typeof event.name !== "string" || typeof event.ts !== "string") {
           throw new Error(
-            `bay journal corrupt at ${path}:${lineNo} — missing type/ts. ` +
+            `bay journal corrupt at ${path}:${lineNo} — missing name/ts. ` +
               `Repair or move the journal aside; refusing to fold partial history.`,
           )
         }

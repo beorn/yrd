@@ -3,10 +3,10 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-  createBay,
+  createGitbay,
   createJsonlJournal,
+  integratablePrs,
   pipe,
-  queuedPrs,
   withMergeWorker,
   withQueue,
 } from "../src/index.ts"
@@ -25,12 +25,12 @@ function openStore(path: string): BayStore {
   return { journal: createJsonlJournal(path), close: async () => {} }
 }
 
-// The merge worker runs the REAL effect handler against trivial shell commands
+// The merge worker runs the REAL effect handlers against trivial shell commands
 // (`true` / `false` / `echo`), so there are no mocks — the config resolution,
 // sh -c spawn, exit-code→state mapping, and detail capture all execute for real.
 async function buildMergeBay(path: string, opts: MergeWorkerOptions): Promise<BayRuntime> {
   return pipe(
-    createBay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
+    createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
     withQueue(),
     withMergeWorker(opts),
   )
@@ -41,41 +41,104 @@ function stateOf(state: BayState, id: PrId): string {
 }
 
 function detailOf(events: BayEvent[], to: string): string | undefined {
-  const ev = events.find((e) => e.type === "pr.state-changed" && e.data!.to === to)
+  const ev = events.find((e) => e.name === "pr/changed" && e.data!.to === to)
   return ev?.data!.detail as string | undefined
 }
 
-describe("withMergeWorker — drain → merged (happy path)", () => {
-  it("transitions queued → merging → merged and captures stdout (both placeholders) as detail", async () => {
-    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "echo {pr} {target}" })
+/** `enqueue` seeds a PR directly into `submitted` (the raw test primitive);
+ *  `check` with no check configured is an automatic pass — the shortest path
+ *  to a `checked` PR for tests that only care about the MERGE half. */
+async function seedChecked(bay: BayRuntime, target: string, pr: PrId): Promise<void> {
+  await bay.dispatch({ type: "enqueue", args: { target, pr } })
+  await bay.dispatch({ type: "check", args: { pr } })
+}
+
+describe("withMergeWorker — check: submitted → checking → checked | rejected", () => {
+  it("passes with no check configured (opt-in checks) and transitions to checked", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), {})
     await bay.dispatch({ type: "enqueue", args: { target: "task/x", pr: "C-x" } })
 
-    const { events } = await bay.dispatch({ type: "drain" })
+    const { events } = await bay.dispatch({ type: "check", args: { pr: "C-x" } })
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["submitted→checking", "checking→checked"])
+    expect(stateOf(await bay.state(), "C-x")).toBe("checked")
+  })
 
-    const transitions = events
-      .filter((e) => e.type === "pr.state-changed")
-      .map((e) => `${e.data!.from}→${e.data!.to}`)
-    expect(transitions).toEqual(["queued→merging", "merging→merged"])
-    expect(detailOf(events, "merged")).toBe("C-x task/x") // {pr} {target} both substituted
-    expect(stateOf(await bay.state(), "C-x")).toBe("merged")
+  it("rejects with check-failed when the configured check exits nonzero", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { check: "false" })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/y", pr: "C-y" } })
+
+    const { events } = await bay.dispatch({ type: "check", args: { pr: "C-y" } })
+    expect(detailOf(events, "rejected")).toMatch(/check 'false' failed \(exit 1\)/)
+    const rejected = events.find((e) => e.name === "pr/changed" && e.data!.to === "rejected")!
+    expect(rejected.data!.code).toBe("check-failed")
+    expect(stateOf(await bay.state(), "C-y")).toBe("rejected")
+  })
+
+  it("never merges — check is atomic and stops at the verdict", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/z", pr: "C-z" } })
+    const { events } = await bay.dispatch({ type: "check", args: { pr: "C-z" } })
+    expect(events.some((e) => e.data!.to === "merging" || e.data!.to === "merged")).toBe(false)
+    expect(stateOf(await bay.state(), "C-z")).toBe("checked")
+  })
+
+  it("refuses a PR that isn't submitted, teaching the right verb", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), {})
+    await seedChecked(bay, "task/a", "C-a")
+    await expect(bay.dispatch({ type: "check", args: { pr: "C-a" } })).rejects.toThrow(
+      /check: C-a is already checked — git bay merge C-a/,
+    )
+  })
+
+  it("throws checking an unknown PR", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), {})
+    await expect(bay.dispatch({ type: "check", args: { pr: "C-none" } })).rejects.toThrow(/no PR 'C-none'/)
   })
 })
 
-describe("withMergeWorker — drain → rejected (non-zero is a domain outcome, not a crash)", () => {
+describe("withMergeWorker — merge: checked → merging → merged (happy path)", () => {
+  it("transitions checked → merging → merged and captures stdout (both placeholders) as detail", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "echo {pr} {target}" })
+    await seedChecked(bay, "task/x", "C-x")
+
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-x" } })
+
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["checked→merging", "merging→merged"])
+    expect(detailOf(events, "merged")).toBe("C-x task/x") // {pr} {target} both substituted
+    expect(stateOf(await bay.state(), "C-x")).toBe("merged")
+  })
+
+  it("refuses a PR that isn't checked, teaching the right verb", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
+    await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-early" } })
+    await expect(bay.dispatch({ type: "merge", args: { pr: "C-early" } })).rejects.toThrow(
+      /merge: C-early hasn't been checked yet — git bay check C-early/,
+    )
+  })
+
+  it("never checks — merge is atomic and requires an explicit PR", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
+    await expect(bay.dispatch({ type: "merge", args: {} })).rejects.toThrow(/'pr'.*required/)
+  })
+})
+
+describe("withMergeWorker — merge → rejected (non-zero is a domain outcome, not a crash)", () => {
   it("a non-zero merge command rejects with the exit code in detail (never throws)", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "false" })
-    await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-r" } })
+    await seedChecked(bay, "t", "C-r")
 
-    const { events } = await bay.dispatch({ type: "drain" }) // resolves, does NOT reject
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-r" } }) // resolves, does NOT reject
     expect(detailOf(events, "rejected")).toBe("exit 1")
     expect(stateOf(await bay.state(), "C-r")).toBe("rejected")
   })
 
   it("captures the stderr tail alongside the exit code", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "echo boom >&2; exit 3" })
-    await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-e" } })
+    await seedChecked(bay, "t", "C-e")
 
-    const { events } = await bay.dispatch({ type: "drain" })
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-e" } })
     expect(detailOf(events, "rejected")).toBe("exit 3: boom")
     expect(stateOf(await bay.state(), "C-e")).toBe("rejected")
   })
@@ -103,9 +166,9 @@ describe("withMergeWorker — post-merge ancestry verify (the lying-merge guard,
   it("a merge command that exits 0 WITHOUT landing the target is journaled rejected, never merged", async () => {
     const repo = await makeVerifyRepo()
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true", mainRepo: repo })
-    await bay.dispatch({ type: "enqueue", args: { target: "task/x", pr: "C-lie" } })
+    await seedChecked(bay, "task/x", "C-lie")
 
-    const { events } = await bay.dispatch({ type: "drain" })
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-lie" } })
     expect(stateOf(await bay.state(), "C-lie")).toBe("rejected")
     expect(detailOf(events, "rejected")).toMatch(/lying-merge guard/)
     expect(detailOf(events, "rejected")).toMatch(/not an ancestor/)
@@ -117,20 +180,92 @@ describe("withMergeWorker — post-merge ancestry verify (the lying-merge guard,
       mergeCommand: `git -C ${repo} -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
       mainRepo: repo,
     })
-    await bay.dispatch({ type: "enqueue", args: { target: "task/x", pr: "C-honest" } })
+    await seedChecked(bay, "task/x", "C-honest")
 
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "merge", args: { pr: "C-honest" } })
     expect(stateOf(await bay.state(), "C-honest")).toBe("merged")
   })
 
   it("an unresolvable target with mainRepo set rejects with a teaching detail (never crashes, never merges)", async () => {
     const repo = await makeVerifyRepo()
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true", mainRepo: repo })
-    await bay.dispatch({ type: "enqueue", args: { target: "task/ghost", pr: "C-ghost" } })
+    await seedChecked(bay, "task/ghost", "C-ghost")
 
-    const { events } = await bay.dispatch({ type: "drain" })
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-ghost" } })
     expect(stateOf(await bay.state(), "C-ghost")).toBe("rejected")
     expect(detailOf(events, "rejected")).toMatch(/does not resolve/)
+  })
+})
+
+describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand unset)", () => {
+  async function makeNativeRepo(): Promise<string> {
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-native-repo-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await g(["commit", "-qm", "init", "--allow-empty"])
+    await g(["switch", "-qc", "task/x"])
+    await g(["commit", "-qm", "feat: x", "--allow-empty"])
+    await g(["switch", "-q", "main"])
+    return repo
+  }
+
+  it("lands with a native git merge --no-ff and records 'merged <sha> onto <mainline>'", async () => {
+    const saved = process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_MERGE_COMMAND
+    try {
+      const repo = await makeNativeRepo()
+      const bay = await buildMergeBay(await tmpJournalPath(), { mainRepo: repo }) // no mergeCommand at all
+      await seedChecked(bay, "task/x", "C-native")
+
+      const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-native" } })
+      expect(stateOf(await bay.state(), "C-native")).toBe("merged")
+      expect(detailOf(events, "merged")).toMatch(/^merged [0-9a-f]{40} onto main$/)
+
+      const log = await git(["-C", repo, "log", "--oneline", "-1"], repo)
+      expect(log.stdout).toContain("bay: merge C-native (task/x)")
+    } finally {
+      if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
+    }
+  })
+
+  it("rejects with dirty-mainline when the mainline working tree has a staged (tracked) change", async () => {
+    const saved = process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_MERGE_COMMAND
+    try {
+      const repo = await makeNativeRepo()
+      const { writeFile } = await import("node:fs/promises")
+      await writeFile(join(repo, "dirty.txt"), "uncommitted\n", "utf8")
+      // Untracked files don't block (git merge itself refuses to overwrite
+      // them) — stage it so porcelain status reports a real, blocking change.
+      await git(["-C", repo, "add", "dirty.txt"], repo)
+      const bay = await buildMergeBay(await tmpJournalPath(), { mainRepo: repo })
+      await seedChecked(bay, "task/x", "C-dirty")
+
+      const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-dirty" } })
+      expect(stateOf(await bay.state(), "C-dirty")).toBe("rejected")
+      const rejected = events.find((e) => e.name === "pr/changed" && e.data!.to === "rejected")!
+      expect(rejected.data!.code).toBe("dirty-mainline")
+      expect(detailOf(events, "rejected")).toMatch(/is dirty/)
+    } finally {
+      if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
+    }
+  })
+
+  it("an inline mergeCommand still overrides the native default", async () => {
+    // No mainRepo here — the point is which command RUNS (native vs
+    // configured), not the ancestry guard (covered by its own describe block
+    // above); a bare `echo` never lands anything, so pairing it with a real
+    // ancestry check would always (correctly) reject as a lying merge.
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "echo {pr} {target}" })
+    await seedChecked(bay, "task/x", "C-override")
+
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-override" } })
+    // the configured command's stdout is the detail, NOT the native "merged … onto …" shape
+    expect(detailOf(events, "merged")).toBe("C-override task/x")
   })
 })
 
@@ -157,9 +292,9 @@ describe("withMergeWorker — merge command spawn cwd", () => {
       mergeCommand: `[ "$(pwd -P)" = "$(cd ${JSON.stringify(repo)} && pwd -P)" ]`,
       mainRepo: repo,
     })
-    await bay.dispatch({ type: "enqueue", args: { target: "main", pr: "C-cwd" } })
+    await seedChecked(bay, "main", "C-cwd")
 
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "merge", args: { pr: "C-cwd" } })
     // main is trivially an ancestor of itself, so a correct cwd lands merged;
     // a wrong cwd fails the test command (exit 1) and rejects instead.
     expect(stateOf(await bay.state(), "C-cwd")).toBe("merged")
@@ -170,57 +305,105 @@ describe("withMergeWorker — merge command spawn cwd", () => {
     const bay = await buildMergeBay(await tmpJournalPath(), {
       mergeCommand: `[ "$(pwd -P)" = "$(cd ${JSON.stringify(expectedCwd)} && pwd -P)" ]`,
     })
-    await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-cwd-fallback" } })
+    await seedChecked(bay, "t", "C-cwd-fallback")
 
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "merge", args: { pr: "C-cwd-fallback" } })
     expect(stateOf(await bay.state(), "C-cwd-fallback")).toBe("merged")
   })
 })
 
-describe("withMergeWorker — serial FIFO drain", () => {
-  it("each drain merges exactly the oldest queued PR", async () => {
+describe("withMergeWorker — integrate: the umbrella (submitted → … → merged, one dispatch)", () => {
+  it("walks a submitted PR all the way to merged in ONE dispatch (check then merge)", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/x", pr: "C-x" } })
+
+    const { events } = await bay.dispatch({ type: "integrate", args: { pr: "C-x" } })
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["submitted→checking", "checking→checked", "checked→merging", "merging→merged"])
+    expect(stateOf(await bay.state(), "C-x")).toBe("merged")
+  })
+
+  it("stops at rejected when the check fails — never reaches merging", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { check: "false", mergeCommand: "true" })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/y", pr: "C-y" } })
+
+    const { events } = await bay.dispatch({ type: "integrate", args: { pr: "C-y" } })
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["submitted→checking", "checking→rejected"])
+    expect(stateOf(await bay.state(), "C-y")).toBe("rejected")
+  })
+
+  it("resumes a PR already `checked` — runs merge only, no re-check", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
+    await seedChecked(bay, "task/z", "C-z")
+
+    const { events } = await bay.dispatch({ type: "integrate", args: { pr: "C-z" } })
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["checked→merging", "merging→merged"])
+    expect(stateOf(await bay.state(), "C-z")).toBe("merged")
+  })
+
+  it("refuses a PR that hasn't been submitted yet", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
+    await expect(bay.dispatch({ type: "integrate", args: { pr: "C-none" } })).rejects.toThrow(
+      /integrate: no PR 'C-none'/,
+    )
+  })
+
+  it("refuses a rejected PR, teaching retry", async () => {
+    const bay = await buildMergeBay(await tmpJournalPath(), { check: "false" })
+    await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-rej" } })
+    await bay.dispatch({ type: "integrate", args: { pr: "C-rej" } }) // → rejected
+    await expect(bay.dispatch({ type: "integrate", args: { pr: "C-rej" } })).rejects.toThrow(
+      /integrate: C-rej was rejected — put it back in the queue first: git bay retry C-rej/,
+    )
+  })
+})
+
+describe("withMergeWorker — integrate: no-arg auto-pick (submitted + checked, FIFO)", () => {
+  it("each no-arg integrate lands exactly the oldest submitted/checked PR", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
     for (const t of ["A", "B", "C"]) {
       await bay.dispatch({ type: "enqueue", args: { target: t, pr: `C-${t}` } })
     }
 
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "integrate" })
     let s = await bay.state()
     expect(stateOf(s, "C-A")).toBe("merged")
-    expect(queuedPrs(s).map((c) => c.id)).toEqual(["C-B", "C-C"]) // B, C still queued in order
+    expect(integratablePrs(s).map((c) => c.id)).toEqual(["C-B", "C-C"]) // B, C still waiting, in order
 
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "integrate" })
     expect(stateOf(await bay.state(), "C-B")).toBe("merged")
 
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "integrate" })
     s = await bay.state()
     expect(stateOf(s, "C-C")).toBe("merged")
-    expect(queuedPrs(s)).toEqual([])
+    expect(integratablePrs(s)).toEqual([])
   })
-})
 
-describe("withMergeWorker — empty drain", () => {
-  it("emits a queue.empty event and mutates no state", async () => {
+  it("is a non-event when nothing is submitted/checked — no marker event, just an empty events array", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
-    const { events } = await bay.dispatch({ type: "drain" })
-    expect(events.map((e) => e.type)).toEqual(["queue.empty"])
+    const { events } = await bay.dispatch({ type: "integrate" })
+    expect(events).toEqual([])
     expect(Object.keys((await bay.state()).prs)).toEqual([])
   })
 })
 
-describe("withMergeWorker — missing merge command", () => {
-  it("throws a loud error naming the config key, and the queued→merging event stays durable", async () => {
+describe("withMergeWorker — no merge command configured and no mainRepo", () => {
+  it("throws a loud error, and the checked→merging event stays durable", async () => {
     const saved = process.env.BAY_MERGE_COMMAND
     delete process.env.BAY_MERGE_COMMAND
     try {
       const path = await tmpJournalPath()
       const configCwd = await mkdtemp(join(tmpdir(), "gitbay-noconfig-")) // not a git repo → bay.mergeCommand unset
       const bay = await buildMergeBay(path, { configCwd })
-      await bay.dispatch({ type: "enqueue", args: { target: "t", pr: "C-m" } })
+      await seedChecked(bay, "t", "C-m")
 
-      await expect(bay.dispatch({ type: "drain" })).rejects.toThrow(/merge command not configured/)
-      // Journal-first: the queued→merging event was durable before the effect ran
-      // and threw — so the PR is left `merging` (resumable), not lost.
+      await expect(bay.dispatch({ type: "merge", args: { pr: "C-m" } })).rejects.toThrow(
+        /no merge command configured and no mainRepo/,
+      )
+      // Journal-first: the checked→merging event was durable before the effect
+      // ran and threw — so the PR is left `merging` (resumable), not lost.
       expect(stateOf(await bay.state(), "C-m")).toBe("merging")
     } finally {
       if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
@@ -229,27 +412,32 @@ describe("withMergeWorker — missing merge command", () => {
 })
 
 describe("withMergeWorker — resume-on-restart via replay + requeue", () => {
-  it("a PR stuck in merging replays as merging and is re-drained after retry (requeue)", async () => {
+  it("a PR stuck in merging replays as merging and is resumed (requeue + integrate)", async () => {
     const saved = process.env.BAY_MERGE_COMMAND
     delete process.env.BAY_MERGE_COMMAND
     try {
       const path = await tmpJournalPath()
       const configCwd = await mkdtemp(join(tmpdir(), "gitbay-noconfig-"))
 
-      // Run 1: no command → drain throws mid-effect, leaving C-s durable in `merging`.
+      // Run 1: get C-s to `checked`, then merge with no command and no
+      // mainRepo → throws mid-effect, leaving it durable in `merging`.
       const bay1 = await buildMergeBay(path, { configCwd })
-      await bay1.dispatch({ type: "enqueue", args: { target: "task/s", pr: "C-s" } })
-      await expect(bay1.dispatch({ type: "drain" })).rejects.toThrow(/merge command not configured/)
+      await seedChecked(bay1, "task/s", "C-s")
+      await expect(bay1.dispatch({ type: "merge", args: { pr: "C-s" } })).rejects.toThrow(
+        /no merge command configured and no mainRepo/,
+      )
 
       // Run 2 (restart): fresh bay over the SAME journal with a working command.
       // Replay reconstructs C-s in `merging` WITHOUT re-running any effect.
       const bay2 = await buildMergeBay(path, { mergeCommand: "true" })
       expect(stateOf(await bay2.state(), "C-s")).toBe("merging")
 
-      // requeue resumes it (merging → queued); the next drain merges it.
+      // requeue resumes it (merging → submitted, restarting the WHOLE
+      // pipeline — a half-landed merge is not trusted); integrate re-runs
+      // check (unconfigured, auto-passes) then merge.
       await bay2.dispatch({ type: "requeue", args: { pr: "C-s" } })
-      expect(stateOf(await bay2.state(), "C-s")).toBe("queued")
-      await bay2.dispatch({ type: "drain" })
+      expect(stateOf(await bay2.state(), "C-s")).toBe("submitted")
+      await bay2.dispatch({ type: "integrate", args: { pr: "C-s" } })
       expect(stateOf(await bay2.state(), "C-s")).toBe("merged")
     } finally {
       if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved

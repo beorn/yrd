@@ -79,18 +79,22 @@ describe("git bay CLI — happy path (process-level)", () => {
     const init = await must(["git", "bay", "init"], demo, env)
     expect(init.stdout).toContain("bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)")
 
-    const opened = await must(["git", "bay", "new", "fix-readme"], demo, env)
+    const opened = await must(["git", "bay", "open", "fix-readme"], demo, env)
     const wtPath = opened.stdout.trim()
     expect(wtPath).toContain(".bays/wt1")
 
     const ls = await must(["git", "bay", "ls"], wtPath, env)
-    expect(ls.stdout).toMatch(/WORKTREE\s+NAME\s+STATE\s+AGE\s+IDLE/)
-    expect(ls.stdout).toMatch(/wt1\s+fix-readme\s+open\s+\d+s\s+\d+s\s+← you/)
+    expect(ls.stdout).toMatch(/WORKTREE\s+BAY\s+STATE\s+AGE\s+IDLE/)
+    expect(ls.stdout).toMatch(/wt1\s+fix-readme\s+active\s+\d+s\s+\d+s\s+← you/)
 
     await writeFile(join(wtPath, "README.md"), "hello\n", "utf8")
     await must(["git", "-C", wtPath, "add", "README.md"], wtPath, env)
     await must(["git", "-C", wtPath, "commit", "-qm", "docs: add readme"], wtPath, env)
 
+    // -o wait fuses create+submit+pipeline in one push — the happy path's
+    // whole point is "push and the PR lands", so this test uses the fused
+    // form; the two-step (bare push, then `git bay submit`) flow is its own
+    // describe block below.
     const push = await must(["git", "-C", wtPath, "push", "-o", "wait"], wtPath, env)
     const remote = push.stderr // git relays hook output on stderr as "remote: ..."
     expect(remote).toMatch(/remote: bay: PR1 received — checks running/)
@@ -109,13 +113,13 @@ describe("git bay CLI — happy path (process-level)", () => {
     const again = await run(["git", "-C", wtPath, "push"], wtPath, env)
     expect(again.code).not.toBe(0)
     expect(again.stderr).toMatch(/remote: bay: doors closed — PR1 .* already merged/)
-    expect(again.stderr).toContain("git bay new <name>")
+    expect(again.stderr).toContain("git bay open <name>")
   })
 
   it("a failing check rejects and teaches; retry-after-fix keeps the PR number", async () => {
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env) // always-red check
-    const opened = await must(["git", "bay", "new", "red-then-green"], demo, env)
+    const opened = await must(["git", "bay", "open", "red-then-green"], demo, env)
     const wtPath = opened.stdout.trim()
 
     await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
@@ -135,7 +139,7 @@ describe("git bay CLI — happy path (process-level)", () => {
     // And a fix WITH a new commit resubmits through plain git push — the PR
     // keeps its number across the retry and the revision increments.
     await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
-    const opened2 = await must(["git", "bay", "new", "second"], demo, env)
+    const opened2 = await must(["git", "bay", "open", "second"], demo, env)
     const wt2 = opened2.stdout.trim()
     await writeFile(join(wt2, "g.txt"), "y\n", "utf8")
     await must(["git", "-C", wt2, "add", "g.txt"], wt2, env)
@@ -158,7 +162,7 @@ describe("git bay CLI — happy path (process-level)", () => {
 
   it("close on a dirty worktree refuses at the door — still open, then closes after cleanup (by name)", async () => {
     await must(["git", "bay", "init"], demo, env)
-    const opened = await must(["git", "bay", "new", "dirty-close"], demo, env)
+    const opened = await must(["git", "bay", "open", "dirty-close"], demo, env)
     const wtPath = opened.stdout.trim()
     await writeFile(join(wtPath, "scratch.txt"), "uncommitted\n", "utf8")
 
@@ -173,7 +177,7 @@ describe("git bay CLI — happy path (process-level)", () => {
     // lease.ended and leave state and disk divergent).
     const after = await must(["git", "bay", "ls"], demo, env)
     expect(after.stdout).toContain("dirty-close")
-    expect(after.stdout).toContain("open")
+    expect(after.stdout).toContain("active")
 
     // Clean up the scratch file — the SAME close (by wt-id this time) retires it.
     await must(["rm", join(wtPath, "scratch.txt")], demo, env)
@@ -183,10 +187,10 @@ describe("git bay CLI — happy path (process-level)", () => {
     expect(final.stdout).toContain("no open worktrees")
   })
 
-  it("new refuses a name that shadows a minted id (PR7 / wt3)", async () => {
+  it("open refuses a name that shadows a minted id (PR7 / wt3)", async () => {
     await must(["git", "bay", "init"], demo, env)
     for (const name of ["PR7", "pr7", "wt3", "WT3"]) {
-      const res = await run(["git", "bay", "new", name], demo, env)
+      const res = await run(["git", "bay", "open", name], demo, env)
       expect(res.code, name).toBe(1)
       expect(res.stderr, name).toContain("looks like an id, not a name")
       expect(res.stderr, name).toContain("pick a descriptive name")
@@ -208,12 +212,12 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     await rm(root, { recursive: true, force: true })
   })
 
-  it("two submits mint PR1 then PR2", async () => {
+  it("two adopts mint PR1 then PR2", async () => {
     await must(["git", "-C", demo, "branch", "task/a"], demo, env)
     await must(["git", "-C", demo, "branch", "task/b"], demo, env)
-    const first = await must(["git", "bay", "submit", "task/a"], demo, env)
+    const first = await must(["git", "bay", "adopt", "task/a"], demo, env)
     expect(first.stdout.trim()).toBe("PR1")
-    const second = await must(["git", "bay", "submit", "task/b"], demo, env)
+    const second = await must(["git", "bay", "adopt", "task/b"], demo, env)
     expect(second.stdout.trim()).toBe("PR2")
   })
 
@@ -221,20 +225,27 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     await must(["git", "-C", demo, "branch", "b1"], demo, env)
     await must(["git", "-C", demo, "branch", "b2"], demo, env)
     await must(["git", "-C", demo, "branch", "b3"], demo, env)
-    await must(["git", "bay", "submit", "b1", "--workitem", "dup"], demo, env) // PR1
-    await must(["git", "bay", "submit", "b2", "--workitem", "dup"], demo, env) // PR2
-    await must(["git", "bay", "submit", "b3", "--workitem", "uniq"], demo, env) // PR3
+    await must(["git", "bay", "adopt", "b1", "--workitem", "dup"], demo, env) // PR1, pushed
+    await must(["git", "bay", "adopt", "b2", "--workitem", "dup"], demo, env) // PR2, pushed
+    await must(["git", "bay", "adopt", "b3", "--workitem", "uniq"], demo, env) // PR3, pushed
+    // submit (ask to merge) is what makes them visible to integrate.
+    await must(["git", "bay", "submit", "PR1"], demo, env)
+    await must(["git", "bay", "submit", "PR2"], demo, env)
+    await must(["git", "bay", "submit", "PR3"], demo, env)
 
     const ambiguous = await run(["git", "bay", "integrate", "dup"], demo, env)
     expect(ambiguous.code).toBe(1)
     expect(ambiguous.stderr).toContain("'dup' is ambiguous")
-    expect(ambiguous.stderr).toContain("PR1 (queued)")
-    expect(ambiguous.stderr).toContain("PR2 (queued)")
+    expect(ambiguous.stderr).toContain("PR1 (submitted)")
+    expect(ambiguous.stderr).toContain("PR2 (submitted)")
 
     // Unique name integrates exactly that PR (a red merge command still proves
-    // the name resolved to PR3 — the verdict lines carry the number).
+    // the name resolved to PR3 — the verdict lines carry the number). No
+    // bay.check configured in this block, so the check half auto-passes.
     const integrated = await run(["git", "bay", "integrate", "uniq"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
-    expect(integrated.stdout).toContain("bay: PR3 queued → merging")
+    expect(integrated.stdout).toContain("bay: PR3 submitted → checking")
+    expect(integrated.stdout).toContain("bay: PR3 checking → checked")
+    expect(integrated.stdout).toContain("bay: PR3 checked → merging")
     expect(integrated.stdout).toContain("bay: PR3 merging → rejected — exit 1")
 
     const absent = await run(["git", "bay", "integrate", "no-such-name"], demo, env)
@@ -245,6 +256,35 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
   it("bare integrate with an empty queue says so instead of exiting silently", async () => {
     const res = await must(["git", "bay", "integrate"], demo, env)
     expect(res.stdout).toContain("bay: queue empty — nothing to integrate")
+  })
+
+  it("check then merge, atomically, lands the same PR as one integrate call", async () => {
+    await must(["git", "-C", demo, "branch", "task/atomic"], demo, env)
+    const id = (await must(["git", "bay", "adopt", "task/atomic"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", id], demo, env)
+
+    const checked = await must(["git", "bay", "check", id], demo, env)
+    expect(checked.stdout).toContain(`bay: ${id} submitted → checking`)
+    expect(checked.stdout).toContain(`bay: ${id} checking → checked`)
+    const json1 = await must(["git", "bay", "ls", "--json"], demo, env)
+    expect((JSON.parse(json1.stdout) as { prs: Record<string, { state: string }> }).prs[id]!.state).toBe("checked")
+
+    // merge refuses a not-yet-checked PR, and check refuses an already-checked one.
+    await must(["git", "-C", demo, "branch", "task/not-checked"], demo, env)
+    const id2 = (await must(["git", "bay", "adopt", "task/not-checked"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", id2], demo, env)
+    const earlyMerge = await run(["git", "bay", "merge", id2], demo, env)
+    expect(earlyMerge.code).toBe(1)
+    expect(earlyMerge.stderr).toContain(`${id2} hasn't been checked yet`)
+    const doubleCheck = await run(["git", "bay", "check", id], demo, env)
+    expect(doubleCheck.code).toBe(1)
+    expect(doubleCheck.stderr).toContain(`${id} is already checked`)
+
+    const merged = await must(["git", "bay", "merge", id], demo, { ...env, BAY_MERGE_COMMAND: "true" })
+    expect(merged.stdout).toContain(`bay: ${id} checked → merging`)
+    expect(merged.stdout).toContain(`bay: ${id} merging → merged`)
+    const json2 = await must(["git", "bay", "ls", "--json"], demo, env)
+    expect((JSON.parse(json2.stdout) as { prs: Record<string, { state: string }> }).prs[id]!.state).toBe("merged")
   })
 })
 
@@ -271,12 +311,12 @@ describe("git bay CLI — bay.tracker validation at new", () => {
   })
 
   it("a name the tracker accepts opens a worktree", async () => {
-    const res = await must(["git", "bay", "new", "good-name"], demo, env)
+    const res = await must(["git", "bay", "open", "good-name"], demo, env)
     expect(res.stdout.trim()).toContain(".bays/wt1")
   })
 
   it("a name the tracker refuses is a teaching refusal carrying the tracker's stderr", async () => {
-    const res = await run(["git", "bay", "new", "bogus-name"], demo, env)
+    const res = await run(["git", "bay", "open", "bogus-name"], demo, env)
     expect(res.code).toBe(1)
     expect(res.stderr).toContain("the tracker does not accept 'bogus-name'")
     expect(res.stderr).toContain("no such ticket: bogus-name")
@@ -287,7 +327,7 @@ describe("git bay CLI — bay.tracker validation at new", () => {
 
   it("bay.tracker none skips the check", async () => {
     await must(["git", "-C", demo, "config", "bay.tracker", "none"], demo, env)
-    const res = await must(["git", "bay", "new", "anything-goes"], demo, env)
+    const res = await must(["git", "bay", "open", "anything-goes"], demo, env)
     expect(res.stdout.trim()).toContain(".bays/wt1")
   })
 })
@@ -306,8 +346,8 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     await rm(root, { recursive: true, force: true })
   })
 
-  it("co / status / ping / abandon / enqueue / requeue / drain / prime resolve to the new verbs", async () => {
-    // co → new (with the legacy --no-workitem spelling)
+  it("co / status / ping / abandon / enqueue / requeue / drain / land / prime resolve to the new verbs", async () => {
+    // co → open (with the legacy --no-workitem spelling)
     const co = await must(["git", "bay", "co", "old-style", "--no-workitem"], demo, env)
     expect(co.stdout.trim()).toContain(".bays/wt1")
     // status → ls
@@ -319,19 +359,26 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     // abandon → close
     await must(["git", "bay", "abandon", "wt1"], demo, env)
     expect((await must(["git", "bay", "status"], demo, env)).stdout).toContain("no open worktrees")
-    // enqueue → submit
+    // enqueue → adopt (lands `pushed`); submit (queue) makes it visible to
+    // integrate/drain.
     await must(["git", "-C", demo, "branch", "task/legacy"], demo, env)
     const enq = await must(["git", "bay", "enqueue", "task/legacy"], demo, env)
     expect(enq.stdout.trim()).toBe("PR2") // PR1 was burned by the closed worktree
+    await must(["git", "bay", "submit", "PR2"], demo, env)
     // requeue → retry (teaching refusal proves the alias routes to retry)
     const requeue = await run(["git", "bay", "requeue", "PR99"], demo, env)
     expect(requeue.code).toBe(1)
     expect(requeue.stderr).toContain("bay: no PR or worktree named 'PR99'")
-    // drain / merge / land → integrate
+    // drain → integrate: walks the whole pipeline (no bay.check configured,
+    // so check auto-passes; a red merge command rejects it).
     const drain = await run(["git", "bay", "drain", "PR2"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
-    expect(drain.stdout).toContain("bay: PR2 queued → merging")
-    const merge = await run(["git", "bay", "merge"], demo, env)
-    expect(merge.stdout).toContain("bay: queue empty — nothing to integrate")
+    expect(drain.stdout).toContain("bay: PR2 submitted → checking")
+    expect(drain.stdout).toContain("bay: PR2 checking → checked")
+    expect(drain.stdout).toContain("bay: PR2 checked → merging")
+    expect(drain.stdout).toContain("bay: PR2 merging → rejected — exit 1")
+    // land → integrate (PR2 is now rejected, not submitted/checked — queue is empty)
+    const land = await run(["git", "bay", "land"], demo, env)
+    expect(land.stdout).toContain("bay: queue empty — nothing to integrate")
     // prime → guide
     const prime = await must(["git", "bay", "prime"], demo, env)
     expect(prime.stdout).toContain("git bay is a small continuous-integration server for this repository")
@@ -340,17 +387,55 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
   it("help advertises exactly one spelling per verb — no aliases anywhere", async () => {
     const help = await run(["git", "bay"], demo, env) // bare invocation prints help
     expect(help.code).toBe(0)
-    for (const advertised of ["guide", "init", "new <name>", "close <wt|name>", "gc", "ls", "submit <branch|name>", "integrate", "retry <PR|name>", "audit"]) {
+    for (const advertised of [
+      "guide",
+      "init",
+      "open <name>",
+      "close [options] <wt|name>", // --withdraw gives it an [options] slot, like ls/integrate/audit
+      "gc",
+      "ls",
+      "adopt <branch>",
+      "submit <PR|name>",
+      "check <PR|name>",
+      "merge <PR|name>",
+      "integrate",
+      "retry <PR|name>",
+      "audit",
+    ]) {
       expect(help.stdout, advertised).toContain(advertised)
     }
-    for (const hidden of ["prime", "co", "checkout", "abandon", "return", "refresh", "ping", "status", "enqueue", "adopt", "in", "int", "land", "merge", "drain", "requeue", "receive-pre", "receive-post"]) {
+    for (const hidden of [
+      "prime",
+      "new",
+      "co",
+      "checkout",
+      "install",
+      "setup",
+      "abandon",
+      "return",
+      "refresh",
+      "ping",
+      "status",
+      "enqueue",
+      "queue",
+      "in",
+      "int",
+      "land",
+      "drain",
+      "requeue",
+      "receive-pre",
+      "receive-post",
+    ]) {
       expect(help.stdout, hidden).not.toMatch(new RegExp(`^\\s*${hidden}\\b`, "m"))
     }
     // and the per-command usage line advertises one spelling too, even when
     // invoked through a legacy alias
     const integrateHelp = await run(["git", "bay", "land", "-h"], demo, env)
     expect(integrateHelp.stdout).toContain("Usage: git bay integrate [options] [PR|name]")
-    expect(integrateHelp.stdout).not.toContain("integrate|merge")
+    expect(integrateHelp.stdout).not.toContain("integrate|land")
+    // `merge` is now its OWN advertised verb, not an integrate alias
+    const mergeHelp = await must(["git", "bay", "merge", "-h"], demo, env)
+    expect(mergeHelp.stdout).toContain("Usage: git bay merge [options] <PR|name>")
   })
 })
 
@@ -377,7 +462,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
   })
 
   it("`<verb> -h` works for every verb that reads a positional — new names and old aliases", async () => {
-    for (const verb of ["new", "ls", "submit", "integrate", "retry", "close", "refresh", "co", "status", "enqueue", "requeue", "drain", "abandon", "ping"]) {
+    for (const verb of ["open", "new", "ls", "adopt", "submit", "queue", "check", "merge", "integrate", "retry", "close", "refresh", "co", "status", "enqueue", "requeue", "drain", "abandon", "ping"]) {
       const res = await run(["git", "bay", verb, "-h"], demo, env)
       expect(res.code, `${verb} -h`).toBe(0)
       expect(res.stdout, `${verb} -h`).toContain("Usage: git bay")
@@ -404,8 +489,16 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     await must(["git", "bay", "init"], demo, env)
     const res = await run(["git", "bay", "submit"], demo, env)
     expect(res.code).toBe(1)
-    expect(res.stderr).toContain("missing required argument 'branch|name'")
+    expect(res.stderr).toContain("missing required argument 'PR|name'")
     expect(res.stderr).toContain("Usage: git bay submit") // showHelpAfterError keeps it teaching
+  })
+
+  it("regression: bare `adopt` still teaches that a branch is required", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    const res = await run(["git", "bay", "adopt"], demo, env)
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("missing required argument 'branch'")
+    expect(res.stderr).toContain("Usage: git bay adopt") // showHelpAfterError keeps it teaching
   })
 
   it("unadvertised prefixes resolve — `au` is audit, ambiguity teaches with the canonical names", async () => {
@@ -431,20 +524,26 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
   it("`in`/`int` are exact aliases of integrate (never ambiguity refusals); `i` alone stays genuinely ambiguous with init; `init` itself always resolves as the exact name", async () => {
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "branch", "task/x"], demo, env)
-    const id1 = (await must(["git", "bay", "submit", "task/x"], demo, env)).stdout.trim()
+    const id1 = (await must(["git", "bay", "adopt", "task/x"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", id1], demo, env) // pushed → submitted
 
     // Exact alias match wins BEFORE prefix matching — `in` is never treated as
     // an ambiguous prefix of `init`, even though it IS one character short of it.
+    // No bay.check configured, so the check half auto-passes before the red
+    // merge command rejects it.
     const inRun = await run(["git", "bay", "in", id1], demo, { ...env, BAY_MERGE_COMMAND: "false" })
     expect(inRun.code).toBe(0)
-    expect(inRun.stdout).toContain(`bay: ${id1} queued → merging`)
+    expect(inRun.stdout).toContain(`bay: ${id1} submitted → checking`)
+    expect(inRun.stdout).toContain(`bay: ${id1} checked → merging`)
 
     // `int` is likewise an exact alias, not a prefix.
     await must(["git", "-C", demo, "branch", "task/y"], demo, env)
-    const id2 = (await must(["git", "bay", "submit", "task/y"], demo, env)).stdout.trim()
+    const id2 = (await must(["git", "bay", "adopt", "task/y"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", id2], demo, env)
     const intRun = await run(["git", "bay", "int", id2], demo, { ...env, BAY_MERGE_COMMAND: "false" })
     expect(intRun.code).toBe(0)
-    expect(intRun.stdout).toContain(`bay: ${id2} queued → merging`)
+    expect(intRun.stdout).toContain(`bay: ${id2} submitted → checking`)
+    expect(intRun.stdout).toContain(`bay: ${id2} checked → merging`)
 
     // `i` alone matches no exact name/alias — it's a genuine prefix collision
     // between `init` (exact name) and `integrate` (via the `in`/`int` aliases).
@@ -458,6 +557,25 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     const initAgain = await run(["git", "bay", "init"], demo, env)
     expect(initAgain.code).toBe(0)
     expect(initAgain.stdout).toContain("bay: initialized")
+  })
+
+  it("`o` resolves uniquely to open — no other verb or alias starts with 'o'", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    const res = await must(["git", "bay", "o", "prefix-open"], demo, env)
+    expect(res.stdout.trim()).toContain(".bays/wt1")
+  })
+
+  it("`install`/`setup` are hidden aliases of init and do not widen the 'i' ambiguity", async () => {
+    const root2 = await must(["git", "bay", "install"], demo, env)
+    expect(root2.stdout).toContain("bay: initialized")
+    const root3 = await must(["git", "bay", "setup"], demo, env)
+    expect(root3.stdout).toContain("bay: initialized")
+    // Both resolve to the SAME canonical verb as `init`, so the 'i' prefix
+    // ambiguity set stays exactly {init, integrate} — install/setup add no
+    // new candidate.
+    const i = await run(["git", "bay", "i"], demo, env)
+    expect(i.code).toBe(1)
+    expect(i.stderr).toContain("init, integrate")
   })
 })
 
@@ -484,7 +602,7 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
 
   it("a hygiene clean sweep cannot delete the journal — the exact production incident", async () => {
     await must(["git", "bay", "init"], demo, env)
-    const id = (await must(["git", "bay", "submit", "main"], demo, env)).stdout.trim()
+    const id = (await must(["git", "bay", "adopt", "main"], demo, env)).stdout.trim()
     expect(id).toBe("PR1")
 
     // The hygiene sweep that wiped the hh pilot's first journal at 12:4x:
@@ -515,28 +633,215 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
     expect(ls.stderr).toContain(".bay")
   })
 
-  it("submit refuses an unresolvable target at the door and suggests the near-miss branch", async () => {
-    // The live-demo confusion: the user submitted a NAME; the real branch was
+  it("adopt refuses an unresolvable target at the door and suggests the near-miss branch", async () => {
+    // The live-demo confusion: the user adopted a NAME; the real branch was
     // task/<name>. The old behavior queued it happily and let the merge worker
     // reject it minutes later.
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "branch", "task/demo-readme2"], demo, env)
-    const res = await run(["git", "bay", "submit", "demo-readme2"], demo, env)
+    const res = await run(["git", "bay", "adopt", "demo-readme2"], demo, env)
     expect(res.code).toBe(1)
     expect(res.stderr).toContain("does not resolve to a commit and no worktree carries that name")
     expect(res.stderr).toContain("Did you mean: task/demo-readme2")
     const ls = await must(["git", "bay", "ls", "--json"], demo, env)
-    expect(ls.stdout).not.toContain("PR1") // nothing was queued
+    expect(ls.stdout).not.toContain("PR1") // nothing was created
+  })
+
+  it("submit redirects to adopt when the target isn't a known PR or bay name", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "branch", "task/some-branch"], demo, env)
+    const res = await run(["git", "bay", "submit", "task/some-branch"], demo, env)
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("is not a known PR or bay name")
+    expect(res.stderr).toContain("git bay adopt task/some-branch")
   })
 
   it("bare ls shows every non-merged PR — a rejected one is never invisible", async () => {
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "branch", "task/x"], demo, env)
-    const id = (await must(["git", "bay", "submit", "task/x"], demo, env)).stdout.trim()
+    const id = (await must(["git", "bay", "adopt", "task/x"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", id], demo, env) // pushed → submitted
     await run(["git", "bay", "integrate"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
     const ls = await must(["git", "bay", "ls"], demo, env)
     expect(ls.stdout).toContain(id)
     expect(ls.stdout).toContain("rejected")
     expect(ls.stdout).toContain("exit 1")
+  })
+})
+
+describe("git bay CLI — close --withdraw (v0.3: a bay's PR must be dispositioned before closing)", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("bay-withdraw-"))
+    await must(["git", "bay", "init"], demo, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("close refuses while the bay's PR is still live (rejected, not yet retried); --withdraw teaches then closes", async () => {
+    await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env) // always-red check
+    const opened = await must(["git", "bay", "open", "flaky"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: f"], wtPath, env)
+    const push = await must(["git", "-C", wtPath, "push", "-o", "wait"], wtPath, env)
+    const id = push.stderr.match(/bay: (PR\d+) received/)![1]!
+    expect(push.stderr).toContain(`${id} rejected`)
+
+    const refuse = await run(["git", "bay", "close", "flaky"], demo, env)
+    expect(refuse.code).toBe(1)
+    expect(refuse.stderr).toContain(`${id} is rejected`)
+    expect(refuse.stderr).toContain(`git bay integrate ${id}`)
+    expect(refuse.stderr).toContain(`git bay retry ${id}`)
+    expect(refuse.stderr).toContain("git bay close --withdraw")
+
+    // Still open — the refusal is a returned+journaled event, not a crash;
+    // state and disk never diverged.
+    const stillOpen = await must(["git", "bay", "ls"], demo, env)
+    expect(stillOpen.stdout).toContain("flaky")
+
+    // --withdraw teaches nothing more — it withdraws the PR (→ closed) and closes.
+    await must(["git", "bay", "close", "--withdraw", "flaky"], demo, env)
+    const after = await must(["git", "bay", "ls"], demo, env)
+    expect(after.stdout).not.toContain("flaky")
+    expect(after.stdout).toContain("no open worktrees")
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs[id]!.state).toBe("closed")
+  })
+
+  it("close (no --withdraw) proceeds normally once the bay's PR is merged", async () => {
+    const opened = await must(["git", "bay", "open", "clean-merge"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: f"], wtPath, env)
+    // The merge itself closes the bay (via: merged) — so by the time anyone
+    // could run `close`, the worktree is already gone. This just proves the
+    // merged path never needed --withdraw in the first place.
+    await must(["git", "-C", wtPath, "push", "-o", "wait"], wtPath, env)
+    const ls = await must(["git", "bay", "ls"], demo, env)
+    expect(ls.stdout).toContain("no open worktrees")
+  })
+
+  it("close --withdraw on a still-`pushed` (never submitted) PR: pushed → closed", async () => {
+    const opened = await must(["git", "bay", "open", "never-submitted"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: f"], wtPath, env)
+    await must(["git", "-C", wtPath, "push"], wtPath, env) // bare push — PR1 lands `pushed`, nothing else runs
+
+    const refuse = await run(["git", "bay", "close", "never-submitted"], demo, env)
+    expect(refuse.code).toBe(1)
+    expect(refuse.stderr).toContain("PR1 is pushed")
+    expect(refuse.stderr).toContain("git bay close --withdraw")
+
+    await must(["git", "bay", "close", "--withdraw", "never-submitted"], demo, env)
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs.PR1!.state).toBe("closed")
+  })
+})
+
+describe("git bay CLI — push creates (pushed), submit asks to merge (submitted)", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("bay-create-submit-"))
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.mergeCommand", "git merge --no-ff {target}"], demo, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("a bare push creates the PR in `pushed` and stops — no checks run, nothing merges", async () => {
+    const opened = await must(["git", "bay", "open", "bare-push"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: f"], wtPath, env)
+
+    const push = await must(["git", "-C", wtPath, "push"], wtPath, env)
+    expect(push.stderr).toMatch(/remote: bay: PR1 opened — git bay submit PR1 when ready/)
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    expect(state.prs.PR1!.state).toBe("pushed")
+  })
+
+  it("git bay submit <PR> submits it (pushed → submitted); git bay integrate lands it", async () => {
+    const opened = await must(["git", "bay", "open", "two-step"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: f"], wtPath, env)
+    await must(["git", "-C", wtPath, "push"], wtPath, env) // creates PR1, pushed
+
+    const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
+    expect(submit.stdout).toContain("bay: PR1 submitted — git bay integrate PR1 to land it")
+
+    const integrate = await must(["git", "bay", "integrate"], demo, env)
+    expect(integrate.stdout).toContain("bay: PR1 submitted → checking")
+    expect(integrate.stdout).toContain("bay: PR1 checking → checked")
+    expect(integrate.stdout).toContain("bay: PR1 checked → merging")
+    expect(integrate.stdout).toContain("bay: PR1 merging → merged")
+
+    const ls = await must(["git", "bay", "ls", "PR1"], demo, env)
+    expect(ls.stdout).toContain("PR1 merged")
+  })
+
+  it("-o submit fuses create+queue in one push — a red check rejects it directly from the push", async () => {
+    await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
+    const opened = await must(["git", "bay", "open", "fused-red"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "g.txt"), "y\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "g.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: g"], wtPath, env)
+
+    const push = await must(["git", "-C", wtPath, "push", "-o", "submit"], wtPath, env)
+    expect(push.stderr).toMatch(/remote: bay: PR1 received — checks running/)
+    expect(push.stderr).toMatch(/remote: bay: PR1 rejected — check 'false' failed \(exit 1\)/)
+  })
+
+  it("bay.autoQueue=true makes a bare push behave exactly like -o submit (today's pre-v0.3 default)", async () => {
+    await must(["git", "-C", demo, "config", "bay.autoQueue", "true"], demo, env)
+    const opened = await must(["git", "bay", "open", "auto-queued"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "h.txt"), "z\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "h.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: h"], wtPath, env)
+
+    const push = await must(["git", "-C", wtPath, "push"], wtPath, env) // NO -o option at all
+    expect(push.stderr).toMatch(/remote: bay: PR1 received — checks running/)
+    expect(push.stderr).toMatch(/remote: bay: PR1 merged onto main \(checks ✓\)/)
+  })
+
+  it("submit on an unknown PR-shaped id redirects to adopt (it looks like nothing submit can resolve)", async () => {
+    const res = await run(["git", "bay", "submit", "PR999"], demo, env)
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain("'PR999' is not a known PR or bay name")
+    expect(res.stderr).toContain("git bay adopt PR999")
+  })
+
+  it("submit refuses a PR that is already submitted", async () => {
+    await must(["git", "-C", demo, "branch", "task/dup"], demo, env)
+    const id = (await must(["git", "bay", "adopt", "task/dup"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", id], demo, env)
+    const res = await run(["git", "bay", "submit", id], demo, env)
+    expect(res.code).toBe(1)
+    expect(res.stderr).toContain(`${id} is already submitted`)
   })
 })

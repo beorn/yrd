@@ -101,8 +101,8 @@ describe("createSqliteStore", () => {
     stores.push(store)
 
     const events: BayEvent[] = [
-      { v: 1, ts: "2026-01-01T00:00:00.000Z", actor: "test", type: "leased", lease: "L1" },
-      { v: 1, ts: "2026-01-01T00:00:01.000Z", actor: "test", type: "abandoned", lease: "L1" },
+      { id: "e1", ts: "2026-01-01T00:00:00.000Z", name: "bay/refreshed", cause: { commandId: "c1" }, data: { bay: "L1" } },
+      { id: "e2", ts: "2026-01-01T00:00:01.000Z", name: "bay/closed", cause: { commandId: "c2" }, data: { bay: "L1", via: "close" } },
     ]
     for (const event of events) await store.journal.append(event)
 

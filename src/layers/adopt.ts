@@ -1,43 +1,42 @@
-import type {
-  BayCommand,
-  BayEvent,
-  BayPlugin,
-  BayRuntime,
-  BayState,
-  Layer,
-  PrId,
-  TransitionResult,
-  WorkitemId,
-} from "../types.ts"
+import type { BayCommand, BayPlugin, BayRuntime, BayState, Layer, PrId, TransitionResult, WorkitemId } from "../types.ts"
 import { nextPrId } from "../ids.ts"
 import { prOpenedEvent } from "./queue.ts"
 import { leaseForBranch } from "./receive.ts"
 
 /**
- * withAdopt — the reducer behind `git bay submit <branch|name>` (v0.2: the old
- * `adopt` verb's code, folded into the one advertised submit verb; the CLI
- * aliases `enqueue` and `adopt` land here too). It is pure bookkeeping over the
- * queue: no effects, no git. It correlates a branch created outside a worktree
- * to a fresh PR number and enqueues it as a first-class PR.
+ * withAdopt — the reducer behind `git bay adopt <branch>` — its own
+ * advertised verb: "create a PR for an existing branch, landing in `pushed`"
+ * — distinct from `submit`, which means "ask to merge" (pushed → submitted;
+ * see queue.ts's reduceQueue). `enqueue` remains a hidden CLI alias of
+ * `adopt`, preserving its historical behavior. It is pure bookkeeping over
+ * the queue: no effects, no git. It correlates a branch created outside a
+ * worktree to a fresh PR number and lands it as a first-class PR in `pushed`
+ * — never auto-submitted (that is `submit`'s job).
  *
- * Design note — what submit-of-a-branch buys and its audit contract:
- *   Submitting a legacy branch makes it a first-class PR so the merge worker /
+ * Design note — what adopting a branch buys and its audit contract:
+ *   Adopting a legacy branch makes it a first-class PR so the merge worker /
  *   receiver submit pipeline can process it, and so `git bay audit` stops
- *   flagging it as an unnamed ref — ONCE a name is provided. A nameless submit
- *   (name = null) still enters the queue but stays audit-warned until v0.3's
+ *   flagging it as an unnamed ref — ONCE a name is provided. A nameless adopt
+ *   (name = null) still lands as a PR but stays audit-warned until v0.3's
  *   hard refusal (spec/bead policy: no branch without a name at the front door;
- *   submit is the reconciliation ramp, not a bypass). Enforcing the "nameless
- *   submit stays warned" nuance is the audit layer's job (it can see the PR's
+ *   adopt is the reconciliation ramp, not a bypass). Enforcing the "nameless
+ *   adopt stays warned" nuance is the audit layer's job (it can see the PR's
  *   null name); this reducer only records intent.
  *
+ * v0.3: the old separate `adopt.recorded` audit-trail event is gone — this
+ * reducer's ONLY event is `pr/opened {..., via: "submit", queued: false}`;
+ * `via` already says "this PR came from an explicit adopt, not a worktree's
+ * push", which is all `adopt.recorded` ever added (docs/events.md § event
+ * families: DELETE adopt.* from the write path — absorbed via the `via`
+ * field).
+ *
  * Interlock rule (spec): this layer consumes only lower layers' STATE — leases
- * from withWorkspaces/receive (via leaseForBranch) and the queue slice — and
+ * from withWorktrees/receive (via leaseForBranch) and the queue slice — and
  * emits events the queue folds (prOpenedEvent). It never reaches into their
  * internals.
  */
 
 const LAYER = "adopt"
-const EV_RECORDED = "adopt.recorded"
 
 // ---------- pure lookups ----------
 
@@ -53,13 +52,13 @@ function prTrackingBranch(state: BayState, branch: string): PrId | undefined {
   return undefined
 }
 
-/** The wt-label for an open lease, read loosely from the workspaces slice so
- *  this layer does not hard-depend on withWorkspaces being registered. Falls
+/** The wt-label for an open lease, read loosely from the worktrees slice so
+ *  this layer does not hard-depend on withWorktrees being registered. Falls
  *  back to the lease's name/branch when the slice is absent. */
 function worktreeLabel(state: BayState, leaseId: string): string | undefined {
-  const ws = state.slices.workspaces as { byBay?: Record<number, string> } | undefined
-  if (!ws?.byBay) return undefined
-  for (const [num, held] of Object.entries(ws.byBay)) {
+  const wt = state.slices.worktrees as { byWorktree?: Record<number, string> } | undefined
+  if (!wt?.byWorktree) return undefined
+  for (const [num, held] of Object.entries(wt.byWorktree)) {
     if (held === leaseId) return `wt${num}`
   }
   return undefined
@@ -70,65 +69,57 @@ function worktreeLabel(state: BayState, leaseId: string): string | undefined {
 function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const rawBranch = command.args?.branch
   if (typeof rawBranch !== "string" || rawBranch.trim() === "") {
-    throw new Error("bay: submit: 'branch' (an existing branch name) is required")
+    throw new Error("bay: adopt: 'branch' (an existing branch name) is required")
   }
   const branch = rawBranch
 
   const rawName = command.args?.name
   if (rawName !== undefined && (typeof rawName !== "string" || rawName.trim() === "")) {
-    throw new Error("bay: submit: 'name' must be a non-empty string when provided")
+    throw new Error("bay: adopt: 'name' must be a non-empty string when provided")
   }
   const name: WorkitemId | null = typeof rawName === "string" ? rawName : null
 
   // An OPEN worktree already owns this branch — plain `git push` from inside it
-  // is the submit path (there is no `git bay push`). An ended lease is fine:
-  // submitting recovers closed-out or legacy work.
+  // is the create path (there is no `git bay push`). An ended lease is fine:
+  // adopting recovers closed-out or legacy work.
   const lease = leaseForBranch(state, branch)
   if (lease && lease.endedAt === undefined) {
     const wt = worktreeLabel(state, lease.id) ?? `'${lease.workitem ?? lease.branch}'`
     throw new Error(
-      `bay: submit: '${branch}' is already open in worktree ${wt} — ` +
-        `plain git push from that worktree submits it, or close it first: git bay close ${wt}`,
+      `bay: adopt: '${branch}' is already open in worktree ${wt} — ` +
+        `plain git push from that worktree opens it, or close it first: git bay close ${wt}`,
     )
   }
 
-  // Already a first-class PR — refuse the double-submit, naming it.
+  // Already a first-class PR — refuse the double-adopt, naming it.
   const tracked = prTrackingBranch(state, branch)
   if (tracked) {
     const pr = state.prs[tracked]
     throw new Error(
-      `bay: submit: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "queued"}) — ` +
+      `bay: adopt: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "pushed"}) — ` +
         `git bay ls ${tracked}`,
     )
   }
 
-  const ts = bay.clock()
   const prId = nextPrId(state)
   // Belt-and-suspenders: prOpenedEvent (the builder) does not see state, so the
   // duplicate-id fail-loud lives here. prTrackingBranch already catches
-  // same-branch re-submits; this catches a bare id collision.
+  // same-branch re-adopts; this catches a bare id collision.
   if (state.prs[prId]) {
-    throw new Error(`bay: submit: PR '${prId}' already exists — '${branch}' was submitted before`)
+    throw new Error(`bay: adopt: PR '${prId}' already exists — '${branch}' was adopted before`)
   }
 
-  const opened = prOpenedEvent(bay, prId, branch, name)
-  const recorded: BayEvent = {
-    v: 1,
-    ts,
-    actor: bay.actor,
-    type: EV_RECORDED,
-    pr: prId,
-    data: { branch, pr: prId, name },
-  }
-  return { state, events: [opened, recorded], effects: [] }
+  // queued: false — adopt only ever lands in `pushed`; `git bay submit <PR>`
+  // is the separate ask-to-merge step.
+  const opened = prOpenedEvent(bay, prId, branch, name, "submit", false, command.cause!)
+  return { state, events: [opened], effects: [] }
 }
 
 // ---------- the plugin ----------
 
 /** Built inside the plugin closure (house style): the reducer needs the
  *  runtime's clock/actor to stamp events, but the Reducer contract passes no
- *  runtime. No apply — the pr.opened event is folded by the queue;
- *  `adopt.recorded` is a journal-only audit-trail row. */
+ *  runtime. No apply — the pr/opened event is folded by the queue. */
 export function withAdopt(): BayPlugin {
   return (bay) => {
     const layer: Layer = {

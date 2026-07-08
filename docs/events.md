@@ -1,6 +1,6 @@
 # Events, requests, and telemetry
 
-One naming grammar covers the journal, the future RPC surface, and telemetry: **imperative = request, past tense = event.** `bay/open` is the call; `bay/opened` is the fact. Slash namespacing throughout (the LSP/ACP/MCP convention family). These are target names (v0.3) — today's journal still uses the older dotted names.
+One naming grammar covers the journal, the future RPC surface, and telemetry: **imperative = request, past tense = event.** `bay/open` is the call; `bay/opened` is the fact. Slash namespacing throughout (the LSP/ACP/MCP convention family). Shipped in v0.3 — a pre-v0.3 journal (dotted names — `lease.opened`, `pr.state-changed`, …) needs the one-shot migration (`git bay migrate-journal`) before anything reads it; there is no dual-read shim.
 
 ## The event families
 
@@ -8,10 +8,12 @@ One naming grammar covers the journal, the future RPC surface, and telemetry: **
 gitbay/…      the system        initialized · refused {code, detail} · audited {findings}
 worktree/…    the directories   provisioned · deprovisioned {via}
 bay/…         the loans         opened {worktree, recycled} · refreshed · closed {via}
-pr/…          the work          opened {via} · changed {from, to, revision?, code?}
+pr/…          the work          opened {via, queued} · changed {from, to, revision?, code?}
 ```
 
-Non-events are deliberately not journaled: an empty integrate run, a prune that removed nothing. Every rejection carries a machine-readable kebab-case `code` from a closed union (`merge-conflict`, `lying-merge`, `pin-rewind`, `queue-full`, `poison-retry`, …); building a rejection without a code throws. Codes are for counting; `detail` stays for humans.
+A PR is born `pushed` (a push, or `git bay adopt <branch>`) and moves to `submitted` only when asked to merge — `git bay submit <PR>`, or a push fused with `-o submit`/`-o wait`/`bay.autoQueue`. `pr/opened`'s `queued` field (a literal boolean, its name predates the phase rename) says which: true for a fused creation (the fold plants it straight into `submitted`, no separate transition event); false for a bare creation, in which case a later `pr/changed {from: "pushed", to: "submitted"}` records the explicit ask.
+
+Non-events are deliberately not journaled: an empty integrate run, a prune that removed nothing, a repeat push to a still-`pushed` PR that isn't asking to submit. Every rejection carries a machine-readable kebab-case `code` from a closed union (`merge-conflict`, `lying-merge`, `pin-rewind`, `queue-full`, `poison-retry`, …); building a rejection without a code throws. Codes are for counting; `detail` stays for humans. Status (open/merged/closed) is never itself an event — it's derived from phase (docs/model.md § Status), so nothing journals a `pr/opened` or `pr/changed` for "became open."
 
 ## The data model has three layers
 
@@ -32,7 +34,8 @@ The core is commands-in, events-out; the CLI is one thin adapter and a JSON-RPC 
 | `gitbay/hello` | version, capabilities, event names | — |
 | `bay/open {name}` | bay, worktree, path, recycled | tracker-unknown, pool-exhausted |
 | `bay/refresh` / `bay/close {ref}` | the bay record / snapshot + worktree pooled | unknown-bay / bay-dirty, pr-still-queued |
-| `pr/submit {branch\|name}` | PR id, revision, queue position | pin-rewind, queue-full |
+| `pr/adopt {branch\|name}` | PR id, revision, phase: pushed | pin-rewind |
+| `pr/submit {pr}` | PR id, phase: submitted, queue position | pr-not-pushed, queue-full |
 | `pr/integrate {pr?}` | `merged {sha}` \| `rejected {code}` \| `empty` | mergecommand-unset |
 | `pr/retry` / `pr/approve` / `pr/reject` | PR id, new state | poison-retry / not-in-review |
 | `gitbay/ls` / `stats` / `audit` | tables / counts / findings (read-only) | — |

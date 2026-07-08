@@ -1,6 +1,6 @@
 # withWorktrees — core layer
 
-Manages the directories work happens in. Core-tier: always in the default composition, but still a layer — without it, `submit <branch>` + `integrate` is a pure merge queue for people who bring their own workspaces.
+Manages the directories work happens in. Core-tier: always in the default composition, but still a layer — without it, `adopt <branch>` + `submit` + `integrate` is a pure merge queue for people who bring their own workspaces.
 
 ## The identity model
 
@@ -8,12 +8,12 @@ Manages the directories work happens in. Core-tier: always in the default compos
 
 ## Shipped today
 
-- `new <name>` opens a bay (prints a cd-able path), `close` ends it (refuses if dirty — work is never lost), `refresh` resets the idle clock, `gc` expires idle bays after snapshotting the branch tip to a findability ref.
-- The bay's remote points at the bay-owned repo, so plain `git push` submits.
+- `open <name>` opens a bay (prints a cd-able path; `new`/`co`/`checkout` are hidden aliases), `close` ends it (refuses if dirty, or if its PR is still live — see below), `refresh` resets the idle clock, `gc` expires idle bays after snapshotting the branch tip to a findability ref.
+- `close --withdraw`: closing a bay whose PR hasn't reached a terminal state (pushed, submitted, checking, checked, merging, reviewing, or rejected) refuses and teaches the three ways out — integrate it, retry it, or withdraw it. `--withdraw` moves the PR to `closed` and then closes the bay — but only a resting PR (pushed, submitted, checked, rejected, or reviewing) can be withdrawn; one still actively checking or merging must finish first.
+- The bay's remote points at the bay-owned repo, so plain `git push` opens the PR — creating a PR and asking to merge it are separate acts (see [docs/events.md](../events.md)).
 
-## Planned (v0.3–v0.4)
+## Planned (v0.4)
 
-- `open` becomes the advertised verb (`new`/`co`/`checkout` stay as hidden aliases); `close --withdraw` also abandons the bay's queued PR (without the flag, closing a bay with a queued PR refuses and teaches).
 - **Pooling as an option of this layer** (not a separate plugin): closed worktrees return to a pool and the next `open` recycles one instead of re-running setup. Recycling is the default once shipped — reuse is what makes the system scale when provisioning (dependencies, submodules) takes minutes. Pool directories are gitbay-owned: work is snapshotted at close, then the directory is reset hard between tenants.
 
 ```yaml

@@ -1,6 +1,6 @@
 # git bay
 
-**git bay** is a small continuous-integration server that lives inside your git repository: you work in a disposable worktree, plain `git push` opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken. No hosted service, no background daemon — it's a plain CLI.
+**git bay** is a small continuous-integration server that lives inside your git repository: you work in a disposable worktree, plain `git push` opens a local pull request, and asking it to merge (`git bay submit`, or a fused push) gets it checked and landed onto main — one PR at a time, so main is never broken. No hosted service, no background daemon — it's a plain CLI.
 
 The idea in one sentence more: anyone working in a local clone — human or agent — should get the integration safety a good team gets from GitHub (workspaces, PRs, checks, a merge queue, a full record), with plain git as the interface and nothing new to learn beyond the words GitHub already taught everyone.
 
@@ -19,24 +19,31 @@ In any busy repository, the main branch is a zone of contention: two changes can
 
 `git bay init` stores a small amount of state inside your repository's `.git/` directory: a queue database, an event journal, and a miniature bay-owned git repository whose *hooks* are the whole trick.
 
-`git bay new <name>` opens a **worktree**: an isolated checkout — a git *worktree*, an extra working directory sharing the same repository — already wired so that its `git push` goes to that bay-owned repo. When you push, the hooks fire: your checks run, and only if they pass does your PR merge onto `main`. The verdict prints right in the push output. (git labels hook output `remote:`, even though everything here is on your machine.)
+`git bay open <name>` opens a **bay**: a named loan of a **worktree** — an isolated checkout, an extra working directory sharing the same repository — already wired so that its `git push` goes to that bay-owned repo. When you push, the hooks fire: your checks run, and only if they pass does your PR merge onto `main`. The verdict prints right in the push output. (git labels hook output `remote:`, even though everything here is on your machine.)
 
 ```console
-$ cd "$(git bay new fix-readme)"                  # a worktree for this piece of work
+$ cd "$(git bay open fix-readme)"                 # a bay for this piece of work
 $ ...edit...
 $ git commit -am "docs: fix readme"               # plain git from here on
-$ git push                                        # the push opens PR1
+$ git push -o submit                              # opens PR1 AND asks to merge it, in one step
 remote: bay: PR1 received — checks running
 remote: bay: PR1 merged onto main (checks ✓)
 $ git bay ls PR1
-PR1 merged bb2b8406 onto main (checks: ✓)
+PR1 merged cb36968319faf267025138c1fb1321da7289dd50 onto main (checks: ✓)
 ```
 
-That is real output from a live run, lightly edited for length. From a worktree there is no separate submit command to remember — the push is the PR — and no way to skip the checks by accident.
+That is real output from a live run. Opening a PR and asking to merge it are two separate acts, like a real GitHub PR — `-o submit` above fuses them into one push (`git config bay.autoQueue true` makes every push do this by default). Without the flag, a plain `git push` only opens PR1 (phase: `pushed`) and stops there; `git bay submit PR1` is the separate ask — it moves the PR to `submitted`, and `git bay integrate PR1` is the step that actually runs the checks and lands it (`git bay check`/`git bay merge` run either half alone). Either way, there's no way to skip the checks by accident.
+
+The lifecycle, end to end: **open** a bay → **push** (fills the PR with commits) → **submit** (ask to merge) → **integrate** (checks, then lands) → **close**. See [docs/model.md](docs/model.md) for the full states-and-verbs picture this is a projection of.
+
+Two things worth knowing that don't show up in the demo above:
+
+- **A branch made by hand, outside any bay, still gets in.** `git bay adopt <branch>` mints it a PR (lands in `pushed`) without ever opening a worktree; `git bay submit <PR>` then asks to merge it, same as any other PR.
+- **Push doesn't have to go through a bay at all.** Only a push from *inside* a bay — whose git remote points at the bay-owned repo — trips gitbay's hooks. An ordinary `git push` to your real remote (GitHub, a teammate's fork, CI) is completely unrelated; publishing to that remote after a local merge is its own separate step (many setups have the merge command itself push on success).
 
 ## Principles
 
-1. **Plain git is the interface** — push is submit; state lives in `.git/bay/`.
+1. **Plain git is the interface** — push opens a PR, submit asks to merge it; state lives in `.git/bay/`.
 2. **Borrowed vocabulary, zero invention** — PR, open, close, submit, integrate, checks: every word means what GitHub taught it to mean.
 3. **Integration is serial and proven** — one change at a time; a merge command's exit 0 is a claim, ancestry against refreshed main is the proof.
 4. **Refusals teach** — every "no" states what was checked, what failed, and the exact command that fixes it.
@@ -45,26 +52,26 @@ That is real output from a live run, lightly edited for length. From a worktree 
 ## What you get
 
 - **Main is always checked** — PRs land one at a time, each verified against main *as it is now*, so an untested combination can never land.
-- **Your workflow doesn't change** — after `git bay new`, it's ordinary `git pull` / `git commit` / `git push`; verdicts appear as `remote:` lines in the push output, where git users already look.
+- **Your workflow doesn't change** — after `git bay open`, it's ordinary `git pull` / `git commit` / `git push`; verdicts appear as `remote:` lines in the push output, where git users already look.
 - **Errors that teach** — a refused push names what failed *and the exact command that fixes it*. The error messages are part of the product.
 - **Safe with submodules** — a parent commit and its submodule commits land together or not at all; a pointer that would move backwards is refused, at commit time and again at the door.
-- **Names connect to your issue tracker** — every worktree is opened for a named piece of work; validation and lifecycle callbacks are each one configured command.
+- **Names connect to your issue tracker** — every bay is opened for a named piece of work; validation and lifecycle callbacks are each one configured command.
 - **Plug in your own tools by running commands** — checks, review, tracker, notifications: each is an external command the bay calls. No SDK.
-- **A complete record** — every event appends to one JSONL journal: what was queued, what the checks said, what merged. Replayable, resumable, greppable.
+- **A complete record** — every event appends to one JSONL journal: what was submitted, what the checks said, what merged. Replayable, resumable, greppable.
 - **No daemon** — the plain CLI gives all of the above; a background service is optional (roadmap).
 
 ## Layers
 
-git bay is built as an event-sourced core plus `with*()` layers — each layer registers verbs, events, a state slice, and effect handlers, and the whole tool is one `pipe()` composition. Remove a layer and the system degrades to the rung below instead of breaking (without worktrees, `submit` + `integrate` is a pure merge queue). Each layer has its own page in [docs/](docs/):
+git bay is built as an event-sourced core plus `with*()` layers — each layer registers verbs, events, a state slice, and effect handlers, and the whole tool is one `pipe()` composition. Remove a layer and the system degrades to the rung below instead of breaking (without worktrees, `adopt` + `submit` + `integrate` is a pure merge queue for people who bring their own branches). Each layer has its own page in [docs/](docs/):
 
 | Layer | Tier | What it does |
 | --- | --- | --- |
-| core (`createBay`) | — | journal · fold · dispatch · typed events · the [store seam](docs/store.md) (sqlite default; adapters are ~a page) |
+| core (`createGitbay`) | — | journal · fold · dispatch · typed events · the [store seam](docs/store.md) (sqlite default; adapters are ~a page) |
 | [`withWorktrees`](docs/layers/worktrees.md) | core | bays: named loans of pooled, numbered worktrees; pooling is an option of this layer |
 | `withQueue` / `withReceive` / `withIntegrate` | core | the PR queue, the push door, the serial verified merge |
 | [`withSubmodules`](docs/layers/submodules.md) | core, auto-armed | pin-rewind refusal, atomic super-repo landings, pin audit |
 | [`withIssueTracking`](docs/layers/issue-tracking.md) | optional | validate names at open; auto-close/comment issues on PR outcomes |
-| [`withChecks`](docs/layers/checks.md) | optional | your commands at lifecycle points (provision, push, submit, integrate, merged) |
+| [`withChecks`](docs/layers/checks.md) | optional | your commands at lifecycle points (provision, open, push, submit, integrate, merged) |
 | [`withReviewGate`](docs/layers/review-gate.md) | optional | approval before integrate; `approve`/`reject` are the whole review-tool surface |
 | `withStats` | optional | read-only folds: rejections and refusals by reason code ([events](docs/events.md)) |
 
@@ -72,7 +79,7 @@ Target composition (v0.3 shape — today's layer names differ slightly):
 
 ```ts
 pipe(
-  createBay({ store }),              // journal · fold · dispatch
+  createGitbay({ store }),           // journal · fold · dispatch
   withWorktrees({ pool }),
   withQueue(), withReceive(), withIntegrate(),
   withSubmodules(),                  // auto-armed when .gitmodules exists
@@ -95,7 +102,7 @@ checks:
   submit: bun run lint
   integrate: bun run test
 review: { required: false }
-queue: { limit: 10 }                 # WIP limit: refuse new PRs past N queued
+queue: { limit: 10 }                 # WIP limit: refuse new PRs once N are already submitted
 ```
 
 Two name systems, deliberately: config sections are nouns matching layers (settings); slash names like `bay/open` → `bay/opened` are actions and facts (requests and events — see [docs/events.md](docs/events.md)).
@@ -120,15 +127,15 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 **How do I onboard a coding agent (or a new teammate)?** `git bay guide` prints everything needed before the first action — the loop, the rules, the vocabulary — followed by a live "as of right now" snapshot of this repository's bay. Put `git bay guide` in your agent's startup instructions and the tool onboards the agent itself.
 
-**Is this a GitHub PR?** Same idea, local: a PR is your commits traveling to main as one unit, numbered per repository (PR1, PR2, …), and it lands itself when the checks pass — like auto-merge. A bay PR is local — GitHub does not see it and `gh` commands do not apply.
+**Is this a GitHub PR?** Same idea, local: a PR is your commits traveling to main as one unit, numbered per repository (PR1, PR2, …). A push opens it (phase: `pushed`); `git bay submit` is the "ask to merge" step (`pushed → submitted`), and `git bay integrate` (or a fused push) is the separate step that actually runs the checks and lands it. A bay PR is local — GitHub does not see it and `gh` commands do not apply.
 
-**How do I tell it what checks to run?** `git config bay.check '<command>'` — the bay runs it before merging; exit 0 means pass. Repositories with their own merge process route the merge through `git config bay.mergeCommand '<command with {target}>'`, used by `git bay integrate`.
+**How do I tell it what checks to run?** `git config bay.check '<command>'` — the bay runs it before merging; exit 0 means pass. Repositories with their own merge process route the merge through `git config bay.mergeCommand '<command with {target}>'`, used by `git bay merge`/`integrate`.
 
-**What happens when a check fails?** The push is refused and the message says why. If the fix needs new commits, just `git push` again — the PR keeps its number. If the fix changed no commits, `git bay retry <PR>` re-runs the pipeline.
+**What happens when a check fails?** `check`/`integrate` rejects the PR and the message says why (`git bay ls <PR>` shows it too). If the fix needs new commits, just `git push` again (or `git push -o submit`/`-o wait` if you'd fused the steps) — the PR keeps its number, next revision. If the fix changed no commits, `git bay retry <PR>` re-runs the pipeline.
 
-**What exactly is a worktree? A name?** A **worktree** is the directory you work in — ids look like `wt1`; it is disposable and yours alone. The **name** is what you called the work at `git bay new` — any label, or a ticket id your tracker knows. Worktree verbs (`close`, `refresh`, `gc`) act on worktrees; PR verbs (`ls`, `submit`, `integrate`, `retry`) act on PRs — and every argument accepts an id or a name.
+**What exactly is a bay? A worktree? A name?** A **worktree** is the numbered, persistent directory (ids look like `wt1`) — reused across pieces of work. A **bay** is the named, ephemeral *loan* of one worktree to one piece of work — opened by `git bay open <name>`, disposable and yours alone. The **name** is what you called the work at `open` — any label, or a ticket id your tracker knows. Bay verbs (`close`, `refresh`, `gc`) act on bays; PR verbs (`ls`, `adopt`, `submit`, `check`, `merge`, `integrate`, `retry`) act on PRs — and every argument accepts a wt-id or a name.
 
-**Can it lose my work?** Closing a worktree with uncommitted changes is refused. When `gc` retires an idle worktree, it snapshots the branch tip to a findability ref first. Nothing is ever deleted.
+**Can it lose my work?** Closing a bay with uncommitted changes is refused. Closing a bay whose PR hasn't reached a terminal state (pushed, submitted, checking, checked, merging, reviewing, or rejected) is also refused — the message names your options (integrate it, retry it, or `close --withdraw` it). `--withdraw` itself only resolves a PR that's resting (pushed, submitted, checked, rejected, or reviewing); one still actively checking or merging must finish first. When `gc` retires an idle bay, it snapshots the branch tip to a findability ref first. Nothing is ever deleted.
 
 **What if two agents push at the same time?** Merges are strictly serial: submissions are ordered by the queue and recorded in the journal — they never race each other onto main.
 
@@ -140,17 +147,16 @@ Your repository's own hooks, branches, and remotes are untouched. Removing git b
 
 *Start here*: `guide` (onboarding + live config snapshot) · `init` (set up: store, journal, bay-owned repo + hooks)
 
-*Your worktree*: `new <name>` (open a worktree; prints a cd-able path) · `close <wt|name>` (uncommitted work always preserved) · `gc` (expire idle worktrees, snapshot first)
+*Your bay*: `open <name>` (open a bay; prints a cd-able worktree path) · `close <wt|name>` (refuses if the bay's PR hasn't reached a terminal phase or the worktree is dirty; `--withdraw` closes the PR too) · `gc` (expire idle bays, snapshot first)
 
-*PRs*: `ls [PR|name]` (worktree table + unmerged PRs, `--json`) · `submit <branch|name>` (PR for an existing branch) · `integrate [PR|name]` (integrate the next queued PR, `--watch`) · `retry <PR|name>` (re-queue a rejected PR)
+*PRs*: `ls [PR|name]` (BAY + WORKTREE table, plus every unmerged PR, `--json`) · `adopt <branch>` (create a PR for an existing branch — no bay needed; lands in `pushed`) · `submit <PR|name>` (ask to merge — `pushed → submitted`; never merges) · `check <PR|name>` (run the project check alone — `submitted → checked`; never merges) · `merge <PR|name>` (land a checked PR — `checked → merged`; refuses one that isn't checked) · `integrate [PR|name]` (the umbrella — check then merge, `--watch` keeps draining) · `retry <PR|name>` (put a rejected PR back through the pipeline)
 
 *Repository health*: `audit` (strays, stale pins, refs without a name, `--json`)
 
-Unambiguous prefixes work (`git bay au` is `audit`); every pre-rename verb (`co`, `status`, `land`, `merge`, `abandon`, …) still works as an unadvertised alias; `in`/`int` are shorthand for `integrate`. A merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch.
+Unambiguous prefixes work (`git bay au` is `audit`; `o` is `open`); every pre-v0.3 verb (`new`, `co`, `status`, `land`, `queue`, `abandon`, …) still works as an unadvertised alias, and `install`/`setup` are hidden aliases of `init`; `in`/`int` are shorthand for `integrate`. A merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch. Every event a command produces — the journal row AND everything its effects emit — carries that command's `cause` (a `commandId`, plus `traceId`/`spanId` when the CLI sees a `TRACEPARENT`); see [docs/events.md](docs/events.md).
 
 **Roadmap** (details in the layer pages):
 
-- **v0.3 — vocabulary completion**: `open`/`close` as the advertised workspace verbs; worktree/bay split in `ls`; the event schema in [docs/events.md](docs/events.md) (typed union, envelope with cause/trace ids); `close --withdraw`.
 - **v0.4 — checks + pooling + config**: checks on lifecycle events; worktree pooling on by default; WIP limits; `bay.*` git-config keys unify into `.gitbay.yml`.
 - **v0.5 — review gate + RPC**: the approval state with `approve`/`reject`; a JSON-RPC adapter over the same core (ships when a real subscriber exists).
 - **Horizon**: batching (several compatible changes checked as one candidate — the compatibility check is already on main), native promotion (merge in a staging area instead of your main worktree), optional background service.

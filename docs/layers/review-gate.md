@@ -4,7 +4,7 @@ gitbay tracks review *state*, never review *content*. No comments, no threads, n
 
 ## How it works
 
-When enabled (`review: required`, optionally with path filters), a PR that passes checks enters the `reviewing` state and waits out of the queue's way. Checks run first so reviewers never spend attention on a red PR.
+When enabled (`review: required`, optionally with path filters), a PR that passes checks enters `reviewing` and waits out of the queue's way; approval clears it to merge, rejection sends it back like a failed check. Checks run first so reviewers never spend attention on a red PR. (Reserved today: the type carries `reviewing`; a separate `reviewed` resting state — approved, waiting its turn to merge — isn't a distinct value yet, so approval moves a PR straight from `reviewing` to `merging`.)
 
 Two verbs are the entire inbound surface for any review tool:
 

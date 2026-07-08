@@ -5,13 +5,34 @@ import type {
   BayRuntime,
   BayState,
   BayStore,
+  Cause,
   Effect,
+  GitbayEvent,
   Layer,
   TransitionResult,
 } from "./types.ts"
 
+/** Default id source: a monotonic counter local to ONE createGitbay() runtime
+ *  (never a module-level counter or wall-clock component — either would make
+ *  two separately-built runtimes over the same command sequence diverge,
+ *  breaking the "same commands + fixed clock → byte-identical events"
+ *  determinism tests rely on). Uniqueness only needs to hold within one
+ *  journal, and the single-writer lock already guarantees one runtime writes
+ *  to a given journal at a time. */
+function makeDefaultIdGen(): () => string {
+  let n = 0
+  return () => {
+    n++
+    return `e${n}`
+  }
+}
+
 /**
- * createBay — the era2 core (spec § How it's built).
+ * createGitbay — the era2 core (spec § How it's built; v0.3 rename — "bay" now
+ * names the loan a with*() layer hands out, not the system itself, so
+ * `createBay` read as "create a workspace" when it actually creates the whole
+ * merge-queue system. The broader `Bay*` type names — BayState, BayEvent,
+ * BayRuntime, etc. — are unchanged this pass; only the factory is renamed).
  *
  * A zero-plugin bay is almost nothing: an empty journal, an empty state
  * projection, no verbs. Every capability is a with*() layer registering
@@ -21,14 +42,16 @@ import type {
  * and state of layers below, never internals) is enforced by shape — there
  * is nothing else to reach.
  */
-export function createBay(opts: {
+export function createGitbay(opts: {
   store: BayStore
   actor?: string
   clock?: () => string
+  idGen?: () => string
 }): BayRuntime {
   const layers: Layer[] = []
   const clock = opts.clock ?? (() => new Date().toISOString())
   const actor = opts.actor ?? "bay"
+  const idGen = opts.idGen ?? makeDefaultIdGen()
 
   let folded: BayState | null = null // lazy replay cache; invalidated never (append-only)
 
@@ -92,6 +115,7 @@ export function createBay(opts: {
     store: opts.store,
     clock,
     actor,
+    idGen,
 
     use(layer: Layer): BayRuntime {
       if (layers.some((l) => l.name === layer.name)) {
@@ -105,12 +129,20 @@ export function createBay(opts: {
     state: fold,
 
     async dispatch(command: BayCommand): Promise<{ events: BayEvent[] }> {
+      // Every command gets its cause at the door (docs/events.md § Cause and
+      // spans) — minted here unless the caller (a host reading TRACEPARENT)
+      // already supplied one. Every event this dispatch produces, from the
+      // reducer AND from its effects, carries the SAME cause.
+      const cause: Cause = { commandId: idGen(), ...command.cause }
+      const stamped: BayCommand = { ...command, cause }
+
       const state = await fold()
-      const { state: nextState, events, effects } = reduceThroughLayers(state, command)
+      const { state: nextState, events, effects } = reduceThroughLayers(state, stamped)
+      const causedEffects = effects.map((e) => ({ ...e, cause }))
       // Journal-first: events are durable before effects run (crash-safe resume).
       for (const event of events) await runtime.store.journal.append(event)
       folded = events.reduce(applyEvent, nextState)
-      const effectEvents = await runEffects(effects)
+      const effectEvents = await runEffects(causedEffects)
       for (const event of effectEvents) await runtime.store.journal.append(event)
       folded = effectEvents.reduce(applyEvent, folded)
       return { events: [...events, ...effectEvents] }
@@ -120,14 +152,19 @@ export function createBay(opts: {
   return runtime
 }
 
-/** Helper for layers: build a timestamped event with the runtime's clock/actor. */
-export function makeEvent(
+/** Helper for layers: build a fully-formed v2 event — `{id, name, ts, cause,
+ *  data}` — from the runtime's injected clock/idGen and the typed union
+ *  (GitbayEvent), so a call site can't misspell a name or drop a required
+ *  field. `cause` comes from the current command (a reducer reads it off
+ *  `command.cause`) or the current effect (`effect.cause`) — never minted
+ *  here, so every event a dispatch produces shares one cause. */
+export function makeEvent<Name extends GitbayEvent["name"]>(
   bay: BayRuntime,
-  type: string,
-  data?: BayEvent["data"],
-  refs?: { pr?: string; lease?: string },
+  name: Name,
+  data: Extract<GitbayEvent, { name: Name }>["data"],
+  cause: Cause,
 ): BayEvent {
-  return { v: 1, ts: bay.clock(), actor: bay.actor, type, data, ...refs }
+  return { id: bay.idGen(), ts: bay.clock(), name, cause, data }
 }
 
 /** Identity plugin shape — with*() factories return (bay) => bay. */

@@ -15,14 +15,14 @@ issues:
   validate:     gh issue view {name}
   on-merged:    gh issue close {name} --comment "merged as {sha} ({pr})"
   on-rejected:  gh issue comment {name} --body "PR {pr} rejected: {code} — {detail}"
-  on-abandoned: gh issue comment {name} --body "PR {pr} withdrawn"
+  on-closed:    gh issue comment {name} --body "PR {pr} withdrawn"
 ```
 
 **Auto-close works structurally, not by parsing prose.** GitHub must scan descriptions for "fixes #123"; gitbay already knows the issue — the PR carries the validated name from `open`. Command outcomes are journaled, so a failed close shows up in `stats` instead of vanishing.
 
 Policy stays in your commands, deliberately:
 
-- Merged closes; abandoned only comments (withdrawn work is still open work).
+- Merged closes the issue; closed-by-withdrawal only comments (withdrawn work is still open work).
 - "Merged" fires after the verified local merge. If your merge command also publishes, merged ≈ shipped and closing on it is sound; if you publish later, make `on-merged` verify (`git merge-base --is-ancestor {sha} origin/main`) and comment until then.
 - Teams that gate closes on a human can make `on-merged` file a close *request* with the SHA as evidence.
 
