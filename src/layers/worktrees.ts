@@ -192,16 +192,16 @@ function reduceOpen(bay: BayRuntime, state: BayState, command: BayCommand): Tran
 function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const leaseId = command.args?.lease
   if (typeof leaseId !== "string" || leaseId === "") {
-    throw new Error("bay: close: 'lease' (a lease id) is required")
+    throw new Error("bay: close: 'lease' (a bay id) is required")
   }
   const withdraw = command.args?.withdraw === true
   const lease = state.leases[leaseId]
   if (!lease) {
-    throw new Error(`bay: close: no lease '${leaseId}' — nothing to close`)
+    throw new Error(`bay: close: no bay '${leaseId}' — nothing to close`)
   }
   if (lease.endedAt !== undefined) {
     throw new Error(
-      `bay: close: lease '${leaseId}' already ended (${lease.endReason ?? "ended"}) — nothing to close`,
+      `bay: close: bay '${leaseId}' already ended (${lease.endReason ?? "ended"}) — nothing to close`,
     )
   }
 
@@ -245,21 +245,21 @@ function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   return { state, events, effects: [effect] }
 }
 
-/** refresh {lease}: reset a lease's liveness so gc measures idleness from now.
+/** refresh {lease}: reset a bay's liveness so gc measures idleness from now.
  *  The explicit primitive; commit/push-driven refresh integrates later via the
- *  receiver. Fail-loud on an unknown or already-ended lease. */
+ *  receiver. Fail-loud on an unknown or already-ended bay. */
 function reduceRefresh(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const leaseId = command.args?.lease
   if (typeof leaseId !== "string" || leaseId === "") {
-    throw new Error("bay: refresh: 'lease' (a lease id) is required")
+    throw new Error("bay: refresh: 'lease' (a bay id) is required")
   }
   const lease = state.leases[leaseId]
   if (!lease) {
-    throw new Error(`bay: refresh: no lease '${leaseId}' — nothing to refresh`)
+    throw new Error(`bay: refresh: no bay '${leaseId}' — nothing to refresh`)
   }
   if (lease.endedAt !== undefined) {
     throw new Error(
-      `bay: refresh: lease '${leaseId}' already ended (${lease.endReason ?? "ended"}) — cannot refresh`,
+      `bay: refresh: bay '${leaseId}' already ended (${lease.endReason ?? "ended"}) — cannot refresh`,
     )
   }
 

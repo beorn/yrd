@@ -160,7 +160,7 @@ describe("withWorktrees — close validation", () => {
   it("throws closing an unknown lease", async () => {
     const bay = await buildStubBay(await tmpJournalPath())
     await expect(bay.dispatch({ type: "close", args: { lease: "L99" } })).rejects.toThrow(
-      /no lease 'L99'/,
+      /no bay 'L99'/,
     )
   })
 
@@ -303,7 +303,7 @@ describe("withWorktrees — lease TTL (refresh + gc)", () => {
 
   it("refresh throws for an unknown or already-ended lease", async () => {
     const bay = await buildStubBay(await tmpJournalPath())
-    await expect(bay.dispatch({ type: "refresh", args: { lease: "L99" } })).rejects.toThrow(/no lease 'L99'/)
+    await expect(bay.dispatch({ type: "refresh", args: { lease: "L99" } })).rejects.toThrow(/no bay 'L99'/)
     await bay.dispatch({ type: "open", args: { workitem: "wi-a" } })
     await bay.dispatch({ type: "close", args: { lease: "L1" } })
     await expect(bay.dispatch({ type: "refresh", args: { lease: "L1" } })).rejects.toThrow(/already ended/)
