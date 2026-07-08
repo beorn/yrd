@@ -2,7 +2,7 @@
   "name": "git-bay",
   "version": "0.0.1",
   "private": true,
-  "description": "git bay — local pull requests for your repository: plain git push opens the PR, and it lands itself when the checks pass",
+  "description": "git bay — a small continuous-integration server inside your repository: plain git push opens a local pull request, and git bay integrates it when the checks pass",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/gitbay",

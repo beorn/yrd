@@ -73,17 +73,17 @@ export type MergeWorkerOptions = {
 function reduceDrain(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const rawPr = command.args?.pr
   if (rawPr !== undefined && (typeof rawPr !== "string" || rawPr.trim() === "")) {
-    throw new Error("bay: land: 'pr' must be a non-empty string when provided")
+    throw new Error("bay: integrate: 'pr' must be a non-empty string when provided")
   }
 
   let next
   if (typeof rawPr === "string") {
     const pr = state.prs[rawPr]
-    if (!pr) throw new Error(`bay: land: no PR '${rawPr}' — git bay ls lists them`)
-    if (pr.state === "merged") throw new Error(`bay: land: ${rawPr} is already merged — nothing to land`)
+    if (!pr) throw new Error(`bay: integrate: no PR '${rawPr}' — git bay ls lists them`)
+    if (pr.state === "merged") throw new Error(`bay: integrate: ${rawPr} is already merged — nothing to integrate`)
     if (pr.state !== "queued") {
       throw new Error(
-        `bay: land: ${rawPr} is ${pr.state} — put it back in the queue first: git bay retry ${rawPr}`,
+        `bay: integrate: ${rawPr} is ${pr.state} — put it back in the queue first: git bay retry ${rawPr}`,
       )
     }
     next = pr
