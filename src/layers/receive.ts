@@ -289,7 +289,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }))
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: merged.detail }))
+    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: merged.detail, sha: merged.sha }))
 
     // 3. Keep the bay-owned repo's mainline current so the next push's
     //    merge-base sees reality.

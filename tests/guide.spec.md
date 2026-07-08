@@ -57,7 +57,7 @@ THIS REPOSITORY — a snapshot as of right now; re-run git bay guide for current
   state           .git/bay (initialized)
   check           (not set — pushes merge without a project check; set: git config bay.check '<command>')
   mergeCommand    (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.mergeCommand '<command with {target}>')
-  tracker         (not set — names are not checked against a tracker; set: git config bay.tracker '<command with {name}>')
+  tracker         (not set — names are not checked against a tracker; set: git config bay.issues.validate '<command with {name}>')
   open worktrees  0
   submitted PRs   0
 ```

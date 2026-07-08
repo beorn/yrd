@@ -173,6 +173,10 @@ export type StateChangeOpts = {
    *  readable reason can never be counted by a later `stats` fold (docs/events.md
    *  § event families: "building a rejection without a code throws"). */
   code?: RejectionCode
+  /** The verified landed tip for `to === "merged"` — the SHA the lying-merge
+   *  guard proved an ancestor of the mainline. Machine-truth for issue
+   *  trackers' `{sha}` substitution, never parsed out of detail prose. */
+  sha?: string
 }
 
 /** Build a validated `pr/changed` event. Every caller — the queue's requeue
@@ -195,7 +199,7 @@ export function stateChangeEvent(
   return makeEvent(
     bay,
     EV_CHANGED,
-    { pr, from, to, ...(opts.revision !== undefined ? { revision: opts.revision } : {}), ...(opts.code !== undefined ? { code: opts.code } : {}), ...(opts.detail !== undefined ? { detail: opts.detail } : {}) },
+    { pr, from, to, ...(opts.revision !== undefined ? { revision: opts.revision } : {}), ...(opts.code !== undefined ? { code: opts.code } : {}), ...(opts.detail !== undefined ? { detail: opts.detail } : {}), ...(opts.sha !== undefined ? { sha: opts.sha } : {}) },
     cause,
   )
 }

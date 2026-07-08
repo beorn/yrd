@@ -96,7 +96,7 @@ pipe(
 )
 ```
 
-Configuration is unifying into one committed file whose sections mirror the layer names (today it's a few `git config bay.*` keys — `bay.check`, `bay.mergeCommand`, `bay.tracker`, `bay.queue.batch-size`, `bay.queue.regen-paths`; those retire when this lands):
+Configuration is unifying into one committed file whose sections mirror the layer names (today it's a few `git config bay.*` keys — `bay.check`, `bay.mergeCommand`, `bay.issues.validate` + `bay.issues.on-merged`/`on-rejected`/`on-closed` (`bay.tracker` = deprecated spelling of validate), `bay.queue.batch-size`, `bay.queue.regen-paths`; those retire when this lands):
 
 ```yaml
 store: sqlite                        # or: km — PRs as nodes, queue order = tree order

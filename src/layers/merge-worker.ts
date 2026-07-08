@@ -207,7 +207,7 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     if (!outcome.ok) {
       return [stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail })]
     }
-    const events = [stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail })]
+    const events = [stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha })]
     events.push(...closeMergedBay(bay, state, target, effect.cause!))
     return events
   }
@@ -300,7 +300,7 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions): EffectHandler {
       events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail }))
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail }))
+    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }))
     events.push(...closeMergedBay(bay, mergeState, target, effect.cause!))
     return events
   }

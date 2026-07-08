@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { spawn } from "node:child_process"
@@ -309,22 +310,23 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
   })
 })
 
-describe("git bay CLI — bay.tracker validation at new", () => {
+describe("git bay CLI — issue tracking inbound: bay.issues.validate at open AND adopt (bay.tracker = deprecated spelling)", () => {
   let root: string
   let demo: string
   let env: Record<string, string>
+  let tracker: string
 
   beforeEach(async () => {
     ;({ root, demo, env } = await makeFixture("bay-tracker-"))
     await must(["git", "bay", "init"], demo, env)
-    const tracker = join(root, "tracker.sh")
+    tracker = join(root, "tracker.sh")
     await writeFile(
       tracker,
       `#!/bin/sh\n[ "$1" = "good-name" ] && exit 0\necho "no such ticket: $1" >&2\nexit 3\n`,
       "utf8",
     )
     await chmod(tracker, 0o755)
-    await must(["git", "-C", demo, "config", "bay.tracker", `${tracker} {name}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issues.validate", `${tracker} {name}`], demo, env)
   })
 
   afterEach(async () => {
@@ -336,20 +338,155 @@ describe("git bay CLI — bay.tracker validation at new", () => {
     expect(res.stdout.trim()).toContain(".bays/wt1")
   })
 
-  it("a name the tracker refuses is a teaching refusal carrying the tracker's stderr", async () => {
+  it("a name the tracker refuses is a teaching refusal carrying the tracker's stderr and the modern remedy", async () => {
     const res = await run(["git", "bay", "open", "bogus-name"], demo, env)
     expect(res.code).toBe(1)
     expect(res.stderr).toContain("the tracker does not accept 'bogus-name'")
     expect(res.stderr).toContain("no such ticket: bogus-name")
-    expect(res.stderr).toContain("git config bay.tracker none")
+    expect(res.stderr).toContain("git config bay.issues.validate none")
     const ls = await must(["git", "bay", "ls"], demo, env)
     expect(ls.stdout).toContain("no open worktrees") // nothing opened
   })
 
-  it("bay.tracker none skips the check", async () => {
-    await must(["git", "-C", demo, "config", "bay.tracker", "none"], demo, env)
+  it("the deprecated bay.tracker spelling still validates (dual-read), and bay.issues.validate wins when both are set", async () => {
+    // Only the deprecated key set → it validates.
+    await must(["git", "-C", demo, "config", "--unset", "bay.issues.validate"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.tracker", `${tracker} {name}`], demo, env)
+    const refused = await run(["git", "bay", "open", "bogus-name"], demo, env)
+    expect(refused.code).toBe(1)
+    expect(refused.stderr).toContain("no such ticket: bogus-name")
+    // Modern key set too → it takes precedence (here: an accept-all overrides the refusing tracker).
+    await must(["git", "-C", demo, "config", "bay.issues.validate", "true"], demo, env)
+    const res = await must(["git", "bay", "open", "bogus-name"], demo, env)
+    expect(res.stdout.trim()).toContain(".bays/wt1")
+  })
+
+  it("bay.issues.validate none skips the check", async () => {
+    await must(["git", "-C", demo, "config", "bay.issues.validate", "none"], demo, env)
     const res = await must(["git", "bay", "open", "anything-goes"], demo, env)
     expect(res.stdout.trim()).toContain(".bays/wt1")
+  })
+
+  it("adopt --workitem validates at the same front door; a nameless adopt stays the audit-warned ramp", async () => {
+    await must(["git", "-C", demo, "switch", "-qc", "task/legacy", "main"], demo, env)
+    await writeFile(join(demo, "legacy.txt"), "x\n", "utf8")
+    await must(["git", "-C", demo, "add", "legacy.txt"], demo, env)
+    await must(["git", "-C", demo, "commit", "-qm", "legacy work"], demo, env)
+    await must(["git", "-C", demo, "switch", "-q", "main"], demo, env)
+
+    // A refused workitem never mints a PR (acceptance: co/ENQUEUE both validate).
+    const refused = await run(["git", "bay", "adopt", "task/legacy", "--workitem", "bogus-name"], demo, env)
+    expect(refused.code).toBe(1)
+    expect(refused.stderr).toContain("bay: adopt: the tracker does not accept 'bogus-name'")
+    const before = await must(["git", "bay", "ls", "--json"], demo, env)
+    expect(Object.keys((JSON.parse(before.stdout) as { prs: Record<string, unknown> }).prs)).toHaveLength(0)
+
+    // An accepted workitem adopts; a NAMELESS adopt skips validation entirely
+    // (the reconciliation ramp — audit owns the warning, not this door).
+    const adopted = await must(["git", "bay", "adopt", "task/legacy", "--workitem", "good-name"], demo, env)
+    expect(adopted.stdout.trim()).toBe("PR1")
+  })
+})
+
+describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run and their outcomes are journaled", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+  let log: string
+
+  async function journalEvents(): Promise<{ name: string; data: Record<string, unknown> }[]> {
+    const raw = await readFile(join(demo, ".git", "bay", "journal.jsonl"), "utf8")
+    return raw
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .map((l) => JSON.parse(l) as { name: string; data: Record<string, unknown> })
+  }
+
+  async function openCommitPush(name: string): Promise<string> {
+    const opened = await must(["git", "bay", "open", name], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, `${name}.txt`), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "-A"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", `feat: ${name}`], wtPath, env)
+    await must(["git", "-C", wtPath, "push"], wtPath, env)
+    return (await must(["git", "-C", wtPath, "rev-parse", "HEAD"], wtPath, env)).stdout.trim()
+  }
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("bay-notify-"))
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.mergeCommand", "git merge --no-ff {target}"], demo, env)
+    log = join(root, "notified.log")
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("a merged PR runs on-merged with {name}/{pr}/{sha} — {sha} is the verified landed tip, and the outcome is journaled", async () => {
+    await must(
+      ["git", "-C", demo, "config", "bay.issues.on-merged", `echo "merged {name} {pr} {sha}" >> ${log}`],
+      demo,
+      env,
+    )
+    const tipSha = await openCommitPush("feat-a")
+    const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
+    expect(submit.stdout).toContain("bay: PR1 merging → merged")
+    expect(submit.stdout).toContain("bay: issue 'feat-a' notified (merged)")
+
+    const notified = await readFile(log, "utf8")
+    expect(notified.trim()).toBe(`merged feat-a PR1 ${tipSha}`)
+
+    const events = await journalEvents()
+    const outcome = events.filter((e) => e.name === "issues/notified")
+    expect(outcome).toHaveLength(1)
+    expect(outcome[0]!.data).toMatchObject({ pr: "PR1", name: "feat-a", on: "merged", code: 0 })
+    const merged = events.find((e) => e.name === "pr/changed" && e.data.to === "merged")
+    expect(merged!.data.sha).toBe(tipSha) // machine-truth on the event itself, not detail prose
+  })
+
+  it("a rejected PR runs on-rejected with {code}/{detail}", async () => {
+    await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issues.on-rejected", `echo "rejected {name} {pr} {code}" >> ${log}`], demo, env)
+    await openCommitPush("feat-red")
+    const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
+    expect(submit.stdout).toContain("bay: issue 'feat-red' notified (rejected)")
+    const notified = await readFile(log, "utf8")
+    expect(notified.trim()).toBe("rejected feat-red PR1 check-failed")
+  })
+
+  it("a failing notify command NEVER fails the verb — the merge stands, stderr is loud, the exit code is journaled", async () => {
+    await must(
+      ["git", "-C", demo, "config", "bay.issues.on-merged", `echo "tracker down" >&2; exit 5`],
+      demo,
+      env,
+    )
+    await openCommitPush("feat-b")
+    const submit = await run(["git", "bay", "submit", "PR1"], demo, env)
+    expect(submit.code).toBe(0) // the verb's outcome is the MERGE, not the notification
+    expect(submit.stdout).toContain("bay: PR1 merging → merged")
+    expect(submit.stderr).toContain("bay: issue notify FAILED for 'feat-b' (merged) — exit 5: tracker down")
+
+    const events = await journalEvents()
+    const outcome = events.find((e) => e.name === "issues/notified")
+    expect(outcome!.data).toMatchObject({ on: "merged", code: 5 })
+    const ls = await must(["git", "bay", "ls", "PR1"], demo, env)
+    expect(ls.stdout).toContain("PR1 merged")
+  })
+
+  it("an unnamed PR notifies nothing — there is no issue to notify", async () => {
+    await must(["git", "-C", demo, "config", "bay.issues.on-merged", `echo "merged {name}" >> ${log}`], demo, env)
+    await must(["git", "-C", demo, "switch", "-qc", "task/anon", "main"], demo, env)
+    await writeFile(join(demo, "anon.txt"), "x\n", "utf8")
+    await must(["git", "-C", demo, "add", "anon.txt"], demo, env)
+    await must(["git", "-C", demo, "commit", "-qm", "anon work"], demo, env)
+    await must(["git", "-C", demo, "switch", "-q", "main"], demo, env)
+    await must(["git", "bay", "adopt", "task/anon"], demo, env)
+    const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
+    expect(submit.stdout).toContain("bay: PR1 merging → merged")
+    expect(submit.stdout).not.toContain("notified")
+    expect(existsSync(log)).toBe(false)
   })
 })
 

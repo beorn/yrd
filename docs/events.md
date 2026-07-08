@@ -8,9 +8,10 @@ One naming grammar covers the journal, the future RPC surface, and telemetry: **
 gitbay/…      the system        initialized · refused {code, detail} · audited {findings}
 worktree/…    the directories   provisioned · deprovisioned {via}
 bay/…         the loans         opened {worktree, recycled} · refreshed · closed {via}
-pr/…          the work          opened {via, queued} · changed {from, to, revision?, code?}
+pr/…          the work          opened {via, queued} · changed {from, to, revision?, code?, sha?} — sha rides merged transitions: the verified landed tip
 queue/…       the order         reordered {order, detail?} — partial order; omitted PRs keep their relative place after the listed ids
 batch/…       the candidates    composed {members, skipped} · built {target, members, ejected, prefixes} · bisect-checked {ok} · member-ejected {detail}
+issues/…      the tracker       notified {name, on, command, code, detail?} — the configured bay.issues.on-<state> ran for a named PR; code is ITS exit (a failed notify journals too — it must not vanish)
 ```
 
 An empty batch compose (no submitted PRs at all) is a non-event, exactly like the empty integrate run below — the CLI derives "nothing to batch" from the silent dispatch.

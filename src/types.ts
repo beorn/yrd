@@ -221,6 +221,26 @@ export type GitbayEvent =
         revision?: number
         code?: RejectionCode
         detail?: string
+        /** Verified landed tip when `to === "merged"` (lying-merge-guard
+         *  proven ancestor of the mainline) — the machine-truth `{sha}` for
+         *  issue-tracker notifications, never parsed from detail prose. */
+        sha?: string
+      }
+    }
+  | {
+      name: "issues/notified"
+      // Outbound issue-tracking outcome (docs/layers/issue-tracking.md): the
+      // configured `bay.issues.on-<state>` command ran for a named PR's
+      // terminal transition. `code` is the command's exit code — success and
+      // failure are BOTH journaled, so a failed tracker close shows up in
+      // stats instead of vanishing. No fold consumes this; it is audit data.
+      data: {
+        pr: PrId
+        name: WorkitemId
+        on: "merged" | "rejected" | "closed"
+        command: string
+        code: number
+        detail?: string
       }
     }
   | {

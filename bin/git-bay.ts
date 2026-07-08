@@ -14,7 +14,7 @@ import { Command } from "@silvery/commander/plain"
 import { colorizeHelp, shouldColorize } from "@silvery/commander"
 import { readFile, readdir, rename, rm } from "node:fs/promises"
 import { join } from "node:path"
-import type { BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
+import type { BayCommand, BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
 import { isOpen } from "../src/types.ts"
 import { createGitbay } from "../src/core.ts"
 import { pipe } from "../src/pipe.ts"
@@ -33,6 +33,7 @@ import {
   appendInboxReceipt,
 } from "../src/layers/receive.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
+import { notifyKeyFor, resolveValidateCommand, withIssueTracking } from "../src/layers/issue-tracking.ts"
 import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "../src/layers/git.ts"
 import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
 
@@ -132,17 +133,77 @@ function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRunti
     withMergeWorker({ configCwd: ctx.mainRepo, mainRepo: ctx.mainRepo }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
     withAdopt(),
+    withIssueTracking({ mainRepo: ctx.mainRepo }),
   )
   // TRACEPARENT propagation (docs/events.md § Cause and spans): the CLI is a
   // thin adapter, so this is the one place it reads the header and threads it
   // onto every command's cause. commandId comes from the SAME idGen core
   // itself uses (runtime.idGen), so this mints no separate id sequence.
   const trace = readTraceparentEnv()
-  if (!trace) return runtime
+  const traced = !trace
+    ? runtime
+    : {
+        ...runtime,
+        dispatch: (command: BayCommand) =>
+          runtime.dispatch({ ...command, cause: command.cause ?? { commandId: runtime.idGen(), ...trace } }),
+      }
+  return withIssueNotifyHost(ctx, traced)
+}
+
+/**
+ * Outbound issue tracking at the ONE dispatch chokepoint (docs/layers/
+ * issue-tracking.md § Outbound): after ANY dispatch whose events contain a
+ * terminal `pr/changed` (merged/rejected/closed) for a NAMED PR — drain,
+ * integrate, retry, close, a fused push's continuation, inbox ingestion —
+ * dispatch `issues-notify` so the configured command runs and its outcome is
+ * journaled. Wrapping dispatch here (exactly like the TRACEPARENT wrapper)
+ * is what makes "some paths notify, some don't" structurally impossible —
+ * the same one-seam lesson as 21002's runMerge.
+ *
+ * A failed notify command NEVER fails the verb that triggered it (the merge
+ * already happened) — it prints loud to stderr and is journaled as
+ * `issues/notified` with the nonzero exit code.
+ */
+function withIssueNotifyHost(ctx: Ctx, runtime: BayRuntime): BayRuntime {
+  const source = createGitConfigSource(ctx.mainRepo)
+  const configured = new Map<string, boolean>()
+  async function hasCommand(key: string): Promise<boolean> {
+    if (!configured.has(key)) {
+      const v = await source.get(key)
+      configured.set(key, v !== undefined && v.trim() !== "" && v.trim() !== "none")
+    }
+    return configured.get(key)!
+  }
   return {
     ...runtime,
-    dispatch: (command) =>
-      runtime.dispatch({ ...command, cause: command.cause ?? { commandId: runtime.idGen(), ...trace } }),
+    dispatch: async (command: BayCommand) => {
+      const result = await runtime.dispatch(command)
+      if (command.type === "issues-notify") return result
+      for (const e of result.events) {
+        if (e.name !== "pr/changed") continue
+        const d = e.data as { pr: PrId; to: string; code?: string; detail?: string; sha?: string }
+        const key = notifyKeyFor(d.to)
+        if (key === undefined || !(await hasCommand(key))) continue
+        const name = (await runtime.state()).prs[d.pr]?.name
+        if (!name) continue // unnamed PR — no issue to notify (adopt's audit-warned ramp)
+        const { events: notified } = await runtime.dispatch({
+          type: "issues-notify",
+          args: { pr: d.pr, to: d.to, name, sha: d.sha, code: d.code, detail: d.detail },
+        })
+        for (const n of notified) {
+          if (n.name !== "issues/notified") continue
+          const nd = n.data as { name: string; on: string; code: number; detail?: string }
+          if (nd.code === 0) {
+            console.log(`bay: issue '${nd.name}' notified (${nd.on})`)
+          } else {
+            console.error(
+              `bay: issue notify FAILED for '${nd.name}' (${nd.on}) — exit ${nd.code}${nd.detail ? `: ${nd.detail}` : ""} — journaled`,
+            )
+          }
+        }
+      }
+      return result
+    },
   }
 }
 
@@ -431,15 +492,16 @@ function relToMain(ctx: Ctx, path: string): string {
   return path.startsWith(ctx.mainRepo + "/") ? path.slice(ctx.mainRepo.length + 1) : path
 }
 
-/** The bay.tracker gate at `open`: when configured (and not "none"), the
- *  tracker command must accept the name (exit 0) before a worktree opens —
- *  one config key connects the issue tracker (spec § bay.tracker '<command
- *  with {name}>'). */
-async function checkTracker(ctx: Ctx, name: string): Promise<void> {
-  const source = createGitConfigSource(ctx.mainRepo)
-  const tracker = await source.get("tracker")
-  if (tracker === undefined || tracker.trim() === "" || tracker.trim() === "none") return
-  const cmd = tracker.replaceAll("{name}", name)
+/** The inbound issue-tracking gate (docs/layers/issue-tracking.md § Inbound):
+ *  when `bay.issues.validate` (or the deprecated `bay.tracker` spelling) is
+ *  configured, the command must accept the workitem name (exit 0) before a
+ *  worktree opens OR an existing branch is adopted under that name — the
+ *  no-branch-without-a-live-workitem doctrine enforced at the front door,
+ *  on every door. */
+async function validateWorkitem(ctx: Ctx, verb: string, name: string): Promise<void> {
+  const validate = await resolveValidateCommand(ctx.mainRepo)
+  if (validate === undefined) return
+  const cmd = validate.replaceAll("{name}", name)
   const proc = Bun.spawn(["sh", "-c", cmd], {
     cwd: ctx.mainRepo,
     stdout: "pipe",
@@ -450,8 +512,8 @@ async function checkTracker(ctx: Ctx, name: string): Promise<void> {
   if (code !== 0) {
     const said = err.trim()
     throw new Error(
-      `bay: open: the tracker does not accept '${name}' — ${cmd} exited ${code}${said ? `:\n${said}` : ""}\n` +
-        `Use a name your tracker knows, or disable the check: git config bay.tracker none`,
+      `bay: ${verb}: the tracker does not accept '${name}' — ${cmd} exited ${code}${said ? `:\n${said}` : ""}\n` +
+        `Use a name your tracker knows, or disable the check: git config bay.issues.validate none`,
     )
   }
 }
@@ -466,7 +528,7 @@ async function verbOpen(ctx: Ctx, name: string | undefined, skipTracker: boolean
         `pick a descriptive name (e.g. fix-readme)`,
     )
   }
-  if (!skipTracker) await checkTracker(ctx, name)
+  if (!skipTracker) await validateWorkitem(ctx, "open", name)
   // Law 8: open self-heals the wiring — init is idempotent and cheap.
   const path = await withWriteBay(ctx, async (bay) => {
     if (!existsSync(ctx.repoGit)) await bay.dispatch({ type: "init" })
@@ -568,6 +630,10 @@ async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | un
       )
     }
   }
+  // Same front door as `open` (acceptance: co/enqueue both validate): a
+  // NAMED adopt must name a workitem the tracker accepts. A nameless adopt
+  // stays the audit-warned reconciliation ramp — nothing to validate.
+  if (name !== undefined) await validateWorkitem(ctx, "adopt", name)
   await withWriteBay(ctx, async (bay) => {
     const { events } = await bay.dispatch({ type: "adopt", args: { branch, name } })
     const opened = events.find((e) => e.name === "pr/opened")
@@ -1060,11 +1126,15 @@ async function guideContext(): Promise<string> {
       ? `  mergeCommand    ${mergeCommand}`
       : "  mergeCommand    (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.mergeCommand '<command with {target}>')",
   )
-  const tracker = process.env.BAY_TRACKER ?? (await source.get("tracker").catch(() => undefined))
+  const tracker =
+    process.env.BAY_ISSUES_VALIDATE ??
+    (await source.get("issues.validate").catch(() => undefined)) ??
+    process.env.BAY_TRACKER ??
+    (await source.get("tracker").catch(() => undefined))
   lines.push(
     tracker !== undefined && tracker.trim() !== ""
       ? `  tracker         ${tracker}`
-      : "  tracker         (not set — names are not checked against a tracker; set: git config bay.tracker '<command with {name}>')",
+      : "  tracker         (not set — names are not checked against a tracker; set: git config bay.issues.validate '<command with {name}>')",
   )
   if (existsSync(bayDir)) {
     const ctx: Ctx = {
@@ -1167,7 +1237,7 @@ async function main(): Promise<void> {
     .action(async (name: string, opts: { workitem?: boolean }) => {
       await verbOpen(await requireBay(), name, opts.workitem === false)
     })
-  hiddenOption(cmdOpen, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.tracker check)")
+  hiddenOption(cmdOpen, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.issues.validate check)")
 
   program
     .command("close <wt|name>")

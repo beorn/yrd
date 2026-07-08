@@ -15,7 +15,7 @@ import { git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "./git.
  * turn these outcomes into `pr/changed` events via `stateChangeEvent`.
  */
 
-function tail(text: string, max = 2000): string {
+export function tail(text: string, max = 2000): string {
   const trimmed = text.replace(/\s+$/, "")
   return trimmed.length <= max ? trimmed : `…${trimmed.slice(-max)}`
 }
@@ -48,7 +48,13 @@ export async function runProjectCheck(check: string | undefined, cwd: string): P
 
 // ---------- merge ----------
 
-export type MergeOutcome = { ok: true; detail: string } | { ok: false; code: RejectionCode; detail: string }
+export type MergeOutcome =
+  /** `sha` is the verified landed tip (the target commit the lying-merge guard
+   *  proved an ancestor of the mainline) — machine-truth for downstream
+   *  consumers ({sha} in issue-tracker commands). Absent only on the
+   *  no-mainRepo library path, which runs no guard and resolves no target. */
+  | { ok: true; detail: string; sha?: string }
+  | { ok: false; code: RejectionCode; detail: string }
 
 export type MergeParams = {
   /** The mainline repo the PR lands onto; also the merge command's spawn cwd
@@ -204,5 +210,5 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     }
   }
 
-  return { ok: true, detail: mergeDetail }
+  return { ok: true, detail: mergeDetail, ...(targetSha !== undefined ? { sha: targetSha } : {}) }
 }
