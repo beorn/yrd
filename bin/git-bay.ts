@@ -2,12 +2,12 @@
 // git bay — the CLI host over the era2 library (spec § The verbs; law 2: quiet
 // on success, meaningful exit codes, --json everywhere it matters).
 //
-// Advertised verbs: guide | init | open | close | gc | ls | submit | integrate |
-// retry | audit. Every pre-v0.3 verb name still works as a hidden alias
-// (new, co, checkout, install, setup, abandon, return, refresh, ping, status,
-// enqueue, adopt, merge, drain, requeue, prime) — nothing breaks, nothing is
-// advertised twice. Hook modes (installed by init, not user-facing):
-// receive-pre | receive-post
+// Advertised verbs: guide | init | open | close | gc | ls | adopt | submit |
+// check | merge | integrate | retry | audit. Every pre-v0.3 verb name still
+// works as a hidden alias (new, co, checkout, install, setup, abandon, return,
+// refresh, ping, status, enqueue, queue, in, int, land, drain, requeue, prime)
+// — nothing breaks, nothing is advertised twice. Hook modes (installed by
+// init, not user-facing): receive-pre | receive-post
 
 import { existsSync } from "node:fs"
 import { Command } from "@silvery/commander/plain"
@@ -15,13 +15,14 @@ import { colorizeHelp, shouldColorize } from "@silvery/commander"
 import { readFile, rename } from "node:fs/promises"
 import { join } from "node:path"
 import type { BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
+import { isOpen } from "../src/types.ts"
 import { createGitbay } from "../src/core.ts"
 import { pipe } from "../src/pipe.ts"
 import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
 import { withWorktrees, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/worktrees.ts"
-import { withQueue, queuedPrs } from "../src/layers/queue.ts"
+import { withQueue, submittedPrs } from "../src/layers/queue.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
   withReceive,
@@ -148,9 +149,7 @@ function resolvePr(state: BayState, token: string): PrId {
     }
     return lease.changeId
   }
-  const open = Object.values(state.prs).filter(
-    (pr) => pr.name === token && pr.state !== "merged" && pr.state !== "abandoned",
-  )
+  const open = Object.values(state.prs).filter((pr) => pr.name === token && isOpen(pr.state))
   if (open.length === 1) return open[0]!.id
   if (open.length > 1) {
     throw new Error(
@@ -181,9 +180,9 @@ function resolvePr(state: BayState, token: string): PrId {
 
 /** The PR record for a resolved id, or the "no push yet" teaching refusal —
  *  the id can come from a worktree's pre-minted number before any push. Says
- *  "no PR yet" rather than "not open yet" on purpose: `open` is now a real PR
- *  state (§6 addendum), so "not open yet" would misleadingly suggest one
- *  exists in some OTHER state. */
+ *  "no PR yet" rather than "not open yet" on purpose: `open` is DERIVED
+ *  (isOpen), not a state name, so "not open yet" would misleadingly suggest a
+ *  stored state that doesn't exist. */
 function prOrTeach(state: BayState, prId: PrId, verb: string): PullRequest {
   const pr = state.prs[prId]
   if (pr) return pr
@@ -256,11 +255,12 @@ function worktreeTable(state: BayState, actor: string, now: number, ttlMs: numbe
     const lease = state.leases[leaseId]
     if (!lease) continue
     const you = lease.actor === actor ? "← you" : ""
-    // AGE = since `open` (createdAt); IDLE = since the newest activity (what
-    // `refresh` resets and what gc measures); STATE flips to `stale` when
-    // idle exceeds the timeout — the same predicate gc uses. "active", never
-    // "open" — `open` is now a PR lifecycle state (§6 addendum) and this is a
-    // worktree's activity, a different axis entirely; never interchange them.
+    // AGE = since the worktree opened (createdAt); IDLE = since the newest
+    // activity (what `refresh` resets and what gc measures); STATE flips to
+    // `stale` when idle exceeds the timeout — the same predicate gc uses.
+    // "active", never "open" — `open` is a derived PR status (isOpen) and
+    // this is a worktree's activity, a different axis entirely; never
+    // interchange them.
     const last = slice.lastActive?.[leaseId] ?? lease.createdAt
     const st = now - Date.parse(last) > ttlMs ? "stale" : "active"
     rows.push([`wt${n}`, lease.workitem ?? "—", st, age(lease.createdAt, now), age(last, now), you])
@@ -404,9 +404,9 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
   }
 }
 
-/** `adopt <branch>` (§6 addendum: took over submit's OLD meaning) — creates a
- *  PR for an existing branch, landing in `open` (never auto-queued; `submit`/
- *  `queue` is the separate ask-to-merge step). */
+/** `adopt <branch>` — creates a PR for an existing branch, landing in
+ *  `pushed` (never auto-submitted; `submit` is the separate ask-to-merge
+ *  step). */
 async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | undefined): Promise<void> {
   if (!target) throw new Error("bay: adopt: a branch, SHA, or worktree name is required")
   // Refuse at the door, not at integrate time: an unresolvable target used to be
@@ -449,12 +449,12 @@ async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | un
   })
 }
 
-/** `submit <PR|name>` / alias `queue` (§6 addendum: submit's NEW meaning) —
- *  "ask to merge": moves an existing PR from `open` to `queued`. Lazy, like
- *  `adopt` always has been: this only queues it — `git bay integrate` (or a
- *  fused `-o submit`/`-o wait`/`bay.autoQueue` push) is what actually runs the
- *  check/merge pipeline. A token that resolves to no known PR/bay redirects
- *  to `adopt`, since that is what creates one. */
+/** `submit <PR|name>` — "ask to merge": moves an existing PR from `pushed` to
+ *  `submitted`. Lazy, like `adopt` always has been: this only submits it —
+ *  it never merges (docs/model.md § Verbs: "Never merges") — `git bay
+ *  integrate` (or a fused `-o submit`/`-o wait`/`bay.autoQueue` push) is what
+ *  actually runs the check/merge pipeline. A token that resolves to no known
+ *  PR/bay redirects to `adopt`, since that is what creates one. */
 async function verbQueue(ctx: Ctx, target: string | undefined): Promise<void> {
   if (!target) throw new Error("bay: submit: a PR number or name is required — git bay ls lists them")
   await withWriteBay(ctx, async (bay) => {
@@ -474,15 +474,15 @@ async function verbQueue(ctx: Ctx, target: string | undefined): Promise<void> {
     }
     prOrTeach(state, prId, "submit") // "has no PR yet" teaches instead of a reducer miss
     await bay.dispatch({ type: "queue", args: { pr: prId } })
-    console.log(`bay: ${prId} queued — git bay integrate ${prId} to land it`)
+    console.log(`bay: ${prId} submitted — git bay integrate ${prId} to land it`)
   })
 }
 
-/** Verdict lines shared by the post-receive hook, retry, and submit/queue.
- *  A bare push that only creates (no auto-queue) has no pr/changed event at
- *  all — that's the "opened, not queued" case, printed distinctly. An empty
- *  events array (a repeat push to an already-`open` PR, still not queuing) is
- *  a non-event: quiet on success, nothing to print. */
+/** Verdict lines shared by the post-receive hook and retry. A bare push that
+ *  only creates (no auto-submit) has no pr/changed event at all — that's the
+ *  "opened, not submitted" case, printed distinctly. An empty events array (a
+ *  repeat push to an already-`pushed` PR, still not submitting) is a
+ *  non-event: quiet on success, nothing to print. */
 function printVerdict(events: { name: string; data: Record<string, unknown> }[], opts: { label?: string } = {}): void {
   if (events.length === 0) return
   const opened = events.find((e) => e.name === "pr/opened")
@@ -514,19 +514,22 @@ async function verbRetry(ctx: Ctx, target: string | undefined): Promise<void> {
     const state = await bay.state()
     const prId = resolvePr(state, target)
     const pr = prOrTeach(state, prId, "retry")
-    if (pr.state === "open") {
+    if (pr.state === "pushed") {
       throw new Error(`bay: retry: ${prId} hasn't been submitted yet — git bay submit ${prId}`)
     }
     if (pr.state === "merged") {
       throw new Error(`bay: retry: ${prId} is already merged — start the next piece of work: git bay open <name>`)
     }
-    if (pr.state === "abandoned") {
+    if (pr.state === "closed") {
       throw new Error(`bay: retry: ${prId} was withdrawn — start the next piece of work: git bay open <name>`)
     }
     if (pr.state === "checking" || pr.state === "reviewing") {
       throw new Error(`bay: retry: ${prId} is ${pr.state} — wait for the verdict (git bay ls ${prId})`)
     }
-    if (pr.state !== "queued") await bay.dispatch({ type: "requeue", args: { pr: prId } })
+    if (pr.state === "checked") {
+      throw new Error(`bay: retry: ${prId} is already checked, not rejected — git bay merge ${prId} to land it`)
+    }
+    if (pr.state !== "submitted") await bay.dispatch({ type: "requeue", args: { pr: prId } })
     const slice = (state.slices["queue"] ?? { targets: {} }) as { targets: Record<string, string> }
     const branch = slice.targets[prId]
     if (!branch) throw new Error(`bay: retry: no merge target recorded for ${prId} — cannot resubmit`)
@@ -599,6 +602,48 @@ async function ingestInbox(ctx: Ctx, bay: BayRuntime): Promise<void> {
   }
 }
 
+/** One line per `pr/changed` event ("bay: PR1 submitted → checking"), shared
+ *  by `check`, `merge`, and `integrate` — the three verbs that report their
+ *  OWN transitions directly rather than through printVerdict's push-flavored
+ *  wording. Returns whether anything printed, so callers can report "nothing
+ *  to do" on a silent (non-event) dispatch. */
+function printTransitions(events: { name: string; data: Record<string, unknown> }[]): boolean {
+  let any = false
+  for (const e of events) {
+    if (e.name !== "pr/changed") continue
+    const d = e.data as { pr: string; from: string; to: string; detail?: string }
+    console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
+    any = true
+  }
+  return any
+}
+
+/** `check <PR>`: submitted → checking → checked | rejected. Atomic — stops at
+ *  the verdict, never merges (docs/model.md § Verbs). */
+async function verbCheck(ctx: Ctx, target: string | undefined): Promise<void> {
+  if (!target) throw new Error("bay: check: a PR number or name is required — git bay ls lists them")
+  await withWriteBay(ctx, async (bay) => {
+    const state = await bay.state()
+    const prId = resolvePr(state, target)
+    prOrTeach(state, prId, "check")
+    const { events } = await bay.dispatch({ type: "check", args: { pr: prId } })
+    printTransitions(events)
+  })
+}
+
+/** `merge <PR>`: checked → merging → merged | rejected. Atomic — refuses a PR
+ *  that isn't `checked`, never runs the check itself (docs/model.md § Verbs). */
+async function verbMerge(ctx: Ctx, target: string | undefined): Promise<void> {
+  if (!target) throw new Error("bay: merge: a PR number or name is required — git bay ls lists them")
+  await withWriteBay(ctx, async (bay) => {
+    const state = await bay.state()
+    const prId = resolvePr(state, target)
+    prOrTeach(state, prId, "merge")
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: prId } })
+    printTransitions(events)
+  })
+}
+
 async function verbIntegrate(ctx: Ctx, target: string | undefined, watch: boolean, intervalSec: number): Promise<void> {
   await withWriteBay(ctx, async (bay) => {
     let prId: PrId | undefined
@@ -609,15 +654,8 @@ async function verbIntegrate(ctx: Ctx, target: string | undefined, watch: boolea
     }
     for (;;) {
       await ingestInbox(ctx, bay)
-      const { events } = await bay.dispatch({ type: "drain", args: prId ? { pr: prId } : undefined })
-      let integrated = false
-      for (const e of events) {
-        if (e.name === "pr/changed") {
-          const d = e.data as { pr: string; from: string; to: string; detail?: string }
-          console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
-          integrated = true
-        }
-      }
+      const { events } = await bay.dispatch({ type: "integrate", args: prId ? { pr: prId } : undefined })
+      const integrated = printTransitions(events)
       if (!watch) {
         if (!integrated) console.log("bay: queue empty — nothing to integrate")
         break
@@ -722,26 +760,28 @@ const GUIDE = `git bay is a small continuous-integration server for this reposit
 THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
-  3. git push                          # opens your PR (state: open) — nothing runs yet
-  4. git bay submit <PR>               # ask to merge (open -> queued) — checks run, then the merge; READ the remote:/output lines
-  5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
+  3. git push                          # opens your PR (state: pushed) — nothing runs yet
+  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — queues it, does NOT merge
+  5. git bay integrate <PR>            # runs checks, then lands it (submitted -> ... -> merged); READ the remote:/output lines
+  6. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
-  - In a hurry? git push -o submit fuses steps 3+4 (git config bay.autoQueue true makes every push do this).
+  - In a hurry? git push -o submit fuses steps 3-5 (git config bay.autoQueue true makes every push do this).
+  - No git config bay.mergeCommand needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.mergeCommand only to override it.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
-  - Done with a worktree? git bay close <bay|wt> refuses while its PR is still queued — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
+  - Done with a worktree? git bay close <bay|wt> refuses while its PR is still open — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
   - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
   - A bay PR is local — GitHub does not see it and gh commands do not apply.
 VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (open), git bay submit asks to merge it (queued)
-  queue      queued PRs waiting to be integrated; they merge one at a time, in order
-  checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it (submitted)
+  check      git bay check <PR> runs the ONE project check alone (submitted -> checked); git config bay.check '<command>'; exit 0 means pass
+  merge      git bay merge <PR> lands a CHECKED PR onto main alone (checked -> merged); git bay integrate <PR> runs check then merge together
 ADDRESSING
-  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
+  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
@@ -781,7 +821,7 @@ async function guideContext(): Promise<string> {
   lines.push(
     mergeCommand !== undefined && mergeCommand.trim() !== ""
       ? `  mergeCommand    ${mergeCommand}`
-      : "  mergeCommand    (not set — git bay integrate refuses until: git config bay.mergeCommand '<command with {target}>')",
+      : "  mergeCommand    (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.mergeCommand '<command with {target}>')",
   )
   const tracker = process.env.BAY_TRACKER ?? (await source.get("tracker").catch(() => undefined))
   lines.push(
@@ -794,7 +834,7 @@ async function guideContext(): Promise<string> {
     const state = await readBay(ctx).state()
     const open = Object.values(state.leases).filter((l) => l.endedAt === undefined).length
     lines.push(`  open worktrees  ${open}`)
-    lines.push(`  queued PRs      ${queuedPrs(state).length}`)
+    lines.push(`  submitted PRs   ${submittedPrs(state).length}`)
   }
   return lines.join("\n")
 }
@@ -936,8 +976,8 @@ async function main(): Promise<void> {
     .addHelpText(
       "after",
       "\nColumns: BAY = the name given at open; WORKTREE = its wt-id. AGE = time since open; IDLE = time since last activity.\n" +
-        "STATE values: active | stale (idle past the timeout — gc will expire it; git bay refresh <bay|wt> keeps it). This is the WORKTREE's activity, distinct from a PR's own state (open, queued, checking, …).\n" +
-        "Addressing: bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.",
+        "STATE values: active | stale (idle past the timeout — gc will expire it; git bay refresh <bay|wt> keeps it). This is the WORKTREE's activity, distinct from a PR's own phase (pushed, submitted, checking, …).\n" +
+        "Addressing: bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.",
     )
     .option("--json", "machine-readable output")
     .action(async (target: string | undefined, opts: { json?: boolean }) => {
@@ -948,7 +988,7 @@ async function main(): Promise<void> {
     .command("adopt <branch>")
     .alias("enqueue")
     .helpGroup("PRs:")
-    .description("create a PR for an existing branch (from inside a worktree, plain git push does this); lands in `open`")
+    .description("create a PR for an existing branch (from inside a worktree, plain git push does this); lands in `pushed`")
     .action(async (target: string, opts: { workitem?: string }) => {
       await verbAdopt(await requireBay(), target, opts.workitem)
     })
@@ -958,16 +998,32 @@ async function main(): Promise<void> {
     .command("submit <PR|name>")
     .alias("queue")
     .helpGroup("PRs:")
-    .description("ask to merge — queues an open PR for integration (open → queued)")
+    .description("ask to merge — queues a pushed PR for integration (pushed → submitted); never merges")
     .action(async (target: string) => {
       await verbQueue(await requireBay(), target)
     })
 
   program
-    .command("integrate [PR|name]")
-    .aliases(["in", "int", "land", "merge", "drain"])
+    .command("check <PR|name>")
     .helpGroup("PRs:")
-    .description("integrate the next queued PR into main (or the named one); --watch keeps integrating")
+    .description("run the project check alone (submitted → checking → checked); stops there, never merges")
+    .action(async (target: string) => {
+      await verbCheck(await requireBay(), target)
+    })
+
+  program
+    .command("merge <PR|name>")
+    .helpGroup("PRs:")
+    .description("land a checked PR onto main (checked → merging → merged); refuses a PR that isn't checked")
+    .action(async (target: string) => {
+      await verbMerge(await requireBay(), target)
+    })
+
+  program
+    .command("integrate [PR|name]")
+    .aliases(["in", "int", "land", "drain"])
+    .helpGroup("PRs:")
+    .description("run check then merge on the next submitted PR into main (or the named one); --watch keeps integrating")
     .option("--watch", "keep integrating on an interval")
     .option("--interval <sec>", "watch poll interval in seconds", "15")
     .action(async (target: string | undefined, opts: { watch?: boolean; interval?: string }) => {
