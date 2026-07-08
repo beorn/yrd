@@ -1,6 +1,6 @@
 # withWorktrees — core layer
 
-Manages the directories work happens in. Core-tier: always in the default composition, but still a layer — without it, `submit <branch>` + `integrate` is a pure merge queue for people who bring their own workspaces.
+Manages the directories work happens in. Core-tier: always in the default composition, but still a layer — without it, `adopt <branch>` + `submit` + `integrate` is a pure merge queue for people who bring their own workspaces.
 
 ## The identity model
 
@@ -9,8 +9,8 @@ Manages the directories work happens in. Core-tier: always in the default compos
 ## Shipped today
 
 - `open <name>` opens a bay (prints a cd-able path; `new`/`co`/`checkout` are hidden aliases), `close` ends it (refuses if dirty, or if its PR is still live — see below), `refresh` resets the idle clock, `gc` expires idle bays after snapshotting the branch tip to a findability ref.
-- `close --withdraw`: closing a bay whose PR hasn't reached a terminal state (queued, checking, merging, reviewing, or rejected) refuses and teaches the three ways out — integrate it, retry it, or withdraw it. `--withdraw` moves the PR to `abandoned` and then closes.
-- The bay's remote points at the bay-owned repo, so plain `git push` submits.
+- `close --withdraw`: closing a bay whose PR hasn't reached a terminal state (open, queued, checking, merging, reviewing, or rejected) refuses and teaches the three ways out — integrate it, retry it, or withdraw it. `--withdraw` moves the PR to `abandoned` and then closes.
+- The bay's remote points at the bay-owned repo, so plain `git push` opens the PR (§6 addendum: creation and the ask-to-merge are separate acts — see [docs/events.md](../events.md)).
 
 ## Planned (v0.4)
 

@@ -87,11 +87,12 @@ export type RejectionCode =
  *  {code, detail}`) — never a PR state transition, just "no, and here is why".
  *  Closed on purpose, same rationale as RejectionCode. Only `pr-still-queued`
  *  is wired to an event this pass (`close` without `--withdraw`); the rest are
- *  named now so later slices (pooling, WIP limit, review gate) have a code to
- *  reach for instead of inventing one ad hoc. */
+ *  named now so later slices (pooling, WIP limit, review gate, RPC) have a
+ *  code to reach for instead of inventing one ad hoc. */
 export type RefusalCode =
-  | "pr-still-queued" // close refused: the bay's PR is still queued — use --withdraw
-  | "doors-closed" // submit/push refused: the PR is already merged
+  | "pr-still-queued" // close refused: the bay's PR is still live — use --withdraw
+  | "doors-closed" // submit/push refused: the PR is already merged or was withdrawn
+  | "pr-not-open" // reserved: submit/queue refused — the PR isn't in `open` (§6 addendum)
   | "tracker-unknown" // reserved: open refused, the tracker doesn't know the name
   | "pool-exhausted" // reserved: v0.4 pooling, no worktree available
   | "unknown-bay" // reserved: refresh/close addressed a bay that doesn't exist

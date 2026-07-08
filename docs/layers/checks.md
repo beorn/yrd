@@ -4,7 +4,7 @@ Runs your configured commands at lifecycle points and journals each verdict. The
 
 ## Shipped today
 
-Two git-config commands: `bay.check` (runs on the submitter's bay when a PR arrives; exit 0 = pass) and `bay.mergeCommand` (repositories with their own merge process route the merge itself through a command; used by `integrate`). A merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch.
+Two git-config commands: `bay.check` (runs on the submitter's bay when a PR is queued for merge — whether by `git bay submit`, or a push fused with `-o submit`/`-o wait`/`bay.autoQueue`; exit 0 = pass) and `bay.mergeCommand` (repositories with their own merge process route the merge itself through a command; used by `integrate`). A merge command's exit code is never taken on faith — a PR only counts as merged when it is provably an ancestor of the refreshed main branch.
 
 ## Planned: checks on lifecycle events
 
@@ -12,8 +12,8 @@ One command (or later, steps) per hook point:
 
 - `provision` — once per worktree build (dependency install, direnv) — this is what makes pooling fast to *re*-enter
 - `open` — per loan, fast setup
-- `push` — at the receive door, before the PR exists (cheapest refusals, taught at push time)
-- `submit` — speculative, on the submitter's bay (today's `bay.check`)
+- `push` — at the receive door, before the PR exists (cheapest refusals, taught at push time; runs whether or not the push queues)
+- `queue` — speculative, on the submitter's bay, when a PR is asked to merge (today's `bay.check`)
 - `integrate` — the gate before each merge
 - `merged` — follow-ups after a verified landing
 
