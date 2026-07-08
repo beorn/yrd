@@ -4,10 +4,12 @@ import type {
   BayPlugin,
   BayRuntime,
   BayState,
+  Cause,
   Layer,
   PrId,
   PrState,
   PullRequest,
+  RejectionCode,
   TransitionResult,
   WorkitemId,
 } from "../types.ts"
@@ -37,15 +39,17 @@ import { nextPrId } from "../ids.ts"
 /** Legal transitions. Exhaustive over PrState so a new state can't be added
  *  without deciding its edges. queued→merging is direct in v0.1 (no checks
  *  layer yet); checking/reviewing are the guarded rungs a later with*() adds.
- *  merging/rejected → queued is the retry/resume edge (crash recovery). abandon
- *  (merging/... → abandoned) lands later with withWorkspaces' close, so no path
- *  produces `abandoned` yet — it is a terminal state with no producer here. */
+ *  merging/rejected → queued is the retry/resume edge (crash recovery).
+ *  queued|rejected|reviewing → abandoned is `close --withdraw` (v0.3 § verbs):
+ *  a bay's PR can be withdrawn from any of those three "still live" states;
+ *  `checking`/`merging` are NOT withdrawable (an effect may already be
+ *  in flight for them — wait for the verdict, then retry or withdraw). */
 const TRANSITIONS: Record<PrState, PrState[]> = {
-  queued: ["checking", "merging"],
+  queued: ["checking", "merging", "abandoned"],
   checking: ["merging", "rejected"],
-  reviewing: ["merging", "rejected"],
+  reviewing: ["merging", "rejected", "abandoned"],
   merging: ["merged", "rejected", "queued"],
-  rejected: ["queued"],
+  rejected: ["queued", "abandoned"],
   merged: [],
   abandoned: [],
 }
@@ -69,8 +73,8 @@ export function assertTransition(from: PrState, to: PrState): void {
 // ---------- slice ----------
 
 const LAYER = "queue"
-const EV_OPENED = "pr.opened"
-const EV_STATE_CHANGED = "pr.state-changed"
+const EV_OPENED = "pr/opened"
+const EV_CHANGED = "pr/changed"
 
 /** FIFO order (append on enqueue) + the merge target per PR. The target (a
  *  branch name or SHA to merge) has no home on the core PullRequest type, so
@@ -126,38 +130,57 @@ export function queueTarget(state: BayState, pr: PrId): string {
 
 // ---------- shared state-changed event builder (validated) ----------
 
-/** Build a validated `pr.state-changed` event. Both the queue's requeue reducer
- *  and the merge worker's effect handler go through this, so every transition —
- *  wherever it originates — passes assertTransition BEFORE the event exists
- *  (fail-loud before journaling). `revision` rides along when a re-push bumps
- *  it (same PR number, next revision). */
+export type StateChangeOpts = {
+  detail?: string
+  revision?: number
+  /** Required whenever `to === "rejected"` — a rejection with no machine-
+   *  readable reason can never be counted by a later `stats` fold (docs/events.md
+   *  § event families: "building a rejection without a code throws"). */
+  code?: RejectionCode
+}
+
+/** Build a validated `pr/changed` event. Every caller — the queue's requeue
+ *  reducer, the receiver's submit pipeline, the merge worker's effect handler —
+ *  goes through this, so every transition passes assertTransition BEFORE the
+ *  event exists (fail-loud before journaling), and every rejection carries a
+ *  code before it can be journaled at all. */
 export function stateChangeEvent(
   bay: BayRuntime,
   pr: PrId,
   from: PrState,
   to: PrState,
-  detail?: string,
-  revision?: number,
+  cause: Cause,
+  opts: StateChangeOpts = {},
 ): BayEvent {
   assertTransition(from, to)
-  const data: Record<string, unknown> = { pr, from, to }
-  if (detail !== undefined) data.detail = detail
-  if (revision !== undefined) data.revision = revision
-  return makeEvent(bay, EV_STATE_CHANGED, data, { pr })
+  if (to === "rejected" && opts.code === undefined) {
+    throw new Error(`bay: refusing to build ${pr} rejected without a 'code' — every rejection must be countable`)
+  }
+  return makeEvent(
+    bay,
+    EV_CHANGED,
+    { pr, from, to, ...(opts.revision !== undefined ? { revision: opts.revision } : {}), ...(opts.code !== undefined ? { code: opts.code } : {}), ...(opts.detail !== undefined ? { detail: opts.detail } : {}) },
+    cause,
+  )
 }
 
-/** Build a `pr.opened` event for layers ABOVE the queue (e.g. the receiver's
+/** Build a `pr/opened` event for layers ABOVE the queue (e.g. the receiver's
  *  submit pipeline) — events are the composition contract: a higher layer emits
- *  them, this layer folds them, exactly like stateChangeEvent. Callers must
- *  have checked uniqueness against state.prs (fail-loud duplicate-id rule lives
- *  in reduceEnqueue; builders don't see state). */
+ *  them, this layer folds them, exactly like stateChangeEvent. `via` records
+ *  where the PR came from: "push" (a worktree's plain git push, correlated to
+ *  a bay) or "submit" (the explicit `submit <branch|name>` verb — this absorbs
+ *  what v0.2 recorded as a separate `adopt.recorded` row). Callers must have
+ *  checked uniqueness against state.prs (fail-loud duplicate-id rule lives in
+ *  reduceEnqueue; builders don't see state). */
 export function prOpenedEvent(
   bay: BayRuntime,
   pr: PrId,
   target: string,
   name: WorkitemId | null,
+  via: "push" | "submit",
+  cause: Cause,
 ): BayEvent {
-  return makeEvent(bay, EV_OPENED, { pr, target, name }, { pr })
+  return makeEvent(bay, EV_OPENED, { pr, target, workName: name, via }, cause)
 }
 
 // ---------- reducers (pure) ----------
@@ -186,7 +209,7 @@ function reduceEnqueue(bay: BayRuntime, state: BayState, command: BayCommand): T
     throw new Error(`bay: submit: PR '${prId}' already exists — PR numbers are unique`)
   }
 
-  return { state, events: [prOpenedEvent(bay, prId, target, name)], effects: [] }
+  return { state, events: [prOpenedEvent(bay, prId, target, name, "submit", command.cause!)], effects: [] }
 }
 
 function reduceRequeue(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
@@ -200,20 +223,20 @@ function reduceRequeue(bay: BayRuntime, state: BayState, command: BayCommand): T
   }
   // stateChangeEvent validates existing.state → queued: legal only from merging
   // (resume) or rejected (retry); anything else (queued/checking/merged) throws.
-  const event = stateChangeEvent(bay, pr, existing.state, "queued")
+  const event = stateChangeEvent(bay, pr, existing.state, "queued", command.cause!)
   return { state, events: [event], effects: [] }
 }
 
 // ---------- apply (pure fold; runs on live dispatch AND replay) ----------
 
 function apply(state: BayState, event: BayEvent): BayState {
-  switch (event.type) {
+  switch (event.name) {
     case EV_OPENED: {
-      const d = event.data as { pr: PrId; target: string; name: WorkitemId | null }
+      const d = event.data as { pr: PrId; target: string; workName: WorkitemId | null }
       const slice = sliceOf(state)
       const pr: PullRequest = {
         id: d.pr,
-        name: d.name,
+        name: d.workName,
         lease: "", // enqueued targets are not necessarily bound to a lease
         revision: 1,
         repos: [], // cross-repo structure resolved later; `target` is the merge locator
@@ -232,7 +255,7 @@ function apply(state: BayState, event: BayEvent): BayState {
       }
     }
 
-    case EV_STATE_CHANGED: {
+    case EV_CHANGED: {
       // Transition legality was already enforced in the reducer (assertTransition,
       // before this event was journaled), so apply trusts a journaled event and
       // folds it — this is what makes replay of valid history never throw.
@@ -260,7 +283,7 @@ function apply(state: BayState, event: BayEvent): BayState {
 // ---------- the plugin ----------
 
 /**
- * Built inside the plugin closure (same reason as withWorkspaces): the reducer
+ * Built inside the plugin closure (same reason as withWorktrees): the reducer
  * needs the runtime's injected clock/actor to timestamp events, but the
  * `Reducer` contract `(state, command, next)` passes no runtime. `bay.use(layer)`
  * is exactly what `definePlugin(layer)(bay)` does; we inline it because the

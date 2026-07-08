@@ -37,7 +37,7 @@ import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "./git.t
  */
 
 const LAYER = "receive"
-const EV_INITIALIZED = "bay.initialized"
+const EV_INITIALIZED = "gitbay/initialized"
 const FX_INIT = "receive.init"
 const FX_SUBMIT = "submit.run"
 
@@ -103,13 +103,16 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
     if (existing.state === "merged") {
       throw new Error(
         `bay: doors closed — ${prId} for '${branch}' is already merged. ` +
-          `Start the next piece of work in a fresh worktree: git bay new <name>`,
+          `Start the next piece of work in a fresh worktree: git bay open <name>`,
       )
     }
     if (existing.state === "rejected") {
       // Re-push after rejection: same PR number, next revision.
       events.push(
-        stateChangeEvent(bay, prId, "rejected", "queued", `re-push of ${branch}`, existing.revision + 1),
+        stateChangeEvent(bay, prId, "rejected", "queued", command.cause!, {
+          detail: `re-push of ${branch}`,
+          revision: existing.revision + 1,
+        }),
       )
     } else if (existing.state !== "queued") {
       throw new Error(
@@ -117,9 +120,9 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
       )
     }
   } else {
-    events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null))
+    events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null, "push", command.cause!))
   }
-  events.push(stateChangeEvent(bay, prId, "queued", "checking"))
+  events.push(stateChangeEvent(bay, prId, "queued", "checking", command.cause!))
 
   const effect: Effect = {
     type: FX_SUBMIT,
@@ -151,7 +154,7 @@ function hookScript(mode: "pre" | "post", bayDir: string, mainRepo: string): str
 }
 
 function makeInitHandler(opts: ReceiveOptions) {
-  return async (_effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
+  return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const { mainRepo, bayDir, repoGit } = await resolveReceive(opts)
     await mkdir(bayDir, { recursive: true })
     // Self-excluding state dir (the .direnv pattern): `*` ignores everything
@@ -178,11 +181,12 @@ function makeInitHandler(opts: ReceiveOptions) {
     }
 
     return [
-      makeEvent(bay, EV_INITIALIZED, {
-        repo: repoGit,
-        journal: join(bayDir, "journal.jsonl"),
-        store: "sqlite",
-      }),
+      makeEvent(
+        bay,
+        EV_INITIALIZED,
+        { repo: repoGit, journal: join(bayDir, "journal.jsonl"), store: "sqlite" },
+        effect.cause!,
+      ),
     ]
   }
 }
@@ -217,7 +221,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       ])
       if (code !== 0) {
         const detail = `check '${check}' failed (exit ${code}): ${tail(err || out)}`
-        events.push(stateChangeEvent(bay, d.pr, "checking", "rejected", detail))
+        events.push(stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { detail, code: "check-failed" }))
         return events
       }
     }
@@ -232,17 +236,14 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       .join("\n")
     if (dirty !== "") {
       events.push(
-        stateChangeEvent(
-          bay,
-          d.pr,
-          "checking",
-          "rejected",
-          `mainline working tree at ${mainRepo} is dirty — commit or clean it, then git bay retry ${d.pr}`,
-        ),
+        stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
+          detail: `mainline working tree at ${mainRepo} is dirty — commit or clean it, then git bay retry ${d.pr}`,
+          code: "dirty-mainline",
+        }),
       )
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "checking", "merging"))
+    events.push(stateChangeEvent(bay, d.pr, "checking", "merging", effect.cause!))
 
     const headRes = await git(["-C", mainRepo, "symbolic-ref", "--short", "HEAD"])
     const mainline = headRes.code === 0 ? headRes.stdout.trim() : "main"
@@ -258,7 +259,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     if (merge.code !== 0) {
       await git(["-C", mainRepo, "merge", "--abort"]) // best-effort restore; a failed abort surfaces below
       const detail = `merge of ${d.branch} onto ${mainline} failed (exit ${merge.code}): ${tail(merge.stderr || merge.stdout)}`
-      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", detail))
+      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { detail, code: "merge-conflict" }))
       return events
     }
     const mergeSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"])).stdout.trim()
@@ -267,9 +268,11 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     //    merge-base sees reality.
     await git(["-C", repoGit, "fetch", "--quiet", mainRepo, `+refs/heads/${mainline}:refs/heads/${mainline}`])
 
-    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", `merged ${mergeSha} onto ${mainline}`))
+    events.push(
+      stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: `merged ${mergeSha} onto ${mainline}` }),
+    )
     if (d.lease) {
-      events.push(makeEvent(bay, "lease.ended", { lease: d.lease, endReason: "merged" }, { lease: d.lease, pr: d.pr }))
+      events.push(makeEvent(bay, "bay/closed", { bay: d.lease, via: "merged" }, effect.cause!))
     }
     return events
   }
@@ -308,7 +311,7 @@ export async function preReceiveCheck(
     if (pr?.state === "merged") {
       throw new Error(
         `bay: doors closed — ${pr.id} for '${branch}' is already merged. ` +
-          `Start the next piece of work in a fresh worktree: git bay new <name>`,
+          `Start the next piece of work in a fresh worktree: git bay open <name>`,
       )
     }
 

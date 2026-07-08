@@ -10,7 +10,6 @@ import type {
   PrId,
   TransitionResult,
 } from "../types.ts"
-import { makeEvent } from "../core.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { git, resolveBaseRef } from "./git.ts"
 import { queuedPrs, queueTarget, stateChangeEvent } from "./queue.ts"
@@ -35,7 +34,6 @@ import { queuedPrs, queueTarget, stateChangeEvent } from "./queue.ts"
  * a killed submit is structurally impossible.
  */
 
-const EV_QUEUE_EMPTY = "queue.empty"
 const FX_MERGE_RUN = "merge.run"
 const LAYER = "merge-worker"
 
@@ -90,17 +88,17 @@ function reduceDrain(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   } else {
     const queued = queuedPrs(state)
     if (queued.length === 0) {
-      // Observable no-op: this event lets a land loop see "nothing to do" from the
-      // dispatch return value without polling state. No layer folds it (it changes
-      // nothing) — it exists purely as a progress marker in the journal + return.
-      return { state, events: [makeEvent(bay, EV_QUEUE_EMPTY)], effects: [] }
+      // Non-event (docs/events.md § event families): an empty integrate run
+      // journals nothing. The CLI reports "nothing to integrate" from an
+      // empty events list instead of matching a marker event type.
+      return { state, events: [], effects: [] }
     }
     next = queued[0]!
   }
 
   const target = queueTarget(state, next.id)
   // queued → merging (validated); the effect carries exactly what the command needs.
-  const event = stateChangeEvent(bay, next.id, "queued", "merging")
+  const event = stateChangeEvent(bay, next.id, "queued", "merging", command.cause!)
   const effect: Effect = { type: FX_MERGE_RUN, data: { pr: next.id, target } }
   return { state, events: [event], effects: [effect] }
 }
@@ -149,14 +147,12 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
       const r = await git(["-C", opts.mainRepo, "rev-parse", "--verify", "--quiet", `${d.target}^{commit}`], opts.mainRepo)
       if (r.code !== 0) {
         return [
-          stateChangeEvent(
-            bay,
-            d.pr,
-            from,
-            "rejected",
-            `target '${d.target}' does not resolve in ${opts.mainRepo} — cannot verify a landing, refusing to run the merge. ` +
+          stateChangeEvent(bay, d.pr, from, "rejected", effect.cause!, {
+            code: "unresolvable-target",
+            detail:
+              `target '${d.target}' does not resolve in ${opts.mainRepo} — cannot verify a landing, refusing to run the merge. ` +
               `Fix the target (branch deleted? typo?) and retry: git bay retry ${d.pr}`,
-          ),
+          }),
         ]
       }
       targetSha = r.stdout.trim()
@@ -189,26 +185,24 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
         const anc = await git(["-C", opts.mainRepo, "merge-base", "--is-ancestor", targetSha, baseRef], opts.mainRepo)
         if (anc.code !== 0) {
           return [
-            stateChangeEvent(
-              bay,
-              d.pr,
-              from,
-              "rejected",
-              `merge command exited 0 but ${d.target}@${targetSha.slice(0, 8)} is not an ancestor of ${baseRef} — ` +
+            stateChangeEvent(bay, d.pr, from, "rejected", effect.cause!, {
+              code: "lying-merge",
+              detail:
+                `merge command exited 0 but ${d.target}@${targetSha.slice(0, 8)} is not an ancestor of ${baseRef} — ` +
                 `refusing to record merged (lying-merge guard). If the landing is real but unpushed, push it and ` +
                 `retry: git bay retry ${d.pr}. If the command lands by rebase/squash, use a merge-based ` +
                 `landing — ancestry is the proof this guard accepts.`,
-            ),
+            }),
           ]
         }
       }
-      return [stateChangeEvent(bay, d.pr, from, "merged", tail(stdout))]
+      return [stateChangeEvent(bay, d.pr, from, "merged", effect.cause!, { detail: tail(stdout) })]
     }
     // A non-zero merge command is a DOMAIN outcome (rejected), never a crash — do
     // not throw. The detail names the exit code and the stderr tail (law 7).
     const errTail = tail(stderr)
     const detail = errTail === "" ? `exit ${code}` : `exit ${code}: ${errTail}`
-    return [stateChangeEvent(bay, d.pr, from, "rejected", detail)]
+    return [stateChangeEvent(bay, d.pr, from, "rejected", effect.cause!, { detail, code: "merge-command-failed" })]
   }
 }
 
@@ -218,7 +212,7 @@ export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
   return (bay) => {
     const layer: Layer = {
       name: LAYER,
-      // No apply: the merge worker emits pr.state-changed events that the
+      // No apply: the merge worker emits pr/changed events that the
       // queue layer folds; it owns no state slice of its own.
       reduce(state, command, next) {
         if (command.type === "drain") return reduceDrain(bay, state, command)

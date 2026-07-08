@@ -2,11 +2,12 @@
 // git bay — the CLI host over the era2 library (spec § The verbs; law 2: quiet
 // on success, meaningful exit codes, --json everywhere it matters).
 //
-// Advertised verbs: guide | init | new | close | gc | ls | submit | integrate |
-// retry | audit. Every pre-v0.2 verb name still works as a hidden alias
-// (co, checkout, abandon, return, refresh, ping, status, enqueue, adopt,
-// merge, drain, requeue, prime) — nothing breaks, nothing is advertised twice.
-// Hook modes (installed by init, not user-facing): receive-pre | receive-post
+// Advertised verbs: guide | init | open | close | gc | ls | submit | integrate |
+// retry | audit. Every pre-v0.3 verb name still works as a hidden alias
+// (new, co, checkout, install, setup, abandon, return, refresh, ping, status,
+// enqueue, adopt, merge, drain, requeue, prime) — nothing breaks, nothing is
+// advertised twice. Hook modes (installed by init, not user-facing):
+// receive-pre | receive-post
 
 import { existsSync } from "node:fs"
 import { Command } from "@silvery/commander/plain"
@@ -14,12 +15,12 @@ import { colorizeHelp, shouldColorize } from "@silvery/commander"
 import { readFile, rename } from "node:fs/promises"
 import { join } from "node:path"
 import type { BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
-import { createBay } from "../src/core.ts"
+import { createGitbay } from "../src/core.ts"
 import { pipe } from "../src/pipe.ts"
 import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
-import { withWorkspaces, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/workspaces.ts"
+import { withWorktrees, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/worktrees.ts"
 import { withQueue, queuedPrs } from "../src/layers/queue.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
@@ -31,6 +32,7 @@ import {
 } from "../src/layers/receive.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
 import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "../src/layers/git.ts"
+import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
 
 // ---------- context ----------
 
@@ -76,14 +78,25 @@ async function resolveCtx(): Promise<Ctx> {
 }
 
 function buildBay(ctx: Ctx, store: ReturnType<typeof createReadStore>): BayRuntime {
-  return pipe(
-    createBay({ store, actor: ctx.actor }),
-    withWorkspaces({ mainRepo: ctx.mainRepo, bayRemote: ctx.repoGit, leaseTimeoutMs: ctx.leaseTimeoutMs }),
+  const runtime = pipe(
+    createGitbay({ store, actor: ctx.actor }),
+    withWorktrees({ mainRepo: ctx.mainRepo, bayRemote: ctx.repoGit, leaseTimeoutMs: ctx.leaseTimeoutMs }),
     withQueue(),
     withMergeWorker({ configCwd: ctx.mainRepo, mainRepo: ctx.mainRepo }),
     withReceive({ mainRepo: ctx.mainRepo, bayDir: ctx.bayDir }),
     withAdopt(),
   )
+  // TRACEPARENT propagation (docs/events.md § Cause and spans): the CLI is a
+  // thin adapter, so this is the one place it reads the header and threads it
+  // onto every command's cause. commandId comes from the SAME idGen core
+  // itself uses (runtime.idGen), so this mints no separate id sequence.
+  const trace = readTraceparentEnv()
+  if (!trace) return runtime
+  return {
+    ...runtime,
+    dispatch: (command) =>
+      runtime.dispatch({ ...command, cause: command.cause ?? { commandId: runtime.idGen(), ...trace } }),
+  }
 }
 
 async function withWriteBay<T>(ctx: Ctx, fn: (bay: BayRuntime) => Promise<T>): Promise<T> {
@@ -101,15 +114,15 @@ function readBay(ctx: Ctx): BayRuntime {
 
 // ---------- dual addressing (PR number | wt-id | name) ----------
 
-/** The workspaces slice's worktree index, read loosely (empty when absent). */
-function byBayOf(state: BayState): Record<number, LeaseId> {
-  const slice = state.slices.workspaces as { byBay?: Record<number, LeaseId> } | undefined
-  return slice?.byBay ?? {}
+/** The worktrees slice's worktree index, read loosely (empty when absent). */
+function byWorktreeOf(state: BayState): Record<number, LeaseId> {
+  const slice = state.slices.worktrees as { byWorktree?: Record<number, LeaseId> } | undefined
+  return slice?.byWorktree ?? {}
 }
 
-/** wt-label (wt1, wt2, …) for an open lease, from the workspaces slice. */
+/** wt-label (wt1, wt2, …) for an open lease, from the worktrees slice. */
 function wtLabelFor(state: BayState, leaseId: LeaseId): string | undefined {
-  for (const [num, held] of Object.entries(byBayOf(state))) {
+  for (const [num, held] of Object.entries(byWorktreeOf(state))) {
     if (held === leaseId) return `wt${num}`
   }
   return undefined
@@ -128,7 +141,7 @@ function resolvePr(state: BayState, token: string): PrId {
   }
   const wtShaped = /^wt(\d+)$/i.exec(token)
   if (wtShaped) {
-    const leaseId = byBayOf(state)[Number(wtShaped[1])]
+    const leaseId = byWorktreeOf(state)[Number(wtShaped[1])]
     const lease = leaseId ? state.leases[leaseId] : undefined
     if (!lease || lease.endedAt !== undefined) {
       throw new Error(`bay: no open worktree wt${wtShaped[1]} — git bay ls shows the open ones`)
@@ -184,7 +197,7 @@ function prOrTeach(state: BayState, prId: PrId, verb: string): PullRequest {
 function resolveWorktree(state: BayState, token: string, verb: string): { lease: Lease; wt: string } {
   const wtShaped = /^wt(\d+)$/i.exec(token)
   if (wtShaped) {
-    const leaseId = byBayOf(state)[Number(wtShaped[1])]
+    const leaseId = byWorktreeOf(state)[Number(wtShaped[1])]
     const lease = leaseId ? state.leases[leaseId] : undefined
     if (!lease || lease.endedAt !== undefined) {
       throw new Error(`bay: no open worktree wt${wtShaped[1]} — git bay ls shows the open ones`)
@@ -226,25 +239,29 @@ function pad(text: string, width: number): string {
   return text.length >= width ? text : text + " ".repeat(width - text.length)
 }
 
+/** BAY/WORKTREE identity split (spec § worktree/bay identity split): BAY is
+ *  the named, ephemeral loan (the work); WORKTREE is the numbered, persistent
+ *  directory it's holding. Both columns stay in `ls` — only the header label
+ *  changes (v0.2 called the loan's column NAME). */
 function worktreeTable(state: BayState, actor: string, now: number, ttlMs: number): string {
-  const slice = (state.slices["workspaces"] ?? { byBay: {} }) as {
-    byBay: Record<number, string>
+  const slice = (state.slices["worktrees"] ?? { byWorktree: {} }) as {
+    byWorktree: Record<number, string>
     lastActive?: Record<string, string>
   }
   const rows: string[][] = []
-  for (const [n, leaseId] of Object.entries(slice.byBay).sort(([a], [b]) => Number(a) - Number(b))) {
+  for (const [n, leaseId] of Object.entries(slice.byWorktree).sort(([a], [b]) => Number(a) - Number(b))) {
     const lease = state.leases[leaseId]
     if (!lease) continue
     const you = lease.actor === actor ? "← you" : ""
-    // AGE = since `new` (createdAt); IDLE = since the newest activity (what
+    // AGE = since `open` (createdAt); IDLE = since the newest activity (what
     // `refresh` resets and what gc measures); STATE flips to `stale` when
     // idle exceeds the timeout — the same predicate gc uses.
     const last = slice.lastActive?.[leaseId] ?? lease.createdAt
     const st = now - Date.parse(last) > ttlMs ? "stale" : "open"
     rows.push([`wt${n}`, lease.workitem ?? "—", st, age(lease.createdAt, now), age(last, now), you])
   }
-  if (rows.length === 0) return "no open worktrees — git bay new <name> opens one"
-  const header = ["WORKTREE", "NAME", "STATE", "AGE", "IDLE", ""]
+  if (rows.length === 0) return "no open worktrees — git bay open <name> opens one"
+  const header = ["WORKTREE", "BAY", "STATE", "AGE", "IDLE", ""]
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
   const fmt = (r: string[]) =>
     r
@@ -269,10 +286,9 @@ function prLine(pr: PullRequest, detail: string | undefined): string {
 async function lastDetail(bay: BayRuntime, id: PrId): Promise<string | undefined> {
   let detail: string | undefined
   for await (const ev of bay.store.journal.replay()) {
-    if (ev.type === "pr.state-changed" && ev.pr === id) {
-      const d = (ev.data ?? {}) as { detail?: string }
-      if (d.detail !== undefined) detail = d.detail
-    }
+    if (ev.name !== "pr/changed") continue
+    const d = ev.data as { pr: PrId; detail?: string }
+    if (d.pr === id && d.detail !== undefined) detail = d.detail
   }
   return detail
 }
@@ -290,9 +306,10 @@ function relToMain(ctx: Ctx, path: string): string {
   return path.startsWith(ctx.mainRepo + "/") ? path.slice(ctx.mainRepo.length + 1) : path
 }
 
-/** The bay.tracker gate at `new`: when configured (and not "none"), the tracker
- *  command must accept the name (exit 0) before a worktree opens — one config
- *  key connects the issue tracker (spec § bay.tracker '<command with {name}>'). */
+/** The bay.tracker gate at `open`: when configured (and not "none"), the
+ *  tracker command must accept the name (exit 0) before a worktree opens —
+ *  one config key connects the issue tracker (spec § bay.tracker '<command
+ *  with {name}>'). */
 async function checkTracker(ctx: Ctx, name: string): Promise<void> {
   const source = createGitConfigSource(ctx.mainRepo)
   const tracker = await source.get("tracker")
@@ -308,30 +325,30 @@ async function checkTracker(ctx: Ctx, name: string): Promise<void> {
   if (code !== 0) {
     const said = err.trim()
     throw new Error(
-      `bay: new: the tracker does not accept '${name}' — ${cmd} exited ${code}${said ? `:\n${said}` : ""}\n` +
+      `bay: open: the tracker does not accept '${name}' — ${cmd} exited ${code}${said ? `:\n${said}` : ""}\n` +
         `Use a name your tracker knows, or disable the check: git config bay.tracker none`,
     )
   }
 }
 
-async function verbNew(ctx: Ctx, name: string | undefined, skipTracker: boolean): Promise<void> {
-  if (!name) throw new Error("bay: new: a name for the work is required — e.g. git bay new fix-readme")
+async function verbOpen(ctx: Ctx, name: string | undefined, skipTracker: boolean): Promise<void> {
+  if (!name) throw new Error("bay: open: a name for the work is required — e.g. git bay open fix-readme")
   // Name-shadowing guard: PRn / wtN are minted ids; a name that looks like one
   // would make every later dual-addressed argument ambiguous on purpose.
   if (/^(PR\d+|wt\d+)$/i.test(name)) {
     throw new Error(
-      `bay: new: '${name}' looks like an id, not a name — PR numbers and worktree ids are minted by the bay; ` +
+      `bay: open: '${name}' looks like an id, not a name — PR numbers and worktree ids are minted by the bay; ` +
         `pick a descriptive name (e.g. fix-readme)`,
     )
   }
   if (!skipTracker) await checkTracker(ctx, name)
-  // Law 8: new self-heals the wiring — init is idempotent and cheap.
+  // Law 8: open self-heals the wiring — init is idempotent and cheap.
   const path = await withWriteBay(ctx, async (bay) => {
     if (!existsSync(ctx.repoGit)) await bay.dispatch({ type: "init" })
-    const { events } = await bay.dispatch({ type: "co", args: { workitem: name } })
-    const provisioned = events.find((e) => e.type === "workspace.provisioned")
+    const { events } = await bay.dispatch({ type: "open", args: { workitem: name } })
+    const provisioned = events.find((e) => e.name === "worktree/provisioned")
     const p = (provisioned?.data as { path?: string } | undefined)?.path
-    if (!p) throw new Error("bay: new: no workspace.provisioned event — provisioning failed silently (bug)")
+    if (!p) throw new Error("bay: open: no worktree/provisioned event — provisioning failed silently (bug)")
     return p
   })
   console.log(path) // stdout is the cd-able path — nothing else
@@ -418,17 +435,18 @@ async function verbSubmit(ctx: Ctx, target: string | undefined, name: string | u
   }
   await withWriteBay(ctx, async (bay) => {
     const { events } = await bay.dispatch({ type: "adopt", args: { branch, name } })
-    const id = events.find((e) => e.type === "pr.opened")?.pr
+    const opened = events.find((e) => e.name === "pr/opened")
+    const id = (opened?.data as { pr?: string } | undefined)?.pr
     console.log(id ?? "")
   })
 }
 
 /** Verdict lines shared by the post-receive hook and synchronous retry. */
-function printVerdict(events: { type: string; pr?: string; data?: Record<string, unknown> }[]): void {
-  const id = events.find((e) => e.pr)?.pr ?? "?"
+function printVerdict(events: { name: string; data: Record<string, unknown> }[]): void {
+  const id = (events.find((e) => "pr" in e.data)?.data as { pr?: string } | undefined)?.pr ?? "?"
   console.log(`bay: ${id} received — checks running`)
   for (const e of events) {
-    if (e.type !== "pr.state-changed") continue
+    if (e.name !== "pr/changed") continue
     const d = e.data as { pr: string; to: string; detail?: string }
     if (d.to === "merged") {
       const m = d.detail?.match(/^merged [0-9a-f]+ onto (\S+)$/)
@@ -449,7 +467,7 @@ async function verbRetry(ctx: Ctx, target: string | undefined): Promise<void> {
     const prId = resolvePr(state, target)
     const pr = prOrTeach(state, prId, "retry")
     if (pr.state === "merged") {
-      throw new Error(`bay: retry: ${prId} is already merged — start the next piece of work: git bay new <name>`)
+      throw new Error(`bay: retry: ${prId} is already merged — start the next piece of work: git bay open <name>`)
     }
     if (pr.state === "checking" || pr.state === "reviewing") {
       throw new Error(`bay: retry: ${prId} is ${pr.state} — wait for the verdict (git bay ls ${prId})`)
@@ -465,16 +483,16 @@ async function verbRetry(ctx: Ctx, target: string | undefined): Promise<void> {
   })
 }
 
-async function verbClose(ctx: Ctx, target: string | undefined): Promise<void> {
+async function verbClose(ctx: Ctx, target: string | undefined, withdraw: boolean): Promise<void> {
   if (!target) throw new Error("bay: close: a wt-id or name is required — git bay ls shows the open ones")
   await withWriteBay(ctx, async (bay) => {
     // Host-boundary dirty preflight, BEFORE dispatch: the reducer is pure and
-    // the core is journal-first, so once it emits lease.ended the state says
-    // "ended" even if the retire effect then refuses on dirt — state and disk
-    // diverge and the worktree table stops showing a worktree that is still
-    // occupied. Refusing here keeps it open, so the fix path is simply
-    // "commit or clean, then close again". The retire handler keeps its own
-    // dirty check as the race floor. gc expiry deliberately skips this
+    // the core is journal-first, so once it emits bay/closed the state says
+    // "ended" even if the deprovision effect then refuses on dirt — state and
+    // disk diverge and the worktree table stops showing a worktree that is
+    // still occupied. Refusing here keeps it open, so the fix path is simply
+    // "commit or clean, then close again". The deprovision handler keeps its
+    // own dirty check as the race floor. gc expiry deliberately skips this
     // preflight — a timeout sweep must end idle worktrees regardless; the
     // custodian reclaim in provision covers any dirty worktree it leaves.
     const state = await bay.state()
@@ -488,7 +506,15 @@ async function verbClose(ctx: Ctx, target: string | undefined): Promise<void> {
         )
       }
     }
-    await bay.dispatch({ type: "abandon", args: { lease: lease.id } })
+    const { events } = await bay.dispatch({ type: "close", args: { lease: lease.id, withdraw, wt } })
+    // A refusal is a normal returned+journaled event (spec § rejection/refusal
+    // codes), not a throw — but the CLI still surfaces it as one (teaching
+    // stderr + exit 1), so this is the one place that bridges the two.
+    const refused = events.find((e) => e.name === "gitbay/refused")
+    if (refused) {
+      const d = refused.data as { detail: string }
+      throw new Error(`bay: close: ${d.detail}`)
+    }
   })
 }
 
@@ -497,7 +523,7 @@ async function verbRefresh(ctx: Ctx, target: string | undefined): Promise<void> 
   await withWriteBay(ctx, async (bay) => {
     const state = await bay.state()
     const { lease } = resolveWorktree(state, target, "refresh")
-    await bay.dispatch({ type: "ping", args: { lease: lease.id } })
+    await bay.dispatch({ type: "refresh", args: { lease: lease.id } })
   })
 }
 
@@ -530,7 +556,7 @@ async function verbIntegrate(ctx: Ctx, target: string | undefined, watch: boolea
       const { events } = await bay.dispatch({ type: "drain", args: prId ? { pr: prId } : undefined })
       let integrated = false
       for (const e of events) {
-        if (e.type === "pr.state-changed") {
+        if (e.name === "pr/changed") {
           const d = e.data as { pr: string; from: string; to: string; detail?: string }
           console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
           integrated = true
@@ -558,7 +584,7 @@ async function verbAudit(ctx: Ctx, json: boolean): Promise<void> {
   const findings = await withWriteBay(ctx, async (bay) => {
     const audited = mod.withAudit()(bay)
     const { events } = await audited.dispatch({ type: "audit", args: { mainRepo: ctx.mainRepo } })
-    const done = events.find((e) => e.type === "audit.completed")
+    const done = events.find((e) => e.name === "gitbay/audited")
     return ((done?.data ?? {}) as { findings?: unknown[] }).findings ?? []
   })
   if (json) console.log(JSON.stringify({ findings }))
@@ -610,30 +636,30 @@ async function hookPost(ctx: Ctx): Promise<void> {
  *  shipped behavior. */
 const GUIDE = `git bay is a small continuous-integration server for this repository: you work in a disposable worktree, plain git push opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken.
 THE LOOP
-  1. cd "$(git bay new <name>)"       # your own worktree; <name> = what you call this piece of work
-  2. edit, git add, git commit        # plain git; commit hooks guard submodule pins + identity
-  3. git push                         # the push opens your PR — checks run, then the merge; READ the remote: lines
-  4. git bay ls <PR>                  # re-read a verdict later (the PR number from the push output)
+  1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
+  2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
+  3. git push                          # the push opens your PR — checks run, then the merge; READ the remote: lines
+  4. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
-  - Done with a worktree? git bay close <wt|name> refuses while uncommitted work exists — commit or clean first; work is never deleted.
-  - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay new <name>.
+  - Done with a worktree? git bay close <bay|wt> refuses while its PR is still queued — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
+  - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
   - A bay PR is local — GitHub does not see it and gh commands do not apply.
 VOCABULARY
-  bay        the tool — this repository's merge queue (git bay init sets it up)
-  worktree   the directory you work in (ids look like wt1); disposable, yours alone
-  name       what you called the work at new — any label, or a ticket id your tracker knows
+  bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
+  worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
+  name       what you called the work at open — any label, or a ticket id your tracker knows
   PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository
   queue      submitted PRs waiting to be integrated; they merge one at a time, in order
   checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
 ADDRESSING
-  Worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
+  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
-Primed. Start: cd "$(git bay new <name>)"   (all verbs: git bay help)`
+Primed. Start: cd "$(git bay open <name>)"   (all verbs: git bay help)`
 
 /** The live half of `git bay guide`: what THIS repository's bay looks like —
  *  initialized or not, which check/merge/tracker commands are configured, how
@@ -733,7 +759,7 @@ async function main(): Promise<void> {
   const program = new Command()
   program
     .name("git bay")
-    .description("local pull requests for your repository — plain git push opens the PR (new? run: git bay guide)")
+    .description("local pull requests for your repository — plain git push opens the PR (first time? run: git bay guide)")
     .showHelpAfterError()
     .showSuggestionAfterError()
   // Every advertised verb sets its own group; the default group exists so the
@@ -756,46 +782,52 @@ async function main(): Promise<void> {
 
   program
     .command("init")
+    .aliases(["install", "setup"])
     .helpGroup("Start here:")
     .description("set up git bay for this repository (state in .git/bay/: store, journal, bay-owned repo.git + hooks)")
     .action(async () => {
       await verbInit(await resolveCtx())
     })
 
-  const cmdNew = program
-    .command("new <name>")
-    .aliases(["co", "checkout"])
-    .helpGroup("Your worktree:")
-    .description("open a worktree for a named piece of work; prints its path (cd-able)")
+  const cmdOpen = program
+    .command("open <name>")
+    .aliases(["new", "co", "checkout"])
+    .helpGroup("Your bay:")
+    .description("open a bay for a named piece of work; prints its worktree path (cd-able)")
     .action(async (name: string, opts: { workitem?: boolean }) => {
-      await verbNew(await requireBay(), name, opts.workitem === false)
+      await verbOpen(await requireBay(), name, opts.workitem === false)
     })
-  hiddenOption(cmdNew, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.tracker check)")
+  hiddenOption(cmdOpen, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.tracker check)")
 
   program
     .command("close <wt|name>")
     .aliases(["abandon", "return"])
-    .helpGroup("Your worktree:")
-    .description("close the worktree; uncommitted work is always preserved (refuses if dirty)")
-    .action(async (target: string) => {
-      await verbClose(await requireBay(), target)
+    .helpGroup("Your bay:")
+    .description("close the bay; refuses if its PR is still queued (use --withdraw) or its worktree is dirty")
+    .option("--withdraw", "also withdraw the bay's queued/rejected/in-review PR (moves it to abandoned)")
+    .action(async (target: string, opts: { withdraw?: boolean }) => {
+      await verbClose(await requireBay(), target, opts.withdraw === true)
     })
 
   program
     .command("gc")
-    .helpGroup("Your worktree:")
-    .description("expire idle worktrees (work is snapshotted first, never deleted)")
+    .helpGroup("Your bay:")
+    .description("expire idle bays (work is snapshotted first, never deleted)")
     .action(async () => {
       const ctx = await requireBay()
       await withWriteBay(ctx, async (bay) => {
+        const before = await bay.state()
         const { events } = await bay.dispatch({ type: "gc" })
+        if (events.length === 0) {
+          console.log("bay: gc clean — no idle worktrees past the timeout")
+          return
+        }
         for (const e of events) {
-          if (e.type === "lease.ended") {
-            const d = e.data as { lease: string; bay?: number | null; workitem?: string | null }
-            const wt = d.bay ? `wt${d.bay}` : d.lease
-            console.log(`bay: ${wt}${d.workitem ? ` (${d.workitem})` : ""} expired — work preserved; worktree reclaimable`)
-          }
-          if (e.type === "gc.clean") console.log("bay: gc clean — no idle worktrees past the timeout")
+          if (e.name !== "bay/closed") continue
+          const d = e.data as { bay: string; via: string }
+          const lease = before.leases[d.bay]
+          const wt = wtLabelFor(before, d.bay) ?? d.bay
+          console.log(`bay: ${wt}${lease?.workitem ? ` (${lease.workitem})` : ""} expired — work preserved; worktree reclaimable`)
         }
       })
     })
@@ -814,12 +846,12 @@ async function main(): Promise<void> {
     .command("ls [PR|name]")
     .alias("status")
     .helpGroup("PRs:")
-    .description("worktree table + every unmerged PR, or one PR's verdict")
+    .description("BAY + WORKTREE table, every unmerged PR, or one PR's verdict")
     .addHelpText(
       "after",
-      "\nColumns: AGE = time since new opened the worktree; IDLE = time since its last activity.\n" +
-        "STATE values: open (active) | stale (idle past the timeout — gc will expire it; git bay refresh <wt|name> keeps it).\n" +
-        "Addressing: worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.",
+      "\nColumns: BAY = the name given at open; WORKTREE = its wt-id. AGE = time since open; IDLE = time since last activity.\n" +
+        "STATE values: open (active) | stale (idle past the timeout — gc will expire it; git bay refresh <bay|wt> keeps it).\n" +
+        "Addressing: bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.",
     )
     .option("--json", "machine-readable output")
     .action(async (target: string | undefined, opts: { json?: boolean }) => {

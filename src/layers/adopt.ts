@@ -1,14 +1,4 @@
-import type {
-  BayCommand,
-  BayEvent,
-  BayPlugin,
-  BayRuntime,
-  BayState,
-  Layer,
-  PrId,
-  TransitionResult,
-  WorkitemId,
-} from "../types.ts"
+import type { BayCommand, BayPlugin, BayRuntime, BayState, Layer, PrId, TransitionResult, WorkitemId } from "../types.ts"
 import { nextPrId } from "../ids.ts"
 import { prOpenedEvent } from "./queue.ts"
 import { leaseForBranch } from "./receive.ts"
@@ -30,14 +20,19 @@ import { leaseForBranch } from "./receive.ts"
  *   submit stays warned" nuance is the audit layer's job (it can see the PR's
  *   null name); this reducer only records intent.
  *
+ * v0.3: the old separate `adopt.recorded` audit-trail event is gone — this
+ * reducer's ONLY event is `pr/opened {..., via: "submit"}`; `via` already says
+ * "this PR came from an explicit submit, not a worktree's push", which is all
+ * `adopt.recorded` ever added (docs/events.md § event families: DELETE adopt.*
+ * from the write path — absorbed via the `via` field).
+ *
  * Interlock rule (spec): this layer consumes only lower layers' STATE — leases
- * from withWorkspaces/receive (via leaseForBranch) and the queue slice — and
+ * from withWorktrees/receive (via leaseForBranch) and the queue slice — and
  * emits events the queue folds (prOpenedEvent). It never reaches into their
  * internals.
  */
 
 const LAYER = "adopt"
-const EV_RECORDED = "adopt.recorded"
 
 // ---------- pure lookups ----------
 
@@ -53,13 +48,13 @@ function prTrackingBranch(state: BayState, branch: string): PrId | undefined {
   return undefined
 }
 
-/** The wt-label for an open lease, read loosely from the workspaces slice so
- *  this layer does not hard-depend on withWorkspaces being registered. Falls
+/** The wt-label for an open lease, read loosely from the worktrees slice so
+ *  this layer does not hard-depend on withWorktrees being registered. Falls
  *  back to the lease's name/branch when the slice is absent. */
 function worktreeLabel(state: BayState, leaseId: string): string | undefined {
-  const ws = state.slices.workspaces as { byBay?: Record<number, string> } | undefined
-  if (!ws?.byBay) return undefined
-  for (const [num, held] of Object.entries(ws.byBay)) {
+  const wt = state.slices.worktrees as { byWorktree?: Record<number, string> } | undefined
+  if (!wt?.byWorktree) return undefined
+  for (const [num, held] of Object.entries(wt.byWorktree)) {
     if (held === leaseId) return `wt${num}`
   }
   return undefined
@@ -102,7 +97,6 @@ function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): Tra
     )
   }
 
-  const ts = bay.clock()
   const prId = nextPrId(state)
   // Belt-and-suspenders: prOpenedEvent (the builder) does not see state, so the
   // duplicate-id fail-loud lives here. prTrackingBranch already catches
@@ -111,24 +105,15 @@ function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): Tra
     throw new Error(`bay: submit: PR '${prId}' already exists — '${branch}' was submitted before`)
   }
 
-  const opened = prOpenedEvent(bay, prId, branch, name)
-  const recorded: BayEvent = {
-    v: 1,
-    ts,
-    actor: bay.actor,
-    type: EV_RECORDED,
-    pr: prId,
-    data: { branch, pr: prId, name },
-  }
-  return { state, events: [opened, recorded], effects: [] }
+  const opened = prOpenedEvent(bay, prId, branch, name, "submit", command.cause!)
+  return { state, events: [opened], effects: [] }
 }
 
 // ---------- the plugin ----------
 
 /** Built inside the plugin closure (house style): the reducer needs the
  *  runtime's clock/actor to stamp events, but the Reducer contract passes no
- *  runtime. No apply — the pr.opened event is folded by the queue;
- *  `adopt.recorded` is a journal-only audit-trail row. */
+ *  runtime. No apply — the pr/opened event is folded by the queue. */
 export function withAdopt(): BayPlugin {
   return (bay) => {
     const layer: Layer = {

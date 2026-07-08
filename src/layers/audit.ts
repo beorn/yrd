@@ -1,4 +1,5 @@
 import type {
+  AuditFinding,
   BayCommand,
   BayEvent,
   BayPlugin,
@@ -24,25 +25,23 @@ import { git, resolveBaseRef } from "./git.ts"
  * at any time, from any state, changing nothing.
  *
  * Interlock rule (spec): audit consumes only lower layers' STATE — leases from
- * withWorkspaces, and (optionally) the queue slice — never their internals. It
- * degrades gracefully: with no workspaces layer it sees no leases; with no queue
+ * withWorktrees, and (optionally) the queue slice — never their internals. It
+ * degrades gracefully: with no worktrees layer it sees no leases; with no queue
  * layer it sees no queued targets. Each check independently reports what it can.
  *
  * Exit-code contract: this layer surfaces `{ findings, clean }`; the CLI maps
  * clean → exit 0 and any finding → exit 1 (spec § verbs). `formatAudit` renders
- * the human text (law 7: every refusal names its remedy).
+ * the human text (law 7: every refusal names its remedy). Emits ONE
+ * `gitbay/audited {findings, clean}` event per run (v0.3 rename of
+ * `audit.completed` — the system-scoped `gitbay/…` family, since an audit is
+ * whole-repository, not one bay/worktree/PR).
  */
 
 const LAYER = "audit"
-const EV_COMPLETED = "audit.completed"
+const EV_AUDITED = "gitbay/audited"
 const FX_RUN = "audit.run"
 
-export type AuditFinding = {
-  kind: "stray" | "unreachable-pin" | "unnamed-ref"
-  subject: string
-  detail: string
-  remedy: string
-}
+export type { AuditFinding }
 
 // ---------- human rendering (law 7) ----------
 
@@ -188,7 +187,7 @@ const auditRunHandler: EffectHandler = async (effect: Effect, bay: BayRuntime): 
     ...(await findUnnamedRefs(mainRepo, state)),
   ]
 
-  return [makeEvent(bay, EV_COMPLETED, { findings, clean: findings.length === 0 })]
+  return [makeEvent(bay, EV_AUDITED, { findings, clean: findings.length === 0 }, effect.cause!)]
 }
 
 // ---------- the plugin ----------
