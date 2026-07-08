@@ -1,18 +1,18 @@
 // bay library — event-sourced core; capabilities land as with*() layers.
 // Design: @hab/20926-gitbay/spec.md (hh workspace).
 export * from "./types.ts"
-export { createBay, makeEvent, definePlugin } from "./core.ts"
+export { createGitbay, makeEvent, definePlugin } from "./core.ts"
 export { pipe } from "./pipe.ts"
 export { nextPrId } from "./ids.ts"
 export { createJsonlJournal } from "./journal.ts"
 export { createGitConfigSource, resolveOption } from "./config.ts"
 export {
-  withWorkspaces,
+  withWorktrees,
   staleLeases,
   DEFAULT_LEASE_TIMEOUT_MS,
-  type WorkspacesOptions,
-  type WorkspacesSlice,
-} from "./layers/workspaces.ts"
+  type WorktreesOptions,
+  type WorktreesSlice,
+} from "./layers/worktrees.ts"
 export { withQueue, queuedPrs, type QueueSlice } from "./layers/queue.ts"
 export { overlap, composeBatch, type Overlap, type SkippedTarget, type BatchResult } from "./batch-compat.ts"
 export { changedPaths } from "./layers/git.ts"
