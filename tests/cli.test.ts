@@ -206,6 +206,10 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
   beforeEach(async () => {
     ;({ root, demo, env } = await makeFixture("bay-ids-"))
     await must(["git", "bay", "init"], demo, env)
+    // This block exercises submit/check/merge/integrate as separate atomic
+    // steps, so autoMerge is off — otherwise submit's own default
+    // auto-integrate would race ahead of the manual steps under test.
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
   })
 
   afterEach(async () => {
@@ -340,6 +344,9 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
   beforeEach(async () => {
     ;({ root, demo, env } = await makeFixture("bay-alias-"))
     await must(["git", "bay", "init"], demo, env)
+    // submit's own default auto-integrate would otherwise land PR2 before the
+    // drain step below gets to demonstrate it as a separate step.
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
   })
 
   afterEach(async () => {
@@ -523,6 +530,9 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
 
   it("`in`/`int` are exact aliases of integrate (never ambiguity refusals); `i` alone stays genuinely ambiguous with init; `init` itself always resolves as the exact name", async () => {
     await must(["git", "bay", "init"], demo, env)
+    // Otherwise submit's own default auto-integrate would land the PR before
+    // the explicit `in`/`int` integrate call below gets a chance to run.
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
     await must(["git", "-C", demo, "branch", "task/x"], demo, env)
     const id1 = (await must(["git", "bay", "adopt", "task/x"], demo, env)).stdout.trim()
     await must(["git", "bay", "submit", id1], demo, env) // pushed → submitted
@@ -658,6 +668,9 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
 
   it("bare ls shows every non-merged PR — a rejected one is never invisible", async () => {
     await must(["git", "bay", "init"], demo, env)
+    // Otherwise submit's own default auto-integrate would land the PR before
+    // the explicit integrate call below gets to reject it with BAY_MERGE_COMMAND=false.
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
     await must(["git", "-C", demo, "branch", "task/x"], demo, env)
     const id = (await must(["git", "bay", "adopt", "task/x"], demo, env)).stdout.trim()
     await must(["git", "bay", "submit", id], demo, env) // pushed → submitted
@@ -751,7 +764,7 @@ describe("git bay CLI — close --withdraw (v0.3: a bay's PR must be disposition
   })
 })
 
-describe("git bay CLI — push creates (pushed), submit asks to merge (submitted)", () => {
+describe("git bay CLI — push creates (pushed); submit asks to merge and auto-integrates by default (bay.autoMerge)", () => {
   let root: string
   let demo: string
   let env: Record<string, string>
@@ -782,8 +795,27 @@ describe("git bay CLI — push creates (pushed), submit asks to merge (submitted
     expect(state.prs.PR1!.state).toBe("pushed")
   })
 
-  it("git bay submit <PR> submits it (pushed → submitted); git bay integrate lands it", async () => {
+  it("git bay submit <PR> auto-integrates by default — one call reaches `merged` (pushed → submitted → ... → merged)", async () => {
     const opened = await must(["git", "bay", "open", "two-step"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: f"], wtPath, env)
+    await must(["git", "-C", wtPath, "push"], wtPath, env) // creates PR1, pushed
+
+    const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
+    expect(submit.stdout).toContain("bay: PR1 submitted → checking")
+    expect(submit.stdout).toContain("bay: PR1 checking → checked")
+    expect(submit.stdout).toContain("bay: PR1 checked → merging")
+    expect(submit.stdout).toContain("bay: PR1 merging → merged")
+
+    const ls = await must(["git", "bay", "ls", "PR1"], demo, env)
+    expect(ls.stdout).toContain("PR1 merged")
+  })
+
+  it("bay.autoMerge=false rests submit at `submitted` — a separate git bay integrate lands it", async () => {
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+    const opened = await must(["git", "bay", "open", "manual-mode"], demo, env)
     const wtPath = opened.stdout.trim()
     await writeFile(join(wtPath, "f.txt"), "x\n", "utf8")
     await must(["git", "-C", wtPath, "add", "f.txt"], wtPath, env)
@@ -816,13 +848,26 @@ describe("git bay CLI — push creates (pushed), submit asks to merge (submitted
     expect(push.stderr).toMatch(/remote: bay: PR1 rejected — check 'false' failed \(exit 1\)/)
   })
 
-  it("bay.autoQueue=true makes a bare push behave exactly like -o submit (today's pre-v0.3 default)", async () => {
+  it("bay.autoQueue=true makes a bare push behave exactly like -o submit (the pre-v0.3 legacy default, still honored for back-compat)", async () => {
     await must(["git", "-C", demo, "config", "bay.autoQueue", "true"], demo, env)
     const opened = await must(["git", "bay", "open", "auto-queued"], demo, env)
     const wtPath = opened.stdout.trim()
     await writeFile(join(wtPath, "h.txt"), "z\n", "utf8")
     await must(["git", "-C", wtPath, "add", "h.txt"], wtPath, env)
     await must(["git", "-C", wtPath, "commit", "-qm", "feat: h"], wtPath, env)
+
+    const push = await must(["git", "-C", wtPath, "push"], wtPath, env) // NO -o option at all
+    expect(push.stderr).toMatch(/remote: bay: PR1 received — checks running/)
+    expect(push.stderr).toMatch(/remote: bay: PR1 merged onto main \(checks ✓\)/)
+  })
+
+  it("bay.autoSubmit=true makes a bare push submit too — with autoMerge still on by default, it ships all the way", async () => {
+    await must(["git", "-C", demo, "config", "bay.autoSubmit", "true"], demo, env)
+    const opened = await must(["git", "bay", "open", "auto-submit"], demo, env)
+    const wtPath = opened.stdout.trim()
+    await writeFile(join(wtPath, "j.txt"), "z\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "j.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "feat: j"], wtPath, env)
 
     const push = await must(["git", "-C", wtPath, "push"], wtPath, env) // NO -o option at all
     expect(push.stderr).toMatch(/remote: bay: PR1 received — checks running/)
@@ -837,6 +882,10 @@ describe("git bay CLI — push creates (pushed), submit asks to merge (submitted
   })
 
   it("submit refuses a PR that is already submitted", async () => {
+    // Rest at `submitted` so the second submit call finds it still there —
+    // otherwise the first call's default auto-integrate would already have
+    // landed it, and the second call would report "already merged" instead.
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
     await must(["git", "-C", demo, "branch", "task/dup"], demo, env)
     const id = (await must(["git", "bay", "adopt", "task/dup"], demo, env)).stdout.trim()
     await must(["git", "bay", "submit", id], demo, env)

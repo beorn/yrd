@@ -213,7 +213,7 @@ describe("withAdopt — receiver seam (submit-then-push, no duplicate PR)", () =
     const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-z", name: "wi-z" } })
     const adoptedId = events.find((e) => e.name === "pr/opened")!.data.pr
 
-    await bay.dispatch({ type: "submit", args: { branch: "legacy-z", sha: "f".repeat(40), queued: true } })
+    await bay.dispatch({ type: "submit", args: { branch: "legacy-z", sha: "f".repeat(40), queued: true, autoMerge: true } })
     const state = await bay.state()
     expect(Object.keys(state.prs)).toEqual([adoptedId]) // ONE PR, the adopted one
     expect(state.prs[adoptedId as string]!.state).toBe("checking")
