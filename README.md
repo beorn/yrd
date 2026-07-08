@@ -2,6 +2,8 @@
 
 **git bay** is a small continuous-integration server that lives inside your git repository: you work in a disposable worktree, plain `git push` opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken. No hosted service, no background daemon — it's a plain CLI.
 
+Where this is going: [docs/vision.md](docs/vision.md) (the why and the vocabulary) and [docs/roadmap.md](docs/roadmap.md) (the target design, versioned).
+
 ## Why you'd want it
 
 **You want git bay if…**
