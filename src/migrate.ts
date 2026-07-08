@@ -205,12 +205,15 @@ export async function migrateJournal(dir: string): Promise<{ migrated: number; d
       case "pr.opened": {
         const pr = d.pr as string
         const via = prMintedByLease.has(pr) ? "push" : "submit"
+        // v1 never had an `open`-then-submit split (§6 addendum, v0.3-later) —
+        // every v1 PR was born directly into `queued`. queued: true preserves
+        // that semantics exactly on migration.
         out.push({
           id: nextId(),
           ts: event.ts,
           name: "pr/opened",
           cause,
-          data: { pr, target: d.target, workName: d.name ?? null, via },
+          data: { pr, target: d.target, workName: d.name ?? null, via, queued: true },
         })
         break
       }

@@ -4,27 +4,31 @@ import { prOpenedEvent } from "./queue.ts"
 import { leaseForBranch } from "./receive.ts"
 
 /**
- * withAdopt — the reducer behind `git bay submit <branch|name>` (v0.2: the old
- * `adopt` verb's code, folded into the one advertised submit verb; the CLI
- * aliases `enqueue` and `adopt` land here too). It is pure bookkeeping over the
- * queue: no effects, no git. It correlates a branch created outside a worktree
- * to a fresh PR number and enqueues it as a first-class PR.
+ * withAdopt — the reducer behind `git bay adopt <branch>` (§6 addendum:
+ * `adopt` is now its OWN advertised verb — "create a PR for an existing
+ * branch, landing in `open`" — after `submit` was repurposed to mean "ask to
+ * merge" (open → queued; see queue.ts's reduceQueue). `enqueue` remains a
+ * hidden CLI alias of `adopt`, preserving its historical behavior). It is
+ * pure bookkeeping over the queue: no effects, no git. It correlates a branch
+ * created outside a worktree to a fresh PR number and lands it as a
+ * first-class PR in `open` — never auto-queued (that is `submit`'s job now).
  *
- * Design note — what submit-of-a-branch buys and its audit contract:
- *   Submitting a legacy branch makes it a first-class PR so the merge worker /
+ * Design note — what adopting a branch buys and its audit contract:
+ *   Adopting a legacy branch makes it a first-class PR so the merge worker /
  *   receiver submit pipeline can process it, and so `git bay audit` stops
- *   flagging it as an unnamed ref — ONCE a name is provided. A nameless submit
- *   (name = null) still enters the queue but stays audit-warned until v0.3's
+ *   flagging it as an unnamed ref — ONCE a name is provided. A nameless adopt
+ *   (name = null) still lands as a PR but stays audit-warned until v0.3's
  *   hard refusal (spec/bead policy: no branch without a name at the front door;
- *   submit is the reconciliation ramp, not a bypass). Enforcing the "nameless
- *   submit stays warned" nuance is the audit layer's job (it can see the PR's
+ *   adopt is the reconciliation ramp, not a bypass). Enforcing the "nameless
+ *   adopt stays warned" nuance is the audit layer's job (it can see the PR's
  *   null name); this reducer only records intent.
  *
  * v0.3: the old separate `adopt.recorded` audit-trail event is gone — this
- * reducer's ONLY event is `pr/opened {..., via: "submit"}`; `via` already says
- * "this PR came from an explicit submit, not a worktree's push", which is all
- * `adopt.recorded` ever added (docs/events.md § event families: DELETE adopt.*
- * from the write path — absorbed via the `via` field).
+ * reducer's ONLY event is `pr/opened {..., via: "submit", queued: false}`;
+ * `via` already says "this PR came from an explicit adopt, not a worktree's
+ * push", which is all `adopt.recorded` ever added (docs/events.md § event
+ * families: DELETE adopt.* from the write path — absorbed via the `via`
+ * field).
  *
  * Interlock rule (spec): this layer consumes only lower layers' STATE — leases
  * from withWorktrees/receive (via leaseForBranch) and the queue slice — and
@@ -65,34 +69,34 @@ function worktreeLabel(state: BayState, leaseId: string): string | undefined {
 function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const rawBranch = command.args?.branch
   if (typeof rawBranch !== "string" || rawBranch.trim() === "") {
-    throw new Error("bay: submit: 'branch' (an existing branch name) is required")
+    throw new Error("bay: adopt: 'branch' (an existing branch name) is required")
   }
   const branch = rawBranch
 
   const rawName = command.args?.name
   if (rawName !== undefined && (typeof rawName !== "string" || rawName.trim() === "")) {
-    throw new Error("bay: submit: 'name' must be a non-empty string when provided")
+    throw new Error("bay: adopt: 'name' must be a non-empty string when provided")
   }
   const name: WorkitemId | null = typeof rawName === "string" ? rawName : null
 
   // An OPEN worktree already owns this branch — plain `git push` from inside it
-  // is the submit path (there is no `git bay push`). An ended lease is fine:
-  // submitting recovers closed-out or legacy work.
+  // is the create path (there is no `git bay push`). An ended lease is fine:
+  // adopting recovers closed-out or legacy work.
   const lease = leaseForBranch(state, branch)
   if (lease && lease.endedAt === undefined) {
     const wt = worktreeLabel(state, lease.id) ?? `'${lease.workitem ?? lease.branch}'`
     throw new Error(
-      `bay: submit: '${branch}' is already open in worktree ${wt} — ` +
-        `plain git push from that worktree submits it, or close it first: git bay close ${wt}`,
+      `bay: adopt: '${branch}' is already open in worktree ${wt} — ` +
+        `plain git push from that worktree opens it, or close it first: git bay close ${wt}`,
     )
   }
 
-  // Already a first-class PR — refuse the double-submit, naming it.
+  // Already a first-class PR — refuse the double-adopt, naming it.
   const tracked = prTrackingBranch(state, branch)
   if (tracked) {
     const pr = state.prs[tracked]
     throw new Error(
-      `bay: submit: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "queued"}) — ` +
+      `bay: adopt: '${branch}' is already tracked by ${tracked} (${pr?.state ?? "open"}) — ` +
         `git bay ls ${tracked}`,
     )
   }
@@ -100,12 +104,14 @@ function reduceAdopt(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   const prId = nextPrId(state)
   // Belt-and-suspenders: prOpenedEvent (the builder) does not see state, so the
   // duplicate-id fail-loud lives here. prTrackingBranch already catches
-  // same-branch re-submits; this catches a bare id collision.
+  // same-branch re-adopts; this catches a bare id collision.
   if (state.prs[prId]) {
-    throw new Error(`bay: submit: PR '${prId}' already exists — '${branch}' was submitted before`)
+    throw new Error(`bay: adopt: PR '${prId}' already exists — '${branch}' was adopted before`)
   }
 
-  const opened = prOpenedEvent(bay, prId, branch, name, "submit", command.cause!)
+  // queued: false — adopt only ever lands in `open`; `git bay submit <PR>`
+  // (or `queue`) is the separate ask-to-merge step (§6 addendum).
+  const opened = prOpenedEvent(bay, prId, branch, name, "submit", false, command.cause!)
   return { state, events: [opened], effects: [] }
 }
 

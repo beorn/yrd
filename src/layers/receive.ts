@@ -79,16 +79,22 @@ function reduceInit(bay: BayRuntime, state: BayState, opts: ReceiveOptions): Tra
   return { state, events: [], effects: [effect] }
 }
 
-/** submit {branch, sha}: correlate to a lease/PR, open the PR (or re-queue a
- *  rejected one as its next revision), transition queued→checking, and hand the
- *  pipeline to the submit.run effect. Doors-closed (already merged) is refused
- *  HERE too — the pre-receive hook refuses earlier for UX, but the reducer is
- *  the layer that must hold without the hook (law 4: the receiver refuses last). */
+/** submit {branch, sha, queued?}: correlate to a lease/PR, create the PR (or
+ *  resume a rejected one as its next revision), and — only when `queued` is
+ *  true (§6 addendum: `-o submit`/`-o wait`/`bay.autoQueue`, computed by the
+ *  CLI host before dispatch) — move it into `queued` and hand the pipeline to
+ *  the submit.run effect. A bare push (queued: false/undefined) creates the
+ *  PR in `open` and stops there: no check runs, nothing merges, until
+ *  `git bay submit <PR>` (or a later fused push) asks to land it. Doors-closed
+ *  (already merged/abandoned) is refused HERE too — the pre-receive hook
+ *  refuses earlier for UX, but the reducer is the layer that must hold
+ *  without the hook (law 4: the receiver refuses last). */
 function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
   const branch = command.args?.branch
   const sha = command.args?.sha
   if (typeof branch !== "string" || branch === "") throw new Error("bay: submit: 'branch' is required")
   if (typeof sha !== "string" || sha === "") throw new Error("bay: submit: 'sha' is required")
+  const queued = command.args?.queued === true
 
   // Correlation order: the worktree wins (lease → PR number), then a PR already
   // tracking this branch (push = a revision of it, never a duplicate), then a
@@ -99,36 +105,63 @@ function reduceSubmit(bay: BayRuntime, state: BayState, command: BayCommand): Tr
   const existing = state.prs[prId]
 
   const events: BayEvent[] = []
+  const runPipeline = (): TransitionResult => {
+    events.push(stateChangeEvent(bay, prId, "queued", "checking", command.cause!))
+    const effect: Effect = {
+      type: FX_SUBMIT,
+      data: { pr: prId, branch, sha, bayPath: lease?.path ?? null, lease: lease?.id ?? null },
+    }
+    return { state, events, effects: [effect] }
+  }
+
   if (existing) {
     if (existing.state === "merged") {
       throw new Error(
         `bay: doors closed — ${prId} for '${branch}' is already merged. ` +
-          `Start the next piece of work in a fresh worktree: git bay open <name>`,
+          `Start the next piece of work in a fresh bay: git bay open <name>`,
+      )
+    }
+    if (existing.state === "abandoned") {
+      throw new Error(
+        `bay: doors closed — ${prId} for '${branch}' was withdrawn. ` +
+          `Start the next piece of work in a fresh bay: git bay open <name>`,
       )
     }
     if (existing.state === "rejected") {
-      // Re-push after rejection: same PR number, next revision.
+      // Re-push after rejection: same PR number, next revision — a retry-by-push
+      // always re-runs the pipeline, regardless of the queued flag.
       events.push(
         stateChangeEvent(bay, prId, "rejected", "queued", command.cause!, {
           detail: `re-push of ${branch}`,
           revision: existing.revision + 1,
         }),
       )
-    } else if (existing.state !== "queued") {
-      throw new Error(
-        `bay: ${prId} is ${existing.state} — wait for the verdict (git bay ls ${prId})`,
-      )
+      return runPipeline()
     }
-  } else {
-    events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null, "push", command.cause!))
+    if (existing.state === "open") {
+      if (!queued) {
+        // Still just iterating before asking to land — nothing changed PR-wise
+        // (git already reports the new commits); non-event, nothing to journal.
+        return { state, events: [], effects: [] }
+      }
+      events.push(stateChangeEvent(bay, prId, "open", "queued", command.cause!))
+      return runPipeline()
+    }
+    if (existing.state === "queued") {
+      // Already queued (e.g. `retry`'s own requeue-then-resubmit dance already
+      // moved it here in an earlier dispatch this same command sequence) —
+      // just run the pipeline; nothing new to transition into.
+      return runPipeline()
+    }
+    throw new Error(`bay: ${prId} is ${existing.state} — wait for the verdict (git bay ls ${prId})`)
   }
-  events.push(stateChangeEvent(bay, prId, "queued", "checking", command.cause!))
 
-  const effect: Effect = {
-    type: FX_SUBMIT,
-    data: { pr: prId, branch, sha, bayPath: lease?.path ?? null, lease: lease?.id ?? null },
+  // Brand new PR from this push.
+  events.push(prOpenedEvent(bay, prId, branch, lease?.workitem ?? null, "push", queued, command.cause!))
+  if (!queued) {
+    return { state, events, effects: [] } // created, stops at `open` — no pipeline yet
   }
-  return { state, events, effects: [effect] }
+  return runPipeline()
 }
 
 // ---------- effect handlers (async; the only I/O) ----------
@@ -311,7 +344,13 @@ export async function preReceiveCheck(
     if (pr?.state === "merged") {
       throw new Error(
         `bay: doors closed — ${pr.id} for '${branch}' is already merged. ` +
-          `Start the next piece of work in a fresh worktree: git bay open <name>`,
+          `Start the next piece of work in a fresh bay: git bay open <name>`,
+      )
+    }
+    if (pr?.state === "abandoned") {
+      throw new Error(
+        `bay: doors closed — ${pr.id} for '${branch}' was withdrawn. ` +
+          `Start the next piece of work in a fresh bay: git bay open <name>`,
       )
     }
 

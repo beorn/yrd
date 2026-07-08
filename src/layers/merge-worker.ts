@@ -79,6 +79,9 @@ function reduceDrain(bay: BayRuntime, state: BayState, command: BayCommand): Tra
     const pr = state.prs[rawPr]
     if (!pr) throw new Error(`bay: integrate: no PR '${rawPr}' — git bay ls lists them`)
     if (pr.state === "merged") throw new Error(`bay: integrate: ${rawPr} is already merged — nothing to integrate`)
+    if (pr.state === "open") {
+      throw new Error(`bay: integrate: ${rawPr} hasn't been submitted yet — git bay submit ${rawPr}`)
+    }
     if (pr.state !== "queued") {
       throw new Error(
         `bay: integrate: ${rawPr} is ${pr.state} — put it back in the queue first: git bay retry ${rawPr}`,

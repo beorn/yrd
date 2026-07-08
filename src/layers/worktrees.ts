@@ -214,7 +214,10 @@ function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   const addressedAs = typeof command.args?.wt === "string" ? command.args.wt : leaseId
 
   if (pr && pr.state !== "merged" && pr.state !== "abandoned") {
-    const withdrawable = pr.state === "queued" || pr.state === "rejected" || pr.state === "reviewing"
+    // §6 addendum: `open` joined the withdrawable set — a PR born by a bare
+    // push (never submitted) is exactly as "still live" as a queued one.
+    const withdrawable =
+      pr.state === "open" || pr.state === "queued" || pr.state === "rejected" || pr.state === "reviewing"
     if (!withdraw) {
       const detail =
         `${pr.id} is ${pr.state} — integrate it (git bay integrate ${pr.id}), ` +
