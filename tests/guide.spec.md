@@ -10,30 +10,30 @@ The static half must be complete with no repository present (an agent can read i
 $ git bay guide
 git bay is a small continuous-integration server for this repository: you work in a disposable worktree, plain git push opens a local pull request, and git bay integrates it into main when the checks pass — one at a time, so main is never broken.
 THE LOOP
-  1. cd "$(git bay new <name>)"       # your own worktree; <name> = what you call this piece of work
-  2. edit, git add, git commit        # plain git; commit hooks guard submodule pins + identity
-  3. git push                         # the push opens your PR — checks run, then the merge; READ the remote: lines
-  4. git bay ls <PR>                  # re-read a verdict later (the PR number from the push output)
+  1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
+  2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
+  3. git push                          # the push opens your PR — checks run, then the merge; READ the remote: lines
+  4. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
-  - Done with a worktree? git bay close <wt|name> refuses while uncommitted work exists — commit or clean first; work is never deleted.
-  - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay new <name>.
+  - Done with a worktree? git bay close <bay|wt> refuses while its PR is still queued — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
+  - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
   - A bay PR is local — GitHub does not see it and gh commands do not apply.
 VOCABULARY
-  bay        the tool — this repository's merge queue (git bay init sets it up)
-  worktree   the directory you work in (ids look like wt1); disposable, yours alone
-  name       what you called the work at new — any label, or a ticket id your tracker knows
+  bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
+  worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
+  name       what you called the work at open — any label, or a ticket id your tracker knows
   PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository
   queue      submitted PRs waiting to be integrated; they merge one at a time, in order
   checks     the command git bay runs before integrating a PR (git config bay.check '<command>'); exit 0 means pass
 ADDRESSING
-  Worktree verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
+  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
-Primed. Start: cd "$(git bay new <name>)"   (all verbs: git bay help)
+Primed. Start: cd "$(git bay open <name>)"   (all verbs: git bay help)
 
 THIS DIRECTORY
   not a git repository — cd into your repo first, then: git bay init

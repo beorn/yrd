@@ -11,14 +11,14 @@ bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
 $ git config bay.check "true"
 ```
 
-## Open a worktree for a named piece of work
+## Open a bay for a named piece of work
 
-PR numbers are sequential per repository, so the first worktree's PR is PR1 — the doc can assert it literally.
+PR numbers are sequential per repository, so the first bay's PR is PR1 — the doc can assert it literally.
 
 ```console
-$ cd "$(git bay new fix-readme)"
+$ cd "$(git bay open fix-readme)"
 $ git bay ls
-WORKTREE  NAME        STATE  AGE  IDLE
+WORKTREE  BAY         STATE  AGE  IDLE
 wt1       fix-readme  open   {{age:/\d+[smhd]\s+/}}{{idle:/\d+[smhd]\s*/}}← you
 ```
 
@@ -34,7 +34,7 @@ $ git push -o wait
 ! ...
 ```
 
-## The PR landed, the worktree closed
+## The PR landed, the bay closed
 
 ```console
 $ git bay ls PR1

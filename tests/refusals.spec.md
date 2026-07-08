@@ -22,7 +22,7 @@ that failed, with its exit code and output.
 
 ```console
 $ git config bay.check "false"
-$ cd "$(git bay new red-check)"
+$ cd "$(git bay open red-check)"
 $ echo hello > README.md && git add README.md
 $ git commit -qm "docs: add readme"
 $ git push -o wait
@@ -55,14 +55,14 @@ PR1 merged {{sha:/[0-9a-f]{40}/}} onto main (checks: ✓)
 
 ## Dirty close refuses
 
-`close` ends a worktree, but it never destroys uncommitted work — the reason
+`close` ends a bay, but it never destroys uncommitted work — the reason
 this project exists (spec § Design laws #5, "the loan closes at submit"). The
 refusal happens at the door, BEFORE anything journals: the worktree stays
-yours. Note the dual addressing: the argument is the NAME given at `new`; the
+yours. Note the dual addressing: the argument is the NAME given at `open`; the
 refusal answers with the worktree id (`wt1`), and either form works.
 
 ```console
-$ cd "$DEMO" && cd "$(git bay new dirty-close)"
+$ cd "$DEMO" && cd "$(git bay open dirty-close)"
 $ echo "uncommitted change" > scratch.txt
 $ git bay close dirty-close
 ! bay: refusing to close wt1 — the worktree at ... has uncommitted work:
@@ -70,7 +70,7 @@ $ git bay close dirty-close
 ! Commit or push it first; bay never deletes uncommitted work. The worktree is still yours.
 [1]
 $ git bay ls
-WORKTREE  NAME         STATE  AGE  IDLE
+WORKTREE  BAY          STATE  AGE  IDLE
 wt1       dirty-close  open   ...
 ```
 
@@ -84,7 +84,7 @@ $ rm scratch.txt
 $ cd "$DEMO"
 $ git bay close dirty-close
 $ git bay ls
-no open worktrees — git bay new <name> opens one
+no open worktrees — git bay open <name> opens one
 ```
 
 (The `cd` out first matters: a successful close removes the worktree directory,
@@ -92,14 +92,14 @@ and a shell left standing in a removed directory can't run anything git after.)
 
 ## Doors closed
 
-The signature refusal, from a fresh worktree: once a PR is merged, its branch
+The signature refusal, from a fresh bay: once a PR is merged, its branch
 is a closed door — re-pushing it (even a new, unrelated commit) is refused
 before it ever reaches a check. Note the PR number: `dirty-close` above burned
-PR2 (a worktree pre-mints its number at `new`, and a number is never reused),
-so this worktree's PR is PR3.
+PR2 (a bay pre-mints its PR number at `open`, and a number is never reused),
+so this bay's PR is PR3.
 
 ```console
-$ cd "$DEMO" && cd "$(git bay new doors-closed)"
+$ cd "$DEMO" && cd "$(git bay open doors-closed)"
 $ echo hello > doors-closed.md && git add doors-closed.md
 $ git commit -qm "docs: doors closed demo"
 $ git push -o wait
@@ -109,9 +109,37 @@ $ git push -o wait
 ! ...
 $ git commit -qm wip --allow-empty && git push
 ! ...
-! remote: bay: doors closed — PR3 for 'task/doors-closed' is already merged. Start the next piece of work in a fresh worktree: git bay new <name>
+! remote: bay: doors closed — PR3 for 'task/doors-closed' is already merged. Start the next piece of work in a fresh worktree: git bay open <name>
 ! ...
 [1]
+```
+
+## Close refuses a bay whose PR is still live — withdraw it explicitly
+
+v0.3: `close` refuses when the bay's own PR hasn't reached a terminal
+disposition (queued, checking, merging, reviewing, or rejected-but-not-yet-
+retried) — closing silently while a PR could still land is exactly the class
+of surprise this project exists to prevent. The refusal names all three ways
+out: integrate it, retry it, or `close --withdraw` it (which moves the PR to
+`abandoned` and then closes).
+
+```console
+$ cd "$DEMO" && git config bay.check "false"
+$ cd "$(git bay open flaky)"
+$ echo hello > flaky.md && git add flaky.md
+$ git commit -qm "docs: flaky demo"
+$ git push -o wait
+! ...
+! remote: bay: PR4 received — checks running
+! remote: bay: PR4 rejected — check 'false' failed (exit 1):
+! ...
+$ git bay close flaky
+! bay: close: PR4 is rejected — integrate it (git bay integrate PR4), retry it (git bay retry PR4), or withdraw it (git bay close --withdraw wt1)
+[1]
+$ cd "$DEMO"
+$ git bay close --withdraw flaky
+$ git bay ls PR4
+PR4 abandoned
 ```
 
 Assertions above follow the same mdspec idioms as gitbay.spec.md (see its
