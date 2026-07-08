@@ -9,8 +9,8 @@ Manages the directories work happens in. Core-tier: always in the default compos
 ## Shipped today
 
 - `open <name>` opens a bay (prints a cd-able path; `new`/`co`/`checkout` are hidden aliases), `close` ends it (refuses if dirty, or if its PR is still live — see below), `refresh` resets the idle clock, `gc` expires idle bays after snapshotting the branch tip to a findability ref.
-- `close --withdraw`: closing a bay whose PR hasn't reached a terminal state (open, queued, checking, merging, reviewing, or rejected) refuses and teaches the three ways out — integrate it, retry it, or withdraw it. `--withdraw` moves the PR to `abandoned` and then closes.
-- The bay's remote points at the bay-owned repo, so plain `git push` opens the PR (§6 addendum: creation and the ask-to-merge are separate acts — see [docs/events.md](../events.md)).
+- `close --withdraw`: closing a bay whose PR hasn't reached a terminal state (pushed, submitted, checking, checked, merging, reviewing, or rejected) refuses and teaches the three ways out — integrate it, retry it, or withdraw it. `--withdraw` moves the PR to `closed` and then closes the bay — but only a resting PR (pushed, submitted, checked, rejected, or reviewing) can be withdrawn; one still actively checking or merging must finish first.
+- The bay's remote points at the bay-owned repo, so plain `git push` opens the PR — creating a PR and asking to merge it are separate acts (see [docs/events.md](../events.md)).
 
 ## Planned (v0.4)
 

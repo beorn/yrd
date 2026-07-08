@@ -12,9 +12,9 @@ store: km       # PRs are nodes in a km vault: queue order = tree order, issues 
 
 ## What a store owns
 
-The store is the **authority for records and their order**: `prs.get/put/list(inQueueOrder)`, `worktrees.get/put/list`. Each kind answers "what's the queue order" its own way — sqlite by an index column, a tree-shaped store by node position, which makes "move this PR up the queue" an ordinary edit in that system. The append-only **journal stays gitbay's flight recorder** in every store (jsonl, cheap appends on the hot path): it's history and audit, not authority.
+The store is the **authority for records and their order**: `prs.get/put/list(inQueueOrder)`, `worktrees.get/put/list`. A PR record carries its id, name, phase, revision, and the worktree/lease it's loaned to (which carries its branch — see [model.md](model.md) § What the store holds); `open` is derived from phase, never stored. Each kind answers "what's the queue order" its own way — sqlite by an index column, a tree-shaped store by node position, which makes "move this PR up the queue" an ordinary edit in that system. The append-only **journal stays gitbay's flight recorder** in every store (jsonl, cheap appends on the hot path): it's history and audit, not authority.
 
-Note this is the interesting half of "are PRs what we queue?" — yes: there is no separate queue entity. The queue is the PRs currently in state `queued`, in order. A pluggable queue store is a pluggable PR store.
+Note this is the interesting half of "are PRs what we queue?" — yes: there is no separate queue entity. The queue is the PRs currently `submitted`, in order. A pluggable queue store is a pluggable PR store.
 
 ## The one-page rule
 
