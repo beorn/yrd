@@ -6,7 +6,7 @@ import {
   createGitbay,
   createJsonlJournal,
   pipe,
-  queuedPrs,
+  submittedPrs,
   withMergeWorker,
   withQueue,
   withWorktrees,
@@ -37,9 +37,9 @@ function queueSlice(state: BayState): unknown {
 }
 
 describe("withAdopt — mint + enqueue (the submit-a-branch reducer)", () => {
-  it("mints the next sequential PR id, records via: submit, and lands in `open` (never auto-queued)", async () => {
+  it("mints the next sequential PR id, records via: submit, and lands in `pushed` (never auto-submitted)", async () => {
     const bay = await buildAdoptBay(await tmpJournalPath())
-    await bay.dispatch({ type: "enqueue", args: { target: "first-branch" } }) // PR1, queued directly (the raw primitive)
+    await bay.dispatch({ type: "enqueue", args: { target: "first-branch" } }) // PR1, submitted directly (the raw primitive)
 
     const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-x", name: "wi-x" } })
 
@@ -50,10 +50,10 @@ describe("withAdopt — mint + enqueue (the submit-a-branch reducer)", () => {
     expect(opened.data).toMatchObject({ target: "legacy-x", workName: "wi-x", via: "submit", queued: false })
 
     const state = await bay.state()
-    // §6 addendum: adopt lands in `open` — it is NOT in the queue until an
-    // explicit `submit`/`queue` asks to merge it.
-    expect(queuedPrs(state).map((c) => c.id)).toEqual(["PR1"])
-    expect(state.prs[prId]).toMatchObject({ id: prId, name: "wi-x", state: "open" })
+    // adopt lands in `pushed` — it is NOT submitted until an explicit
+    // `submit` asks to merge it.
+    expect(submittedPrs(state).map((c) => c.id)).toEqual(["PR1"])
+    expect(state.prs[prId]).toMatchObject({ id: prId, name: "wi-x", state: "pushed" })
   })
 
   it("submits without a name (records workName: null)", async () => {
@@ -158,7 +158,7 @@ describe("withAdopt — replay", () => {
 })
 
 describe("withAdopt — pipeline acceptance", () => {
-  it("an adopted PR, once queued (submit), drains through the merge worker to merged", async () => {
+  it("an adopted PR, once submitted, integrates through the merge worker to merged", async () => {
     const bay = pipe(
       createGitbay({ store: openStore(await tmpJournalPath()), clock: CLOCK, actor: ACTOR }),
       withQueue(),
@@ -167,18 +167,18 @@ describe("withAdopt — pipeline acceptance", () => {
     )
     const { events } = await bay.dispatch({ type: "adopt", args: { branch: "legacy-x", name: "wi-x" } })
     const prId = events.find((e) => e.name === "pr/opened")!.data.pr as PrId
-    expect((await bay.state()).prs[prId]!.state).toBe("open") // adopt never auto-queues (§6 addendum)
+    expect((await bay.state()).prs[prId]!.state).toBe("pushed") // adopt never auto-submits
 
-    // submit/queue is the separate ask-to-merge step; only then does the
-    // pipeline (which `drain` runs) have anything to do.
+    // submit ("queue" internally) is the separate ask-to-merge step; only
+    // then does the pipeline (which `integrate` runs) have anything to do.
     await bay.dispatch({ type: "queue", args: { pr: prId } })
-    await bay.dispatch({ type: "drain" })
+    await bay.dispatch({ type: "integrate" })
     expect((await bay.state()).prs[prId]!.state).toBe("merged")
   })
 })
 
 describe("withAdopt — receiver seam (submit-then-push, no duplicate PR)", () => {
-  it("a bare re-push of an adopted (still-open) branch is a no-op — same PR, no duplicate, no transition", async () => {
+  it("a bare re-push of an adopted (still-pushed) branch is a no-op — same PR, no duplicate, no transition", async () => {
     const { withReceive } = await import("../src/layers/receive.ts")
     const stubSubmit = (bay0: ReturnType<typeof createGitbay>) =>
       bay0.use({ name: "stub-submit", effects: { "submit.run": async () => [] } })
@@ -193,13 +193,13 @@ describe("withAdopt — receiver seam (submit-then-push, no duplicate PR)", () =
     const adoptedId = events.find((e) => e.name === "pr/opened")!.data.pr
 
     const { events: pushEvents } = await bay.dispatch({ type: "submit", args: { branch: "legacy-y", sha: "f".repeat(40) } })
-    expect(pushEvents).toEqual([]) // still `open`, no queued flag — non-event
+    expect(pushEvents).toEqual([]) // still `pushed`, no queued flag — non-event
     const state = await bay.state()
     expect(Object.keys(state.prs)).toEqual([adoptedId]) // ONE PR, the adopted one — never duplicated
-    expect(state.prs[adoptedId as string]!.state).toBe("open")
+    expect(state.prs[adoptedId as string]!.state).toBe("pushed")
   })
 
-  it("a fused push (-o submit) of an adopted (still-open) branch reuses the PR id and runs the pipeline", async () => {
+  it("a fused push (-o submit) of an adopted (still-pushed) branch reuses the PR id and runs the pipeline", async () => {
     const { withReceive } = await import("../src/layers/receive.ts")
     const stubSubmit = (bay0: ReturnType<typeof createGitbay>) =>
       bay0.use({ name: "stub-submit", effects: { "submit.run": async () => [] } })
