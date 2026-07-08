@@ -6,6 +6,7 @@ export { pipe } from "./pipe.ts"
 export { nextPrId } from "./ids.ts"
 export { createJsonlJournal } from "./journal.ts"
 export { createGitConfigSource, resolveOption } from "./config.ts"
+export { migrateJournal } from "./migrate.ts"
 export {
   withWorktrees,
   staleLeases,

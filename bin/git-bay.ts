@@ -901,6 +901,22 @@ async function main(): Promise<void> {
       await verbAudit(await requireBay(), opts.json === true)
     })
 
+  // One-shot journal migration (spec § event schema v2) — hidden: an operator
+  // runs this once, deliberately, when moving a pre-v0.3 bay forward. Not a
+  // dual-read shim; there is nothing else that understands the v1 shape.
+  program
+    .command("migrate-journal", { hidden: true })
+    .description("one-shot: migrate .git/bay/journal.jsonl from the pre-v0.3 event names to v2 (backs up as journal.v1.jsonl)")
+    .action(async () => {
+      const ctx = await requireBay()
+      const { migrateJournal } = await import("../src/migrate.ts")
+      const { migrated, dropped } = await migrateJournal(ctx.bayDir)
+      console.log(
+        `bay: migrated ${migrated} event(s) to v2 (${dropped} non-event row(s) dropped); ` +
+          `original backed up as ${relToMain(ctx, join(ctx.bayDir, "journal.v1.jsonl"))}`,
+      )
+    })
+
   // Hook modes — installed by init inside the bay-owned repo, not user-facing.
   program
     .command("receive-pre", { hidden: true })
