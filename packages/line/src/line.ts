@@ -562,6 +562,7 @@ export function withLine() {
               index: run.cursor,
               status: effectRun.status,
               error,
+              ...(effectRun.output === undefined ? {} : { output: effectRun.output }),
             }),
             event("line/run/finished", { run: run.id, status: "failed", error }),
           ]

@@ -272,10 +272,10 @@ describe("withContests", () => {
       status: "passed",
       attempt: "A2",
       commit: CLAUDE_SHA,
-      output: { commit: CLAUDE_SHA, submission: "S1", revision: 1 },
+      output: { commit: CLAUDE_SHA, submission: "PR1", revision: 1 },
     })
     const bayState = (await app.state()).bays
-    expect(resolveSubmission(bayState, "S1")).toMatchObject({
+    expect(resolveSubmission(bayState, "PR1")).toMatchObject({
       bay: "B2",
       branch: "task/contest-c1-a2",
       headSha: CLAUDE_SHA,
@@ -384,13 +384,13 @@ describe("withContests", () => {
       status: "failed",
       error: { code: "promotion-error", message: "executor crashed after durable intake" },
     })
-    expect((await app.state()).bays.submissions.S1).toMatchObject({ revision: 1, status: "pushed", headSha: CODEX_SHA })
+    expect((await app.state()).bays.submissions.PR1).toMatchObject({ revision: 1, status: "pushed", headSha: CODEX_SHA })
 
     app.command = command
     await app.command(app.commands.effect.retry, { id: promotion })
     await app.effectRuns.run(promotion, { executor: "replacement", leaseMs: 60_000 })
     expect((await app.contests.show("C1")).promotion).toMatchObject({ status: "passed", attemptNumber: 2 })
-    expect((await app.state()).bays.submissions.S1).toMatchObject({
+    expect((await app.state()).bays.submissions.PR1).toMatchObject({
       revision: 1,
       status: "submitted",
       headSha: CODEX_SHA,

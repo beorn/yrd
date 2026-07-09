@@ -101,7 +101,7 @@ describe("line command adapters", () => {
     )
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = await app.line.integrate({ submission: "S1" }, { executor: "local", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, { executor: "local", leaseMs: 60_000 })
     expect(run.status).toBe("passed")
     expect(await readFile(join(repo, "feature.txt"), "utf8")).toBe("feature\n")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
@@ -124,7 +124,7 @@ describe("line command adapters", () => {
     ).toThrow("placeholder {target} is retired; use $YRD_TARGET")
 
     const runner = configuredCommandStep<SubmissionShape>({
-      command: 'test "$YRD_SUBMISSION" = "S1"',
+      command: 'test "$YRD_SUBMISSION" = "PR1"',
       cwd: ".",
       purpose: "check",
     })
@@ -146,7 +146,7 @@ describe("line command adapters", () => {
     await app.command(app.commands.bay.submit, { branch: "task/one", headSha: firstSha, base: "main" })
     await app.command(app.commands.bay.submit, { branch: "task/two", headSha: secondSha, base: "main" })
 
-    const runs = await app.line.integrate({ submissions: ["S1", "S2"] }, { executor: "local", leaseMs: 60_000 })
+    const runs = await app.line.integrate({ submissions: ["PR1", "PR2"] }, { executor: "local", leaseMs: 60_000 })
 
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ status: "passed", submissions: [{ headSha: firstSha }, { headSha: secondSha }] })
@@ -176,7 +176,7 @@ describe("line command adapters", () => {
     )
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = await app.line.integrate({ submission: "S1" }, { executor: "local", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, { executor: "local", leaseMs: 60_000 })
 
     expect(run).toMatchObject({
       status: "waiting",
@@ -222,7 +222,7 @@ describe("line command adapters", () => {
     )
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = await app.line.integrate({ submission: "S1" }, { executor: "local", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, { executor: "local", leaseMs: 60_000 })
 
     expect(run).toMatchObject({ status: "failed", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)

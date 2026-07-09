@@ -8,6 +8,7 @@ import {
   type BaysState,
   type BayWorkspaceAdapter,
   type GitPushReceiver,
+  type HasBays,
   type ReceiverReceipt,
   type ReceiverTarget,
 } from "@yrd/bay"
@@ -23,7 +24,8 @@ import {
   createYrdEventStore,
   from,
   withEffects,
-  type EffectOutcome,
+  type AnyYrdApp,
+  type HasEffects,
   type YrdEventStore,
 } from "@yrd/core"
 import {
@@ -37,13 +39,12 @@ import {
   withMerge,
   withStep,
   type CommandEvidence,
-  type GitCheckEvidence,
+  type HasLine,
   type IntegratedShape,
   type StepExecution,
   type StepRunner,
-  type SubmissionShape,
 } from "@yrd/line"
-import { createKmTaskSource, withTasks, type TaskSource } from "@yrd/task"
+import { createKmTaskSource, withTasks, type HasTasks, type TaskSource } from "@yrd/task"
 import { withBays } from "@yrd/bay"
 import { withContests } from "@yrd/contest"
 import type { ResolvedYrdProjectConfig, YrdStepConfig } from "./config.ts"
@@ -54,6 +55,7 @@ import { runYrd } from "./run.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliLineAdministration } from "./types.ts"
 
 const BUILTIN_STEPS = new Set(["check", "review", "merge", "deploy"])
+type RuntimeLineApp = AnyYrdApp & HasEffects & HasTasks & HasBays & HasLine
 
 export type DefaultYrdAppOptions = Readonly<{
   repo: string
@@ -77,7 +79,7 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   }
   for (const name of config.line.steps) {
     if (!BUILTIN_STEPS.has(name)) throw new Error(`yrd: step '${name}' requires a custom withStep() composition`)
-    if ((name === "review" || name === "deploy") && config.steps[name]?.run === undefined) {
+    if (name !== "merge" && config.steps[name]?.run === undefined) {
       throw new Error(`yrd: default line step '${name}' requires steps.${name}.run`)
     }
   }
@@ -89,18 +91,10 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   }
 }
 
-function unavailableStep<Shape extends SubmissionShape>(name: string): StepRunner<Shape, CommandEvidence> {
-  return (): EffectOutcome<CommandEvidence> => ({
-    status: "failed",
-    error: { code: `${name}-not-configured`, message: `yrd: line step '${name}' is not configured` },
-  })
-}
-
-function gitCandidateStep(repo: string, stateDir: string, name: string, config?: YrdStepConfig) {
-  if (config?.run === undefined) return unavailableStep<SubmissionShape>(name)
+function gitCandidateStep(repo: string, stateDir: string, name: string, config: YrdStepConfig) {
   return gitCheckStep({
     repo,
-    command: config.run,
+    command: config.run!,
     artifactRoot: join(stateDir, "artifacts"),
     purpose: name,
     runner: config.runner,
@@ -108,10 +102,13 @@ function gitCandidateStep(repo: string, stateDir: string, name: string, config?:
   })
 }
 
-function deployStep(repo: string, stateDir: string, config?: YrdStepConfig): StepRunner<IntegratedShape, CommandEvidence> {
-  if (config?.run === undefined) return unavailableStep<IntegratedShape>("deploy")
+function deployStep(
+  repo: string,
+  stateDir: string,
+  config: YrdStepConfig,
+): StepRunner<IntegratedShape, CommandEvidence> {
   const options = {
-    command: config.run,
+    command: config.run!,
     cwd: repo,
     purpose: "deploy",
     artifactRoot: join(stateDir, "artifacts"),
@@ -164,23 +161,33 @@ export function createDefaultYrdApp(options: DefaultYrdAppOptions): YrdCliApp {
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     })
   const taskSources = options.taskSources ?? [createKmTaskSource({ cwd: options.repo })]
-  const check = gitCandidateStep(options.repo, options.stateDir, "check", options.config.steps.check)
-  const review = gitCandidateStep(options.repo, options.stateDir, "review", options.config.steps.review)
-  const merge = gitMergeStep({ repo: options.repo, command: options.config.steps.merge?.run })
-  const deploy = deployStep(options.repo, options.stateDir, options.config.steps.deploy)
-
-  const lineApp = from(createYrd({ store: options.store }))
+  const base = from(createYrd({ store: options.store }))
     .then(withEffects())
     .then(withTasks({ sources: taskSources }))
     .then(withBays({ workspace, defaultBase: options.config.line.base }))
     .then(withLine())
     .then(withBatch(options.config.line.batch))
-    .then(withStep("check", check))
-    .then(withStep("review", review))
-    .then(withMerge(merge))
-    .then(withStep("deploy", deploy, { needsIntegration: true }))
-    .then(withDefaultSteps(options.config.line.steps))
     .build()
+  let lineApp = withStep(
+    "check",
+    gitCandidateStep(options.repo, options.stateDir, "check", options.config.steps.check!),
+  )(base) as unknown as RuntimeLineApp
+  const review = options.config.steps.review
+  if (review?.run !== undefined) {
+    lineApp = withStep("review", gitCandidateStep(options.repo, options.stateDir, "review", review))(
+      lineApp,
+    ) as unknown as RuntimeLineApp
+  }
+  lineApp = withMerge(gitMergeStep({ repo: options.repo, command: options.config.steps.merge?.run }))(
+    lineApp,
+  ) as unknown as RuntimeLineApp
+  const deploy = options.config.steps.deploy
+  if (deploy?.run !== undefined) {
+    lineApp = withStep("deploy", deployStep(options.repo, options.stateDir, deploy), { needsIntegration: true })(
+      lineApp as unknown as AnyYrdApp & HasBays & HasLine<IntegratedShape>,
+    ) as unknown as RuntimeLineApp
+  }
+  lineApp = withDefaultSteps(options.config.line.steps)(lineApp)
 
   let app: YrdCliApp | undefined
   const evaluators =
@@ -326,6 +333,12 @@ function defaultIO(): YrdCliIO {
   return {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
+    ...(process.stdout.isTTY
+      ? {
+          hyperlink: (label: string, target: string) =>
+            `\u001B]8;;${target.replace(/[\u001B\u0007]/gu, "")}\u001B\\${label}\u001B]8;;\u001B\\`,
+        }
+      : {}),
     cwd: process.cwd(),
   }
 }

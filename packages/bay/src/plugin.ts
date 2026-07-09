@@ -508,7 +508,7 @@ export function withBays(options: WithBaysOptions) {
         if (existing?.status === "integrated" || existing?.status === "withdrawn") {
           throw new Error(`yrd: submission '${existing.id}' is ${existing.status}; start a new bay`)
         }
-        const id = existing?.id ?? nextId("S", current.submissions)
+        const id = existing?.id ?? nextId("PR", current.submissions)
         const revision = (existing?.revision ?? 0) + 1
         return {
           events: [
@@ -550,7 +550,7 @@ export function withBays(options: WithBaysOptions) {
           }
         }
 
-        const id = nextId("S", current.submissions)
+        const id = nextId("PR", current.submissions)
         const base = args.base ?? defaultBase
         const existing = resolveSubmission(current, args.branch)
         if (existing !== undefined && isLiveSubmission(existing.status)) {

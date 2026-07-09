@@ -102,17 +102,17 @@ describe("withBays", () => {
     await openActiveBay(app)
 
     await app.command(app.commands.bay.intake, { bay: "B1", headSha: HEAD_1, baseSha: BASE })
-    expect((await app.state()).bays.submissions.S1).toMatchObject({
+    expect((await app.state()).bays.submissions.PR1).toMatchObject({
       status: "pushed",
       revision: 1,
       headSha: HEAD_1,
     })
 
-    await app.command(app.commands.bay.submit, { submission: "S1" })
-    expect((await app.state()).bays.submissions.S1?.status).toBe("submitted")
+    await app.command(app.commands.bay.submit, { submission: "PR1" })
+    expect((await app.state()).bays.submissions.PR1?.status).toBe("submitted")
 
     await app.command(app.commands.bay.intake, { bay: "B1", headSha: HEAD_2, baseSha: BASE })
-    const submission = (await app.state()).bays.submissions.S1!
+    const submission = (await app.state()).bays.submissions.PR1!
     expect(submission).toMatchObject({ status: "pushed", revision: 2, headSha: HEAD_2 })
     expect(submission.revisions).toEqual([
       { revision: 1, headSha: HEAD_1, base: "main", baseSha: BASE, pushedAt: "2026-01-01T00:00:00.000Z" },
@@ -129,8 +129,8 @@ describe("withBays", () => {
     expect((await app.command(app.commands.bay.intake, args)).events).toHaveLength(1)
     expect((await app.command(app.commands.bay.intake, args)).events).toHaveLength(0)
     expect((await app.state()).bays).toMatchObject({
-      receipts: { [receipt]: { submission: "S1", branch: "task/fix-release", headSha: HEAD_1 } },
-      submissions: { S1: { revision: 1, headSha: HEAD_1 } },
+      receipts: { [receipt]: { submission: "PR1", branch: "task/fix-release", headSha: HEAD_1 } },
+      submissions: { PR1: { revision: 1, headSha: HEAD_1 } },
     })
     await expect(
       app.command(app.commands.bay.intake, { ...args, headSha: HEAD_2 }),
@@ -173,7 +173,7 @@ describe("withBays", () => {
       name: "release-fix",
     })
 
-    const submission = (await app.state()).bays.submissions.S1!
+    const submission = (await app.state()).bays.submissions.PR1!
     expect(submission).toMatchObject({
       branch: "release/fix",
       base: "release/2.0",
@@ -189,7 +189,7 @@ describe("withBays", () => {
     const app = createApp(fake.workspace)
     await openActiveBay(app)
     await app.command(app.commands.bay.intake, { bay: "B1", headSha: HEAD_1 })
-    await app.command(app.commands.bay.submit, { submission: "S1" })
+    await app.command(app.commands.bay.submit, { submission: "PR1" })
 
     await expect(app.command(app.commands.bay.close, { bay: "B1" })).rejects.toThrow(
       "integrate it or close with withdraw=true",
@@ -197,7 +197,7 @@ describe("withBays", () => {
 
     fake.setDirty(true)
     const closing = await app.command(app.commands.bay.close, { bay: "B1", withdraw: true })
-    expect((await app.state()).bays.submissions.S1?.status).toBe("withdrawn")
+    expect((await app.state()).bays.submissions.PR1?.status).toBe("withdrawn")
     await app.effectRuns.run(closing.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
     expect((await app.state()).bays.bays.B1).toMatchObject({
       status: "active",

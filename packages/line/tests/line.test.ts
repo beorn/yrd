@@ -319,7 +319,7 @@ describe("withLine", () => {
       check: (input) => {
         const ids = input.submissions.map((submission) => submission.id)
         checked.push(ids)
-        return ids.includes("S3")
+        return ids.includes("PR3")
           ? { status: "failed", error: { code: "check-failed", message: "bad submission" } }
           : { status: "passed", output: { checked: true } }
       },
@@ -332,21 +332,21 @@ describe("withLine", () => {
     const runs = await app.line.integrate({ submissions: [] }, runOptions)
     const submissions = (await app.state()).bays.submissions
 
-    expect(checked).toEqual([["S1", "S2", "S3", "S4"], ["S1", "S2"], ["S3", "S4"], ["S3"], ["S4"]])
+    expect(checked).toEqual([["PR1", "PR2", "PR3", "PR4"], ["PR1", "PR2"], ["PR3", "PR4"], ["PR3"], ["PR4"]])
     expect(runs.map((run) => [run.submissions.map((submission) => submission.id), run.status])).toEqual([
-      [["S1", "S2", "S3", "S4"], "failed"],
-      [["S1", "S2"], "passed"],
-      [["S3", "S4"], "failed"],
-      [["S3"], "failed"],
-      [["S4"], "passed"],
+      [["PR1", "PR2", "PR3", "PR4"], "failed"],
+      [["PR1", "PR2"], "passed"],
+      [["PR3", "PR4"], "failed"],
+      [["PR3"], "failed"],
+      [["PR4"], "passed"],
     ])
     expect(
       Object.fromEntries(Object.values(submissions).map((submission) => [submission.id, submission.status])),
     ).toEqual({
-      S1: "integrated",
-      S2: "integrated",
-      S3: "rejected",
-      S4: "integrated",
+      PR1: "integrated",
+      PR2: "integrated",
+      PR3: "rejected",
+      PR4: "integrated",
     })
   })
 

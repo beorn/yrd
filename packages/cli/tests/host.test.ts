@@ -67,9 +67,7 @@ describe("createDefaultYrdApp", () => {
       defaultSteps: ["check", "merge"],
       installed: {
         check: { index: 0, kind: "step" },
-        review: { index: 1, kind: "step" },
-        merge: { index: 2, kind: "merge" },
-        deploy: { index: 3, kind: "step", needsIntegration: true },
+        merge: { index: 1, kind: "merge" },
       },
     })
     expect(
@@ -89,7 +87,7 @@ describe("createDefaultYrdApp", () => {
     ])
 
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
-    const run = await app.line.integrate({ submission: "S1" }, { executor: "test", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, { executor: "test", leaseMs: 60_000 })
     expect(run).toMatchObject({ status: "passed", selected: ["check", "merge"] })
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     await app.close()

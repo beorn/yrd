@@ -30,6 +30,7 @@ export type YrdCliApp = AnyYrdApp & HasEffects & HasBays & HasLine & HasTasks & 
 export type YrdCliIO = {
   stdout(text: string): void
   stderr(text: string): void
+  hyperlink?(label: string, target: string): string
   cwd?: string
   executor?: string
   leaseMs?: number

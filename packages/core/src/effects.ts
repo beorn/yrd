@@ -17,7 +17,7 @@ export type EffectError = {
 
 export type EffectOutcome<Output> =
   | { status: "passed"; output: Output }
-  | { status: "failed"; error: EffectError }
+  | { status: "failed"; error: EffectError; output?: unknown }
   | {
       status: "waiting"
       token: string
@@ -65,7 +65,7 @@ type FinishArgs = {
   id: string
   attempt: number
   token?: string
-  outcome: { status: "passed"; output: unknown } | { status: "failed"; error: EffectError }
+  outcome: { status: "passed"; output: unknown } | { status: "failed"; error: EffectError; output?: unknown }
 }
 type LoseArgs = { id: string; attempt: number; reason: string }
 type RetryArgs = { id: string }
@@ -289,7 +289,7 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         status: outcome.status,
         ...(outcome.status === "passed"
           ? { output: outcome.output, error: undefined }
-          : { error: outcome.error, output: undefined }),
+          : { error: outcome.error, ...(outcome.output === undefined ? { output: undefined } : { output: outcome.output }) }),
       }
       break
     }

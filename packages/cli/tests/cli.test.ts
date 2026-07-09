@@ -268,11 +268,11 @@ describe("runYrd", () => {
     await openAndSubmit(app)
 
     const before = await app.state()
-    expect(before.bays.submissions.S1).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_SHA })
+    expect(before.bays.submissions.PR1).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_SHA })
 
     const integrated = outputIO()
     expect(
-      await runYrd(app, yrd("line", "integrate", "S1", "--steps", "check,merge", "--json"), integrated.io),
+      await runYrd(app, yrd("line", "integrate", "PR1", "--steps", "check,merge", "--json"), integrated.io),
       integrated.stderr(),
     ).toBe(0)
     expect(JSON.parse(integrated.stdout())).toMatchObject({
@@ -282,11 +282,11 @@ describe("runYrd", () => {
           id: "R1",
           status: "passed",
           selected: ["check", "merge"],
-          submission: { id: "S1", headSha: HEAD_SHA },
+          submission: { id: "PR1", headSha: HEAD_SHA },
         },
       ],
     })
-    expect((await app.state()).bays.submissions.S1).toMatchObject({
+    expect((await app.state()).bays.submissions.PR1).toMatchObject({
       status: "integrated",
       integration: { commit: MERGED_SHA },
     })
@@ -299,7 +299,7 @@ describe("runYrd", () => {
     expect(await runYrd(clean, yrd("bay", "open", "fresh-head"), open.io)).toBe(0)
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(clean, yrd("bay", "submit"), submit.io)).toBe(0)
-    expect((await clean.state()).bays.submissions.S1).toMatchObject({
+    expect((await clean.state()).bays.submissions.PR1).toMatchObject({
       bay: "B1",
       headSha: refreshedHead,
       status: "submitted",
@@ -328,7 +328,7 @@ describe("runYrd", () => {
     )
     expect(resolved).toEqual(["topic/direct"])
     expect(JSON.parse(submit.stdout())).toMatchObject({
-      submissions: [{ id: "S1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA, status: "submitted" }],
+      submissions: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA, status: "submitted" }],
     })
   })
 
@@ -337,14 +337,17 @@ describe("runYrd", () => {
     await openAndSubmit(app)
 
     const integrate = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "S1"), integrate.io)).toBe(0)
+    expect(await runYrd(app, yrd("line", "integrate", "PR1"), integrate.io)).toBe(0)
     expect((await app.line.get("R1"))?.status).toBe("waiting")
+    const waiting = outputIO({ hyperlink: (label, target) => `[${label.trim()}](${target})` })
+    expect(await runYrd(app, yrd("line", "status", "PR1"), waiting.io)).toBe(0)
+    expect(waiting.stdout()).toContain("[open](https://ci.invalid/run/1)")
 
     const finish = outputIO()
     expect(
       await runYrd(
         app,
-        yrd("line", "finish", "S1", "--ok", "--token", "remote-check", "--json"),
+        yrd("line", "finish", "PR1", "--ok", "--token", "remote-check", "--json"),
         finish.io,
       ),
     ).toBe(0)
@@ -358,7 +361,7 @@ describe("runYrd", () => {
   it("records an external failing verdict successfully while the line run becomes failed", async () => {
     const app = createApp({ waitingCheck: true })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("line", "integrate", "S1"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
 
     const finish = outputIO()
     expect(
@@ -367,7 +370,7 @@ describe("runYrd", () => {
         yrd(
           "line",
           "finish",
-          "S1",
+          "PR1",
           "--step",
           "check",
           "--fail",
@@ -375,16 +378,21 @@ describe("runYrd", () => {
           "remote-check",
           "--detail",
           "private tests failed",
+          "--artifact",
+          "report=/tmp/private-tests.log",
           "--json",
         ),
         finish.io,
       ),
     ).toBe(0)
     expect(JSON.parse(finish.stdout())).toMatchObject({ run: { id: "R1", status: "failed" } })
-    expect((await app.state()).bays.submissions.S1).toMatchObject({
+    expect((await app.state()).bays.submissions.PR1).toMatchObject({
       status: "rejected",
       detail: "private tests failed",
     })
+    const status = outputIO({ hyperlink: (label, target) => `[${label.trim()}](${target})` })
+    expect(await runYrd(app, yrd("line", "status", "PR1"), status.io)).toBe(0)
+    expect(status.stdout()).toContain("[1](file:///tmp/private-tests.log)")
   })
 
   it("preserves zero-selector and explicitly empty step selection semantics", async () => {
@@ -395,14 +403,14 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("line", "integrate", "--steps", "--json"), integrated.io)).toBe(0)
     expect(JSON.parse(integrated.stdout())).toMatchObject({
       command: "line.integrate",
-      results: [{ id: "R1", submission: { id: "S1" }, selected: [], status: "passed", steps: [] }],
+      results: [{ id: "R1", submission: { id: "PR1" }, selected: [], status: "passed", steps: [] }],
     })
 
     const idle = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "--json"), idle.io)).toBe(0)
     expect(JSON.parse(idle.stdout())).toMatchObject({
       command: "line.integrate",
-      results: [{ id: "R2", submission: { id: "S1" }, selected: ["check", "merge"], status: "passed" }],
+      results: [{ id: "R2", submission: { id: "PR1" }, selected: ["check", "merge"], status: "passed" }],
     })
 
     const drained = outputIO()
@@ -423,7 +431,7 @@ describe("runYrd", () => {
         {
           id: "R1",
           status: "passed",
-          submissions: [{ id: "S1" }, { id: "S2" }],
+          submissions: [{ id: "PR1" }, { id: "PR2" }],
         },
       ],
     })
@@ -432,7 +440,7 @@ describe("runYrd", () => {
   it("uses read capabilities for line status and contest show without appending events", async () => {
     const app = createApp()
     await openAndSubmit(app)
-    await app.line.integrate({ submission: "S1" }, { executor: "test", leaseMs: 60_000, now: () => 0 })
+    await app.line.integrate({ submission: "PR1" }, { executor: "test", leaseMs: 60_000, now: () => 0 })
     await app.tasks.record({ ref: { source: "km", id: "T1" }, title: "Task one" })
     const base = await app.contests.resolveBase()
     await app.command(app.commands.task.compete, {
@@ -447,8 +455,20 @@ describe("runYrd", () => {
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
     const status = outputIO()
-    expect(await runYrd(app, yrd("line", "status", "S1", "--json"), status.io)).toBe(0)
-    expect(JSON.parse(status.stdout())).toMatchObject({ command: "line.status", results: [{ submission: "S1" }] })
+    expect(await runYrd(app, yrd("line", "status", "PR1", "--json"), status.io)).toBe(0)
+    expect(JSON.parse(status.stdout())).toMatchObject({
+      command: "line.status",
+      results: [{ base: "main", submissions: [{ id: "PR1" }] }],
+    })
+
+    const human = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      hyperlink: (label, target) => `[${label.trim()}](${target})`,
+    })
+    expect(await runYrd(app, yrd("line", "status", "PR1"), human.io)).toBe(0)
+    expect(human.stdout()).toMatch(/PR\s+STATE\s+TARGET\s+AGE\s+TOUCHED\s+RUN/u)
+    expect(human.stdout()).toContain("[PR1](file:///repo/.bays/B1)")
+    expect(human.stdout()).toContain("[/repo/.bays/B1](file:///repo/.bays/B1)")
 
     const show = outputIO()
     expect(await runYrd(app, yrd("contest", "show", "C1", "--json"), show.io)).toBe(0)

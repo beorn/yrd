@@ -1,9 +1,10 @@
 import { isAbsolute, relative, resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { resolveBay, resolveSubmission, submissionForBay, type Bay, type BaysState, type Submission } from "@yrd/bay"
 import type { Contest, ContestWork, ContestsState } from "@yrd/contest"
 import type { Command, CommandRun, EffectRun, EffectsState } from "@yrd/core"
-import type { LineRun, LinesState } from "@yrd/line"
+import type { LineRun, LineSummary, LinesState, StepEvidence } from "@yrd/line"
 import type { TaskRef, TasksState } from "@yrd/task"
 import {
   classifyFailure,
@@ -383,6 +384,149 @@ function humanRuns(runs: readonly LineRun[]): string {
         .join("\n")
 }
 
+type Cell = string | Readonly<{ label: string; href: string }>
+type LineStatusResult = LineSummary & { submissions: Submission[] }
+
+function cellText(cell: Cell): string {
+  return typeof cell === "string" ? cell : cell.label
+}
+
+function table(headers: readonly string[], rows: readonly (readonly Cell[])[], io: YrdCliIO): string {
+  const widths = headers.map((header, column) =>
+    Math.max(header.length, ...rows.map((row) => cellText(row[column] ?? "").length)),
+  )
+  const render = (row: readonly Cell[]) =>
+    row
+      .map((cell, column) => {
+        const text = cellText(cell)
+        const label = text.padEnd(widths[column]!)
+        return typeof cell === "string" || io.hyperlink === undefined ? label : io.hyperlink(label, cell.href)
+      })
+      .join("  ")
+      .trimEnd()
+  return [render(headers), render(widths.map((width) => "-".repeat(width))), ...rows.map(render)].join("\n")
+}
+
+function elapsed(milliseconds: number): string {
+  const ms = Math.max(0, milliseconds)
+  if (ms < 1_000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`
+  return `${Math.floor(ms / 86_400_000)}d`
+}
+
+function age(timestamp: string | undefined, now: number): string {
+  if (timestamp === undefined) return "-"
+  const time = Date.parse(timestamp)
+  return Number.isFinite(time) ? elapsed(now - time) : "-"
+}
+
+function latest(...timestamps: (string | undefined)[]): string | undefined {
+  return timestamps.filter((value): value is string => value !== undefined).sort().at(-1)
+}
+
+function latestRun(submission: Submission, summary: LineSummary): LineRun | undefined {
+  return [...summary.running, ...summary.waiting, ...summary.finished]
+    .filter((run) => run.submissions.some((member) => member.id === submission.id))
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+    .at(-1)
+}
+
+function relevantStep(run: LineRun | undefined): StepEvidence | undefined {
+  if (run === undefined) return undefined
+  return (
+    [...run.steps].reverse().find((step) => step.status === "failed") ??
+    [...run.steps].reverse().find((step) => ["requested", "running", "waiting", "lost"].includes(step.status)) ??
+    [...run.steps].reverse().find((step) => step.status !== "queued")
+  )
+}
+
+function stepArtifacts(step: StepEvidence | undefined): readonly unknown[] {
+  if (step?.artifacts !== undefined) return step.artifacts
+  const output = step?.output
+  if (typeof output !== "object" || output === null || !("artifacts" in output)) return []
+  return Array.isArray(output.artifacts) ? output.artifacts : []
+}
+
+function artifactHref(artifact: unknown): string | undefined {
+  if (typeof artifact !== "object" || artifact === null) return undefined
+  const value = "uri" in artifact ? artifact.uri : "path" in artifact ? artifact.path : undefined
+  if (typeof value !== "string" || value === "") return undefined
+  return /^[a-z][a-z0-9+.-]*:/iu.test(value) ? value : pathToFileURL(resolve(value)).href
+}
+
+function lineState(submission: Submission, run: LineRun | undefined): string {
+  if (run?.status === "running") return "checking"
+  if (run?.status === "waiting") return "waiting"
+  return submission.status
+}
+
+function humanLineStatus(state: CliState, results: readonly LineStatusResult[], selected: Set<string>, io: YrdCliIO): string {
+  const now = io.now?.() ?? Date.now()
+  return results
+    .map((result) => {
+      const all = Object.values(state.bays.submissions).filter((submission) => submission.base === result.base)
+      const active = all.filter((submission) => {
+        const status = lineState(submission, latestRun(submission, result))
+        return status === "checking" || status === "waiting"
+      }).length
+      const open = all.filter((submission) => submission.status !== "integrated" && submission.status !== "withdrawn").length
+      const integrated = all.filter((submission) => submission.status === "integrated").length
+      const rejected = all.filter((submission) => submission.status === "rejected").length
+      const baseSha = all.map((submission) => submission.baseSha).find((sha) => sha !== undefined)
+      const summary = table(
+        ["LINE", "OPEN", "ACTIVE", "INTEGRATED", "REJECTED"],
+        [[`${result.base}${baseSha === undefined ? "" : `@${baseSha.slice(0, 12)}`}`, String(open), String(active), String(integrated), String(rejected)]],
+        io,
+      )
+      const visible = result.submissions.filter(
+        (submission) => selected.has(submission.id) || (submission.status !== "integrated" && submission.status !== "withdrawn"),
+      )
+      if (visible.length === 0) return `${summary}\n\nNo open PRs.`
+      const rows = visible.map((submission): Cell[] => {
+        const run = latestRun(submission, result)
+        const step = relevantStep(run)
+        const bay = submission.bay === undefined ? undefined : state.bays.bays[submission.bay]
+        const path = bay?.path
+        const revision = submission.revisions.at(-1)
+        const last = latest(
+          revision?.pushedAt,
+          submission.submittedAt,
+          submission.rejectedAt,
+          submission.integratedAt,
+          submission.withdrawnAt,
+          run?.startedAt,
+          run?.finishedAt,
+          ...((run?.steps ?? []).flatMap((item) => [item.startedAt, item.finishedAt])),
+        )
+        const runTime = run === undefined ? "-" : elapsed((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt))
+        const evidence = stepArtifacts(step)
+        const firstArtifact = artifactHref(evidence[0])
+        const pr: Cell = path === undefined ? submission.id : { label: submission.id, href: pathToFileURL(path).href }
+        return [
+          pr,
+          lineState(submission, run),
+          submission.base,
+          age(submission.submittedAt ?? revision?.pushedAt, now),
+          age(last, now),
+          runTime,
+          step?.name ?? "-",
+          step?.error?.code ?? step?.detail ?? step?.status ?? "-",
+          step?.url === undefined ? "-" : { label: "open", href: step.url },
+          evidence.length === 0
+            ? "-"
+            : firstArtifact === undefined
+              ? String(evidence.length)
+              : { label: String(evidence.length), href: firstArtifact },
+          path === undefined ? "-" : { label: path, href: pathToFileURL(path).href },
+        ]
+      })
+      return `${summary}\n\n${table(["PR", "STATE", "TARGET", "AGE", "TOUCHED", "RUN", "STEP", "RESULT", "LOG", "ART", "PATH"], rows, io)}`
+    })
+    .join("\n\n")
+}
+
 async function lineStatus(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -390,49 +534,36 @@ async function lineStatus(
   io: YrdCliIO,
 ): Promise<void> {
   const state = await stateOf(app)
-  const results: unknown[] = []
-  if (selectors.length > 0) {
-    for (const selector of selectors) {
-      const submission = resolveSubmission(state.bays, selector)
-      if (submission === undefined) {
-        results.push(await app.line.status(selector))
-        continue
-      }
-      const summary = await app.line.status(submission.base)
-      results.push({
-        submission: submission.id,
-        base: submission.base,
-        runs: [...summary.running, ...summary.waiting, ...summary.finished].filter((run) =>
-          run.submissions.some((member) => member.id === submission.id),
-        ),
-      })
+  const bases = new Set<string>()
+  const selected = new Set<string>()
+  for (const selector of selectors) {
+    const submission = resolveSubmission(state.bays, selector)
+    if (submission === undefined) bases.add(selector)
+    else {
+      bases.add(submission.base)
+      selected.add(submission.id)
     }
-  } else {
-    const bases = new Set<string>()
+  }
+  if (selectors.length === 0) {
     for (const submission of Object.values(state.bays.submissions)) bases.add(submission.base)
     for (const run of Object.values(state.lines.runs)) bases.add(run.base)
     if (bases.size === 0) bases.add("main")
-    for (const base of [...bases].sort()) results.push(await app.line.status(base))
+  }
+  const results: LineStatusResult[] = []
+  for (const base of [...bases].sort()) {
+    const summary = await app.line.status(base)
+    results.push({
+      ...summary,
+      submissions: Object.values(state.bays.submissions).filter(
+        (submission) => submission.base === base && (selected.size === 0 || selected.has(submission.id)),
+      ),
+    })
   }
   printResult(
     io,
     jsonEnabled(options),
     { command: "line.status", results },
-    results
-      .map((result) => {
-        if (typeof result !== "object" || result === null) return String(result)
-        const item = result as {
-          base?: string
-          submission?: string
-          runs?: unknown[]
-          running?: unknown[]
-          waiting?: unknown[]
-        }
-        return item.submission === undefined
-          ? `${item.base ?? "line"}: running=${item.running?.length ?? 0} waiting=${item.waiting?.length ?? 0}`
-          : `${item.submission}: runs=${item.runs?.length ?? 0}`
-      })
-      .join("\n"),
+    humanLineStatus(state, results, selected, io),
   )
 }
 
@@ -623,6 +754,7 @@ async function finishLine(
               code: `${step.name}-failed`,
               message: options.detail ?? `${step.name} failed externally`,
             },
+            output: evidence,
           },
   })
   const resumed = await app.line.run(run.id, runtimeOptions(io))
