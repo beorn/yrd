@@ -2,7 +2,7 @@
   "name": "@yrd/bay",
   "version": "0.0.1",
   "private": true,
-  "description": "Yrd bay — the Git-native bay implementation; git bay remains a compatibility command surface",
+  "description": "Yrd bay - the Git-native bay implementation; git bay remains a compatibility command surface",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/yrd",
