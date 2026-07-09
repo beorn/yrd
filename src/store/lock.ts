@@ -41,12 +41,16 @@ export function resolveWriterLockPath(dir: string): string {
 export async function acquireWriterLock(dir: string, opts: WriterLockOptions = {}): Promise<WriterLock> {
   await mkdir(dir, { recursive: true })
   const lockPath = resolveWriterLockPath(dir)
-  if (heldPaths.has(lockPath)) throw busyError(lockPath)
-
-  const fd = openSync(lockPath, "a+")
   const timeoutMs = Math.max(0, opts.timeoutMs ?? 0)
   const pollIntervalMs = Math.max(1, opts.pollIntervalMs ?? 25)
   const deadline = Date.now() + timeoutMs
+
+  while (heldPaths.has(lockPath)) {
+    if (Date.now() >= deadline) throw busyError(lockPath)
+    await Bun.sleep(pollIntervalMs)
+  }
+
+  const fd = openSync(lockPath, "a+")
   let acquired = false
 
   try {

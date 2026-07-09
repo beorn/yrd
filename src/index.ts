@@ -1,6 +1,8 @@
 // bay library — event-sourced core; capabilities land as with*() layers.
 // Design: @hab/20926-gitbay/spec.md (hh workspace).
 export * from "./types.ts"
+export * from "./app.ts"
+export * from "./effects.ts"
 export { createGitbay, makeEvent, definePlugin } from "./core.ts"
 export { pipe } from "./pipe.ts"
 export { nextPrId } from "./ids.ts"
@@ -32,6 +34,7 @@ export { withAudit, formatAudit, type AuditFinding } from "./layers/audit.ts"
 export { withAdopt } from "./layers/adopt.ts"
 export { createSqliteStore } from "./store/sqlite.ts"
 export { createReadStore } from "./store/read.ts"
+export { createYrdEventStore } from "./store/app.ts"
 export { acquireWriterLock } from "./store/lock.ts"
 export {
   applyContestEvent,
