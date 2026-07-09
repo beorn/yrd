@@ -8,10 +8,15 @@
 - `git yrd <verb>` — alias of `git bay <verb>` (`bin/git-yrd.ts` on PATH makes it a git subcommand).
 - Every existing `git bay` verb, hook, and workflow keeps working unchanged.
 
+## What changed in slice 2
+
+- **Repo rename complete**: the GitHub repo is now `beorn/yrd`; old `beorn/gitbay` URLs redirect.
+- **Package repository metadata updated**: `package.json` now points at `github:beorn/yrd`.
+- **Compatibility commands remain installed**: `yrd` and `git-yrd` are the primary Yrd-facing bins; `git-bay` and `gitbay` stay as compatibility bins over the same implementation.
+
 ## What is staged, not done
 
-- **Repo rename `beorn/gitbay` → `beorn/yrd`**: one `gh repo rename` (GitHub keeps redirects for old clone URLs), executed by the repo owner deliberately, not from a work lane. The package `repository` field follows it in the same change.
-- **Package rename (`git-bay` → yrd-scoped names)**: rides the repo rename. Consumers depend on the package NAME, so the rename and every consumer update must move in one coordinated slice.
+- **Package rename (`git-bay` → yrd-scoped names)**: consumers depend on the package NAME, so the rename and every consumer update must move in one coordinated slice.
 - **Consuming-repo moves** (re-homing this repo's checkout path, renaming planning documents): owned by each consuming repo on its own schedule; this repo only guarantees that old (`git bay`) and new (`yrd bay`) surfaces stay equivalent through the transition.
 - **Projections `line`, `task`, `contest`**: arrive with the Yrd monorepo transition; `yrd` names them as staged so the CLI shape is stable from day one.
 
