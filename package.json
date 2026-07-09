@@ -17,6 +17,11 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "yrd": "bun ./bin/yrd.ts",
+    "git-yrd": "bun ./bin/git-yrd.ts",
+    "git-bay": "bun ./bin/git-bay.ts",
+    "gitbay": "bun ./bin/git-bay.ts",
+    "bay": "bun ./bin/git-bay.ts",
     "test": "bun --bun x vitest run",
     "check": "tsc --noEmit && bun --bun x vitest run",
     "spec": "PATH=\"$PWD/tests/bin:$PATH\" bun --bun x mdspec tests/gitbay.spec.md tests/batch.spec.md tests/refusals.spec.md tests/guide.spec.md"
