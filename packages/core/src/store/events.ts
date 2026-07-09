@@ -21,7 +21,6 @@ export async function createYrdEventStore(options: {
   const writerScope = new AsyncLocalStorage<boolean>()
   let writer = Promise.resolve()
   let closed = false
-  const index = createYrdEventIndex(options.dir)
 
   function assertOpen(): void {
     if (closed) throw new Error("yrd: event store is closed")
@@ -58,14 +57,22 @@ export async function createYrdEventStore(options: {
   }
 
   const initialLock = await acquireWriterLock(options.dir, lockOptions)
+  let initializedIndex: ReturnType<typeof createYrdEventIndex> | undefined
   try {
-    index.rebuild(await Array.fromAsync(replay()))
-  } catch (error) {
-    index.close()
-    throw error
+    const events = await Array.fromAsync(replay())
+    const candidate = createYrdEventIndex(options.dir)
+    try {
+      candidate.rebuild(events)
+      initializedIndex = candidate
+    } catch (error) {
+      candidate.close()
+      throw error
+    }
   } finally {
     await initialLock.release()
   }
+  if (initializedIndex === undefined) throw new Error("yrd: event index failed to initialize")
+  const index = initializedIndex
 
   return {
     index,

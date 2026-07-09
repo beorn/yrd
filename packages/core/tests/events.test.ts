@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -158,5 +158,15 @@ describe("Era2 filesystem event store", () => {
     }
     await writeFile(join(dir, "events.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify(event)}\n`)
     await expect(createYrdEventStore({ dir })).rejects.toThrow("duplicate event id 'duplicate'")
+  })
+
+  it("validates the event authority before opening or mutating an existing index", async () => {
+    const dir = await storeDir()
+    const legacy = { id: "old", name: "bay/opened", ts: "2026-01-01T00:00:00.000Z", data: {} }
+    await writeFile(join(dir, "events.jsonl"), `${JSON.stringify(legacy)}\n`)
+    await writeFile(join(dir, "index.sqlite"), "legacy index must remain byte-identical")
+
+    await expect(createYrdEventStore({ dir })).rejects.toThrow("invalid event envelope")
+    expect(await readFile(join(dir, "index.sqlite"), "utf8")).toBe("legacy index must remain byte-identical")
   })
 })
