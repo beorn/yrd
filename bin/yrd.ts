@@ -1001,8 +1001,8 @@ async function contestPromote(args: string[]): Promise<void> {
       contest: id,
       attempt: attempt.id,
       ...(pr === undefined ? {} : { pr }),
-      push: { code: push.code },
-      submit: { code: submit.code },
+      push,
+      submit,
     },
     `attempt:${attempt.id}`,
   )

@@ -416,11 +416,12 @@ The first evaluator is manual: inspect the attempts and select the winner.
 Automatic ranking should stay a plugin over the recorded evidence, because
 quality is product-specific and often needs human judgment.
 
-Contest commands append `contest/...` lifecycle rows to the bay event log while
-`contest.json` remains the first read model. The rows record contest opening,
-attempt start/finish, manual selection, and promotion, so future folded contest
-state can rebuild from the same `.git/bay/events.jsonl` authority as bays and
-lines.
+Contest commands append `contest/...` lifecycle rows to the bay event log and
+fold `contest show/select/promote` from those rows when present. `contest.json`
+remains a rebuildable read-model cache and compatibility fallback. The rows
+record contest opening, attempt start/finish, manual selection, and promotion,
+so contest state comes from the same `.git/bay/events.jsonl` authority as bays
+and lines.
 
 ## Safety Rules
 

@@ -123,7 +123,98 @@ export function contestPath(bayDir: string, id: string): string {
   return join(bayDir, "contests", id, "contest.json")
 }
 
+function attemptOrder(id: string): number {
+  const match = /^A(?<n>\d+)$/u.exec(id)
+  return match?.groups?.n === undefined ? Number.MAX_SAFE_INTEGER : Number.parseInt(match.groups.n, 10)
+}
+
+export async function foldContestFromEvents(bayDir: string, id: string): Promise<ContestRecord | undefined> {
+  const journal = createJsonlJournal(bayEventsPath(bayDir))
+  let opened: { ts: string; data: Extract<ContestEvent, { name: "contest/opened" }>["data"] } | undefined
+  const started = new Map<string, Extract<ContestEvent, { name: "contest/attempt/started" }>["data"]>()
+  const finished = new Map<string, Extract<ContestEvent, { name: "contest/attempt/finished" }>["data"]>()
+  let winner: string | undefined
+  let promoted: ContestRecord["promoted"]
+
+  for await (const event of journal.replay()) {
+    if (!event.name.startsWith("contest/")) continue
+    const contest = event.data.contest
+    if (contest !== id) continue
+    switch (event.name) {
+      case "contest/opened":
+        opened = { ts: event.ts, data: event.data as Extract<ContestEvent, { name: "contest/opened" }>["data"] }
+        break
+      case "contest/attempt/started": {
+        const data = event.data as Extract<ContestEvent, { name: "contest/attempt/started" }>["data"]
+        started.set(data.attempt, data)
+        break
+      }
+      case "contest/attempt/finished": {
+        const data = event.data as Extract<ContestEvent, { name: "contest/attempt/finished" }>["data"]
+        finished.set(data.attempt, data)
+        break
+      }
+      case "contest/selected": {
+        const data = event.data as Extract<ContestEvent, { name: "contest/selected" }>["data"]
+        winner = data.winner
+        break
+      }
+      case "contest/promoted": {
+        const data = event.data as Extract<ContestEvent, { name: "contest/promoted" }>["data"]
+        promoted = {
+          attempt: data.attempt,
+          at: event.ts,
+          push: data.push,
+          submit: data.submit,
+          ...(data.pr === undefined ? {} : { pr: data.pr }),
+        }
+        break
+      }
+    }
+  }
+
+  if (opened === undefined) return undefined
+  const attempts: ContestAttempt[] = []
+  for (const [attemptId, done] of [...finished.entries()].sort(([a], [b]) => attemptOrder(a) - attemptOrder(b))) {
+    const start = started.get(attemptId)
+    if (start === undefined) return undefined
+    attempts.push({
+      id: attemptId,
+      agent: done.agent,
+      bayName: done.bay,
+      bayPath: done.bayPath,
+      command: start.command,
+      startedAt: done.startedAt,
+      finishedAt: done.finishedAt,
+      durationMs: done.durationMs,
+      exitCode: done.exitCode,
+      logs: done.logs,
+      metrics: done.metrics,
+      git: done.git,
+      evals: done.evals,
+    })
+  }
+
+  return {
+    version: 1,
+    id,
+    task: opened.data.task,
+    prompt: opened.data.prompt,
+    repo: opened.data.repo,
+    base: opened.data.base,
+    baseSha: opened.data.baseSha,
+    createdAt: opened.ts,
+    agents: opened.data.agents,
+    attempts,
+    ...(winner === undefined ? {} : { winner }),
+    ...(promoted === undefined ? {} : { promoted }),
+  }
+}
+
 export async function readContest(bayDir: string, id: string): Promise<ContestRecord> {
+  const folded = await foldContestFromEvents(bayDir, id)
+  if (folded !== undefined) return folded
+
   const path = contestPath(bayDir, id)
   const raw = await readFile(path, "utf8").catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err)

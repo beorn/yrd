@@ -405,8 +405,8 @@ export type GitbayEvent =
         contest: string
         attempt: string
         pr?: string
-        push: { code: number }
-        submit: { code: number }
+        push: { code: number; stdout: string; stderr: string }
+        submit: { code: number; stdout: string; stderr: string }
       }
     }
 

@@ -18,7 +18,8 @@ repo in hub/yrd/reference or in @yrd beads.
   shorter provider-only form remains accepted for scripts.
 - Contest lifecycle writes `contest/...` rows to events.jsonl for opened,
   attempt started/finished, selected, and promoted facts while the JSON contest
-  record remains the first read model.
+  record remains a rebuildable read-model cache/fallback. `yrd contest
+  show/select/promote` fold from those events when present.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
 - `bay.check.runner=waiting` treats `bay.check` as an external check launcher:
@@ -116,9 +117,8 @@ Rules:
 ## Next Work
 
 1. Contest hardening
-   - Fold `yrd contest show/select/promote` from `contest/...` events instead
-     of treating contest.json as the authority; keep the JSON file as a
-     rebuildable/read-model cache.
+   - Move contest state into a proper with* plugin layer over the installed
+     `contest/...` events; keep contest.json as a rebuildable/read-model cache.
    - Add runner-specific cost adapters where a provider does not emit dollar
      cost directly; keep missing cost explicit, never guessed.
    - Add richer evaluator plugins for tests, review, diff quality, performance,

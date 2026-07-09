@@ -1054,6 +1054,7 @@ describe("yrd CLI — contest projection", () => {
     expect(alphaAttempt.evals[0]!.exitCode).toBe(0)
     expect(await readFile(alphaAttempt.logs.stdout, "utf8")).toContain('"input_tokens":10')
 
+    await rm(join(demo, ".git", "bay", "contests", record.id, "contest.json"))
     const shown = await must([process.execPath, YRD_BIN, "contest", "show", record.id, "--json"], demo, env)
     const shownRecord = JSON.parse(shown.stdout) as typeof record
     expect(shownRecord.attempts.map((attempt) => attempt.agent)).toEqual(["fake-alpha", "fake-beta"])
