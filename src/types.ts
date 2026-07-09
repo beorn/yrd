@@ -378,6 +378,16 @@ export type GitbayEvent =
           reasoningOutputTokens?: number
           totalTokens?: number
           costUsd?: number
+          costSource?: string
+          costRates?: {
+            inputTokensUsdPerMillion?: number
+            cachedInputTokensUsdPerMillion?: number
+            cacheCreationInputTokensUsdPerMillion?: number
+            cacheReadInputTokensUsdPerMillion?: number
+            outputTokensUsdPerMillion?: number
+            reasoningOutputTokensUsdPerMillion?: number
+            totalTokensUsdPerMillion?: number
+          }
           source?: string
         }
         git: {

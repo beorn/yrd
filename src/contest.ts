@@ -16,7 +16,19 @@ export type ContestMetrics = {
   reasoningOutputTokens?: number
   totalTokens?: number
   costUsd?: number
+  costSource?: string
+  costRates?: ContestCostRates
   source?: string
+}
+
+export type ContestCostRates = {
+  inputTokensUsdPerMillion?: number
+  cachedInputTokensUsdPerMillion?: number
+  cacheCreationInputTokensUsdPerMillion?: number
+  cacheReadInputTokensUsdPerMillion?: number
+  outputTokensUsdPerMillion?: number
+  reasoningOutputTokensUsdPerMillion?: number
+  totalTokensUsdPerMillion?: number
 }
 
 export type ContestEval = {
@@ -85,6 +97,7 @@ export type CompeteOptions = {
   agents: string[]
   base: string
   agentCommands: Map<string, string>
+  costAdapters: Map<string, ContestCostRates>
   evalCommands: string[]
   json: boolean
 }
@@ -357,6 +370,7 @@ Yrd contest attempt rules:
 
 export function extractMetrics(text: string, source: string): ContestMetrics {
   const metrics: ContestMetrics = {}
+  let foundCost = false
   const visit = (value: unknown, keyHint = ""): void => {
     if (typeof value === "number" && Number.isFinite(value)) {
       const key = keyHint.toLowerCase().replace(/[_-]/g, "")
@@ -375,6 +389,7 @@ export function extractMetrics(text: string, source: string): ContestMetrics {
       } else if (key === "totaltokens") metrics.totalTokens = Math.max(metrics.totalTokens ?? 0, value)
       else if (key === "costusd" || key === "totalcostusd" || key === "usd" || key === "cost") {
         metrics.costUsd = Math.max(metrics.costUsd ?? 0, value)
+        foundCost = true
       }
       return
     }
@@ -413,7 +428,31 @@ export function extractMetrics(text: string, source: string): ContestMetrics {
   ) {
     metrics.source = source
   }
+  if (foundCost) metrics.costSource = source
   return metrics
+}
+
+function costTerm(tokens: number | undefined, usdPerMillion: number | undefined): number {
+  if (tokens === undefined || usdPerMillion === undefined) return 0
+  return (tokens / 1_000_000) * usdPerMillion
+}
+
+function hasCostRates(rates: ContestCostRates): boolean {
+  return Object.values(rates).some((value) => value !== undefined)
+}
+
+export function applyCostAdapter(metrics: ContestMetrics, rates: ContestCostRates | undefined, source: string): ContestMetrics {
+  if (rates === undefined || !hasCostRates(rates) || metrics.costUsd !== undefined) return metrics
+  const costUsd =
+    costTerm(metrics.inputTokens, rates.inputTokensUsdPerMillion) +
+    costTerm(metrics.cachedInputTokens, rates.cachedInputTokensUsdPerMillion) +
+    costTerm(metrics.cacheCreationInputTokens, rates.cacheCreationInputTokensUsdPerMillion) +
+    costTerm(metrics.cacheReadInputTokens, rates.cacheReadInputTokensUsdPerMillion) +
+    costTerm(metrics.outputTokens, rates.outputTokensUsdPerMillion) +
+    costTerm(metrics.reasoningOutputTokens, rates.reasoningOutputTokensUsdPerMillion) +
+    costTerm(metrics.totalTokens, rates.totalTokensUsdPerMillion)
+  if (costUsd <= 0) return metrics
+  return { ...metrics, costUsd, costSource: source, costRates: rates }
 }
 
 async function gitText(args: string[], cwd: string): Promise<string> {
@@ -460,6 +499,7 @@ export async function runAttempt(params: {
   baseSha: string
   contestDir: string
   agentCommands: Map<string, string>
+  costAdapters: Map<string, ContestCostRates>
   evalCommands: string[]
   appendEvent?: ContestEventAppender
 }): Promise<ContestAttempt> {
@@ -497,7 +537,11 @@ export async function runAttempt(params: {
   const stderrPath = join(attemptDir, "stderr.log")
   await writeFile(stdoutPath, result.stdout, "utf8")
   await writeFile(stderrPath, result.stderr, "utf8")
-  const metrics = extractMetrics(`${result.stdout}\n${result.stderr}`, "runner-output")
+  const metrics = applyCostAdapter(
+    extractMetrics(`${result.stdout}\n${result.stderr}`, "runner-output"),
+    params.costAdapters.get(params.agent),
+    `configured:${params.agent}`,
+  )
   const evals: ContestEval[] = []
   for (const command of params.evalCommands) {
     evals.push(await runEvalCommand(command, params.bayPath, env))

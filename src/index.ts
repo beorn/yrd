@@ -39,5 +39,6 @@ export {
   contestSlice,
   emptyContestSlice,
   withContests,
+  type ContestCostRates,
   type ContestSlice,
 } from "./contest.ts"

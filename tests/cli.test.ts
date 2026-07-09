@@ -963,6 +963,7 @@ describe("yrd CLI — line projection", () => {
 
     const taskHelp = await must([process.execPath, YRD_BIN, "task", "--help"], demo, env)
     expect(taskHelp.stdout).toContain('--agents "ag codex/claude"')
+    expect(taskHelp.stdout).toContain("--agent-cost")
     expect(taskHelp.stdout).toContain("Built-in contest agents: codex, claude")
     expect(taskHelp.stdout).toContain("Agent lists use ag-style provider-list syntax")
     expect(taskHelp.stdout).not.toContain("claude-opus")
@@ -994,7 +995,7 @@ describe("yrd CLI — contest projection", () => {
 
   it("competes in multiple bays, records metrics/evals, selects, and promotes the winner", async () => {
     const alpha =
-      `printf '%s\\n' '{"usage":{"input_tokens":10,"output_tokens":5},"cost_usd":0.01}'; ` +
+      `printf '%s\\n' '{"usage":{"input_tokens":10,"output_tokens":5}}'; ` +
       `printf 'alpha\\n' > result.txt; git add result.txt; git commit -qm 'feat: alpha'`
     const beta =
       `printf '%s\\n' '{"usage":{"input_tokens":8,"output_tokens":4},"cost_usd":0.02}'; ` +
@@ -1013,6 +1014,8 @@ describe("yrd CLI — contest projection", () => {
         "2",
         "--agent-cmd",
         `fake-alpha=${alpha}`,
+        "--agent-cost",
+        "fake-alpha=input:1000,output:2000",
         "--agent-cmd",
         `fake-beta=${beta}`,
         "--eval",
@@ -1046,6 +1049,7 @@ describe("yrd CLI — contest projection", () => {
           reasoningOutputTokens?: number
           totalTokens?: number
           costUsd?: number
+          costSource?: string
         }
         git: { committed: boolean; changedFiles: string[] }
         evals: { exitCode: number }[]
@@ -1057,7 +1061,13 @@ describe("yrd CLI — contest projection", () => {
     const alphaAttempt = record.attempts.find((attempt) => attempt.agent === "fake-alpha")!
     const betaAttempt = record.attempts.find((attempt) => attempt.agent === "fake-beta")!
     expect(alphaAttempt.exitCode).toBe(0)
-    expect(alphaAttempt.metrics).toMatchObject({ inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.01 })
+    expect(alphaAttempt.metrics).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      costUsd: 0.02,
+      costSource: "configured:fake-alpha",
+    })
     expect(alphaAttempt.git.committed).toBe(true)
     expect(alphaAttempt.git.changedFiles).toContain("result.txt")
     expect(alphaAttempt.evals[0]!.exitCode).toBe(0)
@@ -1117,7 +1127,7 @@ describe("yrd CLI — contest projection", () => {
       finishedAt: alphaAttempt.finishedAt,
       exitCode: 0,
       logs: alphaAttempt.logs,
-      metrics: { totalTokens: 15, costUsd: 0.01 },
+      metrics: { totalTokens: 15, costUsd: 0.02, costSource: "configured:fake-alpha" },
       git: { committed: true, changedFiles: ["result.txt"] },
       evals: [{ command: "test -f result.txt", exitCode: 0 }],
     })

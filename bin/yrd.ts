@@ -13,6 +13,7 @@ import {
   sanitizePart,
   writeContest,
   type CompeteOptions,
+  type ContestCostRates,
   type ContestRecord,
 } from "../src/contest.ts"
 import { createGitConfigSource, resolveOption } from "../src/config.ts"
@@ -59,11 +60,13 @@ const TASK_USAGE = `yrd task — task intake projection
 
 USAGE
   yrd task compete <task> [--agents "ag codex/claude"] [--prompt <text>] [--prompt-file <path>]
-                   [--agent-cmd <name=command>] [--eval <command>] [--base <ref>] [--bays <n>] [--json]
+                   [--agent-cmd <name=command>] [--agent-cost <name=field:usd-per-million,...>]
+                   [--eval <command>] [--base <ref>] [--bays <n>] [--json]
 
 Built-in contest agents: codex, claude
 Agent lists use ag-style provider-list syntax; "ag codex/claude" fans out into attempts.
 Custom commands run with YRD_PROMPT, YRD_TASK, YRD_BAY, YRD_AGENT, and YRD_CONTEST_ATTEMPT in env.
+Cost adapters are explicit rates only: e.g. --agent-cost codex=input:1.25,output:10,cached-input:0.125
 `
 
 const CONTEST_USAGE = `yrd contest — contest lifecycle
@@ -742,6 +745,45 @@ function parseAgentCommand(raw: string): [string, string] {
   return [name, command]
 }
 
+function parseCostField(raw: string): keyof ContestCostRates {
+  const normalized = raw.trim().toLowerCase().replace(/[_\s]+/g, "-")
+  if (normalized === "input" || normalized === "input-tokens" || normalized === "prompt") return "inputTokensUsdPerMillion"
+  if (normalized === "cached-input" || normalized === "cached-input-tokens" || normalized === "cached-prompt") {
+    return "cachedInputTokensUsdPerMillion"
+  }
+  if (normalized === "cache-creation-input" || normalized === "cache-create" || normalized === "cache-creation") {
+    return "cacheCreationInputTokensUsdPerMillion"
+  }
+  if (normalized === "cache-read-input" || normalized === "cache-read") return "cacheReadInputTokensUsdPerMillion"
+  if (normalized === "output" || normalized === "output-tokens" || normalized === "completion") return "outputTokensUsdPerMillion"
+  if (normalized === "reasoning-output" || normalized === "reasoning") return "reasoningOutputTokensUsdPerMillion"
+  if (normalized === "total" || normalized === "total-tokens") return "totalTokensUsdPerMillion"
+  fail(`yrd: task compete: unknown --agent-cost field '${raw}'`)
+}
+
+function parseAgentCost(raw: string): [string, ContestCostRates] {
+  const eq = raw.indexOf("=")
+  if (eq <= 0) fail("yrd: task compete: --agent-cost requires <name=field:usd-per-million,...>")
+  const name = raw.slice(0, eq).trim()
+  if (name === "") fail("yrd: task compete: --agent-cost requires an agent name")
+  const rates: ContestCostRates = {}
+  const fields = raw
+    .slice(eq + 1)
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+  if (fields.length === 0) fail("yrd: task compete: --agent-cost requires at least one rate")
+  for (const field of fields) {
+    const sep = field.includes(":") ? field.indexOf(":") : field.indexOf("=")
+    if (sep <= 0) fail("yrd: task compete: --agent-cost rates use <field:usd-per-million>")
+    const key = parseCostField(field.slice(0, sep))
+    const value = Number(field.slice(sep + 1))
+    if (!Number.isFinite(value) || value < 0) fail(`yrd: task compete: --agent-cost ${field} must be a non-negative number`)
+    rates[key] = value
+  }
+  return [name, rates]
+}
+
 async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays?: number }> {
   let task: string | undefined
   let prompt: string | undefined
@@ -751,6 +793,7 @@ async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays
   let bays: number | undefined
   let json = false
   const agentCommands = new Map<string, string>()
+  const costAdapters = new Map<string, ContestCostRates>()
   const evalCommands: string[] = []
 
   for (let i = 0; i < args.length; i++) {
@@ -780,6 +823,21 @@ async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays
     if (arg.startsWith("--agent-cmd=")) {
       const [name, command] = parseAgentCommand(arg.slice("--agent-cmd=".length))
       agentCommands.set(name, command)
+      continue
+    }
+    if (arg === "--agent-cost" || arg === "--cost-adapter") {
+      const [name, rates] = parseAgentCost(valueAfter(arg))
+      costAdapters.set(name, rates)
+      continue
+    }
+    if (arg.startsWith("--agent-cost=")) {
+      const [name, rates] = parseAgentCost(arg.slice("--agent-cost=".length))
+      costAdapters.set(name, rates)
+      continue
+    }
+    if (arg.startsWith("--cost-adapter=")) {
+      const [name, rates] = parseAgentCost(arg.slice("--cost-adapter=".length))
+      costAdapters.set(name, rates)
       continue
     }
     if (arg === "--eval" || arg === "--eval-cmd") {
@@ -841,7 +899,7 @@ async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays
   }
   if (promptFile !== undefined) prompt = await readFile(promptFile, "utf8")
   prompt ??= `Implement this task: ${task}`
-  return { task, prompt, agents, base, agentCommands, evalCommands, json, bays }
+  return { task, prompt, agents, base, agentCommands, costAdapters, evalCommands, json, bays }
 }
 
 async function taskCompete(args: string[]): Promise<void> {
@@ -903,6 +961,7 @@ async function taskCompete(args: string[]): Promise<void> {
         baseSha,
         contestDir,
         agentCommands: parsed.agentCommands,
+        costAdapters: parsed.costAdapters,
         evalCommands: parsed.evalCommands,
         appendEvent,
       }),

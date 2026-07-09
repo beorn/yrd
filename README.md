@@ -253,7 +253,10 @@ syntax as `ag codex/claude`, but with contest semantics. Plain
 `ag codex/claude` selects one healthy provider seat; yrd fans the list out into
 one isolated bay attempt per provider. The shorter `--agents codex/claude` and
 comma-separated lists still parse for compatibility. Custom competitors can
-provide an explicit command.
+provide an explicit command. Runners that emit tokens but not dollars can use
+explicit rates with `--agent-cost <agent=field:usd-per-million,...>`, for
+example `--agent-cost codex=input:1.25,output:10,cached-input:0.125`.
+Unconfigured dollar cost stays missing.
 
 ### Plain Git
 
@@ -408,7 +411,8 @@ Each attempt records the evidence needed to choose a real winner:
 - bay path, branch, commit SHA, changed files, and diff stats
 - start/end time, duration, exit code, stdout/stderr log paths
 - token and cost metrics, including cache/reasoning token fields when the
-  runner provides them
+  runner provides them and explicit `--agent-cost` rates when it does not
+  provide dollars
 - evaluator output from configured checks, reviews, or human selection
 - selected winner and promotion result
 

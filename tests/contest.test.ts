@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { builtInAgentCommand, contestRecords, extractMetrics, withContests } from "../src/contest.ts"
+import { applyCostAdapter, builtInAgentCommand, contestRecords, extractMetrics, withContests } from "../src/contest.ts"
 import { createGitbay, createJsonlJournal, pipe } from "../src/index.ts"
 import type { BayEvent, BayStore } from "../src/index.ts"
 
@@ -47,7 +47,31 @@ describe("contest metrics", () => {
       reasoningOutputTokens: 2,
       totalTokens: 22,
       costUsd: 0.0123,
+      costSource: "runner-output",
       source: "runner-output",
+    })
+  })
+
+  it("applies configured token rates without guessing missing runner cost", () => {
+    const metrics = extractMetrics(JSON.stringify({ usage: { input_tokens: 10, output_tokens: 5 } }), "runner-output")
+
+    expect(applyCostAdapter(metrics, undefined, "configured:codex")).toEqual(metrics)
+    expect(applyCostAdapter(metrics, { inputTokensUsdPerMillion: 1000, outputTokensUsdPerMillion: 2000 }, "configured:codex")).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 5,
+      totalTokens: 15,
+      costUsd: 0.02,
+      costSource: "configured:codex",
+      costRates: { inputTokensUsdPerMillion: 1000, outputTokensUsdPerMillion: 2000 },
+    })
+  })
+
+  it("preserves runner-reported cost over configured token rates", () => {
+    const metrics = extractMetrics(JSON.stringify({ usage: { input_tokens: 10, output_tokens: 5 }, cost_usd: 0.01 }), "runner-output")
+
+    expect(applyCostAdapter(metrics, { inputTokensUsdPerMillion: 1000, outputTokensUsdPerMillion: 2000 }, "configured:codex")).toMatchObject({
+      costUsd: 0.01,
+      costSource: "runner-output",
     })
   })
 })
