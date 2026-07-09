@@ -9,7 +9,7 @@ import {
   type DeepReadonly,
   type ExtendYrdApp,
 } from "../src/app.ts"
-import { pipe } from "../src/pipe.ts"
+import { from, pipe } from "../src/pipe.ts"
 
 type CounterState = { value: number }
 type CounterCommands = {
@@ -102,6 +102,15 @@ describe("Era2 Yrd app", () => {
     // @ts-expect-error createYrd() has no counter state yet
     withCounterReset(createYrd({ store: createMemoryEventStore() }))
     withCounterReset(app)
+  })
+
+  it("threads inferred capabilities through an unbounded builder composition", async () => {
+    const seed = createYrd({ store: createMemoryEventStore() })
+    const app = from(seed).then(withCounter).then(withCounterReset).build()
+
+    expect(app).toBe(seed)
+    await app.command(app.commands.counter.increment, { by: 2 })
+    expect((await app.state()).counter.value).toBe(2)
   })
 
   it("uses object command refs in process and one flat registry at serialization boundaries", async () => {

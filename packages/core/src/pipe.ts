@@ -1,5 +1,23 @@
 type Step<Input, Output> = (value: Input) => Output
 
+export type PipeBuilder<Value> = {
+  then<Output>(step: Step<Value, Output>): PipeBuilder<Output>
+  build(): Value
+}
+
+/** Compose an arbitrary number of plugins while preserving each intermediate
+ * capability type. Use pipe() for short, visually complete compositions. */
+export function from<Value>(value: Value): PipeBuilder<Value> {
+  return {
+    then<Output>(step: Step<Value, Output>): PipeBuilder<Output> {
+      return from(step(value))
+    },
+    build(): Value {
+      return value
+    },
+  }
+}
+
 export function pipe<A>(seed: A): A
 export function pipe<A, B>(seed: A, ab: Step<A, B>): B
 export function pipe<A, B, C>(seed: A, ab: Step<A, B>, bc: Step<B, C>): C
