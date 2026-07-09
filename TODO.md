@@ -11,6 +11,8 @@ research stay outside this repo in `hub/yrd/reference`.
 
 - Repo identity is `beorn/yrd`; old `beorn/gitbay` URLs redirect.
 - `yrd bay <verb>` and `git bay <verb>` resolve through the same implementation.
+- `yrd line status|audit|integrate|watch` projects the current Git Bay
+  integration state and check/merge machinery.
 - Compatibility commands remain: `git-bay`, `gitbay`, and `bun bay`.
 - Package metadata points at `github:beorn/yrd`, but the package name is still
   `git-bay`.
@@ -40,12 +42,10 @@ yrd bay refresh
 yrd bay submit [<submission-name>]
 yrd bay close
 
-yrd line provision [<base>]
-yrd line deprovision [<base>]
-yrd line status [<base>]
-yrd line audit [<base>]
-yrd line integrate [<base>] --steps check,merge,deploy
-yrd line watch [<base>]
+yrd line status [PR|name] [--json]
+yrd line audit [--json]
+yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
+yrd line watch [PR|name] [--interval <sec>]
 
 yrd task compete <task> --agents codex,claude --base main --bays 2
 yrd contest show <contest>
@@ -61,6 +61,8 @@ Rules:
 - `--retry` is an option on step-running commands, not a separate command tree.
 - Keep `git bay` as the Git-native projection; do not add `@yrd/git-bay` unless
   there is a second non-Git bay implementation.
+- `yrd line provision`, `yrd line deprovision`, and `deploy` steps are staged,
+  not installed, until line state/artifacts/runners are real.
 
 ## Package Split
 
@@ -77,19 +79,18 @@ Target packages:
 
 ## Next Work
 
-1. **Line contracts + `yrd line integrate`**
-   - Define core submission and line-step event/state contracts.
-   - Implement `yrd line integrate --steps check,merge` over the current Git
-     Bay integration machinery.
-   - Record `line/step/*` start/end events with base/head shas, duration,
-     exit code, error, and artifact references.
+1. **Line hardening**
+   - Finish core submission and line-step event/state contracts.
+   - Extend `line/step/*` start/end events with base/head shas, duration, exit
+     code, error, and artifact references.
    - Add local artifact/log capture for step output.
    - Make `--retry` and process restart journal-driven by skipping successful
      step results for the same submission and commit.
-   - Expose folded line status/staleness.
+   - Expose stronger folded line status/staleness.
+   - Add the runner seam for remote, container, or hosted test execution.
 2. **`@ci` cutover**
-   - Switch `@ci` to the new Yrd bay+line shape as soon as the line projection
-     is usable.
+   - Switch `@ci` to the new Yrd bay+line shape once artifact capture, folded
+     status, and resume semantics are strong enough for the CI lane.
    - Keep the existing Git Bay command surface as compatibility while the line
      projection proves itself.
 3. **Docs/spec boundary**

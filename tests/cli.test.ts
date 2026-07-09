@@ -13,6 +13,7 @@ import { spawn } from "node:child_process"
  */
 
 const BIN = new URL("../bin/git-bay.ts", import.meta.url).pathname
+const YRD_BIN = new URL("../bin/yrd.ts", import.meta.url).pathname
 
 type Run = { code: number; stdout: string; stderr: string }
 
@@ -307,6 +308,58 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     expect(merged.stdout).toContain(`bay: ${id} merging → merged`)
     const json2 = await must(["git", "bay", "ls", "--json"], demo, env)
     expect((JSON.parse(json2.stdout) as { prs: Record<string, { state: string }> }).prs[id]!.state).toBe("merged")
+  })
+})
+
+describe("yrd CLI — line projection", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("yrd-line-"))
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("line integrate can run check then merge through existing line events", async () => {
+    await branchWithFiles(demo, env, "task/line-work", { "line.txt": "ok\n" })
+    const adopted = await must(["git", "bay", "adopt", "task/line-work", "--workitem", "line-work"], demo, env)
+    const pr = adopted.stdout.trim()
+    await must(["git", "bay", "submit", pr], demo, env)
+
+    const checked = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "check"], demo, env)
+    expect(checked.stdout).toContain(`bay: ${pr} submitted → checking`)
+    expect(checked.stdout).toContain(`bay: ${pr} checking → checked`)
+
+    const merged = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "merge"], demo, env)
+    expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
+    expect(merged.stdout).toContain(`bay: ${pr} merging → merged`)
+
+    const journal = await readFile(join(demo, ".git/bay/journal.jsonl"), "utf8")
+    const rows = journal
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { name: string; data: { step?: string } })
+    expect(rows.filter((row) => row.name === "line/step/started").map((row) => row.data.step)).toEqual(["check", "merge"])
+    expect(rows.filter((row) => row.name === "line/step/finished").map((row) => row.data.step)).toEqual(["check", "merge"])
+  })
+
+  it("line status projects to the bay state and unsupported steps teach", async () => {
+    const help = await must([process.execPath, YRD_BIN, "--help"], demo, env)
+    expect(help.stdout).toContain("Installed projections: bay, line")
+
+    const status = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
+    expect(status.stdout).toContain("no open worktrees")
+
+    const deploy = await run([process.execPath, YRD_BIN, "line", "integrate", "--steps", "deploy"], demo, env)
+    expect(deploy.code).toBe(2)
+    expect(deploy.stderr).toContain("step 'deploy' is staged, not installed yet")
   })
 })
 

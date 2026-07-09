@@ -4,7 +4,7 @@
 
 The idea in one sentence more: anyone working in a local clone — human or agent — should get the integration safety a good team gets from GitHub (workspaces, PRs, checks, a merge queue, a full record), with plain git as the interface and nothing new to learn beyond the words GitHub already taught everyone.
 
-> **Yrd:** this repo is becoming the bay component of **Yrd**, the software delivery yard — `yrd bay …` and `git yrd …` work today as aliases of `git bay …`; see [docs/yrd.md](docs/yrd.md). Existing workflows are unchanged. The next Yrd milestone is the line projection for CI/integration; contest mode comes later and does not block that cutover.
+> **Yrd:** this repo is becoming the bay component of **Yrd**, the software delivery yard — `yrd bay …` and `git yrd …` work today as aliases of `git bay …`, and `yrd line status|audit|integrate|watch` now projects the current integration path; see [docs/yrd.md](docs/yrd.md). Existing workflows are unchanged. The next Yrd milestone is hardening the line for the `@ci` cutover; contest mode comes later and does not block that cutover.
 
 ## Why you'd want it
 
@@ -186,7 +186,7 @@ Unambiguous prefixes work (`git bay au` is `audit`; `o` is `open`); every pre-v0
 
 **Roadmap** (details in the layer pages):
 
-- **Next — Yrd line + `@ci` cutover**: expose the current integration path as `yrd line integrate --steps check,merge`, emit line-step events, capture step artifacts/logs, support journal-driven resume, and move the CI integration lane onto it.
+- **Next — Yrd line hardening + `@ci` cutover**: `yrd line status|audit|integrate|watch` projects the current integration path today, with installed `check` and `merge` steps. Next, capture step artifacts/logs, strengthen folded status/staleness, support journal-driven resume for same submission+commit, add the remote-runner seam, and move the CI integration lane onto it.
 - **Then — package split + config**: split toward `@yrd/core`, `@yrd/bay`, `@yrd/line`, `@yrd/task`, `@yrd/cli`; unify `bay.*` git-config keys into the Yrd config shape with `tasks` as the tracker-agnostic intake layer.
 - **Then — review/RPC/adapters**: review gate, JSON-RPC, km/ag/hab/GitHub adapters as real subscribers appear.
 - **Later — contest mode**: multiple agent/harness attempts for one real task with manual winner selection first.

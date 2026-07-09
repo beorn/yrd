@@ -8,6 +8,8 @@ bay component, not a separate product.
 ## Available today
 
 - `yrd bay <verb>` runs the same implementation as `git bay <verb>`.
+- `yrd line status|audit|integrate|watch` projects the current check/merge
+  integration path over the same Git Bay state and journal.
 - `git yrd <verb>` is a Git subcommand alias for the same bay projection.
 - `git bay <verb>`, `git-bay`, and `gitbay` remain compatibility command
   surfaces over the same implementation.
@@ -40,13 +42,19 @@ Git Bay, GitHub, and other Git-facing projections.
 
 ## Command projections
 
-The installed projection is `bay`. The Yrd-facing command shape is:
+The installed projections are `bay` and `line`. The Yrd-facing command shape
+is:
 
 ```bash
 yrd bay open <name>
 yrd bay refresh
 yrd bay submit [<submission-name>]
 yrd bay close
+
+yrd line status [PR|name] [--json]
+yrd line audit [--json]
+yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
+yrd line watch [PR|name] [--interval <sec>]
 ```
 
 The current Git Bay CLI exposes the shipped v0.3 verbs documented in the README
@@ -60,10 +68,7 @@ Planned projections:
 ```bash
 yrd line provision [<base>]
 yrd line deprovision [<base>]
-yrd line status [<base>]
-yrd line audit [<base>]
-yrd line integrate [<base>] --steps check,merge,deploy
-yrd line watch [<base>]
+yrd line integrate [PR|name] --steps deploy
 
 yrd task compete <task> --agents codex,claude --base main --bays 2
 yrd contest show <contest>
@@ -77,23 +82,30 @@ yrd contest promote <contest>
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
 `--retry` is an option on step-running commands, not a separate vocabulary
-branch.
+branch. The installed line sequence is `check,merge`; `deploy` is staged until
+artifact capture, remote runner shape, and deployment records are real.
 
 ## Implementation Order
 
 The first Yrd cutover target is the integration lane: make `@ci` run through
-`yrd bay` + `yrd line` as soon as the line projection is usable. Contest mode is
-above that path and should not block the CI cutover.
+`yrd bay` + `yrd line` once the line has the artifact, status, and resume
+guarantees the CI lane needs. Contest mode is above that path and should not
+block the CI cutover.
 
-The first non-throwaway line slice is:
+The first line projection slice is installed: `yrd line integrate --steps
+check,merge` delegates to the current Git Bay integration logic, and `yrd line
+status`, `audit`, and `watch` expose the same queue and journal-backed state.
+That gives `@ci` a real command surface to start targeting, but not yet the full
+line package.
 
-1. define core submission and line-step event/state contracts;
-2. implement `yrd line integrate --steps check,merge` over the current Git Bay
-   integration logic;
-3. capture step logs/artifacts and reference them from `line/step/*/end`;
-4. make retry/resume journal-driven by skipping successful step results for the
+Remaining non-throwaway line work:
+
+1. finish core submission and line-step event/state contracts;
+2. capture step logs/artifacts and reference them from `line/step/*/end`;
+3. make retry/resume journal-driven by skipping successful step results for the
    same submission and commit;
-5. expose current line status/staleness from folded state;
+4. expose stronger folded line status/staleness;
+5. add the runner seam for remote/container/hosted execution;
 6. switch `@ci` to that line projection before building task intake or contest
    mode.
 
@@ -198,7 +210,7 @@ Still coordinated separately:
 - package name changes from `git-bay` to Yrd-scoped package names
 - consuming-repo path and bead moves
 - full monorepo package split
-- `line` projection and `@ci` cutover
+- line artifacts/status/resume hardening and `@ci` cutover
 - `task` and `contest` projections beyond the advertised CLI shape
 
 ## Reference
