@@ -1,5 +1,6 @@
 import { createReadStream, existsSync } from "node:fs"
-import { appendFile, mkdir } from "node:fs/promises"
+import { AsyncLocalStorage } from "node:async_hooks"
+import { mkdir, open } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { join } from "node:path"
 import type { YrdEvent, YrdEventStore } from "../app.ts"
@@ -11,7 +12,8 @@ export async function createYrdEventStore(options: { dir: string; lock?: WriterL
   await mkdir(options.dir, { recursive: true })
   const path = join(options.dir, EVENTS_FILE)
   const lockOptions = { timeoutMs: 30_000, pollIntervalMs: 10, ...options.lock }
-  let activeWriter = false
+  const writerScope = new AsyncLocalStorage<boolean>()
+  let writer = Promise.resolve()
   let closed = false
 
   function assertOpen(): void {
@@ -52,13 +54,20 @@ export async function createYrdEventStore(options: { dir: string; lock?: WriterL
     replay,
     async append(events) {
       assertOpen()
-      if (!activeWriter) throw new Error("yrd: append requires an active writer lease")
+      if (writerScope.getStore() !== true) throw new Error("yrd: append requires an active writer lease")
       if (events.length === 0) return
-      await appendFile(path, events.map((event) => JSON.stringify(event)).join("\n") + "\n", "utf8")
+      const file = await open(path, "a")
+      try {
+        await file.writeFile(events.map((event) => JSON.stringify(event)).join("\n") + "\n", "utf8")
+        await file.datasync()
+      } finally {
+        await file.close()
+      }
     },
     async read(run) {
       assertOpen()
-      if (activeWriter) return await run()
+      if (writerScope.getStore() === true) return await run()
+      await writer
       const lock = await acquireWriterLock(options.dir, lockOptions)
       try {
         return await run()
@@ -66,17 +75,23 @@ export async function createYrdEventStore(options: { dir: string; lock?: WriterL
         await lock.release()
       }
     },
-    async withWriter(run) {
+    withWriter(run) {
       assertOpen()
-      if (activeWriter) throw new Error("yrd: nested writer lease is not allowed")
-      const lock = await acquireWriterLock(options.dir, lockOptions)
-      activeWriter = true
-      try {
-        return await run()
-      } finally {
-        activeWriter = false
-        await lock.release()
+      if (writerScope.getStore() === true) return Promise.reject(new Error("yrd: nested writer lease is not allowed"))
+      const execute = async () => {
+        const lock = await acquireWriterLock(options.dir, lockOptions)
+        try {
+          return await writerScope.run(true, run)
+        } finally {
+          await lock.release()
+        }
       }
+      const result = writer.then(execute, execute)
+      writer = result.then(
+        () => undefined,
+        () => undefined,
+      )
+      return result
     },
     close() {
       closed = true

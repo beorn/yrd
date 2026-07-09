@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 const OP_REF = Symbol("yrd.op")
 const EFFECT_REF = Symbol("yrd.effect")
@@ -346,29 +347,23 @@ function parseArgs<Args>(command: Command<Args, any>, input: unknown): Args {
 export function createMemoryEventStore(initial: readonly YrdEvent[] = []): YrdEventStore {
   const events = initial.map(clone)
   let writer = Promise.resolve()
-  let activeWriter = false
+  const writerScope = new AsyncLocalStorage<boolean>()
   return {
     async *replay() {
       for (const applied of events) yield clone(applied)
     },
     async append(next) {
-      if (!activeWriter) throw new Error("yrd: append requires an active writer lease")
+      if (writerScope.getStore() !== true) throw new Error("yrd: append requires an active writer lease")
       events.push(...next.map(clone))
     },
     async read(run) {
-      if (activeWriter) return await run()
+      if (writerScope.getStore() === true) return await run()
       await writer
       return await run()
     },
     withWriter(run) {
-      const execute = async () => {
-        activeWriter = true
-        try {
-          return await run()
-        } finally {
-          activeWriter = false
-        }
-      }
+      if (writerScope.getStore() === true) return Promise.reject(new Error("yrd: nested writer lease is not allowed"))
+      const execute = () => writerScope.run(true, run)
       const result = writer.then(execute, execute)
       writer = result.then(
         () => undefined,

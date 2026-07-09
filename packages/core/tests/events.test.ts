@@ -70,6 +70,38 @@ describe("Era2 filesystem event store", () => {
     await expect(Array.fromAsync(store.replay())).resolves.toEqual([applied])
   })
 
+  it("queues concurrent callers without leaking writer authority across async contexts", async () => {
+    const store = await createYrdEventStore({ dir: await storeDir() })
+    let releaseFirst!: () => void
+    let markStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    const release = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const order: string[] = []
+
+    const first = store.withWriter(async () => {
+      order.push("first:start")
+      markStarted()
+      await release
+      order.push("first:end")
+    })
+    await started
+    await expect(store.append([])).rejects.toThrow("append requires an active writer lease")
+    const second = store.withWriter(async () => {
+      order.push("second")
+    })
+    const nested = expect(store.withWriter(() => store.withWriter(async () => undefined))).rejects.toThrow(
+      "nested writer lease",
+    )
+
+    releaseFirst()
+    await Promise.all([first, second, nested])
+    expect(order).toEqual(["first:start", "first:end", "second"])
+  })
+
   it("serializes fold -> apply -> append across independent app instances", async () => {
     const dir = await storeDir()
     const appA = pipe(createYrd({ store: await createYrdEventStore({ dir }) }), withSequence)
