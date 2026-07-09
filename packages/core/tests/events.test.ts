@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -115,5 +115,48 @@ describe("Era2 filesystem event store", () => {
     )
 
     expect((await appA.state()).sequence.issued).toEqual(Array.from({ length: 20 }, (_, index) => index + 1))
+  })
+
+  it("maintains a rebuildable SQLite index over the authoritative event log", async () => {
+    const dir = await storeDir()
+    const store = await createYrdEventStore({ dir })
+    const app = pipe(
+      createYrd({
+        store,
+        idGen: (() => {
+          let id = 0
+          return () => `id-${++id}`
+        })(),
+      }),
+      withSequence,
+    )
+    await app.command(app.commands.sequence.allocate, undefined)
+    await app.command(app.commands.sequence.allocate, undefined)
+
+    expect(store.index.query({ name: "sequence/allocated" })).toMatchObject([
+      { seq: 1, name: "sequence/allocated", data: { number: 1 } },
+      { seq: 2, name: "sequence/allocated", data: { number: 2 } },
+    ])
+    await store.close()
+    await rm(join(dir, "index.sqlite"), { force: true })
+    await rm(join(dir, "index.sqlite-wal"), { force: true })
+    await rm(join(dir, "index.sqlite-shm"), { force: true })
+
+    const rebuilt = await createYrdEventStore({ dir })
+    expect(rebuilt.index.query({ op: "sequence.allocate" }).map((entry) => entry.id)).toEqual(["id-2", "id-4"])
+    await rebuilt.close()
+  })
+
+  it("refuses duplicate durable event identities while rebuilding the index", async () => {
+    const dir = await storeDir()
+    const event = {
+      id: "duplicate",
+      name: "test/event",
+      ts: "2026-01-01T00:00:00.000Z",
+      cause: { commandId: "command", op: "test.write" },
+      data: {},
+    }
+    await writeFile(join(dir, "events.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify(event)}\n`)
+    await expect(createYrdEventStore({ dir })).rejects.toThrow("duplicate event id 'duplicate'")
   })
 })

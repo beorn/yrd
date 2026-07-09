@@ -4,17 +4,24 @@ import { mkdir, open } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { join } from "node:path"
 import type { YrdEvent, YrdEventStore } from "../app.ts"
+import { createYrdEventIndex, type YrdEventIndex } from "./index.ts"
 import { acquireWriterLock, type WriterLockOptions } from "./lock.ts"
 
 const EVENTS_FILE = "events.jsonl"
 
-export async function createYrdEventStore(options: { dir: string; lock?: WriterLockOptions }): Promise<YrdEventStore> {
+export type YrdFilesystemEventStore = YrdEventStore & { index: YrdEventIndex }
+
+export async function createYrdEventStore(options: {
+  dir: string
+  lock?: WriterLockOptions
+}): Promise<YrdFilesystemEventStore> {
   await mkdir(options.dir, { recursive: true })
   const path = join(options.dir, EVENTS_FILE)
   const lockOptions = { timeoutMs: 30_000, pollIntervalMs: 10, ...options.lock }
   const writerScope = new AsyncLocalStorage<boolean>()
   let writer = Promise.resolve()
   let closed = false
+  const index = createYrdEventIndex(options.dir)
 
   function assertOpen(): void {
     if (closed) throw new Error("yrd: event store is closed")
@@ -50,7 +57,18 @@ export async function createYrdEventStore(options: { dir: string; lock?: WriterL
     }
   }
 
+  const initialLock = await acquireWriterLock(options.dir, lockOptions)
+  try {
+    index.rebuild(await Array.fromAsync(replay()))
+  } catch (error) {
+    index.close()
+    throw error
+  } finally {
+    await initialLock.release()
+  }
+
   return {
+    index,
     replay,
     async append(events) {
       assertOpen()
@@ -62,6 +80,11 @@ export async function createYrdEventStore(options: { dir: string; lock?: WriterL
         await file.datasync()
       } finally {
         await file.close()
+      }
+      try {
+        index.record(events)
+      } catch {
+        index.rebuild(await Array.fromAsync(replay()))
       }
     },
     async read(run) {
@@ -95,6 +118,7 @@ export async function createYrdEventStore(options: { dir: string; lock?: WriterL
     },
     close() {
       closed = true
+      index.close()
       return Promise.resolve()
     },
   }
