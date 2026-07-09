@@ -60,7 +60,7 @@ yrd bay close
 yrd line status [PR|name] [--json]
 yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
-yrd line watch [PR|name] [--interval <sec>]
+yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
 yrd contest show <contest> [--json]
@@ -95,6 +95,8 @@ configured default sequence." `--steps` is the canonical narrowing flag.
 `--retry` is an option on step-running commands, not a separate vocabulary
 branch. The installed local line sequence is `check,merge,deploy`. Deploy runs
 only after merge, records a step verdict, and cannot revoke `merged`.
+`yrd line watch --steps check,merge,deploy` keeps draining the line and deploys
+each PR it merges.
 
 ## Implementation Order
 
@@ -110,9 +112,9 @@ status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. Human
-`yrd line status` renders the same folded line summary concisely. That gives
-`@ci` a real command surface to start targeting, but not yet the full line
-package.
+`yrd line status` renders the same folded line summary concisely. Watch mode can
+run the full `check,merge,deploy` sequence for each merged PR. That gives `@ci`
+a real command surface to start targeting, but not yet the full line package.
 
 Remaining non-throwaway line work:
 

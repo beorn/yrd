@@ -30,6 +30,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - `yrd line integrate --steps deploy` runs the configured post-merge
   `bay.deploy` step, records `line/step` events and artifacts, exits nonzero
   on deploy failure, and never changes a merged PR back out of `merged`.
+- `yrd line integrate --steps check,merge,deploy --watch` and
+  `yrd line watch --steps check,merge,deploy` keep draining the line and deploy
+  each PR they merge.
 - Fresh bay state uses events.jsonl, index.sqlite, and prs.git; one-generation
   compatibility reads legacy journal.jsonl, bay.db, and repo.git when present.
 - `git bay submit <branch>` opens and submits an existing source branch without
@@ -70,7 +73,7 @@ yrd bay close
 yrd line status [PR|name] [--json]
 yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
-yrd line watch [PR|name] [--interval <sec>]
+yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
 yrd contest show <contest>

@@ -42,7 +42,7 @@ USAGE
   yrd line status [PR|name] [--json]
   yrd line audit [--json]
   yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
-  yrd line watch [PR|name] [--interval <sec>]
+  yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 Installed steps: check, merge, deploy
 `
@@ -285,8 +285,12 @@ async function lineStatus(args: string[]): Promise<void> {
   console.log(formatLineStatus(JSON.parse(res.stdout) as LineStatusView))
 }
 
-function mergedPrFrom(output: string): string | undefined {
-  return output.match(/bay: (PR\d+) merging → merged\b/u)?.[1]
+function mergedPrsFrom(output: string): string[] {
+  const seen = new Set<string>()
+  for (const match of output.matchAll(/bay: (PR\d+) merging → merged\b/gu)) {
+    seen.add(match[1]!)
+  }
+  return [...seen]
 }
 
 async function runGitBayAndWrite(args: string[], cwd: string): Promise<Awaited<ReturnType<typeof runCommand>>> {
@@ -298,6 +302,36 @@ async function runGitBayAndWrite(args: string[], cwd: string): Promise<Awaited<R
 async function runDeployStep(paths: Awaited<ReturnType<typeof resolveRepoPaths>>, target: string): Promise<void> {
   const res = await runGitBayAndWrite(["deploy", target], paths.repo)
   if (res.code !== 0) process.exit(res.code)
+}
+
+function isWatch(parsed: ParsedIntegrate): boolean {
+  return parsed.passthrough.includes("--watch")
+}
+
+function parseWatchIntervalSec(parsed: ParsedIntegrate): number {
+  const index = parsed.passthrough.indexOf("--interval")
+  const raw = index === -1 ? "15" : parsed.passthrough[index + 1]
+  const interval = Number(raw)
+  if (!Number.isFinite(interval) || interval <= 0) {
+    fail(`yrd: line integrate: --interval must be a positive number of seconds, got '${raw ?? ""}'`)
+  }
+  return interval
+}
+
+async function lineWatchWithDeploy(parsed: ParsedIntegrate): Promise<void> {
+  const paths = await resolveRepoPaths()
+  const intervalMs = parseWatchIntervalSec(parsed) * 1000
+  let target = parsed.target
+
+  for (;;) {
+    const integrated = await runGitBayAndWrite(["integrate", ...(target === undefined ? [] : [target])], paths.repo)
+    if (integrated.code !== 0) process.exit(integrated.code)
+    for (const pr of mergedPrsFrom(integrated.stdout)) {
+      await runDeployStep(paths, pr)
+    }
+    target = undefined
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
 }
 
 async function lineIntegrate(args: string[]): Promise<void> {
@@ -316,13 +350,20 @@ async function lineIntegrate(args: string[]): Promise<void> {
   }
 
   if (includesDeploy) {
-    if (parsed.passthrough.length > 0) fail("yrd: line integrate: deploy does not support --watch/--interval yet")
     if (parsed.steps.at(-1) !== "deploy") {
       fail(`yrd: line integrate: deploy must be the final step (got '${stepKey}')`)
     }
     if (stepKey !== "deploy" && stepKey !== "merge,deploy" && stepKey !== "check,merge,deploy") {
       fail(`yrd: line integrate: unsupported step order '${stepKey}' (installed sequence: check,merge,deploy)`)
     }
+    if (isWatch(parsed)) {
+      if (stepKey !== "check,merge,deploy") {
+        fail("yrd: line integrate: --watch with deploy runs the full line; use --steps check,merge,deploy")
+      }
+      await lineWatchWithDeploy(parsed)
+      return
+    }
+    if (parsed.passthrough.length > 0) fail("yrd: line integrate: deploy does not support --interval without --watch")
 
     const paths = await resolveRepoPaths()
     if (stepKey === "deploy") {
@@ -341,8 +382,9 @@ async function lineIntegrate(args: string[]): Promise<void> {
 
     const integrated = await runGitBayAndWrite(["integrate", ...(parsed.target === undefined ? [] : [parsed.target])], paths.repo)
     if (integrated.code !== 0) process.exit(integrated.code)
-    const deployTarget = parsed.target ?? mergedPrFrom(integrated.stdout)
-    if (deployTarget !== undefined) await runDeployStep(paths, deployTarget)
+    for (const pr of parsed.target === undefined ? mergedPrsFrom(integrated.stdout) : [parsed.target]) {
+      await runDeployStep(paths, pr)
+    }
     return
   }
 
@@ -382,7 +424,7 @@ async function lineProjection(args: string[]): Promise<void> {
     return
   }
   if (command === "watch") {
-    await reenterGitBay(["integrate", ...args.slice(1), "--watch"])
+    await lineIntegrate([...args.slice(1), "--watch"])
     return
   }
   if (command === "integrate") {

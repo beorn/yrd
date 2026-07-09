@@ -30,6 +30,51 @@ async function run(cmd: string[], cwd: string, env: Record<string, string>): Pro
   })
 }
 
+async function runUntilOutput(
+  cmd: string[],
+  cwd: string,
+  env: Record<string, string>,
+  pattern: RegExp,
+  timeoutMs = PROCESS_TEST_TIMEOUT_MS,
+): Promise<Run> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(cmd[0]!, cmd.slice(1), { cwd, env: { ...process.env, ...env } })
+    let stdout = ""
+    let stderr = ""
+    let matched = false
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM")
+      reject(new Error(`${cmd.join(" ")} did not print ${pattern} within ${timeoutMs}ms\nstdout: ${stdout}\nstderr: ${stderr}`))
+    }, timeoutMs)
+    const observe = (): void => {
+      if (!matched && pattern.test(`${stdout}\n${stderr}`)) {
+        matched = true
+        child.kill("SIGTERM")
+      }
+    }
+    child.stdout.on("data", (c) => {
+      stdout += c
+      observe()
+    })
+    child.stderr.on("data", (c) => {
+      stderr += c
+      observe()
+    })
+    child.on("error", (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      if (!matched) {
+        reject(new Error(`${cmd.join(" ")} exited before printing ${pattern}\nstdout: ${stdout}\nstderr: ${stderr}`))
+        return
+      }
+      resolve({ code: code ?? -1, stdout, stderr })
+    })
+  })
+}
+
 async function must(cmd: string[], cwd: string, env: Record<string, string>): Promise<Run> {
   const res = await run(cmd, cwd, env)
   if (res.code !== 0) {
@@ -529,6 +574,35 @@ describe("yrd CLI — line projection", () => {
     await must(["git", "-C", demo, "config", "--unset", "bay.deploy"], demo, env)
     const skipped = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "deploy"], demo, env)
     expect(skipped.stdout).toContain(`bay: ${pr} deploy → skipped — deploy skipped`)
+  })
+
+  it("line watch can deploy each PR it merges", async () => {
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.deploy",
+        "printf 'watch deploy {pr} {base}\\n' >> deploy-watch.log; printf 'watch deployed {pr}\\n'",
+      ],
+      demo,
+      env,
+    )
+    await branchWithFiles(demo, env, "task/deploy-watch", { "deploy-watch.txt": "ship\n" })
+    const pr = (await must(["git", "bay", "adopt", "task/deploy-watch", "--workitem", "deploy-watch"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", pr], demo, env)
+
+    const watched = await runUntilOutput(
+      [process.execPath, YRD_BIN, "line", "integrate", "--steps", "check,merge,deploy", "--watch", "--interval", "0.05"],
+      demo,
+      env,
+      new RegExp(`bay: ${pr} deploy → deployed`),
+    )
+    expect(watched.stdout).toContain(`bay: ${pr} submitted → checking`)
+    expect(watched.stdout).toContain(`bay: ${pr} merging → merged`)
+    expect(watched.stdout).toContain(`bay: ${pr} deploy → deployed — watch deployed ${pr}`)
+    expect(await readFile(join(demo, "deploy-watch.log"), "utf8")).toBe(`watch deploy ${pr} main\n`)
   })
 
   it("a failed deploy exits nonzero without unmerging the PR", async () => {
