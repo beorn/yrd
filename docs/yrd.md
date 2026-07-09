@@ -228,12 +228,13 @@ It also appends contest lifecycle rows to `.git/bay/events.jsonl`:
 `contest/opened`, `contest/attempt/started`, `contest/attempt/finished`,
 `contest/selected`, and `contest/promoted`. `yrd contest show/select/promote`
 fold from those events when present; `contest.json` remains a rebuildable
-read-model cache and compatibility fallback. Runner stdout/stderr are log
-artifacts. Token and cost metrics are extracted best-effort from runner JSON
-output, including cache and reasoning token fields when runners expose them:
-Claude's `--output-format json` currently reports dollar cost, while Codex
-JSONL reports token fields but may not report a cost field. The record keeps
-missing cost as missing, not guessed.
+read-model cache and compatibility fallback. `withContests()` also projects the
+same rows into `BayState.slices.contests` for plugin consumers. Runner
+stdout/stderr are log artifacts. Token and cost metrics are extracted
+best-effort from runner JSON output, including cache and reasoning token fields
+when runners expose them: Claude's `--output-format json` currently reports
+dollar cost, while Codex JSONL reports token fields but may not report a cost
+field. The record keeps missing cost as missing, not guessed.
 
 ## Integration boundaries
 
@@ -261,8 +262,9 @@ Still coordinated separately:
 - consuming-repo path and bead moves
 - full monorepo package split
 - line artifacts/status/resume hardening and `@ci` cutover
-- contest hardening: with* plugin contest state, richer evaluator plugins,
-  runner-specific cost adapters, and remote/hosted runner support
+- contest hardening: route contest command behavior through the plugin surface,
+  richer evaluator plugins, runner-specific cost adapters, and remote/hosted
+  runner support
 
 ## Reference
 

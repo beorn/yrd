@@ -1,5 +1,10 @@
+import { mkdtemp } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { builtInAgentCommand, extractMetrics } from "../src/contest.ts"
+import { builtInAgentCommand, contestRecords, extractMetrics, withContests } from "../src/contest.ts"
+import { createGitbay, createJsonlJournal, pipe } from "../src/index.ts"
+import type { BayEvent, BayStore } from "../src/index.ts"
 
 describe("contest agent commands", () => {
   it("runs Codex through ag's native codex exec path", () => {
@@ -43,6 +48,88 @@ describe("contest metrics", () => {
       totalTokens: 22,
       costUsd: 0.0123,
       source: "runner-output",
+    })
+  })
+})
+
+describe("contest state layer", () => {
+  it("folds contest lifecycle events into a withContests state slice", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yrd-contest-layer-"))
+    const journal = createJsonlJournal(join(dir, "events.jsonl"))
+    const store: BayStore = { journal, close: async () => {} }
+    const cause = { commandId: "test" }
+    let nextId = 0
+    const event = (name: BayEvent["name"], data: BayEvent["data"], ts = "2026-01-01T00:00:00.000Z"): BayEvent => {
+      nextId++
+      return { id: `e${nextId}`, name, ts, cause, data }
+    }
+
+    await journal.append(
+      event("contest/opened", {
+        contest: "C1",
+        task: "make-answer",
+        prompt: "write answer",
+        repo: "/repo",
+        base: "main",
+        baseSha: "base",
+        agents: ["codex"],
+      }),
+    )
+    await journal.append(
+      event("contest/attempt/started", {
+        contest: "C1",
+        attempt: "A1",
+        agent: "codex",
+        bay: "contest-c1-codex",
+        bayPath: "/repo/.bays/wt1",
+        command: ["ag", "codex"],
+        startedAt: "2026-01-01T00:00:01.000Z",
+      }),
+    )
+    await journal.append(
+      event("contest/attempt/finished", {
+        contest: "C1",
+        attempt: "A1",
+        agent: "codex",
+        bay: "contest-c1-codex",
+        bayPath: "/repo/.bays/wt1",
+        startedAt: "2026-01-01T00:00:01.000Z",
+        finishedAt: "2026-01-01T00:00:03.000Z",
+        exitCode: 0,
+        durationMs: 2000,
+        logs: { stdout: "/tmp/stdout.log", stderr: "/tmp/stderr.log" },
+        metrics: { inputTokens: 10, outputTokens: 5, totalTokens: 15, source: "runner-output" },
+        git: {
+          baseSha: "base",
+          headSha: "head",
+          committed: true,
+          changedFiles: ["answer.txt"],
+          status: "",
+          diffStat: "answer.txt | 1 +",
+        },
+        evals: [{ command: "test -f answer.txt", startedAt: "s", finishedAt: "f", durationMs: 1, exitCode: 0, stdout: "", stderr: "" }],
+      }),
+    )
+    await journal.append(event("contest/selected", { contest: "C1", winner: "A1" }))
+    await journal.append(
+      event("contest/promoted", {
+        contest: "C1",
+        attempt: "A1",
+        pr: "PR1",
+        push: { code: 0, stdout: "", stderr: "" },
+        submit: { code: 0, stdout: "merged", stderr: "" },
+      }),
+    )
+
+    const bay = pipe(createGitbay({ store, clock: () => "2026-01-01T00:00:00.000Z" }), withContests())
+    const record = contestRecords(await bay.state()).C1
+
+    expect(record).toMatchObject({
+      id: "C1",
+      task: "make-answer",
+      attempts: [{ id: "A1", agent: "codex", command: ["ag", "codex"], metrics: { totalTokens: 15 } }],
+      winner: "A1",
+      promoted: { attempt: "A1", pr: "PR1", submit: { stdout: "merged" } },
     })
   })
 })

@@ -20,6 +20,9 @@ repo in hub/yrd/reference or in @yrd beads.
   attempt started/finished, selected, and promoted facts while the JSON contest
   record remains a rebuildable read-model cache/fallback. `yrd contest
   show/select/promote` fold from those events when present.
+- `withContests()` folds those installed contest events into
+  `BayState.slices.contests`, so contest state is now available through the
+  plugin state system as well as the CLI read model.
 - Contest metrics capture explicit runner token, cache-token,
   reasoning-token, duration, cost, and evaluator evidence. Missing dollar cost
   remains missing rather than estimated.
@@ -120,8 +123,8 @@ Rules:
 ## Next Work
 
 1. Contest hardening
-   - Move contest state into a proper with* plugin layer over the installed
-     `contest/...` events; keep contest.json as a rebuildable/read-model cache.
+   - Route more contest command behavior through the with* plugin state/effect
+     surface; keep contest.json as a rebuildable/read-model cache.
    - Add runner-specific cost adapters where a provider does not emit dollar
      cost directly; keep missing cost explicit, never guessed.
    - Add richer evaluator plugins for tests, review, diff quality, performance,

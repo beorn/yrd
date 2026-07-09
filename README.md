@@ -421,7 +421,8 @@ fold `contest show/select/promote` from those rows when present. `contest.json`
 remains a rebuildable read-model cache and compatibility fallback. The rows
 record contest opening, attempt start/finish, manual selection, and promotion,
 so contest state comes from the same `.git/bay/events.jsonl` authority as bays
-and lines.
+and lines. `withContests()` exposes that folded state to plugin consumers under
+`BayState.slices.contests`.
 
 ## Safety Rules
 

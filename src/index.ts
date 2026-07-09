@@ -33,3 +33,11 @@ export { withAdopt } from "./layers/adopt.ts"
 export { createSqliteStore } from "./store/sqlite.ts"
 export { createReadStore } from "./store/read.ts"
 export { acquireWriterLock } from "./store/lock.ts"
+export {
+  applyContestEvent,
+  contestRecords,
+  contestSlice,
+  emptyContestSlice,
+  withContests,
+  type ContestSlice,
+} from "./contest.ts"

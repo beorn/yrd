@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, join } from "node:path"
-import type { Cause, GitbayEvent } from "./types.ts"
+import { definePlugin } from "./core.ts"
+import type { BayEvent, BayPlugin, BayState, Cause, GitbayEvent } from "./types.ts"
 import { createJsonlJournal } from "./journal.ts"
 import { git, repoScopedCleanEnv } from "./layers/git.ts"
 import { bayEventsPath } from "./paths.ts"
@@ -95,12 +96,32 @@ type RepoPaths = {
 }
 
 type ContestEvent = Extract<GitbayEvent, { name: `contest/${string}` }>
+type ContestOpenedData = Extract<ContestEvent, { name: "contest/opened" }>["data"]
+type ContestAttemptStartedData = Extract<ContestEvent, { name: "contest/attempt/started" }>["data"]
+type ContestAttemptFinishedData = Extract<ContestEvent, { name: "contest/attempt/finished" }>["data"]
+
+export type ContestSlice = {
+  records: Record<string, ContestRecord>
+  starts: Record<string, Record<string, ContestAttemptStartedData>>
+}
 
 export type ContestEventAppender = <Name extends ContestEvent["name"]>(
   name: Name,
   data: Extract<ContestEvent, { name: Name }>["data"],
   idPart: string,
 ) => Promise<void>
+
+export function emptyContestSlice(): ContestSlice {
+  return { records: {}, starts: {} }
+}
+
+export function contestSlice(state: BayState): ContestSlice {
+  return (state.slices.contests as ContestSlice | undefined) ?? emptyContestSlice()
+}
+
+export function contestRecords(state: BayState): Record<string, ContestRecord> {
+  return contestSlice(state).records
+}
 
 export async function resolveRepoPaths(cwd = process.cwd()): Promise<RepoPaths> {
   const repoRes = await git(["-C", cwd, "rev-parse", "--show-toplevel"], cwd)
@@ -132,87 +153,124 @@ function attemptOrder(id: string): number {
   return match?.groups?.n === undefined ? Number.MAX_SAFE_INTEGER : Number.parseInt(match.groups.n, 10)
 }
 
-export async function foldContestFromEvents(bayDir: string, id: string): Promise<ContestRecord | undefined> {
-  const journal = createJsonlJournal(bayEventsPath(bayDir))
-  let opened: { ts: string; data: Extract<ContestEvent, { name: "contest/opened" }>["data"] } | undefined
-  const started = new Map<string, Extract<ContestEvent, { name: "contest/attempt/started" }>["data"]>()
-  const finished = new Map<string, Extract<ContestEvent, { name: "contest/attempt/finished" }>["data"]>()
-  let winner: string | undefined
-  let promoted: ContestRecord["promoted"]
-
-  for await (const event of journal.replay()) {
-    if (!event.name.startsWith("contest/")) continue
-    const contest = event.data.contest
-    if (contest !== id) continue
-    switch (event.name) {
-      case "contest/opened":
-        opened = { ts: event.ts, data: event.data as Extract<ContestEvent, { name: "contest/opened" }>["data"] }
-        break
-      case "contest/attempt/started": {
-        const data = event.data as Extract<ContestEvent, { name: "contest/attempt/started" }>["data"]
-        started.set(data.attempt, data)
-        break
-      }
-      case "contest/attempt/finished": {
-        const data = event.data as Extract<ContestEvent, { name: "contest/attempt/finished" }>["data"]
-        finished.set(data.attempt, data)
-        break
-      }
-      case "contest/selected": {
-        const data = event.data as Extract<ContestEvent, { name: "contest/selected" }>["data"]
-        winner = data.winner
-        break
-      }
-      case "contest/promoted": {
-        const data = event.data as Extract<ContestEvent, { name: "contest/promoted" }>["data"]
-        promoted = {
-          attempt: data.attempt,
-          at: event.ts,
-          push: data.push,
-          submit: data.submit,
-          ...(data.pr === undefined ? {} : { pr: data.pr }),
-        }
-        break
-      }
-    }
-  }
-
-  if (opened === undefined) return undefined
-  const attempts: ContestAttempt[] = []
-  for (const [attemptId, done] of [...finished.entries()].sort(([a], [b]) => attemptOrder(a) - attemptOrder(b))) {
-    const start = started.get(attemptId)
-    if (start === undefined) return undefined
-    attempts.push({
-      id: attemptId,
-      agent: done.agent,
-      bayName: done.bay,
-      bayPath: done.bayPath,
-      command: start.command,
-      startedAt: done.startedAt,
-      finishedAt: done.finishedAt,
-      durationMs: done.durationMs,
-      exitCode: done.exitCode,
-      logs: done.logs,
-      metrics: done.metrics,
-      git: done.git,
-      evals: done.evals,
-    })
-  }
-
+function openedRecord(id: string, ts: string, data: ContestOpenedData, existing?: ContestRecord): ContestRecord {
   return {
     version: 1,
     id,
-    task: opened.data.task,
-    prompt: opened.data.prompt,
-    repo: opened.data.repo,
-    base: opened.data.base,
-    baseSha: opened.data.baseSha,
-    createdAt: opened.ts,
-    agents: opened.data.agents,
-    attempts,
-    ...(winner === undefined ? {} : { winner }),
-    ...(promoted === undefined ? {} : { promoted }),
+    task: data.task,
+    prompt: data.prompt,
+    repo: data.repo,
+    base: data.base,
+    baseSha: data.baseSha,
+    createdAt: ts,
+    agents: data.agents,
+    attempts: existing?.attempts ?? [],
+    ...(existing?.winner === undefined ? {} : { winner: existing.winner }),
+    ...(existing?.promoted === undefined ? {} : { promoted: existing.promoted }),
   }
+}
+
+function finishedAttempt(start: ContestAttemptStartedData, done: ContestAttemptFinishedData): ContestAttempt {
+  return {
+    id: done.attempt,
+    agent: done.agent,
+    bayName: done.bay,
+    bayPath: done.bayPath,
+    command: start.command,
+    startedAt: done.startedAt,
+    finishedAt: done.finishedAt,
+    durationMs: done.durationMs,
+    exitCode: done.exitCode,
+    logs: done.logs,
+    metrics: done.metrics,
+    git: done.git,
+    evals: done.evals,
+  }
+}
+
+function sortAttempts(attempts: ContestAttempt[]): ContestAttempt[] {
+  return [...attempts].sort((a, b) => attemptOrder(a.id) - attemptOrder(b.id))
+}
+
+export function applyContestEvent(slice: ContestSlice, event: BayEvent): ContestSlice {
+  if (!event.name.startsWith("contest/")) return slice
+  const contest = event.data.contest
+  if (typeof contest !== "string") return slice
+
+  switch (event.name) {
+    case "contest/opened": {
+      const data = event.data as ContestOpenedData
+      return {
+        ...slice,
+        records: { ...slice.records, [contest]: openedRecord(contest, event.ts, data, slice.records[contest]) },
+      }
+    }
+    case "contest/attempt/started": {
+      const data = event.data as ContestAttemptStartedData
+      return {
+        ...slice,
+        starts: { ...slice.starts, [contest]: { ...(slice.starts[contest] ?? {}), [data.attempt]: data } },
+      }
+    }
+    case "contest/attempt/finished": {
+      const data = event.data as ContestAttemptFinishedData
+      const record = slice.records[contest]
+      const start = slice.starts[contest]?.[data.attempt]
+      if (record === undefined || start === undefined) return slice
+      const attempts = sortAttempts([
+        ...record.attempts.filter((attempt) => attempt.id !== data.attempt),
+        finishedAttempt(start, data),
+      ])
+      return { ...slice, records: { ...slice.records, [contest]: { ...record, attempts } } }
+    }
+    case "contest/selected": {
+      const record = slice.records[contest]
+      if (record === undefined) return slice
+      const data = event.data as Extract<ContestEvent, { name: "contest/selected" }>["data"]
+      return { ...slice, records: { ...slice.records, [contest]: { ...record, winner: data.winner } } }
+    }
+    case "contest/promoted": {
+      const record = slice.records[contest]
+      if (record === undefined) return slice
+      const data = event.data as Extract<ContestEvent, { name: "contest/promoted" }>["data"]
+      return {
+        ...slice,
+        records: {
+          ...slice.records,
+          [contest]: {
+            ...record,
+            promoted: {
+              attempt: data.attempt,
+              at: event.ts,
+              push: data.push,
+              submit: data.submit,
+              ...(data.pr === undefined ? {} : { pr: data.pr }),
+            },
+          },
+        },
+      }
+    }
+    default:
+      return slice
+  }
+}
+
+export function withContests(): BayPlugin {
+  return definePlugin({
+    name: "contests",
+    apply(state, event) {
+      const current = contestSlice(state)
+      const next = applyContestEvent(current, event)
+      return next === current ? state : { ...state, slices: { ...state.slices, contests: next } }
+    },
+  })
+}
+
+export async function foldContestFromEvents(bayDir: string, id: string): Promise<ContestRecord | undefined> {
+  const journal = createJsonlJournal(bayEventsPath(bayDir))
+  let slice = emptyContestSlice()
+  for await (const event of journal.replay()) slice = applyContestEvent(slice, event)
+  return slice.records[id]
 }
 
 export async function readContest(bayDir: string, id: string): Promise<ContestRecord> {
