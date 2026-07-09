@@ -62,7 +62,7 @@ yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
-yrd task compete <task> --agents codex,claude --base main --bays 2
+yrd task compete <task> --agents codex/claude --base main --bays 2
 yrd contest show <contest> [--json]
 yrd contest select <contest> --winner <attempt>
 yrd contest promote <contest>
@@ -85,8 +85,9 @@ yrd line integrate [PR|name] --steps deploy
 `yrd task compete <task>` creates a contest and launches bay attempts.
 `yrd contest ...` commands manage an existing contest lifecycle. Built-in
 competitors resolve through `ag`: `codex` runs `ag codex ...` and `claude` runs
-`ag claude ...`. Custom competitors can be supplied with
-`--agent-cmd <name=command>`.
+`ag claude ...`. Slash-separated lists such as `codex/claude` mirror ag's
+provider-list vocabulary; comma-separated lists remain accepted. Custom
+competitors can be supplied with `--agent-cmd <name=command>`.
 
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
@@ -114,12 +115,10 @@ line package.
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts;
-2. make retry/resume journal-driven by skipping successful step results for the
-   same submission and commit;
-3. extend folded line status into concise human output after the JSON shape is
+2. extend folded line status into concise human output after the JSON shape is
    proven;
-4. add the runner seam for remote/container/hosted execution;
-5. switch `@ci` to that line projection.
+3. add the runner seam for remote/container/hosted execution;
+4. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
 API docs. Tentative reference, background research, and prior-art notes stay
@@ -166,15 +165,16 @@ Step events map naturally to spans:
 
 ```text
 line/step/started { step, pr?, batch?, target, role?, index? }
-line/step/finished { step, pr?, batch?, target, ok, detail?, exitCode?, durationMs?, baseSha?, headSha?, error?, artifacts? }
+line/step/finished { step, pr?, batch?, target, ok, detail?, exitCode?, durationMs?, configHash?, skipped?, baseSha?, headSha?, error?, artifacts? }
 error { code, message, exitCode? }
 ```
 
 Artifacts include logs, coverage, reports, and build outputs. The default local
 artifact store writes command stdout/stderr under `.git/bay/artifacts/`; the
 event carries references, not inline blobs. A resumed line run folds the journal
-first and skips a successful step result only when it matches the same
-submission and commit. A checked PR is stale when its recorded `baseSha` or
+first and skips a successful check result only when it matches the same PR,
+target, base commit, head commit, and check config hash; the resumed event
+records `skipped: true`. A checked PR is stale when its recorded `baseSha` or
 `headSha` no longer matches the current line base or target commit.
 
 Human intervention is also a journaled fact. A future `line/override` event

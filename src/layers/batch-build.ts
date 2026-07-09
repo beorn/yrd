@@ -20,7 +20,7 @@ import type {
 import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prOpenedEvent, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent, submittedPrs } from "./queue.ts"
-import { stepFinished, stepStarted } from "./steps.ts"
+import { stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
 
 const LAYER = "batch-build"
 // Effect types are internal wiring (never journaled) — only EV_* names are
@@ -564,6 +564,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       `(git config bay.provision), then: git bay retry ${d.batch}.`
 
     const events: BayEvent[] = []
+    const configHash = stepConfigHash("check", d.gateCommand)
 
     // The all-red-env guard's other half: gate the UNTOUCHED batch base first.
     const baselineRun = { step: "check" as const, batch: d.batch, target: record.base, role: "baseline" as const }
@@ -573,7 +574,12 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       baseline = await checkBaseline(scratch, d.gateCommand, d.batch, record.base)
     } catch (err) {
       if (err instanceof ProvisionError) {
-        events.push(stepFinished(bay, baselineRun, false, err.message, cause, { error: stepError("provision-failed", err.message) }))
+        events.push(
+          stepFinished(bay, baselineRun, false, err.message, cause, {
+            configHash,
+            error: stepError("provision-failed", err.message),
+          }),
+        )
         return [...events, refused("provision-failed", provisionRefusal(err))]
       }
       throw err
@@ -591,6 +597,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
           baselineOutput,
           await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: baselineRun, output: baselineOutput }),
           baselineError,
+          { configHash },
         ),
       ),
     )
@@ -624,7 +631,12 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         checked = await checkPrefix(scratch, d.gateCommand, d.batch, prefix)
       } catch (err) {
         if (err instanceof ProvisionError) {
-          events.push(stepFinished(bay, prefixRun, false, err.message, cause, { error: stepError("provision-failed", err.message) }))
+          events.push(
+            stepFinished(bay, prefixRun, false, err.message, cause, {
+              configHash,
+              error: stepError("provision-failed", err.message),
+            }),
+          )
           return [...events, refused("provision-failed", provisionRefusal(err))]
         }
         throw err
@@ -642,6 +654,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
             checkedOutput,
             await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: prefixRun, output: checkedOutput }),
             checkedError,
+            { configHash },
           ),
         ),
       )

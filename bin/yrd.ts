@@ -30,7 +30,7 @@ const USAGE = `yrd — the software delivery yard
 USAGE
   yrd bay <verb> [args]   the Git-native bay (same implementation as \`git bay\`)
   yrd line <verb> [args]  integration line projection over the same bay state
-  yrd task compete <task> --agents codex,claude [options]
+  yrd task compete <task> --agents codex/claude [options]
   yrd contest <verb> [args]
 
 Installed projections: bay, line, task, contest
@@ -51,7 +51,7 @@ Staged steps: deploy
 const TASK_USAGE = `yrd task — task intake projection
 
 USAGE
-  yrd task compete <task> [--agents codex,claude] [--prompt <text>] [--prompt-file <path>]
+  yrd task compete <task> [--agents codex/claude] [--prompt <text>] [--prompt-file <path>]
                    [--agent-cmd <name=command>] [--eval <command>] [--base <ref>] [--bays <n>] [--json]
 
 Built-in contest agents: codex, claude
@@ -240,7 +240,7 @@ function requireOk(res: Awaited<ReturnType<typeof runCommand>>, label: string): 
 
 function parseList(raw: string): string[] {
   return raw
-    .split(",")
+    .split(/[\/,]/)
     .map((part) => part.trim())
     .filter((part) => part !== "")
 }

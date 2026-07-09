@@ -17,6 +17,9 @@ repo in hub/yrd/reference or in @yrd beads.
   references on `line/step/finished`.
 - Failed line step runs include normalized `error { code, message, exitCode? }`
   metadata using the same rejection-code vocabulary as PR verdicts.
+- Resume paths skip a previously successful check when PR, target, base SHA,
+  head SHA, and check config hash still match; skipped rows carry
+  `skipped: true`.
 - Line status JSON includes a folded line summary with open items, last step
   results, base/head SHAs, and checked-PR staleness reasons.
 - hh consumes this repo at vendor/yrd.
@@ -50,7 +53,7 @@ yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
-yrd task compete <task> --agents codex,claude --base main --bays 2
+yrd task compete <task> --agents codex/claude --base main --bays 2
 yrd contest show <contest>
 yrd contest select <contest> --winner <attempt>
 yrd contest promote <contest>
@@ -82,8 +85,8 @@ Rules:
    - Finish core submission and line-step event/state contracts.
    - Broaden artifact/log capture beyond the local command runner as remote
      and hosted runners land.
-   - Make --retry and process restart journal-driven by skipping successful
-     step results for the same submission and commit.
+   - Extend journal-driven resume beyond successful checks as more step kinds
+     land; keep merge non-skippable unless the line can prove a landed result.
    - Extend folded line status beyond JSON into concise human output once @ci
      has settled on the machine shape.
    - Add the runner seam for remote, container, or hosted test execution.
@@ -135,6 +138,7 @@ Rules:
 - Line runs capture artifacts/logs, expose folded status, and resume from the
   journal for the same submission and commit. Local command artifacts are
   installed, JSON folded status is installed, and normalized step errors are
-  installed; resume semantics remain.
+  installed. Successful check reuse is installed for matching
+  PR/base/head/config; broader step resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

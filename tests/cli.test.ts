@@ -446,7 +446,7 @@ describe("yrd CLI — line projection", () => {
     expect(help.stdout).toContain("Installed projections: bay, line, task, contest")
 
     const taskHelp = await must([process.execPath, YRD_BIN, "task", "--help"], demo, env)
-    expect(taskHelp.stdout).toContain("--agents codex,claude")
+    expect(taskHelp.stdout).toContain("--agents codex/claude")
     expect(taskHelp.stdout).toContain("Built-in contest agents: codex, claude")
     expect(taskHelp.stdout).not.toContain("claude-opus")
 
@@ -489,7 +489,7 @@ describe("yrd CLI — contest projection", () => {
         "compete",
         "demo-task",
         "--agents",
-        "fake-alpha,fake-beta",
+        "fake-alpha/fake-beta",
         "--bays",
         "2",
         "--agent-cmd",
@@ -1431,10 +1431,16 @@ describe("git bay CLI — one merge seam (21002): retry re-runs the gates, never
   })
 
   it("PR4 shape: a merge-command refusal STANDS on retry — the command re-runs, mainline never moves", async () => {
+    const checkCalls = join(root, "check-calls.log")
+    const check = join(root, "check.sh")
+    await writeFile(check, `#!/bin/sh\necho check >> ${checkCalls}\n`, "utf8")
+    await chmod(check, 0o755)
+
     const calls = join(root, "gate-calls.log")
     const refuse = join(root, "refuse.sh")
     await writeFile(refuse, `#!/bin/sh\necho run >> ${calls}\necho "reviewer-not-author gate: refused" >&2\nexit 1\n`, "utf8")
     await chmod(refuse, 0o755)
+    await must(["git", "-C", demo, "config", "bay.check", check], demo, env)
     await must(["git", "-C", demo, "config", "bay.mergeCommand", refuse], demo, env)
     await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
 
@@ -1454,10 +1460,16 @@ describe("git bay CLI — one merge seam (21002): retry re-runs the gates, never
 
     const log = (await import("node:fs")).readFileSync(calls, "utf8").trim().split("\n")
     expect(log).toHaveLength(2) // once per attempt — the gate ran BOTH times
+    const checkLog = (await readFile(checkCalls, "utf8")).trim().split("\n")
+    expect(checkLog).toHaveLength(1) // the successful check was reused on retry
 
     const json = await must(["git", "bay", "ls", "--json"], demo, env)
-    const state = JSON.parse(json.stdout) as { prs: Record<string, { state: string }> }
+    const state = JSON.parse(json.stdout) as {
+      prs: Record<string, { state: string }>
+      line: { items: { pr: string; steps: { check?: { skipped?: boolean } } }[] }
+    }
     expect(state.prs.PR1!.state).toBe("rejected")
+    expect(state.line.items.find((item) => item.pr === "PR1")?.steps.check?.skipped).toBe(true)
 
     const headAfter = (await must(["git", "-C", demo, "rev-parse", "HEAD"], demo, env)).stdout.trim()
     expect(headAfter).toBe(headBefore) // no ungated merge ever touched the mainline

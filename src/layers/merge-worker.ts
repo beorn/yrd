@@ -20,7 +20,7 @@ import { batchLandEvidence } from "./batch-build.ts"
 import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
 import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
-import { stepFinished, stepStarted } from "./steps.ts"
+import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
 
 /**
  * withMergeWorker — the pipeline layer (docs/model.md § Verbs): `check`,
@@ -108,6 +108,21 @@ function resolveMainRepo(opts: MergeWorkerOptions): string {
   return opts.mainRepo ?? opts.configCwd ?? process.cwd()
 }
 
+async function maybeReuseSuccessfulCheck(
+  bay: BayRuntime,
+  opts: MergeWorkerOptions,
+  run: StepRunData & { step: "check"; pr: PrId },
+  cause: NonNullable<Effect["cause"]>,
+): Promise<BayEvent[] | undefined> {
+  const mainRepo = opts.mainRepo ?? opts.configCwd
+  if (mainRepo === undefined) return undefined
+  const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
+  if (check === undefined || check.trim() === "") return undefined
+  const refs = { ...(await collectStepRefs(mainRepo, run.target)), configHash: stepConfigHash("check", check) }
+  if (!(await hasReusableSuccessfulStep(bay, run, refs))) return undefined
+  return skippedStepEvents(bay, run, cause, refs)
+}
+
 // ---------- check <PR>: submitted → checking → checked | rejected ----------
 
 function reduceCheck(bay: BayRuntime, state: BayState, command: BayCommand): TransitionResult {
@@ -146,7 +161,7 @@ function reduceCheck(bay: BayRuntime, state: BayState, command: BayCommand): Tra
 /** `skipped: true` = no check is configured (nothing ran, nothing to journal
  *  as a step run); a real run — pass, fail, or provision fault — is never
  *  skipped. */
-type CheckStepOutcome = CheckOutcome & { skipped?: boolean }
+type CheckStepOutcome = CheckOutcome & { skipped?: boolean; configHash?: string }
 
 async function runCheckStep(
   state: BayState,
@@ -157,9 +172,10 @@ async function runCheckStep(
   const mainRepo = resolveMainRepo(opts)
   const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
   if (check === undefined || check.trim() === "") return { ok: true, skipped: true }
+  const configHash = stepConfigHash("check", check)
   const target = queueTarget(state, pr)
   const bayPath = openBayPath(state, target)
-  if (bayPath !== undefined) return await runProjectCheck(check, bayPath)
+  if (bayPath !== undefined) return { ...(await runProjectCheck(check, bayPath)), configHash }
   if (scratch !== undefined) {
     let lease: Awaited<ReturnType<ScratchWorkspaces["acquire"]>>
     try {
@@ -169,7 +185,7 @@ async function runCheckStep(
       throw err
     }
     try {
-      return await runProjectCheck(check, lease.path)
+      return { ...(await runProjectCheck(check, lease.path)), configHash }
     } finally {
       await lease.dispose()
     }
@@ -177,7 +193,7 @@ async function runCheckStep(
   // Library path with no mainRepo (no repo to scratch from): the legacy cwd
   // fallback. CLI hosts always set mainRepo, so bayless PRs get true-tree
   // checks there.
-  return await runProjectCheck(check, mainRepo)
+  return { ...(await runProjectCheck(check, mainRepo)), configHash }
 }
 
 function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspaces | undefined): EffectHandler {
@@ -246,7 +262,7 @@ async function stepFinishedWithOutput(
   bay: BayRuntime,
   opts: MergeWorkerOptions,
   run: StepRunData,
-  outcome: ({ ok: true } | { ok: false; code?: RejectionCode; detail?: string }) & StepCommandOutput,
+  outcome: ({ ok: true } | { ok: false; code?: RejectionCode; detail?: string }) & StepCommandOutput & { configHash?: string },
   detail: string | undefined,
   cause: NonNullable<Effect["cause"]>,
 ): Promise<BayEvent> {
@@ -257,7 +273,7 @@ async function stepFinishedWithOutput(
     outcome.ok === false
       ? stepError(outcome.code ?? (run.step === "check" ? "check-failed" : "merge-command-failed"), detail ?? "step failed", output)
       : undefined
-  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(output, artifacts, error))
+  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(output, artifacts, error, { configHash: outcome.configHash }))
 }
 
 async function runMergeStep(
@@ -363,20 +379,25 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
 
     if (pr.state === "checking") {
       const checkState = await bay.state()
-      const outcome = await runCheckStep(checkState, d.pr, opts, scratch)
-      if (outcome.skipped !== true) {
-        const run = { step: "check" as const, pr: d.pr, target: queueTarget(checkState, d.pr) }
-        events.push(stepStarted(bay, run, effect.cause!))
-        events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!))
-      }
-      if (!outcome.ok) {
-        events.push(
-          stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
-            code: outcome.code ?? "check-failed",
-            detail: outcome.detail,
-          }),
-        )
-        return events
+      const run = { step: "check" as const, pr: d.pr, target: queueTarget(checkState, d.pr) }
+      const reused = await maybeReuseSuccessfulCheck(bay, opts, run, effect.cause!)
+      if (reused !== undefined) {
+        events.push(...reused)
+      } else {
+        const outcome = await runCheckStep(checkState, d.pr, opts, scratch)
+        if (outcome.skipped !== true) {
+          events.push(stepStarted(bay, run, effect.cause!))
+          events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!))
+        }
+        if (!outcome.ok) {
+          events.push(
+            stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
+              code: outcome.code ?? "check-failed",
+              detail: outcome.detail,
+            }),
+          )
+          return events
+        }
       }
       events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
       events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))

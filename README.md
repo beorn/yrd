@@ -238,14 +238,16 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 
 | Command | Input | Output | State / Exit |
 | --- | --- | --- | --- |
-| `yrd task compete <task> --agents codex,claude --prompt <text>` | task name and competitor list | contest id and attempt summaries | opens one bay per competitor, runs configured commands, records metrics |
+| `yrd task compete <task> --agents codex/claude --prompt <text>` | task name and competitor list | contest id and attempt summaries | opens one bay per competitor, runs configured commands, records metrics |
 | `yrd contest show <contest> [--json]` | contest id | attempts, metrics, evaluator output, winner | no state change |
 | `yrd contest select <contest> --winner <attempt>` | contest id and attempt id | selected winner | records manual selection |
 | `yrd contest promote <contest>` | contest with selected winner | PR id or submit output | submits the winning attempt to the line |
 
 Contest competitors are commands. The built-in agent names resolve to local ag
 commands: `codex` means an `ag codex ...` attempt and `claude` means an
-`ag claude ...` attempt. Custom competitors can provide an explicit command.
+`ag claude ...` attempt. Use slash-separated lists such as `codex/claude` to
+mirror ag's provider-list vocabulary; comma-separated lists still parse for
+compatibility. Custom competitors can provide an explicit command.
 
 ### Plain Git
 
@@ -459,14 +461,20 @@ contest/...      opened, attempt started/finished, selected, promoted
 ```
 
 `line/step/finished` rows include the step verdict plus available process
-metadata: `exitCode`, `durationMs`, `baseSha`, `headSha`, structured
-`error { code, message, exitCode? }` metadata on failures, and artifact
-references for captured stdout/stderr. Artifacts are stored as files; journal
-rows carry references, not inline logs.
+metadata: `exitCode`, `durationMs`, `configHash`, `baseSha`, `headSha`,
+structured `error { code, message, exitCode? }` metadata on failures, and
+artifact references for captured stdout/stderr. Artifacts are stored as files;
+journal rows carry references, not inline logs.
 
 `yrd line status --json` projects a folded `line` summary over the same event
 log: open PRs, current targets, last step results, artifact refs, and staleness
 when a checked PR's base or target commit has moved since its check.
+
+On retry/resume, the line can reuse a previous successful check when the PR,
+target, base commit, head commit, and check config hash still match; the new
+step row records `skipped: true`. Merge steps are deliberately not skipped: a
+merge either landed and made the PR terminal, or it must run again under the
+guard.
 
 External orchestrators can assign workers around git bay, but those actors live
 above this tool. git bay owns only the git-backed bays, PR state, line mechanics,

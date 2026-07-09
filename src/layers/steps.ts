@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto"
 import { makeEvent } from "../core.ts"
-import type { BayEvent, BayRuntime, Cause, StepFinishMetadata, StepRunData } from "../types.ts"
+import type { BayEvent, BayRuntime, Cause, PrId, StepFinishMetadata, StepRunData } from "../types.ts"
 
 /**
  * line/step event builders — the ONE spelling for "a step ran against a target
@@ -32,6 +33,8 @@ export function stepFinished(
       ...(detail !== undefined ? { detail } : {}),
       ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
       ...(metadata.durationMs !== undefined ? { durationMs: metadata.durationMs } : {}),
+      ...(metadata.configHash !== undefined ? { configHash: metadata.configHash } : {}),
+      ...(metadata.skipped !== undefined ? { skipped: metadata.skipped } : {}),
       ...(metadata.error !== undefined ? { error: metadata.error } : {}),
       ...(metadata.artifacts !== undefined && metadata.artifacts.length > 0 ? { artifacts: metadata.artifacts } : {}),
       ...(metadata.baseSha !== undefined ? { baseSha: metadata.baseSha } : {}),
@@ -39,4 +42,58 @@ export function stepFinished(
     },
     cause,
   )
+}
+
+export function stepConfigHash(step: StepRunData["step"], config: string): string {
+  return createHash("sha256").update(step).update("\0").update(config.trim()).digest("hex")
+}
+
+export async function hasReusableSuccessfulStep(
+  bay: BayRuntime,
+  run: StepRunData,
+  refs: { baseSha?: string; headSha?: string; configHash?: string },
+): Promise<boolean> {
+  if (run.pr === undefined || refs.baseSha === undefined || refs.headSha === undefined || refs.configHash === undefined) return false
+  for await (const ev of bay.store.journal.replay()) {
+    if (ev.name !== "line/step/finished") continue
+    const d = ev.data as {
+      step?: StepRunData["step"]
+      pr?: PrId
+      target?: string
+      ok?: boolean
+      baseSha?: string
+      headSha?: string
+      configHash?: string
+    }
+    if (
+      d.step === run.step &&
+      d.pr === run.pr &&
+      d.target === run.target &&
+      d.ok === true &&
+      d.baseSha === refs.baseSha &&
+      d.headSha === refs.headSha &&
+      d.configHash === refs.configHash
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+export function skippedStepEvents(
+  bay: BayRuntime,
+  run: StepRunData,
+  cause: Cause,
+  refs: { baseSha?: string; headSha?: string; configHash?: string },
+): BayEvent[] {
+  return [
+    stepStarted(bay, run, cause),
+    stepFinished(bay, run, true, "skipped; previous successful check matches base/head/config", cause, {
+      durationMs: 0,
+      configHash: refs.configHash,
+      skipped: true,
+      baseSha: refs.baseSha,
+      headSha: refs.headSha,
+    }),
+  ]
 }

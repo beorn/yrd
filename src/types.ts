@@ -357,6 +357,8 @@ export type StepError = {
 export type StepFinishMetadata = {
   exitCode?: number
   durationMs?: number
+  configHash?: string
+  skipped?: boolean
   error?: StepError
   artifacts?: StepArtifact[]
   baseSha?: string

@@ -64,10 +64,16 @@ export function stepError(code: RejectionCode, message: string, output: StepComm
   }
 }
 
-export function stepMetadata(output: StepCommandOutput, artifacts: StepArtifact[], error?: StepError): StepFinishMetadata {
+export function stepMetadata(
+  output: StepCommandOutput,
+  artifacts: StepArtifact[],
+  error?: StepError,
+  extra: Pick<StepFinishMetadata, "configHash"> = {},
+): StepFinishMetadata {
   return {
     ...(output.exitCode !== undefined ? { exitCode: output.exitCode } : {}),
     ...(output.durationMs !== undefined ? { durationMs: output.durationMs } : {}),
+    ...(extra.configHash !== undefined ? { configHash: extra.configHash } : {}),
     ...(error !== undefined ? { error } : {}),
     ...(artifacts.length > 0 ? { artifacts } : {}),
     ...(output.baseSha !== undefined ? { baseSha: output.baseSha } : {}),

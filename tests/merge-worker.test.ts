@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -444,6 +444,82 @@ describe("withMergeWorker — integrate: the umbrella (submitted → … → mer
     await expect(bay.dispatch({ type: "integrate", args: { pr: "C-rej" } })).rejects.toThrow(
       /integrate: C-rej was rejected — put it back in the queue first: git bay retry C-rej/,
     )
+  })
+
+  it("reuses a previous successful check for the same base/head after requeue", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-reuse-check-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await g(["commit", "-qm", "base", "--allow-empty"])
+    await g(["switch", "-qc", "task/reuse"])
+    await g(["commit", "-qm", "feat: reuse", "--allow-empty"])
+    await g(["switch", "-q", "main"])
+
+    const calls = join(repo, "check-calls.log")
+    const check = join(repo, "check.sh")
+    await writeFile(check, `#!/bin/sh\necho check >> ${calls}\n`, "utf8")
+    await chmod(check, 0o755)
+
+    const bay = await buildMergeBay(await tmpJournalPath(), {
+      mainRepo: repo,
+      check,
+      mergeCommand: "false",
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/reuse", pr: "C-reuse" } })
+
+    await bay.dispatch({ type: "integrate", args: { pr: "C-reuse" } })
+    expect(stateOf(await bay.state(), "C-reuse")).toBe("rejected")
+
+    await bay.dispatch({ type: "requeue", args: { pr: "C-reuse" } })
+    const { events } = await bay.dispatch({ type: "integrate", args: { pr: "C-reuse" } })
+    const checkRows = events.filter((event) => event.name === "line/step/finished" && event.data!.step === "check")
+    expect(checkRows).toHaveLength(1)
+    expect(checkRows[0]!.data!.skipped).toBe(true)
+    expect(checkRows[0]!.data!.configHash).toMatch(/^[0-9a-f]{64}$/)
+
+    expect((await readFile(calls, "utf8")).trim().split("\n")).toHaveLength(1)
+    expect(stateOf(await bay.state(), "C-reuse")).toBe("rejected")
+  })
+
+  it("does not reuse a previous check when the configured check command changes", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-recheck-config-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await g(["commit", "-qm", "base", "--allow-empty"])
+    await g(["switch", "-qc", "task/recheck"])
+    await g(["commit", "-qm", "feat: recheck", "--allow-empty"])
+    await g(["switch", "-q", "main"])
+
+    const calls = join(repo, "check-calls.log")
+    const check1 = join(repo, "check1.sh")
+    const check2 = join(repo, "check2.sh")
+    await writeFile(check1, `#!/bin/sh\necho check1 >> ${calls}\n`, "utf8")
+    await writeFile(check2, `#!/bin/sh\necho check2 >> ${calls}\n`, "utf8")
+    await chmod(check1, 0o755)
+    await chmod(check2, 0o755)
+
+    const journal = await tmpJournalPath()
+    const first = await buildMergeBay(journal, { mainRepo: repo, check: check1, mergeCommand: "false" })
+    await first.dispatch({ type: "enqueue", args: { target: "task/recheck", pr: "C-recheck" } })
+    await first.dispatch({ type: "integrate", args: { pr: "C-recheck" } })
+    await first.dispatch({ type: "requeue", args: { pr: "C-recheck" } })
+
+    const second = await buildMergeBay(journal, { mainRepo: repo, check: check2, mergeCommand: "false" })
+    const { events } = await second.dispatch({ type: "integrate", args: { pr: "C-recheck" } })
+    const checkRows = events.filter((event) => event.name === "line/step/finished" && event.data!.step === "check")
+    expect(checkRows).toHaveLength(1)
+    expect(checkRows[0]!.data!.skipped).toBeUndefined()
+
+    expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual(["check1", "check2"])
+    expect(stateOf(await second.state(), "C-recheck")).toBe("rejected")
   })
 })
 

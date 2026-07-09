@@ -424,6 +424,8 @@ type StepStatus = {
   detail?: string
   exitCode?: number
   durationMs?: number
+  configHash?: string
+  skipped?: boolean
   baseSha?: string
   headSha?: string
   error?: StepError
@@ -464,6 +466,8 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
       detail?: string
       exitCode?: number
       durationMs?: number
+      configHash?: string
+      skipped?: boolean
       baseSha?: string
       headSha?: string
       error?: StepError
@@ -478,6 +482,8 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
       ...(d.detail !== undefined ? { detail: d.detail } : {}),
       ...(d.exitCode !== undefined ? { exitCode: d.exitCode } : {}),
       ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
+      ...(d.configHash !== undefined ? { configHash: d.configHash } : {}),
+      ...(d.skipped !== undefined ? { skipped: d.skipped } : {}),
       ...(d.baseSha !== undefined ? { baseSha: d.baseSha } : {}),
       ...(d.headSha !== undefined ? { headSha: d.headSha } : {}),
       ...(d.error !== undefined ? { error: d.error } : {}),

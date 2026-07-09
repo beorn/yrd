@@ -20,7 +20,7 @@ import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./
 import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
-import { stepFinished, stepStarted } from "./steps.ts"
+import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
 
 /**
  * withReceive — the receiver (spec § Using it: "the remote is the API"; v0.1-b of
@@ -277,25 +277,32 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     const cwd = d.bayPath ?? mainRepo
     if (check !== undefined && check.trim() !== "") {
       const run = { step: "check" as const, pr: d.pr, target: d.branch }
-      events.push(stepStarted(bay, run, effect.cause!))
-      const checked = await runProjectCheck(check, cwd)
-      const checkedOutput = await collectStepRefs(mainRepo, run.target, checked)
-      const error = checked.ok ? undefined : stepError("check-failed", checked.detail, checkedOutput)
-      events.push(
-        stepFinished(
-          bay,
-          run,
-          checked.ok,
-          checked.ok ? undefined : checked.detail,
-          effect.cause!,
-          stepMetadata(checkedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checkedOutput }), error),
-        ),
-      )
-      if (!checked.ok) {
+      const refs = { ...(await collectStepRefs(mainRepo, run.target)), configHash: stepConfigHash("check", check) }
+      if (await hasReusableSuccessfulStep(bay, run, refs)) {
+        events.push(...skippedStepEvents(bay, run, effect.cause!, refs))
+      } else {
+        events.push(stepStarted(bay, run, effect.cause!))
+        const checked = await runProjectCheck(check, cwd)
+        const checkedOutput = await collectStepRefs(mainRepo, run.target, checked)
+        const error = checked.ok ? undefined : stepError("check-failed", checked.detail, checkedOutput)
         events.push(
-          stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
+          stepFinished(
+            bay,
+            run,
+            checked.ok,
+            checked.ok ? undefined : checked.detail,
+            effect.cause!,
+            stepMetadata(checkedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checkedOutput }), error, {
+              configHash: refs.configHash,
+            }),
+          ),
         )
-        return events
+        if (!checked.ok) {
+          events.push(
+            stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
+          )
+          return events
+        }
       }
     }
     events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
