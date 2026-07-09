@@ -36,6 +36,7 @@ import { withAdopt } from "../src/layers/adopt.ts"
 import { notifyKeyFor, resolveValidateCommand, withIssueTracking } from "../src/layers/issue-tracking.ts"
 import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "../src/layers/git.ts"
 import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
+import { bayEventsPath, bayPrsGitPath } from "../src/paths.ts"
 
 // ---------- context ----------
 
@@ -114,7 +115,7 @@ async function resolveCtx(): Promise<Ctx> {
   return {
     mainRepo,
     bayDir,
-    repoGit: join(bayDir, "repo.git"),
+    repoGit: bayPrsGitPath(bayDir),
     actor,
     leaseTimeoutMs,
     batchSize,
@@ -406,7 +407,7 @@ function prLine(pr: PullRequest, detail: string | undefined): string {
   return `${pr.id} ${pr.state}`
 }
 
-/** Last recorded state-change detail for a PR, from the journal. */
+/** Last recorded state-change detail for a PR, from the event log. */
 async function lastDetail(bay: BayRuntime, id: PrId): Promise<string | undefined> {
   let detail: string | undefined
   for await (const ev of bay.store.journal.replay()) {
@@ -601,7 +602,7 @@ async function verbInit(ctx: Ctx): Promise<void> {
   await withWriteBay(ctx, async (bay) => {
     await bay.dispatch({ type: "init" })
   })
-  console.log(`bay: initialized (store: sqlite, journal: ${relToMain(ctx, join(ctx.bayDir, "journal.jsonl"))})`)
+  console.log(`bay: initialized (store: sqlite, events: ${relToMain(ctx, bayEventsPath(ctx.bayDir))})`)
 }
 
 function relToMain(ctx: Ctx, path: string): string {
@@ -1227,7 +1228,7 @@ ADDRESSING
   Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
-  .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
+  .git/bay/events.jsonl    append-only event log (every verdict, replayable)
 Primed. Start: cd "$(git bay open <name>)"   (all verbs: git bay help)`
 
 /** The live half of `git bay guide`: what THIS repository's bay looks like —
@@ -1280,7 +1281,7 @@ async function guideContext(): Promise<string> {
     const ctx: Ctx = {
       mainRepo,
       bayDir,
-      repoGit: join(bayDir, "repo.git"),
+      repoGit: bayPrsGitPath(bayDir),
       actor: "guide",
       batchSize: 1,
       batchGeneratedGlobs: [],
@@ -1364,7 +1365,7 @@ async function main(): Promise<void> {
     .command("init")
     .aliases(["install", "setup"])
     .helpGroup("Start here:")
-    .description("set up git bay for this repository (state in .git/bay/: store, journal, bay-owned repo.git + hooks)")
+    .description("set up git bay for this repository (state in .git/bay/: events, index, bay-owned prs.git + hooks)")
     .action(async () => {
       await verbInit(await resolveCtx())
     })
@@ -1516,19 +1517,19 @@ async function main(): Promise<void> {
       await verbAudit(await requireBay(), opts.json === true)
     })
 
-  // One-shot journal migration (spec § event schema v2) — hidden: an operator
+  // One-shot event-log migration (spec § event schema v2) — hidden: an operator
   // runs this once, deliberately, when moving a pre-v0.3 bay forward. Not a
   // dual-read shim; there is nothing else that understands the v1 shape.
   program
     .command("migrate-journal", { hidden: true })
-    .description("one-shot: migrate .git/bay/journal.jsonl from the pre-v0.3 event names to v2 (backs up as journal.v1.jsonl)")
+    .description("one-shot: migrate the bay event log from pre-v0.3 event names to v2 (backs up the original)")
     .action(async () => {
       const ctx = await requireBay()
       const { migrateJournal } = await import("../src/migrate.ts")
-      const { migrated, dropped } = await migrateJournal(ctx.bayDir)
+      const { migrated, dropped, backupPath } = await migrateJournal(ctx.bayDir)
       console.log(
         `bay: migrated ${migrated} event(s) to v2 (${dropped} non-event row(s) dropped); ` +
-          `original backed up as ${relToMain(ctx, join(ctx.bayDir, "journal.v1.jsonl"))}`,
+          `original backed up as ${relToMain(ctx, backupPath)}`,
       )
     })
 

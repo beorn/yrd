@@ -1,14 +1,15 @@
 import { readFile, rename, writeFile } from "node:fs/promises"
 import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import type { DeprovisionVia, RejectionCode } from "./types.ts"
+import { bayEventsPath, EVENTS_FILE } from "./paths.ts"
 
 /**
- * journal.jsonl v1 → v2, one-shot (spec § event schema v2, "the journal
+ * Event-log v1 → v2, one-shot (spec § event schema v2, "the journal
  * migration"). v1 rows are the pre-v0.3 dotted event names — `{v, ts, actor,
  * type, pr?, lease?, data?}`. v2 rows are the slash-namespaced families —
  * `{id, ts, name, cause, data}` (docs/events.md). There is no dual-read shim:
- * a v1 journal must be migrated before any v0.3 code reads it, and this file
+ * a v1 event log must be migrated before any v0.3 code reads it, and this file
  * is the only place that still knows the v1 shape.
  *
  * Renames (docs/events.md § event families):
@@ -110,20 +111,21 @@ function endReasonToVia(endReason: unknown): DeprovisionVia {
 }
 
 /**
- * Migrate one v1 journal in place: reads `<dir>/journal.jsonl`, backs the
- * original up alongside as `journal.v1.jsonl` (never overwritten — a second
- * run against an already-migrated dir is refused, not silently re-run), and
- * writes the migrated v2 rows back to `journal.jsonl`. Non-events are
+ * Migrate one v1 event log in place: reads `<dir>/events.jsonl` (or legacy
+ * `<dir>/journal.jsonl` when that is the existing active log), backs the
+ * original up alongside as `events.v1.jsonl` or `journal.v1.jsonl` (never
+ * overwritten — a second run against an already-migrated dir is refused, not
+ * silently re-run), and writes the migrated v2 rows back to the same path. Non-events are
  * dropped; every other row is renamed and reshaped 1:1 (no fan-out, no
  * merging of rows) using a small amount of running state (which worktree a
  * lease holds, which PRs a lease pre-minted, each lease's last `via`) needed
  * to fill in fields v1 didn't carry on every row.
  */
-export async function migrateJournal(dir: string): Promise<{ migrated: number; dropped: number }> {
-  const journalPath = join(dir, "journal.jsonl")
-  const backupPath = join(dir, "journal.v1.jsonl")
+export async function migrateJournal(dir: string): Promise<{ migrated: number; dropped: number; backupPath: string }> {
+  const journalPath = bayEventsPath(dir)
+  const backupPath = join(dir, basename(journalPath) === EVENTS_FILE ? "events.v1.jsonl" : "journal.v1.jsonl")
   if (!existsSync(journalPath)) {
-    throw new Error(`bay: migrate: no journal at ${journalPath} — nothing to migrate`)
+    throw new Error(`bay: migrate: no event log at ${journalPath} — nothing to migrate`)
   }
   if (existsSync(backupPath)) {
     throw new Error(
@@ -332,5 +334,5 @@ export async function migrateJournal(dir: string): Promise<{ migrated: number; d
   const body = out.map((e) => JSON.stringify(e)).join("\n") + (out.length > 0 ? "\n" : "")
   await writeFile(journalPath, body, "utf8")
 
-  return { migrated: out.length, dropped }
+  return { migrated: out.length, dropped, backupPath }
 }

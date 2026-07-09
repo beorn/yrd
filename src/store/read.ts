@@ -1,6 +1,6 @@
-import { join } from "node:path"
 import type { BayStore } from "../types.ts"
 import { createJsonlJournal } from "../journal.ts"
+import { bayEventsPath } from "../paths.ts"
 
 /**
  * Read-only store — the journal with no sqlite and NO writer lock. For verbs
@@ -11,7 +11,7 @@ import { createJsonlJournal } from "../journal.ts"
  * lock (principles § Fail Loud, Fail Now).
  */
 export function createReadStore(dir: string): BayStore {
-  const journal = createJsonlJournal(join(dir, "journal.jsonl"))
+  const journal = createJsonlJournal(bayEventsPath(dir))
   return {
     journal: {
       replay: journal.replay,

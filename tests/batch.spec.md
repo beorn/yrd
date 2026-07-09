@@ -1,13 +1,13 @@
 # git bay batches — executable spec
 
-Batching is automatic when `bay.queue.batch-size` is greater than one: `git bay integrate` composes compatible submitted PRs into a batch candidate, lands that candidate through the pipeline (check, then the merge command), and records the batch in the journal-backed status output. A configured check runs against the tree it judges: a bayless PR — including every batch candidate — gets a scratch workspace at its own target, never the mainline working tree. When the candidate lands, each member's outcome becomes journal truth: a `pr/changed` → merged per member (its compose-time tip as `sha`) plus one `line/batch/finished` summary. Every check/merge run also journals a `line/step/started`/`finished` pair — serial and batch alike. These specs rest submitted PRs with `bay.autoMerge false` so a queue can form; with the default auto-flow each submit would land individually before a batch could compose.
+Batching is automatic when `bay.queue.batch-size` is greater than one: `git bay integrate` composes compatible submitted PRs into a batch candidate, lands that candidate through the pipeline (check, then the merge command), and records the batch in the event-log-backed status output. A configured check runs against the tree it judges: a bayless PR — including every batch candidate — gets a scratch workspace at its own target, never the mainline working tree. When the candidate lands, each member's outcome becomes event truth: a `pr/changed` → merged per member (its compose-time tip as `sha`) plus one `line/batch/finished` summary. Every check/merge run also records a `line/step/started`/`finished` pair — serial and batch alike. These specs rest submitted PRs with `bay.autoMerge false` so a queue can form; with the default auto-flow each submit would land individually before a batch could compose.
 
 ## Happy batch
 
 ```console
 $ git init -q batch-happy && cd batch-happy && git commit -qm init --allow-empty
 $ git bay init
-bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
+bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git config bay.queue.batch-size 2
 $ git config bay.autoMerge false
 $ git config bay.mergeCommand 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}'
@@ -40,7 +40,7 @@ $ cd ..
 ```console
 $ git init -q batch-conflict && cd batch-conflict && git commit -qm init --allow-empty
 $ git bay init
-bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
+bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git config bay.queue.batch-size 2
 $ git config bay.autoMerge false
 $ git config bay.mergeCommand 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}'
@@ -82,7 +82,7 @@ $ cat > merge-if-clean.sh <<'SH'
 > SH
 $ chmod +x merge-if-clean.sh
 $ git bay init
-bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
+bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git config bay.queue.batch-size 2
 $ git config bay.autoMerge false
 $ git config bay.mergeCommand './merge-if-clean.sh {target}'

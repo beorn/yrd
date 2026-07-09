@@ -35,7 +35,7 @@ ADDRESSING
   Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
-  .git/bay/journal.jsonl   append-only event journal (every verdict, replayable)
+  .git/bay/events.jsonl    append-only event log (every verdict, replayable)
 Primed. Start: cd "$(git bay open <name>)"   (all verbs: git bay help)
 
 THIS DIRECTORY
@@ -49,7 +49,7 @@ The second half is dynamic: the repository, whether the bay is initialized, the 
 ```console
 $ git init -q demo && cd demo && git commit -qm init --allow-empty
 $ git bay init
-bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)
+bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git bay guide
 ...
 THIS REPOSITORY — a snapshot as of right now; re-run git bay guide for current state

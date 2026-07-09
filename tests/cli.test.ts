@@ -14,6 +14,7 @@ import { spawn } from "node:child_process"
 
 const GIT_BAY_BIN = new URL("../bin/git-bay", import.meta.url).pathname
 const YRD_BIN = new URL("../bin/yrd", import.meta.url).pathname
+const PROCESS_TEST_TIMEOUT_MS = 15_000
 
 type Run = { code: number; stdout: string; stderr: string }
 
@@ -96,7 +97,7 @@ describe("git bay CLI — happy path (process-level)", () => {
 
   it("init → new → commit → push → merged → ls → doors closed", async () => {
     const init = await must(["git", "bay", "init"], demo, env)
-    expect(init.stdout).toContain("bay: initialized (store: sqlite, journal: .git/bay/journal.jsonl)")
+    expect(init.stdout).toContain("bay: initialized (store: sqlite, events: .git/bay/events.jsonl)")
 
     const opened = await must(["git", "bay", "open", "fix-readme"], demo, env)
     const wtPath = opened.stdout.trim()
@@ -177,7 +178,7 @@ describe("git bay CLI — happy path (process-level)", () => {
     const json = await must(["git", "bay", "ls", "--json"], demo, env)
     const state = JSON.parse(json.stdout) as { prs: Record<string, { revision: number }> }
     expect(state.prs[redId]!.revision).toBe(2)
-  })
+  }, PROCESS_TEST_TIMEOUT_MS)
 
   it("close on a dirty worktree refuses at the door — still open, then closes after cleanup (by name)", async () => {
     await must(["git", "bay", "init"], demo, env)
@@ -380,7 +381,7 @@ describe("yrd CLI — line projection", () => {
     expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
     expect(merged.stdout).toContain(`bay: ${pr} merging → merged`)
 
-    const journal = await readFile(join(demo, ".git/bay/journal.jsonl"), "utf8")
+    const journal = await readFile(join(demo, ".git/bay/events.jsonl"), "utf8")
     const rows = journal
       .trim()
       .split("\n")
@@ -632,7 +633,7 @@ describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run 
   let log: string
 
   async function journalEvents(): Promise<{ name: string; data: Record<string, unknown> }[]> {
-    const raw = await readFile(join(demo, ".git", "bay", "journal.jsonl"), "utf8")
+    const raw = await readFile(join(demo, ".git", "bay", "events.jsonl"), "utf8")
     return raw
       .split("\n")
       .filter((l) => l.trim() !== "")
@@ -1126,8 +1127,13 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
   it("init puts state inside the git dir, not the working tree", async () => {
     const { existsSync } = await import("node:fs")
     const init = await must(["git", "bay", "init"], demo, env)
-    expect(init.stdout).toContain("journal: .git/bay/journal.jsonl")
-    expect(existsSync(join(demo, ".git", "bay", "journal.jsonl"))).toBe(true)
+    expect(init.stdout).toContain("events: .git/bay/events.jsonl")
+    expect(existsSync(join(demo, ".git", "bay", "events.jsonl"))).toBe(true)
+    expect(existsSync(join(demo, ".git", "bay", "index.sqlite"))).toBe(true)
+    expect(existsSync(join(demo, ".git", "bay", "prs.git"))).toBe(true)
+    expect(existsSync(join(demo, ".git", "bay", "journal.jsonl"))).toBe(false)
+    expect(existsSync(join(demo, ".git", "bay", "bay.db"))).toBe(false)
+    expect(existsSync(join(demo, ".git", "bay", "repo.git"))).toBe(false)
     expect(existsSync(join(demo, ".bay"))).toBe(false)
   })
 

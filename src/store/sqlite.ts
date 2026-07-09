@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite"
 import { mkdir } from "node:fs/promises"
-import { join } from "node:path"
 import type { BayStore } from "../types.ts"
 import { createJsonlJournal } from "../journal.ts"
+import { bayEventsPath, bayIndexPath } from "../paths.ts"
 import { acquireWriterLock } from "./lock.ts"
 
 /**
@@ -11,7 +11,7 @@ import { acquireWriterLock } from "./lock.ts"
  *
  * M1 keeps the sqlite side minimal on purpose: the journal (jsonl,
  * substrate-independent per spec) is the only durable state this store
- * is REQUIRED to own. `bay.db` today holds nothing but a `meta` row
+ * is REQUIRED to own. `index.sqlite` today holds nothing but a `meta` row
  * recording its own schema version — materialized views (leases,
  * changesets) are a read-path optimization for later, folded from the
  * journal exactly like every other consumer (core.ts `fold()`). Adding
@@ -33,7 +33,7 @@ export async function createSqliteStore(opts: { dir: string }): Promise<BayStore
 
   let db: Database
   try {
-    db = new Database(join(dir, "bay.db"), { create: true })
+    db = new Database(bayIndexPath(dir), { create: true })
     db.run("PRAGMA journal_mode = WAL")
     db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     db.run("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", [String(SCHEMA_VERSION)])
@@ -44,7 +44,7 @@ export async function createSqliteStore(opts: { dir: string }): Promise<BayStore
     throw err
   }
 
-  const journal = createJsonlJournal(join(dir, "journal.jsonl"))
+  const journal = createJsonlJournal(bayEventsPath(dir))
 
   let closed = false
   return {

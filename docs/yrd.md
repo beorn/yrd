@@ -10,7 +10,7 @@ component, not a separate product.
 
 - `yrd bay <verb>` runs the same implementation as `git bay <verb>`.
 - `yrd line status|audit|integrate|watch` projects the current check/merge
-  integration path over the same Git Bay state and journal.
+  integration path over the same Git Bay state and event log.
 - `yrd task compete <task>` opens one bay per competitor, runs agent/harness
   attempts, and records logs, git metrics, token/cost metrics when the runner
   exposes them, evaluator results, and commits.
@@ -105,7 +105,7 @@ work for replacing the current `@ci` lane.
 
 The first line projection slice is installed: `yrd line integrate --steps
 check,merge` delegates to the current Git Bay integration logic, `yrd line
-status`, `audit`, and `watch` expose the same queue and journal-backed state,
+status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. That
@@ -171,13 +171,13 @@ error { code, message, exitCode? }
 
 Artifacts include logs, coverage, reports, and build outputs. The default local
 artifact store writes command stdout/stderr under `.git/bay/artifacts/`; the
-event carries references, not inline blobs. A resumed line run folds the journal
+event carries references, not inline blobs. A resumed line run folds the event log
 first and skips a successful check result only when it matches the same PR,
 target, base commit, head commit, and check config hash; the resumed event
 records `skipped: true`. A checked PR is stale when its recorded `baseSha` or
 `headSha` no longer matches the current line base or target commit.
 
-Human intervention is also a journaled fact. A future `line/override` event
+Human intervention is also an event-log fact. A future `line/override` event
 records who overrode what and why without pretending the line succeeded
 automatically.
 

@@ -124,7 +124,7 @@ export type RefusalCode =
   | "poison-retry" // reserved: retry refused past a failure-count ceiling
   | "not-in-review" // reserved: v0.5 review gate, approve/reject on a PR not in review
 
-// ---------- events v2 (journal rows; additive-only, versioned) ----------
+// ---------- events v2 (event-log rows; additive-only, versioned) ----------
 
 /** Every command's identity, threaded through every event it produces
  *  (docs/events.md § Cause and spans). Minted once per dispatch by core
@@ -164,7 +164,7 @@ export type BayEvent = {
  * (the `ls` "← you" column).
  */
 export type GitbayEvent =
-  | { name: "gitbay/initialized"; data: { repo: string; journal: string; store: string } }
+  | { name: "gitbay/initialized"; data: { repo: string; events?: string; journal?: string; store: string } }
   | {
       name: "gitbay/refused"
       data: { code: RefusalCode; detail: string; pr?: PrId; bay?: LeaseId }
@@ -308,7 +308,7 @@ export type GitbayEvent =
     }
   | {
       name: "line/batch/finished"
-      // The candidate landed and each member's outcome is journal truth
+      // The candidate landed and each member's outcome is event-log truth
       // (LE-5): every member also gets its own `pr/changed` → merged carrying
       // its compose-time tip as `sha`. Emitted once per batch — the record's
       // settled flag makes re-settling (crash recovery via `batch-settle`) a

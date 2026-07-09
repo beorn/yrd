@@ -78,6 +78,15 @@ async function makeV1Dir(): Promise<string> {
   return dir
 }
 
+async function makeCurrentV1Dir(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "gitbay-migrate-"))
+  const body = v1Fixture()
+    .map((l) => JSON.stringify(l))
+    .join("\n")
+  await writeFile(join(dir, "events.jsonl"), body + "\n", "utf8")
+  return dir
+}
+
 /** The equivalent shape a v1 fold would have produced for THIS fixture —
  *  computed by hand (not by re-running removed v1 code) since that is exactly
  *  what "no dual-read shim" rules out; this is the fixture's ground truth,
@@ -124,6 +133,19 @@ describe("migrateJournal — v1 → v2", () => {
     const dir = await makeV1Dir()
     await migrateJournal(dir)
     await expect(migrateJournal(dir)).rejects.toThrow(/already exists/)
+  })
+
+  it("migrates the current events.jsonl path and backs it up as events.v1.jsonl", async () => {
+    const dir = await makeCurrentV1Dir()
+    const { migrated, backupPath } = await migrateJournal(dir)
+
+    expect(migrated).toBe(v1Fixture().length - 3)
+    expect(backupPath).toBe(join(dir, "events.v1.jsonl"))
+    expect(existsSync(join(dir, "events.v1.jsonl"))).toBe(true)
+    expect(existsSync(join(dir, "journal.v1.jsonl"))).toBe(false)
+
+    const migratedLines = (await readFile(join(dir, "events.jsonl"), "utf8")).trim().split("\n")
+    expect(migratedLines).toHaveLength(migrated)
   })
 
   it("event names are the v2 slash-namespaced families, in order, adopt.recorded absorbed", async () => {

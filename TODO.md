@@ -22,6 +22,8 @@ repo in hub/yrd/reference or in @yrd beads.
   `skipped: true`.
 - Line status JSON includes a folded line summary with open items, last step
   results, base/head SHAs, and checked-PR staleness reasons.
+- Fresh bay state uses events.jsonl, index.sqlite, and prs.git; one-generation
+  compatibility reads legacy journal.jsonl, bay.db, and repo.git when present.
 - hh consumes this repo at vendor/yrd.
 
 ## Product Shape
@@ -85,7 +87,7 @@ Rules:
    - Finish core submission and line-step event/state contracts.
    - Broaden artifact/log capture beyond the local command runner as remote
      and hosted runners land.
-   - Extend journal-driven resume beyond successful checks as more step kinds
+   - Extend event-log-driven resume beyond successful checks as more step kinds
      land; keep merge non-skippable unless the line can prove a landed result.
    - Extend folded line status beyond JSON into concise human output once @ci
      has settled on the machine shape.
@@ -95,10 +97,7 @@ Rules:
      resume semantics are strong enough for the CI lane.
    - Keep the existing Git Bay command surface as compatibility while the line
      projection proves itself.
-4. Storage names and migration
-   - Rename journal.jsonl -> events.jsonl, bay.db -> index.sqlite, and
-     repo.git/ -> prs.git/ in one migration wave with one-generation compatible
-     reads.
+4. Storage and indexing
    - Add sqlite materialized views for PRs, bay leases, queue order, and
      verdicts, folded from events.jsonl; keep the event log as source of truth.
 5. Model refinements
@@ -136,7 +135,7 @@ Rules:
 - Line steps record structured state and events that can project to config, CLI
   args, logs, and spans.
 - Line runs capture artifacts/logs, expose folded status, and resume from the
-  journal for the same submission and commit. Local command artifacts are
+  event log for the same submission and commit. Local command artifacts are
   installed, JSON folded status is installed, and normalized step errors are
   installed. Successful check reuse is installed for matching
   PR/base/head/config; broader step resume semantics remain.

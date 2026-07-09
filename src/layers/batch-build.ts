@@ -353,7 +353,7 @@ function makeBatchBuildHandler(opts: BatchBuildOptions, scratch: ScratchWorkspac
 
     if (composed.length === 0) {
       // Everything was skipped by the compatibility fold — no scratch work
-      // happened, but the skip verdict is still a journaled fact.
+      // happened, but the skip verdict is still an event-log fact.
       return [
         makeEvent(
           bay,
@@ -759,7 +759,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
 /** Fold the CANDIDATE's terminal outcome onto its batch record. Member
  *  outcomes are deliberately NOT inferred here anymore (LE-5): settle journals
  *  a real `pr/changed` per member (plus `batch/settled`), so replay consumers
- *  read member truth from the journal, not from a fold-only flip. */
+ *  read member truth from the event log, not from a fold-only flip. */
 function applyCandidateOutcome(state: BayState, batch: PrId, to: unknown, sha: string | undefined): BayState {
   if (to !== "merged" && to !== "rejected") return state
   const slice = sliceOf(state)
@@ -938,7 +938,7 @@ export function withBatchBuild(opts: BatchBuildOptions): BayPlugin {
         if (command.type !== "integrate" && command.type !== "merge") return result
         // A landing verb touched a batch CANDIDATE (the reducer's own
         // pr/changed names it) — append a settle effect so the members'
-        // outcomes become journal truth in the SAME dispatch, right after the
+        // outcomes become event-log truth in the SAME dispatch, right after the
         // merge effect journals the candidate's verdict (the core folds each
         // effect's events before the next effect runs).
         const batches = sliceOf(state).batches

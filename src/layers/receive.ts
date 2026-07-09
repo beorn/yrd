@@ -21,10 +21,11 @@ import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
+import { bayEventsPath, bayPrsGitPath } from "../paths.ts"
 
 /**
  * withReceive — the receiver (spec § Using it: "the remote is the API"; v0.1-b of
- * @hab/20926-gitbay). It owns the bay-owned local repo (`<bayDir>/repo.git`),
+ * @hab/20926-gitbay). It owns the bay-owned local repo (`<bayDir>/prs.git`),
  * its pre/post-receive hooks (written self-locating at `init`, law 8), and the
  * synchronous submit pipeline behind `git push -o wait`.
  *
@@ -59,7 +60,7 @@ export async function resolveReceive(opts: ReceiveOptions): Promise<ResolvedRece
   const source = createGitConfigSource(cwd)
   const mainRepo = (await resolveOption(opts.mainRepo, "mainRepo", source, cwd))!
   const bayDir = (await resolveOption(opts.bayDir, "dir", createGitConfigSource(mainRepo), (await defaultBayDir(mainRepo)).dir))!
-  return { mainRepo, bayDir, repoGit: join(bayDir, "repo.git") }
+  return { mainRepo, bayDir, repoGit: bayPrsGitPath(bayDir) }
 }
 
 // ---------- state lookup (published for hooks + CLI) ----------
@@ -235,7 +236,7 @@ function makeInitHandler(opts: ReceiveOptions) {
       makeEvent(
         bay,
         EV_INITIALIZED,
-        { repo: repoGit, journal: join(bayDir, "journal.jsonl"), store: "sqlite" },
+        { repo: repoGit, events: bayEventsPath(bayDir), store: "sqlite" },
         effect.cause!,
       ),
     ]

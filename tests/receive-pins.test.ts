@@ -26,7 +26,7 @@ describe("preReceiveCheck — gitlink pin verdicts", () => {
   let root: string
   let main: string // "main repo" containing the nested sub repo
   let sub: string
-  let superRepo: string // plays the bay-owned repo.git (diff-tree source)
+  let superRepo: string // plays the bay-owned prs.git (diff-tree source)
   let shas: { A: string; B: string; B2: string; Bamend: string }
   let supers: { s0: string; s1: string; sDesc: string; sRewrite: string; sRewind: string }
 

@@ -447,6 +447,8 @@ are events first and folded into state on read. `index.sqlite` is a rebuildable
 query index derived from those events, used for fast status, audit, and lookup
 commands. `prs.git/` is Git storage only: bay worktrees push PR refs and objects
 there, and its receive hooks validate the push and append domain events.
+Existing bays that still have `journal.jsonl`, `bay.db`, or `repo.git/` are
+read for one compatibility generation; fresh state uses the names above.
 
 Event log entries use slash names and typed payloads:
 
@@ -464,7 +466,7 @@ contest/...      opened, attempt started/finished, selected, promoted
 metadata: `exitCode`, `durationMs`, `configHash`, `baseSha`, `headSha`,
 structured `error { code, message, exitCode? }` metadata on failures, and
 artifact references for captured stdout/stderr. Artifacts are stored as files;
-journal rows carry references, not inline logs.
+event rows carry references, not inline logs.
 
 `yrd line status --json` projects a folded `line` summary over the same event
 log: open PRs, current targets, last step results, artifact refs, and staleness
