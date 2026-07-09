@@ -404,3 +404,48 @@ describe("withBatchBuild — per-member journal truth when the candidate lands (
     expect(stateOf(state, "PR3")).toBe("merged")
   })
 })
+
+describe("withBatchBuild — Bay-Gate trailer on a native candidate landing (main-mover audit evidence)", () => {
+  it("names the batch id, member count, and ejected members on the main-moving merge commit", async () => {
+    const savedMerge = process.env.BAY_MERGE_COMMAND
+    const savedCheck = process.env.BAY_CHECK
+    delete process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_CHECK
+    try {
+      const repo = await makeRepo()
+      await branch(repo, "task/a", { "a.ts": "a\n" })
+      await branch(repo, "task/b", { dir: "file blocks directory\n" })
+      await branch(repo, "task/c", { "dir/file.ts": "nested file\n" }) // file-blocks-directory merge conflict → ejected at build
+
+      // NATIVE landing: no mergeCommand anywhere, so runMerge authors the
+      // main-moving commit itself and must make it self-evidencing.
+      const bay = pipe(
+        createGitbay({ store: openStore(await tmpJournalPath()), clock: CLOCK, actor: ACTOR }),
+        withQueue(),
+        withBatchBuild({ mainRepo: repo, generatedGlobs: [] }),
+        withMergeWorker({ mainRepo: repo }),
+      )
+      await bay.dispatch({ type: "enqueue", args: { target: "task/a", pr: "PR1" } })
+      await bay.dispatch({ type: "enqueue", args: { target: "task/b", pr: "PR2" } })
+      await bay.dispatch({ type: "enqueue", args: { target: "task/c", pr: "PR3" } })
+      await bay.dispatch({ type: "batch-build" })
+
+      const base = await must(["-C", repo, "rev-parse", "main"], repo)
+      const candidate = await must(["-C", repo, "rev-parse", "bay/batch/PR4"], repo)
+      await bay.dispatch({ type: "integrate", args: { pr: "PR4" } })
+
+      const trailer = await must(
+        ["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"],
+        repo,
+      )
+      expect(trailer).toBe(`pr=PR4 target=${candidate} base=${base} batch=PR4 members=2 ejected=PR3 check=none`)
+      // Verifiable from the graph alone: base is the merge's first parent,
+      // the candidate its second.
+      expect(await must(["-C", repo, "rev-parse", "main^1"], repo)).toBe(base)
+      expect(await must(["-C", repo, "rev-parse", "main^2"], repo)).toBe(candidate)
+    } finally {
+      if (savedMerge !== undefined) process.env.BAY_MERGE_COMMAND = savedMerge
+      if (savedCheck !== undefined) process.env.BAY_CHECK = savedCheck
+    }
+  })
+})

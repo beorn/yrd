@@ -288,6 +288,52 @@ describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand un
     }
   })
 
+  it("stamps the audited Bay-Gate trailer (pr/target/base/check) on the native merge commit", async () => {
+    const savedMerge = process.env.BAY_MERGE_COMMAND
+    const savedCheck = process.env.BAY_CHECK
+    delete process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_CHECK
+    try {
+      const repo = await makeNativeRepo()
+      const base = (await git(["-C", repo, "rev-parse", "main"], repo)).stdout.trim()
+      const target = (await git(["-C", repo, "rev-parse", "task/x"], repo)).stdout.trim()
+      const bay = await buildMergeBay(await tmpJournalPath(), { mainRepo: repo, check: "true" })
+      await seedChecked(bay, "task/x", "C-trailer")
+
+      await bay.dispatch({ type: "merge", args: { pr: "C-trailer" } })
+
+      const trailer = await git(["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"], repo)
+      expect(trailer.stdout.trim()).toBe(`pr=C-trailer target=${target} base=${base} check=true`)
+      // The trailer's claims are verifiable from the commit graph alone:
+      // base is the first parent, target the second.
+      expect((await git(["-C", repo, "rev-parse", "main^1"], repo)).stdout.trim()).toBe(base)
+      expect((await git(["-C", repo, "rev-parse", "main^2"], repo)).stdout.trim()).toBe(target)
+    } finally {
+      if (savedMerge !== undefined) process.env.BAY_MERGE_COMMAND = savedMerge
+      if (savedCheck !== undefined) process.env.BAY_CHECK = savedCheck
+    }
+  })
+
+  it("stamps check=none when no gate is configured — non-evidence auditors must reject, not a pass", async () => {
+    const savedMerge = process.env.BAY_MERGE_COMMAND
+    const savedCheck = process.env.BAY_CHECK
+    delete process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_CHECK
+    try {
+      const repo = await makeNativeRepo()
+      const bay = await buildMergeBay(await tmpJournalPath(), { mainRepo: repo })
+      await seedChecked(bay, "task/x", "C-nocheck")
+
+      await bay.dispatch({ type: "merge", args: { pr: "C-nocheck" } })
+
+      const trailer = await git(["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"], repo)
+      expect(trailer.stdout.trim()).toMatch(/^pr=C-nocheck target=[0-9a-f]{40} base=[0-9a-f]{40} check=none$/)
+    } finally {
+      if (savedMerge !== undefined) process.env.BAY_MERGE_COMMAND = savedMerge
+      if (savedCheck !== undefined) process.env.BAY_CHECK = savedCheck
+    }
+  })
+
   it("an inline mergeCommand still overrides the native default", async () => {
     // No mainRepo here — the point is which command RUNS (native vs
     // configured), not the ancestry guard (covered by its own describe block

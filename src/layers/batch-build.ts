@@ -1,6 +1,7 @@
 import { composeBatch, type SkippedTarget } from "../batch-compat.ts"
 import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
+import type { BatchLandEvidence } from "./pipeline.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import type {
   BayCommand,
@@ -93,6 +94,17 @@ function emptySlice(): BatchSlice {
 
 function sliceOf(state: BayState): BatchSlice {
   return (state.slices[LAYER] as BatchSlice | undefined) ?? emptySlice()
+}
+
+/** Published selector (interlock rule: other layers read this slice through
+ *  exported selectors, never its shape): the landing evidence for a batch
+ *  candidate PR — batch id, member count, ejected members — or undefined when
+ *  `pr` is not a batch. The native merge path stamps this into the
+ *  `Bay-Gate:` trailer so the main-moving commit itself names the batch. */
+export function batchLandEvidence(state: BayState, pr: PrId): BatchLandEvidence | undefined {
+  const record = sliceOf(state).batches[pr]
+  if (!record) return undefined
+  return { batch: record.batch, members: record.members.length, ejected: record.ejected.map((e) => e.pr) }
 }
 
 function memberSummary(member: BatchMember): { pr: PrId; target: string; tip?: string } {

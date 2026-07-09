@@ -294,7 +294,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))
     const mergeRun = { step: "merge" as const, pr: d.pr, target: d.branch }
     events.push(stepStarted(bay, mergeRun, effect.cause!))
-    const merged = await runMerge({ mainRepo, pr: d.pr, target: d.branch, configCwd: mainRepo })
+    const merged = await runMerge({ mainRepo, pr: d.pr, target: d.branch, configCwd: mainRepo, check: opts.check })
     events.push(stepFinished(bay, mergeRun, merged.ok, merged.detail, effect.cause!))
     if (!merged.ok) {
       events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }))

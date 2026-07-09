@@ -13,6 +13,7 @@ import type {
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
+import { batchLandEvidence } from "./batch-build.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
 import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 import { stepFinished, stepStarted } from "./steps.ts"
@@ -249,6 +250,10 @@ async function runMergeStep(
     target,
     mergeCommand: opts.mergeCommand,
     configCwd: opts.configCwd,
+    // Bay-Gate trailer evidence (native path): name the selected gate, and —
+    // when the landed PR is a batch candidate — the batch id/members/ejected.
+    check: opts.check,
+    batch: batchLandEvidence(state, pr),
   })
   return { target, outcome }
 }

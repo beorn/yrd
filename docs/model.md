@@ -61,6 +61,20 @@ Three of these are atomic single-steps; `integrate` is the umbrella that ties th
 
 **Only `integrate` auto-flows.** `check` and `merge` are inert building blocks — they do exactly their one step and stop. `integrate` is where the auto-* config takes effect — `submit`'s default "reaches `merged`" behavior (§ The auto-flow) is the SYSTEM composing `submit` with an `integrate` call, not a change to the `submit` verb itself.
 
+## Landing evidence: the `Bay-Gate:` trailer
+
+Every main-moving merge commit the **native** merge path authors (bay.mergeCommand unset) is self-evidencing — its message carries one `Bay-Gate:` trailer naming what an auditor needs, so the commit graph alone answers "what gated this land?":
+
+```
+Bay-Gate: pr=<id> target=<sha40> base=<sha40> [batch=<id> members=<n> ejected=<a,b|none>] check=<command|none>
+```
+
+- `base` is the mainline HEAD the merge landed on — by construction the merge commit's **first parent**; `target` is the verified tip — its **second parent**. Auditors verify both against the graph, so the trailer cannot lie about where it landed.
+- `check` names the resolved gate command (same precedence as the check runner: inline > `BAY_CHECK` > `git config bay.check`). `check=none` means no gate was configured — an auditor that requires gate evidence must treat that as **non-evidence**, never as a pass.
+- The `batch`/`members`/`ejected` triple appears only when the landed PR is a batch candidate: the batch id, how many members rode it, and which members were ejected on the way (`none` when the batch landed whole). `check` is deliberately last and greedy so the command may contain spaces.
+
+A configured `bay.mergeCommand` authors its own commit, so evidence there is the **command's** responsibility — a delegate host stamps its own trailer convention (or refuses). Either way, a main-mover with neither is exactly what a spine audit should block.
+
 ## Addressing
 
 Every verb that names a PR/bay accepts a PR id (`PR7`), a name (the label given at `open`, or `adopt`'s), or a worktree id (`wt3`) — gitbay resolves whichever you give it. `adopt <branch>` is the one verb that takes a raw branch (or SHA, or an existing worktree's name) directly, to mint it a PR; every other verb addresses the PR/bay that results, by id or name.

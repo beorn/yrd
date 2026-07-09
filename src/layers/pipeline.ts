@@ -59,6 +59,15 @@ export type MergeOutcome =
   | { ok: true; detail: string; sha?: string }
   | { ok: false; code: RejectionCode; detail: string }
 
+/** Batch evidence for the landing trailer: names what a main-mover audit needs
+ *  when the landed PR is a batch candidate — the batch id, how many members
+ *  rode it, and which members were ejected on the way. */
+export type BatchLandEvidence = {
+  batch: string
+  members: number
+  ejected: string[]
+}
+
 export type MergeParams = {
   /** The mainline repo the PR lands onto; also the merge command's spawn cwd
    *  and the ancestry-verify's target. Omitted only by library callers that
@@ -77,6 +86,51 @@ export type MergeParams = {
   /** cwd for resolving bay.mergeCommand/bay.check from git config — defaults
    *  to mainRepo, then process.cwd(). */
   configCwd?: string
+  /** Inline override for bay.check — only consulted to NAME the selected gate
+   *  in the native path's `Bay-Gate:` trailer (resolution precedence identical
+   *  to the check runner: inline > BAY_CHECK > git config bay.check). */
+  check?: string
+  /** Present when the landed PR is a batch candidate: stamped into the
+   *  `Bay-Gate:` trailer so the main-moving commit itself names the batch id,
+   *  member count, and ejected members (auditable without the journal). */
+  batch?: BatchLandEvidence
+}
+
+/**
+ * The audited landing trailer the NATIVE merge path stamps on every
+ * main-moving merge commit it authors. A configured bay.mergeCommand authors
+ * its own commit, so evidence there is the command's responsibility (the
+ * delegate host writes its own trailer convention); the native path is
+ * gitbay's own main-mover and must be self-evidencing.
+ *
+ * Grammar (one line; `check` is LAST and greedy so the command may contain
+ * spaces): `pr=<id> target=<sha40> base=<sha40>
+ * [batch=<id> members=<n> ejected=<a,b|none>] check=<command|none>`.
+ * `base` is the mainline HEAD the merge landed on — the merge commit's first
+ * parent, so auditors can verify the anchor from the commit graph alone;
+ * `target` is its second parent (the verified tip). `check=none` means no
+ * gate was configured — auditors that require gate evidence must treat that
+ * as non-evidence, not as a pass.
+ */
+export function formatBayGateTrailer(fields: {
+  pr: string
+  target: string
+  base: string
+  check: string | undefined
+  batch?: BatchLandEvidence
+}): string {
+  for (const [key, value] of [["pr", fields.pr], ["batch id", fields.batch?.batch]] as const) {
+    if (value !== undefined && /\s/u.test(value)) {
+      throw new Error(`bay: Bay-Gate trailer ${key} '${value}' contains whitespace — refs cannot, so this is a caller bug`)
+    }
+  }
+  const batch = fields.batch
+  const batchPart =
+    batch === undefined
+      ? ""
+      : ` batch=${batch.batch} members=${batch.members} ejected=${batch.ejected.length === 0 ? "none" : batch.ejected.join(",")}`
+  const check = fields.check === undefined || fields.check.trim() === "" ? "none" : fields.check.trim()
+  return `Bay-Gate: pr=${fields.pr} target=${fields.target} base=${fields.base}${batchPart} check=${check}`
 }
 
 /** Resolve the configured merge command: inline > BAY_MERGE_COMMAND > git
@@ -140,8 +194,15 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     }
     const headRes = await git(["-C", mainRepo, "symbolic-ref", "--short", "HEAD"], mainRepo)
     const mainline = headRes.code === 0 ? headRes.stdout.trim() : "main"
+    // Audited landing trailer (Bay-Gate): base = the mainline HEAD this merge
+    // lands on (the merge commit's first parent), captured BEFORE merging;
+    // check = the resolved gate, named so the main-moving commit itself says
+    // what gated it. Resolution mirrors the check runner's precedence.
+    const baseSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"], mainRepo)).stdout.trim()
+    const check = await resolveCheck(params.check, configCwd)
+    const trailer = formatBayGateTrailer({ pr, target: targetSha!, base: baseSha, check, batch: params.batch })
     const merge = await git(
-      ["-C", mainRepo, "merge", "--no-ff", "-m", `bay: merge ${pr} (${target})`, targetSha!],
+      ["-C", mainRepo, "merge", "--no-ff", "-m", `bay: merge ${pr} (${target})`, "-m", trailer, targetSha!],
       mainRepo,
     )
     if (merge.code !== 0) {
