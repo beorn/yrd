@@ -30,7 +30,16 @@ import {
   runProjectCheck,
   runWaitingCheckLauncher,
 } from "./pipeline.ts"
-import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted, stepWaiting } from "./steps.ts"
+import {
+  hasReusableSuccessfulStep,
+  latestFinishedStep,
+  skippedStepEvents,
+  staleCheckReasons,
+  stepConfigHash,
+  stepFinished,
+  stepStarted,
+  stepWaiting,
+} from "./steps.ts"
 
 /**
  * withMergeWorker — the pipeline layer (docs/model.md § Verbs): `check`,
@@ -406,6 +415,36 @@ function closeMergedBay(bay: BayRuntime, state: BayState, target: string, cause:
   return []
 }
 
+async function staleCheckRejectionEvents(
+  bay: BayRuntime,
+  opts: MergeWorkerOptions,
+  run: StepRunData & { step: "merge"; pr: PrId },
+  cause: NonNullable<Effect["cause"]>,
+): Promise<BayEvent[] | undefined> {
+  const mainRepo = opts.mainRepo ?? opts.configCwd
+  if (mainRepo === undefined) return undefined
+
+  const refs = await collectStepRefs(mainRepo, run.target)
+  const check = await latestFinishedStep(bay, { step: "check", pr: run.pr, target: run.target })
+  const reasons = staleCheckReasons(check, refs)
+  if (reasons.length === 0) return undefined
+
+  const detail = `stale check: ${reasons.join("; ")} — retry ${run.pr} to re-run the line`
+  const outcome = {
+    ok: false as const,
+    code: "stale-check" as const,
+    detail,
+    durationMs: 0,
+    ...(refs.baseSha !== undefined ? { baseSha: refs.baseSha } : {}),
+    ...(refs.headSha !== undefined ? { headSha: refs.headSha } : {}),
+  }
+  return [
+    stepStarted(bay, run, cause),
+    await stepFinishedWithOutput(bay, opts, run, outcome, detail, cause),
+    stateChangeEvent(bay, run.pr, "merging", "rejected", cause, { code: "stale-check", detail }),
+  ]
+}
+
 async function stepFinishedWithOutput(
   bay: BayRuntime,
   opts: MergeWorkerOptions,
@@ -484,8 +523,12 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const d = effect.data as { pr: PrId }
     const state = await bay.state()
-    const { target, outcome } = await runMergeStep(state, d.pr, opts)
+    const target = queueTarget(state, d.pr)
     const run = { step: "merge" as const, pr: d.pr, target }
+    const stale = await staleCheckRejectionEvents(bay, opts, run, effect.cause!)
+    if (stale !== undefined) return stale
+
+    const { outcome } = await runMergeStep(state, d.pr, opts)
     const events: BayEvent[] = [stepStarted(bay, run, effect.cause!)]
     events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.detail, effect.cause!))
     if (!outcome.ok) {
@@ -601,6 +644,7 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
     const pr = (await bay.state()).prs[d.pr]
     if (!pr) throw new Error(`bay: integrate: no PR '${d.pr}' in state`)
 
+    let freshCheckPassed = false
     if (pr.state === "checking") {
       const checkState = await bay.state()
       const run = { step: "check" as const, pr: d.pr, target: queueTarget(checkState, d.pr) }
@@ -630,13 +674,20 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
       }
       events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
       events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))
+      freshCheckPassed = true
     } else if (pr.state !== "merging") {
       throw new Error(`bay: integrate: ${d.pr} is ${pr.state}, not checking/merging — a reducer bug journaled a bad state`)
     }
 
     const mergeState = await bay.state()
-    const { target, outcome } = await runMergeStep(mergeState, d.pr, opts)
+    const target = queueTarget(mergeState, d.pr)
     const mergeRun = { step: "merge" as const, pr: d.pr, target }
+    if (!freshCheckPassed) {
+      const stale = await staleCheckRejectionEvents(bay, opts, mergeRun, effect.cause!)
+      if (stale !== undefined) return [...events, ...stale]
+    }
+
+    const { outcome } = await runMergeStep(mergeState, d.pr, opts)
     events.push(stepStarted(bay, mergeRun, effect.cause!))
     events.push(await stepFinishedWithOutput(bay, opts, mergeRun, outcome, outcome.detail, effect.cause!))
     if (!outcome.ok) {

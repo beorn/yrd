@@ -33,6 +33,8 @@ repo in hub/yrd/reference or in @yrd beads.
   results, base/head SHAs, and checked-PR staleness reasons.
 - Human `yrd line status` renders that same folded line summary concisely:
   base, open PRs, step verdicts, artifact counts, and stale reasons.
+- Stale checked PRs are rejected with `stale-check` before the merge command
+  runs, so retry re-enters the line from check.
 - Targeted `yrd line status <selector...>` keeps showing check/merge/deploy
   step evidence for requested PRs, including terminal merged PRs used for
   deployment audit.
@@ -122,8 +124,6 @@ Rules:
      land; keep merge non-skippable unless the line can prove a landed result.
    - Add remote/container/hosted runner adapters that produce the installed
      waiting/finish contract.
-   - Enforce stale checked verdicts before merge instead of only displaying
-     stale status.
 3. @ci cutover
    - Switch @ci to yrd bay + yrd line once artifact capture, folded status, and
      resume semantics are strong enough for the CI lane.
@@ -169,6 +169,7 @@ Rules:
   installed, JSON folded status is installed, and normalized step errors are
   installed. Human folded status is installed. Parked external check launch and
   finish are installed. Successful check reuse is installed for matching
-  PR/base/head/config; broader step resume semantics remain.
+  PR/base/head/config; stale checked PRs are rejected before merge. Broader step
+  resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

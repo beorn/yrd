@@ -97,6 +97,7 @@ export type RejectionCode =
   | "check-failed" // bay.check exited nonzero (pipeline.ts's runProjectCheck)
   | "dirty-mainline" // mainline working tree was dirty at merge time (pipeline.ts's runMerge, native path)
   | "merge-conflict" // git merge --no-ff onto mainline failed (pipeline.ts's runMerge, native path)
+  | "stale-check" // a checked PR's recorded gate no longer matches the current base/head refs
   | "unresolvable-target" // the merge target does not resolve to a commit (pipeline.ts's runMerge)
   | "lying-merge" // merge command exited 0 but target is not an ancestor (pipeline.ts's runMerge)
   | "merge-command-failed" // the configured merge command itself exited nonzero (pipeline.ts's runMerge)

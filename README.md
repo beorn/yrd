@@ -489,7 +489,9 @@ event rows carry references, not inline logs.
 `yrd line status` projects a folded `line` summary over the same event log:
 base branch, open PRs, current targets, last step results, artifact refs, and
 staleness when a checked PR's base or target commit has moved since its check.
-`--json` emits the same projection as stable machine-readable data.
+`--json` emits the same projection as stable machine-readable data. A merge of a
+stale checked PR is rejected before the merge command runs, records
+`stale-check`, and leaves `retry` to re-run the line from check.
 
 On retry/resume, the line can reuse a previous successful check when the PR,
 target, base commit, head commit, and check config hash still match; the new

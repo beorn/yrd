@@ -117,7 +117,8 @@ that external check's pass/fail verdict, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. Human
 `yrd line status` renders the same folded line summary concisely. Targeted
 status accepts one or more selectors and keeps showing check/merge/deploy
-evidence for terminal merged PRs. Watch mode can run the full
+evidence for terminal merged PRs. Stale checked PRs are rejected with
+`stale-check` before a merge command runs. Watch mode can run the full
 `check,merge,deploy` sequence for each merged PR. That gives `@ci` a real
 command surface to start targeting, but not yet the full line package.
 
@@ -127,9 +128,7 @@ Remaining non-throwaway line work:
    check/merge/deploy and externally finished checks;
 2. add remote/container/hosted runner adapters and richer external artifact
    references;
-3. enforce stale check verdicts before merge instead of only surfacing them in
-   status;
-4. switch `@ci` to that line projection.
+3. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
 API docs. Tentative reference, background research, and prior-art notes stay
@@ -192,7 +191,9 @@ event carries references, not inline blobs. A resumed line run folds the event l
 first and skips a successful check result only when it matches the same PR,
 target, base commit, head commit, and check config hash; the resumed event
 records `skipped: true`. A checked PR is stale when its recorded `baseSha` or
-`headSha` no longer matches the current line base or target commit.
+`headSha` no longer matches the current line base or target commit. A stale
+checked PR is rejected with `stale-check` before merge, so retry can re-enter
+the line from check instead of landing unverified work.
 
 Human intervention is also an event-log fact. A future `line/override` event
 records who overrode what and why without pretending the line succeeded

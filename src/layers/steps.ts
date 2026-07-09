@@ -75,6 +75,36 @@ export function stepConfigHash(step: StepRunData["step"], config: string): strin
   return createHash("sha256").update(step).update("\0").update(config.trim()).digest("hex")
 }
 
+export type FinishedStepRecord = StepRunData & { ok: boolean; detail?: string } & StepFinishMetadata
+
+export async function latestFinishedStep(bay: BayRuntime, run: StepRunData): Promise<FinishedStepRecord | undefined> {
+  if (run.pr === undefined) return undefined
+  let latest: FinishedStepRecord | undefined
+  for await (const ev of bay.store.journal.replay()) {
+    if (ev.name !== "line/step/finished") continue
+    const d = ev.data as FinishedStepRecord
+    if (d.step === run.step && d.pr === run.pr && d.target === run.target && typeof d.ok === "boolean") {
+      latest = d
+    }
+  }
+  return latest
+}
+
+export function staleCheckReasons(
+  check: { ok?: boolean; baseSha?: string; headSha?: string } | undefined,
+  refs: { baseSha?: string; headSha?: string },
+): string[] {
+  if (check?.ok !== true) return []
+  const reasons: string[] = []
+  if (check.headSha !== undefined && refs.headSha !== undefined && check.headSha !== refs.headSha) {
+    reasons.push("target changed since check")
+  }
+  if (check.baseSha !== undefined && refs.baseSha !== undefined && check.baseSha !== refs.baseSha) {
+    reasons.push("base changed since check")
+  }
+  return reasons
+}
+
 export async function hasReusableSuccessfulStep(
   bay: BayRuntime,
   run: StepRunData,

@@ -36,6 +36,7 @@ import {
 import { withAdopt } from "../src/layers/adopt.ts"
 import { notifyKeyFor, resolveValidateCommand, withIssueTracking } from "../src/layers/issue-tracking.ts"
 import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "../src/layers/git.ts"
+import { staleCheckReasons } from "../src/layers/steps.ts"
 import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
 import { bayEventsPath, bayPrsGitPath } from "../src/paths.ts"
 
@@ -507,15 +508,8 @@ async function lineItemStatus(
   const target = queueTarget(state, pr.id)
   const targetSha = await resolveCommit(ctx.mainRepo, target)
   const steps = stepsByPr.get(pr.id) ?? {}
-  const staleReasons: string[] = []
-  if (pr.state === "checked" && steps.check?.ok === true) {
-    if (steps.check.headSha !== undefined && targetSha !== undefined && steps.check.headSha !== targetSha) {
-      staleReasons.push("target changed since check")
-    }
-    if (steps.check.baseSha !== undefined && baseSha !== undefined && steps.check.baseSha !== baseSha) {
-      staleReasons.push("base changed since check")
-    }
-  }
+  const staleReasons =
+    pr.state === "checked" ? staleCheckReasons(steps.check, { ...(baseSha !== undefined ? { baseSha } : {}), ...(targetSha !== undefined ? { headSha: targetSha } : {}) }) : []
   return {
     pr: pr.id,
     state: pr.state,

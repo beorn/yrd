@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -160,6 +161,45 @@ describe("withMergeWorker — merge: checked → merging → merged (happy path)
   it("never checks — merge is atomic and requires an explicit PR", async () => {
     const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "true" })
     await expect(bay.dispatch({ type: "merge", args: {} })).rejects.toThrow(/'pr'.*required/)
+  })
+
+  it("rejects a checked PR whose recorded check is stale without running merge", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "gitbay-stale-check-"))
+    const g = async (args: string[]) => {
+      const res = await git(["-C", repo, "-c", "user.name=t", "-c", "user.email=t@e", ...args], repo)
+      if (res.code !== 0) throw new Error(`fixture git ${args.join(" ")} failed: ${res.stderr}`)
+      return res
+    }
+    await g(["init", "-q", "-b", "main"])
+    await g(["commit", "-qm", "base", "--allow-empty"])
+    await g(["switch", "-qc", "task/stale"])
+    await g(["commit", "-qm", "feat: stale", "--allow-empty"])
+    await g(["switch", "-q", "main"])
+
+    const calls = join(repo, "merge-calls.log")
+    const merge = join(repo, "merge.sh")
+    await writeFile(merge, `#!/bin/sh\necho merge >> ${calls}\n`, "utf8")
+    await chmod(merge, 0o755)
+
+    const bay = await buildMergeBay(await tmpJournalPath(), {
+      mainRepo: repo,
+      check: "true",
+      mergeCommand: merge,
+    })
+    await bay.dispatch({ type: "enqueue", args: { target: "task/stale", pr: "C-stale" } })
+    await bay.dispatch({ type: "check", args: { pr: "C-stale" } })
+    expect(stateOf(await bay.state(), "C-stale")).toBe("checked")
+
+    await g(["commit", "-qm", "base moved", "--allow-empty"])
+
+    const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-stale" } })
+    const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
+    expect(transitions).toEqual(["checked→merging", "merging→rejected"])
+    expect(detailOf(events, "rejected")).toContain("stale check: base changed since check")
+    const finished = events.find((e) => e.name === "line/step/finished" && e.data!.step === "merge")!
+    expect(finished.data!.error).toMatchObject({ code: "stale-check", message: expect.stringContaining("base changed since check") })
+    expect(existsSync(calls)).toBe(false)
+    expect(stateOf(await bay.state(), "C-stale")).toBe("rejected")
   })
 })
 

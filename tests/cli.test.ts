@@ -433,7 +433,7 @@ describe("yrd CLI — line projection", () => {
     await rm(root, { recursive: true, force: true })
   })
 
-  it("line integrate can run check then merge through existing line events", async () => {
+  it("line status marks stale checks and merge rejects them", async () => {
     await must(
       [
         "git",
@@ -491,9 +491,19 @@ describe("yrd CLI — line projection", () => {
     const staleHumanStatus = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
     expect(staleHumanStatus.stdout).toContain("stale=base changed since check")
 
-    const merged = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "merge"], demo, env)
-    expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
-    expect(merged.stdout).toContain(`bay: ${pr} merging → merged`)
+    const staleMerge = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "merge"], demo, env)
+    expect(staleMerge.stdout).toContain(`bay: ${pr} checked → merging`)
+    expect(staleMerge.stdout).toContain(`bay: ${pr} merging → rejected — stale check: base changed since check`)
+
+    const rejectedStatus = await must([process.execPath, YRD_BIN, "line", "status", pr, "--json"], demo, env)
+    const rejected = JSON.parse(rejectedStatus.stdout) as {
+      line: { state: string; steps: { merge?: { ok?: boolean; error?: { code?: string; message?: string } } } }
+    }
+    expect(rejected.line.state).toBe("rejected")
+    expect(rejected.line.steps.merge).toMatchObject({
+      ok: false,
+      error: { code: "stale-check", message: expect.stringContaining("base changed since check") },
+    })
 
     const journal = await readFile(join(demo, ".git/bay/events.jsonl"), "utf8")
     const rows = journal
@@ -508,6 +518,7 @@ describe("yrd CLI — line projection", () => {
               ok?: boolean
               exitCode?: number
               durationMs?: number
+              error?: { code?: string }
               artifacts?: { name: string; path: string; bytes: number }[]
             }
           },
@@ -527,6 +538,9 @@ describe("yrd CLI — line projection", () => {
     expect(stderr.bytes).toBeGreaterThan(0)
     expect(await readFile(stdout.path, "utf8")).toBe("check stdout\n")
     expect(await readFile(stderr.path, "utf8")).toBe("check stderr\n")
+    const mergeFinished = rows.find((row) => row.name === "line/step/finished" && row.data.step === "merge")!
+    expect(mergeFinished.data.ok).toBe(false)
+    expect(mergeFinished.data.error).toMatchObject({ code: "stale-check" })
   })
 
   it("line integrate can deploy after merge and record deploy step artifacts", async () => {
@@ -798,10 +812,14 @@ describe("yrd CLI — line projection", () => {
     const checked = JSON.parse(finishedStatus.stdout) as {
       line: {
         state: string
+        stale?: boolean
+        staleReasons?: string[]
         steps: { check?: { ok?: boolean; waiting?: boolean; token?: string; url?: string; durationMs?: number } }
       }
     }
     expect(checked.line.state).toBe("checked")
+    expect(checked.line.stale).toBe(true)
+    expect(checked.line.staleReasons).toContain("base changed since check")
     expect(checked.line.steps.check).toMatchObject({
       ok: true,
       token: "remote-1",
@@ -810,9 +828,13 @@ describe("yrd CLI — line projection", () => {
     })
     expect(checked.line.steps.check?.waiting).toBeUndefined()
 
-    const merged = await must([process.execPath, YRD_BIN, "line", "integrate"], demo, env)
-    expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
-    expect(merged.stdout).toContain(`bay: ${pr} merging → merged`)
+    const staleMerge = await must([process.execPath, YRD_BIN, "line", "integrate"], demo, env)
+    expect(staleMerge.stdout).toContain(`bay: ${pr} checked → merging`)
+    expect(staleMerge.stdout).toContain(`bay: ${pr} merging → rejected — stale check: base changed since check`)
+
+    const retried = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--retry"], demo, env)
+    expect(retried.stdout).toContain(`bay: ${pr} received — checks running`)
+    expect(retried.stdout).toContain(`bay: ${pr} merged onto main (checks ✓)`)
 
     await must(["git", "-C", demo, "config", "bay.check.runner", "waiting"], demo, env)
     await must(
