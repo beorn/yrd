@@ -60,6 +60,7 @@ yrd bay close
 yrd line status [selector...] [--json]
 yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
+yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>]
 yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
@@ -111,7 +112,8 @@ check,merge,deploy` delegates to the current Git Bay integration logic, `yrd lin
 status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, `bay.check.runner=waiting` can park an
-external check launcher with `line/step/waiting`, and `yrd line status --json` exposes
+external check launcher with `line/step/waiting`, `yrd line finish` can record
+that external check's pass/fail verdict, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. Human
 `yrd line status` renders the same folded line summary concisely. Targeted
 status accepts one or more selectors and keeps showing check/merge/deploy
@@ -122,9 +124,12 @@ command surface to start targeting, but not yet the full line package.
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts beyond local
-   check/merge/deploy and parked external checks;
-2. add callback/resume completion for remote/container/hosted check verdicts;
-3. switch `@ci` to that line projection.
+   check/merge/deploy and externally finished checks;
+2. add remote/container/hosted runner adapters and richer external artifact
+   references;
+3. enforce stale check verdicts before merge instead of only surfacing them in
+   status;
+4. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
 API docs. Tentative reference, background research, and prior-art notes stay
@@ -168,8 +173,9 @@ model must not require local child processes. Remote runners, container runners,
 or hosted CI adapters should satisfy the same step result contract. The
 installed first seam is `bay.check.runner=waiting`: `bay.check` launches the
 external job, exit `0` emits `line/step/waiting` and parks the PR in `checking`,
-and exit nonzero rejects the launcher failure. Completing that parked verdict is
-still future callback/resume work.
+and exit nonzero rejects the launcher failure. `yrd line finish <PR> --step
+check --ok|--fail` records the external verdict, validates the token when one
+was emitted, and moves the PR to `checked` or `rejected`.
 
 Step events map naturally to spans:
 

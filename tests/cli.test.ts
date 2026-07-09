@@ -126,6 +126,16 @@ async function branchWithFiles(
   await must(["git", "-C", repo, "switch", "-q", "main"], repo, env)
 }
 
+async function openBranchAsSubmittedPr(repo: string, env: Record<string, string>, branch: string, name: string): Promise<string> {
+  const opened = await must(["git", "bay", "open", name, "--from", branch], repo, env)
+  const wtPath = opened.stdout.trim()
+  await must(["git", "-C", wtPath, "push"], wtPath, env)
+  const ls = await must(["git", "bay", "ls", name, "--json"], repo, env)
+  const data = JSON.parse(ls.stdout) as { pr: { id: string } }
+  await must(["git", "bay", "submit", name], repo, env)
+  return data.pr.id
+}
+
 describe("git bay CLI — happy path (process-level)", () => {
   let root: string
   let demo: string
@@ -676,7 +686,7 @@ describe("yrd CLI — line projection", () => {
     })
   })
 
-  it("line integrate can park a remote check and keep draining runnable PRs", async () => {
+  it("line integrate can park and finish a remote check while draining runnable PRs", async () => {
     await must(["git", "-C", demo, "config", "bay.check.runner", "waiting"], demo, env)
     await must(
       [
@@ -691,8 +701,7 @@ describe("yrd CLI — line projection", () => {
       env,
     )
     await branchWithFiles(demo, env, "task/remote-check", { "remote-check.txt": "park\n" })
-    const pr = (await must(["git", "bay", "adopt", "task/remote-check", "--workitem", "remote-check"], demo, env)).stdout.trim()
-    await must(["git", "bay", "submit", pr], demo, env)
+    const pr = await openBranchAsSubmittedPr(demo, env, "task/remote-check", "remote-check")
 
     const parked = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "check"], demo, env)
     expect(parked.stdout).toContain(`bay: ${pr} submitted → checking`)
@@ -736,6 +745,10 @@ describe("yrd CLI — line projection", () => {
     expect(human.stdout).toContain("check=waiting")
     expect(human.stdout).toContain("url=https://ci.invalid/run/1")
 
+    const wrongToken = await run([process.execPath, YRD_BIN, "line", "finish", pr, "--ok", "--token", "wrong"], demo, env)
+    expect(wrongToken.code).toBe(1)
+    expect(wrongToken.stderr).toContain(`token mismatch for ${pr}`)
+
     const journal = await readFile(join(demo, ".git/bay/events.jsonl"), "utf8")
     const rows = journal
       .trim()
@@ -749,14 +762,91 @@ describe("yrd CLI — line projection", () => {
     await must(["git", "-C", demo, "config", "bay.check.runner", "local"], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
     await branchWithFiles(demo, env, "task/after-park", { "after-park.txt": "go\n" })
-    const next = (await must(["git", "bay", "adopt", "task/after-park", "--workitem", "after-park"], demo, env)).stdout.trim()
-    await must(["git", "bay", "submit", next], demo, env)
+    const next = await openBranchAsSubmittedPr(demo, env, "task/after-park", "after-park")
 
     const drained = await must([process.execPath, YRD_BIN, "line", "integrate"], demo, env)
     expect(drained.stdout).toContain(`bay: ${next} submitted → checking`)
     expect(drained.stdout).toContain(`bay: ${next} merging → merged`)
     expect(drained.stdout).not.toContain(`${pr} checking → checked`)
-  })
+
+    const finished = await must(
+      [
+        process.execPath,
+        YRD_BIN,
+        "line",
+        "finish",
+        pr,
+        "--step",
+        "check",
+        "--ok",
+        "--token",
+        "remote-1",
+        "--detail",
+        "remote green",
+        "--duration-ms",
+        "1234",
+        "--url",
+        "https://ci.invalid/run/1",
+      ],
+      demo,
+      env,
+    )
+    expect(finished.stdout).toContain(`bay: ${pr} check → passed — remote green`)
+    expect(finished.stdout).toContain(`bay: ${pr} checking → checked`)
+
+    const finishedStatus = await must([process.execPath, YRD_BIN, "line", "status", pr, "--json"], demo, env)
+    const checked = JSON.parse(finishedStatus.stdout) as {
+      line: {
+        state: string
+        steps: { check?: { ok?: boolean; waiting?: boolean; token?: string; url?: string; durationMs?: number } }
+      }
+    }
+    expect(checked.line.state).toBe("checked")
+    expect(checked.line.steps.check).toMatchObject({
+      ok: true,
+      token: "remote-1",
+      url: "https://ci.invalid/run/1",
+      durationMs: 1234,
+    })
+    expect(checked.line.steps.check?.waiting).toBeUndefined()
+
+    const merged = await must([process.execPath, YRD_BIN, "line", "integrate"], demo, env)
+    expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
+    expect(merged.stdout).toContain(`bay: ${pr} merging → merged`)
+
+    await must(["git", "-C", demo, "config", "bay.check.runner", "waiting"], demo, env)
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.check",
+        `printf '%s\\n' '{"token":"remote-2","detail":"queued red"}'`,
+      ],
+      demo,
+      env,
+    )
+    await branchWithFiles(demo, env, "task/remote-red", { "remote-red.txt": "red\n" })
+    const red = await openBranchAsSubmittedPr(demo, env, "task/remote-red", "remote-red")
+    await must([process.execPath, YRD_BIN, "line", "integrate", red, "--steps", "check"], demo, env)
+
+    const failed = await must(
+      [process.execPath, YRD_BIN, "line", "finish", red, "--fail", "--token", "remote-2", "--detail", "remote red", "--exit-code", "8"],
+      demo,
+      env,
+    )
+    expect(failed.stdout).toContain(`bay: ${red} check → failed — remote red`)
+    expect(failed.stdout).toContain(`bay: ${red} checking → rejected — remote red`)
+
+    const failedStatus = await must([process.execPath, YRD_BIN, "line", "status", "--json"], demo, env)
+    const failedLine = JSON.parse(failedStatus.stdout) as {
+      line: { items: { pr: string; state: string; steps: { check?: { error?: { code?: string; exitCode?: number } } } }[] }
+    }
+    const failedItem = failedLine.line.items.find((item) => item.pr === red)!
+    expect(failedItem.state).toBe("rejected")
+    expect(failedItem.steps.check?.error).toMatchObject({ code: "check-failed", exitCode: 8 })
+  }, PROCESS_TEST_TIMEOUT_MS)
 
   it("line status accepts multiple targeted selectors in order", async () => {
     await branchWithFiles(demo, env, "task/multi-a", { "multi-a.txt": "a\n" })

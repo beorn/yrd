@@ -12,6 +12,7 @@ import type {
   PullRequest,
   StepCommandOutput,
   StepRunData,
+  StepWaitingMetadata,
   TransitionResult,
 } from "../types.ts"
 import { makeEvent } from "../core.ts"
@@ -59,6 +60,7 @@ import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinis
  */
 
 const FX_CHECK_RUN = "check.run"
+const FX_CHECK_FINISH = "check.finish"
 const FX_MERGE_RUN = "merge.run"
 const FX_DEPLOY_RUN = "deploy.run"
 const FX_INTEGRATE_RUN = "integrate.run"
@@ -170,6 +172,48 @@ function reduceCheck(bay: BayRuntime, state: BayState, command: BayCommand): Tra
   return { state, events: [event], effects: [effect] }
 }
 
+function optionalStringArg(command: BayCommand, key: string, verb: string): string | undefined {
+  const value = command.args?.[key]
+  if (value === undefined) return undefined
+  if (typeof value !== "string") throw new Error(`bay: ${verb}: '${key}' must be a string`)
+  return value
+}
+
+function optionalNumberArg(command: BayCommand, key: string, verb: string): number | undefined {
+  const value = command.args?.[key]
+  if (value === undefined) return undefined
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`bay: ${verb}: '${key}' must be a finite number`)
+  return value
+}
+
+function reduceCheckFinish(state: BayState, command: BayCommand): TransitionResult {
+  const pr = requirePrArg(command, "check-finish")
+  const existing = state.prs[pr]
+  if (!existing) throw new Error(`bay: check-finish: no PR '${pr}' — git bay ls lists them`)
+  if (typeof command.args?.ok !== "boolean") throw new Error("bay: check-finish: 'ok' must be true or false")
+  if (existing.state !== "checking") {
+    throw new Error(`bay: check-finish: ${pr} is ${existing.state} — only a parked check in 'checking' can be finished`)
+  }
+  const detail = optionalStringArg(command, "detail", "check-finish")
+  const token = optionalStringArg(command, "token", "check-finish")
+  const url = optionalStringArg(command, "url", "check-finish")
+  const exitCode = optionalNumberArg(command, "exitCode", "check-finish")
+  const durationMs = optionalNumberArg(command, "durationMs", "check-finish")
+  const effect: Effect = {
+    type: FX_CHECK_FINISH,
+    data: {
+      pr,
+      ok: command.args.ok,
+      ...(detail !== undefined ? { detail } : {}),
+      ...(token !== undefined ? { token } : {}),
+      ...(url !== undefined ? { url } : {}),
+      ...(exitCode !== undefined ? { exitCode } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+    },
+  }
+  return { state, events: [], effects: [effect] }
+}
+
 /** Run the check step in the right TREE. A live bay = the submitter's own
  *  worktree (unchanged). A bayless PR (a branch-intake submission, a batch
  *  candidate) gets a scratch workspace checked out at ITS target — running the
@@ -247,6 +291,80 @@ function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspace
       return events
     }
     events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
+    return events
+  }
+}
+
+type WaitingCheck = StepRunData &
+  StepWaitingMetadata & {
+    step: "check"
+    pr: PrId
+    target: string
+  }
+
+async function latestWaitingCheck(bay: BayRuntime, pr: PrId): Promise<WaitingCheck | undefined> {
+  let latest: WaitingCheck | undefined
+  for await (const ev of bay.store.journal.replay()) {
+    if (ev.name !== "line/step/waiting" && ev.name !== "line/step/finished") continue
+    const d = ev.data as StepRunData & StepWaitingMetadata & { ok?: boolean }
+    if (d.pr !== pr || d.step !== "check" || d.target === undefined) continue
+    if (ev.name === "line/step/waiting") latest = { ...d, step: "check", pr, target: d.target }
+    else latest = undefined
+  }
+  return latest
+}
+
+function makeCheckFinishHandler(): EffectHandler {
+  return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
+    const d = effect.data as {
+      pr: PrId
+      ok: boolean
+      detail?: string
+      token?: string
+      url?: string
+      exitCode?: number
+      durationMs?: number
+    }
+    const state = await bay.state()
+    const pr = state.prs[d.pr]
+    if (pr?.state !== "checking") {
+      throw new Error(`bay: check-finish: ${d.pr} is ${pr?.state ?? "unknown"} — only a parked check in 'checking' can be finished`)
+    }
+    const waiting = await latestWaitingCheck(bay, d.pr)
+    if (waiting === undefined) throw new Error(`bay: check-finish: no parked external check for ${d.pr}`)
+    if (waiting.token !== undefined && d.token !== waiting.token) {
+      throw new Error(`bay: check-finish: token mismatch for ${d.pr}`)
+    }
+
+    const detail = d.detail ?? (d.ok ? "external check passed" : "external check failed")
+    const exitCode = d.exitCode ?? (d.ok ? 0 : 1)
+    const output: StepCommandOutput = {
+      exitCode,
+      ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
+      ...(waiting.baseSha !== undefined ? { baseSha: waiting.baseSha } : {}),
+      ...(waiting.headSha !== undefined ? { headSha: waiting.headSha } : {}),
+    }
+    const run = { step: "check" as const, pr: d.pr, target: waiting.target }
+    const error = d.ok ? undefined : stepError("check-failed", detail, output)
+    const token = d.token ?? waiting.token
+    const url = d.url ?? waiting.url
+    const events: BayEvent[] = [
+      stepFinished(bay, run, d.ok, detail, effect.cause!, {
+        ...(token !== undefined ? { token } : {}),
+        ...(url !== undefined ? { url } : {}),
+        exitCode,
+        ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
+        ...(waiting.configHash !== undefined ? { configHash: waiting.configHash } : {}),
+        ...(waiting.baseSha !== undefined ? { baseSha: waiting.baseSha } : {}),
+        ...(waiting.headSha !== undefined ? { headSha: waiting.headSha } : {}),
+        ...(error !== undefined ? { error } : {}),
+      }),
+    ]
+    events.push(
+      d.ok
+        ? stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!)
+        : stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail }),
+    )
     return events
   }
 }
@@ -550,6 +668,7 @@ export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
       // layers fold (queue.ts, worktrees.ts); it owns no state slice of its own.
       reduce(state, command, next) {
         if (command.type === "check") return reduceCheck(bay, state, command)
+        if (command.type === "check-finish") return reduceCheckFinish(state, command)
         if (command.type === "merge") return reduceMerge(bay, state, command)
         if (command.type === "deploy") return reduceDeploy(state, command)
         if (command.type === "integrate") return reduceIntegrate(bay, state, command)
@@ -557,6 +676,7 @@ export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
       },
       effects: {
         [FX_CHECK_RUN]: makeCheckRunHandler(opts, scratch),
+        [FX_CHECK_FINISH]: makeCheckFinishHandler(),
         [FX_MERGE_RUN]: makeMergeRunHandler(opts),
         [FX_DEPLOY_RUN]: makeDeployRunHandler(opts),
         [FX_INTEGRATE_RUN]: makeIntegrateRunHandler(opts, scratch),

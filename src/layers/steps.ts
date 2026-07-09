@@ -31,6 +31,8 @@ export function stepFinished(
       ...data,
       ok,
       ...(detail !== undefined ? { detail } : {}),
+      ...(metadata.token !== undefined ? { token: metadata.token } : {}),
+      ...(metadata.url !== undefined ? { url: metadata.url } : {}),
       ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
       ...(metadata.durationMs !== undefined ? { durationMs: metadata.durationMs } : {}),
       ...(metadata.configHash !== undefined ? { configHash: metadata.configHash } : {}),

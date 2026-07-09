@@ -233,6 +233,7 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 | `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary or targeted PR step evidence, including terminal merged PRs | no state change; exits `0` |
 | `yrd line audit [--json]` | repository from cwd | audit findings | no state change; exits `0` clean or `1` with findings |
 | `yrd line integrate [selector] [--steps check,merge,deploy] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams line drain output | runs registered steps; deploy failures exit `1` without unmerging |
+| `yrd line finish <selector> --step check (--ok\|--fail)` | parked PR plus optional token/detail/url/exit-code | external check result and PR transition | completes a `line/step/waiting`; command exits `0` for recorded pass or fail, nonzero for mismatched token/state |
 | `yrd line watch [selector] [--steps check,merge,deploy]` | optional PR/name | repeated integration output | keeps draining eligible work; with deploy in the step list, deploys each PR it merges |
 
 ### Contest Ops
@@ -283,8 +284,8 @@ The default check runner is `local`: `bay.check` runs to a pass/fail verdict.
 `0` records `line/step/waiting`, captures stdout/stderr artifacts, and leaves
 the PR in `checking`; nonzero rejects the PR as a failed launcher. The launcher
 may print JSON such as `{"token":"...","url":"...","detail":"..."}` for status
-projection. Finishing a parked external check is still callback work, not a
-completed command surface.
+projection. The external runner completes the parked result with
+`yrd line finish <PR> --step check --ok|--fail --token <token>`.
 
 For shared, version-controlled policy, committed config lives in `.gitbay.yml`
 at the repository root. It uses a small GitHub Actions-inspired shape: line
@@ -343,6 +344,8 @@ launchers, or repository-specific policy.
   verdict and reject on nonzero exit. With `bay.check.runner waiting`, a check
   command is an external-runner launcher: success parks the PR with a token,
   URL, artifacts, and `line/step/waiting`; launcher failure rejects it.
+  `yrd line finish` turns that parked row into `line/step/finished` plus
+  `checking -> checked` or `checking -> rejected`.
 - **Reviews** are async steps between `checked` and `merging`. Approval moves
   the PR out of `reviewing`; rejection records the reason and keeps the PR out
   of the line. Verdicts are bound to the reviewed SHA, so a new push invalidates

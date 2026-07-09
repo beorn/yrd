@@ -42,6 +42,7 @@ USAGE
   yrd line status [selector...] [--json]
   yrd line audit [--json]
   yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
+  yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>]
   yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 Installed steps: check, merge, deploy
@@ -153,6 +154,17 @@ type LineStatusTargetView = LineStatusView & {
   selector: string
 }
 
+type ParsedFinish = {
+  target: string
+  ok: boolean
+  step: "check"
+  token?: string
+  detail?: string
+  url?: string
+  exitCode?: string
+  durationMs?: string
+}
+
 function parseIntegrateArgs(args: string[]): ParsedIntegrate {
   let target: string | undefined
   let stepsRaw: string | undefined
@@ -219,6 +231,111 @@ function parseStatusArgs(args: string[]): { targets: string[]; json: boolean } {
   return { targets, json }
 }
 
+function parseFinishArgs(args: string[]): ParsedFinish {
+  let target: string | undefined
+  let step = "check"
+  let ok = false
+  let failResult = false
+  let token: string | undefined
+  let detail: string | undefined
+  let url: string | undefined
+  let exitCode: string | undefined
+  let durationMs: string | undefined
+
+  const valueAfter = (argv: string[], index: number, name: string): string => {
+    const value = argv[index + 1]
+    if (value === undefined) fail(`yrd: line finish: ${name} requires a value`)
+    return value
+  }
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    if (arg === "--help" || arg === "-h") {
+      console.log(LINE_USAGE)
+      process.exit(0)
+    }
+    if (arg === "--ok") {
+      ok = true
+      continue
+    }
+    if (arg === "--fail") {
+      failResult = true
+      continue
+    }
+    if (arg === "--step") {
+      step = valueAfter(args, i, "--step")
+      i++
+      continue
+    }
+    if (arg.startsWith("--step=")) {
+      step = arg.slice("--step=".length)
+      continue
+    }
+    if (arg === "--token") {
+      token = valueAfter(args, i, "--token")
+      i++
+      continue
+    }
+    if (arg.startsWith("--token=")) {
+      token = arg.slice("--token=".length)
+      continue
+    }
+    if (arg === "--detail") {
+      detail = valueAfter(args, i, "--detail")
+      i++
+      continue
+    }
+    if (arg.startsWith("--detail=")) {
+      detail = arg.slice("--detail=".length)
+      continue
+    }
+    if (arg === "--url") {
+      url = valueAfter(args, i, "--url")
+      i++
+      continue
+    }
+    if (arg.startsWith("--url=")) {
+      url = arg.slice("--url=".length)
+      continue
+    }
+    if (arg === "--exit-code") {
+      exitCode = valueAfter(args, i, "--exit-code")
+      i++
+      continue
+    }
+    if (arg.startsWith("--exit-code=")) {
+      exitCode = arg.slice("--exit-code=".length)
+      continue
+    }
+    if (arg === "--duration-ms") {
+      durationMs = valueAfter(args, i, "--duration-ms")
+      i++
+      continue
+    }
+    if (arg.startsWith("--duration-ms=")) {
+      durationMs = arg.slice("--duration-ms=".length)
+      continue
+    }
+    if (arg.startsWith("-")) fail(`yrd: line finish: unknown option '${arg}'`)
+    if (target !== undefined) fail(`yrd: line finish: unexpected extra argument '${arg}'`)
+    target = arg
+  }
+
+  if (target === undefined || target.trim() === "") fail("yrd: line finish: PR or name is required")
+  if (step !== "check") fail(`yrd: line finish: unsupported step '${step}' (installed async finish: check)`)
+  if (ok === failResult) fail("yrd: line finish: choose exactly one of --ok or --fail")
+  return {
+    target,
+    ok,
+    step: "check",
+    ...(token !== undefined ? { token } : {}),
+    ...(detail !== undefined ? { detail } : {}),
+    ...(url !== undefined ? { url } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  }
+}
+
 function writeCaptured(res: Awaited<ReturnType<typeof runCommand>>): void {
   if (res.stdout !== "") process.stdout.write(res.stdout)
   if (res.stderr !== "") process.stderr.write(res.stderr)
@@ -245,7 +362,7 @@ function formatStep(name: LineStepName, step: LineStepView | undefined): string 
   const code = !step.ok && step.error?.code !== undefined ? `:${step.error.code}` : ""
   const duration = step.durationMs !== undefined ? ` ${step.durationMs}ms` : ""
   const artifacts = Array.isArray(step.artifacts) && step.artifacts.length > 0 ? ` artifacts=${step.artifacts.length}` : ""
-  const url = step.waiting === true && step.url !== undefined ? ` url=${step.url}` : ""
+  const url = step.url !== undefined ? ` url=${step.url}` : ""
   return `${name}=${status}${code}${duration}${artifacts}${url}`
 }
 
@@ -432,6 +549,20 @@ async function lineIntegrate(args: string[]): Promise<void> {
   await reenterGitBay(["integrate", ...(parsed.target === undefined ? [] : [parsed.target]), ...parsed.passthrough])
 }
 
+async function lineFinish(args: string[]): Promise<void> {
+  const parsed = parseFinishArgs(args)
+  await reenterGitBay([
+    "check-finish",
+    parsed.target,
+    parsed.ok ? "--ok" : "--fail",
+    ...(parsed.token === undefined ? [] : ["--token", parsed.token]),
+    ...(parsed.detail === undefined ? [] : ["--detail", parsed.detail]),
+    ...(parsed.url === undefined ? [] : ["--url", parsed.url]),
+    ...(parsed.exitCode === undefined ? [] : ["--exit-code", parsed.exitCode]),
+    ...(parsed.durationMs === undefined ? [] : ["--duration-ms", parsed.durationMs]),
+  ])
+}
+
 async function lineProjection(args: string[]): Promise<void> {
   const command = args[0]
   if (command === undefined || command === "--help" || command === "-h" || command === "help") {
@@ -454,10 +585,14 @@ async function lineProjection(args: string[]): Promise<void> {
     await lineIntegrate(args.slice(1))
     return
   }
+  if (command === "finish") {
+    await lineFinish(args.slice(1))
+    return
+  }
   if (command === "provision" || command === "deprovision") {
     fail(`yrd: line ${command}: staged, not installed yet`)
   }
-  fail(`yrd: unknown line command '${command}' (installed: status, audit, integrate, watch)`)
+  fail(`yrd: unknown line command '${command}' (installed: status, audit, integrate, finish, watch)`)
 }
 
 async function runGitBay(args: string[], cwd: string) {

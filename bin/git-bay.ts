@@ -1112,6 +1112,15 @@ function printTransitions(events: { name: string; data: Record<string, unknown> 
   return any
 }
 
+function printCheckFinishEvents(events: { name: string; data: Record<string, unknown> }[]): void {
+  for (const e of events) {
+    if (e.name !== "line/step/finished") continue
+    const d = e.data as { step?: string; pr?: string; ok?: boolean; detail?: string }
+    if (d.step !== "check" || d.pr === undefined || d.ok === undefined) continue
+    console.log(`bay: ${d.pr} check → ${d.ok ? "passed" : "failed"}${d.detail ? ` — ${d.detail}` : ""}`)
+  }
+}
+
 /** `check <PR>`: submitted → checking → checked | rejected. Atomic — stops at
  *  the verdict, never merges (docs/model.md § Verbs). */
 async function verbCheck(ctx: Ctx, target: string | undefined): Promise<void> {
@@ -1121,6 +1130,43 @@ async function verbCheck(ctx: Ctx, target: string | undefined): Promise<void> {
     const prId = resolvePr(state, target)
     prOrTeach(state, prId, "check")
     const { events } = await bay.dispatch({ type: "check", args: { pr: prId } })
+    printTransitions(events)
+  })
+}
+
+function parseOptionalNumber(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) return undefined
+  const value = Number(raw)
+  if (!Number.isFinite(value)) throw new Error(`bay: check-finish: ${flag} must be a finite number, got '${raw}'`)
+  return value
+}
+
+async function verbCheckFinish(
+  ctx: Ctx,
+  target: string | undefined,
+  opts: { ok?: boolean; fail?: boolean; token?: string; detail?: string; url?: string; exitCode?: string; durationMs?: string },
+): Promise<void> {
+  if (!target) throw new Error("bay: check-finish: a PR number or name is required — git bay ls lists them")
+  const ok = opts.ok === true
+  const fail = opts.fail === true
+  if (ok === fail) throw new Error("bay: check-finish: choose exactly one of --ok or --fail")
+  await withWriteBay(ctx, async (bay) => {
+    const state = await bay.state()
+    const prId = resolvePr(state, target)
+    prOrTeach(state, prId, "check-finish")
+    const { events } = await bay.dispatch({
+      type: "check-finish",
+      args: {
+        pr: prId,
+        ok,
+        ...(opts.token !== undefined ? { token: opts.token } : {}),
+        ...(opts.detail !== undefined ? { detail: opts.detail } : {}),
+        ...(opts.url !== undefined ? { url: opts.url } : {}),
+        ...(opts.exitCode !== undefined ? { exitCode: parseOptionalNumber(opts.exitCode, "--exit-code") } : {}),
+        ...(opts.durationMs !== undefined ? { durationMs: parseOptionalNumber(opts.durationMs, "--duration-ms") } : {}),
+      },
+    })
+    printCheckFinishEvents(events)
     printTransitions(events)
   })
 }
@@ -1608,6 +1654,25 @@ async function main(): Promise<void> {
     .action(async (target: string) => {
       await verbCheck(await requireBay(), target)
     })
+
+  program
+    .command("check-finish <PR|name>", { hidden: true })
+    .description("finish a parked external check result")
+    .option("--ok", "record the parked check as passed")
+    .option("--fail", "record the parked check as failed")
+    .option("--token <token>", "correlation token from line/step/waiting")
+    .option("--detail <text>", "human-readable result detail")
+    .option("--url <url>", "external runner URL")
+    .option("--exit-code <n>", "external runner exit code")
+    .option("--duration-ms <n>", "external runner duration in milliseconds")
+    .action(
+      async (
+        target: string,
+        opts: { ok?: boolean; fail?: boolean; token?: string; detail?: string; url?: string; exitCode?: string; durationMs?: string },
+      ) => {
+        await verbCheckFinish(await requireBay(), target, opts)
+      },
+    )
 
   program
     .command("merge <PR|name>")

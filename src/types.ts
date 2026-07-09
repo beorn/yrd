@@ -363,6 +363,8 @@ export type StepError = {
 }
 
 export type StepFinishMetadata = {
+  token?: string
+  url?: string
   exitCode?: number
   durationMs?: number
   configHash?: string
