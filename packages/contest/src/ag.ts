@@ -36,6 +36,7 @@ export type AgContestLaunch = Readonly<{
   account?: string
   tier?: string
   effort?: string
+  instructions?: string
   yolo?: boolean
   args: readonly string[]
 }>
@@ -157,6 +158,7 @@ function defaultLaunch(input: ContestRunnerInput): AgContestLaunch {
   const account = text(config.account, "account") ?? text(routing?.account, "routing.account")
   const tier = text(config.tier, "tier") ?? text(routing?.tier, "routing.tier")
   const effort = text(config.effort, "effort")
+  const instructions = text(config.instructions, "instructions")
   const yolo = boolean(config.yolo, "yolo") ?? provider === "claude"
   const configuredArgs = stringList(config.args, "args")
   const args =
@@ -175,6 +177,7 @@ function defaultLaunch(input: ContestRunnerInput): AgContestLaunch {
     ...(account === undefined ? {} : { account }),
     ...(tier === undefined ? {} : { tier }),
     ...(effort === undefined ? {} : { effort }),
+    ...(instructions === undefined ? {} : { instructions }),
     yolo,
     args,
   }
@@ -202,11 +205,11 @@ function launchArgv(command: readonly string[], input: ContestRunnerInput, launc
   if (launch.effort !== undefined) {
     argv.push(launch.provider === "codex" ? "--model-reasoning-effort" : "--effort", launch.effort)
   }
-  argv.push(...launch.args, "--", taskPrompt(input))
+  argv.push(...launch.args, "--", taskPrompt(input, launch.instructions))
   return argv
 }
 
-function taskPrompt(input: ContestRunnerInput): string {
+function taskPrompt(input: ContestRunnerInput, instructions?: string): string {
   const task = input.task
   const lines = [
     "Implement the following real task in the isolated Yrd Work Bay that is your current working directory.",
@@ -219,6 +222,7 @@ function taskPrompt(input: ContestRunnerInput): string {
   if (task.revision !== undefined) lines.push(`Task revision: ${task.revision}`)
   if (task.labels !== undefined && task.labels.length > 0) lines.push(`Labels: ${task.labels.join(", ")}`)
   lines.push("", "Task description:", task.description ?? "No additional description was supplied.", "")
+  if (instructions !== undefined) lines.push("Additional instructions:", instructions, "")
   lines.push(
     `Base branch: ${input.base}`,
     `Base commit: ${input.bay.baseSha ?? "missing"}`,

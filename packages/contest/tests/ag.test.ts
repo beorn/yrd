@@ -138,6 +138,7 @@ describe("createAgContestRunner", () => {
         tier: "frontier",
         effort: "xhigh",
         args: ["--ephemeral"],
+        instructions: "Preserve the public command contract.",
       }),
       { id: "E1", attempt: 1, executor: "test" },
     )
@@ -170,6 +171,7 @@ describe("createAgContestRunner", () => {
     expect(prompt).toContain("Task id: @yrd/core/21012")
     expect(prompt).toContain("Finish Yrd")
     expect(prompt).toContain("Implement the contest runner end to end.\nPreserve immutable evidence.")
+    expect(prompt).toContain("Additional instructions:\nPreserve the public command contract.")
     expect(prompt).toContain("commit all intended changes")
     expect(prompt).toContain(`Base commit: ${baseSha}`)
     expect(agentRequests[0]?.env.YRD_TASK_ID).toBe("@yrd/core/21012")
