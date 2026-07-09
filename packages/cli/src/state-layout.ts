@@ -112,6 +112,8 @@ const DIRECTORY_MARKERS = new Set([
   "artifacts",
   "contests",
   "worktrees",
+  "receiver-inbox",
+  "receiver-init",
 ])
 
 const LEGACY_ONLY_MARKERS = new Set([
@@ -134,6 +136,8 @@ const SHARED_SUPPORT = new Set([
   "contests",
   "worktrees",
 ])
+
+const CURRENT_ONLY_MARKERS = new Set(["receiver-inbox", "receiver-init"])
 
 function pathKind(info: Awaited<ReturnType<typeof lstat>>): StatePathKind {
   if (info.isSymbolicLink()) return "symlink"
@@ -392,6 +396,7 @@ async function inspectLocation(location: MutableLocation, fs: StateLayoutFileSys
     }
 
     if (LEGACY_ONLY_MARKERS.has(name) || isLegacyBackup(name) || isLegacyInbox(name)) evidence.legacy = true
+    else if (CURRENT_ONLY_MARKERS.has(name)) evidence.current = true
     else if (SHARED_ANCHORS.has(name)) {
       evidence.currentAnchor = true
       evidence.legacyAnchor = true

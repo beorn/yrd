@@ -49,6 +49,7 @@ export type StepEvidence = {
   url?: string
   detail?: string
   artifacts?: readonly unknown[]
+  checkpoint?: unknown
   output?: unknown
   error?: EffectError
 }

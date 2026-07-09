@@ -22,6 +22,7 @@ export type CommandEvidence = {
 export type GitCheckEvidence = CommandEvidence & {
   baseSha: string
   candidateSha: string
+  candidateRef?: string
 }
 
 export type ConfiguredCommandOptions<Shape extends SubmissionShape> = {
@@ -31,6 +32,8 @@ export type ConfiguredCommandOptions<Shape extends SubmissionShape> = {
   artifactRoot?: string
   variables?: (input: StepExecution<Shape>) => Record<string, string | undefined>
 }
+
+export type ConfiguredWaitingCommandOptions<Shape extends SubmissionShape> = ConfiguredCommandOptions<Shape>
 
 const RETIRED_PLACEHOLDERS = new Map([
   ["{name}", "$YRD_TASK"],
@@ -121,29 +124,7 @@ export function configuredCommandStep<Shape extends SubmissionShape>(
   validateCommand(options.command, options.purpose)
   const configHash = commandHash(options.purpose, options.command)
   return async (input, context): Promise<EffectOutcome<CommandEvidence>> => {
-    const cwd = resolve(typeof options.cwd === "function" ? await options.cwd(input) : options.cwd)
-    const variables = {
-      YRD_BASE: input.submission.base,
-      YRD_BASE_SHA: input.submission.baseSha,
-      YRD_RUN: input.run,
-      YRD_SHA: input.submission.headSha,
-      YRD_SHAS: JSON.stringify(input.submissions.map((submission) => submission.headSha)),
-      YRD_STEP: input.step,
-      YRD_SUBMISSION: input.submission.id,
-      YRD_SUBMISSIONS: JSON.stringify(input.submissions.map((submission) => submission.id)),
-      YRD_TARGET: input.targetSha ?? input.submission.headSha,
-      ...options.variables?.(input),
-    }
-    const result = await runCommand(options.command, cwd, variables)
-    const artifactRoot = resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts"))
-    const artifacts = await writeArtifacts(artifactRoot, input, context.attempt, result.stdout, result.stderr)
-    const evidence: CommandEvidence = {
-      exitCode: result.exitCode,
-      durationMs: result.durationMs,
-      configHash,
-      artifacts,
-      ...(tail(result.stdout || result.stderr) === "" ? {} : { detail: tail(result.stdout || result.stderr) }),
-    }
+    const { result, evidence } = await executeConfiguredCommand(options, configHash, input, context.attempt)
     return result.exitCode === 0
       ? { status: "passed", output: evidence }
       : {
@@ -153,6 +134,125 @@ export function configuredCommandStep<Shape extends SubmissionShape>(
             message: `${options.purpose} command exited ${result.exitCode}${evidence.detail ? `: ${evidence.detail}` : ""}`,
           },
         }
+  }
+}
+
+async function executeConfiguredCommand<Shape extends SubmissionShape>(
+  options: ConfiguredCommandOptions<Shape>,
+  configHash: string,
+  input: StepExecution<Shape>,
+  attempt: number,
+): Promise<{
+  result: { exitCode: number; durationMs: number; stdout: string; stderr: string }
+  evidence: CommandEvidence
+}> {
+  const cwd = resolve(typeof options.cwd === "function" ? await options.cwd(input) : options.cwd)
+  const variables = {
+    YRD_BASE: input.submission.base,
+    YRD_BASE_SHA: input.submission.baseSha,
+    YRD_RUN: input.run,
+    YRD_SHA: input.submission.headSha,
+    YRD_SHAS: JSON.stringify(input.submissions.map((submission) => submission.headSha)),
+    YRD_STEP: input.step,
+    YRD_SUBMISSION: input.submission.id,
+    YRD_SUBMISSIONS: JSON.stringify(input.submissions.map((submission) => submission.id)),
+    YRD_TARGET: input.targetSha ?? input.submission.headSha,
+    ...options.variables?.(input),
+  }
+  const result = await runCommand(options.command, cwd, variables)
+  const artifactRoot = resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts"))
+  const artifacts = await writeArtifacts(artifactRoot, input, attempt, result.stdout, result.stderr)
+  return {
+    result,
+    evidence: {
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      configHash,
+      artifacts,
+      ...(tail(result.stdout || result.stderr) === "" ? {} : { detail: tail(result.stdout || result.stderr) }),
+    },
+  }
+}
+
+type WaitingLaunch = {
+  token: string
+  url?: string
+  detail?: string
+  artifacts: readonly unknown[]
+}
+
+function waitingLaunch(stdout: string): WaitingLaunch {
+  let parsed: unknown
+  for (const line of stdout.trim().split(/\r?\n/u).reverse()) {
+    if (line.trim() === "") continue
+    try {
+      parsed = JSON.parse(line)
+      break
+    } catch {
+      continue
+    }
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("waiting step launcher must print a JSON object containing token")
+  }
+  const value = parsed as Record<string, unknown>
+  if (typeof value.token !== "string" || value.token.trim() === "") {
+    throw new Error("waiting step launcher JSON token must be a non-empty string")
+  }
+  if (value.url !== undefined && typeof value.url !== "string") {
+    throw new Error("waiting step launcher JSON url must be a string")
+  }
+  if (value.detail !== undefined && typeof value.detail !== "string") {
+    throw new Error("waiting step launcher JSON detail must be a string")
+  }
+  if (value.artifacts !== undefined && !Array.isArray(value.artifacts)) {
+    throw new Error("waiting step launcher JSON artifacts must be an array")
+  }
+  return {
+    token: value.token,
+    ...(value.url === undefined ? {} : { url: value.url }),
+    ...(value.detail === undefined ? {} : { detail: value.detail }),
+    artifacts: value.artifacts ?? [],
+  }
+}
+
+/** Launch a remote step and park its durable effect. The local command is only
+ * a launcher; its immutable evidence is retained as the waiting checkpoint. */
+export function configuredWaitingCommandStep<Shape extends SubmissionShape>(
+  options: ConfiguredWaitingCommandOptions<Shape>,
+): StepRunner<Shape, CommandEvidence> {
+  validateCommand(options.command, options.purpose)
+  const configHash = commandHash(options.purpose, options.command)
+  return async (input, context): Promise<EffectOutcome<CommandEvidence>> => {
+    const { result, evidence } = await executeConfiguredCommand(options, configHash, input, context.attempt)
+    if (result.exitCode !== 0) {
+      return {
+        status: "failed",
+        error: {
+          code: `${options.purpose}-launcher-failed`,
+          message: `${options.purpose} launcher exited ${result.exitCode}${evidence.detail ? `: ${evidence.detail}` : ""}`,
+        },
+      }
+    }
+    try {
+      const launch = waitingLaunch(result.stdout)
+      return {
+        status: "waiting",
+        token: launch.token,
+        ...(launch.url === undefined ? {} : { url: launch.url }),
+        ...(launch.detail === undefined ? {} : { detail: launch.detail }),
+        artifacts: [...evidence.artifacts, ...launch.artifacts],
+        checkpoint: evidence,
+      }
+    } catch (cause) {
+      return {
+        status: "failed",
+        error: {
+          code: `${options.purpose}-launcher-invalid`,
+          message: cause instanceof Error ? cause.message : String(cause),
+        },
+      }
+    }
   }
 }
 
@@ -208,24 +308,67 @@ export type GitCheckOptions = {
   repo: string
   command: string
   artifactRoot?: string
+  purpose?: string
+  runner?: "local" | "waiting"
+  environment?: string
+}
+
+async function pinCandidate(repo: string, ref: string, sha: string): Promise<void> {
+  const created = await git(repo, ["update-ref", "--create-reflog", ref, sha, "0".repeat(sha.length)], true)
+  if (created.code === 0) return
+  const existing = await git(repo, ["rev-parse", "--verify", `${ref}^{commit}`], true)
+  if (existing.code === 0 && existing.stdout === sha) return
+  throw new Error(created.stderr || created.stdout || `candidate ref '${ref}' already exists with a different commit`)
 }
 
 export function gitCheckStep(options: GitCheckOptions): StepRunner<SubmissionShape, GitCheckEvidence> {
   const repo = resolve(options.repo)
   return async (input, context) => {
     try {
+      const purpose = options.purpose ?? "check"
       const branch = input.submission.base
       await git(repo, ["check-ref-format", "--branch", branch])
       const baseSha = await commit(repo, `refs/heads/${branch}`)
       return await withScratch(repo, baseSha, async (path) => {
         const candidate = await prepareCandidate(path, input)
         if (candidate.status !== "passed") return candidate
-        const runner = configuredCommandStep<SubmissionShape>({
+        const configured = {
           command: options.command,
           cwd: path,
-          purpose: "check",
+          purpose,
           artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
-        })
+          variables: () => ({
+            YRD_BASE_SHA: baseSha,
+            YRD_CANDIDATE_SHA: candidate.output,
+            ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
+          }),
+        }
+        if (options.runner === "waiting") {
+          const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
+          await pinCandidate(repo, candidateRef, candidate.output)
+          const outcome = await configuredWaitingCommandStep<SubmissionShape>(configured)(
+            { ...input, targetSha: candidate.output },
+            context,
+          )
+          if (outcome.status === "waiting") {
+            return {
+              ...outcome,
+              checkpoint: {
+                ...(outcome.checkpoint as CommandEvidence),
+                baseSha,
+                candidateSha: candidate.output,
+                candidateRef,
+              },
+            }
+          }
+          return outcome.status === "passed"
+            ? {
+                status: "passed",
+                output: { ...outcome.output, baseSha, candidateSha: candidate.output, candidateRef },
+              }
+            : outcome
+        }
+        const runner = configuredCommandStep<SubmissionShape>(configured)
         const outcome = await runner({ ...input, targetSha: candidate.output }, context)
         return outcome.status === "passed"
           ? {

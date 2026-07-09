@@ -154,7 +154,12 @@ function createApp(
       "check",
       (_input: StepExecution<SubmissionShape>): EffectOutcome<CheckOutput> =>
         options.waitingCheck
-          ? { status: "waiting", token: "remote-check", url: "https://ci.invalid/run/1" }
+          ? {
+              status: "waiting",
+              token: "remote-check",
+              url: "https://ci.invalid/run/1",
+              checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
+            }
           : { status: "passed", output: { checked: true } },
     ),
     withMerge(
@@ -344,6 +349,9 @@ describe("runYrd", () => {
       ),
     ).toBe(0)
     expect(JSON.parse(finish.stdout())).toMatchObject({ command: "line.finish", run: { id: "R1", status: "passed" } })
+    expect((await app.line.get("R1"))?.shape).toMatchObject({
+      results: { check: { baseSha: BASE_SHA, candidateSha: HEAD_SHA } },
+    })
     expect((await app.line.get("R1"))?.steps.map((step) => step.status)).toEqual(["passed", "passed"])
   })
 

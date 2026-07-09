@@ -25,6 +25,23 @@ export type YrdProjectConfig = Readonly<{
   contest: YrdContestConfig
 }>
 
+export type ResolvedYrdProjectConfig = Readonly<{
+  version: 1
+  line: Readonly<{ base: string; batch: false | number; steps: readonly string[] }>
+  steps: Readonly<Record<string, YrdStepConfig>>
+  contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
+}>
+
+export type YrdConfigSource = Readonly<{
+  readText(path: string): Promise<string | undefined>
+  gitGet(key: string): Promise<string | undefined>
+}>
+
+export type LoadedYrdConfig = Readonly<{
+  path?: string
+  config: ResolvedYrdProjectConfig
+}>
+
 function fail(path: string, message: string): never {
   throw new Error(`yrd: config ${path} ${message}`)
 }
@@ -138,3 +155,123 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
     contest: parseContest(input.contest),
   }
 }
+
+function missing(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
+}
+
+function cleanEnvironment(): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")))
+}
+
+function defaultSource(repo: string): YrdConfigSource {
+  return {
+    async readText(path) {
+      try {
+        return await readFile(path, "utf8")
+      } catch (error) {
+        if (missing(error)) return undefined
+        throw error
+      }
+    },
+    async gitGet(key) {
+      const child = Bun.spawn(["git", "-C", repo, "config", "--get", key], {
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: cleanEnvironment(),
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ])
+      if (exitCode === 1) return undefined
+      if (exitCode !== 0) throw new Error(stderr.trim() || `yrd: git config --get ${key} exited ${exitCode}`)
+      const value = stdout.trim()
+      return value === "" ? undefined : value
+    },
+  }
+}
+
+function configuredBatch(value: string | undefined): false | number | undefined {
+  if (value === undefined) return undefined
+  if (value === "false") return false
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) fail("bay.batch", "must be false or a non-negative integer")
+  return parsed
+}
+
+function configuredRunner(value: string | undefined, path: string): YrdStepRunner | undefined {
+  if (value === undefined) return undefined
+  if (value !== "local" && value !== "waiting") fail(path, "must be 'local' or 'waiting'")
+  return value
+}
+
+/** Load the built-in workflow plugin's data config. Current bay.* Git keys
+ * remain useful to `git bay`; retired auto/adopt/queue keys are never read. */
+export async function loadYrdConfig(options: {
+  repo: string
+  defaultBase: string
+  source?: YrdConfigSource
+}): Promise<LoadedYrdConfig> {
+  const source = options.source ?? defaultSource(options.repo)
+  const path = join(options.repo, ".yrd.yml")
+  const legacyPath = join(options.repo, ".gitbay.yml")
+  const [text, legacy] = await Promise.all([source.readText(path), source.readText(legacyPath)])
+  if (legacy !== undefined) {
+    throw new Error(`yrd: retired .gitbay.yml exists at ${legacyPath}; rename and rewrite it as .yrd.yml`)
+  }
+  let parsed: YrdProjectConfig
+  try {
+    parsed = parseYrdConfig(text === undefined ? undefined : Bun.YAML.parse(text))
+  } catch (error) {
+    throw new Error(`yrd: could not load ${path}: ${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  const [gitBase, gitBatch, gitCheck, gitCheckRunner, gitReview, gitReviewRunner, gitMerge, gitDeploy, gitDeployRunner] =
+    await Promise.all([
+      source.gitGet("bay.base"),
+      source.gitGet("bay.batch"),
+      source.gitGet("bay.check"),
+      source.gitGet("bay.check.runner"),
+      source.gitGet("bay.review"),
+      source.gitGet("bay.review.runner"),
+      source.gitGet("bay.merge"),
+      source.gitGet("bay.deploy"),
+      source.gitGet("bay.deploy.runner"),
+    ])
+
+  const steps: Record<string, YrdStepConfig> = { ...parsed.steps }
+  const install = (name: string, run: string | undefined, runner: YrdStepRunner | undefined): void => {
+    const current = steps[name]
+    if (current !== undefined) return
+    if (run !== undefined || name === "merge") steps[name] = { ...(run === undefined ? {} : { run }), runner: runner ?? "local" }
+  }
+  install("check", gitCheck, configuredRunner(gitCheckRunner, "bay.check.runner"))
+  install("review", gitReview, configuredRunner(gitReviewRunner, "bay.review.runner"))
+  install("merge", gitMerge, "local")
+  install("deploy", gitDeploy, configuredRunner(gitDeployRunner, "bay.deploy.runner"))
+  steps.check ??= { run: 'git diff --check "$YRD_BASE_SHA"..HEAD', runner: "local" }
+
+  const defaultSteps = ["check", ...(steps.review === undefined ? [] : ["review"]), "merge", ...(steps.deploy === undefined ? [] : ["deploy"])]
+  return {
+    ...(text === undefined ? {} : { path }),
+    config: {
+      version: 1,
+      line: {
+        base: parsed.line.base ?? gitBase ?? options.defaultBase,
+        batch: parsed.line.batch ?? configuredBatch(gitBatch) ?? 1,
+        steps: parsed.line.steps ?? defaultSteps,
+      },
+      steps,
+      contest: {
+        concurrency: parsed.contest.concurrency ?? 2,
+        timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
+        evaluators: parsed.contest.evaluators ?? ["check"],
+      },
+    },
+  }
+}
+import { readFile } from "node:fs/promises"
+import { join } from "node:path"

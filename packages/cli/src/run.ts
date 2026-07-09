@@ -521,6 +521,12 @@ function artifacts(values: unknown): readonly { name: string; uri: string }[] | 
   })
 }
 
+function jsonRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
 async function waitingLineRun(app: YrdCliApp, selector: string, stepName?: string): Promise<LineRun> {
   const direct = await app.line.get(selector)
   if (direct !== undefined) return direct
@@ -594,9 +600,12 @@ async function finishLine(
   const exitCode = positiveInteger(options.exitCode, "--exit-code")
   const durationMs = positiveInteger(options.durationMs, "--duration-ms")
   const evidence = {
+    ...(jsonRecord(effectRun.checkpoint) ?? {}),
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.url === undefined ? {} : { url: options.url }),
-    ...(recordedArtifacts === undefined ? {} : { artifacts: recordedArtifacts }),
+    ...(effectRun.artifacts === undefined && recordedArtifacts === undefined
+      ? {}
+      : { artifacts: [...(effectRun.artifacts ?? []), ...(recordedArtifacts ?? [])] }),
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
   }

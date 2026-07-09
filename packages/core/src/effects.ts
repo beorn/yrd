@@ -18,7 +18,14 @@ export type EffectError = {
 export type EffectOutcome<Output> =
   | { status: "passed"; output: Output }
   | { status: "failed"; error: EffectError }
-  | { status: "waiting"; token: string; url?: string; detail?: string; artifacts?: readonly unknown[] }
+  | {
+      status: "waiting"
+      token: string
+      url?: string
+      detail?: string
+      artifacts?: readonly unknown[]
+      checkpoint?: unknown
+    }
 
 export type EffectRun = {
   id: string
@@ -33,6 +40,7 @@ export type EffectRun = {
   url?: string
   detail?: string
   artifacts?: readonly unknown[]
+  checkpoint?: unknown
   output?: unknown
   error?: EffectError
   lostReason?: string
@@ -50,6 +58,7 @@ type WaitArgs = {
   url?: string
   detail?: string
   artifacts?: readonly unknown[]
+  checkpoint?: unknown
 }
 type HeartbeatArgs = { id: string; attempt: number; executor: string; leaseExpiresAt: string }
 type FinishArgs = {
@@ -151,6 +160,7 @@ function parseWait(input: unknown): WaitArgs {
     ...(url === undefined ? {} : { url }),
     ...(detail === undefined ? {} : { detail }),
     ...(artifacts === undefined ? {} : { artifacts }),
+    ...(args.checkpoint === undefined ? {} : { checkpoint: args.checkpoint }),
   }
 }
 
@@ -252,6 +262,7 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         url: undefined,
         detail: undefined,
         artifacts: undefined,
+        checkpoint: undefined,
         output: undefined,
         error: undefined,
         lostReason: undefined,
@@ -265,6 +276,7 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         ...(data.url === undefined ? {} : { url: data.url as string }),
         ...(data.detail === undefined ? {} : { detail: data.detail as string }),
         ...(data.artifacts === undefined ? {} : { artifacts: data.artifacts as readonly unknown[] }),
+        ...(data.checkpoint === undefined ? {} : { checkpoint: data.checkpoint }),
       }
       break
     case "effect/heartbeat":
@@ -294,6 +306,7 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         url: undefined,
         detail: undefined,
         artifacts: undefined,
+        checkpoint: undefined,
         output: undefined,
         error: undefined,
         lostReason: undefined,
@@ -469,6 +482,7 @@ export function withEffects() {
             ...(outcome.url === undefined ? {} : { url: outcome.url }),
             ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
             ...(outcome.artifacts === undefined ? {} : { artifacts: outcome.artifacts }),
+            ...(outcome.checkpoint === undefined ? {} : { checkpoint: outcome.checkpoint }),
           })
         } else {
           await app.command(finish, { id, attempt, outcome })

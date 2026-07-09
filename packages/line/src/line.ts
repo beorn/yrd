@@ -425,6 +425,7 @@ function projectLineState(state: LinesState, applied: YrdEvent, effectRuns: Reco
       url: effectRun.url,
       detail: effectRun.detail,
       artifacts: effectRun.artifacts,
+      checkpoint: effectRun.checkpoint,
     }
     nextRun = { ...run, status: "waiting" }
   } else {

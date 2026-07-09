@@ -1,3 +1,4 @@
+export * from "./adapters.ts"
 import { Task as TaskDomain, withTasks } from "./tasks.ts"
 import type { Task as TaskValue } from "./types.ts"
 

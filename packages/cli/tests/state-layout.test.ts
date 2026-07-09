@@ -101,6 +101,22 @@ describe("classifyStateLayout", () => {
     expect(result.decision.action).toBe("open-current")
   })
 
+  it("recognizes the managed receiver inbox and initialization lock as current state", async () => {
+    const result = await classifyStateLayout({
+      gitDir: GIT_DIR,
+      fs: fixture({
+        [CURRENT_DIR]: directory(),
+        [`${CURRENT_DIR}/index.sqlite`]: file("SQLite format 3"),
+        [`${CURRENT_DIR}/prs.git`]: directory(),
+        [`${CURRENT_DIR}/receiver-inbox`]: directory(),
+        [`${CURRENT_DIR}/receiver-init`]: directory(),
+      }),
+    })
+
+    expect(result.kind).toBe("current")
+    expect(result.decision.action).toBe("open-current")
+  })
+
   it("recognizes legacy v2 GitBay events by their missing cause.op", async () => {
     const result = await classifyStateLayout({
       gitDir: GIT_DIR,

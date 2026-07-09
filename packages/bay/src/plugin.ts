@@ -69,6 +69,7 @@ export type IntakeSubmissionArgs = {
   base?: string
   headSha: string
   baseSha?: string
+  receipt?: string
 }
 
 export type SubmitArgs =
@@ -160,6 +161,10 @@ function parseIntake(input: unknown): IntakeSubmissionArgs {
   const bay = optionalString(args, "bay", "bay.intake")
   const branch = optionalString(args, "branch", "bay.intake")
   if (bay === undefined && branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
+  const receipt = optionalString(args, "receipt", "bay.intake")
+  if (receipt !== undefined && !/^[0-9a-f]{64}$/u.test(receipt)) {
+    throw new Error("yrd: bay.intake: 'receipt' must be a 64-character lowercase hex id")
+  }
   return {
     ...(bay === undefined ? {} : { bay }),
     ...(optionalString(args, "name", "bay.intake") === undefined ? {} : { name: args.name as string }),
@@ -167,6 +172,7 @@ function parseIntake(input: unknown): IntakeSubmissionArgs {
     ...(optionalString(args, "base", "bay.intake") === undefined ? {} : { base: args.base as string }),
     headSha: commitSha(args, "headSha", "bay.intake"),
     ...(args.baseSha === undefined ? {} : { baseSha: commitSha(args, "baseSha", "bay.intake") }),
+    ...(receipt === undefined ? {} : { receipt }),
   }
 }
 
@@ -287,7 +293,21 @@ function projectBayState(state: BaysState, applied: YrdEvent, effectRuns: Record
               rejectedAt: undefined,
               detail: undefined,
             }
-      return replaceSubmission(state, submission)
+      const next = replaceSubmission(state, submission)
+      if (typeof data.receipt !== "string") return next
+      return {
+        ...next,
+        receipts: {
+          ...next.receipts,
+          [data.receipt]: {
+            submission: id,
+            branch: data.branch as string,
+            headSha: data.headSha as string,
+            base: data.base as string,
+            ...(data.baseSha === undefined ? {} : { baseSha: data.baseSha as string }),
+          },
+        },
+      }
     }
     case "submission/submitted": {
       const submission = state.submissions[data.submission as string]
@@ -467,6 +487,22 @@ export function withBays(options: WithBaysOptions) {
         const bay = args.bay === undefined ? undefined : requiredBay(current, args.bay)
         if (bay !== undefined && bay.status !== "active")
           throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
+        const branch = args.branch ?? bay!.branch
+        const base = args.base ?? bay?.base ?? defaultBase
+        if (args.receipt !== undefined) {
+          const received = current.receipts[args.receipt]
+          if (received !== undefined) {
+            if (
+              received.branch !== branch ||
+              received.headSha !== args.headSha ||
+              received.base !== base ||
+              received.baseSha !== args.baseSha
+            ) {
+              throw new Error(`yrd: receiver receipt '${args.receipt}' does not match its recorded intake`)
+            }
+            return { events: [], effects: [] }
+          }
+        }
         const existing =
           bay === undefined ? resolveSubmission(current, args.branch!) : submissionForBay(current, bay.id)
         if (existing?.status === "integrated" || existing?.status === "withdrawn") {
@@ -480,10 +516,11 @@ export function withBays(options: WithBaysOptions) {
               submission: id,
               ...(bay === undefined ? {} : { bay: bay.id }),
               ...((args.name ?? bay?.name) ? { name: args.name ?? bay?.name } : {}),
-              branch: args.branch ?? bay!.branch,
-              base: args.base ?? bay?.base ?? defaultBase,
+              branch,
+              base,
               headSha: args.headSha,
               ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
+              ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
               revision,
             }),
           ],

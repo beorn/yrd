@@ -156,6 +156,52 @@ describe("line command adapters", () => {
     expect(await git(repo, ["merge-base", "--is-ancestor", secondSha, "main"])).toBe("")
   })
 
+  it("parks a remote check with an immutable checkpoint and pinned candidate ref", async () => {
+    const { repo, featureSha } = await repository()
+    const app = pipe(
+      createYrd({ store: createMemoryEventStore() }),
+      withEffects(),
+      withBays({ workspace: unusedWorkspace }),
+      withLine(),
+      withStep(
+        "check",
+        gitCheckStep({
+          repo,
+          runner: "waiting",
+          command:
+            `printf '%s\\n' '{"token":"ci-1","url":"https://ci.invalid/1",` +
+            `"detail":"queued","artifacts":[{"name":"remote","uri":"artifact://ci-1"}]}'`,
+        }),
+      ),
+    )
+    await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = await app.line.integrate({ submission: "S1" }, { executor: "local", leaseMs: 60_000 })
+
+    expect(run).toMatchObject({
+      status: "waiting",
+      steps: [
+        {
+          status: "waiting",
+          token: "ci-1",
+          url: "https://ci.invalid/1",
+          detail: "queued",
+          checkpoint: {
+            baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            candidateRef: "refs/yrd/candidates/R1/check/attempt-1",
+          },
+        },
+      ],
+    })
+    const checkpoint = run.steps[0]!.checkpoint as GitCheckEvidence
+    expect(await git(repo, ["rev-parse", checkpoint.candidateRef!])).toBe(checkpoint.candidateSha)
+    expect(checkpoint.artifacts.some((artifact) => artifact.name === "stdout")).toBe(true)
+    expect(run.steps[0]!.artifacts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "remote", uri: "artifact://ci-1" })]),
+    )
+  })
+
   it("refuses merge when the base moves after the checked candidate", async () => {
     const { repo, featureSha } = await repository()
     type Checked = AddStepResult<SubmissionShape, "check", GitCheckEvidence>

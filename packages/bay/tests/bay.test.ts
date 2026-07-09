@@ -120,6 +120,23 @@ describe("withBays", () => {
     ])
   })
 
+  it("deduplicates a durable receiver receipt atomically with its intake event", async () => {
+    const app = createApp(createWorkspace().workspace)
+    await openActiveBay(app)
+    const receipt = "f".repeat(64)
+    const args = { bay: "B1", headSha: HEAD_1, baseSha: BASE, receipt }
+
+    expect((await app.command(app.commands.bay.intake, args)).events).toHaveLength(1)
+    expect((await app.command(app.commands.bay.intake, args)).events).toHaveLength(0)
+    expect((await app.state()).bays).toMatchObject({
+      receipts: { [receipt]: { submission: "S1", branch: "task/fix-release", headSha: HEAD_1 } },
+      submissions: { S1: { revision: 1, headSha: HEAD_1 } },
+    })
+    await expect(
+      app.command(app.commands.bay.intake, { ...args, headSha: HEAD_2 }),
+    ).rejects.toThrow(`receiver receipt '${receipt}' does not match its recorded intake`)
+  })
+
   it("refreshes the committed head and dirty state through a durable workspace effect", async () => {
     const fake = createWorkspace()
     const app = createApp(fake.workspace)

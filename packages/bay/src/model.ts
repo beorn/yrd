@@ -60,6 +60,10 @@ export type Submission = {
 export type BaysState = {
   bays: Record<BayId, Bay>
   submissions: Record<SubmissionId, Submission>
+  receipts: Record<
+    string,
+    { submission: SubmissionId; branch: string; headSha: string; base: string; baseSha?: string }
+  >
 }
 
 export type ProvisionBayInput = {
@@ -107,7 +111,7 @@ export function defaultBayBranch(name: string): string {
 }
 
 export function emptyBaysState(): BaysState {
-  return { bays: {}, submissions: {} }
+  return { bays: {}, submissions: {}, receipts: {} }
 }
 
 export function isLiveSubmission(status: SubmissionStatus): boolean {

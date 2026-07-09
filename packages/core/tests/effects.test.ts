@@ -145,6 +145,7 @@ describe("Era2 durable effects", () => {
           url: "https://ci.invalid/1",
           detail: "queued on linux-arm64",
           artifacts: [{ kind: "runner-log", uri: "artifact://remote-1/log" }],
+          checkpoint: { baseSha: "a".repeat(40), candidateSha: "b".repeat(40) },
         }))
         return current
       },
@@ -161,6 +162,7 @@ describe("Era2 durable effects", () => {
       url: "https://ci.invalid/1",
       detail: "queued on linux-arm64",
       artifacts: [{ kind: "runner-log", uri: "artifact://remote-1/log" }],
+      checkpoint: { baseSha: "a".repeat(40), candidateSha: "b".repeat(40) },
     })
 
     await app.command(app.commands.effect.finish, {
@@ -169,7 +171,11 @@ describe("Era2 durable effects", () => {
       token: "remote-1",
       outcome: { status: "passed", output: { receipt: "remote-ok" } },
     })
-    expect((await app.state()).effects.runs[id]).toMatchObject({ status: "passed", output: { receipt: "remote-ok" } })
+    expect((await app.state()).effects.runs[id]).toMatchObject({
+      status: "passed",
+      checkpoint: { baseSha: "a".repeat(40), candidateSha: "b".repeat(40) },
+      output: { receipt: "remote-ok" },
+    })
   })
 
   it("marks expired work lost, retries as a new attempt, and rejects stale completion", async () => {
