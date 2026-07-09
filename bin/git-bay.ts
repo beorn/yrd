@@ -28,6 +28,7 @@ import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
   withReceive,
   resolveReceive,
+  leaseForBranch,
   parseReceiveStdin,
   preReceiveCheck,
   appendInboxReceipt,
@@ -635,7 +636,7 @@ async function validateWorkitem(ctx: Ctx, verb: string, name: string): Promise<v
   }
 }
 
-async function verbOpen(ctx: Ctx, name: string | undefined, skipTracker: boolean): Promise<void> {
+async function verbOpen(ctx: Ctx, name: string | undefined, skipTracker: boolean, sourceBranch: string | undefined): Promise<void> {
   if (!name) throw new Error("bay: open: a name for the work is required — e.g. git bay open fix-readme")
   // Name-shadowing guard: PRn / wtN are minted ids; a name that looks like one
   // would make every later dual-addressed argument ambiguous on purpose.
@@ -646,10 +647,23 @@ async function verbOpen(ctx: Ctx, name: string | undefined, skipTracker: boolean
     )
   }
   if (!skipTracker) await validateWorkitem(ctx, "open", name)
+  const from = sourceBranch === undefined ? undefined : await resolveLocalBranchOrTeach(ctx, "open", sourceBranch)
   // Law 8: open self-heals the wiring — init is idempotent and cheap.
   const path = await withWriteBay(ctx, async (bay) => {
     if (!existsSync(ctx.repoGit)) await bay.dispatch({ type: "init" })
-    const { events } = await bay.dispatch({ type: "open", args: { workitem: name } })
+    if (from !== undefined) {
+      const state = await bay.state()
+      const tracked = prForTarget(state, from)
+      if (tracked !== undefined) {
+        throw new Error(`bay: open: '${from}' is already tracked by ${tracked} — git bay ls ${tracked}`)
+      }
+      const openLease = leaseForBranch(state, from)
+      if (openLease !== undefined && openLease.endedAt === undefined) {
+        const wt = wtLabelFor(state, openLease.id) ?? openLease.id
+        throw new Error(`bay: open: '${from}' is already open in ${wt} — git bay ls`)
+      }
+    }
+    const { events } = await bay.dispatch({ type: "open", args: { workitem: name, ...(from !== undefined ? { sourceBranch: from } : {}) } })
     const provisioned = events.find((e) => e.name === "worktree/provisioned")
     const p = (provisioned?.data as { path?: string } | undefined)?.path
     if (!p) throw new Error("bay: open: no worktree/provisioned event — provisioning failed silently (bug)")
@@ -786,6 +800,29 @@ async function resolveGitTargetOrTeach(ctx: Ctx, verb: "submit" | "adopt", targe
     `bay: ${verb}: '${target}' is not a known PR, bay, or branch — ` +
       `git bay ls lists PRs and bays; git branch lists branches.${hint}`,
   )
+}
+
+async function resolveLocalBranchOrTeach(ctx: Ctx, verb: "open", target: string): Promise<string> {
+  const branch = target.replace(/^refs\/heads\//, "")
+  const resolved = await git(
+    ["-C", ctx.mainRepo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`],
+    ctx.mainRepo,
+  )
+  if (resolved.code === 0) return branch
+  const refs = await git(["-C", ctx.mainRepo, "for-each-ref", "--format=%(refname:short)", "refs/heads"], ctx.mainRepo)
+  const near = refs.stdout
+    .split("\n")
+    .filter((r) => r !== "" && r.toLowerCase().includes(branch.toLowerCase()))
+    .slice(0, 3)
+  const hint = near.length > 0 ? ` Did you mean: ${near.join(", ")}?` : ""
+  throw new Error(`bay: ${verb}: --from '${target}' is not a local branch — git branch lists branches.${hint}`)
+}
+
+function resolveSourceBranchOption(opts: { from?: string; head?: string }): string | undefined {
+  if (opts.from !== undefined && opts.head !== undefined && opts.from !== opts.head) {
+    throw new Error(`bay: open: --from and --head name different branches (${opts.from} vs ${opts.head})`)
+  }
+  return opts.from ?? opts.head
 }
 
 /** `submit <PR|name|branch>` — "ask to merge": moves an existing PR from
@@ -1397,8 +1434,10 @@ async function main(): Promise<void> {
     .aliases(["new", "co", "checkout"])
     .helpGroup("Your bay:")
     .description("open a bay for a named piece of work; prints its worktree path (cd-able)")
-    .action(async (name: string, opts: { workitem?: boolean }) => {
-      await verbOpen(await requireBay(), name, opts.workitem === false)
+    .option("--from <branch>", "open the bay on an existing local source branch")
+    .option("--head <branch>", "alias for --from")
+    .action(async (name: string, opts: { workitem?: boolean; from?: string; head?: string }) => {
+      await verbOpen(await requireBay(), name, opts.workitem === false, resolveSourceBranchOption(opts))
     })
   hiddenOption(cmdOpen, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.issue check)")
 

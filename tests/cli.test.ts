@@ -216,6 +216,56 @@ describe("git bay CLI — happy path (process-level)", () => {
       expect(res.stderr, name).toContain("pick a descriptive name")
     }
   })
+
+  it("open --from attaches a bay name to an existing source branch", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    await branchWithFiles(demo, env, "task/existing", { "legacy.txt": "old\n" })
+
+    const opened = await must(["git", "bay", "open", "repair-existing", "--from", "task/existing"], demo, env)
+    const wtPath = opened.stdout.trim()
+    expect((await must(["git", "-C", wtPath, "branch", "--show-current"], wtPath, env)).stdout.trim()).toBe("task/existing")
+    expect(await readFile(join(wtPath, "legacy.txt"), "utf8")).toBe("old\n")
+
+    await writeFile(join(wtPath, "repair.txt"), "fixed\n", "utf8")
+    await must(["git", "-C", wtPath, "add", "repair.txt"], wtPath, env)
+    await must(["git", "-C", wtPath, "commit", "-qm", "fix: repair existing"], wtPath, env)
+    const pushed = await must(["git", "-C", wtPath, "push"], wtPath, env)
+    expect(pushed.stderr).toContain("remote: bay: PR1 opened — git bay submit PR1 when ready")
+
+    const json = await must(["git", "bay", "ls", "--json"], demo, env)
+    const state = JSON.parse(json.stdout) as {
+      leases: Record<string, { workitem: string | null; branch: string; changeId: string }>
+      prs: Record<string, { name: string | null; state: string }>
+      line: { items: { pr: string; target: string }[] }
+    }
+    const lease = Object.values(state.leases)[0]!
+    expect(lease).toMatchObject({ workitem: "repair-existing", branch: "task/existing", changeId: "PR1" })
+    expect(state.prs.PR1).toMatchObject({ name: "repair-existing", state: "pushed" })
+  })
+
+  it("open --from refuses missing or already-tracked source branches before opening a bay", async () => {
+    await must(["git", "bay", "init"], demo, env)
+    await must(["git", "-C", demo, "branch", "task/near-miss"], demo, env)
+    await must(["git", "-C", demo, "branch", "task/other"], demo, env)
+
+    const mismatch = await run(["git", "bay", "open", "bad-head", "--from", "task/near-miss", "--head", "task/other"], demo, env)
+    expect(mismatch.code).toBe(1)
+    expect(mismatch.stderr).toContain("--from and --head name different branches")
+
+    const missing = await run(["git", "bay", "open", "missing", "--from", "near"], demo, env)
+    expect(missing.code).toBe(1)
+    expect(missing.stderr).toContain("--from 'near' is not a local branch")
+    expect(missing.stderr).toContain("Did you mean: task/near-miss")
+
+    await branchWithFiles(demo, env, "task/tracked", { "tracked.txt": "tracked\n" })
+    await must(["git", "bay", "submit", "task/tracked"], demo, env)
+    const tracked = await run(["git", "bay", "open", "tracked-again", "--from", "task/tracked"], demo, env)
+    expect(tracked.code).toBe(1)
+    expect(tracked.stderr).toContain("'task/tracked' is already tracked by PR1")
+
+    const ls = await must(["git", "bay", "ls"], demo, env)
+    expect(ls.stdout).toContain("no open worktrees")
+  })
 })
 
 describe("git bay CLI — PR numbers are sequential and addressable by name", () => {
@@ -801,7 +851,7 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     for (const advertised of [
       "guide",
       "init",
-      "open <name>",
+      "open [options] <name>",
       "close [options] <wt|name>", // --withdraw gives it an [options] slot, like ls/integrate/audit
       "gc",
       "ls",
@@ -845,6 +895,9 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     const integrateHelp = await run(["git", "bay", "land", "-h"], demo, env)
     expect(integrateHelp.stdout).toContain("Usage: git bay integrate [options] [PR|name]")
     expect(integrateHelp.stdout).not.toContain("integrate|land")
+    const openHelp = await must(["git", "bay", "open", "--help"], demo, env)
+    expect(openHelp.stdout).toContain("--from <branch>")
+    expect(openHelp.stdout).toContain("--head <branch>")
     // `merge` is now its OWN advertised verb, not an integrate alias
     const mergeHelp = await must(["git", "bay", "merge", "-h"], demo, env)
     expect(mergeHelp.stdout).toContain("Usage: git bay merge [options] <PR|name>")

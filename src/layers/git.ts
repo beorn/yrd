@@ -82,6 +82,15 @@ export async function worktreeAdd(
   }
 }
 
+/** `git worktree add <path> <branch>` for `git bay open --from <branch>`:
+ *  attach the bay to an existing source branch instead of creating task/<name>. */
+export async function worktreeAddExistingBranch(repo: string, branch: string, path: string): Promise<void> {
+  const res = await git(["-C", repo, "worktree", "add", path, branch], repo)
+  if (res.code !== 0) {
+    throw new Error(`bay: git worktree add failed (exit ${res.code}):\n${res.stderr.trim()}`)
+  }
+}
+
 /** The provisioned bay's HEAD commit — the changeset's baseSha for this repo. */
 export async function headSha(path: string): Promise<string> {
   const res = await git(["-C", path, "rev-parse", "HEAD"], path)

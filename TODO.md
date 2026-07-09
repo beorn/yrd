@@ -13,6 +13,8 @@ repo in hub/yrd/reference or in @yrd beads.
 - yrd line status/audit/integrate/watch projects the current check/merge path.
 - yrd task compete and yrd contest show/select/promote are installed as the
   first manual-selection contest projection over real bay attempts.
+- Contest `--agents codex/claude` uses ag-style slash-separated provider lists;
+  built-in `codex` and `claude` attempts execute through `ag`.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
 - Failed line step runs include normalized `error { code, message, exitCode? }`
@@ -29,6 +31,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - `git bay submit <branch>` opens and submits an existing source branch without
   first provisioning a bay; `submit --wait` forces integration even when
   `bay.autoMerge` is false.
+- `git bay open <name> --from <branch>` opens a bay worktree on an existing
+  local source branch and keeps the bay name as the PR/work item name;
+  `--head` is an alias for GitHub PR vocabulary.
 - Public config vocabulary uses `bay.issue`, `bay.merge`, `bay.autoSubmit`,
   and `bay.autoMerge`; retired `bay.tracker`, `bay.mergeCommand`, and
   `bay.autoQueue` are not read.
@@ -107,8 +112,10 @@ Rules:
    - Add sqlite materialized views for PRs, bay leases, queue order, and
      verdicts, folded from events.jsonl; keep the event log as source of truth.
 5. Model refinements
-   - Add per-PR source/base storage and --from/--head plus --base/--line
-     aliases, while keeping the initial queue serial per base.
+   - Add per-PR base storage and --base/--line aliases, while keeping the
+     initial queue serial per base.
+   - Keep `open --from`/`--head` as the source-branch spelling for bay repair
+     work.
    - Thread base-aware provisioning through contests once `open --base` is
      installed; the first contest projection records the selected base and
      computes git metrics from it, but bay creation still follows the current

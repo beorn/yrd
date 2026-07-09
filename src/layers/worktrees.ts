@@ -27,6 +27,7 @@ import {
   setConfig,
   updateRef,
   worktreeAdd,
+  worktreeAddExistingBranch,
   worktreeRemove,
 } from "./git.ts"
 
@@ -175,7 +176,16 @@ function reduceOpen(bay: BayRuntime, state: BayState, command: BayCommand): Tran
   // branch fallback, and the abandoned-work ref all agree on one id. A worktree
   // closed before its first push burns its number (numbers are never reused).
   const changeId = nextPrId(state)
-  const branch = workitem ? `task/${workitem}` : `bay/${changeId}`
+  const rawSourceBranch = command.args?.sourceBranch
+  if (rawSourceBranch !== undefined && (typeof rawSourceBranch !== "string" || rawSourceBranch.trim() === "")) {
+    throw new Error("bay: open: 'sourceBranch' must be a non-empty string when provided")
+  }
+  const sourceBranch = typeof rawSourceBranch === "string" ? rawSourceBranch : undefined
+  const branch = sourceBranch ?? (workitem ? `task/${workitem}` : `bay/${changeId}`)
+  const alreadyOpen = Object.values(state.leases).find((lease) => lease.endedAt === undefined && lease.branch === branch)
+  if (alreadyOpen) {
+    throw new Error(`bay: open: '${branch}' is already open in another bay`)
+  }
 
   const opened = makeEvent(
     bay,
@@ -185,7 +195,7 @@ function reduceOpen(bay: BayRuntime, state: BayState, command: BayCommand): Tran
   )
   const effect: Effect = {
     type: FX_PROVISION,
-    data: { lease: leaseId, worktree, branch, changeId, workitem },
+    data: { lease: leaseId, worktree, branch, changeId, workitem, ...(sourceBranch !== undefined ? { sourceBranch } : {}) },
   }
   return { state, events: [opened], effects: [effect] }
 }
@@ -425,7 +435,7 @@ async function resolveConfig(
 
 function makeProvisionHandler(opts: WorktreesOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
-    const d = effect.data as { lease: LeaseId; worktree: string; branch: string; changeId: PrId }
+    const d = effect.data as { lease: LeaseId; worktree: string; branch: string; changeId: PrId; sourceBranch?: string }
     const { mainRepo, baysRoot, bayRemote } = await resolveConfig(opts)
     const path = `${baysRoot}/${d.worktree}`
     const baseRef = await resolveBaseRef(mainRepo)
@@ -455,7 +465,11 @@ function makeProvisionHandler(opts: WorktreesOptions) {
       await worktreeRemove(mainRepo, path) // committed work stays on its branch
     }
 
-    await worktreeAdd(mainRepo, d.branch, path, baseRef) // throws literal git stderr on failure
+    if (d.sourceBranch !== undefined) {
+      await worktreeAddExistingBranch(mainRepo, d.sourceBranch, path)
+    } else {
+      await worktreeAdd(mainRepo, d.branch, path, baseRef) // throws literal git stderr on failure
+    }
     const sha = await headSha(path)
 
     const data: { bay: LeaseId; worktree: string; path: string; baseSha: string; headSha: string; upstream?: string } = {

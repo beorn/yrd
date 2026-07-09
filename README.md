@@ -137,12 +137,11 @@ records a deploy verdict and may stop the line, but cannot revoke `merged`.
 open a bay -> work with git -> push -> submit -> line integrate -> close
 ```
 
-- `git bay open <name> [--from <branch>] [--base <branch>]` creates an isolated
+- `git bay open <name> [--from <branch>|--head <branch>]` creates an isolated
   worktree and wires its `bay` remote to git bay's local PR Git repo.
 - `git push` from inside that bay creates or updates a local PR and leaves it at
   `pushed`.
-- `git bay submit <branch>` can also submit a source branch directly to its base
-  branch or `--base`.
+- `git bay submit <branch>` can also submit a source branch directly.
 - `git bay submit [selector...]` moves the PR to `submitted`. With
   `bay.autoMerge` enabled, submit also runs the default line steps.
 - `yrd line integrate [selector...] --steps ...` runs selected line steps.
@@ -220,9 +219,9 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 
 | Command | Input | Output | State / Exit |
 | --- | --- | --- | --- |
-| `git bay open <name> [--from <branch>] [--base <branch>]` | work name, source branch defaulting to name, optional base branch | worktree path to stdout; PR/base/branch details to stderr | opens a bay and reserves a PR; refuses invalid names |
+| `git bay open <name> [--from <branch>\|--head <branch>]` | work name, optional existing source branch | worktree path to stdout | opens a bay and reserves a PR; refuses invalid names or invalid source branches |
 | `git bay refresh [bay...]` | zero or more bay ids/names | refreshed bay ids | resets idle clock so live work is not pruned; missing bay exits `1` |
-| `git bay submit [selector...] [--wait] [--base <branch>]` | active bay, PR, name, or source branch | PR transition and line verdicts | moves to `submitted`; may run default line steps; `--wait` returns on terminal verdict or parked waiting state |
+| `git bay submit [selector...] [--wait]` | active bay, PR, name, or source branch | PR transition and line verdicts | moves to `submitted`; may run default line steps; `--wait` returns on terminal verdict or parked waiting state |
 | `git bay close [bay...] [--withdraw]` | zero or more bays | closed bay summary | refuses dirty work; live PRs require `--withdraw`; merged/closed PRs are safe |
 
 ### Line Ops
@@ -346,15 +345,9 @@ launchers, or repository-specific policy.
 A line sits on a base branch. The base branch is the PR's destination branch;
 the PR source is `branch`, and its destination is `base`.
 
-```bash
-git bay open fix-release --base release/2.0
-git bay open fix-release --from task/fix-release --base release/2.0
-git bay submit PR7 --base release/2.0
-yrd line status release/2.0
-```
-
-`--from` and `--base` are the canonical flags. `--head` aliases `--from` for
-GitHub PR vocabulary; `--line` aliases `--base` for git bay's line vocabulary.
+`--from` is the canonical source-branch flag. `--head` aliases `--from` for
+GitHub PR vocabulary. Base-branch selection is the line model, and the concrete
+`--base`/`--line` command flags remain tracked in `TODO.md`.
 
 The default line sits on the repository default branch. There is no separate
 line object to create: selecting another base branch uses the line sitting on
