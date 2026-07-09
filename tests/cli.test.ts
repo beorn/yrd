@@ -676,6 +676,35 @@ describe("yrd CLI — line projection", () => {
     })
   })
 
+  it("line status accepts multiple targeted selectors in order", async () => {
+    await branchWithFiles(demo, env, "task/multi-a", { "multi-a.txt": "a\n" })
+    const prA = (await must(["git", "bay", "adopt", "task/multi-a", "--workitem", "multi-a"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", prA], demo, env)
+    await must([process.execPath, YRD_BIN, "line", "integrate", prA, "--steps", "check"], demo, env)
+
+    await branchWithFiles(demo, env, "task/multi-b", { "multi-b.txt": "b\n" })
+    const prB = (await must(["git", "bay", "adopt", "task/multi-b", "--workitem", "multi-b"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", prB], demo, env)
+
+    const json = await must([process.execPath, YRD_BIN, "line", "status", prB, prA, "--json"], demo, env)
+    const status = JSON.parse(json.stdout) as {
+      targets: {
+        selector: string
+        line: { pr: string; state: string; steps?: { check?: { ok: boolean } } }
+      }[]
+    }
+    expect(status.targets.map((target) => target.selector)).toEqual([prB, prA])
+    expect(status.targets.map((target) => target.line.pr)).toEqual([prB, prA])
+    expect(status.targets.map((target) => target.line.state)).toEqual(["submitted", "checked"])
+    expect(status.targets[1]!.line.steps?.check).toMatchObject({ ok: true })
+
+    const human = await must([process.execPath, YRD_BIN, "line", "status", prB, prA], demo, env)
+    const lines = human.stdout.trim().split("\n")
+    expect(lines[0]).toContain(`${prB} submitted target=`)
+    expect(lines[1]).toContain(`${prA} checked target=`)
+    expect(lines[1]).toContain("check=ok")
+  })
+
   it("line status projects to the bay state and unsupported steps teach", async () => {
     const help = await must([process.execPath, YRD_BIN, "--help"], demo, env)
     expect(help.stdout).toContain("Installed projections: bay, line, task, contest")

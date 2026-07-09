@@ -57,7 +57,7 @@ yrd bay refresh
 yrd bay submit [selector...] [--wait]
 yrd bay close
 
-yrd line status [PR|name] [--json]
+yrd line status [selector...] [--json]
 yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
@@ -113,10 +113,10 @@ local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. Human
 `yrd line status` renders the same folded line summary concisely. Targeted
-status keeps showing check/merge/deploy evidence for terminal merged PRs. Watch
-mode can run the full `check,merge,deploy` sequence for each merged PR. That
-gives `@ci` a real command surface to start targeting, but not yet the full line
-package.
+status accepts one or more selectors and keeps showing check/merge/deploy
+evidence for terminal merged PRs. Watch mode can run the full
+`check,merge,deploy` sequence for each merged PR. That gives `@ci` a real
+command surface to start targeting, but not yet the full line package.
 
 Remaining non-throwaway line work:
 

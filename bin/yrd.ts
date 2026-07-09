@@ -39,7 +39,7 @@ Installed projections: bay, line, task, contest
 const LINE_USAGE = `yrd line — integration line projection
 
 USAGE
-  yrd line status [PR|name] [--json]
+  yrd line status [selector...] [--json]
   yrd line audit [--json]
   yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
   yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
@@ -146,6 +146,10 @@ type LineStatusView = {
   detail?: string
 }
 
+type LineStatusTargetView = LineStatusView & {
+  selector: string
+}
+
 function parseIntegrateArgs(args: string[]): ParsedIntegrate {
   let target: string | undefined
   let stepsRaw: string | undefined
@@ -194,8 +198,8 @@ function parseIntegrateArgs(args: string[]): ParsedIntegrate {
   return { target, steps: parseSteps(stepsRaw), retry, passthrough }
 }
 
-function parseStatusArgs(args: string[]): { target?: string; json: boolean } {
-  let target: string | undefined
+function parseStatusArgs(args: string[]): { targets: string[]; json: boolean } {
+  const targets: string[] = []
   let json = false
   for (const arg of args) {
     if (arg === "--help" || arg === "-h") {
@@ -207,10 +211,9 @@ function parseStatusArgs(args: string[]): { target?: string; json: boolean } {
       continue
     }
     if (arg.startsWith("-")) fail(`yrd: line status: unknown option '${arg}'`)
-    if (target !== undefined) fail(`yrd: line status: unexpected extra argument '${arg}'`)
-    target = arg
+    targets.push(arg)
   }
-  return { target, json }
+  return { targets, json }
 }
 
 function writeCaptured(res: Awaited<ReturnType<typeof runCommand>>): void {
@@ -275,7 +278,23 @@ function formatLineStatus(view: LineStatusView): string {
 async function lineStatus(args: string[]): Promise<void> {
   const parsed = parseStatusArgs(args)
   const paths = await resolveRepoPaths()
-  const lsArgs = ["ls", ...(parsed.target === undefined ? [] : [parsed.target]), "--json"]
+  if (parsed.targets.length > 1) {
+    const targets: LineStatusTargetView[] = []
+    for (const target of parsed.targets) {
+      const res = await runGitBay(["ls", target, "--json"], paths.repo)
+      requireCommandOk(res)
+      targets.push({ selector: target, ...(JSON.parse(res.stdout) as LineStatusView) })
+    }
+    if (parsed.json) {
+      console.log(JSON.stringify({ targets }))
+      return
+    }
+    console.log(targets.map(formatLineStatus).join("\n"))
+    return
+  }
+
+  const target = parsed.targets[0]
+  const lsArgs = ["ls", ...(target === undefined ? [] : [target]), "--json"]
   const res = await runGitBay(lsArgs, paths.repo)
   requireCommandOk(res)
   if (parsed.json) {
