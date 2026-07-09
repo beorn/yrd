@@ -250,12 +250,14 @@ function parsePin(input: unknown): GitRevisionPin {
 function parseTokens(input: unknown): TokenCounts {
   const value = plainObject(input, "token counts")
   rejectUnknown(value, TOKEN_KEYS, "token counts")
+  const count = (field: keyof TokenCounts): number | null =>
+    value[field] === null ? null : nonNegativeInteger(value[field], `token count '${field}'`)
   return {
-    input: nonNegativeInteger(value.input, "token count 'input'"),
-    output: nonNegativeInteger(value.output, "token count 'output'"),
-    cachedInput: nonNegativeInteger(value.cachedInput, "token count 'cachedInput'"),
-    cacheWrite: nonNegativeInteger(value.cacheWrite, "token count 'cacheWrite'"),
-    reasoning: nonNegativeInteger(value.reasoning, "token count 'reasoning'"),
+    input: count("input"),
+    output: count("output"),
+    cachedInput: count("cachedInput"),
+    cacheWrite: count("cacheWrite"),
+    reasoning: count("reasoning"),
   }
 }
 

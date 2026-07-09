@@ -31,11 +31,11 @@ export type GitRevisionPin = Readonly<{
 }>
 
 export type TokenCounts = Readonly<{
-  input: number
-  output: number
-  cachedInput: number
-  cacheWrite: number
-  reasoning: number
+  input: number | null
+  output: number | null
+  cachedInput: number | null
+  cacheWrite: number | null
+  reasoning: number | null
 }>
 
 export type UsdCost =
