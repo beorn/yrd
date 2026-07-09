@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, join } from "node:path"
+import type { Cause, GitbayEvent } from "./types.ts"
+import { createJsonlJournal } from "./journal.ts"
 import { git, repoScopedCleanEnv } from "./layers/git.ts"
+import { bayEventsPath } from "./paths.ts"
 
 export type ContestMetrics = {
   inputTokens?: number
@@ -87,6 +90,14 @@ type RepoPaths = {
   bayDir: string
 }
 
+type ContestEvent = Extract<GitbayEvent, { name: `contest/${string}` }>
+
+export type ContestEventAppender = <Name extends ContestEvent["name"]>(
+  name: Name,
+  data: Extract<ContestEvent, { name: Name }>["data"],
+  idPart: string,
+) => Promise<void>
+
 export async function resolveRepoPaths(cwd = process.cwd()): Promise<RepoPaths> {
   const repoRes = await git(["-C", cwd, "rev-parse", "--show-toplevel"], cwd)
   if (repoRes.code !== 0) throw new Error(`yrd: not inside a git repository: ${repoRes.stderr.trim()}`)
@@ -125,6 +136,19 @@ export async function writeContest(bayDir: string, record: ContestRecord): Promi
   const path = contestPath(bayDir, record.id)
   await mkdir(join(bayDir, "contests", record.id), { recursive: true })
   await writeFile(path, JSON.stringify(record, null, 2) + "\n", "utf8")
+}
+
+export function createContestEventAppender(bayDir: string, cause: Cause): ContestEventAppender {
+  const journal = createJsonlJournal(bayEventsPath(bayDir))
+  return async (name, data, idPart) => {
+    await journal.append({
+      id: `${cause.commandId}:${name}:${idPart}`,
+      name,
+      ts: new Date().toISOString(),
+      cause,
+      data,
+    })
+  }
 }
 
 export async function runCommand(cmd: string[], cwd: string, env: Record<string, string> = {}): Promise<CommandResult> {
@@ -271,11 +295,26 @@ export async function runAttempt(params: {
   contestDir: string
   agentCommands: Map<string, string>
   evalCommands: string[]
+  appendEvent?: ContestEventAppender
 }): Promise<ContestAttempt> {
   const prompt = attemptPrompt(params.task, params.prompt, params.bayPath)
   const command = resolveAgentCommand(params.agent, prompt, params.agentCommands)
+  const contestId = basename(params.contestDir)
   const started = Date.now()
   const startedAt = new Date(started).toISOString()
+  await params.appendEvent?.(
+    "contest/attempt/started",
+    {
+      contest: contestId,
+      attempt: params.id,
+      agent: params.agent,
+      bay: params.bayName,
+      bayPath: params.bayPath,
+      command,
+      startedAt,
+    },
+    `attempt:${params.id}:started`,
+  )
   const env = {
     YRD_CONTEST_ATTEMPT: params.id,
     YRD_AGENT: params.agent,
@@ -297,7 +336,7 @@ export async function runAttempt(params: {
   for (const command of params.evalCommands) {
     evals.push(await runEvalCommand(command, params.bayPath, env))
   }
-  return {
+  const attempt: ContestAttempt = {
     id: params.id,
     agent: params.agent,
     bayName: params.bayName,
@@ -312,6 +351,26 @@ export async function runAttempt(params: {
     git: await collectGitMetrics(params.bayPath, params.baseSha),
     evals,
   }
+  await params.appendEvent?.(
+    "contest/attempt/finished",
+    {
+      contest: contestId,
+      attempt: attempt.id,
+      agent: attempt.agent,
+      bay: attempt.bayName,
+      bayPath: attempt.bayPath,
+      startedAt: attempt.startedAt,
+      finishedAt: attempt.finishedAt,
+      exitCode: attempt.exitCode,
+      durationMs: attempt.durationMs,
+      logs: attempt.logs,
+      metrics: attempt.metrics,
+      git: attempt.git,
+      evals: attempt.evals,
+    },
+    `attempt:${attempt.id}:finished`,
+  )
+  return attempt
 }
 
 export function formatContest(record: ContestRecord): string {

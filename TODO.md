@@ -16,6 +16,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - Contest `--agents "ag codex/claude"` uses ag-style slash-separated provider
   lists; built-in `codex` and `claude` attempts execute through `ag`. The
   shorter provider-only form remains accepted for scripts.
+- Contest lifecycle writes `contest/...` rows to events.jsonl for opened,
+  attempt started/finished, selected, and promoted facts while the JSON contest
+  record remains the first read model.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
 - `bay.check.runner=waiting` treats `bay.check` as an external check launcher:
@@ -113,8 +116,9 @@ Rules:
 ## Next Work
 
 1. Contest hardening
-   - Move contest records from the first JSON-file projection toward the
-     event/state/plugin model used by the rest of Yrd.
+   - Fold `yrd contest show/select/promote` from `contest/...` events instead
+     of treating contest.json as the authority; keep the JSON file as a
+     rebuildable/read-model cache.
    - Add runner-specific cost adapters where a provider does not emit dollar
      cost directly; keep missing cost explicit, never guessed.
    - Add richer evaluator plugins for tests, review, diff quality, performance,

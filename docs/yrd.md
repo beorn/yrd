@@ -224,10 +224,14 @@ step results, tests, coverage, review verdicts, diff size, performance, cost,
 wall time, and human selection.
 
 The first implementation stores contest records under `.git/bay/contests/`.
-Runner stdout/stderr are log artifacts. Token and cost metrics are extracted
-best-effort from runner JSON output: Claude's `--output-format json` currently
-reports dollar cost, while Codex JSONL reports tokens but may not report a cost
-field. The record keeps missing cost as missing, not guessed.
+It also appends contest lifecycle rows to `.git/bay/events.jsonl`:
+`contest/opened`, `contest/attempt/started`, `contest/attempt/finished`,
+`contest/selected`, and `contest/promoted`. Runner stdout/stderr are log
+artifacts. Token and cost metrics are extracted best-effort from runner JSON
+output: Claude's `--output-format json` currently reports dollar cost, while
+Codex JSONL reports tokens but may not report a cost field. The record keeps
+missing cost as missing, not guessed. Folding the contest read model from those
+events is the next hardening step; `contest.json` remains the first read model.
 
 ## Integration boundaries
 
@@ -255,7 +259,7 @@ Still coordinated separately:
 - consuming-repo path and bead moves
 - full monorepo package split
 - line artifacts/status/resume hardening and `@ci` cutover
-- contest hardening: event-sourced contest state, richer evaluator plugins,
+- contest hardening: event-folded contest state, richer evaluator plugins,
   runner-specific cost adapters, and remote/hosted runner support
 
 ## Reference

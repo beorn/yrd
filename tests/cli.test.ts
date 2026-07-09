@@ -1025,11 +1025,16 @@ describe("yrd CLI — contest projection", () => {
 
     const record = JSON.parse(competed.stdout) as {
       id: string
+      prompt: string
+      repo: string
       attempts: {
         id: string
         agent: string
         bayName: string
         bayPath: string
+        command: string[]
+        startedAt: string
+        finishedAt: string
         exitCode: number
         logs: { stdout: string; stderr: string }
         metrics: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number }
@@ -1063,6 +1068,59 @@ describe("yrd CLI — contest projection", () => {
     const prs = (JSON.parse(state.stdout) as { prs: Record<string, { name: string | null; state: string }> }).prs
     const submitted = Object.values(prs).find((pr) => pr.name === betaAttempt.bayName)
     expect(submitted?.state).toBe("submitted")
+
+    const events = (await readFile(join(demo, ".git", "bay", "events.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { name: string; data: Record<string, unknown> })
+    const contestEvents = events.filter((event) => event.name.startsWith("contest/"))
+    expect(contestEvents.map((event) => event.name)).toEqual(
+      expect.arrayContaining([
+        "contest/opened",
+        "contest/attempt/started",
+        "contest/attempt/finished",
+        "contest/selected",
+        "contest/promoted",
+      ]),
+    )
+    expect(contestEvents.find((event) => event.name === "contest/opened")?.data).toMatchObject({
+      contest: record.id,
+      task: "demo-task",
+      prompt: record.prompt,
+      repo: record.repo,
+      agents: ["fake-alpha", "fake-beta"],
+    })
+    expect(
+      contestEvents.find((event) => event.name === "contest/attempt/started" && event.data.attempt === alphaAttempt.id)?.data,
+    ).toMatchObject({
+      contest: record.id,
+      agent: "fake-alpha",
+      bay: alphaAttempt.bayName,
+      command: ["sh", "-c", alpha],
+    })
+    expect(
+      contestEvents.find((event) => event.name === "contest/attempt/finished" && event.data.attempt === alphaAttempt.id)?.data,
+    ).toMatchObject({
+      contest: record.id,
+      agent: "fake-alpha",
+      startedAt: alphaAttempt.startedAt,
+      finishedAt: alphaAttempt.finishedAt,
+      exitCode: 0,
+      logs: alphaAttempt.logs,
+      metrics: { totalTokens: 15, costUsd: 0.01 },
+      git: { committed: true, changedFiles: ["result.txt"] },
+      evals: [{ command: "test -f result.txt", exitCode: 0 }],
+    })
+    expect(contestEvents.find((event) => event.name === "contest/selected")?.data).toMatchObject({
+      contest: record.id,
+      winner: betaAttempt.id,
+    })
+    expect(contestEvents.find((event) => event.name === "contest/promoted")?.data).toMatchObject({
+      contest: record.id,
+      attempt: betaAttempt.id,
+      push: { code: 0 },
+      submit: { code: 0 },
+    })
   }, 15_000)
 })
 

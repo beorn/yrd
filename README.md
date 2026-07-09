@@ -416,6 +416,12 @@ The first evaluator is manual: inspect the attempts and select the winner.
 Automatic ranking should stay a plugin over the recorded evidence, because
 quality is product-specific and often needs human judgment.
 
+Contest commands append `contest/...` lifecycle rows to the bay event log while
+`contest.json` remains the first read model. The rows record contest opening,
+attempt start/finish, manual selection, and promotion, so future folded contest
+state can rebuild from the same `.git/bay/events.jsonl` authority as bays and
+lines.
+
 ## Safety Rules
 
 - Final landings are serial per base, and waiting PRs never bypass the final

@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises"
 import {
   contestPath,
+  createContestEventAppender,
   formatContest,
   nextContestId,
   parsePrFromText,
@@ -854,6 +855,7 @@ async function taskCompete(args: string[]): Promise<void> {
   const baseSha = base.stdout.trim()
   const id = await nextContestId(paths.bayDir)
   const contestDir = contestPath(paths.bayDir, id).replace(/\/contest\.json$/, "")
+  const appendEvent = createContestEventAppender(paths.bayDir, { commandId: `yrd:task:compete:${id}` })
   const record: ContestRecord = {
     version: 1,
     id,
@@ -867,6 +869,19 @@ async function taskCompete(args: string[]): Promise<void> {
     attempts: [],
   }
   await writeContest(paths.bayDir, record)
+  await appendEvent(
+    "contest/opened",
+    {
+      contest: id,
+      task: record.task,
+      prompt: record.prompt,
+      repo: record.repo,
+      base: record.base,
+      baseSha: record.baseSha,
+      agents: record.agents,
+    },
+    "opened",
+  )
 
   const opened: { id: string; agent: string; bayName: string; bayPath: string }[] = []
   for (const [index, agent] of parsed.agents.entries()) {
@@ -889,6 +904,7 @@ async function taskCompete(args: string[]): Promise<void> {
         contestDir,
         agentCommands: parsed.agentCommands,
         evalCommands: parsed.evalCommands,
+        appendEvent,
       }),
     ),
   )
@@ -944,6 +960,11 @@ async function contestSelect(args: string[]): Promise<void> {
   }
   record.winner = winner
   await writeContest(paths.bayDir, record)
+  await createContestEventAppender(paths.bayDir, { commandId: `yrd:contest:select:${id}` })(
+    "contest/selected",
+    { contest: id, winner },
+    `winner:${winner}`,
+  )
   console.log(`yrd: ${id} winner ${winner}`)
 }
 
@@ -974,6 +995,17 @@ async function contestPromote(args: string[]): Promise<void> {
   const pr = parsePrFromText(`${push.stdout}\n${push.stderr}\n${submit.stdout}\n${submit.stderr}`)
   record.promoted = { attempt: attempt.id, at: new Date().toISOString(), push, submit, ...(pr === undefined ? {} : { pr }) }
   await writeContest(paths.bayDir, record)
+  await createContestEventAppender(paths.bayDir, { commandId: `yrd:contest:promote:${id}` })(
+    "contest/promoted",
+    {
+      contest: id,
+      attempt: attempt.id,
+      ...(pr === undefined ? {} : { pr }),
+      push: { code: push.code },
+      submit: { code: submit.code },
+    },
+    `attempt:${attempt.id}`,
+  )
   requireOk(submit, `yrd: contest promote: submit ${attempt.bayName}`)
   console.log(`yrd: ${id} promoted ${attempt.id}${pr === undefined ? "" : ` as ${pr}`}`)
 }

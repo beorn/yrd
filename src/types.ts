@@ -328,6 +328,87 @@ export type GitbayEvent =
         members: { pr: PrId; target: string; tip?: string }[]
       }
     }
+  | {
+      name: "contest/opened"
+      // Contest lifecycle events are audit data for the task/contest projection.
+      // The JSON contest file is the first read model; these rows are the
+      // durable event-log facts that let the projection move toward normal Yrd
+      // state folding without inventing a second history store.
+      data: {
+        contest: string
+        task: string
+        prompt: string
+        repo: string
+        base: string
+        baseSha: string
+        agents: string[]
+      }
+    }
+  | {
+      name: "contest/attempt/started"
+      data: {
+        contest: string
+        attempt: string
+        agent: string
+        bay: string
+        bayPath: string
+        command: string[]
+        startedAt: string
+      }
+    }
+  | {
+      name: "contest/attempt/finished"
+      data: {
+        contest: string
+        attempt: string
+        agent: string
+        bay: string
+        bayPath: string
+        startedAt: string
+        finishedAt: string
+        exitCode: number
+        durationMs: number
+        logs: { stdout: string; stderr: string }
+        metrics: {
+          inputTokens?: number
+          outputTokens?: number
+          totalTokens?: number
+          costUsd?: number
+          source?: string
+        }
+        git: {
+          baseSha: string
+          headSha?: string
+          committed: boolean
+          changedFiles: string[]
+          status: string
+          diffStat: string
+        }
+        evals: {
+          command: string
+          startedAt: string
+          finishedAt: string
+          durationMs: number
+          exitCode: number
+          stdout: string
+          stderr: string
+        }[]
+      }
+    }
+  | {
+      name: "contest/selected"
+      data: { contest: string; winner: string }
+    }
+  | {
+      name: "contest/promoted"
+      data: {
+        contest: string
+        attempt: string
+        pr?: string
+        push: { code: number }
+        submit: { code: number }
+      }
+    }
 
 /** One step run's identity — shared by line/step/started and line/step/finished.
  *  `step` stays a payload field (not a name segment) so the union stays closed
