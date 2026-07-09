@@ -233,7 +233,7 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 | `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary or targeted PR step evidence, including terminal merged PRs | no state change; exits `0` |
 | `yrd line audit [--json]` | repository from cwd | audit findings | no state change; exits `0` clean or `1` with findings |
 | `yrd line integrate [selector] [--steps check,merge,deploy] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams line drain output | runs registered steps; deploy failures exit `1` without unmerging |
-| `yrd line finish <selector> --step check (--ok\|--fail)` | parked PR plus optional token/detail/url/exit-code | external check result and PR transition | completes a `line/step/waiting`; command exits `0` for recorded pass or fail, nonzero for mismatched token/state |
+| `yrd line finish <selector> --step check (--ok\|--fail)` | parked PR plus optional token/detail/url/artifact/exit-code | external check result and PR transition | completes a `line/step/waiting`; command exits `0` for recorded pass or fail, nonzero for mismatched token/state |
 | `yrd line watch [selector] [--steps check,merge,deploy]` | optional PR/name | repeated integration output | keeps draining eligible work; with deploy in the step list, deploys each PR it merges |
 
 ### Contest Ops
@@ -284,8 +284,9 @@ The default check runner is `local`: `bay.check` runs to a pass/fail verdict.
 `0` records `line/step/waiting`, captures stdout/stderr artifacts, and leaves
 the PR in `checking`; nonzero rejects the PR as a failed launcher. The launcher
 may print JSON such as `{"token":"...","url":"...","detail":"..."}` for status
-projection. The external runner completes the parked result with
-`yrd line finish <PR> --step check --ok|--fail --token <token>`.
+projection, plus `artifacts` as an object or array of `{name,path|url}` refs.
+The external runner completes the parked result with
+`yrd line finish <PR> --step check --ok|--fail --token <token> --artifact report=https://ci.example/run/1/report`.
 
 For shared, version-controlled policy, committed config lives in `.gitbay.yml`
 at the repository root. It uses a small GitHub Actions-inspired shape: line
@@ -343,9 +344,10 @@ launchers, or repository-specific policy.
 - **Checks** are registered transitions that capture stdout/stderr in the
   verdict and reject on nonzero exit. With `bay.check.runner waiting`, a check
   command is an external-runner launcher: success parks the PR with a token,
-  URL, artifacts, and `line/step/waiting`; launcher failure rejects it.
-  `yrd line finish` turns that parked row into `line/step/finished` plus
-  `checking -> checked` or `checking -> rejected`.
+  URL, launcher artifact refs, and `line/step/waiting`; launcher failure
+  rejects it. `yrd line finish` turns that parked row into
+  `line/step/finished` plus `checking -> checked` or `checking -> rejected`,
+  and can attach final external artifacts with `--artifact name=path-or-url`.
 - **Reviews** are async steps between `checked` and `merging`. Approval moves
   the PR out of `reviewing`; rejection records the reason and keeps the PR out
   of the line. Verdicts are bound to the reviewed SHA, so a new push invalidates
@@ -477,14 +479,16 @@ contest/...      opened, attempt started/finished, selected, promoted
 ```
 
 `line/step/waiting` rows include a parked step's detail, optional token/URL,
-config hash, base/head SHAs, duration, and artifact references. `yrd line
-status` renders those rows as `check=waiting`.
+config hash, base/head SHAs, duration, captured stdout/stderr artifacts, and
+external artifact references supplied by the launcher. `yrd line status` renders
+those rows as `check=waiting`.
 
 `line/step/finished` rows include the step verdict plus available process
 metadata: `exitCode`, `durationMs`, `configHash`, `baseSha`, `headSha`,
 structured `error { code, message, exitCode? }` metadata on failures, and
-artifact references for captured stdout/stderr. Artifacts are stored as files;
-event rows carry references, not inline logs.
+artifact references for captured stdout/stderr or external refs supplied by
+`yrd line finish --artifact`. Local artifacts are stored as files; event rows
+carry references, not inline logs.
 
 `yrd line status` projects a folded `line` summary over the same event log:
 base branch, open PRs, current targets, last step results, artifact refs, and

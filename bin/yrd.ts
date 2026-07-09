@@ -42,7 +42,7 @@ USAGE
   yrd line status [selector...] [--json]
   yrd line audit [--json]
   yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
-  yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>]
+  yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>] [--artifact <name=ref>]
   yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 Installed steps: check, merge, deploy
@@ -161,6 +161,7 @@ type ParsedFinish = {
   token?: string
   detail?: string
   url?: string
+  artifacts: string[]
   exitCode?: string
   durationMs?: string
 }
@@ -239,6 +240,7 @@ function parseFinishArgs(args: string[]): ParsedFinish {
   let token: string | undefined
   let detail: string | undefined
   let url: string | undefined
+  const artifacts: string[] = []
   let exitCode: string | undefined
   let durationMs: string | undefined
 
@@ -298,6 +300,15 @@ function parseFinishArgs(args: string[]): ParsedFinish {
       url = arg.slice("--url=".length)
       continue
     }
+    if (arg === "--artifact") {
+      artifacts.push(valueAfter(args, i, "--artifact"))
+      i++
+      continue
+    }
+    if (arg.startsWith("--artifact=")) {
+      artifacts.push(arg.slice("--artifact=".length))
+      continue
+    }
     if (arg === "--exit-code") {
       exitCode = valueAfter(args, i, "--exit-code")
       i++
@@ -331,6 +342,7 @@ function parseFinishArgs(args: string[]): ParsedFinish {
     ...(token !== undefined ? { token } : {}),
     ...(detail !== undefined ? { detail } : {}),
     ...(url !== undefined ? { url } : {}),
+    artifacts,
     ...(exitCode !== undefined ? { exitCode } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
   }
@@ -558,6 +570,7 @@ async function lineFinish(args: string[]): Promise<void> {
     ...(parsed.token === undefined ? [] : ["--token", parsed.token]),
     ...(parsed.detail === undefined ? [] : ["--detail", parsed.detail]),
     ...(parsed.url === undefined ? [] : ["--url", parsed.url]),
+    ...parsed.artifacts.flatMap((artifact) => ["--artifact", artifact]),
     ...(parsed.exitCode === undefined ? [] : ["--exit-code", parsed.exitCode]),
     ...(parsed.durationMs === undefined ? [] : ["--duration-ms", parsed.durationMs]),
   ])

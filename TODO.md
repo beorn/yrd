@@ -22,8 +22,9 @@ repo in hub/yrd/reference or in @yrd beads.
   exit `0` records `line/step/waiting` with token/URL/detail/artifacts and
   parks the PR in `checking`; launcher failure rejects the PR.
 - `yrd line finish <PR> --step check --ok|--fail` completes a parked external
-  check, validates the waiting token when present, records `line/step/finished`,
-  and moves the PR to `checked` or `rejected`.
+  check, validates the waiting token when present, accepts external artifact
+  refs with `--artifact name=path-or-url`, records `line/step/finished`, and
+  moves the PR to `checked` or `rejected`.
 - Failed line step runs include normalized `error { code, message, exitCode? }`
   metadata using the same rejection-code vocabulary as PR verdicts.
 - Resume paths skip a previously successful check when PR, target, base SHA,
@@ -84,7 +85,7 @@ yrd bay close
 yrd line status [selector...] [--json]
 yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
-yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>]
+yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>] [--artifact <name=ref>]
 yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
@@ -118,12 +119,10 @@ Rules:
 2. Line hardening
    - Finish core submission and line-step event/state contracts beyond local
      check/merge/deploy and externally finished checks.
-   - Broaden artifact/log capture beyond the local command runner as remote
-     and hosted runners land.
+   - Add remote/container/hosted runner adapters that produce the installed
+     waiting/finish/artifact contract.
    - Extend event-log-driven resume beyond successful checks as more step kinds
      land; keep merge non-skippable unless the line can prove a landed result.
-   - Add remote/container/hosted runner adapters that produce the installed
-     waiting/finish contract.
 3. @ci cutover
    - Switch @ci to yrd bay + yrd line once artifact capture, folded status, and
      resume semantics are strong enough for the CI lane.
@@ -168,8 +167,9 @@ Rules:
   event log for the same submission and commit. Local command artifacts are
   installed, JSON folded status is installed, and normalized step errors are
   installed. Human folded status is installed. Parked external check launch and
-  finish are installed. Successful check reuse is installed for matching
-  PR/base/head/config; stale checked PRs are rejected before merge. Broader step
-  resume semantics remain.
+  finish are installed, including external artifact refs from launcher metadata
+  and `line finish --artifact`. Successful check reuse is installed for
+  matching PR/base/head/config; stale checked PRs are rejected before merge.
+  Broader step resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

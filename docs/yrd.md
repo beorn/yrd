@@ -113,21 +113,21 @@ status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, `bay.check.runner=waiting` can park an
 external check launcher with `line/step/waiting`, `yrd line finish` can record
-that external check's pass/fail verdict, and `yrd line status --json` exposes
-folded open-line items with last step results and checked-PR staleness. Human
-`yrd line status` renders the same folded line summary concisely. Targeted
-status accepts one or more selectors and keeps showing check/merge/deploy
-evidence for terminal merged PRs. Stale checked PRs are rejected with
-`stale-check` before a merge command runs. Watch mode can run the full
-`check,merge,deploy` sequence for each merged PR. That gives `@ci` a real
-command surface to start targeting, but not yet the full line package.
+that external check's pass/fail verdict with final artifact refs, and `yrd line
+status --json` exposes folded open-line items with last step results and
+checked-PR staleness. Human `yrd line status` renders the same folded line
+summary concisely. Targeted status accepts one or more selectors and keeps
+showing check/merge/deploy evidence for terminal merged PRs. Stale checked PRs
+are rejected with `stale-check` before a merge command runs. Watch mode can run
+the full `check,merge,deploy` sequence for each merged PR. That gives `@ci` a
+real command surface to start targeting, but not yet the full line package.
 
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts beyond local
    check/merge/deploy and externally finished checks;
-2. add remote/container/hosted runner adapters and richer external artifact
-   references;
+2. add remote/container/hosted runner adapters that produce the installed
+   waiting/finish/artifact contract;
 3. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
@@ -172,9 +172,11 @@ model must not require local child processes. Remote runners, container runners,
 or hosted CI adapters should satisfy the same step result contract. The
 installed first seam is `bay.check.runner=waiting`: `bay.check` launches the
 external job, exit `0` emits `line/step/waiting` and parks the PR in `checking`,
-and exit nonzero rejects the launcher failure. `yrd line finish <PR> --step
-check --ok|--fail` records the external verdict, validates the token when one
-was emitted, and moves the PR to `checked` or `rejected`.
+and exit nonzero rejects the launcher failure. Launcher output may include JSON
+`artifacts` as an object or array of `{name,path|url}` refs. `yrd line finish <PR> --step check --ok|--fail`
+records the external verdict, validates the token when one was emitted, accepts
+final artifact refs with
+`--artifact name=path-or-url`, and moves the PR to `checked` or `rejected`.
 
 Step events map naturally to spans:
 
@@ -186,10 +188,12 @@ error { code, message, exitCode? }
 ```
 
 Artifacts include logs, coverage, reports, and build outputs. The default local
-artifact store writes command stdout/stderr under `.git/bay/artifacts/`; the
-event carries references, not inline blobs. A resumed line run folds the event log
-first and skips a successful check result only when it matches the same PR,
-target, base commit, head commit, and check config hash; the resumed event
+artifact store writes command stdout/stderr under `.git/bay/artifacts/`;
+external runners can attach URL or path refs from waiting metadata and
+`yrd line finish --artifact`. The event carries references, not inline blobs. A
+resumed line run folds the event log first and skips a successful check result
+only when it matches the same PR, target, base commit, head commit, and check
+config hash; the resumed event
 records `skipped: true`. A checked PR is stale when its recorded `baseSha` or
 `headSha` no longer matches the current line base or target commit. A stale
 checked PR is rejected with `stale-check` before merge, so retry can re-enter

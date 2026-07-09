@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto"
-import type { RejectionCode, StepCommandOutput } from "../types.ts"
+import type { RejectionCode, StepArtifact, StepCommandOutput } from "../types.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
+import { parseStepArtifactRefs } from "./artifacts.ts"
 import { git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 
 /**
@@ -31,7 +32,7 @@ export type CheckRunner = "local" | "waiting"
 export type CheckOutcome =
   | ({ ok: true; waiting?: false } & StepCommandOutput)
   | ({ ok: false; waiting?: false; detail: string; code?: RejectionCode } & StepCommandOutput)
-  | ({ ok: false; waiting: true; detail: string; token?: string; url?: string } & StepCommandOutput)
+  | ({ ok: false; waiting: true; detail: string; token?: string; url?: string; artifacts?: StepArtifact[] } & StepCommandOutput)
 
 /** Resolve the ONE project check command: inline > BAY_CHECK > git config
  *  bay.check > none (unset — checks are opt-in). */
@@ -48,12 +49,12 @@ export async function resolveCheckRunner(checkRunner: string | undefined, config
   throw new Error(`bay: unknown bay.check.runner '${raw}' (supported: local, waiting)`)
 }
 
-function parseWaitingMetadata(stdout: string, stderr: string): { detail: string; token?: string; url?: string } {
+function parseWaitingMetadata(stdout: string, stderr: string): { detail: string; token?: string; url?: string; artifacts?: StepArtifact[] } {
   for (const line of [...stdout.split("\n"), ...stderr.split("\n")].reverse()) {
     const trimmed = line.trim()
     if (trimmed === "") continue
     try {
-      const parsed = JSON.parse(trimmed) as { detail?: unknown; message?: unknown; token?: unknown; url?: unknown }
+      const parsed = JSON.parse(trimmed) as { artifacts?: unknown; detail?: unknown; message?: unknown; token?: unknown; url?: unknown }
       if (parsed && typeof parsed === "object") {
         const detail =
           typeof parsed.detail === "string"
@@ -61,10 +62,12 @@ function parseWaitingMetadata(stdout: string, stderr: string): { detail: string;
             : typeof parsed.message === "string"
               ? parsed.message
               : tail(stdout || stderr) || "waiting for external check"
+        const artifacts = parseStepArtifactRefs(parsed.artifacts)
         return {
           detail,
           ...(typeof parsed.token === "string" && parsed.token !== "" ? { token: parsed.token } : {}),
           ...(typeof parsed.url === "string" && parsed.url !== "" ? { url: parsed.url } : {}),
+          ...(artifacts.length > 0 ? { artifacts } : {}),
         }
       }
     } catch {

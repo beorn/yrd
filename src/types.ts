@@ -343,9 +343,10 @@ export type StepRunData = {
 }
 
 export type StepArtifact = {
-  name: "stdout" | "stderr"
-  path: string
-  bytes: number
+  name: string
+  path?: string
+  url?: string
+  bytes?: number
 }
 
 export type StepCommandOutput = {

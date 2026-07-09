@@ -25,6 +25,7 @@ import { withWorktrees, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/lay
 import { prForTarget, queueTarget, withQueue, submittedPrs } from "../src/layers/queue.ts"
 import { withBatchBuild } from "../src/layers/batch-build.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
+import { parseStepArtifactRefs } from "../src/layers/artifacts.ts"
 import {
   withReceive,
   resolveReceive,
@@ -1138,12 +1139,22 @@ function parseOptionalNumber(raw: string | undefined, flag: string): number | un
 async function verbCheckFinish(
   ctx: Ctx,
   target: string | undefined,
-  opts: { ok?: boolean; fail?: boolean; token?: string; detail?: string; url?: string; exitCode?: string; durationMs?: string },
+  opts: {
+    artifact?: string | string[]
+    ok?: boolean
+    fail?: boolean
+    token?: string
+    detail?: string
+    url?: string
+    exitCode?: string
+    durationMs?: string
+  },
 ): Promise<void> {
   if (!target) throw new Error("bay: check-finish: a PR number or name is required — git bay ls lists them")
   const ok = opts.ok === true
   const fail = opts.fail === true
   if (ok === fail) throw new Error("bay: check-finish: choose exactly one of --ok or --fail")
+  const artifacts = parseStepArtifactRefs(opts.artifact)
   await withWriteBay(ctx, async (bay) => {
     const state = await bay.state()
     const prId = resolvePr(state, target)
@@ -1158,6 +1169,7 @@ async function verbCheckFinish(
         ...(opts.url !== undefined ? { url: opts.url } : {}),
         ...(opts.exitCode !== undefined ? { exitCode: parseOptionalNumber(opts.exitCode, "--exit-code") } : {}),
         ...(opts.durationMs !== undefined ? { durationMs: parseOptionalNumber(opts.durationMs, "--duration-ms") } : {}),
+        ...(artifacts.length > 0 ? { artifacts } : {}),
       },
     })
     printCheckFinishEvents(events)
@@ -1657,12 +1669,22 @@ async function main(): Promise<void> {
     .option("--token <token>", "correlation token from line/step/waiting")
     .option("--detail <text>", "human-readable result detail")
     .option("--url <url>", "external runner URL")
+    .option("--artifact <name=path-or-url>", "external artifact reference (comma-separated or repeatable)")
     .option("--exit-code <n>", "external runner exit code")
     .option("--duration-ms <n>", "external runner duration in milliseconds")
     .action(
       async (
         target: string,
-        opts: { ok?: boolean; fail?: boolean; token?: string; detail?: string; url?: string; exitCode?: string; durationMs?: string },
+        opts: {
+          artifact?: string | string[]
+          ok?: boolean
+          fail?: boolean
+          token?: string
+          detail?: string
+          url?: string
+          exitCode?: string
+          durationMs?: string
+        },
       ) => {
         await verbCheckFinish(await requireBay(), target, opts)
       },

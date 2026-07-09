@@ -10,6 +10,7 @@ import type {
   PrId,
   RejectionCode,
   PullRequest,
+  StepArtifact,
   StepCommandOutput,
   StepRunData,
   StepWaitingMetadata,
@@ -18,7 +19,7 @@ import type {
 import { makeEvent } from "../core.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import { batchLandEvidence } from "./batch-build.ts"
-import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
+import { collectStepRefs, parseStepArtifactRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
 import {
   type CheckOutcome,
@@ -195,6 +196,17 @@ function optionalNumberArg(command: BayCommand, key: string, verb: string): numb
   return value
 }
 
+function optionalArtifactsArg(command: BayCommand, verb: string): StepArtifact[] | undefined {
+  const value = command.args?.artifacts
+  if (value === undefined) return undefined
+  try {
+    const artifacts = parseStepArtifactRefs(value)
+    return artifacts.length > 0 ? artifacts : undefined
+  } catch (err) {
+    throw new Error(`bay: ${verb}: ${(err as Error).message}`)
+  }
+}
+
 function reduceCheckFinish(state: BayState, command: BayCommand): TransitionResult {
   const pr = requirePrArg(command, "check-finish")
   const existing = state.prs[pr]
@@ -208,6 +220,7 @@ function reduceCheckFinish(state: BayState, command: BayCommand): TransitionResu
   const url = optionalStringArg(command, "url", "check-finish")
   const exitCode = optionalNumberArg(command, "exitCode", "check-finish")
   const durationMs = optionalNumberArg(command, "durationMs", "check-finish")
+  const artifacts = optionalArtifactsArg(command, "check-finish")
   const effect: Effect = {
     type: FX_CHECK_FINISH,
     data: {
@@ -218,6 +231,7 @@ function reduceCheckFinish(state: BayState, command: BayCommand): TransitionResu
       ...(url !== undefined ? { url } : {}),
       ...(exitCode !== undefined ? { exitCode } : {}),
       ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(artifacts !== undefined ? { artifacts } : {}),
     },
   }
   return { state, events: [], effects: [effect] }
@@ -333,6 +347,7 @@ function makeCheckFinishHandler(): EffectHandler {
       url?: string
       exitCode?: number
       durationMs?: number
+      artifacts?: StepArtifact[]
     }
     const state = await bay.state()
     const pr = state.prs[d.pr]
@@ -363,6 +378,7 @@ function makeCheckFinishHandler(): EffectHandler {
         ...(url !== undefined ? { url } : {}),
         exitCode,
         ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
+        ...(d.artifacts !== undefined && d.artifacts.length > 0 ? { artifacts: d.artifacts } : {}),
         ...(waiting.configHash !== undefined ? { configHash: waiting.configHash } : {}),
         ...(waiting.baseSha !== undefined ? { baseSha: waiting.baseSha } : {}),
         ...(waiting.headSha !== undefined ? { headSha: waiting.headSha } : {}),
@@ -485,7 +501,8 @@ async function stepWaitingWithOutput(
 ): Promise<BayEvent> {
   const mainRepo = opts.mainRepo ?? opts.configCwd
   const output = mainRepo === undefined ? outcome : await collectStepRefs(mainRepo, run.target, outcome)
-  const artifacts = await writeStepArtifacts({ mainRepo, cause, run, output })
+  const capturedArtifacts = await writeStepArtifacts({ mainRepo, cause, run, output })
+  const artifacts = [...(outcome.artifacts ?? []), ...capturedArtifacts]
   return stepWaiting(bay, run, cause, {
     detail: outcome.detail,
     ...(outcome.token !== undefined ? { token: outcome.token } : {}),

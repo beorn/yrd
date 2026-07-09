@@ -709,7 +709,7 @@ describe("yrd CLI — line projection", () => {
         demo,
         "config",
         "bay.check",
-        `printf '%s\\n' '{"token":"remote-1","url":"https://ci.invalid/run/1","detail":"queued remote"}'`,
+        `printf '%s\\n' '{"token":"remote-1","url":"https://ci.invalid/run/1","detail":"queued remote","artifacts":{"launcher-log":"https://ci.invalid/run/1/log"}}'`,
       ],
       demo,
       env,
@@ -735,7 +735,7 @@ describe("yrd CLI — line projection", () => {
             url?: string
             exitCode?: number
             configHash?: string
-            artifacts?: unknown[]
+            artifacts?: { name?: string; url?: string }[]
             baseSha?: string
             headSha?: string
           }
@@ -751,7 +751,10 @@ describe("yrd CLI — line projection", () => {
       exitCode: 0,
     })
     expect(line.line.steps.check?.configHash).toMatch(/^[0-9a-f]{64}$/)
-    expect(line.line.steps.check?.artifacts).toHaveLength(1)
+    expect(line.line.steps.check?.artifacts).toHaveLength(2)
+    expect(line.line.steps.check?.artifacts).toContainEqual(
+      expect.objectContaining({ name: "launcher-log", url: "https://ci.invalid/run/1/log" }),
+    )
     expect(line.line.steps.check?.baseSha).toMatch(/^[0-9a-f]{40}$/)
     expect(line.line.steps.check?.headSha).toMatch(/^[0-9a-f]{40}$/)
 
@@ -801,6 +804,8 @@ describe("yrd CLI — line projection", () => {
         "1234",
         "--url",
         "https://ci.invalid/run/1",
+        "--artifact",
+        "junit=https://ci.invalid/run/1/junit.xml",
       ],
       demo,
       env,
@@ -814,7 +819,16 @@ describe("yrd CLI — line projection", () => {
         state: string
         stale?: boolean
         staleReasons?: string[]
-        steps: { check?: { ok?: boolean; waiting?: boolean; token?: string; url?: string; durationMs?: number } }
+        steps: {
+          check?: {
+            artifacts?: { name?: string; url?: string }[]
+            ok?: boolean
+            waiting?: boolean
+            token?: string
+            url?: string
+            durationMs?: number
+          }
+        }
       }
     }
     expect(checked.line.state).toBe("checked")
@@ -826,6 +840,9 @@ describe("yrd CLI — line projection", () => {
       url: "https://ci.invalid/run/1",
       durationMs: 1234,
     })
+    expect(checked.line.steps.check?.artifacts).toEqual([
+      expect.objectContaining({ name: "junit", url: "https://ci.invalid/run/1/junit.xml" }),
+    ])
     expect(checked.line.steps.check?.waiting).toBeUndefined()
 
     const staleMerge = await must([process.execPath, YRD_BIN, "line", "integrate"], demo, env)

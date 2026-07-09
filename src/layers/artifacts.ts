@@ -37,10 +37,11 @@ export async function writeStepArtifacts(params: {
   run: StepRunData
   output: StepCommandOutput
 }): Promise<StepArtifact[]> {
+  type CapturedStream = { name: "stdout" | "stderr"; text: string }
   const streams = [
     { name: "stdout" as const, text: params.output.stdout },
     { name: "stderr" as const, text: params.output.stderr },
-  ].filter((stream): stream is { name: StepArtifact["name"]; text: string } => stream.text !== undefined && stream.text.length > 0)
+  ].filter((stream): stream is CapturedStream => typeof stream.text === "string" && stream.text.length > 0)
   if (streams.length === 0) return []
   const bayDir = params.bayDir ?? (params.mainRepo === undefined ? undefined : await resolveBayDir(params.mainRepo))
   if (bayDir === undefined) return []
@@ -54,6 +55,55 @@ export async function writeStepArtifacts(params: {
     artifacts.push({ name: stream.name, path, bytes: Buffer.byteLength(stream.text, "utf8") })
   }
   return artifacts
+}
+
+export function parseStepArtifactRef(raw: string): StepArtifact {
+  const eq = raw.indexOf("=")
+  if (eq <= 0 || eq === raw.length - 1) {
+    throw new Error(`artifact '${raw}' must be name=path-or-url`)
+  }
+  const name = raw.slice(0, eq).trim()
+  const ref = raw.slice(eq + 1).trim()
+  if (name === "" || ref === "") throw new Error(`artifact '${raw}' must be name=path-or-url`)
+  if (/^https?:\/\//i.test(ref)) return { name, url: ref }
+  return { name, path: ref }
+}
+
+function artifactFromObject(raw: Record<string, unknown>): StepArtifact | undefined {
+  const name = raw.name
+  const path = raw.path
+  const url = raw.url
+  const bytes = raw.bytes
+  if (typeof name !== "string" || name.trim() === "") return undefined
+  if (typeof url === "string" && url.trim() !== "") {
+    return { name: name.trim(), url: url.trim(), ...(typeof bytes === "number" && Number.isFinite(bytes) ? { bytes } : {}) }
+  }
+  if (typeof path === "string" && path.trim() !== "") {
+    return { name: name.trim(), path: path.trim(), ...(typeof bytes === "number" && Number.isFinite(bytes) ? { bytes } : {}) }
+  }
+  return undefined
+}
+
+export function parseStepArtifactRefs(raw: unknown): StepArtifact[] {
+  if (raw === undefined || raw === null) return []
+  if (typeof raw === "string") {
+    return raw
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part !== "")
+      .map(parseStepArtifactRef)
+  }
+  if (Array.isArray(raw)) {
+    return raw.flatMap((item) => parseStepArtifactRefs(item))
+  }
+  if (typeof raw === "object") {
+    const artifact = artifactFromObject(raw as Record<string, unknown>)
+    if (artifact !== undefined) return [artifact]
+    return Object.entries(raw as Record<string, unknown>)
+      .filter(([, value]) => typeof value === "string" && value.trim() !== "")
+      .map(([name, value]) => (/^https?:\/\//i.test(value as string) ? { name, url: (value as string).trim() } : { name, path: (value as string).trim() }))
+  }
+  return []
 }
 
 export function stepError(code: StepErrorCode, message: string, output: StepCommandOutput = {}): StepError {
