@@ -371,7 +371,11 @@ export type GitbayEvent =
         logs: { stdout: string; stderr: string }
         metrics: {
           inputTokens?: number
+          cachedInputTokens?: number
+          cacheCreationInputTokens?: number
+          cacheReadInputTokens?: number
           outputTokens?: number
+          reasoningOutputTokens?: number
           totalTokens?: number
           costUsd?: number
           source?: string

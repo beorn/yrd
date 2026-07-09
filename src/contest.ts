@@ -8,7 +8,11 @@ import { bayEventsPath } from "./paths.ts"
 
 export type ContestMetrics = {
   inputTokens?: number
+  cachedInputTokens?: number
+  cacheCreationInputTokens?: number
+  cacheReadInputTokens?: number
   outputTokens?: number
+  reasoningOutputTokens?: number
   totalTokens?: number
   costUsd?: number
   source?: string
@@ -299,8 +303,17 @@ export function extractMetrics(text: string, source: string): ContestMetrics {
     if (typeof value === "number" && Number.isFinite(value)) {
       const key = keyHint.toLowerCase().replace(/[_-]/g, "")
       if (key === "inputtokens" || key === "prompttokens") metrics.inputTokens = Math.max(metrics.inputTokens ?? 0, value)
+      else if (key === "cachedinputtokens" || key === "cachedprompttokens") {
+        metrics.cachedInputTokens = Math.max(metrics.cachedInputTokens ?? 0, value)
+      } else if (key === "cachecreationinputtokens") {
+        metrics.cacheCreationInputTokens = Math.max(metrics.cacheCreationInputTokens ?? 0, value)
+      } else if (key === "cachereadinputtokens") {
+        metrics.cacheReadInputTokens = Math.max(metrics.cacheReadInputTokens ?? 0, value)
+      }
       else if (key === "outputtokens" || key === "completiontokens") {
         metrics.outputTokens = Math.max(metrics.outputTokens ?? 0, value)
+      } else if (key === "reasoningoutputtokens") {
+        metrics.reasoningOutputTokens = Math.max(metrics.reasoningOutputTokens ?? 0, value)
       } else if (key === "totaltokens") metrics.totalTokens = Math.max(metrics.totalTokens ?? 0, value)
       else if (key === "costusd" || key === "totalcostusd" || key === "usd" || key === "cost") {
         metrics.costUsd = Math.max(metrics.costUsd ?? 0, value)
@@ -332,7 +345,11 @@ export function extractMetrics(text: string, source: string): ContestMetrics {
   }
   if (
     metrics.inputTokens !== undefined ||
+    metrics.cachedInputTokens !== undefined ||
+    metrics.cacheCreationInputTokens !== undefined ||
+    metrics.cacheReadInputTokens !== undefined ||
     metrics.outputTokens !== undefined ||
+    metrics.reasoningOutputTokens !== undefined ||
     metrics.totalTokens !== undefined ||
     metrics.costUsd !== undefined
   ) {

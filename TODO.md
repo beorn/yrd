@@ -20,6 +20,9 @@ repo in hub/yrd/reference or in @yrd beads.
   attempt started/finished, selected, and promoted facts while the JSON contest
   record remains a rebuildable read-model cache/fallback. `yrd contest
   show/select/promote` fold from those events when present.
+- Contest metrics capture explicit runner token, cache-token,
+  reasoning-token, duration, cost, and evaluator evidence. Missing dollar cost
+  remains missing rather than estimated.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
 - `bay.check.runner=waiting` treats `bay.check` as an external check launcher:

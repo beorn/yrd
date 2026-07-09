@@ -407,8 +407,8 @@ Each attempt records the evidence needed to choose a real winner:
 - competitor id and command
 - bay path, branch, commit SHA, changed files, and diff stats
 - start/end time, duration, exit code, stdout/stderr log paths
-- token and cost metrics when the runner or `ag session metrics` can provide
-  them
+- token and cost metrics, including cache/reasoning token fields when the
+  runner provides them
 - evaluator output from configured checks, reviews, or human selection
 - selected winner and promotion result
 

@@ -230,8 +230,9 @@ It also appends contest lifecycle rows to `.git/bay/events.jsonl`:
 fold from those events when present; `contest.json` remains a rebuildable
 read-model cache and compatibility fallback. Runner stdout/stderr are log
 artifacts. Token and cost metrics are extracted best-effort from runner JSON
-output: Claude's `--output-format json` currently reports dollar cost, while
-Codex JSONL reports tokens but may not report a cost field. The record keeps
+output, including cache and reasoning token fields when runners expose them:
+Claude's `--output-format json` currently reports dollar cost, while Codex
+JSONL reports token fields but may not report a cost field. The record keeps
 missing cost as missing, not guessed.
 
 ## Integration boundaries

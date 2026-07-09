@@ -1037,7 +1037,16 @@ describe("yrd CLI — contest projection", () => {
         finishedAt: string
         exitCode: number
         logs: { stdout: string; stderr: string }
-        metrics: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number }
+        metrics: {
+          inputTokens?: number
+          cachedInputTokens?: number
+          cacheCreationInputTokens?: number
+          cacheReadInputTokens?: number
+          outputTokens?: number
+          reasoningOutputTokens?: number
+          totalTokens?: number
+          costUsd?: number
+        }
         git: { committed: boolean; changedFiles: string[] }
         evals: { exitCode: number }[]
       }[]
