@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { resolveSubmission, type BayWorkspaceAdapter, type DeprovisionedBay, type ProvisionedBay } from "@yrd/bay"
+import {
+  resolveSubmission,
+  type BayWorkspaceAdapter,
+  type DeprovisionedBay,
+  type ProvisionedBay,
+  type RefreshedBay,
+} from "@yrd/bay"
 import {
   createMemoryEventStore,
   createYrd,
@@ -40,6 +46,12 @@ function workspace(): BayWorkspaceAdapter {
       return {
         status: "passed",
         output: { path: `/repo/.bays/${input.bay}`, headSha: BASE_SHA, baseSha: BASE_SHA },
+      }
+    },
+    refresh(input): EffectOutcome<RefreshedBay> {
+      return {
+        status: "passed",
+        output: { path: `/repo/.bays/${input.bay}`, headSha: BASE_SHA, baseSha: BASE_SHA, dirty: false },
       }
     },
     deprovision(): EffectOutcome<DeprovisionedBay> {

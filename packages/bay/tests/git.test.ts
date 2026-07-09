@@ -96,4 +96,30 @@ describe("createGitWorkspace", () => {
     expect(bay).toMatchObject({ status: "active", branch: "release-fix", from: "release-fix" })
     expect((await git(bay.path!, ["branch", "--show-current"])).stdout).toBe("release-fix")
   })
+
+  it("refreshes the exact committed head and reports uncommitted work", async () => {
+    const { root, repo } = await repository()
+    const app = pipe(
+      createYrd({ store: createMemoryEventStore() }),
+      withEffects(),
+      withBays({ workspace: createGitWorkspace({ repo, baysRoot: join(root, "bays") }) }),
+    )
+    const opened = await app.command(app.commands.bay.open, { name: "refresh-head" })
+    await app.effectRuns.run(opened.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
+    const bay = (await app.state()).bays.bays.B1!
+
+    await writeFile(join(bay.path!, "work.txt"), "committed\n")
+    await git(bay.path!, ["add", "work.txt"])
+    await git(bay.path!, ["commit", "-qm", "work"])
+    const committed = (await git(bay.path!, ["rev-parse", "HEAD"])).stdout
+    await writeFile(join(bay.path!, "dirty.txt"), "not committed\n")
+
+    const refreshed = await app.command(app.commands.bay.refresh, { bay: "B1" })
+    await app.effectRuns.run(refreshed.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
+    expect((await app.state()).bays.bays.B1).toMatchObject({
+      status: "active",
+      headSha: committed,
+      dirty: true,
+    })
+  })
 })

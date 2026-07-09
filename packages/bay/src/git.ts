@@ -2,7 +2,14 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { EffectOutcome } from "@yrd/core"
 import type { BayWorkspaceAdapter } from "./plugin.ts"
-import type { DeprovisionBayInput, DeprovisionedBay, ProvisionBayInput, ProvisionedBay } from "./model.ts"
+import type {
+  DeprovisionBayInput,
+  DeprovisionedBay,
+  ProvisionBayInput,
+  ProvisionedBay,
+  RefreshBayInput,
+  RefreshedBay,
+} from "./model.ts"
 
 export type GitWorkspaceOptions = {
   repo: string
@@ -81,6 +88,26 @@ export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspaceAd
         return { status: "passed", output: { path, headSha, baseSha } }
       } catch (cause) {
         return failure("provision-failed", cause)
+      }
+    },
+    async refresh(input: RefreshBayInput): Promise<EffectOutcome<RefreshedBay>> {
+      if (input.path === undefined) return failure("refresh-failed", `bay '${input.bay}' has no workspace path`)
+      try {
+        const branch = (await git(input.path, ["branch", "--show-current"])).stdout.trim()
+        if (branch !== input.branch) {
+          throw new Error(`workspace '${input.path}' is on branch '${branch}', expected '${input.branch}'`)
+        }
+        const [headSha, baseSha, status] = await Promise.all([
+          commit(input.path, "HEAD"),
+          commit(repo, input.base),
+          git(input.path, ["status", "--porcelain"]),
+        ])
+        return {
+          status: "passed",
+          output: { path: input.path, headSha, baseSha, dirty: status.stdout.trim() !== "" },
+        }
+      } catch (cause) {
+        return failure("refresh-failed", cause)
       }
     },
     async deprovision(input: DeprovisionBayInput): Promise<EffectOutcome<DeprovisionedBay>> {

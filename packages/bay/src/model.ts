@@ -22,6 +22,7 @@ export type Bay = {
   path?: string
   headSha?: string
   baseSha?: string
+  dirty?: boolean
   effectId?: string
   closedAt?: string
   failure?: BayFailure
@@ -73,6 +74,20 @@ export type ProvisionedBay = {
   path: string
   headSha: string
   baseSha: string
+}
+
+export type RefreshBayInput = {
+  bay: BayId
+  path?: string
+  branch: string
+  base: string
+}
+
+export type RefreshedBay = {
+  path: string
+  headSha: string
+  baseSha: string
+  dirty: boolean
 }
 
 export type DeprovisionBayInput = {

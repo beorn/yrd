@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 import { createMemoryEventStore, createYrd, pipe, withEffects, type EffectOutcome } from "@yrd/core"
-import { withBays, type BayWorkspaceAdapter, type DeprovisionedBay, type ProvisionedBay } from "../src/index.ts"
+import {
+  withBays,
+  type BayWorkspaceAdapter,
+  type DeprovisionedBay,
+  type ProvisionedBay,
+  type RefreshedBay,
+} from "../src/index.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -20,6 +26,13 @@ function createWorkspace() {
       return {
         status: "passed",
         output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE },
+      }
+    },
+    refresh(input): EffectOutcome<RefreshedBay> {
+      calls.push(`refresh:${input.bay}`)
+      return {
+        status: "passed",
+        output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_2, baseSha: BASE, dirty },
       }
     },
     deprovision(input): EffectOutcome<DeprovisionedBay> {
@@ -105,6 +118,23 @@ describe("withBays", () => {
       { revision: 1, headSha: HEAD_1, base: "main", baseSha: BASE, pushedAt: "2026-01-01T00:00:00.000Z" },
       { revision: 2, headSha: HEAD_2, base: "main", baseSha: BASE, pushedAt: "2026-01-01T00:00:00.000Z" },
     ])
+  })
+
+  it("refreshes the committed head and dirty state through a durable workspace effect", async () => {
+    const fake = createWorkspace()
+    const app = createApp(fake.workspace)
+    await openActiveBay(app)
+
+    const refreshed = await app.command(app.commands.bay.refresh, { bay: "B1" })
+    expect(refreshed.effectIds).toHaveLength(1)
+    await app.effectRuns.run(refreshed.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
+    expect((await app.state()).bays.bays.B1).toMatchObject({
+      status: "active",
+      headSha: HEAD_2,
+      baseSha: BASE,
+      dirty: false,
+    })
+    expect(fake.calls).toEqual(["provision:B1", "refresh:B1"])
   })
 
   it("submits a prepared branch without provisioning a bay", async () => {

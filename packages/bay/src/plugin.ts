@@ -28,6 +28,8 @@ import {
   type DeprovisionedBay,
   type ProvisionBayInput,
   type ProvisionedBay,
+  type RefreshBayInput,
+  type RefreshedBay,
   type Submission,
   type SubmissionId,
 } from "./model.ts"
@@ -39,6 +41,10 @@ export type BayWorkspaceAdapter = {
     input: ProvisionBayInput,
     context: EffectContext,
   ): EffectOutcome<ProvisionedBay> | Promise<EffectOutcome<ProvisionedBay>>
+  refresh(
+    input: RefreshBayInput,
+    context: EffectContext,
+  ): EffectOutcome<RefreshedBay> | Promise<EffectOutcome<RefreshedBay>>
   deprovision(
     input: DeprovisionBayInput,
     context: EffectContext,
@@ -82,6 +88,7 @@ type BayCommands = {
 
 export type BayEffects = {
   provision: Fx<ProvisionBayInput, EffectOutcome<ProvisionedBay>>
+  refresh: Fx<RefreshBayInput, EffectOutcome<RefreshedBay>>
   deprovision: Fx<DeprovisionBayInput, EffectOutcome<DeprovisionedBay>>
 }
 
@@ -235,10 +242,6 @@ function projectBayState(state: BaysState, applied: YrdEvent, effectRuns: Record
       const bay = data as unknown as Omit<Bay, "status" | "openedAt" | "refreshedAt">
       return replaceBay(state, { ...bay, status: "opening", openedAt: applied.ts, refreshedAt: applied.ts })
     }
-    case "bay/refreshed": {
-      const bay = state.bays[data.bay as string]
-      return bay === undefined ? state : replaceBay(state, { ...bay, refreshedAt: applied.ts })
-    }
     case "bay/closing": {
       const bay = state.bays[data.bay as string]
       return bay === undefined
@@ -321,7 +324,9 @@ function projectBayState(state: BaysState, applied: YrdEvent, effectRuns: Record
       })
     }
     case "effect/requested": {
-      if (data.effect !== "bay.provision" && data.effect !== "bay.deprovision") return state
+      if (data.effect !== "bay.provision" && data.effect !== "bay.refresh" && data.effect !== "bay.deprovision") {
+        return state
+      }
       const input = data.input as { bay?: unknown }
       const bay = typeof input.bay === "string" ? state.bays[input.bay] : undefined
       return bay === undefined ? state : replaceBay(state, { ...bay, effectId: data.id as string })
@@ -329,7 +334,12 @@ function projectBayState(state: BaysState, applied: YrdEvent, effectRuns: Record
     case "effect/finished":
     case "effect/lost": {
       const run = effectRuns[data.id as string]
-      if (run === undefined || (run.effect !== "bay.provision" && run.effect !== "bay.deprovision")) return state
+      if (
+        run === undefined ||
+        (run.effect !== "bay.provision" && run.effect !== "bay.refresh" && run.effect !== "bay.deprovision")
+      ) {
+        return state
+      }
       const input = run.input as { bay: BayId }
       const bay = state.bays[input.bay]
       if (bay === undefined) return state
@@ -342,6 +352,21 @@ function projectBayState(state: BaysState, applied: YrdEvent, effectRuns: Record
           path: output.path,
           headSha: output.headSha,
           baseSha: output.baseSha,
+          dirty: false,
+          failure: undefined,
+        })
+      }
+      if (run.effect === "bay.refresh") {
+        if (run.status !== "passed") return replaceBay(state, { ...bay, status: "active", failure: failureOf(run) })
+        const output = run.output as RefreshedBay
+        return replaceBay(state, {
+          ...bay,
+          status: "active",
+          path: output.path,
+          headSha: output.headSha,
+          baseSha: output.baseSha,
+          dirty: output.dirty,
+          refreshedAt: applied.ts,
           failure: undefined,
         })
       }
@@ -359,10 +384,12 @@ export function withBays(options: WithBaysOptions) {
     Object.assign(app.initialState, { bays: emptyBaysState() })
 
     const provision = fx(options.workspace.provision.bind(options.workspace), { title: "Provision bay workspace" })
+    const refreshWorkspace = fx(options.workspace.refresh.bind(options.workspace), { title: "Refresh bay workspace" })
     const deprovision = fx(options.workspace.deprovision.bind(options.workspace), {
       title: "Deprovision bay workspace",
     })
     app.effectRuns.register(["bay", "provision"], provision)
+    app.effectRuns.register(["bay", "refresh"], refreshWorkspace)
     app.effectRuns.register(["bay", "deprovision"], deprovision)
 
     const open = op(
@@ -405,7 +432,21 @@ export function withBays(options: WithBaysOptions) {
       (state: DeepReadonly<{ bays: BaysState }>, args: RefreshBayArgs) => {
         const bay = requiredBay(baysOf(state), args.bay)
         if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
-        return { events: [event("bay/refreshed", { bay: bay.id })], effects: [] }
+        return {
+          events: [],
+          effects: [
+            effect(
+              refreshWorkspace,
+              {
+                bay: bay.id,
+                ...(bay.path === undefined ? {} : { path: bay.path }),
+                branch: bay.branch,
+                base: bay.base,
+              },
+              `bay:${bay.id}:refresh`,
+            ),
+          ],
+        }
       },
       { title: "Refresh bay", visibility: "public", args: { parse: parseRefresh } },
     )
@@ -526,7 +567,7 @@ export function withBays(options: WithBaysOptions) {
     )
 
     Object.assign(app.commands, { bay: { open, refresh, intake, submit, close } })
-    Object.assign(app, { bayEffects: { provision, deprovision } })
+    Object.assign(app, { bayEffects: { provision, refresh: refreshWorkspace, deprovision } })
 
     const project = app.project
     app.project = (state, applied) => {
