@@ -41,6 +41,35 @@ function withSender<A extends AnyYrdApp & HasEffects>(app: A): ExtendYrdApp<A, {
 }
 
 describe("Era2 durable effects", () => {
+  it("delegates effect events so later plugins can project completed effect state", async () => {
+    let observedStatus: string | undefined
+    const app = pipe(
+      createYrd({ store: createMemoryEventStore() }),
+      withEffects(),
+      (current) => {
+        const project = current.project
+        current.project = (state, applied) => {
+          const projected = project(state, applied)
+          if (applied.name === "effect/finished") {
+            const id = (applied.data as { id: string }).id
+            observedStatus = projected.effects.runs[id]?.status
+          }
+          return projected
+        }
+        current.effectRuns.register(["test", "deliver"], deliver, async () => ({
+          status: "passed",
+          output: { receipt: "observed" },
+        }))
+        return current
+      },
+      withSender,
+    )
+
+    const submitted = await app.command(app.commands.sender.send, { message: "observe" })
+    await app.effectRuns.run(submitted.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
+    expect(observedStatus).toBe("passed")
+  })
+
   it("uses the wrapped fx function by default and persists only its JSON descriptor", async () => {
     const app = pipe(
       createYrd({ store: createMemoryEventStore() }),
@@ -114,6 +143,8 @@ describe("Era2 durable effects", () => {
           status: "waiting",
           token: "remote-1",
           url: "https://ci.invalid/1",
+          detail: "queued on linux-arm64",
+          artifacts: [{ kind: "runner-log", uri: "artifact://remote-1/log" }],
         }))
         return current
       },
@@ -123,7 +154,14 @@ describe("Era2 durable effects", () => {
     const id = submitted.effectIds[0]!
 
     await app.effectRuns.run(id, { executor: "remote", leaseMs: 60_000 })
-    expect((await app.state()).effects.runs[id]).toMatchObject({ status: "waiting", attempt: 1, token: "remote-1" })
+    expect((await app.state()).effects.runs[id]).toMatchObject({
+      status: "waiting",
+      attempt: 1,
+      token: "remote-1",
+      url: "https://ci.invalid/1",
+      detail: "queued on linux-arm64",
+      artifacts: [{ kind: "runner-log", uri: "artifact://remote-1/log" }],
+    })
 
     await app.command(app.commands.effect.finish, {
       id,

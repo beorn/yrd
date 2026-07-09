@@ -18,6 +18,7 @@ export type Command<Args = undefined, State extends object = object> = Readonly<
   fn: OperationHandler<State, Args>
   title?: string
   description?: string
+  visibility: "public" | "internal"
   args?: ArgsParser<Args>
 }>
 
@@ -159,10 +160,11 @@ export function op<State extends object, Args>(
   definition: {
     title?: string
     description?: string
+    visibility?: "public" | "internal"
     args?: ArgsParser<Args>
   } = {},
 ): Command<Args, State> {
-  return Object.freeze({ ...definition, fn, [OP_REF]: true as const })
+  return Object.freeze({ visibility: "internal", ...definition, fn, [OP_REF]: true as const })
 }
 
 export function fx<Input, Output>(

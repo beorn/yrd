@@ -3,7 +3,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { acquireWriterLock, resolveWriterLockPath, type WriterLock } from "../src/store/lock.ts"
+import { acquireWriterLock, resolveWriterLockPath, type WriterLock } from "../packages/core/src/store/lock.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import type { BayEvent, BayStore } from "../src/types.ts"
 
@@ -78,7 +78,7 @@ describe("acquireWriterLock", () => {
   it("never steals a live holder because diagnostic metadata looks old", async () => {
     const dir = await makeDir()
     const ready = join(dir, "holder-ready")
-    const lockModule = fileURLToPath(new URL("../src/store/lock.ts", import.meta.url))
+    const lockModule = fileURLToPath(new URL("../packages/core/src/store/lock.ts", import.meta.url))
     const child = Bun.spawn(
       [
         process.execPath,

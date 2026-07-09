@@ -18,7 +18,7 @@ export type EffectError = {
 export type EffectOutcome<Output> =
   | { status: "passed"; output: Output }
   | { status: "failed"; error: EffectError }
-  | { status: "waiting"; token: string; url?: string }
+  | { status: "waiting"; token: string; url?: string; detail?: string; artifacts?: readonly unknown[] }
 
 export type EffectRun = {
   id: string
@@ -31,6 +31,8 @@ export type EffectRun = {
   leaseExpiresAt?: string
   token?: string
   url?: string
+  detail?: string
+  artifacts?: readonly unknown[]
   output?: unknown
   error?: EffectError
   lostReason?: string
@@ -41,7 +43,14 @@ export type EffectsState = {
 }
 
 type StartArgs = { id: string; executor: string; leaseExpiresAt: string }
-type WaitArgs = { id: string; attempt: number; token: string; url?: string }
+type WaitArgs = {
+  id: string
+  attempt: number
+  token: string
+  url?: string
+  detail?: string
+  artifacts?: readonly unknown[]
+}
 type HeartbeatArgs = { id: string; attempt: number; executor: string; leaseExpiresAt: string }
 type FinishArgs = {
   id: string
@@ -122,11 +131,19 @@ function parseWait(input: unknown): WaitArgs {
   const args = object(input, "effect.wait")
   const url = args.url
   if (url !== undefined && typeof url !== "string") throw new Error("yrd: effect.wait: 'url' must be a string")
+  const detail = args.detail
+  if (detail !== undefined && typeof detail !== "string") throw new Error("yrd: effect.wait: 'detail' must be a string")
+  const artifacts = args.artifacts
+  if (artifacts !== undefined && !Array.isArray(artifacts)) {
+    throw new Error("yrd: effect.wait: 'artifacts' must be an array")
+  }
   return {
     id: stringField(args, "id", "effect.wait"),
     attempt: attemptField(args, "effect.wait"),
     token: stringField(args, "token", "effect.wait"),
     ...(url === undefined ? {} : { url }),
+    ...(detail === undefined ? {} : { detail }),
+    ...(artifacts === undefined ? {} : { artifacts }),
   }
 }
 
@@ -226,6 +243,8 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         leaseExpiresAt: data.leaseExpiresAt as string,
         token: undefined,
         url: undefined,
+        detail: undefined,
+        artifacts: undefined,
         output: undefined,
         error: undefined,
         lostReason: undefined,
@@ -237,6 +256,8 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         status: "waiting",
         token: data.token as string,
         ...(data.url === undefined ? {} : { url: data.url as string }),
+        ...(data.detail === undefined ? {} : { detail: data.detail as string }),
+        ...(data.artifacts === undefined ? {} : { artifacts: data.artifacts as readonly unknown[] }),
       }
       break
     case "effect/heartbeat":
@@ -264,6 +285,8 @@ function applyEffectEvent(state: Record<string, unknown>, applied: YrdEvent): Re
         leaseExpiresAt: undefined,
         token: undefined,
         url: undefined,
+        detail: undefined,
+        artifacts: undefined,
         output: undefined,
         error: undefined,
         lostReason: undefined,
@@ -355,10 +378,12 @@ export function withEffects() {
     Object.assign(app.commands, { effect: { start, wait, heartbeat, finish, lose, retry } })
 
     const project = app.project
-    app.project = (state, applied) =>
-      applied.name.startsWith("effect/")
-        ? applyEffectEvent(state as Record<string, unknown>, applied)
-        : project(state, applied)
+    app.project = (state, applied) => {
+      const projected = project(state, applied)
+      return applied.name.startsWith("effect/")
+        ? applyEffectEvent(projected as Record<string, unknown>, applied)
+        : projected
+    }
 
     const handlers = new WeakMap<AnyFx, EffectExecutor<any, any>>()
     const effectRuns: EffectRuns = {
@@ -394,6 +419,8 @@ export function withEffects() {
             attempt,
             token: outcome.token,
             ...(outcome.url === undefined ? {} : { url: outcome.url }),
+            ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
+            ...(outcome.artifacts === undefined ? {} : { artifacts: outcome.artifacts }),
           })
         } else {
           await app.command(finish, { id, attempt, outcome })

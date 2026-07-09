@@ -13,7 +13,7 @@ import {
   type YrdEvent,
 } from "../src/app.ts"
 import { pipe } from "../src/pipe.ts"
-import { createYrdEventStore } from "../src/store/app.ts"
+import { createYrdEventStore } from "../src/store/events.ts"
 
 const roots: string[] = []
 

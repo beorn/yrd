@@ -1,12 +1,15 @@
 {
-  "name": "@yrd/bay",
+  "name": "yrd",
   "version": "0.0.1",
   "private": true,
-  "description": "Yrd bay - the Git-native bay implementation; git bay remains a compatibility command surface",
+  "description": "Composable software-development orchestration for tasks, bays, integration lines, and contests",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/yrd",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "yrd": "bin/yrd",
     "git-yrd": "bin/git-yrd",

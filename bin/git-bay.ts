@@ -18,7 +18,7 @@ import type { BayCommand, BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, 
 import { isOpen } from "../src/types.ts"
 import { createGitbay } from "../src/core.ts"
 import { runConfiguredCommand } from "../src/command.ts"
-import { pipe } from "../src/pipe.ts"
+import { pipe } from "../packages/core/src/pipe.ts"
 import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"

@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises"
 import type { BayStore } from "../types.ts"
 import { createJsonlJournal } from "../journal.ts"
 import { bayEventsPath, bayIndexPath } from "../paths.ts"
-import { acquireWriterLock } from "./lock.ts"
+import { acquireWriterLock } from "../../packages/core/src/store/lock.ts"
 
 /**
  * sqlite store provider (spec § Store provider — "sqlite (default;
@@ -20,7 +20,7 @@ import { acquireWriterLock } from "./lock.ts"
  *
  * The writer lock is held for the store's whole lifetime — one sqlite
  * store per `dir` at a time, enforced by `acquireWriterLock` (see
- * store/lock.ts for the pid-file + stale-takeover mechanics).
+ * @yrd/core's store/lock.ts for the stable OS writer lock).
  */
 
 const SCHEMA_VERSION = 1
