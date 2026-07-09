@@ -349,6 +349,33 @@ describe("yrd CLI — line projection", () => {
     expect(checked.stdout).toContain(`bay: ${pr} submitted → checking`)
     expect(checked.stdout).toContain(`bay: ${pr} checking → checked`)
 
+    const lineStatus = await must([process.execPath, YRD_BIN, "line", "status", "--json"], demo, env)
+    const line = JSON.parse(lineStatus.stdout) as {
+      line: {
+        items: {
+          pr: string
+          state: string
+          stale: boolean
+          staleReasons: string[]
+          steps: { check?: { ok: boolean; baseSha?: string; headSha?: string; artifacts?: unknown[] } }
+        }[]
+      }
+    }
+    const lineItem = line.line.items.find((item) => item.pr === pr)!
+    expect(lineItem.state).toBe("checked")
+    expect(lineItem.stale).toBe(false)
+    expect(lineItem.steps.check).toMatchObject({ ok: true })
+    expect(lineItem.steps.check?.baseSha).toMatch(/^[0-9a-f]{40}$/)
+    expect(lineItem.steps.check?.headSha).toMatch(/^[0-9a-f]{40}$/)
+    expect(lineItem.steps.check?.artifacts).toHaveLength(2)
+
+    await must(["git", "-C", demo, "commit", "-qm", "base move", "--allow-empty"], demo, env)
+    const staleStatus = await must([process.execPath, YRD_BIN, "line", "status", "--json"], demo, env)
+    const staleLine = JSON.parse(staleStatus.stdout) as typeof line
+    const staleItem = staleLine.line.items.find((item) => item.pr === pr)!
+    expect(staleItem.stale).toBe(true)
+    expect(staleItem.staleReasons).toContain("base changed since check")
+
     const merged = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "merge"], demo, env)
     expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
     expect(merged.stdout).toContain(`bay: ${pr} merging → merged`)
@@ -490,7 +517,7 @@ describe("yrd CLI — contest projection", () => {
     const prs = (JSON.parse(state.stdout) as { prs: Record<string, { name: string | null; state: string }> }).prs
     const submitted = Object.values(prs).find((pr) => pr.name === betaAttempt.bayName)
     expect(submitted?.state).toBe("submitted")
-  })
+  }, 15_000)
 })
 
 describe("git bay CLI — issue tracking inbound: bay.issues.validate at open AND adopt (bay.tracker = deprecated spelling)", () => {

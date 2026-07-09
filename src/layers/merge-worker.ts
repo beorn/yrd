@@ -16,7 +16,7 @@ import type {
 import { makeEvent } from "../core.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import { batchLandEvidence } from "./batch-build.ts"
-import { stepMetadata, writeStepArtifacts } from "./artifacts.ts"
+import { collectStepRefs, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
 import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 import { stepFinished, stepStarted } from "./steps.ts"
@@ -249,8 +249,10 @@ async function stepFinishedWithOutput(
   detail: string | undefined,
   cause: NonNullable<Effect["cause"]>,
 ): Promise<BayEvent> {
-  const artifacts = await writeStepArtifacts({ mainRepo: opts.mainRepo ?? opts.configCwd, cause, run, output: outcome })
-  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(outcome, artifacts))
+  const mainRepo = opts.mainRepo ?? opts.configCwd
+  const output = mainRepo === undefined ? outcome : await collectStepRefs(mainRepo, run.target, outcome)
+  const artifacts = await writeStepArtifacts({ mainRepo, cause, run, output })
+  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(output, artifacts))
 }
 
 async function runMergeStep(

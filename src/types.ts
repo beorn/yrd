@@ -344,6 +344,8 @@ export type StepCommandOutput = {
   durationMs?: number
   stdout?: string
   stderr?: string
+  baseSha?: string
+  headSha?: string
 }
 
 export type StepFinishMetadata = {

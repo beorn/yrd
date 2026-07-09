@@ -18,7 +18,7 @@ import type {
   TransitionResult,
 } from "../types.ts"
 import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
-import { stepMetadata, writeStepArtifacts } from "./artifacts.ts"
+import { collectStepRefs, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prOpenedEvent, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent, submittedPrs } from "./queue.ts"
 import { stepFinished, stepStarted } from "./steps.ts"
 
@@ -578,6 +578,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       }
       throw err
     }
+    const baselineOutput = await collectStepRefs(opts.mainRepo, baselineRun.target, baseline)
     events.push(
       stepFinished(
         bay,
@@ -585,7 +586,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         baseline.ok,
         baseline.detail,
         cause,
-        stepMetadata(baseline, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: baselineRun, output: baseline })),
+        stepMetadata(baselineOutput, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: baselineRun, output: baselineOutput })),
       ),
     )
     if (!baseline.ok) {
@@ -623,6 +624,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         }
         throw err
       }
+      const checkedOutput = await collectStepRefs(opts.mainRepo, prefixRun.target, checked)
       events.push(
         stepFinished(
           bay,
@@ -630,7 +632,7 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
           checked.ok,
           checked.detail,
           cause,
-          stepMetadata(checked, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: prefixRun, output: checked })),
+          stepMetadata(checkedOutput, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: prefixRun, output: checkedOutput })),
         ),
       )
       if (!checked.ok) {

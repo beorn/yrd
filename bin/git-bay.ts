@@ -22,7 +22,7 @@ import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
 import { withWorktrees, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/worktrees.ts"
-import { withQueue, submittedPrs } from "../src/layers/queue.ts"
+import { queueTarget, withQueue, submittedPrs } from "../src/layers/queue.ts"
 import { withBatchBuild } from "../src/layers/batch-build.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
@@ -34,7 +34,7 @@ import {
 } from "../src/layers/receive.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
 import { notifyKeyFor, resolveValidateCommand, withIssueTracking } from "../src/layers/issue-tracking.ts"
-import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv } from "../src/layers/git.ts"
+import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "../src/layers/git.ts"
 import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
 
 // ---------- context ----------
@@ -417,6 +417,102 @@ async function lastDetail(bay: BayRuntime, id: PrId): Promise<string | undefined
   return detail
 }
 
+type StepStatus = {
+  ok: boolean
+  ts: string
+  target: string
+  detail?: string
+  exitCode?: number
+  durationMs?: number
+  baseSha?: string
+  headSha?: string
+  artifacts?: unknown[]
+}
+
+type LineItemStatus = {
+  pr: PrId
+  state: PullRequest["state"]
+  target: string
+  targetSha?: string
+  stale: boolean
+  staleReasons: string[]
+  steps: Partial<Record<"check" | "merge", StepStatus>>
+}
+
+async function resolveCommit(repo: string, ref: string): Promise<string | undefined> {
+  const res = await git(["-C", repo, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repo)
+  return res.code === 0 ? res.stdout.trim() : undefined
+}
+
+async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
+  base: string
+  baseSha?: string
+  counts: Record<string, number>
+  items: LineItemStatus[]
+}> {
+  const base = await resolveBaseRef(ctx.mainRepo)
+  const baseSha = await resolveCommit(ctx.mainRepo, base)
+  const stepsByPr = new Map<PrId, Partial<Record<"check" | "merge", StepStatus>>>()
+  for await (const ev of bay.store.journal.replay()) {
+    if (ev.name !== "line/step/finished") continue
+    const d = ev.data as {
+      pr?: PrId
+      step?: "check" | "merge"
+      target?: string
+      ok?: boolean
+      detail?: string
+      exitCode?: number
+      durationMs?: number
+      baseSha?: string
+      headSha?: string
+      artifacts?: unknown[]
+    }
+    if (d.pr === undefined || (d.step !== "check" && d.step !== "merge") || d.target === undefined || d.ok === undefined) continue
+    const current = stepsByPr.get(d.pr) ?? {}
+    current[d.step] = {
+      ok: d.ok,
+      ts: ev.ts,
+      target: d.target,
+      ...(d.detail !== undefined ? { detail: d.detail } : {}),
+      ...(d.exitCode !== undefined ? { exitCode: d.exitCode } : {}),
+      ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
+      ...(d.baseSha !== undefined ? { baseSha: d.baseSha } : {}),
+      ...(d.headSha !== undefined ? { headSha: d.headSha } : {}),
+      ...(d.artifacts !== undefined ? { artifacts: d.artifacts } : {}),
+    }
+    stepsByPr.set(d.pr, current)
+  }
+
+  const counts: Record<string, number> = {}
+  const items: LineItemStatus[] = []
+  for (const pr of Object.values(state.prs).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))) {
+    counts[pr.state] = (counts[pr.state] ?? 0) + 1
+    if (!isOpen(pr.state)) continue
+    const target = queueTarget(state, pr.id)
+    const targetSha = await resolveCommit(ctx.mainRepo, target)
+    const steps = stepsByPr.get(pr.id) ?? {}
+    const staleReasons: string[] = []
+    if (pr.state === "checked" && steps.check?.ok === true) {
+      if (steps.check.headSha !== undefined && targetSha !== undefined && steps.check.headSha !== targetSha) {
+        staleReasons.push("target changed since check")
+      }
+      if (steps.check.baseSha !== undefined && baseSha !== undefined && steps.check.baseSha !== baseSha) {
+        staleReasons.push("base changed since check")
+      }
+    }
+    items.push({
+      pr: pr.id,
+      state: pr.state,
+      target,
+      ...(targetSha !== undefined ? { targetSha } : {}),
+      stale: staleReasons.length > 0,
+      staleReasons,
+      steps,
+    })
+  }
+  return { base, ...(baseSha !== undefined ? { baseSha } : {}), counts, items }
+}
+
 type BatchSummaryMember = {
   pr: PrId
   target: string
@@ -559,7 +655,15 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
     const prId = resolvePr(state, target)
     const pr = prOrTeach(state, prId, "ls")
     if (json) {
-      console.log(JSON.stringify({ pr, detail: await lastDetail(bay, prId), batch: batchRecord(state, prId) }))
+      const line = await lineStatus(ctx, bay, state)
+      console.log(
+        JSON.stringify({
+          pr,
+          detail: await lastDetail(bay, prId),
+          batch: batchRecord(state, prId),
+          line: line.items.find((item) => item.pr === prId),
+        }),
+      )
       return
     }
     console.log(prLine(pr, await lastDetail(bay, prId)))
@@ -568,7 +672,7 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
     return
   }
   if (json) {
-    console.log(JSON.stringify({ leases: state.leases, prs: state.prs, batches: batchSlice(state) }))
+    console.log(JSON.stringify({ leases: state.leases, prs: state.prs, batches: batchSlice(state), line: await lineStatus(ctx, bay, state) }))
     return
   }
   console.log(worktreeTable(state, ctx.actor, Date.now(), ctx.leaseTimeoutMs ?? DEFAULT_LEASE_TIMEOUT_MS))

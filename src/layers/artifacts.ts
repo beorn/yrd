@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import type { Cause, StepArtifact, StepCommandOutput, StepFinishMetadata, StepRunData } from "../types.ts"
-import { defaultBayDir } from "./git.ts"
+import { defaultBayDir, git, resolveBaseRef } from "./git.ts"
 
 function sanitizePart(raw: string | number | undefined): string {
   const value = String(raw ?? "")
@@ -61,5 +61,21 @@ export function stepMetadata(output: StepCommandOutput, artifacts: StepArtifact[
     ...(output.exitCode !== undefined ? { exitCode: output.exitCode } : {}),
     ...(output.durationMs !== undefined ? { durationMs: output.durationMs } : {}),
     ...(artifacts.length > 0 ? { artifacts } : {}),
+    ...(output.baseSha !== undefined ? { baseSha: output.baseSha } : {}),
+    ...(output.headSha !== undefined ? { headSha: output.headSha } : {}),
   }
+}
+
+export async function collectStepRefs(mainRepo: string, target: string, output: StepCommandOutput = {}): Promise<StepCommandOutput> {
+  const refs: StepCommandOutput = { ...output }
+  if (refs.baseSha === undefined) {
+    const baseRef = await resolveBaseRef(mainRepo)
+    const base = await git(["-C", mainRepo, "rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`], mainRepo)
+    if (base.code === 0) refs.baseSha = base.stdout.trim()
+  }
+  if (refs.headSha === undefined) {
+    const head = await git(["-C", mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], mainRepo)
+    if (head.code === 0) refs.headSha = head.stdout.trim()
+  }
+  return refs
 }

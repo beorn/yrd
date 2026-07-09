@@ -160,6 +160,7 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
   let output: StepCommandOutput = {}
 
   let targetSha: string | undefined
+  let baseSha: string | undefined
   if (mainRepo) {
     const start = Date.now()
     const resolved = await git(["-C", mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], mainRepo)
@@ -177,6 +178,8 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
       }
     }
     targetSha = resolved.stdout.trim()
+    const base = await git(["-C", mainRepo, "rev-parse", "HEAD"], mainRepo)
+    if (base.code === 0) baseSha = base.stdout.trim()
   }
 
   const mergeCommand = await resolveMergeCommand(params.mergeCommand, configCwd)
@@ -209,15 +212,14 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     // lands on (the merge commit's first parent), captured BEFORE merging;
     // check = the resolved gate, named so the main-moving commit itself says
     // what gated it. Resolution mirrors the check runner's precedence.
-    const baseSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"], mainRepo)).stdout.trim()
     const check = await resolveCheck(params.check, configCwd)
-    const trailer = formatBayGateTrailer({ pr, target: targetSha!, base: baseSha, check, batch: params.batch })
+    const trailer = formatBayGateTrailer({ pr, target: targetSha!, base: baseSha!, check, batch: params.batch })
     const start = Date.now()
     const merge = await git(
       ["-C", mainRepo, "merge", "--no-ff", "-m", `bay: merge ${pr} (${target})`, "-m", trailer, targetSha!],
       mainRepo,
     )
-    output = { exitCode: merge.code, durationMs: Date.now() - start, stdout: merge.stdout, stderr: merge.stderr }
+    output = { exitCode: merge.code, durationMs: Date.now() - start, stdout: merge.stdout, stderr: merge.stderr, baseSha, headSha: targetSha }
     if (merge.code !== 0) {
       await git(["-C", mainRepo, "merge", "--abort"], mainRepo) // best-effort restore; a failed abort surfaces below
       return {
@@ -242,13 +244,15 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
       new Response(proc.stderr).text(),
       proc.exited,
     ])
-    output = { exitCode: code, durationMs: Date.now() - start, stdout, stderr }
+    output = { exitCode: code, durationMs: Date.now() - start, stdout, stderr, baseSha, headSha: targetSha }
     if (code !== 0) {
       const errTail = tail(stderr)
       return {
         ok: false,
         code: "merge-command-failed",
         ...output,
+        baseSha,
+        headSha: targetSha,
         detail: errTail === "" ? `exit ${code}` : `exit ${code}: ${errTail}`,
       }
     }

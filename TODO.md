@@ -15,6 +15,8 @@ repo in hub/yrd/reference or in @yrd beads.
   first manual-selection contest projection over real bay attempts.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
+- Line status JSON includes a folded line summary with open items, last step
+  results, base/head SHAs, and checked-PR staleness reasons.
 - hh consumes this repo at vendor/yrd.
 
 ## Product Shape
@@ -76,13 +78,13 @@ Rules:
      over recorded evidence, not hidden policy.
 2. Line hardening
    - Finish core submission and line-step event/state contracts.
-   - Extend line/step start/end events with base/head SHAs and normalized
-     error metadata.
+   - Add normalized error metadata to step events.
    - Broaden artifact/log capture beyond the local command runner as remote
      and hosted runners land.
    - Make --retry and process restart journal-driven by skipping successful
      step results for the same submission and commit.
-   - Expose stronger folded line status/staleness.
+   - Extend folded line status beyond JSON into concise human output once @ci
+     has settled on the machine shape.
    - Add the runner seam for remote, container, or hosted test execution.
 3. @ci cutover
    - Switch @ci to yrd bay + yrd line once artifact capture, folded status, and
@@ -131,6 +133,6 @@ Rules:
   args, logs, and spans.
 - Line runs capture artifacts/logs, expose folded status, and resume from the
   journal for the same submission and commit. Local command artifacts are
-  installed; folded status and resume semantics remain.
+  installed and JSON folded status is installed; resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

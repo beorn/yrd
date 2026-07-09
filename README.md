@@ -459,9 +459,13 @@ contest/...      opened, attempt started/finished, selected, promoted
 ```
 
 `line/step/finished` rows include the step verdict plus available process
-metadata: `exitCode`, `durationMs`, and artifact references for captured
-stdout/stderr. Artifacts are stored as files; journal rows carry references, not
-inline logs.
+metadata: `exitCode`, `durationMs`, `baseSha`, `headSha`, and artifact
+references for captured stdout/stderr. Artifacts are stored as files; journal
+rows carry references, not inline logs.
+
+`yrd line status --json` projects a folded `line` summary over the same event
+log: open PRs, current targets, last step results, artifact refs, and staleness
+when a checked PR's base or target commit has moved since its check.
 
 External orchestrators can assign workers around git bay, but those actors live
 above this tool. git bay owns only the git-backed bays, PR state, line mechanics,
