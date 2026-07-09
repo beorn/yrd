@@ -51,7 +51,6 @@ import { loadYrdConfig } from "./config.ts"
 import { classifyFailure, diagnostic, resolveInvocation } from "./invocation.ts"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrd } from "./run.ts"
-import { classifyStateLayout } from "./state-layout.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliLineAdministration } from "./types.ts"
 
 const BUILTIN_STEPS = new Set(["check", "review", "merge", "deploy"])
@@ -258,16 +257,6 @@ function attachLineAdministration(app: YrdCliApp, repository: YrdRepository, con
   Object.assign(app.line, administration)
 }
 
-async function assertStateLayout(repository: YrdRepository): Promise<void> {
-  const layout = await classifyStateLayout({
-    gitDir: repository.gitDir,
-    legacyLocations: repository.legacyLocations,
-  })
-  if (layout.decision.action !== "refuse") return
-  const detail = layout.findings.map((finding) => finding.message).join("\n")
-  throw new Error(`${layout.decision.diagnostic}${detail === "" ? "" : `\n${detail}`}`)
-}
-
 async function composeFilesystemApp(
   repository: YrdRepository,
   config: ResolvedYrdProjectConfig,
@@ -293,7 +282,6 @@ async function composeFilesystemApp(
 
 export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
   const repository = await discoverYrdRepository(options)
-  await assertStateLayout(repository)
   const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
   const receiver = await createGitPushReceiver({ mainRepo: repository.repo, stateDir: repository.stateDir })
   const app = await composeFilesystemApp(repository, loaded.config, receiver)
@@ -324,7 +312,6 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
   if (gitDir === undefined || gitDir === "") throw new Error("yrd: receiver hook requires GIT_DIR")
   const receiver = await loadGitPushReceiver(resolve(process.cwd(), gitDir))
   const repository = await discoverYrdRepository({ cwd: receiver.mainRepo, env })
-  await assertStateLayout(repository)
   const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
   const app = await composeFilesystemApp(repository, loaded.config, receiver)
   try {

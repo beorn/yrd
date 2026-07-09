@@ -29,16 +29,13 @@ describe("discoverYrdRepository", () => {
     await git(primary, "add", "README.md")
     await git(primary, "commit", "-qm", "initial")
     await git(primary, "worktree", "add", "-qb", "task/linked", linked)
-    await git(primary, "config", "bay.dir", "../legacy-bay")
     const nested = join(linked, "nested")
     await mkdir(nested)
     const canonicalPrimary = await realpath(primary)
     const canonicalLinked = await realpath(linked)
-    const canonicalRoot = await realpath(root)
-
     const result = await discoverYrdRepository({
       cwd: nested,
-      env: { ...process.env, BAY_DIR: "../legacy-env", GIT_DIR: "/must/not/leak" },
+      env: { ...process.env, GIT_DIR: "/must/not/leak" },
     })
 
     expect(result).toEqual({
@@ -48,11 +45,6 @@ describe("discoverYrdRepository", () => {
       stateDir: join(canonicalPrimary, ".git", "yrd"),
       baysRoot: join(canonicalPrimary, ".bays"),
       defaultBase: "trunk",
-      legacyLocations: [
-        { path: join(canonicalPrimary, ".bay"), source: "<repo>/.bay" },
-        { path: join(canonicalRoot, "legacy-env"), source: "BAY_DIR" },
-        { path: join(canonicalRoot, "legacy-bay"), source: "bay.dir" },
-      ],
     })
   })
 

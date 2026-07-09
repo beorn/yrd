@@ -13,25 +13,17 @@
   "bin": {
     "yrd": "bin/yrd",
     "git-yrd": "bin/git-yrd",
-    "git-bay": "bin/git-bay",
-    "gitbay": "bin/git-bay"
-  },
-  "exports": {
-    ".": "./src/index.ts"
+    "git-bay": "bin/git-bay"
   },
   "scripts": {
     "yrd": "bun ./bin/yrd",
     "git-yrd": "bun ./bin/git-yrd",
     "git-bay": "bun ./bin/git-bay",
-    "gitbay": "bun ./bin/git-bay",
-    "bay": "bun ./bin/git-bay",
     "test": "bun --bun x vitest run",
-    "check": "tsc --noEmit && bun --bun x vitest run",
-    "spec": "PATH=\"$PWD/tests/bin:$PATH\" bun --bun x mdspec tests/gitbay.spec.md tests/batch.spec.md tests/refusals.spec.md tests/guide.spec.md"
+    "check": "tsc --noEmit && bun --bun x vitest run"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
-    "mdspec": "^0.4.0",
     "typescript": "^6.0.3",
     "vitest": "4.1.9"
   },

@@ -1,2 +1,4 @@
 #!/usr/bin/env bun
-import "./git-yrd.ts"
+import { runYrdProcess } from "../packages/cli/src/index.ts"
+
+process.exitCode = await runYrdProcess()

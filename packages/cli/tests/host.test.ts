@@ -47,7 +47,6 @@ describe("createDefaultYrdApp", () => {
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      version: 1,
       line: { base: "main", batch: 1, steps: ["check", "merge"] },
       steps: {
         check: { run: "test -f feature.txt", runner: "local" },
@@ -99,7 +98,6 @@ describe("createDefaultYrdApp", () => {
   it("refuses data config that names a transition the built-in plugin did not install", async () => {
     const { repo } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      version: 1,
       line: { base: "main", batch: 1, steps: ["security"] },
       steps: { security: { run: "security-check", runner: "local" } },
       contest: { concurrency: 2, timeoutMs: 60_000, evaluators: ["security"] },

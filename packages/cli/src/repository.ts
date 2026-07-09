@@ -1,5 +1,4 @@
 import { join, resolve } from "node:path"
-import type { LegacyStateLocation } from "./state-layout.ts"
 
 export type RepositoryProcessRequest = Readonly<{
   argv: readonly string[]
@@ -22,7 +21,6 @@ export type YrdRepository = Readonly<{
   stateDir: string
   baysRoot: string
   defaultBase: string
-  legacyLocations: readonly LegacyStateLocation[]
 }>
 
 const defaultProcess: RepositoryProcessRunner = async (request) => {
@@ -109,8 +107,7 @@ export async function discoverYrdRepository(options: {
 } = {}): Promise<YrdRepository> {
   const cwd = resolve(options.cwd ?? process.cwd())
   const runner = options.process ?? defaultProcess
-  const sourceEnv = options.env ?? process.env
-  const env = cleanEnvironment(sourceEnv)
+  const env = cleanEnvironment(options.env ?? process.env)
   const top = await git(runner, cwd, env, ["rev-parse", "--path-format=absolute", "--show-toplevel"], true)
   const worktree = value(top)
   if (worktree === undefined) throw new Error(`yrd: '${cwd}' is not inside a Git worktree`)
@@ -122,12 +119,6 @@ export async function discoverYrdRepository(options: {
   const primary = primaryWorktree(worktrees.stdout)
   if (primary === undefined) throw new Error("yrd: Git did not report a primary worktree")
   const repo = primary.path
-  const configuredLegacy = value(await git(runner, repo, env, ["config", "--get", "bay.dir"], true))
-  const legacyLocations: LegacyStateLocation[] = []
-  legacyLocations.push({ path: join(repo, ".bay"), source: "<repo>/.bay" })
-  if (sourceEnv.BAY_DIR?.trim()) legacyLocations.push({ path: resolve(repo, sourceEnv.BAY_DIR), source: "BAY_DIR" })
-  if (configuredLegacy !== undefined) legacyLocations.push({ path: resolve(repo, configuredLegacy), source: "bay.dir" })
-
   return {
     repo,
     worktree: resolve(worktree),
@@ -135,6 +126,5 @@ export async function discoverYrdRepository(options: {
     stateDir: join(gitDir, "yrd"),
     baysRoot: join(repo, ".bays"),
     defaultBase: await defaultBranch(runner, repo, env, primary.branch),
-    legacyLocations,
   }
 }
