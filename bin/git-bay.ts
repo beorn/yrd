@@ -2,7 +2,7 @@
 // git bay — the CLI host over the era2 library (spec § The verbs; law 2: quiet
 // on success, meaningful exit codes, --json everywhere it matters).
 //
-// Advertised verbs: guide | init | open | close | gc | ls | adopt | submit |
+// Advertised verbs: guide | init | open | close | gc | ls | submit |
 // check | merge | integrate | retry | audit. Every pre-v0.3 verb name still
 // works as a hidden alias (new, co, checkout, install, setup, abandon, return,
 // refresh, ping, status, enqueue, queue, in, int, land, drain, requeue, prime)
@@ -22,7 +22,7 @@ import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
 import { createReadStore } from "../src/store/read.ts"
 import { withWorktrees, staleLeases, DEFAULT_LEASE_TIMEOUT_MS } from "../src/layers/worktrees.ts"
-import { queueTarget, withQueue, submittedPrs } from "../src/layers/queue.ts"
+import { prForTarget, queueTarget, withQueue, submittedPrs } from "../src/layers/queue.ts"
 import { withBatchBuild } from "../src/layers/batch-build.ts"
 import { withMergeWorker } from "../src/layers/merge-worker.ts"
 import {
@@ -767,35 +767,69 @@ async function verbAdopt(ctx: Ctx, target: string | undefined, name: string | un
   })
 }
 
-/** `submit <PR|name>` — "ask to merge": moves an existing PR from `pushed` to
- *  `submitted`. The VERB itself is intrinsically lazy, like `adopt` always
- *  has been — it only submits (docs/model.md § The auto-flow: "submit stays
- *  intrinsically lazy"). Whether the PR keeps going from there is a SYSTEM
- *  behavior, not a verb change: `bay.autoMerge` (default true) auto-runs
- *  `integrate` right after, so a plain `git bay submit <PR>` reaches `merged`
- *  by default; set `bay.autoMerge false` to rest at `submitted` for a manual
- *  `check`/`merge`/`integrate`. A token that resolves to no known PR/bay
- *  redirects to `adopt`, since that is what creates one. */
-async function verbQueue(ctx: Ctx, target: string | undefined): Promise<void> {
-  if (!target) throw new Error("bay: submit: a PR number or name is required — git bay ls lists them")
+async function resolveGitTargetOrTeach(ctx: Ctx, verb: "submit" | "adopt", target: string): Promise<string> {
+  const resolved = await git(
+    ["-C", ctx.mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`],
+    ctx.mainRepo,
+  )
+  if (resolved.code === 0) return target
+  const refs = await git(
+    ["-C", ctx.mainRepo, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"],
+    ctx.mainRepo,
+  )
+  const near = refs.stdout
+    .split("\n")
+    .filter((r) => r !== "" && r.toLowerCase().includes(target.toLowerCase()))
+    .slice(0, 3)
+  const hint = near.length > 0 ? ` Did you mean: ${near.join(", ")}?` : ""
+  throw new Error(
+    `bay: ${verb}: '${target}' is not a known PR, bay, or branch — ` +
+      `git bay ls lists PRs and bays; git branch lists branches.${hint}`,
+  )
+}
+
+/** `submit <PR|name|branch>` — "ask to merge": moves an existing PR from
+ *  `pushed` to `submitted`, or creates a submitted PR directly for an existing
+ *  branch/SHA. Whether the PR keeps going from there is a SYSTEM behavior:
+ *  `bay.autoMerge` (default true) auto-runs `integrate` right after, so a
+ *  plain `git bay submit <target>` reaches `merged` by default. `--wait` is
+ *  the verb-side mirror of `git push -o wait`: it forces that integrate step
+ *  even when `bay.autoMerge` is false. */
+async function verbQueue(ctx: Ctx, target: string | undefined, wait: boolean): Promise<void> {
+  if (!target) throw new Error("bay: submit: a PR number, bay name, or branch is required — git bay ls lists PRs and bays")
   await withWriteBay(ctx, async (bay) => {
     const state = await bay.state()
     let prId: PrId
+    let createdSubmitted = false
     try {
       prId = resolvePr(state, target)
     } catch (err) {
       const msg = (err as Error).message
       if (msg.includes("no PR or worktree named")) {
-        throw new Error(
-          `bay: submit: '${target}' is not a known PR or bay name — to create one from an existing branch: ` +
-            `git bay adopt ${target}`,
-        )
+        const branch = await resolveGitTargetOrTeach(ctx, "submit", target)
+        const existing = prForTarget(state, branch)
+        if (existing !== undefined) {
+          prId = existing
+        } else {
+          const { events } = await bay.dispatch({ type: "enqueue", args: { target: branch } })
+          const opened = events.find((e) => e.name === "pr/opened")
+          const id = (opened?.data as { pr?: string } | undefined)?.pr
+          if (!id) throw new Error("bay: submit: no pr/opened event — branch submission failed silently (bug)")
+          prId = id
+          createdSubmitted = true
+        }
+      } else {
+        throw err
       }
-      throw err
     }
-    prOrTeach(state, prId, "submit") // "has no PR yet" teaches instead of a reducer miss
-    await bay.dispatch({ type: "queue", args: { pr: prId } })
-    const { autoMerge } = await resolveAutoFlow(ctx)
+    const beforeQueue = await bay.state()
+    const pr = prOrTeach(beforeQueue, prId, "submit") // "has no PR yet" teaches instead of a reducer miss
+    if (pr.state === "pushed") {
+      await bay.dispatch({ type: "queue", args: { pr: prId } })
+    } else if (!createdSubmitted && !(wait && (pr.state === "submitted" || pr.state === "checked"))) {
+      await bay.dispatch({ type: "queue", args: { pr: prId } })
+    }
+    const { autoMerge } = wait ? { autoMerge: true } : await resolveAutoFlow(ctx)
     if (!autoMerge) {
       console.log(`bay: ${prId} submitted — git bay integrate ${prId} to land it`)
       return
@@ -1206,7 +1240,7 @@ THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
   3. git push                          # opens your PR (state: pushed) — nothing runs yet
-  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — auto-integrates to merged by default; READ the remote:/output lines
+  4. git bay submit <PR|branch>        # ask to merge — auto-integrates to merged by default; READ the remote:/output lines
   5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
@@ -1221,11 +1255,11 @@ VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it and, by default, lands it (submitted -> ... -> merged)
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it and, by default, lands it (submitted -> ... -> merged); git bay submit <branch> opens and submits an existing branch directly
   check      git bay check <PR> runs the ONE project check alone (submitted -> checked); git config bay.check '<command>'; exit 0 means pass
   merge      git bay merge <PR> lands a CHECKED PR onto main alone (checked -> merged); git bay integrate <PR> runs check then merge together
 ADDRESSING
-  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.
+  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (check, merge, integrate, retry) take a PR number or a name; submit also accepts a source branch; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/events.jsonl    append-only event log (every verdict, replayable)
@@ -1432,7 +1466,7 @@ async function main(): Promise<void> {
       "after",
       "\nColumns: BAY = the name given at open; WORKTREE = its wt-id. AGE = time since open; IDLE = time since last activity.\n" +
         "STATE values: active | stale (idle past the timeout — gc will expire it; git bay refresh <bay|wt> keeps it). This is the WORKTREE's activity, distinct from a PR's own phase (pushed, submitted, checking, …).\n" +
-        "Addressing: bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.",
+        "Addressing: bay verbs (close, refresh) take a wt-id or a name; PR verbs (check, merge, integrate, retry) take a PR number or a name; submit also accepts a source branch; ls takes either kind.",
     )
     .option("--json", "machine-readable output")
     .action(async (target: string | undefined, opts: { json?: boolean }) => {
@@ -1440,22 +1474,23 @@ async function main(): Promise<void> {
     })
 
   const cmdAdopt = program
-    .command("adopt <branch>")
+    .command("adopt <branch>", { hidden: true })
     .alias("enqueue")
     .helpGroup("PRs:")
-    .description("create a PR for an existing branch (from inside a worktree, plain git push does this); lands in `pushed`")
+    .description("legacy: create a PR for an existing branch without submitting it")
     .action(async (target: string, opts: { workitem?: string }) => {
       await verbAdopt(await requireBay(), target, opts.workitem)
     })
   hiddenOption(cmdAdopt, "--workitem <name>", "legacy spelling: name the PR")
 
   program
-    .command("submit <PR|name>")
+    .command("submit <PR|name|branch>")
     .alias("queue")
     .helpGroup("PRs:")
-    .description("ask to merge (pushed → submitted); auto-integrates to merged by default — bay.autoMerge false rests it at submitted")
-    .action(async (target: string) => {
-      await verbQueue(await requireBay(), target)
+    .description("ask to merge an existing PR/bay or create one from a branch; auto-integrates by default")
+    .option("--wait", "force line integration even when bay.autoMerge is false")
+    .action(async (target: string, opts: { wait?: boolean }) => {
+      await verbQueue(await requireBay(), target, opts.wait === true)
     })
 
   program
@@ -1493,7 +1528,7 @@ async function main(): Promise<void> {
     .command("retry <PR|name>")
     .alias("requeue")
     .helpGroup("PRs:")
-    .description("put a rejected or stuck PR back in the queue and re-run its pipeline")
+    .description("retry a rejected or stuck PR through the line")
     .action(async (target: string) => {
       await verbRetry(await requireBay(), target)
     })

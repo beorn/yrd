@@ -24,6 +24,9 @@ repo in hub/yrd/reference or in @yrd beads.
   results, base/head SHAs, and checked-PR staleness reasons.
 - Fresh bay state uses events.jsonl, index.sqlite, and prs.git; one-generation
   compatibility reads legacy journal.jsonl, bay.db, and repo.git when present.
+- `git bay submit <branch>` opens and submits an existing source branch without
+  first provisioning a bay; `submit --wait` forces integration even when
+  `bay.autoMerge` is false.
 - hh consumes this repo at vendor/yrd.
 
 ## Product Shape
@@ -47,7 +50,7 @@ task -> bay attempt(s) -> submission(s) -> line -> integrated result
 ```bash
 yrd bay open <name>
 yrd bay refresh
-yrd bay submit [<submission-name>]
+yrd bay submit [selector...] [--wait]
 yrd bay close
 
 yrd line status [PR|name] [--json]
@@ -107,11 +110,9 @@ Rules:
      installed; the first contest projection records the selected base and
      computes git metrics from it, but bay creation still follows the current
      bay default.
-   - Add cwd-as-identifier, variadic targets, and branch resolution for submit.
-   - Hide/remove old branch-intake public vocabulary; branch-backed workspace
-     provisioning is open --from, branch intake without a bay is submit
-     <branch>.
-   - Add submit --wait as the verb-side mirror of git push -o wait.
+   - Add cwd-as-identifier and variadic targets.
+   - Continue retiring old branch-intake vocabulary from public docs while
+     keeping compatibility aliases callable.
    - Clean config vocabulary: keep bay.issue and bay.merge as public keys, and
      remove retired queue/config spellings.
 6. Package split + config

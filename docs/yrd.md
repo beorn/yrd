@@ -54,7 +54,7 @@ Yrd-facing command shape is:
 ```bash
 yrd bay open <name>
 yrd bay refresh
-yrd bay submit [<submission-name>]
+yrd bay submit [selector...] [--wait]
 yrd bay close
 
 yrd line status [PR|name] [--json]
@@ -84,10 +84,10 @@ yrd line integrate [PR|name] --steps deploy
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
 `yrd contest ...` commands manage an existing contest lifecycle. Built-in
-competitors resolve through `ag`: `codex` runs `ag codex ...` and `claude` runs
-`ag claude ...`. Slash-separated lists such as `codex/claude` mirror ag's
-provider-list vocabulary; comma-separated lists remain accepted. Custom
-competitors can be supplied with `--agent-cmd <name=command>`.
+competitors use ag's provider-list vocabulary: `--agents codex/claude` is the
+yrd form of `ag codex/claude`, then yrd fans that list out into one isolated bay
+attempt per provider. Comma-separated lists remain accepted. Custom competitors
+can be supplied with `--agent-cmd <name=command>`.
 
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.

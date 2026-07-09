@@ -13,7 +13,7 @@ THE LOOP
   1. cd "$(git bay open <name>)"       # your own worktree; <name> = what you call this piece of work
   2. edit, git add, git commit         # plain git; commit hooks guard submodule pins + identity
   3. git push                          # opens your PR (state: pushed) — nothing runs yet
-  4. git bay submit <PR>               # ask to merge (pushed -> submitted) — auto-integrates to merged by default; READ the remote:/output lines
+  4. git bay submit <PR|branch>        # ask to merge — auto-integrates to merged by default; READ the remote:/output lines
   5. git bay ls <PR>                   # re-read a verdict later (the PR number from the push output)
 RULES
   - Work only inside your worktree, never in the repository's main checkout.
@@ -28,11 +28,11 @@ VOCABULARY
   bay        the named, ephemeral LOAN of a worktree to one piece of work — opened by git bay open <name>
   worktree   the numbered, persistent directory a bay holds (ids look like wt1) — bays come and go, worktrees are reused
   name       what you called the work at open — any label, or a ticket id your tracker knows
-  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it and, by default, lands it (submitted -> ... -> merged)
+  PR         your commits traveling to main as one unit — numbered PR1, PR2, … per repository; a push creates one (pushed), git bay submit asks to merge it and, by default, lands it (submitted -> ... -> merged); git bay submit <branch> opens and submits an existing branch directly
   check      git bay check <PR> runs the ONE project check alone (submitted -> checked); git config bay.check '<command>'; exit 0 means pass
   merge      git bay merge <PR> lands a CHECKED PR onto main alone (checked -> merged); git bay integrate <PR> runs check then merge together
 ADDRESSING
-  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (submit, check, merge, integrate, retry) take a PR number or a name; ls takes either kind.
+  Bay verbs (close, refresh) take a wt-id or a name; PR verbs (check, merge, integrate, retry) take a PR number or a name; submit also accepts a source branch; ls takes either kind.
 MACHINE-READABLE
   git bay ls --json        full state as JSON
   .git/bay/events.jsonl    append-only event log (every verdict, replayable)

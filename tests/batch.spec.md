@@ -13,13 +13,9 @@ $ git config bay.autoMerge false
 $ git config bay.mergeCommand 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}'
 $ git switch -qc task/a main && echo a > a.txt && git add a.txt && git commit -qm a && git switch -q main
 $ git switch -qc task/b main && echo b > b.txt && git add b.txt && git commit -qm b && git switch -q main
-$ git bay adopt task/a
-PR1
-$ git bay adopt task/b
-PR2
-$ git bay submit PR1
+$ git bay submit task/a
 bay: PR1 submitted — git bay integrate PR1 to land it
-$ git bay submit PR2
+$ git bay submit task/b
 bay: PR2 submitted — git bay integrate PR2 to land it
 $ git bay integrate
 bay: batch PR3 built — members: PR1, PR2
@@ -46,13 +42,9 @@ $ git config bay.autoMerge false
 $ git config bay.mergeCommand 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}'
 $ git switch -qc task/file main && echo file > dir && git add dir && git commit -qm file && git switch -q main
 $ git switch -qc task/nested main && mkdir -p dir && echo nested > dir/file.txt && git add dir/file.txt && git commit -qm nested && git switch -q main
-$ git bay adopt task/file
-PR1
-$ git bay adopt task/nested
-PR2
-$ git bay submit PR1
+$ git bay submit task/file
 bay: PR1 submitted — git bay integrate PR1 to land it
-$ git bay submit PR2
+$ git bay submit task/nested
 bay: PR2 submitted — git bay integrate PR2 to land it
 $ git bay integrate
 bay: batch PR3 built — members: PR1; ejected: PR2
@@ -89,13 +81,9 @@ $ git config bay.mergeCommand './merge-if-clean.sh {target}'
 $ git config bay.check 'test ! -f bad.txt'
 $ git switch -qc task/good main && echo ok > good.txt && git add good.txt && git commit -qm good && git switch -q main
 $ git switch -qc task/bad main && echo bad > bad.txt && git add bad.txt && git commit -qm bad && git switch -q main
-$ git bay adopt task/good
-PR1
-$ git bay adopt task/bad
-PR2
-$ git bay submit PR1
+$ git bay submit task/good
 bay: PR1 submitted — git bay integrate PR1 to land it
-$ git bay submit PR2
+$ git bay submit task/bad
 bay: PR2 submitted — git bay integrate PR2 to land it
 $ git bay integrate
 bay: batch PR3 built — members: PR1, PR2

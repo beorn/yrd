@@ -142,17 +142,19 @@ $ git bay ls PR4
 PR4 closed
 ```
 
-## Submit redirects to adopt
+## Submit accepts branches directly
 
-`submit` means "ask to merge" (`pushed` → `submitted`) — it takes a PR or bay
-name, not a branch. A branch that isn't a known PR or bay name gets a
-redirect to the verb that actually creates one.
+`submit` means "ask to merge". It can take a PR, a bay name, or an existing
+source branch. A branch creates the local PR directly in `submitted`.
 
 ```console
-$ cd "$DEMO" && git branch task/legacy-thing
+$ cd "$DEMO" && git config bay.check true
+$ git switch -qc task/legacy-thing main && echo legacy > legacy.txt && git add legacy.txt && git commit -qm legacy && git switch -q main
 $ git bay submit task/legacy-thing
-! bay: submit: 'task/legacy-thing' is not a known PR or bay name — to create one from an existing branch: git bay adopt task/legacy-thing
-[1]
+bay: PR5 submitted → checking
+bay: PR5 checking → checked
+bay: PR5 checked → merging
+bay: PR5 merging → merged — merged {{sha5:/[0-9a-f]{40}/}} onto main
 ```
 
 Assertions above follow the same mdspec idioms as gitbay.spec.md (see its

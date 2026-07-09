@@ -793,8 +793,7 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
       "close [options] <wt|name>", // --withdraw gives it an [options] slot, like ls/integrate/audit
       "gc",
       "ls",
-      "adopt <branch>",
-      "submit <PR|name>",
+      "submit [options] <PR|name|branch>",
       "check <PR|name>",
       "merge <PR|name>",
       "integrate",
@@ -803,6 +802,7 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     ]) {
       expect(help.stdout, advertised).toContain(advertised)
     }
+    const commandLine = (name: string) => new RegExp(`^  ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "m")
     for (const hidden of [
       "prime",
       "new",
@@ -810,6 +810,7 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
       "checkout",
       "install",
       "setup",
+      "adopt",
       "abandon",
       "return",
       "refresh",
@@ -825,7 +826,7 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
       "receive-pre",
       "receive-post",
     ]) {
-      expect(help.stdout, hidden).not.toMatch(new RegExp(`^\\s*${hidden}\\b`, "m"))
+      expect(help.stdout, hidden).not.toMatch(commandLine(hidden))
     }
     // and the per-command usage line advertises one spelling too, even when
     // invoked through a legacy alias
@@ -888,7 +889,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     await must(["git", "bay", "init"], demo, env)
     const res = await run(["git", "bay", "submit"], demo, env)
     expect(res.code).toBe(1)
-    expect(res.stderr).toContain("missing required argument 'PR|name'")
+    expect(res.stderr).toContain("missing required argument 'PR|name|branch'")
     expect(res.stderr).toContain("Usage: git bay submit") // showHelpAfterError keeps it teaching
   })
 
@@ -1184,13 +1185,14 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
     expect(ls.stdout).not.toContain("PR1") // nothing was created
   })
 
-  it("submit redirects to adopt when the target isn't a known PR or bay name", async () => {
+  it("submit accepts an existing branch directly and rests at submitted when autoMerge is off", async () => {
     await must(["git", "bay", "init"], demo, env)
-    await must(["git", "-C", demo, "branch", "task/some-branch"], demo, env)
-    const res = await run(["git", "bay", "submit", "task/some-branch"], demo, env)
-    expect(res.code).toBe(1)
-    expect(res.stderr).toContain("is not a known PR or bay name")
-    expect(res.stderr).toContain("git bay adopt task/some-branch")
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+    await branchWithFiles(demo, env, "task/some-branch", { "some.txt": "some\n" })
+    const res = await must(["git", "bay", "submit", "task/some-branch"], demo, env)
+    expect(res.stdout).toContain("bay: PR1 submitted — git bay integrate PR1 to land it")
+    const ls = await must(["git", "bay", "ls", "PR1"], demo, env)
+    expect(ls.stdout).toContain("PR1 submitted")
   })
 
   it("bare ls shows every non-merged PR — a rejected one is never invisible", async () => {
@@ -1362,6 +1364,20 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     expect(ls.stdout).toContain("PR1 merged")
   })
 
+  it("git bay submit <branch> --wait forces integration even when bay.autoMerge is false", async () => {
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+    await branchWithFiles(demo, env, "task/waited", { "waited.txt": "waited\n" })
+
+    const submit = await must(["git", "bay", "submit", "task/waited", "--wait"], demo, env)
+    expect(submit.stdout).toContain("bay: PR1 submitted → checking")
+    expect(submit.stdout).toContain("bay: PR1 checking → checked")
+    expect(submit.stdout).toContain("bay: PR1 checked → merging")
+    expect(submit.stdout).toContain("bay: PR1 merging → merged")
+
+    const ls = await must(["git", "bay", "ls", "PR1"], demo, env)
+    expect(ls.stdout).toContain("PR1 merged")
+  })
+
   it("-o submit fuses create+queue in one push — a red check rejects it directly from the push", async () => {
     await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
     const opened = await must(["git", "bay", "open", "fused-red"], demo, env)
@@ -1401,11 +1417,11 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     expect(push.stderr).toMatch(/remote: bay: PR1 merged onto main \(checks ✓\)/)
   })
 
-  it("submit on an unknown PR-shaped id redirects to adopt (it looks like nothing submit can resolve)", async () => {
+  it("submit on an unknown PR-shaped id teaches the PR/name/branch addressing model", async () => {
     const res = await run(["git", "bay", "submit", "PR999"], demo, env)
     expect(res.code).toBe(1)
-    expect(res.stderr).toContain("'PR999' is not a known PR or bay name")
-    expect(res.stderr).toContain("git bay adopt PR999")
+    expect(res.stderr).toContain("'PR999' is not a known PR, bay, or branch")
+    expect(res.stderr).toContain("git bay ls lists PRs and bays; git branch lists branches")
   })
 
   it("submit refuses a PR that is already submitted", async () => {
