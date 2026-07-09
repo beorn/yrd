@@ -59,8 +59,10 @@ yrd bay close
 
 yrd line status [selector...] [--json]
 yrd line audit [--json]
+yrd line provision [base] [--json]
+yrd line deprovision [base] [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
-yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>]
+yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>] [--artifact <name=ref>]
 yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
@@ -75,12 +77,12 @@ The current Git Bay CLI exposes the shipped v0.3 verbs documented in the README
 that implementation; shipped compatibility verbs stay available while the CLI
 converges.
 
-Staged line lifecycle commands:
-
-```bash
-yrd line provision [<base>]
-yrd line deprovision [<base>]
-```
+`yrd line provision [base]` is a disposable line-environment preflight: it
+creates a scratch workspace at the base, runs `bay.provision` when configured,
+reports the resolved base SHA, and releases the scratch. `yrd line deprovision`
+currently resolves the same base and reports that there are no persistent line
+resources to tear down; future remote runners may attach durable resources to
+this lifecycle.
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
 `yrd contest ...` commands manage an existing contest lifecycle. Built-in
@@ -119,15 +121,16 @@ checked-PR staleness. Human `yrd line status` renders the same folded line
 summary concisely. Targeted status accepts one or more selectors and keeps
 showing check/merge/deploy evidence for terminal merged PRs. Stale checked PRs
 are rejected with `stale-check` before a merge command runs. Watch mode can run
-the full `check,merge,deploy` sequence for each merged PR. That gives `@ci` a
-real command surface to start targeting, but not yet the full line package.
+the full `check,merge,deploy` sequence for each merged PR. `yrd line provision`
+preflights the configured scratch setup against the line base. That gives `@ci`
+a real command surface to start targeting, but not yet the full line package.
 
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts beyond local
    check/merge/deploy and externally finished checks;
 2. add remote/container/hosted runner adapters that produce the installed
-   waiting/finish/artifact contract;
+   waiting/finish/artifact/provision contract;
 3. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or

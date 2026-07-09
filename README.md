@@ -232,6 +232,8 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 | --- | --- | --- | --- |
 | `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary or targeted PR step evidence, including terminal merged PRs | no state change; exits `0` |
 | `yrd line audit [--json]` | repository from cwd | audit findings | no state change; exits `0` clean or `1` with findings |
+| `yrd line provision [base] [--json]` | optional base branch/ref | provision preflight summary or JSON | creates a disposable scratch at the base, runs `bay.provision` if configured, then releases it |
+| `yrd line deprovision [base] [--json]` | optional base branch/ref | deprovision summary or JSON | no persistent line resources yet; exits `0` after resolving the base |
 | `yrd line integrate [selector] [--steps check,merge,deploy] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams line drain output | runs registered steps; deploy failures exit `1` without unmerging |
 | `yrd line finish <selector> --step check (--ok\|--fail)` | parked PR plus optional token/detail/url/artifact/exit-code | external check result and PR transition | completes a `line/step/waiting`; command exits `0` for recorded pass or fail, nonzero for mismatched token/state |
 | `yrd line watch [selector] [--steps check,merge,deploy]` | optional PR/name | repeated integration output | keeps draining eligible work; with deploy in the step list, deploys each PR it merges |
@@ -266,6 +268,7 @@ Small repos can use git config:
 ```bash
 git config bay.check '<command>'          # line check step; exit 0 passes
 git config bay.check.runner local|waiting # local verdict or external launcher
+git config bay.provision '<command>'      # prepare scratch workspaces for checks
 git config bay.merge '<command>'          # merge override; {branch}, {base}, {pr}
 git config bay.deploy '<command>'         # deploy step after merge; exit 0 passes
 git config bay.issue '<command>'          # validate bay names; {name}
@@ -278,6 +281,13 @@ No merge command is required. If unset, git bay uses native
 `git merge --no-ff`. A merge command's exit `0` is only a claim; the PR is
 recorded as merged only when the submitted revision is an ancestor of the
 refreshed base.
+
+`bay.provision` runs inside disposable scratch workspaces before bayless checks
+and line preflights. The command receives `BAY_SCRATCH_PATH` and
+`BAY_SCRATCH_REF` in the environment. `yrd line provision [base]` runs the same
+provision hook against a scratch at the line base and releases it, so operators
+can verify that the line environment is runnable before queue work depends on
+it.
 
 The default check runner is `local`: `bay.check` runs to a pass/fail verdict.
 `bay.check.runner waiting` treats `bay.check` as an external CI launcher. Exit

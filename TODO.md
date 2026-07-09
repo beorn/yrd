@@ -45,6 +45,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - `yrd line integrate --steps check,merge,deploy --watch` and
   `yrd line watch --steps check,merge,deploy` keep draining the line and deploy
   each PR they merge.
+- `yrd line provision [base]` runs the configured `bay.provision` hook in a
+  disposable scratch at the line base and releases it; `yrd line deprovision`
+  currently reports that no persistent line resources exist yet.
 - Fresh bay state uses events.jsonl, index.sqlite, and prs.git; one-generation
   compatibility reads legacy journal.jsonl, bay.db, and repo.git when present.
 - `git bay submit <branch>` opens and submits an existing source branch without
@@ -84,6 +87,8 @@ yrd bay close
 
 yrd line status [selector...] [--json]
 yrd line audit [--json]
+yrd line provision [base] [--json]
+yrd line deprovision [base] [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
 yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>] [--artifact <name=ref>]
 yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
@@ -102,8 +107,8 @@ Rules:
 - --retry is an option on step-running commands, not a separate command tree.
 - Keep git bay as the Git-native projection; do not add @yrd/git-bay unless
   there is a second non-Git bay implementation.
-- yrd line provision and yrd line deprovision are staged until line state and
-  remote runners are real.
+- yrd line provision is a disposable preflight today; remote runners may later
+  attach persistent resources that make deprovision do real teardown.
 
 ## Next Work
 
@@ -120,7 +125,7 @@ Rules:
    - Finish core submission and line-step event/state contracts beyond local
      check/merge/deploy and externally finished checks.
    - Add remote/container/hosted runner adapters that produce the installed
-     waiting/finish/artifact contract.
+     waiting/finish/artifact/provision contract.
    - Extend event-log-driven resume beyond successful checks as more step kinds
      land; keep merge non-skippable unless the line can prove a landed result.
 3. @ci cutover
@@ -170,6 +175,7 @@ Rules:
   finish are installed, including external artifact refs from launcher metadata
   and `line finish --artifact`. Successful check reuse is installed for
   matching PR/base/head/config; stale checked PRs are rejected before merge.
-  Broader step resume semantics remain.
+  Disposable line provision preflight is installed. Broader step resume
+  semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

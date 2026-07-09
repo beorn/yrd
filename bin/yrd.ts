@@ -14,6 +14,9 @@ import {
   type CompeteOptions,
   type ContestRecord,
 } from "../src/contest.ts"
+import { createGitConfigSource, resolveOption } from "../src/config.ts"
+import { createScratchWorkspaces } from "../src/scratch.ts"
+import { git, resolveBaseRef } from "../src/layers/git.ts"
 
 // yrd — the software delivery yard (staged identity for this repo; see
 // docs/yrd.md). Projections are subcommands; `bay`, `line`, `task`, and
@@ -41,11 +44,14 @@ const LINE_USAGE = `yrd line — integration line projection
 USAGE
   yrd line status [selector...] [--json]
   yrd line audit [--json]
+  yrd line provision [base] [--json]
+  yrd line deprovision [base] [--json]
   yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
   yrd line finish <PR|name> [--step check] (--ok|--fail) [--token <token>] [--detail <text>] [--artifact <name=ref>]
   yrd line watch [PR|name] [--steps check,merge,deploy] [--interval <sec>]
 
 Installed steps: check, merge, deploy
+Provision preflights bay.provision in a disposable scratch workspace.
 `
 
 const TASK_USAGE = `yrd task — task intake projection
@@ -115,6 +121,11 @@ type ParsedIntegrate = {
   steps: LineStepName[]
   retry: boolean
   passthrough: string[]
+}
+
+type ParsedLineLifecycle = {
+  base?: string
+  json: boolean
 }
 
 type LineStepView = {
@@ -230,6 +241,25 @@ function parseStatusArgs(args: string[]): { targets: string[]; json: boolean } {
     targets.push(arg)
   }
   return { targets, json }
+}
+
+function parseLineLifecycleArgs(args: string[], verb: "provision" | "deprovision"): ParsedLineLifecycle {
+  let base: string | undefined
+  let json = false
+  for (const arg of args) {
+    if (arg === "--help" || arg === "-h") {
+      console.log(LINE_USAGE)
+      process.exit(0)
+    }
+    if (arg === "--json") {
+      json = true
+      continue
+    }
+    if (arg.startsWith("-")) fail(`yrd: line ${verb}: unknown option '${arg}'`)
+    if (base !== undefined) fail(`yrd: line ${verb}: unexpected extra argument '${arg}'`)
+    base = arg
+  }
+  return { base, json }
 }
 
 function parseFinishArgs(args: string[]): ParsedFinish {
@@ -576,6 +606,77 @@ async function lineFinish(args: string[]): Promise<void> {
   ])
 }
 
+async function resolveLineBase(repo: string, requested: string | undefined): Promise<{ base: string; baseSha: string }> {
+  const base = requested ?? (await resolveBaseRef(repo))
+  const resolved = await git(["-C", repo, "rev-parse", "--verify", "--quiet", `${base}^{commit}`], repo)
+  if (resolved.code !== 0 || resolved.stdout.trim() === "") {
+    domainError(`line: cannot resolve base '${base}'`)
+  }
+  return { base, baseSha: resolved.stdout.trim() }
+}
+
+async function resolveProvisionCommand(repo: string): Promise<string | undefined> {
+  const command = await resolveOption(undefined, "provision", createGitConfigSource(repo))
+  return command === undefined || command.trim() === "" ? undefined : command
+}
+
+async function lineProvision(args: string[]): Promise<void> {
+  const parsed = parseLineLifecycleArgs(args, "provision")
+  const paths = await resolveRepoPaths()
+  const { base, baseSha } = await resolveLineBase(paths.repo, parsed.base)
+  const provisionCommand = await resolveProvisionCommand(paths.repo)
+  const scratch = createScratchWorkspaces({
+    mainRepo: paths.repo,
+    provisionCommand,
+    prefix: "yrd-line-provision-",
+  })
+  const lease = await scratch.acquire(baseSha, { provision: true })
+  const scratchPath = lease.path
+  try {
+    const actualSha = await git(["-C", scratchPath, "rev-parse", "HEAD"], scratchPath)
+    if (actualSha.code !== 0 || actualSha.stdout.trim() !== baseSha) {
+      domainError(`line provision: scratch resolved ${actualSha.stdout.trim() || "unknown"} instead of ${baseSha}`)
+    }
+  } finally {
+    await lease.dispose()
+  }
+
+  const result = {
+    line: {
+      base,
+      baseSha,
+      provisioned: true,
+      ...(provisionCommand === undefined ? {} : { provisionCommand }),
+    },
+    scratch: { path: scratchPath, released: true },
+  }
+  if (parsed.json) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+  const configured = provisionCommand === undefined ? "no bay.provision configured" : "bay.provision ok"
+  console.log(`yrd: line ${base} provisioned at ${baseSha.slice(0, 12)} (${configured}; scratch released)`)
+}
+
+async function lineDeprovision(args: string[]): Promise<void> {
+  const parsed = parseLineLifecycleArgs(args, "deprovision")
+  const paths = await resolveRepoPaths()
+  const { base, baseSha } = await resolveLineBase(paths.repo, parsed.base)
+  const result = {
+    line: {
+      base,
+      baseSha,
+      deprovisioned: true,
+      persistentResources: false,
+    },
+  }
+  if (parsed.json) {
+    console.log(JSON.stringify(result, null, 2))
+    return
+  }
+  console.log(`yrd: line ${base} has no persistent resources to deprovision (${baseSha.slice(0, 12)})`)
+}
+
 async function lineProjection(args: string[]): Promise<void> {
   const command = args[0]
   if (command === undefined || command === "--help" || command === "-h" || command === "help") {
@@ -602,10 +703,15 @@ async function lineProjection(args: string[]): Promise<void> {
     await lineFinish(args.slice(1))
     return
   }
-  if (command === "provision" || command === "deprovision") {
-    fail(`yrd: line ${command}: staged, not installed yet`)
+  if (command === "provision") {
+    await lineProvision(args.slice(1))
+    return
   }
-  fail(`yrd: unknown line command '${command}' (installed: status, audit, integrate, finish, watch)`)
+  if (command === "deprovision") {
+    await lineDeprovision(args.slice(1))
+    return
+  }
+  fail(`yrd: unknown line command '${command}' (installed: status, audit, provision, deprovision, integrate, finish, watch)`)
 }
 
 async function runGitBay(args: string[], cwd: string) {

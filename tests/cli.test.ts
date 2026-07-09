@@ -433,6 +433,43 @@ describe("yrd CLI — line projection", () => {
     await rm(root, { recursive: true, force: true })
   })
 
+  it("line provision preflights bay.provision in a released scratch workspace", async () => {
+    const provisionLog = join(root, "provision.log")
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.provision",
+        `printf '%s %s\\n' "$BAY_SCRATCH_REF" "$BAY_SCRATCH_PATH" > '${provisionLog}'`,
+      ],
+      demo,
+      env,
+    )
+
+    const provisioned = await must([process.execPath, YRD_BIN, "line", "provision", "main", "--json"], demo, env)
+    const data = JSON.parse(provisioned.stdout) as {
+      line: { base: string; baseSha: string; provisioned: boolean; provisionCommand?: string }
+      scratch: { path: string; released: boolean }
+    }
+    expect(data.line).toMatchObject({ base: "main", provisioned: true })
+    expect(data.line.baseSha).toMatch(/^[0-9a-f]{40}$/)
+    expect(data.line.provisionCommand).toContain("BAY_SCRATCH_REF")
+    expect(data.scratch.released).toBe(true)
+    expect(existsSync(data.scratch.path)).toBe(false)
+    expect(await readFile(provisionLog, "utf8")).toBe(`${data.line.baseSha} ${data.scratch.path}\n`)
+
+    const deprovisioned = await must([process.execPath, YRD_BIN, "line", "deprovision", "main"], demo, env)
+    expect(deprovisioned.stdout).toContain("no persistent resources to deprovision")
+
+    await must(["git", "-C", demo, "config", "bay.provision", "echo provision bad >&2; exit 6"], demo, env)
+    const failed = await run([process.execPath, YRD_BIN, "line", "provision", "main"], demo, env)
+    expect(failed.code).toBe(1)
+    expect(failed.stderr).toContain("provision 'echo provision bad >&2; exit 6' failed (exit 6)")
+    expect(failed.stderr).toContain("provision bad")
+  })
+
   it("line status marks stale checks and merge rejects them", async () => {
     await must(
       [
