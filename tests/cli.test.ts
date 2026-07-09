@@ -477,10 +477,8 @@ describe("yrd CLI — contest projection", () => {
     expect(await readFile(alphaAttempt.logs.stdout, "utf8")).toContain('"input_tokens":10')
 
     const shown = await must([process.execPath, YRD_BIN, "contest", "show", record.id, "--json"], demo, env)
-    expect(JSON.parse(shown.stdout).attempts.map((attempt: { agent: string }) => attempt.agent)).toEqual([
-      "fake-alpha",
-      "fake-beta",
-    ])
+    const shownRecord = JSON.parse(shown.stdout) as typeof record
+    expect(shownRecord.attempts.map((attempt) => attempt.agent)).toEqual(["fake-alpha", "fake-beta"])
 
     const selected = await must([process.execPath, YRD_BIN, "contest", "select", record.id, "--winner", betaAttempt.id], demo, env)
     expect(selected.stdout).toContain(`yrd: ${record.id} winner ${betaAttempt.id}`)
