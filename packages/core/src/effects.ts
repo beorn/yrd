@@ -83,8 +83,15 @@ export type EffectRuns = {
     effect: Fx<Input, EffectOutcome<Output>>,
     handler?: EffectExecutor<Input, Output>,
   ): void
-  run(id: string, options: { executor: string; leaseMs: number; now?: () => number }): Promise<EffectRun>
+  run(id: string, options: EffectRunOptions): Promise<EffectRun>
   recover(options: { now: string; reason?: string }): Promise<string[]>
+}
+
+export type EffectRunOptions = {
+  executor: string
+  leaseMs: number
+  heartbeatMs?: number
+  now?: () => number
 }
 
 export type HasEffects = {
@@ -392,6 +399,13 @@ export function withEffects() {
         handlers.set(ref, handler ?? ref.fn)
       },
       async run(id, options) {
+        if (!Number.isSafeInteger(options.leaseMs) || options.leaseMs < 2) {
+          throw new Error("yrd: effect leaseMs must be an integer of at least 2ms")
+        }
+        const heartbeatMs = options.heartbeatMs ?? Math.max(1, Math.floor(options.leaseMs / 3))
+        if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs >= options.leaseMs) {
+          throw new Error("yrd: effect heartbeatMs must be a positive integer smaller than leaseMs")
+        }
         const before = requireRun(await app.state(), id)
         if (before.status !== "requested") throw new Error(`yrd: effect '${id}' is ${before.status}, not requested`)
         const ref = app.effectRegistry.effectAt(before.effect)
@@ -404,6 +418,26 @@ export function withEffects() {
           executor: options.executor,
           leaseExpiresAt: new Date(now + options.leaseMs).toISOString(),
         })
+        let heartbeatFailure: unknown
+        let heartbeatChain = Promise.resolve()
+        const timer = setInterval(() => {
+          heartbeatChain = heartbeatChain.then(async () => {
+            if (heartbeatFailure !== undefined) return
+            try {
+              const current = requireRun(await app.state(), id)
+              if (current.status !== "running") return
+              const heartbeatNow = options.now?.() ?? Date.now()
+              await app.command(heartbeat, {
+                id,
+                attempt,
+                executor: options.executor,
+                leaseExpiresAt: new Date(heartbeatNow + options.leaseMs).toISOString(),
+              })
+            } catch (error) {
+              heartbeatFailure = error
+            }
+          })
+        }, heartbeatMs)
         let outcome: EffectOutcome<unknown>
         try {
           outcome = await handler(before.input, { id, attempt, executor: options.executor })
@@ -411,6 +445,20 @@ export function withEffects() {
           outcome = {
             status: "failed",
             error: { code: "executor-error", message: error instanceof Error ? error.message : String(error) },
+          }
+        } finally {
+          clearInterval(timer)
+          await heartbeatChain
+        }
+        const current = requireRun(await app.state(), id)
+        if (current.status !== "running") return current
+        if (heartbeatFailure !== undefined) {
+          outcome = {
+            status: "failed",
+            error: {
+              code: "heartbeat-failed",
+              message: heartbeatFailure instanceof Error ? heartbeatFailure.message : String(heartbeatFailure),
+            },
           }
         }
         if (outcome.status === "waiting") {

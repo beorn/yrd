@@ -249,4 +249,35 @@ describe("Era2 durable effects", () => {
     })
     withSender(pipe(bare, withEffects()))
   })
+
+  it("renews the lease while a bounded local effect is still running", async () => {
+    let now = 0
+    const app = pipe(
+      createYrd({ store: createMemoryEventStore() }),
+      withEffects(),
+      (current) => {
+        current.effectRuns.register(["test", "deliver"], deliver, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30))
+          return { status: "passed", output: { receipt: "slow-ok" } }
+        })
+        return current
+      },
+      withSender,
+    )
+    const submitted = await app.command(app.commands.sender.send, { message: "slow" })
+
+    await app.effectRuns.run(submitted.effectIds[0]!, {
+      executor: "local",
+      leaseMs: 20,
+      heartbeatMs: 5,
+      now: () => (now += 10),
+    })
+
+    const events = await Array.fromAsync(app.events())
+    expect(events.filter((applied) => applied.name === "effect/heartbeat").length).toBeGreaterThanOrEqual(2)
+    expect((await app.state()).effects.runs[submitted.effectIds[0]!]).toMatchObject({
+      status: "passed",
+      output: { receipt: "slow-ok" },
+    })
+  })
 })
