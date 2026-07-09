@@ -27,9 +27,9 @@ repo in hub/yrd/reference or in @yrd beads.
   moves the PR to `checked` or `rejected`.
 - Failed line step runs include normalized `error { code, message, exitCode? }`
   metadata using the same rejection-code vocabulary as PR verdicts.
-- Resume paths skip a previously successful check when PR, target, base SHA,
-  head SHA, and check config hash still match; skipped rows carry
-  `skipped: true`.
+- Resume paths skip previously successful check and deploy steps when PR,
+  target, base SHA, head SHA, and step config hash still match; skipped rows
+  carry `skipped: true`. Merge remains non-skippable.
 - Line status JSON includes a folded line summary with open items, last step
   results, base/head SHAs, and checked-PR staleness reasons.
 - Human `yrd line status` renders that same folded line summary concisely:
@@ -126,8 +126,9 @@ Rules:
      check/merge/deploy and externally finished checks.
    - Add remote/container/hosted runner adapters that produce the installed
      waiting/finish/artifact/provision contract.
-   - Extend event-log-driven resume beyond successful checks as more step kinds
-     land; keep merge non-skippable unless the line can prove a landed result.
+   - Extend event-log-driven resume beyond check/deploy as more non-merge step
+     kinds land; keep merge non-skippable unless the line can prove a landed
+     result.
 3. @ci cutover
    - Switch @ci to yrd bay + yrd line once artifact capture, folded status, and
      resume semantics are strong enough for the CI lane.
@@ -173,9 +174,9 @@ Rules:
   installed, JSON folded status is installed, and normalized step errors are
   installed. Human folded status is installed. Parked external check launch and
   finish are installed, including external artifact refs from launcher metadata
-  and `line finish --artifact`. Successful check reuse is installed for
-  matching PR/base/head/config; stale checked PRs are rejected before merge.
-  Disposable line provision preflight is installed. Broader step resume
-  semantics remain.
+  and `line finish --artifact`. Successful check and deploy reuse are installed
+  for matching PR/base/head/config; stale checked PRs are rejected before merge.
+  Disposable line provision preflight is installed. Broader non-merge step
+  resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

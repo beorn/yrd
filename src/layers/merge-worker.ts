@@ -26,6 +26,7 @@ import {
   resolveCheck,
   resolveCheckRunner,
   resolveDeployBaseRef,
+  resolveDeployCommand,
   runDeploy,
   runMerge,
   runProjectCheck,
@@ -461,6 +462,21 @@ async function staleCheckRejectionEvents(
   ]
 }
 
+async function maybeReuseSuccessfulDeploy(
+  bay: BayRuntime,
+  opts: MergeWorkerOptions,
+  run: StepRunData & { step: "deploy"; pr: PrId },
+  cause: NonNullable<Effect["cause"]>,
+): Promise<BayEvent[] | undefined> {
+  const mainRepo = opts.mainRepo ?? opts.configCwd
+  if (mainRepo === undefined) return undefined
+  const deployCommand = await resolveDeployCommand(opts.deployCommand, opts.configCwd ?? mainRepo)
+  if (deployCommand === undefined || deployCommand.trim() === "") return undefined
+  const refs = { ...(await collectStepRefs(mainRepo, run.target)), configHash: stepConfigHash("deploy", deployCommand) }
+  if (!(await hasReusableSuccessfulStep(bay, run, refs))) return undefined
+  return skippedStepEvents(bay, run, cause, refs)
+}
+
 async function stepFinishedWithOutput(
   bay: BayRuntime,
   opts: MergeWorkerOptions,
@@ -585,6 +601,8 @@ function makeDeployRunHandler(opts: MergeWorkerOptions): EffectHandler {
     const mainRepo = resolveMainRepo(opts)
     const target = await resolveDeployBaseRef(mainRepo)
     const run = { step: "deploy" as const, pr: d.pr, target }
+    const reusable = await maybeReuseSuccessfulDeploy(bay, opts, run, effect.cause!)
+    if (reusable !== undefined) return reusable
     const outcome = await runDeploy({
       mainRepo: opts.mainRepo,
       pr: d.pr,

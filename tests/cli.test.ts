@@ -588,7 +588,7 @@ describe("yrd CLI — line projection", () => {
         demo,
         "config",
         "bay.deploy",
-        "printf 'deploy {pr} {base} {sha}\\n' > deploy.log; printf 'deploy stdout\\n'",
+        "printf 'deploy {pr} {base} {sha}\\n' >> deploy.log; printf 'deploy stdout\\n'",
       ],
       demo,
       env,
@@ -651,6 +651,10 @@ describe("yrd CLI — line projection", () => {
     expect(terminalHumanStatus.stdout).toContain("check=ok")
     expect(terminalHumanStatus.stdout).toContain("merge=ok")
     expect(terminalHumanStatus.stdout).toContain("deploy=ok")
+
+    const redeployed = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "deploy"], demo, env)
+    expect(redeployed.stdout).toContain(`bay: ${pr} deploy → skipped — skipped; previous successful deploy matches base/head/config`)
+    expect((await readFile(join(demo, "deploy.log"), "utf8")).trim().split("\n")).toHaveLength(1)
 
     await must(["git", "-C", demo, "config", "--unset", "bay.deploy"], demo, env)
     const skipped = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "deploy"], demo, env)

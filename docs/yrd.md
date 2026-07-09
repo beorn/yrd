@@ -194,13 +194,13 @@ Artifacts include logs, coverage, reports, and build outputs. The default local
 artifact store writes command stdout/stderr under `.git/bay/artifacts/`;
 external runners can attach URL or path refs from waiting metadata and
 `yrd line finish --artifact`. The event carries references, not inline blobs. A
-resumed line run folds the event log first and skips a successful check result
-only when it matches the same PR, target, base commit, head commit, and check
-config hash; the resumed event
-records `skipped: true`. A checked PR is stale when its recorded `baseSha` or
-`headSha` no longer matches the current line base or target commit. A stale
-checked PR is rejected with `stale-check` before merge, so retry can re-enter
-the line from check instead of landing unverified work.
+resumed line run folds the event log first and skips a successful check or
+deploy result only when it matches the same PR, target, base commit, head
+commit, and step config hash; the resumed event records `skipped: true`. A
+checked PR is stale when its recorded `baseSha` or `headSha` no longer matches
+the current line base or target commit. A stale checked PR is rejected with
+`stale-check` before merge, so retry can re-enter the line from check instead
+of landing unverified work.
 
 Human intervention is also an event-log fact. A future `line/override` event
 records who overrode what and why without pretending the line succeeded

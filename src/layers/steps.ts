@@ -145,7 +145,7 @@ export function skippedStepEvents(
 ): BayEvent[] {
   return [
     stepStarted(bay, run, cause),
-    stepFinished(bay, run, true, "skipped; previous successful check matches base/head/config", cause, {
+    stepFinished(bay, run, true, `skipped; previous successful ${run.step} matches base/head/config`, cause, {
       durationMs: 0,
       configHash: refs.configHash,
       skipped: true,

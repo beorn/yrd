@@ -507,11 +507,11 @@ staleness when a checked PR's base or target commit has moved since its check.
 stale checked PR is rejected before the merge command runs, records
 `stale-check`, and leaves `retry` to re-run the line from check.
 
-On retry/resume, the line can reuse a previous successful check when the PR,
-target, base commit, head commit, and check config hash still match; the new
-step row records `skipped: true`. Merge steps are deliberately not skipped: a
-merge either landed and made the PR terminal, or it must run again under the
-guard.
+On retry/resume, the line can reuse previous successful check and deploy steps
+when the PR, target, base commit, head commit, and step config hash still
+match; the new step row records `skipped: true`. Merge steps are deliberately
+not skipped: a merge either landed and made the PR terminal, or it must run
+again under the guard.
 
 External orchestrators can assign workers around git bay, but those actors live
 above this tool. git bay owns only the git-backed bays, PR state, line mechanics,
