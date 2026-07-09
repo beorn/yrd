@@ -122,4 +122,25 @@ describe("createGitWorkspace", () => {
       dirty: true,
     })
   })
+
+  it("provisions from an explicit base pin even when the base branch moves before execution", async () => {
+    const { root, repo } = await repository()
+    const pinned = (await git(repo, ["rev-parse", "main"])).stdout
+    const app = pipe(
+      createYrd({ store: createMemoryEventStore() }),
+      withEffects(),
+      withBays({ workspace: createGitWorkspace({ repo, baysRoot: join(root, "bays") }) }),
+    )
+    const opened = await app.command(app.commands.bay.open, { name: "pinned-base", base: "main", baseSha: pinned })
+
+    await writeFile(join(repo, "later.txt"), "base moved\n")
+    await git(repo, ["add", "later.txt"])
+    await git(repo, ["commit", "-qm", "move base"])
+    expect((await git(repo, ["rev-parse", "main"])).stdout).not.toBe(pinned)
+
+    await app.effectRuns.run(opened.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
+    const bay = (await app.state()).bays.bays.B1!
+    expect(bay).toMatchObject({ status: "active", base: "main", baseSha: pinned, headSha: pinned })
+    expect((await git(bay.path!, ["rev-parse", "HEAD"])).stdout).toBe(pinned)
+  })
 })

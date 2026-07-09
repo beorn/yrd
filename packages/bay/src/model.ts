@@ -67,6 +67,7 @@ export type ProvisionBayInput = {
   name: string
   branch: string
   base: string
+  baseSha?: string
   from?: string
 }
 

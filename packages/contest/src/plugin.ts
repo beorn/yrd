@@ -69,7 +69,7 @@ type ContestEffectRequest = RunnerRequest | EvaluatorRequest | PromotionRequest
 const SHA = /^[0-9a-f]{40,64}$/iu
 const GIT_REF = /^refs\/[A-Za-z0-9._/@+-]+$/u
 
-const COMPETE_KEYS = new Set(["task", "competitors", "evaluators", "base"])
+const COMPETE_KEYS = new Set(["task", "competitors", "evaluators", "base", "baseSha"])
 const COMPETITOR_KEYS = new Set(["model", "harness", "config"])
 const TASK_REF_KEYS = new Set(["source", "id"])
 const SELECT_KEYS = new Set(["contest", "attempt", "selectedBy", "reason"])
@@ -178,12 +178,12 @@ function parseCompete(input: unknown): TaskCompeteArgs {
     throw new Error("yrd: task.compete requires at least two competitors")
   }
   const evaluators = value.evaluators === undefined ? undefined : parseStringList(value.evaluators, "evaluators")
-  const base = optionalString(value.base, "task.compete 'base'")
   return {
     task: parseTaskRef(value.task),
     competitors: value.competitors.map(parseCompetitor),
     ...(evaluators === undefined ? {} : { evaluators }),
-    ...(base === undefined ? {} : { base }),
+    base: requiredString(value.base, "task.compete 'base'"),
+    baseSha: parseCommit(value.baseSha, "task.compete 'baseSha'"),
   }
 }
 
@@ -771,6 +771,7 @@ function baySnapshot(bay: DeepReadonly<Bay>): Bay {
     ...(bay.path === undefined ? {} : { path: bay.path }),
     ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }),
     ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+    ...(bay.dirty === undefined ? {} : { dirty: bay.dirty }),
     ...(bay.effectId === undefined ? {} : { effectId: bay.effectId }),
     ...(bay.closedAt === undefined ? {} : { closedAt: bay.closedAt }),
     ...(bay.failure === undefined ? {} : { failure: bay.failure }),
@@ -907,7 +908,7 @@ export function withContests(options: WithContestsOptions) {
           throw new Error("yrd: task.compete requires at least one held-out evaluator")
         }
         const id = nextId("C", state.contests.records)
-        const base = args.base ?? defaultBase
+        const base = args.base
         const attempts = Object.fromEntries(
           competitors.map((competitor, index) => {
             const attempt = `A${index + 1}`
@@ -942,6 +943,7 @@ export function withContests(options: WithContestsOptions) {
           id,
           task: task as Task,
           base,
+          baseSha: args.baseSha,
           evaluators: selectedEvaluators,
           attemptOrder: Object.keys(attempts),
           attempts,
@@ -1081,6 +1083,16 @@ export function withContests(options: WithContestsOptions) {
     }
 
     const reads: ContestReads = {
+      async resolveBase(input) {
+        const base = input ?? defaultBase
+        const resolved = await options.git.resolveCommit(base, {
+          id: `contest-base:${base}`,
+          attempt: 1,
+          executor: "contest-base-resolver",
+        })
+        if (resolved === undefined) throw new Error(`yrd: no Git commit '${base}'`)
+        return { base, sha: parseCommit(resolved, `resolved base '${base}'`) }
+      },
       async show(id) {
         return requiredContest((await app.state()).contests, requiredString(id, "contest id")) as Contest
       },
@@ -1112,6 +1124,7 @@ export function withContests(options: WithContestsOptions) {
                 task: taskKey(contest.task.ref),
                 actor: attempt.competitor.id,
                 base: attempt.base,
+                baseSha: contest.baseSha,
               })
               state = await app.state()
               contest = requiredContest(state.contests, id)

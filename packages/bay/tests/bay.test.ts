@@ -22,7 +22,7 @@ function createWorkspace() {
   let dirty = false
   const workspace: BayWorkspaceAdapter = {
     provision(input): EffectOutcome<ProvisionedBay> {
-      calls.push(`provision:${input.bay}`)
+      calls.push(`provision:${input.bay}:${input.baseSha ?? "current"}`)
       return {
         status: "passed",
         output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE },
@@ -94,7 +94,7 @@ describe("withBays", () => {
       headSha: HEAD_1,
       baseSha: BASE,
     })
-    expect(fake.calls).toEqual(["provision:B1"])
+    expect(fake.calls).toEqual(["provision:B1:current"])
   })
 
   it("keeps every pushed commit as an immutable revision and submits the pinned tip", async () => {
@@ -134,7 +134,17 @@ describe("withBays", () => {
       baseSha: BASE,
       dirty: false,
     })
-    expect(fake.calls).toEqual(["provision:B1", "refresh:B1"])
+    expect(fake.calls).toEqual(["provision:B1:current", "refresh:B1"])
+  })
+
+  it("threads an explicitly resolved base commit into workspace provisioning", async () => {
+    const fake = createWorkspace()
+    const app = createApp(fake.workspace)
+    const opened = await app.command(app.commands.bay.open, { name: "same-base", base: "main", baseSha: BASE })
+    await app.effectRuns.run(opened.effectIds[0]!, { executor: "local", leaseMs: 60_000 })
+
+    expect(fake.calls).toEqual([`provision:B1:${BASE}`])
+    expect((await app.state()).bays.bays.B1).toMatchObject({ base: "main", baseSha: BASE })
   })
 
   it("submits a prepared branch without provisioning a bay", async () => {

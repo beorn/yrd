@@ -225,6 +225,7 @@ export type Contest = Readonly<{
   id: string
   task: Task
   base: string
+  baseSha: string
   createdAt: string
   evaluators: readonly Readonly<{ id: string; authority: "held-out" | "advisory" }>[]
   attemptOrder: readonly string[]
@@ -242,7 +243,8 @@ export type TaskCompeteArgs = Readonly<{
   task: TaskRef
   competitors: readonly CompetitorSpec[]
   evaluators?: readonly string[]
-  base?: string
+  base: string
+  baseSha: string
 }>
 
 export type ContestSelectArgs = Readonly<{
@@ -276,6 +278,7 @@ export type ContestCommands = {
 }
 
 export type ContestReads = Readonly<{
+  resolveBase(base?: string): Promise<Readonly<{ base: string; sha: string }>>
   show(contest: string): Promise<Contest>
   list(): Promise<readonly Contest[]>
 }>

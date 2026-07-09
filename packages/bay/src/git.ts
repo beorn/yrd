@@ -71,7 +71,7 @@ export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspaceAd
       const path = safeBayPath(baysRoot, input.bay)
       try {
         await git(repo, ["rev-parse", "--show-toplevel"])
-        const baseSha = await commit(repo, input.base)
+        const baseSha = await commit(repo, input.baseSha ?? input.base)
         if (existsSync(path))
           throw new Error(`workspace path '${path}' already exists; inspect or remove it explicitly`)
         if (input.from === undefined) {

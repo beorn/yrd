@@ -37,6 +37,9 @@ function ids(): () => string {
 function workspace(): BayWorkspaceAdapter {
   return {
     provision(input): EffectOutcome<ProvisionedBay> {
+      if (input.baseSha !== BASE_SHA) {
+        return { status: "failed", error: { code: "wrong-base", message: "contest Bay was not pinned" } }
+      }
       if (input.from !== undefined) {
         return {
           status: "failed",
@@ -85,6 +88,7 @@ function outputFor(attempt: string, model: string, bay: string, branch: string):
 
 function fixtures(options: { waitingModel?: string } = {}) {
   const pins = new Map<string, string>()
+  pins.set("main", BASE_SHA)
   const runner: ContestRunnerAdapter = {
     harness: "ag",
     async run(input) {
@@ -160,6 +164,7 @@ async function recordTask(app: ReturnType<typeof createApp>): Promise<void> {
 
 async function startContest(app: ReturnType<typeof createApp>) {
   await recordTask(app)
+  const base = await app.contests.resolveBase("main")
   await app.command(app.commands.task.compete, {
     task: { source: "km", id: "@yrd/core/21012" },
     competitors: [
@@ -167,7 +172,8 @@ async function startContest(app: ReturnType<typeof createApp>) {
       { model: "claude", harness: "ag", config: { effort: "max", routing: { tier: "frontier" } } },
     ],
     evaluators: ["held-out-tests", "review-notes"],
-    base: "main",
+    base: base.base,
+    baseSha: base.sha,
   })
   return await app.contests.show("C1")
 }
@@ -192,6 +198,7 @@ describe("withContests", () => {
     const opened = await startContest(app)
 
     expect(opened.task).toMatchObject({ ref: { source: "km", id: "@yrd/core/21012" }, revision: "r7" })
+    expect(opened).toMatchObject({ base: "main", baseSha: BASE_SHA })
     expect(opened.attemptOrder).toEqual(["A1", "A2"])
     expect(opened.attempts.A1?.competitor).toMatchObject({ model: "codex", harness: "ag" })
     expect(opened.attempts.A1?.competitor.id).not.toBe(opened.attempts.A2?.competitor.id)
@@ -399,6 +406,8 @@ describe("withContests", () => {
         { model: "codex", harness: "ag", config: { b: 2, a: 1 } },
       ],
       evaluators: ["held-out-tests"],
+      base: "main",
+      baseSha: BASE_SHA,
     }
     await expect(app.command(app.commands.task.compete, args)).rejects.toThrow("task 'km:missing' is not recorded")
     await recordTask(app)

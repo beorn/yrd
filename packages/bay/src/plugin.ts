@@ -57,6 +57,7 @@ export type OpenBayArgs = {
   actor?: string
   from?: string
   base?: string
+  baseSha?: string
 }
 
 export type RefreshBayArgs = { bay: string }
@@ -145,6 +146,7 @@ function parseOpen(input: unknown): OpenBayArgs {
     ...(optionalString(args, "actor", "bay.open") === undefined ? {} : { actor: args.actor as string }),
     ...(optionalString(args, "from", "bay.open") === undefined ? {} : { from: args.from as string }),
     ...(optionalString(args, "base", "bay.open") === undefined ? {} : { base: args.base as string }),
+    ...(args.baseSha === undefined ? {} : { baseSha: commitSha(args, "baseSha", "bay.open") }),
   }
 }
 
@@ -411,6 +413,7 @@ export function withBays(options: WithBaysOptions) {
               name: args.name,
               branch,
               base,
+              ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
               ...(args.task === undefined ? {} : { task: args.task }),
               ...(args.actor === undefined ? {} : { actor: args.actor }),
               ...(args.from === undefined ? {} : { from: args.from }),
@@ -419,7 +422,14 @@ export function withBays(options: WithBaysOptions) {
           effects: [
             effect(
               provision,
-              { bay: id, name: args.name, branch, base, ...(args.from === undefined ? {} : { from: args.from }) },
+              {
+                bay: id,
+                name: args.name,
+                branch,
+                base,
+                ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
+                ...(args.from === undefined ? {} : { from: args.from }),
+              },
               `bay:${id}:provision`,
             ),
           ],
