@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { makeEvent } from "../core.ts"
-import type { BayEvent, BayRuntime, Cause, PrId, StepFinishMetadata, StepRunData } from "../types.ts"
+import type { BayEvent, BayRuntime, Cause, PrId, StepFinishMetadata, StepRunData, StepWaitingMetadata } from "../types.ts"
 
 /**
  * line/step event builders — the ONE spelling for "a step ran against a target
@@ -36,6 +36,31 @@ export function stepFinished(
       ...(metadata.configHash !== undefined ? { configHash: metadata.configHash } : {}),
       ...(metadata.skipped !== undefined ? { skipped: metadata.skipped } : {}),
       ...(metadata.error !== undefined ? { error: metadata.error } : {}),
+      ...(metadata.artifacts !== undefined && metadata.artifacts.length > 0 ? { artifacts: metadata.artifacts } : {}),
+      ...(metadata.baseSha !== undefined ? { baseSha: metadata.baseSha } : {}),
+      ...(metadata.headSha !== undefined ? { headSha: metadata.headSha } : {}),
+    },
+    cause,
+  )
+}
+
+export function stepWaiting(
+  bay: BayRuntime,
+  data: StepRunData,
+  cause: Cause,
+  metadata: StepWaitingMetadata = {},
+): BayEvent {
+  return makeEvent(
+    bay,
+    "line/step/waiting",
+    {
+      ...data,
+      ...(metadata.detail !== undefined ? { detail: metadata.detail } : {}),
+      ...(metadata.token !== undefined ? { token: metadata.token } : {}),
+      ...(metadata.url !== undefined ? { url: metadata.url } : {}),
+      ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
+      ...(metadata.durationMs !== undefined ? { durationMs: metadata.durationMs } : {}),
+      ...(metadata.configHash !== undefined ? { configHash: metadata.configHash } : {}),
       ...(metadata.artifacts !== undefined && metadata.artifacts.length > 0 ? { artifacts: metadata.artifacts } : {}),
       ...(metadata.baseSha !== undefined ? { baseSha: metadata.baseSha } : {}),
       ...(metadata.headSha !== undefined ? { headSha: metadata.headSha } : {}),

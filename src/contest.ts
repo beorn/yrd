@@ -155,20 +155,6 @@ export function builtInAgentCommand(agent: string, prompt: string): string[] {
   if (agent === "claude") {
     return ["ag", "claude", "-p", "--output-format", "json", "--dangerously-skip-permissions", "--", prompt]
   }
-  if (agent === "claude-opus" || agent === "opus") {
-    return [
-      "ag",
-      "claude",
-      "--model",
-      "opus",
-      "-p",
-      "--output-format",
-      "json",
-      "--dangerously-skip-permissions",
-      "--",
-      prompt,
-    ]
-  }
   throw new Error(
     `yrd: no built-in contest agent '${agent}' (built-ins: codex, claude). ` +
       `Use --agent-cmd ${agent}='<command using $YRD_PROMPT>'`,

@@ -123,13 +123,15 @@ pushed/submitted/checked/reviewing/rejected -> closed
 ```
 
 `reviewing` appears only when an async review step parks on external approval.
-The line does not block on parked PRs: it skips waiting work, integrates the
-next runnable PR, and rechecks parked work against the latest base before
-landing. Check and review verdicts bind to the PR tip SHA; a new push
-invalidates them and returns the PR to `pushed`. `closed` is a PR state, not
-normal bay cleanup: `git bay close` changes PR state only when `--withdraw` is
-used on a live PR. Deployment is a configured step over landed state; a failure
-records a deploy verdict and may stop the line, but cannot revoke `merged`.
+An external check launcher can also park a PR in `checking` by recording
+`line/step/waiting`. The line does not block on parked PRs: it skips waiting
+work, integrates the next runnable PR, and rechecks parked work against the
+latest base before landing. Check and review verdicts bind to the PR tip SHA;
+a new push invalidates them and returns the PR to `pushed`. `closed` is a PR
+state, not normal bay cleanup: `git bay close` changes PR state only when
+`--withdraw` is used on a live PR. Deployment is a configured step over landed
+state; a failure records a deploy verdict and may stop the line, but cannot
+revoke `merged`.
 
 ## Workflow
 
@@ -262,6 +264,7 @@ Small repos can use git config:
 
 ```bash
 git config bay.check '<command>'          # line check step; exit 0 passes
+git config bay.check.runner local|waiting # local verdict or external launcher
 git config bay.merge '<command>'          # merge override; {branch}, {base}, {pr}
 git config bay.deploy '<command>'         # deploy step after merge; exit 0 passes
 git config bay.issue '<command>'          # validate bay names; {name}
@@ -274,6 +277,14 @@ No merge command is required. If unset, git bay uses native
 `git merge --no-ff`. A merge command's exit `0` is only a claim; the PR is
 recorded as merged only when the submitted revision is an ancestor of the
 refreshed base.
+
+The default check runner is `local`: `bay.check` runs to a pass/fail verdict.
+`bay.check.runner waiting` treats `bay.check` as an external CI launcher. Exit
+`0` records `line/step/waiting`, captures stdout/stderr artifacts, and leaves
+the PR in `checking`; nonzero rejects the PR as a failed launcher. The launcher
+may print JSON such as `{"token":"...","url":"...","detail":"..."}` for status
+projection. Finishing a parked external check is still callback work, not a
+completed command surface.
 
 For shared, version-controlled policy, committed config lives in `.gitbay.yml`
 at the repository root. It uses a small GitHub Actions-inspired shape: line
@@ -329,7 +340,9 @@ launchers, or repository-specific policy.
   configurable, but `merged` is recorded only after the landed state has proof
   that the submitted revision is an ancestor of the refreshed base.
 - **Checks** are registered transitions that capture stdout/stderr in the
-  verdict and reject on nonzero exit.
+  verdict and reject on nonzero exit. With `bay.check.runner waiting`, a check
+  command is an external-runner launcher: success parks the PR with a token,
+  URL, artifacts, and `line/step/waiting`; launcher failure rejects it.
 - **Reviews** are async steps between `checked` and `merging`. Approval moves
   the PR out of `reviewing`; rejection records the reason and keeps the PR out
   of the line. Verdicts are bound to the reviewed SHA, so a new push invalidates
@@ -459,6 +472,10 @@ line/step/...    started, waiting, finished
 line/batch/...   started, isolated, finished
 contest/...      opened, attempt started/finished, selected, promoted
 ```
+
+`line/step/waiting` rows include a parked step's detail, optional token/URL,
+config hash, base/head SHAs, duration, and artifact references. `yrd line
+status` renders those rows as `check=waiting`.
 
 `line/step/finished` rows include the step verdict plus available process
 metadata: `exitCode`, `durationMs`, `configHash`, `baseSha`, `headSha`,

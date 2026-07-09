@@ -117,9 +117,12 @@ type ParsedIntegrate = {
 }
 
 type LineStepView = {
-  ok: boolean
+  ok?: boolean
+  waiting?: boolean
   durationMs?: number
   skipped?: boolean
+  token?: string
+  url?: string
   error?: { code?: string; message?: string; exitCode?: number }
   artifacts?: unknown[]
 }
@@ -238,11 +241,12 @@ function formatCounts(counts: Record<string, number> | undefined): string {
 
 function formatStep(name: LineStepName, step: LineStepView | undefined): string {
   if (step === undefined) return `${name}=-`
-  const status = step.skipped === true ? "skipped" : step.ok ? "ok" : "failed"
+  const status = step.waiting === true ? "waiting" : step.skipped === true ? "skipped" : step.ok === true ? "ok" : "failed"
   const code = !step.ok && step.error?.code !== undefined ? `:${step.error.code}` : ""
   const duration = step.durationMs !== undefined ? ` ${step.durationMs}ms` : ""
   const artifacts = Array.isArray(step.artifacts) && step.artifacts.length > 0 ? ` artifacts=${step.artifacts.length}` : ""
-  return `${name}=${status}${code}${duration}${artifacts}`
+  const url = step.waiting === true && step.url !== undefined ? ` url=${step.url}` : ""
+  return `${name}=${status}${code}${duration}${artifacts}${url}`
 }
 
 function formatLineItem(item: LineItemView): string {

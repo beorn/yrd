@@ -676,6 +676,88 @@ describe("yrd CLI — line projection", () => {
     })
   })
 
+  it("line integrate can park a remote check and keep draining runnable PRs", async () => {
+    await must(["git", "-C", demo, "config", "bay.check.runner", "waiting"], demo, env)
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.check",
+        `printf '%s\\n' '{"token":"remote-1","url":"https://ci.invalid/run/1","detail":"queued remote"}'`,
+      ],
+      demo,
+      env,
+    )
+    await branchWithFiles(demo, env, "task/remote-check", { "remote-check.txt": "park\n" })
+    const pr = (await must(["git", "bay", "adopt", "task/remote-check", "--workitem", "remote-check"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", pr], demo, env)
+
+    const parked = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "check"], demo, env)
+    expect(parked.stdout).toContain(`bay: ${pr} submitted → checking`)
+    expect(parked.stdout).toContain(`bay: ${pr} check → waiting — queued remote (https://ci.invalid/run/1)`)
+    expect(parked.stdout).not.toContain(`${pr} checking → checked`)
+
+    const status = await must([process.execPath, YRD_BIN, "line", "status", pr, "--json"], demo, env)
+    const line = JSON.parse(status.stdout) as {
+      line: {
+        pr: string
+        state: string
+        steps: {
+          check?: {
+            waiting?: boolean
+            detail?: string
+            token?: string
+            url?: string
+            exitCode?: number
+            configHash?: string
+            artifacts?: unknown[]
+            baseSha?: string
+            headSha?: string
+          }
+        }
+      }
+    }
+    expect(line.line.state).toBe("checking")
+    expect(line.line.steps.check).toMatchObject({
+      waiting: true,
+      detail: "queued remote",
+      token: "remote-1",
+      url: "https://ci.invalid/run/1",
+      exitCode: 0,
+    })
+    expect(line.line.steps.check?.configHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(line.line.steps.check?.artifacts).toHaveLength(1)
+    expect(line.line.steps.check?.baseSha).toMatch(/^[0-9a-f]{40}$/)
+    expect(line.line.steps.check?.headSha).toMatch(/^[0-9a-f]{40}$/)
+
+    const human = await must([process.execPath, YRD_BIN, "line", "status", pr], demo, env)
+    expect(human.stdout).toContain("check=waiting")
+    expect(human.stdout).toContain("url=https://ci.invalid/run/1")
+
+    const journal = await readFile(join(demo, ".git/bay/events.jsonl"), "utf8")
+    const rows = journal
+      .trim()
+      .split("\n")
+      .map((row) => JSON.parse(row) as { name: string; data: { pr?: string; step?: string; token?: string } })
+    expect(rows.find((row) => row.name === "line/step/waiting" && row.data.pr === pr && row.data.step === "check")?.data.token).toBe(
+      "remote-1",
+    )
+    expect(rows.some((row) => row.name === "line/step/finished" && row.data.pr === pr && row.data.step === "check")).toBe(false)
+
+    await must(["git", "-C", demo, "config", "bay.check.runner", "local"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
+    await branchWithFiles(demo, env, "task/after-park", { "after-park.txt": "go\n" })
+    const next = (await must(["git", "bay", "adopt", "task/after-park", "--workitem", "after-park"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", next], demo, env)
+
+    const drained = await must([process.execPath, YRD_BIN, "line", "integrate"], demo, env)
+    expect(drained.stdout).toContain(`bay: ${next} submitted → checking`)
+    expect(drained.stdout).toContain(`bay: ${next} merging → merged`)
+    expect(drained.stdout).not.toContain(`${pr} checking → checked`)
+  })
+
   it("line status accepts multiple targeted selectors in order", async () => {
     await branchWithFiles(demo, env, "task/multi-a", { "multi-a.txt": "a\n" })
     const prA = (await must(["git", "bay", "adopt", "task/multi-a", "--workitem", "multi-a"], demo, env)).stdout.trim()

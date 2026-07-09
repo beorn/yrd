@@ -110,7 +110,8 @@ The first line projection slice is installed: `yrd line integrate --steps
 check,merge,deploy` delegates to the current Git Bay integration logic, `yrd line
 status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
-metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
+metadata, and stdout/stderr artifacts, `bay.check.runner=waiting` can park an
+external check launcher with `line/step/waiting`, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. Human
 `yrd line status` renders the same folded line summary concisely. Targeted
 status accepts one or more selectors and keeps showing check/merge/deploy
@@ -121,8 +122,8 @@ command surface to start targeting, but not yet the full line package.
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts beyond local
-   check/merge/deploy;
-2. add the runner seam for remote/container/hosted execution;
+   check/merge/deploy and parked external checks;
+2. add callback/resume completion for remote/container/hosted check verdicts;
 3. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
@@ -164,12 +165,17 @@ withStep("deploy", command("bun run deploy"))
 
 The runner is a seam: the first runner is a local command runner, but the line
 model must not require local child processes. Remote runners, container runners,
-or hosted CI adapters should satisfy the same step result contract.
+or hosted CI adapters should satisfy the same step result contract. The
+installed first seam is `bay.check.runner=waiting`: `bay.check` launches the
+external job, exit `0` emits `line/step/waiting` and parks the PR in `checking`,
+and exit nonzero rejects the launcher failure. Completing that parked verdict is
+still future callback/resume work.
 
 Step events map naturally to spans:
 
 ```text
 line/step/started { step, pr?, batch?, target, role?, index? }
+line/step/waiting { step, pr?, batch?, target, detail?, token?, url?, durationMs?, configHash?, baseSha?, headSha?, artifacts? }
 line/step/finished { step, pr?, batch?, target, ok, detail?, exitCode?, durationMs?, configHash?, skipped?, baseSha?, headSha?, error?, artifacts? }
 error { code, message, exitCode? }
 ```

@@ -264,10 +264,14 @@ export type GitbayEvent =
       // the bisect baseline gate (role "baseline", no pr — it tests the batch
       // base itself). The started/finished pair is a run-record, not a crash
       // marker: both journal when the running effect returns; a crash mid-step
-      // still shows as the PR stuck checking/merging. `line/step/waiting` is
-      // reserved for async steps (review, remote runners) and is not emitted
-      // yet.
+      // still shows as the PR stuck checking/merging. `line/step/waiting`
+      // records a step that handed off to an external runner and parked the PR
+      // without a terminal verdict.
       data: StepRunData
+    }
+  | {
+      name: "line/step/waiting"
+      data: StepRunData & StepWaitingMetadata
     }
   | { name: "line/step/finished"; data: StepRunData & { ok: boolean; detail?: string } & StepFinishMetadata }
   | {
@@ -364,6 +368,18 @@ export type StepFinishMetadata = {
   configHash?: string
   skipped?: boolean
   error?: StepError
+  artifacts?: StepArtifact[]
+  baseSha?: string
+  headSha?: string
+}
+
+export type StepWaitingMetadata = {
+  detail?: string
+  token?: string
+  url?: string
+  exitCode?: number
+  durationMs?: number
+  configHash?: string
   artifacts?: StepArtifact[]
   baseSha?: string
   headSha?: string

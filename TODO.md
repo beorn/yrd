@@ -18,6 +18,9 @@ repo in hub/yrd/reference or in @yrd beads.
   shorter provider-only form remains accepted for scripts.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
+- `bay.check.runner=waiting` treats `bay.check` as an external check launcher:
+  exit `0` records `line/step/waiting` with token/URL/detail/artifacts and
+  parks the PR in `checking`; launcher failure rejects the PR.
 - Failed line step runs include normalized `error { code, message, exitCode? }`
   metadata using the same rejection-code vocabulary as PR verdicts.
 - Resume paths skip a previously successful check when PR, target, base SHA,
@@ -108,12 +111,13 @@ Rules:
      over recorded evidence, not hidden policy.
 2. Line hardening
    - Finish core submission and line-step event/state contracts beyond local
-     check/merge/deploy.
+     check/merge/deploy and parked external checks.
    - Broaden artifact/log capture beyond the local command runner as remote
      and hosted runners land.
    - Extend event-log-driven resume beyond successful checks as more step kinds
      land; keep merge non-skippable unless the line can prove a landed result.
-   - Add the runner seam for remote, container, or hosted test execution.
+   - Add callback/resume completion for remote, container, or hosted check
+     verdicts.
 3. @ci cutover
    - Switch @ci to yrd bay + yrd line once artifact capture, folded status, and
      resume semantics are strong enough for the CI lane.

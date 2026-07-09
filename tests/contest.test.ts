@@ -18,6 +18,10 @@ describe("contest agent commands", () => {
       "fix it",
     ])
   })
+
+  it("keeps model-specific Claude variants in ag instead of yrd built-ins", () => {
+    expect(() => builtInAgentCommand("claude-opus", "fix it")).toThrow("built-ins: codex, claude")
+  })
 })
 
 describe("contest metrics", () => {

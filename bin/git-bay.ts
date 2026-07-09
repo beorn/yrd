@@ -420,10 +420,13 @@ async function lastDetail(bay: BayRuntime, id: PrId): Promise<string | undefined
 }
 
 type StepStatus = {
-  ok: boolean
+  ok?: boolean
+  waiting?: boolean
   ts: string
   target: string
   detail?: string
+  token?: string
+  url?: string
   exitCode?: number
   durationMs?: number
   configHash?: string
@@ -452,13 +455,15 @@ async function resolveCommit(repo: string, ref: string): Promise<string | undefi
 async function stepStatusByPr(bay: BayRuntime): Promise<Map<PrId, Partial<Record<"check" | "merge" | "deploy", StepStatus>>>> {
   const stepsByPr = new Map<PrId, Partial<Record<"check" | "merge" | "deploy", StepStatus>>>()
   for await (const ev of bay.store.journal.replay()) {
-    if (ev.name !== "line/step/finished") continue
+    if (ev.name !== "line/step/finished" && ev.name !== "line/step/waiting") continue
     const d = ev.data as {
       pr?: PrId
       step?: "check" | "merge" | "deploy"
       target?: string
       ok?: boolean
       detail?: string
+      token?: string
+      url?: string
       exitCode?: number
       durationMs?: number
       configHash?: string
@@ -468,13 +473,16 @@ async function stepStatusByPr(bay: BayRuntime): Promise<Map<PrId, Partial<Record
       error?: StepError
       artifacts?: unknown[]
     }
-    if (d.pr === undefined || (d.step !== "check" && d.step !== "merge" && d.step !== "deploy") || d.target === undefined || d.ok === undefined) continue
+    if (d.pr === undefined || (d.step !== "check" && d.step !== "merge" && d.step !== "deploy") || d.target === undefined) continue
+    if (ev.name === "line/step/finished" && d.ok === undefined) continue
     const current = stepsByPr.get(d.pr) ?? {}
     current[d.step] = {
-      ok: d.ok,
+      ...(ev.name === "line/step/waiting" ? { waiting: true } : { ok: d.ok }),
       ts: ev.ts,
       target: d.target,
       ...(d.detail !== undefined ? { detail: d.detail } : {}),
+      ...(d.token !== undefined ? { token: d.token } : {}),
+      ...(d.url !== undefined ? { url: d.url } : {}),
       ...(d.exitCode !== undefined ? { exitCode: d.exitCode } : {}),
       ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
       ...(d.configHash !== undefined ? { configHash: d.configHash } : {}),
@@ -603,6 +611,14 @@ function printBatchAwareEvents(events: readonly BayEvent[]): void {
       }
       const line = firstDetailLine(d.detail)
       if (line) console.log(line)
+      continue
+    }
+    if (e.name === "line/step/waiting") {
+      const d = e.data as { pr?: string; step?: string; detail?: string; url?: string }
+      if (d.pr !== undefined && d.step !== undefined) {
+        const url = d.url === undefined ? "" : ` (${d.url})`
+        console.log(`bay: ${d.pr} ${d.step} → waiting${d.detail ? ` — ${d.detail}` : ""}${url}`)
+      }
       continue
     }
     if (e.name !== "pr/changed") continue
@@ -1078,10 +1094,20 @@ async function ingestInbox(ctx: Ctx, bay: BayRuntime): Promise<void> {
 function printTransitions(events: { name: string; data: Record<string, unknown> }[]): boolean {
   let any = false
   for (const e of events) {
-    if (e.name !== "pr/changed") continue
-    const d = e.data as { pr: string; from: string; to: string; detail?: string }
-    console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
-    any = true
+    if (e.name === "pr/changed") {
+      const d = e.data as { pr: string; from: string; to: string; detail?: string }
+      console.log(`bay: ${d.pr} ${d.from} → ${d.to}${d.detail ? ` — ${d.detail}` : ""}`)
+      any = true
+      continue
+    }
+    if (e.name === "line/step/waiting") {
+      const d = e.data as { pr?: string; step?: string; detail?: string; url?: string }
+      if (d.pr !== undefined && d.step !== undefined) {
+        const url = d.url === undefined ? "" : ` (${d.url})`
+        console.log(`bay: ${d.pr} ${d.step} → waiting${d.detail ? ` — ${d.detail}` : ""}${url}`)
+        any = true
+      }
+    }
   }
   return any
 }

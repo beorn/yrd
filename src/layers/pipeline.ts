@@ -26,13 +26,52 @@ export function tail(text: string, max = 2000): string {
 /** `code` refines a failed check's rejection: default `check-failed`; a
  *  scratch workspace that could not be provisioned is `provision-failed` —
  *  an environment fault, not a verdict about the PR. */
-export type CheckOutcome = ({ ok: true } | { ok: false; detail: string; code?: RejectionCode }) & StepCommandOutput
+export type CheckRunner = "local" | "waiting"
+
+export type CheckOutcome =
+  | ({ ok: true; waiting?: false } & StepCommandOutput)
+  | ({ ok: false; waiting?: false; detail: string; code?: RejectionCode } & StepCommandOutput)
+  | ({ ok: false; waiting: true; detail: string; token?: string; url?: string } & StepCommandOutput)
 
 /** Resolve the ONE project check command: inline > BAY_CHECK > git config
  *  bay.check > none (unset — checks are opt-in). */
 export async function resolveCheck(check: string | undefined, configCwd: string): Promise<string | undefined> {
   const source = createGitConfigSource(configCwd)
   return await resolveOption(check, "check", source)
+}
+
+export async function resolveCheckRunner(checkRunner: string | undefined, configCwd: string): Promise<CheckRunner> {
+  const source = createGitConfigSource(configCwd)
+  const raw = (await resolveOption(checkRunner, "check.runner", source, "local"))!.trim().toLowerCase()
+  if (raw === "" || raw === "local") return "local"
+  if (raw === "waiting") return "waiting"
+  throw new Error(`bay: unknown bay.check.runner '${raw}' (supported: local, waiting)`)
+}
+
+function parseWaitingMetadata(stdout: string, stderr: string): { detail: string; token?: string; url?: string } {
+  for (const line of [...stdout.split("\n"), ...stderr.split("\n")].reverse()) {
+    const trimmed = line.trim()
+    if (trimmed === "") continue
+    try {
+      const parsed = JSON.parse(trimmed) as { detail?: unknown; message?: unknown; token?: unknown; url?: unknown }
+      if (parsed && typeof parsed === "object") {
+        const detail =
+          typeof parsed.detail === "string"
+            ? parsed.detail
+            : typeof parsed.message === "string"
+              ? parsed.message
+              : tail(stdout || stderr) || "waiting for external check"
+        return {
+          detail,
+          ...(typeof parsed.token === "string" && parsed.token !== "" ? { token: parsed.token } : {}),
+          ...(typeof parsed.url === "string" && parsed.url !== "" ? { url: parsed.url } : {}),
+        }
+      }
+    } catch {
+      // Mixed logs are expected; the plain text fallback below keeps them useful.
+    }
+  }
+  return { detail: tail(stdout || stderr) || "waiting for external check" }
 }
 
 /** Run the resolved check command in `cwd` — the PR's own bay when it still
@@ -50,6 +89,19 @@ export async function runProjectCheck(check: string | undefined, cwd: string): P
   const metadata = { exitCode: code, durationMs: Date.now() - start, stdout: out, stderr: err }
   if (code !== 0) return { ok: false, detail: `check '${check}' failed (exit ${code}): ${tail(err || out)}`, ...metadata }
   return { ok: true, ...metadata }
+}
+
+export async function runWaitingCheckLauncher(check: string, cwd: string): Promise<CheckOutcome> {
+  const start = Date.now()
+  const proc = Bun.spawn(["sh", "-c", check], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  const metadata = { exitCode: code, durationMs: Date.now() - start, stdout, stderr }
+  if (code !== 0) return { ok: false, detail: `check launcher '${check}' failed (exit ${code}): ${tail(stderr || stdout)}`, ...metadata }
+  return { ok: false, waiting: true, ...parseWaitingMetadata(stdout, stderr), ...metadata }
 }
 
 // ---------- deploy ----------

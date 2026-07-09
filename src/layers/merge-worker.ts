@@ -19,8 +19,17 @@ import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from 
 import { batchLandEvidence } from "./batch-build.ts"
 import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
-import { type CheckOutcome, resolveCheck, resolveDeployBaseRef, runDeploy, runMerge, runProjectCheck } from "./pipeline.ts"
-import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
+import {
+  type CheckOutcome,
+  resolveCheck,
+  resolveCheckRunner,
+  resolveDeployBaseRef,
+  runDeploy,
+  runMerge,
+  runProjectCheck,
+  runWaitingCheckLauncher,
+} from "./pipeline.ts"
+import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted, stepWaiting } from "./steps.ts"
 
 /**
  * withMergeWorker — the pipeline layer (docs/model.md § Verbs): `check`,
@@ -70,6 +79,9 @@ export type MergeWorkerOptions = {
    *  check half (spec § Check provider). Inline > BAY_CHECK > git config
    *  bay.check > none (stage skipped with an explicit pass-through). */
   check?: string
+  /** Check runner mode. `local` runs bay.check to a verdict; `waiting` treats
+   *  bay.check as an external-runner launcher and parks the PR in checking. */
+  checkRunner?: string
   /** cwd for ambient (gitconfig) resolution of `bay.merge`/`bay.check`.
    *  Defaults to mainRepo, then process.cwd(). Not consulted at all when the
    *  matching option is inline. */
@@ -121,6 +133,7 @@ async function maybeReuseSuccessfulCheck(
 ): Promise<BayEvent[] | undefined> {
   const mainRepo = opts.mainRepo ?? opts.configCwd
   if (mainRepo === undefined) return undefined
+  if ((await resolveCheckRunner(opts.checkRunner, opts.configCwd ?? mainRepo)) !== "local") return undefined
   const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
   if (check === undefined || check.trim() === "") return undefined
   const refs = { ...(await collectStepRefs(mainRepo, run.target)), configHash: stepConfigHash("check", check) }
@@ -175,12 +188,19 @@ async function runCheckStep(
   scratch: ScratchWorkspaces | undefined,
 ): Promise<CheckStepOutcome> {
   const mainRepo = resolveMainRepo(opts)
+  const runner = await resolveCheckRunner(opts.checkRunner, opts.configCwd ?? mainRepo)
   const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
-  if (check === undefined || check.trim() === "") return { ok: true, skipped: true }
-  const configHash = stepConfigHash("check", check)
+  if (check === undefined || check.trim() === "") {
+    if (runner === "waiting") {
+      return { ok: false, code: "check-failed", detail: "bay.check.runner=waiting requires bay.check to launch the external check" }
+    }
+    return { ok: true, skipped: true }
+  }
+  const configHash = stepConfigHash("check", runner === "local" ? check : `${runner}\0${check}`)
   const target = queueTarget(state, pr)
+  const runCheck = runner === "waiting" ? runWaitingCheckLauncher : runProjectCheck
   const bayPath = openBayPath(state, target)
-  if (bayPath !== undefined) return { ...(await runProjectCheck(check, bayPath)), configHash }
+  if (bayPath !== undefined) return { ...(await runCheck(check, bayPath)), configHash }
   if (scratch !== undefined) {
     let lease: Awaited<ReturnType<ScratchWorkspaces["acquire"]>>
     try {
@@ -190,7 +210,7 @@ async function runCheckStep(
       throw err
     }
     try {
-      return { ...(await runProjectCheck(check, lease.path)), configHash }
+      return { ...(await runCheck(check, lease.path)), configHash }
     } finally {
       await lease.dispose()
     }
@@ -198,7 +218,7 @@ async function runCheckStep(
   // Library path with no mainRepo (no repo to scratch from): the legacy cwd
   // fallback. CLI hosts always set mainRepo, so bayless PRs get true-tree
   // checks there.
-  return { ...(await runProjectCheck(check, mainRepo)), configHash }
+  return { ...(await runCheck(check, mainRepo)), configHash }
 }
 
 function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspaces | undefined): EffectHandler {
@@ -210,8 +230,13 @@ function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspace
     if (outcome.skipped !== true) {
       const run = { step: "check" as const, pr: d.pr, target: queueTarget(state, d.pr) }
       events.push(stepStarted(bay, run, effect.cause!))
+      if (outcome.waiting === true) {
+        events.push(await stepWaitingWithOutput(bay, opts, run, outcome, effect.cause!))
+        return events
+      }
       events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!))
     }
+    if (outcome.waiting === true) return events
     if (!outcome.ok) {
       events.push(
         stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
@@ -292,6 +317,29 @@ async function stepFinishedWithOutput(
     cause,
     stepMetadata(output, artifacts, error, { configHash: outcome.configHash, skipped: outcome.skipped }),
   )
+}
+
+async function stepWaitingWithOutput(
+  bay: BayRuntime,
+  opts: MergeWorkerOptions,
+  run: StepRunData,
+  outcome: Extract<CheckStepOutcome, { waiting: true }>,
+  cause: NonNullable<Effect["cause"]>,
+): Promise<BayEvent> {
+  const mainRepo = opts.mainRepo ?? opts.configCwd
+  const output = mainRepo === undefined ? outcome : await collectStepRefs(mainRepo, run.target, outcome)
+  const artifacts = await writeStepArtifacts({ mainRepo, cause, run, output })
+  return stepWaiting(bay, run, cause, {
+    detail: outcome.detail,
+    ...(outcome.token !== undefined ? { token: outcome.token } : {}),
+    ...(outcome.url !== undefined ? { url: outcome.url } : {}),
+    ...(output.exitCode !== undefined ? { exitCode: output.exitCode } : {}),
+    ...(output.durationMs !== undefined ? { durationMs: output.durationMs } : {}),
+    ...(outcome.configHash !== undefined ? { configHash: outcome.configHash } : {}),
+    ...(artifacts.length > 0 ? { artifacts } : {}),
+    ...(output.baseSha !== undefined ? { baseSha: output.baseSha } : {}),
+    ...(output.headSha !== undefined ? { headSha: output.headSha } : {}),
+  })
 }
 
 async function runMergeStep(
@@ -445,8 +493,13 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
         const outcome = await runCheckStep(checkState, d.pr, opts, scratch)
         if (outcome.skipped !== true) {
           events.push(stepStarted(bay, run, effect.cause!))
+          if (outcome.waiting === true) {
+            events.push(await stepWaitingWithOutput(bay, opts, run, outcome, effect.cause!))
+            return events
+          }
           events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!))
         }
+        if (outcome.waiting === true) return events
         if (!outcome.ok) {
           events.push(
             stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
