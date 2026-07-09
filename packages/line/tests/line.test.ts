@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { createMemoryEventStore, createYrd, pipe, withEffects, type EffectOutcome } from "@yrd/core"
 import { withBays, type BayWorkspaceAdapter } from "@yrd/bay"
 import {
+  withBatch,
   withLine,
   withMerge,
   withStep,
@@ -14,6 +15,7 @@ import {
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
+const UPDATED = "3".repeat(40)
 
 type CheckResult = { checked: true }
 type CheckedShape = AddStepResult<SubmissionShape, "check", CheckResult>
@@ -32,6 +34,12 @@ function workspace(): BayWorkspaceAdapter {
         output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
       }
     },
+    refresh(input) {
+      return {
+        status: "passed",
+        output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
+      }
+    },
     deprovision() {
       return { status: "passed", output: {} }
     },
@@ -40,6 +48,7 @@ function workspace(): BayWorkspaceAdapter {
 
 function createLineApp(
   options: {
+    batch?: false | number
     check?: (input: StepExecution<SubmissionShape>) => EffectOutcome<CheckResult>
     merge?: (input: StepExecution<CheckedShape>) => EffectOutcome<{ commit: string; baseSha: string }>
     deploy?: (input: StepExecution<MergedShape>) => EffectOutcome<{ environment: string }>
@@ -50,6 +59,7 @@ function createLineApp(
     withEffects(),
     withBays({ workspace: workspace() }),
     withLine(),
+    withBatch(options.batch ?? false),
     withStep(
       "check",
       (input: StepExecution<SubmissionShape>): EffectOutcome<CheckResult> =>
@@ -84,6 +94,19 @@ async function submitBranch(app: ReturnType<typeof createLineApp>, branch = "tas
 const runOptions = { executor: "local", leaseMs: 60_000 }
 
 describe("withLine", () => {
+  it.each([
+    [false, 1],
+    [0, 1],
+    [1, 1],
+    [4, 4],
+  ] as const)("normalizes batch setting %s to max size %i", async (batch, expected) => {
+    expect((await createLineApp({ batch }).state()).lines.batchSize).toBe(expected)
+  })
+
+  it("rejects a non-integer batch size", () => {
+    expect(() => createLineApp({ batch: 1.5 })).toThrow("batch size must be false or a non-negative integer")
+  })
+
   it("registers typed steps in state and integrates the exact pinned revision", async () => {
     const app = createLineApp()
     const submission = await submitBranch(app)
@@ -97,6 +120,17 @@ describe("withLine", () => {
       op: "line.integrate",
       args: { submission: submission.id },
     })
+    expect(
+      app.commandRegistry
+        .entries()
+        .filter((entry) => entry.path[0] === "line")
+        .map((entry) => [entry.path.join("."), entry.command.visibility]),
+    ).toEqual([
+      ["line.integrate", "public"],
+      ["line.advance", "internal"],
+      ["line.resume", "internal"],
+      ["line.isolate", "internal"],
+    ])
 
     const run = await app.line.integrate({ submission: submission.id }, runOptions)
     expect(run.status).toBe("passed")
@@ -177,6 +211,40 @@ describe("withLine", () => {
     expect(await app.line.run(waiting.id, runOptions)).toMatchObject({ status: "passed" })
   })
 
+  it("refuses to continue a parked run after its pinned submission revision changes", async () => {
+    let merged = false
+    const app = createLineApp({
+      check: () => ({ status: "waiting", token: "remote-stale" }),
+      merge: () => {
+        merged = true
+        return { status: "passed", output: { commit: MERGED, baseSha: MERGED } }
+      },
+    })
+    const submission = await submitBranch(app, "task/stale")
+    const waiting = await app.line.integrate({ submission: submission.id }, runOptions)
+    const effectId = waiting.steps[0]!.effectId!
+    const effectRun = (await app.state()).effects.runs[effectId]!
+
+    await app.command(app.commands.bay.intake, { branch: submission.branch, headSha: UPDATED, base: "main" })
+    await app.command(app.commands.effect.finish, {
+      id: effectId,
+      attempt: effectRun.attempt,
+      token: "remote-stale",
+      outcome: { status: "passed", output: { checked: true } },
+    })
+
+    expect(await app.line.run(waiting.id, runOptions)).toMatchObject({
+      status: "failed",
+      error: { code: "stale-submission" },
+    })
+    expect(merged).toBe(false)
+    expect((await app.state()).bays.submissions[submission.id]).toMatchObject({
+      revision: 2,
+      headSha: UPDATED,
+      status: "pushed",
+    })
+  })
+
   it("records a post-merge deploy failure without revoking integration", async () => {
     const app = createLineApp({
       deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
@@ -188,6 +256,100 @@ describe("withLine", () => {
     expect((await app.state()).bays.submissions[submission.id]).toMatchObject({
       status: "integrated",
       integration: { commit: MERGED },
+    })
+  })
+
+  it("runs an eligible all-pass batch once and integrates every pinned revision", async () => {
+    const checked: string[][] = []
+    const merged: string[][] = []
+    const app = createLineApp({
+      batch: 4,
+      check: (input) => {
+        checked.push(input.submissions.map((submission) => submission.id))
+        return { status: "passed", output: { checked: true } }
+      },
+      merge: (input) => {
+        merged.push(input.submissions.map((submission) => submission.id))
+        return { status: "passed", output: { commit: MERGED, baseSha: MERGED } }
+      },
+    })
+    const first = await submitBranch(app, "task/one")
+    const second = await submitBranch(app, "task/two")
+    const third = await submitBranch(app, "task/three")
+
+    const runs = await app.line.integrate({ submissions: [] }, runOptions)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({
+      status: "passed",
+      submissions: [
+        { id: first.id, revision: 1, headSha: HEAD },
+        { id: second.id, revision: 1, headSha: HEAD },
+        { id: third.id, revision: 1, headSha: HEAD },
+      ],
+    })
+    expect(checked).toEqual([[first.id, second.id, third.id]])
+    expect(merged).toEqual([[first.id, second.id, third.id]])
+    expect(Object.values((await app.state()).bays.submissions).map((submission) => submission.status)).toEqual([
+      "integrated",
+      "integrated",
+      "integrated",
+    ])
+  })
+
+  it("recursively bisects a red batch and rejects only the isolated failure", async () => {
+    const checked: string[][] = []
+    const app = createLineApp({
+      batch: 4,
+      check: (input) => {
+        const ids = input.submissions.map((submission) => submission.id)
+        checked.push(ids)
+        return ids.includes("S3")
+          ? { status: "failed", error: { code: "check-failed", message: "bad submission" } }
+          : { status: "passed", output: { checked: true } }
+      },
+    })
+    await submitBranch(app, "task/one")
+    await submitBranch(app, "task/two")
+    await submitBranch(app, "task/bad")
+    await submitBranch(app, "task/four")
+
+    const runs = await app.line.integrate({ submissions: [] }, runOptions)
+    const submissions = (await app.state()).bays.submissions
+
+    expect(checked).toEqual([["S1", "S2", "S3", "S4"], ["S1", "S2"], ["S3", "S4"], ["S3"], ["S4"]])
+    expect(runs.map((run) => [run.submissions.map((submission) => submission.id), run.status])).toEqual([
+      [["S1", "S2", "S3", "S4"], "failed"],
+      [["S1", "S2"], "passed"],
+      [["S3", "S4"], "failed"],
+      [["S3"], "failed"],
+      [["S4"], "passed"],
+    ])
+    expect(
+      Object.fromEntries(Object.values(submissions).map((submission) => [submission.id, submission.status])),
+    ).toEqual({
+      S1: "integrated",
+      S2: "integrated",
+      S3: "rejected",
+      S4: "integrated",
+    })
+  })
+
+  it("does not bisect a post-merge batch failure or revoke any integration", async () => {
+    const app = createLineApp({
+      batch: 4,
+      deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
+    })
+    const first = await submitBranch(app, "task/one")
+    const second = await submitBranch(app, "task/two")
+
+    const runs = await app.line.integrate({ submissions: [first.id, second.id] }, runOptions)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ status: "failed", error: { code: "deploy-failed" } })
+    expect((await app.state()).bays.submissions).toMatchObject({
+      [first.id]: { status: "integrated", integration: { commit: MERGED } },
+      [second.id]: { status: "integrated", integration: { commit: MERGED } },
     })
   })
 

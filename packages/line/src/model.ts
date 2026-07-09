@@ -3,6 +3,7 @@ import type { EffectError } from "@yrd/core"
 
 export type LineRunId = string
 export type StepName = string
+export type BatchConfig = false | number
 
 export type SubmissionSnapshot = Pick<
   Submission,
@@ -16,6 +17,7 @@ export type IntegrationProof = {
 
 export type SubmissionShape = {
   submission: SubmissionSnapshot
+  submissions: SubmissionSnapshot[]
   results: Record<string, unknown>
 }
 
@@ -54,6 +56,7 @@ export type StepEvidence = {
 export type LineRun = {
   id: LineRunId
   submission: SubmissionSnapshot
+  submissions: SubmissionSnapshot[]
   base: string
   status: "running" | "waiting" | "passed" | "failed"
   selected: StepName[]
@@ -63,9 +66,12 @@ export type LineRun = {
   startedAt: string
   finishedAt?: string
   error?: EffectError
+  parent?: LineRunId
+  isolationPart?: 0 | 1
 }
 
 export type LinesState = {
+  batchSize: number
   installed: Record<StepName, InstalledStep>
   runs: Record<LineRunId, LineRun>
 }
@@ -77,8 +83,8 @@ export type LineSummary = {
   finished: LineRun[]
 }
 
-export function emptyLinesState(): LinesState {
-  return { installed: {}, runs: {} }
+export function emptyLinesState(batchSize = 1): LinesState {
+  return { batchSize, installed: {}, runs: {} }
 }
 
 export function lineSummary(state: LinesState, base: string): LineSummary {

@@ -19,6 +19,11 @@ export type CommandEvidence = {
   detail?: string
 }
 
+export type GitCheckEvidence = CommandEvidence & {
+  baseSha: string
+  candidateSha: string
+}
+
 export type ConfiguredCommandOptions<Shape extends SubmissionShape> = {
   command: string
   cwd: string | ((input: StepExecution<Shape>) => string | Promise<string>)
@@ -122,9 +127,11 @@ export function configuredCommandStep<Shape extends SubmissionShape>(
       YRD_BASE_SHA: input.submission.baseSha,
       YRD_RUN: input.run,
       YRD_SHA: input.submission.headSha,
+      YRD_SHAS: JSON.stringify(input.submissions.map((submission) => submission.headSha)),
       YRD_STEP: input.step,
       YRD_SUBMISSION: input.submission.id,
-      YRD_TARGET: input.submission.headSha,
+      YRD_SUBMISSIONS: JSON.stringify(input.submissions.map((submission) => submission.id)),
+      YRD_TARGET: input.targetSha ?? input.submission.headSha,
       ...options.variables?.(input),
     }
     const result = await runCommand(options.command, cwd, variables)
@@ -180,29 +187,76 @@ async function withScratch<Result>(repo: string, ref: string, run: (path: string
   }
 }
 
+async function prepareCandidate(path: string, input: StepExecution): Promise<EffectOutcome<string>> {
+  for (const submission of input.submissions) {
+    const merged = await git(path, ["merge", "--no-ff", "--no-edit", submission.headSha], true)
+    if (merged.code !== 0) {
+      await git(path, ["merge", "--abort"], true)
+      return {
+        status: "failed",
+        error: {
+          code: "candidate-conflict",
+          message: `submission '${submission.id}' could not be applied to the line candidate: ${merged.stderr || merged.stdout}`,
+        },
+      }
+    }
+  }
+  return { status: "passed", output: await commit(path, "HEAD") }
+}
+
 export type GitCheckOptions = {
   repo: string
   command: string
   artifactRoot?: string
 }
 
-export function gitCheckStep(options: GitCheckOptions): StepRunner<SubmissionShape, CommandEvidence> {
+export function gitCheckStep(options: GitCheckOptions): StepRunner<SubmissionShape, GitCheckEvidence> {
   const repo = resolve(options.repo)
-  return async (input, context) =>
-    await withScratch(repo, input.submission.headSha, async (path) => {
-      const runner = configuredCommandStep<SubmissionShape>({
-        command: options.command,
-        cwd: path,
-        purpose: "check",
-        artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+  return async (input, context) => {
+    try {
+      const branch = input.submission.base
+      await git(repo, ["check-ref-format", "--branch", branch])
+      const baseSha = await commit(repo, `refs/heads/${branch}`)
+      return await withScratch(repo, baseSha, async (path) => {
+        const candidate = await prepareCandidate(path, input)
+        if (candidate.status !== "passed") return candidate
+        const runner = configuredCommandStep<SubmissionShape>({
+          command: options.command,
+          cwd: path,
+          purpose: "check",
+          artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+        })
+        const outcome = await runner({ ...input, targetSha: candidate.output }, context)
+        return outcome.status === "passed"
+          ? {
+              status: "passed",
+              output: { ...outcome.output, baseSha, candidateSha: candidate.output },
+            }
+          : outcome
       })
-      return await runner(input, context)
-    })
+    } catch (cause) {
+      return {
+        status: "failed",
+        error: { code: "check-failed", message: cause instanceof Error ? cause.message : String(cause) },
+      }
+    }
+  }
 }
 
-export type GitMergeOptions = {
+export type GitMergeOptions<Shape extends SubmissionShape = SubmissionShape> = {
   repo: string
   command?: string
+  checkedBaseSha?: (input: StepExecution<Shape>) => string | undefined
+}
+
+function checkedBaseFrom(shape: SubmissionShape): string | undefined {
+  const values = Object.values(shape.results).reverse()
+  for (const value of values) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue
+    const baseSha = (value as { baseSha?: unknown }).baseSha
+    if (typeof baseSha === "string" && /^[0-9a-f]{40,64}$/iu.test(baseSha)) return baseSha
+  }
+  return undefined
 }
 
 async function checkedOutWorktree(repo: string, branchRef: string): Promise<string | undefined> {
@@ -224,18 +278,17 @@ async function mergeAt(
   command: string | undefined,
 ): Promise<EffectOutcome<IntegrationProof>> {
   if (command === undefined) {
-    const merged = await git(path, ["merge", "--no-ff", "--no-edit", input.submission.headSha], true)
-    if (merged.code !== 0) {
-      await git(path, ["merge", "--abort"], true)
-      return { status: "failed", error: { code: "merge-conflict", message: merged.stderr || merged.stdout } }
-    }
+    const candidate = await prepareCandidate(path, input)
+    if (candidate.status !== "passed") return candidate
   } else {
     validateCommand(command, "merge")
     const result = await runCommand(command, path, {
       YRD_BASE: branch,
       YRD_BASE_SHA: baseSha,
       YRD_SHA: input.submission.headSha,
+      YRD_SHAS: JSON.stringify(input.submissions.map((submission) => submission.headSha)),
       YRD_SUBMISSION: input.submission.id,
+      YRD_SUBMISSIONS: JSON.stringify(input.submissions.map((submission) => submission.id)),
       YRD_TARGET: input.submission.headSha,
     })
     if (result.exitCode !== 0) {
@@ -246,14 +299,20 @@ async function mergeAt(
     }
   }
   const landed = await commit(path, "HEAD")
-  const ancestor = await git(path, ["merge-base", "--is-ancestor", input.submission.headSha, landed], true)
-  return ancestor.code === 0
-    ? { status: "passed", output: { commit: landed, baseSha: landed } }
-    : { status: "failed", error: { code: "lying-merge", message: "submitted commit is not in merge result" } }
+  for (const submission of input.submissions) {
+    const ancestor = await git(path, ["merge-base", "--is-ancestor", submission.headSha, landed], true)
+    if (ancestor.code !== 0) {
+      return {
+        status: "failed",
+        error: { code: "lying-merge", message: `submitted commit '${submission.headSha}' is not in merge result` },
+      }
+    }
+  }
+  return { status: "passed", output: { commit: landed, baseSha: landed } }
 }
 
 export function gitMergeStep<Shape extends SubmissionShape>(
-  options: GitMergeOptions,
+  options: GitMergeOptions<Shape>,
 ): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   return async (input): Promise<EffectOutcome<IntegrationProof>> => {
@@ -262,6 +321,16 @@ export function gitMergeStep<Shape extends SubmissionShape>(
       await git(repo, ["check-ref-format", "--branch", branch])
       const baseRef = `refs/heads/${branch}`
       const baseSha = await commit(repo, baseRef)
+      const checkedBaseSha = options.checkedBaseSha?.(input) ?? checkedBaseFrom(input.shape)
+      if (checkedBaseSha !== undefined && checkedBaseSha !== baseSha) {
+        return {
+          status: "failed",
+          error: {
+            code: "stale-check",
+            message: `line '${branch}' moved from checked base '${checkedBaseSha}' to '${baseSha}'`,
+          },
+        }
+      }
       const checkedOut = await checkedOutWorktree(repo, baseRef)
       if (checkedOut !== undefined) {
         const status = await git(checkedOut, ["status", "--porcelain"])
@@ -271,12 +340,22 @@ export function gitMergeStep<Shape extends SubmissionShape>(
         if ((await commit(checkedOut, "HEAD")) !== baseSha) {
           return { status: "failed", error: { code: "stale-base", message: `${branch} moved before merge` } }
         }
-        return await mergeAt(checkedOut, input, branch, baseSha, options.command)
       }
       return await withScratch(repo, baseSha, async (path) => {
         const result = await mergeAt(path, input, branch, baseSha, options.command)
         if (result.status !== "passed") return result
         const landed = result.output.commit
+        if (checkedOut !== undefined) {
+          const status = await git(checkedOut, ["status", "--porcelain"])
+          if (status.stdout !== "" || (await commit(checkedOut, "HEAD")) !== baseSha) {
+            return { status: "failed", error: { code: "stale-base", message: `${branch} moved before merge` } }
+          }
+          const moved = await git(checkedOut, ["merge", "--ff-only", landed], true)
+          if (moved.code !== 0) {
+            return { status: "failed", error: { code: "stale-base", message: moved.stderr || "base branch moved" } }
+          }
+          return result
+        }
         const moved = await git(repo, ["update-ref", baseRef, landed, baseSha], true)
         if (moved.code !== 0) {
           return { status: "failed", error: { code: "stale-base", message: moved.stderr || "base branch moved" } }
