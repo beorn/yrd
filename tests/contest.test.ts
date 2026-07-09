@@ -2,7 +2,16 @@ import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { applyCostAdapter, builtInAgentCommand, contestRecords, extractMetrics, withContests } from "../src/contest.ts"
+import {
+  applyCostAdapter,
+  builtInAgentCommand,
+  contestRecords,
+  extractMetrics,
+  parseContestAgentCost,
+  parseContestCostRates,
+  resolveContestCostAdapters,
+  withContests,
+} from "../src/contest.ts"
 import { createGitbay, createJsonlJournal, pipe } from "../src/index.ts"
 import type { BayEvent, BayStore } from "../src/index.ts"
 
@@ -73,6 +82,27 @@ describe("contest metrics", () => {
       costUsd: 0.01,
       costSource: "runner-output",
     })
+  })
+
+  it("parses and resolves explicit contest cost adapters", async () => {
+    expect(parseContestCostRates("input:1.25,output:10,cached-input:0.125")).toEqual({
+      inputTokensUsdPerMillion: 1.25,
+      outputTokensUsdPerMillion: 10,
+      cachedInputTokensUsdPerMillion: 0.125,
+    })
+    expect(parseContestAgentCost("codex=input=1,reasoning=3")).toEqual([
+      "codex",
+      { inputTokensUsdPerMillion: 1, reasoningOutputTokensUsdPerMillion: 3 },
+    ])
+
+    const source = {
+      async get(key: string): Promise<string | undefined> {
+        return key === "contest.cost.claude" ? "input:2,output:4" : undefined
+      },
+    }
+    const adapters = await resolveContestCostAdapters(["codex", "claude"], new Map([["codex", { inputTokensUsdPerMillion: 9 }]]), source)
+    expect(adapters.get("codex")).toEqual({ inputTokensUsdPerMillion: 9 })
+    expect(adapters.get("claude")).toEqual({ inputTokensUsdPerMillion: 2, outputTokensUsdPerMillion: 4 })
   })
 })
 

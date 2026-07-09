@@ -256,7 +256,9 @@ comma-separated lists still parse for compatibility. Custom competitors can
 provide an explicit command. Runners that emit tokens but not dollars can use
 explicit rates with `--agent-cost <agent=field:usd-per-million,...>`, for
 example `--agent-cost codex=input:1.25,output:10,cached-input:0.125`.
-Unconfigured dollar cost stays missing.
+Repository config can set the same rates with `bay.contest.cost.<agent>`.
+Runner-reported dollar cost wins over configured rates; CLI rates override
+repo config. Unconfigured dollar cost stays missing.
 
 ### Plain Git
 
@@ -276,6 +278,7 @@ git config bay.merge '<command>'          # merge override; {branch}, {base}, {p
 git config bay.deploy '<command>'         # deploy step after merge; exit 0 passes
 git config bay.issue '<command>'          # validate bay names; {name}
 git config bay.review '<command>'         # review gate; {pr}, {branch}, {base}
+git config bay.contest.cost.codex 'input:1.25,output:10,cached-input:0.125'
 git config bay.autoSubmit true|false      # default false
 git config bay.autoMerge true|false       # default true
 ```

@@ -234,8 +234,10 @@ stdout/stderr are log artifacts. Token and cost metrics are extracted
 best-effort from runner JSON output, including cache and reasoning token fields
 when runners expose them: Claude's `--output-format json` currently reports
 dollar cost, while Codex JSONL reports token fields but may not report a cost
-field. `yrd task compete --agent-cost <agent=field:usd-per-million,...>` can
-calculate cost from explicit user/plugin-supplied rates; otherwise the record
+field. `yrd task compete --agent-cost <agent=field:usd-per-million,...>` and
+repo config keys such as `bay.contest.cost.codex=input:1.25,output:10` can
+calculate cost from explicit user/plugin-supplied rates. CLI rates override
+repo config, runner-reported dollars override both, and otherwise the record
 keeps missing cost as missing, not guessed.
 
 ## Integration boundaries

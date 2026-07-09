@@ -24,10 +24,11 @@ repo in hub/yrd/reference or in @yrd beads.
   `BayState.slices.contests`, so contest state is now available through the
   plugin state system as well as the CLI read model.
 - Contest metrics capture explicit runner token, cache-token,
-  reasoning-token, duration, cost, and evaluator evidence. `--agent-cost`
-  supplies explicit per-agent USD-per-million-token adapters for runners that
-  emit tokens but not dollars. Missing dollar cost remains missing rather than
-  estimated.
+  reasoning-token, duration, cost, and evaluator evidence. `--agent-cost` and
+  `bay.contest.cost.<agent>` supply explicit per-agent USD-per-million-token
+  adapters for runners that emit tokens but not dollars. CLI rates override
+  repo config, runner-reported dollars override both, and missing dollar cost
+  remains missing rather than estimated.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
 - `bay.check.runner=waiting` treats `bay.check` as an external check launcher:
@@ -127,8 +128,8 @@ Rules:
 1. Contest hardening
    - Route more contest command behavior through the with* plugin state/effect
      surface; keep contest.json as a rebuildable/read-model cache.
-   - Move explicit cost adapters into plugin/config surfaces beyond the first
-     `--agent-cost` CLI option; keep missing cost explicit, never guessed.
+   - Keep cost adapter parsing shared for CLI/config/plugin consumers and keep
+     missing cost explicit, never guessed.
    - Add richer evaluator plugins for tests, review, diff quality, performance,
      and human scorecards.
    - Keep winner selection manual-first; automatic ranking should be a plugin

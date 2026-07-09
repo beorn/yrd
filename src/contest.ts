@@ -2,7 +2,7 @@ import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { definePlugin } from "./core.ts"
-import type { BayEvent, BayPlugin, BayState, Cause, GitbayEvent } from "./types.ts"
+import type { BayEvent, BayPlugin, BayState, Cause, ConfigSource, GitbayEvent } from "./types.ts"
 import { createJsonlJournal } from "./journal.ts"
 import { git, repoScopedCleanEnv } from "./layers/git.ts"
 import { bayEventsPath } from "./paths.ts"
@@ -29,6 +29,70 @@ export type ContestCostRates = {
   outputTokensUsdPerMillion?: number
   reasoningOutputTokensUsdPerMillion?: number
   totalTokensUsdPerMillion?: number
+}
+
+export function parseContestCostField(raw: string): keyof ContestCostRates {
+  const normalized = raw.trim().toLowerCase().replace(/[_\s]+/g, "-")
+  if (normalized === "input" || normalized === "input-tokens" || normalized === "prompt") return "inputTokensUsdPerMillion"
+  if (normalized === "cached-input" || normalized === "cached-input-tokens" || normalized === "cached-prompt") {
+    return "cachedInputTokensUsdPerMillion"
+  }
+  if (normalized === "cache-creation-input" || normalized === "cache-create" || normalized === "cache-creation") {
+    return "cacheCreationInputTokensUsdPerMillion"
+  }
+  if (normalized === "cache-read-input" || normalized === "cache-read") return "cacheReadInputTokensUsdPerMillion"
+  if (normalized === "output" || normalized === "output-tokens" || normalized === "completion") return "outputTokensUsdPerMillion"
+  if (normalized === "reasoning-output" || normalized === "reasoning") return "reasoningOutputTokensUsdPerMillion"
+  if (normalized === "total" || normalized === "total-tokens") return "totalTokensUsdPerMillion"
+  throw new Error(`unknown cost field '${raw}'`)
+}
+
+export function parseContestCostRates(raw: string): ContestCostRates {
+  const rates: ContestCostRates = {}
+  const fields = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+  if (fields.length === 0) throw new Error("requires at least one rate")
+  for (const field of fields) {
+    const sep = field.includes(":") ? field.indexOf(":") : field.indexOf("=")
+    if (sep <= 0) throw new Error("rates use <field:usd-per-million>")
+    const key = parseContestCostField(field.slice(0, sep))
+    const value = Number(field.slice(sep + 1))
+    if (!Number.isFinite(value) || value < 0) throw new Error(`${field} must be a non-negative number`)
+    rates[key] = value
+  }
+  return rates
+}
+
+export function parseContestAgentCost(raw: string): [string, ContestCostRates] {
+  const eq = raw.indexOf("=")
+  if (eq <= 0) throw new Error("requires <name=field:usd-per-million,...>")
+  const name = raw.slice(0, eq).trim()
+  if (name === "") throw new Error("requires an agent name")
+  return [name, parseContestCostRates(raw.slice(eq + 1))]
+}
+
+export async function resolveContestCostAdapters(
+  agents: string[],
+  inline: Map<string, ContestCostRates>,
+  source: ConfigSource,
+): Promise<Map<string, ContestCostRates>> {
+  const adapters = new Map(inline)
+  for (const agent of agents) {
+    if (adapters.has(agent)) continue
+    const raw = await source.get(`contest.cost.${agent}`)
+    if (raw === undefined) continue
+    const trimmed = raw.trim()
+    if (trimmed === "" || trimmed === "none") continue
+    try {
+      adapters.set(agent, parseContestCostRates(trimmed))
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`bay.contest.cost.${agent}: ${message}`)
+    }
+  }
+  return adapters
 }
 
 export type ContestEval = {

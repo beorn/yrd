@@ -1142,6 +1142,38 @@ describe("yrd CLI — contest projection", () => {
       submit: { code: 0 },
     })
   }, 15_000)
+
+  it("reads contest cost adapters from repo config", async () => {
+    await must(["git", "-C", demo, "config", "bay.contest.cost.fake-alpha", "input:1000,output:2000"], demo, env)
+    const alpha =
+      `printf '%s\\n' '{"usage":{"input_tokens":10,"output_tokens":5}}'; ` +
+      `printf 'alpha\\n' > result.txt; git add result.txt; git commit -qm 'feat: alpha'`
+
+    const competed = await must(
+      [
+        process.execPath,
+        YRD_BIN,
+        "task",
+        "compete",
+        "config-cost",
+        "--agents",
+        "fake-alpha",
+        "--bays",
+        "1",
+        "--agent-cmd",
+        `fake-alpha=${alpha}`,
+        "--json",
+      ],
+      demo,
+      env,
+    )
+
+    const record = JSON.parse(competed.stdout) as { attempts: { agent: string; metrics: { costUsd?: number; costSource?: string } }[] }
+    expect(record.attempts.find((attempt) => attempt.agent === "fake-alpha")?.metrics).toMatchObject({
+      costUsd: 0.02,
+      costSource: "configured:fake-alpha",
+    })
+  }, 15_000)
 })
 
 describe("git bay CLI — issue tracking inbound: bay.issue at open AND adopt", () => {

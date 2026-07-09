@@ -5,9 +5,11 @@ import {
   createContestEventAppender,
   formatContest,
   nextContestId,
+  parseContestAgentCost,
   parsePrFromText,
   readContest,
   resolveRepoPaths,
+  resolveContestCostAdapters,
   runAttempt,
   runCommand,
   sanitizePart,
@@ -66,7 +68,8 @@ USAGE
 Built-in contest agents: codex, claude
 Agent lists use ag-style provider-list syntax; "ag codex/claude" fans out into attempts.
 Custom commands run with YRD_PROMPT, YRD_TASK, YRD_BAY, YRD_AGENT, and YRD_CONTEST_ATTEMPT in env.
-Cost adapters are explicit rates only: e.g. --agent-cost codex=input:1.25,output:10,cached-input:0.125
+Cost adapters are explicit rates only: --agent-cost codex=input:1.25,output:10,cached-input:0.125
+Repo config can set the same rates with: git config bay.contest.cost.codex 'input:1.25,output:10'
 `
 
 const CONTEST_USAGE = `yrd contest — contest lifecycle
@@ -745,43 +748,13 @@ function parseAgentCommand(raw: string): [string, string] {
   return [name, command]
 }
 
-function parseCostField(raw: string): keyof ContestCostRates {
-  const normalized = raw.trim().toLowerCase().replace(/[_\s]+/g, "-")
-  if (normalized === "input" || normalized === "input-tokens" || normalized === "prompt") return "inputTokensUsdPerMillion"
-  if (normalized === "cached-input" || normalized === "cached-input-tokens" || normalized === "cached-prompt") {
-    return "cachedInputTokensUsdPerMillion"
-  }
-  if (normalized === "cache-creation-input" || normalized === "cache-create" || normalized === "cache-creation") {
-    return "cacheCreationInputTokensUsdPerMillion"
-  }
-  if (normalized === "cache-read-input" || normalized === "cache-read") return "cacheReadInputTokensUsdPerMillion"
-  if (normalized === "output" || normalized === "output-tokens" || normalized === "completion") return "outputTokensUsdPerMillion"
-  if (normalized === "reasoning-output" || normalized === "reasoning") return "reasoningOutputTokensUsdPerMillion"
-  if (normalized === "total" || normalized === "total-tokens") return "totalTokensUsdPerMillion"
-  fail(`yrd: task compete: unknown --agent-cost field '${raw}'`)
-}
-
 function parseAgentCost(raw: string): [string, ContestCostRates] {
-  const eq = raw.indexOf("=")
-  if (eq <= 0) fail("yrd: task compete: --agent-cost requires <name=field:usd-per-million,...>")
-  const name = raw.slice(0, eq).trim()
-  if (name === "") fail("yrd: task compete: --agent-cost requires an agent name")
-  const rates: ContestCostRates = {}
-  const fields = raw
-    .slice(eq + 1)
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => part !== "")
-  if (fields.length === 0) fail("yrd: task compete: --agent-cost requires at least one rate")
-  for (const field of fields) {
-    const sep = field.includes(":") ? field.indexOf(":") : field.indexOf("=")
-    if (sep <= 0) fail("yrd: task compete: --agent-cost rates use <field:usd-per-million>")
-    const key = parseCostField(field.slice(0, sep))
-    const value = Number(field.slice(sep + 1))
-    if (!Number.isFinite(value) || value < 0) fail(`yrd: task compete: --agent-cost ${field} must be a non-negative number`)
-    rates[key] = value
+  try {
+    return parseContestAgentCost(raw)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    fail(`yrd: task compete: --agent-cost ${message}`)
   }
-  return [name, rates]
 }
 
 async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays?: number }> {
@@ -905,6 +878,13 @@ async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays
 async function taskCompete(args: string[]): Promise<void> {
   const parsed = await parseCompeteArgs(args)
   const paths = await resolveRepoPaths()
+  let costAdapters: Map<string, ContestCostRates>
+  try {
+    costAdapters = await resolveContestCostAdapters(parsed.agents, parsed.costAdapters, createGitConfigSource(paths.repo))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    fail(`yrd: task compete: invalid cost adapter config: ${message}`)
+  }
   const init = await runGitBay(["init"], paths.repo)
   requireOk(init, "yrd: task compete: git bay init")
 
@@ -961,7 +941,7 @@ async function taskCompete(args: string[]): Promise<void> {
         baseSha,
         contestDir,
         agentCommands: parsed.agentCommands,
-        costAdapters: parsed.costAdapters,
+        costAdapters,
         evalCommands: parsed.evalCommands,
         appendEvent,
       }),
