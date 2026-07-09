@@ -13,8 +13,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - yrd line status/audit/integrate/watch projects the current check/merge path.
 - yrd task compete and yrd contest show/select/promote are installed as the
   first manual-selection contest projection over real bay attempts.
-- Contest `--agents codex/claude` uses ag-style slash-separated provider lists;
-  built-in `codex` and `claude` attempts execute through `ag`.
+- Contest `--agents "ag codex/claude"` uses ag-style slash-separated provider
+  lists; built-in `codex` and `claude` attempts execute through `ag`. The
+  shorter provider-only form remains accepted for scripts.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
 - Failed line step runs include normalized `error { code, message, exitCode? }`
@@ -71,7 +72,7 @@ yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
-yrd task compete <task> --agents codex/claude --base main --bays 2
+yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
 yrd contest show <contest>
 yrd contest select <contest> --winner <attempt>
 yrd contest promote <contest>

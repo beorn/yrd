@@ -587,7 +587,7 @@ describe("yrd CLI — line projection", () => {
     expect(help.stdout).toContain("Installed projections: bay, line, task, contest")
 
     const taskHelp = await must([process.execPath, YRD_BIN, "task", "--help"], demo, env)
-    expect(taskHelp.stdout).toContain("--agents codex/claude")
+    expect(taskHelp.stdout).toContain('--agents "ag codex/claude"')
     expect(taskHelp.stdout).toContain("Built-in contest agents: codex, claude")
     expect(taskHelp.stdout).toContain("Agent lists use ag-style provider-list syntax")
     expect(taskHelp.stdout).not.toContain("claude-opus")
@@ -633,7 +633,7 @@ describe("yrd CLI — contest projection", () => {
         "compete",
         "demo-task",
         "--agents",
-        "fake-alpha/fake-beta",
+        "ag fake-alpha/fake-beta",
         "--bays",
         "2",
         "--agent-cmd",

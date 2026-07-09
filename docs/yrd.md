@@ -62,7 +62,7 @@ yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
-yrd task compete <task> --agents codex/claude --base main --bays 2
+yrd task compete <task> --agents "ag codex/claude" --base main --bays 2
 yrd contest show <contest> [--json]
 yrd contest select <contest> --winner <attempt>
 yrd contest promote <contest>
@@ -83,11 +83,12 @@ yrd line deprovision [<base>]
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
 `yrd contest ...` commands manage an existing contest lifecycle. Built-in
-competitors use ag-style provider-list vocabulary: `--agents codex/claude` uses
-the same list syntax as `ag codex/claude`, but with contest semantics. Plain
-`ag codex/claude` selects one healthy provider seat; yrd fans the list out into
-one isolated bay attempt per provider. Comma-separated lists remain accepted.
-Custom competitors can be supplied with `--agent-cmd <name=command>`.
+competitors use ag-style provider-list vocabulary: `--agents "ag codex/claude"`
+uses the same list syntax as `ag codex/claude`, but with contest semantics.
+Plain `ag codex/claude` selects one healthy provider seat; yrd fans the list out
+into one isolated bay attempt per provider. The shorter `--agents codex/claude`
+and comma-separated lists remain accepted. Custom competitors can be supplied
+with `--agent-cmd <name=command>`.
 
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
