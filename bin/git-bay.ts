@@ -449,14 +449,7 @@ async function resolveCommit(repo: string, ref: string): Promise<string | undefi
   return res.code === 0 ? res.stdout.trim() : undefined
 }
 
-async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
-  base: string
-  baseSha?: string
-  counts: Record<string, number>
-  items: LineItemStatus[]
-}> {
-  const base = await resolveBaseRef(ctx.mainRepo)
-  const baseSha = await resolveCommit(ctx.mainRepo, base)
+async function stepStatusByPr(bay: BayRuntime): Promise<Map<PrId, Partial<Record<"check" | "merge" | "deploy", StepStatus>>>> {
   const stepsByPr = new Map<PrId, Partial<Record<"check" | "merge" | "deploy", StepStatus>>>()
   for await (const ev of bay.store.journal.replay()) {
     if (ev.name !== "line/step/finished") continue
@@ -493,35 +486,63 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
     }
     stepsByPr.set(d.pr, current)
   }
+  return stepsByPr
+}
+
+async function lineItemStatus(
+  ctx: Ctx,
+  state: BayState,
+  pr: PullRequest,
+  baseSha: string | undefined,
+  stepsByPr: Map<PrId, Partial<Record<"check" | "merge" | "deploy", StepStatus>>>,
+): Promise<LineItemStatus> {
+  const target = queueTarget(state, pr.id)
+  const targetSha = await resolveCommit(ctx.mainRepo, target)
+  const steps = stepsByPr.get(pr.id) ?? {}
+  const staleReasons: string[] = []
+  if (pr.state === "checked" && steps.check?.ok === true) {
+    if (steps.check.headSha !== undefined && targetSha !== undefined && steps.check.headSha !== targetSha) {
+      staleReasons.push("target changed since check")
+    }
+    if (steps.check.baseSha !== undefined && baseSha !== undefined && steps.check.baseSha !== baseSha) {
+      staleReasons.push("base changed since check")
+    }
+  }
+  return {
+    pr: pr.id,
+    state: pr.state,
+    target,
+    ...(targetSha !== undefined ? { targetSha } : {}),
+    stale: staleReasons.length > 0,
+    staleReasons,
+    steps,
+  }
+}
+
+async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
+  base: string
+  baseSha?: string
+  counts: Record<string, number>
+  items: LineItemStatus[]
+}> {
+  const base = await resolveBaseRef(ctx.mainRepo)
+  const baseSha = await resolveCommit(ctx.mainRepo, base)
+  const stepsByPr = await stepStatusByPr(bay)
 
   const counts: Record<string, number> = {}
   const items: LineItemStatus[] = []
   for (const pr of Object.values(state.prs).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))) {
     counts[pr.state] = (counts[pr.state] ?? 0) + 1
     if (!isOpen(pr.state)) continue
-    const target = queueTarget(state, pr.id)
-    const targetSha = await resolveCommit(ctx.mainRepo, target)
-    const steps = stepsByPr.get(pr.id) ?? {}
-    const staleReasons: string[] = []
-    if (pr.state === "checked" && steps.check?.ok === true) {
-      if (steps.check.headSha !== undefined && targetSha !== undefined && steps.check.headSha !== targetSha) {
-        staleReasons.push("target changed since check")
-      }
-      if (steps.check.baseSha !== undefined && baseSha !== undefined && steps.check.baseSha !== baseSha) {
-        staleReasons.push("base changed since check")
-      }
-    }
-    items.push({
-      pr: pr.id,
-      state: pr.state,
-      target,
-      ...(targetSha !== undefined ? { targetSha } : {}),
-      stale: staleReasons.length > 0,
-      staleReasons,
-      steps,
-    })
+    items.push(await lineItemStatus(ctx, state, pr, baseSha, stepsByPr))
   }
   return { base, ...(baseSha !== undefined ? { baseSha } : {}), counts, items }
+}
+
+async function lineStatusForPr(ctx: Ctx, bay: BayRuntime, state: BayState, pr: PullRequest): Promise<LineItemStatus> {
+  const base = await resolveBaseRef(ctx.mainRepo)
+  const baseSha = await resolveCommit(ctx.mainRepo, base)
+  return await lineItemStatus(ctx, state, pr, baseSha, await stepStatusByPr(bay))
 }
 
 type BatchSummaryMember = {
@@ -680,12 +701,13 @@ async function verbLs(ctx: Ctx, target: string | undefined, json: boolean): Prom
     const pr = prOrTeach(state, prId, "ls")
     if (json) {
       const line = await lineStatus(ctx, bay, state)
+      const lineItem = line.items.find((item) => item.pr === prId) ?? (await lineStatusForPr(ctx, bay, state, pr))
       console.log(
         JSON.stringify({
           pr,
           detail: await lastDetail(bay, prId),
           batch: batchRecord(state, prId),
-          line: line.items.find((item) => item.pr === prId),
+          line: lineItem,
         }),
       )
       return

@@ -112,9 +112,11 @@ status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
 folded open-line items with last step results and checked-PR staleness. Human
-`yrd line status` renders the same folded line summary concisely. Watch mode can
-run the full `check,merge,deploy` sequence for each merged PR. That gives `@ci`
-a real command surface to start targeting, but not yet the full line package.
+`yrd line status` renders the same folded line summary concisely. Targeted
+status keeps showing check/merge/deploy evidence for terminal merged PRs. Watch
+mode can run the full `check,merge,deploy` sequence for each merged PR. That
+gives `@ci` a real command surface to start targeting, but not yet the full line
+package.
 
 Remaining non-throwaway line work:
 

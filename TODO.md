@@ -27,6 +27,9 @@ repo in hub/yrd/reference or in @yrd beads.
   results, base/head SHAs, and checked-PR staleness reasons.
 - Human `yrd line status` renders that same folded line summary concisely:
   base, open PRs, step verdicts, artifact counts, and stale reasons.
+- Targeted `yrd line status <PR|name>` keeps showing check/merge/deploy step
+  evidence after a PR is terminal, including merged PRs used for deployment
+  audit.
 - `yrd line integrate --steps deploy` runs the configured post-merge
   `bay.deploy` step, records `line/step` events and artifacts, exits nonzero
   on deploy failure, and never changes a merged PR back out of `merged`.

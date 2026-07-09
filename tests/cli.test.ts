@@ -571,6 +571,26 @@ describe("yrd CLI — line projection", () => {
     const deployStdout = deployFinished.data.artifacts!.find((artifact) => artifact.name === "stdout")!
     expect(await readFile(deployStdout.path, "utf8")).toBe("deploy stdout\n")
 
+    const terminalStatus = await must([process.execPath, YRD_BIN, "line", "status", pr, "--json"], demo, env)
+    const terminal = JSON.parse(terminalStatus.stdout) as {
+      line: {
+        pr: string
+        state: string
+        steps: { check?: { ok: boolean }; merge?: { ok: boolean }; deploy?: { ok: boolean; artifacts?: unknown[] } }
+      }
+    }
+    expect(terminal.line).toMatchObject({
+      pr,
+      state: "merged",
+      steps: { check: { ok: true }, merge: { ok: true }, deploy: { ok: true } },
+    })
+    expect(terminal.line.steps.deploy?.artifacts).toHaveLength(1)
+    const terminalHumanStatus = await must([process.execPath, YRD_BIN, "line", "status", pr], demo, env)
+    expect(terminalHumanStatus.stdout).toContain(`${pr} merged target=`)
+    expect(terminalHumanStatus.stdout).toContain("check=ok")
+    expect(terminalHumanStatus.stdout).toContain("merge=ok")
+    expect(terminalHumanStatus.stdout).toContain("deploy=ok")
+
     await must(["git", "-C", demo, "config", "--unset", "bay.deploy"], demo, env)
     const skipped = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "deploy"], demo, env)
     expect(skipped.stdout).toContain(`bay: ${pr} deploy → skipped — deploy skipped`)

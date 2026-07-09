@@ -228,7 +228,7 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 
 | Command | Input | Output | State / Exit |
 | --- | --- | --- | --- |
-| `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary: base, open PRs, last step verdicts, stale checks | no state change; exits `0` |
+| `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary or targeted PR step evidence, including terminal merged PRs | no state change; exits `0` |
 | `yrd line audit [--json]` | repository from cwd | audit findings | no state change; exits `0` clean or `1` with findings |
 | `yrd line integrate [selector] [--steps check,merge,deploy] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams line drain output | runs registered steps; deploy failures exit `1` without unmerging |
 | `yrd line watch [selector] [--steps check,merge,deploy]` | optional PR/name | repeated integration output | keeps draining eligible work; with deploy in the step list, deploys each PR it merges |
