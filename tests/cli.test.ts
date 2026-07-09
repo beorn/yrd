@@ -328,6 +328,18 @@ describe("yrd CLI — line projection", () => {
   })
 
   it("line integrate can run check then merge through existing line events", async () => {
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.check",
+        "printf 'check stdout\\n'; printf 'check stderr\\n' >&2",
+      ],
+      demo,
+      env,
+    )
     await branchWithFiles(demo, env, "task/line-work", { "line.txt": "ok\n" })
     const adopted = await must(["git", "bay", "adopt", "task/line-work", "--workitem", "line-work"], demo, env)
     const pr = adopted.stdout.trim()
@@ -345,9 +357,34 @@ describe("yrd CLI — line projection", () => {
     const rows = journal
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as { name: string; data: { step?: string } })
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            name: string
+            data: {
+              step?: string
+              ok?: boolean
+              exitCode?: number
+              durationMs?: number
+              artifacts?: { name: string; path: string; bytes: number }[]
+            }
+          },
+      )
     expect(rows.filter((row) => row.name === "line/step/started").map((row) => row.data.step)).toEqual(["check", "merge"])
     expect(rows.filter((row) => row.name === "line/step/finished").map((row) => row.data.step)).toEqual(["check", "merge"])
+    const checkFinished = rows.find((row) => row.name === "line/step/finished" && row.data.step === "check")!
+    expect(checkFinished.data.ok).toBe(true)
+    expect(checkFinished.data.exitCode).toBe(0)
+    expect(checkFinished.data.durationMs).toEqual(expect.any(Number))
+    expect(checkFinished.data.artifacts?.map((artifact) => artifact.name).sort()).toEqual(["stderr", "stdout"])
+    const stdout = checkFinished.data.artifacts!.find((artifact) => artifact.name === "stdout")!
+    const stderr = checkFinished.data.artifacts!.find((artifact) => artifact.name === "stderr")!
+    expect(stdout.path).toContain(".git/bay/artifacts/")
+    expect(stderr.path).toContain(".git/bay/artifacts/")
+    expect(stdout.bytes).toBeGreaterThan(0)
+    expect(stderr.bytes).toBeGreaterThan(0)
+    expect(await readFile(stdout.path, "utf8")).toBe("check stdout\n")
+    expect(await readFile(stderr.path, "utf8")).toBe("check stderr\n")
   })
 
   it("line status projects to the bay state and unsupported steps teach", async () => {

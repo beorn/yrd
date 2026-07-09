@@ -92,7 +92,7 @@ For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
 `--retry` is an option on step-running commands, not a separate vocabulary
 branch. The installed line sequence is `check,merge`; `deploy` is staged until
-artifact capture, remote runner shape, and deployment records are real.
+remote runner shape and deployment records are real.
 
 ## Implementation Order
 
@@ -103,15 +103,16 @@ manual-selection projection is installed, and line hardening remains the gating
 work for replacing the current `@ci` lane.
 
 The first line projection slice is installed: `yrd line integrate --steps
-check,merge` delegates to the current Git Bay integration logic, and `yrd line
-status`, `audit`, and `watch` expose the same queue and journal-backed state.
+check,merge` delegates to the current Git Bay integration logic, `yrd line
+status`, `audit`, and `watch` expose the same queue and journal-backed state,
+and local step runs record exit code, duration, and stdout/stderr artifacts.
 That gives `@ci` a real command surface to start targeting, but not yet the full
 line package.
 
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts;
-2. capture step logs/artifacts and reference them from `line/step/*/end`;
+2. add base/head SHA and normalized error metadata to step events;
 3. make retry/resume journal-driven by skipping successful step results for the
    same submission and commit;
 4. expose stronger folded line status/staleness;
@@ -162,16 +163,15 @@ or hosted CI adapters should satisfy the same step result contract.
 Step events map naturally to spans:
 
 ```text
-line/step/check/start { line, submission, attempt?, baseSha, headSha }
-line/step/check/end { success, exitCode?, durationMs, error?, artifacts? }
-line/step/deploy/start { line, submission, baseSha, headSha }
-line/step/deploy/end { success, url?, durationMs, error?, artifacts? }
+line/step/started { step, pr?, batch?, target, role?, index? }
+line/step/finished { step, pr?, batch?, target, ok, detail?, exitCode?, durationMs?, error?, artifacts? }
 ```
 
 Artifacts include logs, coverage, reports, and build outputs. The default local
-artifact store can be a repository-local path; the event carries references, not
-inline blobs. A resumed line run folds the journal first and skips a successful
-step result only when it matches the same submission and commit.
+artifact store writes command stdout/stderr under `.git/bay/artifacts/`; the
+event carries references, not inline blobs. A resumed line run folds the journal
+first and skips a successful step result only when it matches the same
+submission and commit.
 
 Human intervention is also a journaled fact. A future `line/override` event
 records who overrode what and why without pretending the line succeeded

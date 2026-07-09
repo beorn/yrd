@@ -16,6 +16,7 @@ import type {
 import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
+import { stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
@@ -250,7 +251,7 @@ function makeInitHandler(opts: ReceiveOptions) {
 function makeSubmitHandler(opts: ReceiveOptions) {
   return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
     const d = effect.data as { pr: PrId; branch: string; bayPath: string | null; lease: string | null }
-    const { mainRepo, repoGit } = await resolveReceive(opts)
+    const { mainRepo, bayDir, repoGit } = await resolveReceive(opts)
     const events: BayEvent[] = []
 
     // 0. Pin rules, authoritatively (LE-4/SG-2, 21002): post-quarantine,
@@ -278,7 +279,16 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       const run = { step: "check" as const, pr: d.pr, target: d.branch }
       events.push(stepStarted(bay, run, effect.cause!))
       const checked = await runProjectCheck(check, cwd)
-      events.push(stepFinished(bay, run, checked.ok, checked.ok ? undefined : checked.detail, effect.cause!))
+      events.push(
+        stepFinished(
+          bay,
+          run,
+          checked.ok,
+          checked.ok ? undefined : checked.detail,
+          effect.cause!,
+          stepMetadata(checked, await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checked })),
+        ),
+      )
       if (!checked.ok) {
         events.push(
           stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
@@ -295,7 +305,16 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     const mergeRun = { step: "merge" as const, pr: d.pr, target: d.branch }
     events.push(stepStarted(bay, mergeRun, effect.cause!))
     const merged = await runMerge({ mainRepo, pr: d.pr, target: d.branch, configCwd: mainRepo, check: opts.check })
-    events.push(stepFinished(bay, mergeRun, merged.ok, merged.detail, effect.cause!))
+    events.push(
+      stepFinished(
+        bay,
+        mergeRun,
+        merged.ok,
+        merged.detail,
+        effect.cause!,
+        stepMetadata(merged, await writeStepArtifacts({ bayDir, cause: effect.cause!, run: mergeRun, output: merged })),
+      ),
+    )
     if (!merged.ok) {
       events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }))
       return events

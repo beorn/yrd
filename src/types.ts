@@ -265,7 +265,7 @@ export type GitbayEvent =
       // yet.
       data: StepRunData
     }
-  | { name: "line/step/finished"; data: StepRunData & { ok: boolean; detail?: string } }
+  | { name: "line/step/finished"; data: StepRunData & { ok: boolean; detail?: string } & StepFinishMetadata }
   | {
       name: "line/batch/started"
       // The batch candidate exists — the compose verdict and the scratch build
@@ -331,6 +331,28 @@ export type StepRunData = {
   role?: "baseline" | "prefix"
   index?: number
   memberTarget?: string
+}
+
+export type StepArtifact = {
+  name: "stdout" | "stderr"
+  path: string
+  bytes: number
+}
+
+export type StepCommandOutput = {
+  exitCode?: number
+  durationMs?: number
+  stdout?: string
+  stderr?: string
+}
+
+export type StepFinishMetadata = {
+  exitCode?: number
+  durationMs?: number
+  error?: string
+  artifacts?: StepArtifact[]
+  baseSha?: string
+  headSha?: string
 }
 
 /** Why a bay (and its worktree) closed — unifies the old `endReason` +

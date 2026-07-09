@@ -14,9 +14,11 @@ import type {
   EffectHandler,
   Layer,
   PrId,
+  StepCommandOutput,
   TransitionResult,
 } from "../types.ts"
 import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
+import { stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prOpenedEvent, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent, submittedPrs } from "./queue.ts"
 import { stepFinished, stepStarted } from "./steps.ts"
 
@@ -437,7 +439,7 @@ async function runGateCommand(
   cwd: string,
   batch: PrId,
   subst: { pr?: PrId; target: string; memberTarget?: string },
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<{ code: number; stdout: string; stderr: string; exitCode: number; durationMs: number }> {
   let cmd = gateCommand.replaceAll("{batch}", batch).replaceAll("{target}", subst.target)
   if (subst.pr !== undefined) {
     cmd = cmd.replaceAll("{pr}", subst.pr).replaceAll("{member}", subst.pr)
@@ -449,21 +451,23 @@ async function runGateCommand(
     ...(subst.pr !== undefined ? { BAY_BATCH_PR: subst.pr, BAY_BATCH_MEMBER: subst.pr } : {}),
     ...(subst.memberTarget !== undefined ? { BAY_BATCH_MEMBER_TARGET: subst.memberTarget } : {}),
   }
+  const start = Date.now()
   const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe", env })
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ])
-  return { code, stdout, stderr }
+  return { code, stdout, stderr, exitCode: code, durationMs: Date.now() - start }
 }
 
-type GateVerdict = { ok: boolean; detail?: string }
+type GateVerdict = { ok: boolean; detail?: string } & StepCommandOutput
 
-function gateVerdict(res: { code: number; stdout: string; stderr: string }): GateVerdict {
-  if (res.code === 0) return { ok: true }
+function gateVerdict(res: { code: number; stdout: string; stderr: string; exitCode: number; durationMs: number }): GateVerdict {
+  const output = { exitCode: res.exitCode, durationMs: res.durationMs, stdout: res.stdout, stderr: res.stderr }
+  if (res.code === 0) return { ok: true, ...output }
   const out = tail([res.stderr, res.stdout].filter((s) => s.trim() !== "").join("\n"))
-  return { ok: false, detail: out === "" ? `exit ${res.code}` : `exit ${res.code}: ${out}` }
+  return { ok: false, detail: out === "" ? `exit ${res.code}` : `exit ${res.code}: ${out}`, ...output }
 }
 
 async function checkPrefix(
@@ -574,7 +578,16 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       }
       throw err
     }
-    events.push(stepFinished(bay, baselineRun, baseline.ok, baseline.detail, cause))
+    events.push(
+      stepFinished(
+        bay,
+        baselineRun,
+        baseline.ok,
+        baseline.detail,
+        cause,
+        stepMetadata(baseline, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: baselineRun, output: baseline })),
+      ),
+    )
     if (!baseline.ok) {
       return [
         ...events,
@@ -610,7 +623,16 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         }
         throw err
       }
-      events.push(stepFinished(bay, prefixRun, checked.ok, checked.detail, cause))
+      events.push(
+        stepFinished(
+          bay,
+          prefixRun,
+          checked.ok,
+          checked.detail,
+          cause,
+          stepMetadata(checked, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: prefixRun, output: checked })),
+        ),
+      )
       if (!checked.ok) {
         faulting = prefix
         faultingDetail = checked.detail

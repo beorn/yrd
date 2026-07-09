@@ -1,4 +1,4 @@
-import type { RejectionCode } from "../types.ts"
+import type { RejectionCode, StepCommandOutput } from "../types.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 
@@ -25,7 +25,7 @@ export function tail(text: string, max = 2000): string {
 /** `code` refines a failed check's rejection: default `check-failed`; a
  *  scratch workspace that could not be provisioned is `provision-failed` —
  *  an environment fault, not a verdict about the PR. */
-export type CheckOutcome = { ok: true } | { ok: false; detail: string; code?: RejectionCode }
+export type CheckOutcome = ({ ok: true } | { ok: false; detail: string; code?: RejectionCode }) & StepCommandOutput
 
 /** Resolve the ONE project check command: inline > BAY_CHECK > git config
  *  bay.check > none (unset — checks are opt-in). */
@@ -38,15 +38,17 @@ export async function resolveCheck(check: string | undefined, configCwd: string)
  *  has one, else the mainline repo. No command configured is a pass-through
  *  (spec § Check provider: checks are opt-in, not a hard requirement). */
 export async function runProjectCheck(check: string | undefined, cwd: string): Promise<CheckOutcome> {
-  if (check === undefined || check.trim() === "") return { ok: true }
+  if (check === undefined || check.trim() === "") return { ok: true, durationMs: 0, stdout: "", stderr: "" }
+  const start = Date.now()
   const proc = Bun.spawn(["sh", "-c", check], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ])
-  if (code !== 0) return { ok: false, detail: `check '${check}' failed (exit ${code}): ${tail(err || out)}` }
-  return { ok: true }
+  const metadata = { exitCode: code, durationMs: Date.now() - start, stdout: out, stderr: err }
+  if (code !== 0) return { ok: false, detail: `check '${check}' failed (exit ${code}): ${tail(err || out)}`, ...metadata }
+  return { ok: true, ...metadata }
 }
 
 // ---------- merge ----------
@@ -56,8 +58,8 @@ export type MergeOutcome =
    *  proved an ancestor of the mainline) — machine-truth for downstream
    *  consumers ({sha} in issue-tracker commands). Absent only on the
    *  no-mainRepo library path, which runs no guard and resolves no target. */
-  | { ok: true; detail: string; sha?: string }
-  | { ok: false; code: RejectionCode; detail: string }
+  | ({ ok: true; detail: string; sha?: string } & StepCommandOutput)
+  | ({ ok: false; code: RejectionCode; detail: string } & StepCommandOutput)
 
 /** Batch evidence for the landing trailer: names what a main-mover audit needs
  *  when the landed PR is a batch candidate — the batch id, how many members
@@ -155,14 +157,20 @@ export async function resolveMergeCommand(mergeCommand: string | undefined, conf
 export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
   const { pr, target, mainRepo } = params
   const configCwd = params.configCwd ?? mainRepo ?? process.cwd()
+  let output: StepCommandOutput = {}
 
   let targetSha: string | undefined
   if (mainRepo) {
+    const start = Date.now()
     const resolved = await git(["-C", mainRepo, "rev-parse", "--verify", "--quiet", `${target}^{commit}`], mainRepo)
     if (resolved.code !== 0) {
       return {
         ok: false,
         code: "unresolvable-target",
+        exitCode: resolved.code,
+        durationMs: Date.now() - start,
+        stdout: resolved.stdout,
+        stderr: resolved.stderr,
         detail:
           `target '${target}' does not resolve in ${mainRepo} — cannot verify a landing, refusing to run the merge. ` +
           `Fix the target (branch deleted? typo?) and retry: git bay retry ${pr}`,
@@ -189,6 +197,9 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
       return {
         ok: false,
         code: "dirty-mainline",
+        durationMs: 0,
+        stdout: "",
+        stderr: "",
         detail: `mainline working tree at ${mainRepo} is dirty — commit or clean it, then git bay retry ${pr}`,
       }
     }
@@ -201,15 +212,18 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     const baseSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"], mainRepo)).stdout.trim()
     const check = await resolveCheck(params.check, configCwd)
     const trailer = formatBayGateTrailer({ pr, target: targetSha!, base: baseSha, check, batch: params.batch })
+    const start = Date.now()
     const merge = await git(
       ["-C", mainRepo, "merge", "--no-ff", "-m", `bay: merge ${pr} (${target})`, "-m", trailer, targetSha!],
       mainRepo,
     )
+    output = { exitCode: merge.code, durationMs: Date.now() - start, stdout: merge.stdout, stderr: merge.stderr }
     if (merge.code !== 0) {
       await git(["-C", mainRepo, "merge", "--abort"], mainRepo) // best-effort restore; a failed abort surfaces below
       return {
         ok: false,
         code: "merge-conflict",
+        ...output,
         detail: `merge of ${target} onto ${mainline} failed (exit ${merge.code}): ${tail(merge.stderr || merge.stdout)}`,
       }
     }
@@ -221,17 +235,20 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     // hook (a fused push, unified with `merge`/`integrate` per §4) — the hook
     // process exports GIT_DIR=. (and friends), which would silently repoint
     // the spawned command's own git invocations at the wrong repo otherwise.
+    const start = Date.now()
     const proc = Bun.spawn(["sh", "-c", cmd], { cwd: mainRepo, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
     const [stdout, stderr, code] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ])
+    output = { exitCode: code, durationMs: Date.now() - start, stdout, stderr }
     if (code !== 0) {
       const errTail = tail(stderr)
       return {
         ok: false,
         code: "merge-command-failed",
+        ...output,
         detail: errTail === "" ? `exit ${code}` : `exit ${code}: ${errTail}`,
       }
     }
@@ -265,6 +282,7 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
       return {
         ok: false,
         code: "lying-merge",
+        ...output,
         detail:
           `merge command exited 0 but ${target}@${targetSha.slice(0, 8)} is not an ancestor of ${baseRef} — ` +
           `refusing to record merged (lying-merge guard). If the landing is real but unpushed, push it and ` +
@@ -274,5 +292,5 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     }
   }
 
-  return { ok: true, detail: mergeDetail, ...(targetSha !== undefined ? { sha: targetSha } : {}) }
+  return { ok: true, detail: mergeDetail, ...(targetSha !== undefined ? { sha: targetSha } : {}), ...output }
 }

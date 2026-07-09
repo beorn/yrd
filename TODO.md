@@ -13,6 +13,8 @@ repo in hub/yrd/reference or in @yrd beads.
 - yrd line status/audit/integrate/watch projects the current check/merge path.
 - yrd task compete and yrd contest show/select/promote are installed as the
   first manual-selection contest projection over real bay attempts.
+- Local line step runs record exit code, duration, and stdout/stderr artifact
+  references on `line/step/finished`.
 - hh consumes this repo at vendor/yrd.
 
 ## Product Shape
@@ -59,7 +61,7 @@ Rules:
 - Keep git bay as the Git-native projection; do not add @yrd/git-bay unless
   there is a second non-Git bay implementation.
 - yrd line provision, yrd line deprovision, and deploy steps are staged until
-  line state/artifacts/runners are real.
+  line state, remote runners, and deployment records are real.
 
 ## Next Work
 
@@ -74,9 +76,10 @@ Rules:
      over recorded evidence, not hidden policy.
 2. Line hardening
    - Finish core submission and line-step event/state contracts.
-   - Extend line/step start/end events with base/head SHAs, duration, exit
-     code, error, and artifact references.
-   - Add local artifact/log capture for step output.
+   - Extend line/step start/end events with base/head SHAs and normalized
+     error metadata.
+   - Broaden artifact/log capture beyond the local command runner as remote
+     and hosted runners land.
    - Make --retry and process restart journal-driven by skipping successful
      step results for the same submission and commit.
    - Expose stronger folded line status/staleness.
@@ -127,6 +130,7 @@ Rules:
 - Line steps record structured state and events that can project to config, CLI
   args, logs, and spans.
 - Line runs capture artifacts/logs, expose folded status, and resume from the
-  journal for the same submission and commit.
+  journal for the same submission and commit. Local command artifacts are
+  installed; folded status and resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

@@ -434,6 +434,7 @@ git bay stores local state under `.git/`, so `git clean` cannot delete it:
   bay/
     events.jsonl      append-only event authority
     index.sqlite      rebuildable query index for PRs, bays, queue, line, refs
+    artifacts/        stdout/stderr and other step artifacts by command id
     writer.lock       single-writer guard for event/index updates
     prs.git/          local bare repo for PR refs, objects, and hooks
 .bays/                working directories: wt1, wt2, ...
@@ -456,6 +457,11 @@ line/step/...    started, waiting, finished
 line/batch/...   started, isolated, finished
 contest/...      opened, attempt started/finished, selected, promoted
 ```
+
+`line/step/finished` rows include the step verdict plus available process
+metadata: `exitCode`, `durationMs`, and artifact references for captured
+stdout/stderr. Artifacts are stored as files; journal rows carry references, not
+inline logs.
 
 External orchestrators can assign workers around git bay, but those actors live
 above this tool. git bay owns only the git-backed bays, PR state, line mechanics,

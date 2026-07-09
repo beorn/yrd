@@ -1,5 +1,5 @@
 import { makeEvent } from "../core.ts"
-import type { BayEvent, BayRuntime, Cause, StepRunData } from "../types.ts"
+import type { BayEvent, BayRuntime, Cause, StepFinishMetadata, StepRunData } from "../types.ts"
 
 /**
  * line/step event builders — the ONE spelling for "a step ran against a target
@@ -15,6 +15,28 @@ export function stepStarted(bay: BayRuntime, data: StepRunData, cause: Cause): B
   return makeEvent(bay, "line/step/started", data, cause)
 }
 
-export function stepFinished(bay: BayRuntime, data: StepRunData, ok: boolean, detail: string | undefined, cause: Cause): BayEvent {
-  return makeEvent(bay, "line/step/finished", { ...data, ok, ...(detail !== undefined ? { detail } : {}) }, cause)
+export function stepFinished(
+  bay: BayRuntime,
+  data: StepRunData,
+  ok: boolean,
+  detail: string | undefined,
+  cause: Cause,
+  metadata: StepFinishMetadata = {},
+): BayEvent {
+  return makeEvent(
+    bay,
+    "line/step/finished",
+    {
+      ...data,
+      ok,
+      ...(detail !== undefined ? { detail } : {}),
+      ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
+      ...(metadata.durationMs !== undefined ? { durationMs: metadata.durationMs } : {}),
+      ...(metadata.error !== undefined ? { error: metadata.error } : {}),
+      ...(metadata.artifacts !== undefined && metadata.artifacts.length > 0 ? { artifacts: metadata.artifacts } : {}),
+      ...(metadata.baseSha !== undefined ? { baseSha: metadata.baseSha } : {}),
+      ...(metadata.headSha !== undefined ? { headSha: metadata.headSha } : {}),
+    },
+    cause,
+  )
 }
