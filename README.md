@@ -144,6 +144,10 @@ open a bay -> work with git -> push -> submit -> line integrate -> close
 - `git push` from inside that bay creates or updates a local PR and leaves it at
   `pushed`.
 - `git bay submit <branch>` can also submit a source branch directly.
+- An integrator with a prepared branch can use
+  `yrd bay submit <branch> --wait`: it opens the local PR, runs the configured
+  line to a terminal or parked waiting state, and leaves `yrd line status` as
+  the evidence view.
 - `git bay submit [selector...]` moves the PR to `submitted`. With
   `bay.autoMerge` enabled, submit also runs the default line steps.
 - `yrd line integrate [selector...] --steps ...` runs selected line steps.

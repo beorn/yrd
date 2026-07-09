@@ -66,6 +66,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - `git bay submit <branch>` opens and submits an existing source branch without
   first provisioning a bay; `submit --wait` forces integration even when
   `bay.autoMerge` is false.
+- `yrd bay submit <branch> --wait` is covered as the integrator handoff path:
+  it creates the local PR, runs the configured line until terminal or parked,
+  and leaves `yrd line status` as the evidence view.
 - `git bay open <name> --from <branch>` opens a bay worktree on an existing
   local source branch and keeps the bay name as the PR/work item name;
   `--head` is an alias for GitHub PR vocabulary.

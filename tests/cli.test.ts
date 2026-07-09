@@ -2009,6 +2009,21 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     expect(ls.stdout).toContain("PR1 merged")
   })
 
+  it("yrd bay submit <branch> --wait is the branch handoff path for integrators", async () => {
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+    await branchWithFiles(demo, env, "task/yrd-waited", { "yrd-waited.txt": "waited\n" })
+
+    const submit = await must([process.execPath, YRD_BIN, "bay", "submit", "task/yrd-waited", "--wait"], demo, env)
+    expect(submit.stdout).toContain("bay: PR1 submitted → checking")
+    expect(submit.stdout).toContain("bay: PR1 checking → checked")
+    expect(submit.stdout).toContain("bay: PR1 checked → merging")
+    expect(submit.stdout).toContain("bay: PR1 merging → merged")
+
+    const ls = await must([process.execPath, YRD_BIN, "line", "status", "PR1", "--json"], demo, env)
+    const data = JSON.parse(ls.stdout) as { line: { pr: string; state: string; steps: { check?: { ok: boolean }; merge?: { ok: boolean } } } }
+    expect(data.line).toMatchObject({ pr: "PR1", state: "merged", steps: { check: { ok: true }, merge: { ok: true } } })
+  })
+
   it("-o submit fuses create+queue in one push — a red check rejects it directly from the push", async () => {
     await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
     const opened = await must(["git", "bay", "open", "fused-red"], demo, env)
