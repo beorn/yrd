@@ -2,14 +2,20 @@
 
 **Yrd** is the software delivery yard: tasks, bays, integration lines, and
 real-task evaluation of agents or harnesses. This repository currently ships
-the **bay** component. Git Bay is the Git-native command projection for that
-bay component, not a separate product.
+the Git-native **bay** component plus the first `line`, `task`, and `contest`
+command projections. Git Bay is the Git-native command projection for the bay
+component, not a separate product.
 
 ## Available today
 
 - `yrd bay <verb>` runs the same implementation as `git bay <verb>`.
 - `yrd line status|audit|integrate|watch` projects the current check/merge
   integration path over the same Git Bay state and journal.
+- `yrd task compete <task>` opens one bay per competitor, runs agent/harness
+  attempts, and records logs, git metrics, token/cost metrics when the runner
+  exposes them, evaluator results, and commits.
+- `yrd contest show|select|promote` inspects a contest, records a manual
+  winner, and promotes the winning attempt into the bay/line path.
 - `git yrd <verb>` is a Git subcommand alias for the same bay projection.
 - `git bay <verb>`, `git-bay`, and `gitbay` remain compatibility command
   surfaces over the same implementation.
@@ -42,8 +48,8 @@ Git Bay, GitHub, and other Git-facing projections.
 
 ## Command projections
 
-The installed projections are `bay` and `line`. The Yrd-facing command shape
-is:
+The installed projections are `bay`, `line`, `task`, and `contest`. The
+Yrd-facing command shape is:
 
 ```bash
 yrd bay open <name>
@@ -55,6 +61,11 @@ yrd line status [PR|name] [--json]
 yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
+
+yrd task compete <task> --agents codex,claude-opus --base main --bays 2
+yrd contest show <contest> [--json]
+yrd contest select <contest> --winner <attempt>
+yrd contest promote <contest>
 ```
 
 The current Git Bay CLI exposes the shipped v0.3 verbs documented in the README
@@ -63,21 +74,18 @@ The current Git Bay CLI exposes the shipped v0.3 verbs documented in the README
 that implementation; shipped compatibility verbs stay available while the CLI
 converges.
 
-Planned projections:
+Staged line extensions:
 
 ```bash
 yrd line provision [<base>]
 yrd line deprovision [<base>]
 yrd line integrate [PR|name] --steps deploy
-
-yrd task compete <task> --agents codex,claude --base main --bays 2
-yrd contest show <contest>
-yrd contest select <contest> --winner <attempt>
-yrd contest promote <contest>
 ```
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
-`yrd contest ...` commands manage an existing contest lifecycle.
+`yrd contest ...` commands manage an existing contest lifecycle. Built-in
+competitors resolve through `ag`: `codex`, `claude`, and `claude-opus`. Custom
+competitors can be supplied with `--agent-cmd <name=command>`.
 
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
@@ -87,10 +95,11 @@ artifact capture, remote runner shape, and deployment records are real.
 
 ## Implementation Order
 
-The first Yrd cutover target is the integration lane: make `@ci` run through
-`yrd bay` + `yrd line` once the line has the artifact, status, and resume
-guarantees the CI lane needs. Contest mode is above that path and should not
-block the CI cutover.
+The first Yrd cutover target is still the integration lane: make `@ci` run
+through `yrd bay` + `yrd line` once the line has the artifact, status, and
+resume guarantees the CI lane needs. Contest mode is above that path; its first
+manual-selection projection is installed, and line hardening remains the gating
+work for replacing the current `@ci` lane.
 
 The first line projection slice is installed: `yrd line integrate --steps
 check,merge` delegates to the current Git Bay integration logic, and `yrd line
@@ -106,8 +115,7 @@ Remaining non-throwaway line work:
    same submission and commit;
 4. expose stronger folded line status/staleness;
 5. add the runner seam for remote/container/hosted execution;
-6. switch `@ci` to that line projection before building task intake or contest
-   mode.
+6. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
 API docs. Tentative reference, background research, and prior-art notes stay
@@ -177,13 +185,19 @@ moving.
 
 Contest mode is above bay and before final line integration. It evaluates
 multiple independent implementations of the same real task. Manual winner
-selection should ship first; automatic selection is a later plugin once manual
-decisions have produced enough evidence.
+selection is the installed first evaluator. Automatic selection is a later
+plugin once manual decisions have produced enough evidence.
 
 Attempts record agent identity, branch/ref, artifacts, logs, cost, duration,
 and line-step results. Contest evaluators compare submissions using required
 step results, tests, coverage, review verdicts, diff size, performance, cost,
 wall time, and human selection.
+
+The first implementation stores contest records under `.git/bay/contests/`.
+Runner stdout/stderr are log artifacts. Token and cost metrics are extracted
+best-effort from runner JSON output: Claude's `--output-format json` currently
+reports dollar cost, while Codex JSONL reports tokens but may not report a cost
+field. The record keeps missing cost as missing, not guessed.
 
 ## Integration boundaries
 
@@ -211,15 +225,10 @@ Still coordinated separately:
 - consuming-repo path and bead moves
 - full monorepo package split
 - line artifacts/status/resume hardening and `@ci` cutover
-- `task` and `contest` projections beyond the advertised CLI shape
+- contest hardening: event-sourced contest state, richer evaluator plugins,
+  runner-specific cost adapters, and remote/hosted runner support
 
 ## Reference
 
-- [Architecture](architecture.md)
-- [Model](model.md)
-- [Events](events.md)
-- [Store](store.md)
-- [Worktrees and bays](layers/worktrees.md)
-- [Checks](layers/checks.md)
-- [Issue tracking](layers/issue-tracking.md)
-- [Review gate](layers/review-gate.md)
+- [README](../README.md)
+- [TODO](../TODO.md)

@@ -11,6 +11,8 @@ repo in hub/yrd/reference or in @yrd beads.
 - yrd bay, git bay, git-bay, gitbay, and git yrd resolve to one bay
   implementation.
 - yrd line status/audit/integrate/watch projects the current check/merge path.
+- yrd task compete and yrd contest show/select/promote are installed as the
+  first manual-selection contest projection over real bay attempts.
 - hh consumes this repo at vendor/yrd.
 
 ## Product Shape
@@ -61,12 +63,14 @@ Rules:
 
 ## Next Work
 
-1. Contest projection
-   - Implement yrd task compete using ag codex/ag claude style competitors.
-   - Record attempts, stdout/stderr logs, duration, exit code, changed files,
-     commit SHA, optional token/cost metrics, evaluator output, and selected
-     winner.
-   - Keep winner selection manual first; automatic ranking should be a plugin
+1. Contest hardening
+   - Move contest records from the first JSON-file projection toward the
+     event/state/plugin model used by the rest of Yrd.
+   - Add runner-specific cost adapters where a provider does not emit dollar
+     cost directly; keep missing cost explicit, never guessed.
+   - Add richer evaluator plugins for tests, review, diff quality, performance,
+     and human scorecards.
+   - Keep winner selection manual-first; automatic ranking should be a plugin
      over recorded evidence, not hidden policy.
 2. Line hardening
    - Finish core submission and line-step event/state contracts.
@@ -91,6 +95,10 @@ Rules:
 5. Model refinements
    - Add per-PR source/base storage and --from/--head plus --base/--line
      aliases, while keeping the initial queue serial per base.
+   - Thread base-aware provisioning through contests once `open --base` is
+     installed; the first contest projection records the selected base and
+     computes git metrics from it, but bay creation still follows the current
+     bay default.
    - Add cwd-as-identifier, variadic targets, and branch resolution for submit.
    - Hide/remove old branch-intake public vocabulary; branch-backed workspace
      provisioning is open --from, branch intake without a bay is submit

@@ -352,7 +352,7 @@ describe("yrd CLI — line projection", () => {
 
   it("line status projects to the bay state and unsupported steps teach", async () => {
     const help = await must([process.execPath, YRD_BIN, "--help"], demo, env)
-    expect(help.stdout).toContain("Installed projections: bay, line")
+    expect(help.stdout).toContain("Installed projections: bay, line, task, contest")
 
     const status = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
     expect(status.stdout).toContain("no open worktrees")
@@ -360,6 +360,96 @@ describe("yrd CLI — line projection", () => {
     const deploy = await run([process.execPath, YRD_BIN, "line", "integrate", "--steps", "deploy"], demo, env)
     expect(deploy.code).toBe(2)
     expect(deploy.stderr).toContain("step 'deploy' is staged, not installed yet")
+  })
+})
+
+describe("yrd CLI — contest projection", () => {
+  let root: string
+  let demo: string
+  let env: Record<string, string>
+
+  beforeEach(async () => {
+    ;({ root, demo, env } = await makeFixture("yrd-contest-"))
+    await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
+  })
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true })
+  })
+
+  it("competes in multiple bays, records metrics/evals, selects, and promotes the winner", async () => {
+    const alpha =
+      `printf '%s\\n' '{"usage":{"input_tokens":10,"output_tokens":5},"cost_usd":0.01}'; ` +
+      `printf 'alpha\\n' > result.txt; git add result.txt; git commit -qm 'feat: alpha'`
+    const beta =
+      `printf '%s\\n' '{"usage":{"input_tokens":8,"output_tokens":4},"cost_usd":0.02}'; ` +
+      `printf 'beta\\n' > result.txt; git add result.txt; git commit -qm 'feat: beta'`
+
+    const competed = await must(
+      [
+        process.execPath,
+        YRD_BIN,
+        "task",
+        "compete",
+        "demo-task",
+        "--agents",
+        "fake-alpha,fake-beta",
+        "--bays",
+        "2",
+        "--agent-cmd",
+        `fake-alpha=${alpha}`,
+        "--agent-cmd",
+        `fake-beta=${beta}`,
+        "--eval",
+        "test -f result.txt",
+        "--json",
+      ],
+      demo,
+      env,
+    )
+
+    const record = JSON.parse(competed.stdout) as {
+      id: string
+      attempts: {
+        id: string
+        agent: string
+        bayName: string
+        bayPath: string
+        exitCode: number
+        logs: { stdout: string; stderr: string }
+        metrics: { inputTokens?: number; outputTokens?: number; totalTokens?: number; costUsd?: number }
+        git: { committed: boolean; changedFiles: string[] }
+        evals: { exitCode: number }[]
+      }[]
+      winner?: string
+    }
+    expect(record.id).toBe("C1")
+    expect(record.attempts).toHaveLength(2)
+    const alphaAttempt = record.attempts.find((attempt) => attempt.agent === "fake-alpha")!
+    const betaAttempt = record.attempts.find((attempt) => attempt.agent === "fake-beta")!
+    expect(alphaAttempt.exitCode).toBe(0)
+    expect(alphaAttempt.metrics).toMatchObject({ inputTokens: 10, outputTokens: 5, totalTokens: 15, costUsd: 0.01 })
+    expect(alphaAttempt.git.committed).toBe(true)
+    expect(alphaAttempt.git.changedFiles).toContain("result.txt")
+    expect(alphaAttempt.evals[0]!.exitCode).toBe(0)
+    expect(await readFile(alphaAttempt.logs.stdout, "utf8")).toContain('"input_tokens":10')
+
+    const shown = await must([process.execPath, YRD_BIN, "contest", "show", record.id, "--json"], demo, env)
+    expect(JSON.parse(shown.stdout).attempts.map((attempt: { agent: string }) => attempt.agent)).toEqual([
+      "fake-alpha",
+      "fake-beta",
+    ])
+
+    const selected = await must([process.execPath, YRD_BIN, "contest", "select", record.id, "--winner", betaAttempt.id], demo, env)
+    expect(selected.stdout).toContain(`yrd: ${record.id} winner ${betaAttempt.id}`)
+
+    const promoted = await must([process.execPath, YRD_BIN, "contest", "promote", record.id], demo, env)
+    expect(promoted.stdout).toMatch(new RegExp(`yrd: ${record.id} promoted ${betaAttempt.id} as PR\\d+`))
+
+    const state = await must(["git", "bay", "ls", "--json"], demo, env)
+    const prs = (JSON.parse(state.stdout) as { prs: Record<string, { name: string | null; state: string }> }).prs
+    const submitted = Object.values(prs).find((pr) => pr.name === betaAttempt.bayName)
+    expect(submitted?.state).toBe("submitted")
   })
 })
 
