@@ -4,6 +4,8 @@
 
 The idea in one sentence more: anyone working in a local clone — human or agent — should get the integration safety a good team gets from GitHub (workspaces, PRs, checks, a merge queue, a full record), with plain git as the interface and nothing new to learn beyond the words GitHub already taught everyone.
 
+> **Yrd:** this repo is becoming the bay component of **Yrd**, the software delivery yard — `yrd bay …` and `git yrd …` work today as aliases of `git bay …`; see [docs/yrd.md](docs/yrd.md). Existing workflows are unchanged.
+
 ## Why you'd want it
 
 **You want git bay if…**

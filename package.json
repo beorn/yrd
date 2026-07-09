@@ -8,7 +8,9 @@
   "repository": "github:beorn/gitbay",
   "type": "module",
   "bin": {
-    "git-bay": "bin/git-bay.ts"
+    "git-bay": "bin/git-bay.ts",
+    "git-yrd": "bin/git-yrd.ts",
+    "yrd": "bin/yrd.ts"
   },
   "exports": {
     ".": "./src/index.ts"
