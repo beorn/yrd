@@ -3,14 +3,7 @@ import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import {
-  createGitbay,
-  createJsonlJournal,
-  integratablePrs,
-  pipe,
-  withMergeWorker,
-  withQueue,
-} from "../src/index.ts"
+import { createGitbay, createJsonlJournal, integratablePrs, pipe, withMergeWorker, withQueue } from "../src/index.ts"
 import type { BayEvent, BayRuntime, BayState, BayStore, MergeWorkerOptions, PrId } from "../src/index.ts"
 import { git } from "../src/layers/git.ts"
 import { runMerge } from "../src/layers/pipeline.ts"
@@ -31,11 +24,7 @@ function openStore(path: string): BayStore {
 // (`true` / `false` / `echo`), so there are no mocks — the config resolution,
 // sh -c spawn, exit-code→state mapping, and detail capture all execute for real.
 async function buildMergeBay(path: string, opts: MergeWorkerOptions): Promise<BayRuntime> {
-  return pipe(
-    createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
-    withQueue(),
-    withMergeWorker(opts),
-  )
+  return pipe(createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }), withQueue(), withMergeWorker(opts))
 }
 
 function stateOf(state: BayState, id: PrId): string {
@@ -139,14 +128,14 @@ describe("withMergeWorker — check: submitted → checking → checked | reject
 
 describe("withMergeWorker — merge: checked → merging → merged (happy path)", () => {
   it("transitions checked → merging → merged and captures stdout (both placeholders) as detail", async () => {
-    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "echo {pr} {target}" })
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: `echo "$YRD_PR $YRD_TARGET_REF"` })
     await seedChecked(bay, "task/x", "C-x")
 
     const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-x" } })
 
     const transitions = events.filter((e) => e.name === "pr/changed").map((e) => `${e.data!.from}→${e.data!.to}`)
     expect(transitions).toEqual(["checked→merging", "merging→merged"])
-    expect(detailOf(events, "merged")).toBe("C-x task/x") // {pr} {target} both substituted
+    expect(detailOf(events, "merged")).toBe("C-x task/x")
     expect(stateOf(await bay.state(), "C-x")).toBe("merged")
   })
 
@@ -197,7 +186,10 @@ describe("withMergeWorker — merge: checked → merging → merged (happy path)
     expect(transitions).toEqual(["checked→merging", "merging→rejected"])
     expect(detailOf(events, "rejected")).toContain("stale check: base changed since check")
     const finished = events.find((e) => e.name === "line/step/finished" && e.data!.step === "merge")!
-    expect(finished.data!.error).toMatchObject({ code: "stale-check", message: expect.stringContaining("base changed since check") })
+    expect(finished.data!.error).toMatchObject({
+      code: "stale-check",
+      message: expect.stringContaining("base changed since check"),
+    })
     expect(existsSync(calls)).toBe(false)
     expect(stateOf(await bay.state(), "C-stale")).toBe("rejected")
   })
@@ -258,7 +250,7 @@ describe("withMergeWorker — post-merge ancestry verify (the lying-merge guard,
   it("a merge command that actually lands the target passes the verify and records merged", async () => {
     const repo = await makeVerifyRepo()
     const bay = await buildMergeBay(await tmpJournalPath(), {
-      mergeCommand: `git -C ${repo} -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
+      mergeCommand: `git -C ${JSON.stringify(repo)} -c user.name=t -c user.email=t@e merge --no-ff -q "$YRD_TARGET"`,
       mainRepo: repo,
     })
     await seedChecked(bay, "task/x", "C-honest")
@@ -350,7 +342,10 @@ describe("withMergeWorker — zero-config native merge (§4: bay.merge unset)", 
 
       await bay.dispatch({ type: "merge", args: { pr: "C-trailer" } })
 
-      const trailer = await git(["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"], repo)
+      const trailer = await git(
+        ["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"],
+        repo,
+      )
       expect(trailer.stdout.trim()).toBe(`pr=C-trailer target=${target} base=${base} check=true`)
       // The trailer's claims are verifiable from the commit graph alone:
       // base is the first parent, target the second.
@@ -374,7 +369,10 @@ describe("withMergeWorker — zero-config native merge (§4: bay.merge unset)", 
 
       await bay.dispatch({ type: "merge", args: { pr: "C-nocheck" } })
 
-      const trailer = await git(["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"], repo)
+      const trailer = await git(
+        ["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"],
+        repo,
+      )
       expect(trailer.stdout.trim()).toMatch(/^pr=C-nocheck target=[0-9a-f]{40} base=[0-9a-f]{40} check=none$/)
     } finally {
       if (savedMerge !== undefined) process.env.BAY_MERGE = savedMerge
@@ -387,7 +385,7 @@ describe("withMergeWorker — zero-config native merge (§4: bay.merge unset)", 
     // configured), not the ancestry guard (covered by its own describe block
     // above); a bare `echo` never lands anything, so pairing it with a real
     // ancestry check would always (correctly) reject as a lying merge.
-    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: "echo {pr} {target}" })
+    const bay = await buildMergeBay(await tmpJournalPath(), { mergeCommand: `echo "$YRD_PR $YRD_TARGET_REF"` })
     await seedChecked(bay, "task/x", "C-override")
 
     const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-override" } })

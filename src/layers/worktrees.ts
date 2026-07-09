@@ -24,7 +24,7 @@ import {
   porcelainStatus,
   resolveBaseRef,
   revParse,
-  setConfig,
+  setWorktreeConfig,
   updateRef,
   worktreeAdd,
   worktreeAddExistingBranch,
@@ -182,7 +182,9 @@ function reduceOpen(bay: BayRuntime, state: BayState, command: BayCommand): Tran
   }
   const sourceBranch = typeof rawSourceBranch === "string" ? rawSourceBranch : undefined
   const branch = sourceBranch ?? (workitem ? `task/${workitem}` : `bay/${changeId}`)
-  const alreadyOpen = Object.values(state.leases).find((lease) => lease.endedAt === undefined && lease.branch === branch)
+  const alreadyOpen = Object.values(state.leases).find(
+    (lease) => lease.endedAt === undefined && lease.branch === branch,
+  )
   if (alreadyOpen) {
     throw new Error(`bay: open: '${branch}' is already open in another bay`)
   }
@@ -195,7 +197,14 @@ function reduceOpen(bay: BayRuntime, state: BayState, command: BayCommand): Tran
   )
   const effect: Effect = {
     type: FX_PROVISION,
-    data: { lease: leaseId, worktree, branch, changeId, workitem, ...(sourceBranch !== undefined ? { sourceBranch } : {}) },
+    data: {
+      lease: leaseId,
+      worktree,
+      branch,
+      changeId,
+      workitem,
+      ...(sourceBranch !== undefined ? { sourceBranch } : {}),
+    },
   }
   return { state, events: [opened], effects: [effect] }
 }
@@ -211,9 +220,7 @@ function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): Tra
     throw new Error(`bay: close: no bay '${leaseId}' — nothing to close`)
   }
   if (lease.endedAt !== undefined) {
-    throw new Error(
-      `bay: close: bay '${leaseId}' already ended (${lease.endReason ?? "ended"}) — nothing to close`,
-    )
+    throw new Error(`bay: close: bay '${leaseId}' already ended (${lease.endReason ?? "ended"}) — nothing to close`)
   }
 
   const pr = state.prs[lease.changeId]
@@ -241,7 +248,12 @@ function reduceClose(bay: BayRuntime, state: BayState, command: BayCommand): Tra
       return {
         state,
         events: [
-          makeEvent(bay, "gitbay/refused", { code: "pr-still-queued", detail, pr: pr.id, bay: leaseId }, command.cause!),
+          makeEvent(
+            bay,
+            "gitbay/refused",
+            { code: "pr-still-queued", detail, pr: pr.id, bay: leaseId },
+            command.cause!,
+          ),
         ],
         effects: [],
       }
@@ -277,9 +289,7 @@ function reduceRefresh(bay: BayRuntime, state: BayState, command: BayCommand): T
     throw new Error(`bay: refresh: no bay '${leaseId}' — nothing to refresh`)
   }
   if (lease.endedAt !== undefined) {
-    throw new Error(
-      `bay: refresh: bay '${leaseId}' already ended (${lease.endReason ?? "ended"}) — cannot refresh`,
-    )
+    throw new Error(`bay: refresh: bay '${leaseId}' already ended (${lease.endReason ?? "ended"}) — cannot refresh`)
   }
 
   const refreshed = makeEvent(bay, EV_BAY_REFRESHED, { bay: leaseId }, command.cause!)
@@ -472,20 +482,21 @@ function makeProvisionHandler(opts: WorktreesOptions) {
     }
     const sha = await headSha(path)
 
-    const data: { bay: LeaseId; worktree: string; path: string; baseSha: string; headSha: string; upstream?: string } = {
-      bay: d.lease,
-      worktree: d.worktree,
-      path,
-      baseSha,
-      headSha: sha,
-    }
+    const data: { bay: LeaseId; worktree: string; path: string; baseSha: string; headSha: string; upstream?: string } =
+      {
+        bay: d.lease,
+        worktree: d.worktree,
+        path,
+        baseSha,
+        headSha: sha,
+      }
 
     if (bayRemote) {
       // The remote IS the API: plain `git push` inside the bay submits (spec §
       // hot loop). Wire the `bay` remote + push defaults; fail-loud on git error.
       await ensureRemote(path, "bay", bayRemote)
-      await setConfig(path, "remote.pushdefault", "bay")
-      await setConfig(path, "push.default", "current")
+      await setWorktreeConfig(path, "remote.pushDefault", "bay")
+      await setWorktreeConfig(path, "push.default", "current")
       data.upstream = "bay"
     }
 
@@ -520,9 +531,7 @@ function makeDeprovisionHandler(opts: WorktreesOptions) {
 
     await worktreeRemove(mainRepo, d.path) // throws literal git stderr on failure
     const worktree = d.path.split("/").at(-1) ?? ""
-    return [
-      makeEvent(bay, EV_DEPROVISIONED, { worktree, via: d.via, bay: d.lease, abandonedRef }, effect.cause!),
-    ]
+    return [makeEvent(bay, EV_DEPROVISIONED, { worktree, via: d.via, bay: d.lease, abandonedRef }, effect.cause!)]
   }
 }
 

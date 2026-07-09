@@ -59,7 +59,14 @@ export async function resolveReceive(opts: ReceiveOptions): Promise<ResolvedRece
   const cwd = opts.mainRepo ?? process.cwd()
   const source = createGitConfigSource(cwd)
   const mainRepo = (await resolveOption(opts.mainRepo, "mainRepo", source, cwd))!
-  const bayDir = (await resolveOption(opts.bayDir, "dir", createGitConfigSource(mainRepo), (await defaultBayDir(mainRepo)).dir))!
+  const bayDir = (await resolveOption(
+    opts.bayDir,
+    "dir",
+    createGitConfigSource(mainRepo),
+    (
+      await defaultBayDir(mainRepo)
+    ).dir,
+  ))!
   return { mainRepo, bayDir, repoGit: bayPrsGitPath(bayDir) }
 }
 
@@ -232,12 +239,7 @@ function makeInitHandler(opts: ReceiveOptions) {
     }
 
     return [
-      makeEvent(
-        bay,
-        EV_INITIALIZED,
-        { repo: repoGit, events: bayEventsPath(bayDir), store: "sqlite" },
-        effect.cause!,
-      ),
+      makeEvent(bay, EV_INITIALIZED, { repo: repoGit, events: bayEventsPath(bayDir), store: "sqlite" }, effect.cause!),
     ]
   }
 }
@@ -292,14 +294,22 @@ function makeSubmitHandler(opts: ReceiveOptions) {
             checked.ok,
             checked.ok ? undefined : checked.detail,
             effect.cause!,
-            stepMetadata(checkedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checkedOutput }), error, {
-              configHash: refs.configHash,
-            }),
+            stepMetadata(
+              checkedOutput,
+              await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checkedOutput }),
+              error,
+              {
+                configHash: refs.configHash,
+              },
+            ),
           ),
         )
         if (!checked.ok) {
           events.push(
-            stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, { code: "check-failed", detail: checked.detail }),
+            stateChangeEvent(bay, d.pr, "checking", "rejected", effect.cause!, {
+              code: "check-failed",
+              detail: checked.detail,
+            }),
           )
           return events
         }
@@ -323,14 +333,22 @@ function makeSubmitHandler(opts: ReceiveOptions) {
         merged.ok,
         merged.detail,
         effect.cause!,
-        stepMetadata(mergedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run: mergeRun, output: mergedOutput }), error),
+        stepMetadata(
+          mergedOutput,
+          await writeStepArtifacts({ bayDir, cause: effect.cause!, run: mergeRun, output: mergedOutput }),
+          error,
+        ),
       ),
     )
     if (!merged.ok) {
-      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }))
+      events.push(
+        stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: merged.code, detail: merged.detail }),
+      )
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: merged.detail, sha: merged.sha }))
+    events.push(
+      stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: merged.detail, sha: merged.sha }),
+    )
 
     // 3. Keep the bay-owned repo's mainline current so the next push's
     //    merge-base sees reality.
@@ -499,16 +517,24 @@ export async function patchIdRewriteVerdict(
   const base = baseRes.stdout.trim()
 
   const ids = async (pin: string): Promise<string[]> => {
-    const proc = Bun.spawn(
-      ["sh", "-c", `git -C "${subRepo}" log -p --full-index ${base}..${pin} | git patch-id --stable`],
-      { stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() },
-    )
+    const log = await git(["-C", subRepo, "log", "-p", "--full-index", `${base}..${pin}`], subRepo)
+    if (log.code !== 0) {
+      throw new Error(`bay: git log over ${base.slice(0, 12)}..${pin.slice(0, 12)} failed: ${log.stderr.trim()}`)
+    }
+    const proc = Bun.spawn(["git", "patch-id", "--stable"], {
+      cwd: subRepo,
+      stdin: new Blob([log.stdout]),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: repoScopedCleanEnv(),
+    })
     const [out, err, code] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
       proc.exited,
     ])
-    if (code !== 0) throw new Error(`bay: patch-id over ${base.slice(0, 12)}..${pin.slice(0, 12)} failed: ${err.trim()}`)
+    if (code !== 0)
+      throw new Error(`bay: patch-id over ${base.slice(0, 12)}..${pin.slice(0, 12)} failed: ${err.trim()}`)
     return out
       .split("\n")
       .map((l) => l.split(/\s+/)[0])

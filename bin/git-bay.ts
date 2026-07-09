@@ -17,6 +17,7 @@ import { join } from "node:path"
 import type { BayCommand, BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest, StepError } from "../src/types.ts"
 import { isOpen } from "../src/types.ts"
 import { createGitbay } from "../src/core.ts"
+import { runConfiguredCommand } from "../src/command.ts"
 import { pipe } from "../src/pipe.ts"
 import { createGitConfigSource, resolveOption } from "../src/config.ts"
 import { createSqliteStore } from "../src/store/sqlite.ts"
@@ -36,7 +37,7 @@ import {
 } from "../src/layers/receive.ts"
 import { withAdopt } from "../src/layers/adopt.ts"
 import { notifyKeyFor, resolveValidateCommand, withIssueTracking } from "../src/layers/issue-tracking.ts"
-import { defaultBayDir, git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "../src/layers/git.ts"
+import { defaultBayDir, git, porcelainStatus, resolveBaseRef } from "../src/layers/git.ts"
 import { staleCheckReasons } from "../src/layers/steps.ts"
 import { parseTraceparent, readTraceparentEnv } from "../src/trace.ts"
 import { bayEventsPath, bayPrsGitPath } from "../src/paths.ts"
@@ -651,18 +652,16 @@ function relToMain(ctx: Ctx, path: string): string {
 async function validateWorkitem(ctx: Ctx, verb: string, name: string): Promise<void> {
   const validate = await resolveValidateCommand(ctx.mainRepo)
   if (validate === undefined) return
-  const cmd = validate.replaceAll("{name}", name)
-  const proc = Bun.spawn(["sh", "-c", cmd], {
+  const result = await runConfiguredCommand({
+    command: validate,
     cwd: ctx.mainRepo,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: repoScopedCleanEnv(),
+    purpose: "task validation",
+    variables: { YRD_TASK: name },
   })
-  const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited])
-  if (code !== 0) {
-    const said = err.trim()
+  if (result.exitCode !== 0) {
+    const said = result.stderr.trim()
     throw new Error(
-      `bay: ${verb}: the tracker does not accept '${name}' — ${cmd} exited ${code}${said ? `:\n${said}` : ""}\n` +
+      `bay: ${verb}: the tracker does not accept '${name}' — ${validate} exited ${result.exitCode}${said ? `:\n${said}` : ""}\n` +
         `Use a name your tracker knows, or disable the check: git config bay.issue none`,
     )
   }
@@ -1461,13 +1460,13 @@ async function guideContext(): Promise<string> {
   lines.push(
     mergeCommand !== undefined && mergeCommand.trim() !== ""
       ? `  merge           ${mergeCommand}`
-      : "  merge           (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.merge '<command with {target}>')",
+      : "  merge           (not set — merge/integrate use native git merge --no-ff; override: git config bay.merge 'git merge --no-ff \"$YRD_TARGET\"')",
   )
   const tracker = process.env.BAY_ISSUE ?? (await source.get("issue").catch(() => undefined))
   lines.push(
     tracker !== undefined && tracker.trim() !== ""
       ? `  issue           ${tracker}`
-      : "  issue           (not set — names are not checked against a tracker; set: git config bay.issue '<command with {name}>')",
+      : "  issue           (not set — names are not checked against a tracker; set: git config bay.issue 'gh issue view \"$YRD_TASK\"')",
   )
   if (existsSync(bayDir)) {
     const ctx: Ctx = {

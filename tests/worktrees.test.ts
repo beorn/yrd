@@ -3,14 +3,7 @@ import { existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import {
-  createGitbay,
-  createJsonlJournal,
-  definePlugin,
-  makeEvent,
-  pipe,
-  withWorktrees,
-} from "../src/index.ts"
+import { createGitbay, createJsonlJournal, definePlugin, makeEvent, pipe, withWorktrees } from "../src/index.ts"
 import type { BayEvent, BayRuntime, BayState, BayStore, WorktreesSlice } from "../src/index.ts"
 import { git } from "../src/layers/git.ts"
 import { staleLeases } from "../src/layers/worktrees.ts"
@@ -96,11 +89,7 @@ function at(ms: number): string {
   return new Date(Date.parse("2024-01-01T00:00:00.000Z") + ms).toISOString()
 }
 
-async function buildTtlBay(
-  path: string,
-  clock: () => string,
-  leaseTimeoutMs: number,
-): Promise<BayRuntime> {
+async function buildTtlBay(path: string, clock: () => string, leaseTimeoutMs: number): Promise<BayRuntime> {
   return pipe(
     createGitbay({ store: openStore(path), clock, actor: ACTOR }),
     withStubGit, // registered first → its effect handlers shadow the real-git ones
@@ -164,18 +153,14 @@ describe("withWorktrees — worktree allocation (lowest free)", () => {
 describe("withWorktrees — close validation", () => {
   it("throws closing an unknown lease", async () => {
     const bay = await buildStubBay(await tmpJournalPath())
-    await expect(bay.dispatch({ type: "close", args: { lease: "L99" } })).rejects.toThrow(
-      /no bay 'L99'/,
-    )
+    await expect(bay.dispatch({ type: "close", args: { lease: "L99" } })).rejects.toThrow(/no bay 'L99'/)
   })
 
   it("throws closing an already-ended lease", async () => {
     const bay = await buildStubBay(await tmpJournalPath())
     await bay.dispatch({ type: "open", args: { workitem: "wi-a" } })
     await bay.dispatch({ type: "close", args: { lease: "L1" } })
-    await expect(bay.dispatch({ type: "close", args: { lease: "L1" } })).rejects.toThrow(
-      /already ended/,
-    )
+    await expect(bay.dispatch({ type: "close", args: { lease: "L1" } })).rejects.toThrow(/already ended/)
   })
 })
 
@@ -441,6 +426,11 @@ describe.skipIf(!process.env.BAY_GIT_TESTS)("withWorktrees — real git", () => 
       const r2 = await bay.dispatch({ type: "open", args: { workitem: "wi-2" } })
       expect(r2.events.find((e) => e.name === "worktree/provisioned")!.data.upstream).toBe("bay")
       await assertWired(join(baysRoot, "wt2"))
+
+      // Push policy belongs to each linked worktree. A bay must never redirect
+      // pushes made from the parent/mainline worktree.
+      expect((await git(["-C", repo, "config", "--worktree", "--get", "remote.pushdefault"])).code).toBe(1)
+      expect((await git(["-C", repo, "config", "--worktree", "--get", "push.default"])).code).toBe(1)
     } finally {
       await rm(remoteDir, { recursive: true, force: true })
       await rm(repo, { recursive: true, force: true })

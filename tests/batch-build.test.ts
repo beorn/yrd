@@ -52,7 +52,7 @@ async function buildBatchBay(
     withBatchBuild({ mainRepo: repo, generatedGlobs: [], ...batchOpts }),
     withMergeWorker({
       mainRepo: repo,
-      mergeCommand: mergeCommand ?? `git -c user.name=t -c user.email=t@e merge --no-ff -q {target}`,
+      mergeCommand: mergeCommand ?? `git -c user.name=t -c user.email=t@e merge --no-ff -q "$YRD_TARGET"`,
     }),
   )
 }

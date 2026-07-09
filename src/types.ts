@@ -106,9 +106,7 @@ export type RejectionCode =
   | "queue-full" // reserved: v0.4 WIP limit
   | "poison-retry" // reserved: a PR retried past a failure-count ceiling
 
-export type StepErrorCode =
-  | RejectionCode
-  | "deploy-failed" // bay.deploy failed after merge; records a line-step failure but never changes the terminal merged PR state
+export type StepErrorCode = RejectionCode | "deploy-failed" // bay.deploy failed after merge; records a line-step failure but never changes the terminal merged PR state
 
 /** Machine-readable reason a command was refused at the door (`gitbay/refused
  *  {code, detail}`) — never a PR state transition, just "no, and here is why".
@@ -228,7 +226,7 @@ export type GitbayEvent =
         code?: RejectionCode
         detail?: string
         /** Verified landed tip when `to === "merged"` (lying-merge-guard
-         *  proven ancestor of the mainline) — the machine-truth `{sha}` for
+         *  proven ancestor of the mainline) — the machine-truth YRD_SHA for
          *  issue-tracker notifications, never parsed from detail prose. */
         sha?: string
       }
@@ -312,7 +310,14 @@ export type GitbayEvent =
       // Refusals used to be throws that discarded the walk evidence; now the
       // walk's line/step rows and the verdict survive in the journal.
       data:
-        | { batch: PrId; outcome: "ejected"; reason: "build-conflict" | "gate-red"; pr: PrId; target: string; detail: string }
+        | {
+            batch: PrId
+            outcome: "ejected"
+            reason: "build-conflict" | "gate-red"
+            pr: PrId
+            target: string
+            detail: string
+          }
         | { batch: PrId; outcome: "refused"; reason: "baseline-red" | "all-green" | "provision-failed"; detail: string }
     }
   | {

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto"
 import type { RejectionCode, StepArtifact, StepCommandOutput } from "../types.ts"
+import { runConfiguredCommand } from "../command.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { parseStepArtifactRefs } from "./artifacts.ts"
-import { git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
+import { git, porcelainStatus, resolveBaseRef } from "./git.ts"
 
 /**
  * pipeline.ts — the check + merge runners shared by every path that can
@@ -32,7 +33,14 @@ export type CheckRunner = "local" | "waiting"
 export type CheckOutcome =
   | ({ ok: true; waiting?: false } & StepCommandOutput)
   | ({ ok: false; waiting?: false; detail: string; code?: RejectionCode } & StepCommandOutput)
-  | ({ ok: false; waiting: true; detail: string; token?: string; url?: string; artifacts?: StepArtifact[] } & StepCommandOutput)
+  | ({
+      ok: false
+      waiting: true
+      detail: string
+      token?: string
+      url?: string
+      artifacts?: StepArtifact[]
+    } & StepCommandOutput)
 
 /** Resolve the ONE project check command: inline > BAY_CHECK > git config
  *  bay.check > none (unset — checks are opt-in). */
@@ -49,12 +57,21 @@ export async function resolveCheckRunner(checkRunner: string | undefined, config
   throw new Error(`bay: unknown bay.check.runner '${raw}' (supported: local, waiting)`)
 }
 
-function parseWaitingMetadata(stdout: string, stderr: string): { detail: string; token?: string; url?: string; artifacts?: StepArtifact[] } {
+function parseWaitingMetadata(
+  stdout: string,
+  stderr: string,
+): { detail: string; token?: string; url?: string; artifacts?: StepArtifact[] } {
   for (const line of [...stdout.split("\n"), ...stderr.split("\n")].reverse()) {
     const trimmed = line.trim()
     if (trimmed === "") continue
     try {
-      const parsed = JSON.parse(trimmed) as { artifacts?: unknown; detail?: unknown; message?: unknown; token?: unknown; url?: unknown }
+      const parsed = JSON.parse(trimmed) as {
+        artifacts?: unknown
+        detail?: unknown
+        message?: unknown
+        token?: unknown
+        url?: unknown
+      }
       if (parsed && typeof parsed === "object") {
         const detail =
           typeof parsed.detail === "string"
@@ -82,29 +99,28 @@ function parseWaitingMetadata(stdout: string, stderr: string): { detail: string;
  *  (spec § Check provider: checks are opt-in, not a hard requirement). */
 export async function runProjectCheck(check: string | undefined, cwd: string): Promise<CheckOutcome> {
   if (check === undefined || check.trim() === "") return { ok: true, durationMs: 0, stdout: "", stderr: "" }
-  const start = Date.now()
-  const proc = Bun.spawn(["sh", "-c", check], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
-  const [out, err, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-  const metadata = { exitCode: code, durationMs: Date.now() - start, stdout: out, stderr: err }
-  if (code !== 0) return { ok: false, detail: `check '${check}' failed (exit ${code}): ${tail(err || out)}`, ...metadata }
+  const result = await runConfiguredCommand({ command: check, cwd, purpose: "check" })
+  const metadata = result
+  if (result.exitCode !== 0) {
+    return {
+      ok: false,
+      detail: `check '${check}' failed (exit ${result.exitCode}): ${tail(result.stderr || result.stdout)}`,
+      ...metadata,
+    }
+  }
   return { ok: true, ...metadata }
 }
 
 export async function runWaitingCheckLauncher(check: string, cwd: string): Promise<CheckOutcome> {
-  const start = Date.now()
-  const proc = Bun.spawn(["sh", "-c", check], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-  const metadata = { exitCode: code, durationMs: Date.now() - start, stdout, stderr }
-  if (code !== 0) return { ok: false, detail: `check launcher '${check}' failed (exit ${code}): ${tail(stderr || stdout)}`, ...metadata }
-  return { ok: false, waiting: true, ...parseWaitingMetadata(stdout, stderr), ...metadata }
+  const result = await runConfiguredCommand({ command: check, cwd, purpose: "check launcher" })
+  if (result.exitCode !== 0) {
+    return {
+      ok: false,
+      detail: `check launcher '${check}' failed (exit ${result.exitCode}): ${tail(result.stderr || result.stdout)}`,
+      ...result,
+    }
+  }
+  return { ok: false, waiting: true, ...parseWaitingMetadata(result.stdout, result.stderr), ...result }
 }
 
 // ---------- deploy ----------
@@ -115,7 +131,10 @@ export type DeployOutcome =
 
 /** Resolve the optional post-merge deploy command: inline > BAY_DEPLOY >
  *  git config bay.deploy > none. */
-export async function resolveDeployCommand(deployCommand: string | undefined, configCwd: string): Promise<string | undefined> {
+export async function resolveDeployCommand(
+  deployCommand: string | undefined,
+  configCwd: string,
+): Promise<string | undefined> {
   const source = createGitConfigSource(configCwd)
   return await resolveOption(deployCommand, "deploy", source)
 }
@@ -135,7 +154,14 @@ export async function runDeploy(params: {
   const configCwd = params.configCwd ?? params.mainRepo ?? process.cwd()
   const deployCommand = await resolveDeployCommand(params.deployCommand, configCwd)
   if (deployCommand === undefined || deployCommand.trim() === "") {
-    return { ok: true, skipped: true, detail: "deploy skipped — no bay.deploy configured", durationMs: 0, stdout: "", stderr: "" }
+    return {
+      ok: true,
+      skipped: true,
+      detail: "deploy skipped — no bay.deploy configured",
+      durationMs: 0,
+      stdout: "",
+      stderr: "",
+    }
   }
   const configHash = createHash("sha256").update("deploy").update("\0").update(deployCommand.trim()).digest("hex")
 
@@ -143,33 +169,33 @@ export async function runDeploy(params: {
   const base = params.mainRepo !== undefined ? await resolveDeployBaseRef(params.mainRepo) : "HEAD"
   let baseSha: string | undefined
   if (params.mainRepo !== undefined) {
-    const resolved = await git(["-C", params.mainRepo, "rev-parse", "--verify", "--quiet", `${base}^{commit}`], params.mainRepo)
+    const resolved = await git(
+      ["-C", params.mainRepo, "rev-parse", "--verify", "--quiet", `${base}^{commit}`],
+      params.mainRepo,
+    )
     if (resolved.code === 0) baseSha = resolved.stdout.trim()
   }
   const sha = baseSha ?? ""
-  const cmd = deployCommand
-    .replaceAll("{base}", base)
-    .replaceAll("{target}", base)
-    .replaceAll("{pr}", params.pr)
-    .replaceAll("{sha}", sha)
-  const start = Date.now()
-  const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
+  const result = await runConfiguredCommand({
+    command: deployCommand,
+    cwd,
+    purpose: "deploy",
+    variables: { YRD_BASE: base, YRD_PR: params.pr, YRD_SHA: sha, YRD_TARGET: base },
+  })
   const metadata: StepCommandOutput = {
-    exitCode: code,
-    durationMs: Date.now() - start,
-    stdout,
-    stderr,
+    ...result,
     ...(baseSha !== undefined ? { baseSha, headSha: baseSha } : {}),
   }
-  if (code !== 0) {
-    return { ok: false, code: "deploy-failed", configHash, detail: `deploy '${deployCommand}' failed (exit ${code}): ${tail(stderr || stdout)}`, ...metadata }
+  if (result.exitCode !== 0) {
+    return {
+      ok: false,
+      code: "deploy-failed",
+      configHash,
+      detail: `deploy '${deployCommand}' failed (exit ${result.exitCode}): ${tail(result.stderr || result.stdout)}`,
+      ...metadata,
+    }
   }
-  const detail = tail(stdout) || `deployed ${base}${baseSha === undefined ? "" : `@${baseSha.slice(0, 12)}`}`
+  const detail = tail(result.stdout) || `deployed ${base}${baseSha === undefined ? "" : `@${baseSha.slice(0, 12)}`}`
   return { ok: true, configHash, detail, ...metadata }
 }
 
@@ -178,7 +204,7 @@ export async function runDeploy(params: {
 export type MergeOutcome =
   /** `sha` is the verified landed tip (the target commit the lying-merge guard
    *  proved an ancestor of the mainline) — machine-truth for downstream
-   *  consumers ({sha} in issue-tracker commands). Absent only on the
+   *  consumers (YRD_SHA in issue-tracker commands). Absent only on the
    *  no-mainRepo library path, which runs no guard and resolves no target. */
   | ({ ok: true; detail: string; sha?: string } & StepCommandOutput)
   | ({ ok: false; code: RejectionCode; detail: string } & StepCommandOutput)
@@ -243,9 +269,14 @@ export function formatBayGateTrailer(fields: {
   check: string | undefined
   batch?: BatchLandEvidence
 }): string {
-  for (const [key, value] of [["pr", fields.pr], ["batch id", fields.batch?.batch]] as const) {
+  for (const [key, value] of [
+    ["pr", fields.pr],
+    ["batch id", fields.batch?.batch],
+  ] as const) {
     if (value !== undefined && /\s/u.test(value)) {
-      throw new Error(`bay: Bay-Gate trailer ${key} '${value}' contains whitespace — refs cannot, so this is a caller bug`)
+      throw new Error(
+        `bay: Bay-Gate trailer ${key} '${value}' contains whitespace — refs cannot, so this is a caller bug`,
+      )
     }
   }
   const batch = fields.batch
@@ -261,7 +292,10 @@ export function formatBayGateTrailer(fields: {
  *  bay.merge > undefined. Undefined now means "use the native default" (§4:
  *  bay.merge is an override, never a requirement) —
  *  this no longer throws on a missing command. */
-export async function resolveMergeCommand(mergeCommand: string | undefined, configCwd: string): Promise<string | undefined> {
+export async function resolveMergeCommand(
+  mergeCommand: string | undefined,
+  configCwd: string,
+): Promise<string | undefined> {
   const source = createGitConfigSource(configCwd)
   return await resolveOption(mergeCommand, "merge", source)
 }
@@ -341,7 +375,14 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
       ["-C", mainRepo, "merge", "--no-ff", "-m", `bay: merge ${pr} (${target})`, "-m", trailer, targetSha!],
       mainRepo,
     )
-    output = { exitCode: merge.code, durationMs: Date.now() - start, stdout: merge.stdout, stderr: merge.stderr, baseSha, headSha: targetSha }
+    output = {
+      exitCode: merge.code,
+      durationMs: Date.now() - start,
+      stdout: merge.stdout,
+      stderr: merge.stderr,
+      baseSha,
+      headSha: targetSha,
+    }
     if (merge.code !== 0) {
       await git(["-C", mainRepo, "merge", "--abort"], mainRepo) // best-effort restore; a failed abort surfaces below
       return {
@@ -354,31 +395,33 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     const mergeSha = (await git(["-C", mainRepo, "rev-parse", "HEAD"], mainRepo)).stdout.trim()
     mergeDetail = `merged ${mergeSha} onto ${mainline}`
   } else {
-    const cmd = mergeCommand.replaceAll("{target}", target).replaceAll("{pr}", pr).replaceAll("{changeset}", pr)
-    // repoScopedCleanEnv: this path now also runs from INSIDE the post-receive
-    // hook (a fused push, unified with `merge`/`integrate` per §4) — the hook
-    // process exports GIT_DIR=. (and friends), which would silently repoint
-    // the spawned command's own git invocations at the wrong repo otherwise.
-    const start = Date.now()
-    const proc = Bun.spawn(["sh", "-c", cmd], { cwd: mainRepo, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ])
-    output = { exitCode: code, durationMs: Date.now() - start, stdout, stderr, baseSha, headSha: targetSha }
-    if (code !== 0) {
-      const errTail = tail(stderr)
+    const baseRef = mainRepo === undefined ? undefined : await resolveBaseRef(mainRepo)
+    const result = await runConfiguredCommand({
+      command: mergeCommand,
+      cwd: mainRepo ?? configCwd,
+      purpose: "merge",
+      variables: {
+        YRD_PR: pr,
+        YRD_TARGET: targetSha ?? target,
+        YRD_TARGET_REF: target,
+        YRD_SHA: targetSha,
+        YRD_BASE: baseRef,
+        YRD_BASE_SHA: baseSha,
+      },
+    })
+    output = { ...result, baseSha, headSha: targetSha }
+    if (result.exitCode !== 0) {
+      const errTail = tail(result.stderr)
       return {
         ok: false,
         code: "merge-command-failed",
         ...output,
         baseSha,
         headSha: targetSha,
-        detail: errTail === "" ? `exit ${code}` : `exit ${code}: ${errTail}`,
+        detail: errTail === "" ? `exit ${result.exitCode}` : `exit ${result.exitCode}: ${errTail}`,
       }
     }
-    mergeDetail = tail(stdout)
+    mergeDetail = tail(result.stdout)
   }
 
   // Lying-merge guard (G1.1/G1.2), every path: exit 0 is a CLAIM, not a

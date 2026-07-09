@@ -442,7 +442,7 @@ describe("yrd CLI — line projection", () => {
         demo,
         "config",
         "bay.provision",
-        `printf '%s %s\\n' "$BAY_SCRATCH_REF" "$BAY_SCRATCH_PATH" > '${provisionLog}'`,
+        `printf '%s %s\\n' "$YRD_SCRATCH_REF" "$YRD_SCRATCH_PATH" > '${provisionLog}'`,
       ],
       demo,
       env,
@@ -455,7 +455,7 @@ describe("yrd CLI — line projection", () => {
     }
     expect(data.line).toMatchObject({ base: "main", provisioned: true })
     expect(data.line.baseSha).toMatch(/^[0-9a-f]{40}$/)
-    expect(data.line.provisionCommand).toContain("BAY_SCRATCH_REF")
+    expect(data.line.provisionCommand).toContain("YRD_SCRATCH_REF")
     expect(data.scratch.released).toBe(true)
     expect(existsSync(data.scratch.path)).toBe(false)
     expect(await readFile(provisionLog, "utf8")).toBe(`${data.line.baseSha} ${data.scratch.path}\n`)
@@ -588,7 +588,7 @@ describe("yrd CLI — line projection", () => {
         demo,
         "config",
         "bay.deploy",
-        "printf 'deploy {pr} {base} {sha}\\n' >> deploy.log; printf 'deploy stdout\\n'",
+        `printf 'deploy %s %s %s\\n' "$YRD_PR" "$YRD_BASE" "$YRD_SHA" >> deploy.log; printf 'deploy stdout\\n'`,
       ],
       demo,
       env,
@@ -659,7 +659,7 @@ describe("yrd CLI — line projection", () => {
     await must(["git", "-C", demo, "config", "--unset", "bay.deploy"], demo, env)
     const skipped = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "deploy"], demo, env)
     expect(skipped.stdout).toContain(`bay: ${pr} deploy → skipped — deploy skipped`)
-  })
+  }, PROCESS_TEST_TIMEOUT_MS)
 
   it("line watch can deploy each PR it merges", async () => {
     await must(
@@ -669,7 +669,7 @@ describe("yrd CLI — line projection", () => {
         demo,
         "config",
         "bay.deploy",
-        "printf 'watch deploy {pr} {base}\\n' >> deploy-watch.log; printf 'watch deployed {pr}\\n'",
+        `printf 'watch deploy %s %s\\n' "$YRD_PR" "$YRD_BASE" >> deploy-watch.log; printf 'watch deployed %s\\n' "$YRD_PR"`,
       ],
       demo,
       env,
@@ -1192,7 +1192,7 @@ describe("git bay CLI — issue tracking inbound: bay.issue at open AND adopt", 
       "utf8",
     )
     await chmod(tracker, 0o755)
-    await must(["git", "-C", demo, "config", "bay.issue", `${tracker} {name}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue", `${tracker} "$YRD_TASK"`], demo, env)
   })
 
   afterEach(async () => {
@@ -1221,7 +1221,7 @@ describe("git bay CLI — issue tracking inbound: bay.issue at open AND adopt", 
     expect(ignored.stdout.trim()).toContain(".bays/wt1")
     await must(["git", "bay", "close", "ignored-tracker"], demo, env)
 
-    await must(["git", "-C", demo, "config", "bay.issue", `${tracker} {name}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue", `${tracker} "$YRD_TASK"`], demo, env)
     const refused = await run(["git", "bay", "open", "bogus-name"], demo, env)
     expect(refused.code).toBe(1)
     expect(refused.stderr).toContain("no such ticket: bogus-name")
@@ -1282,7 +1282,7 @@ describe("git bay CLI — issue tracking outbound: bay.issue.on-* commands run a
     ;({ root, demo, env } = await makeFixture("bay-notify-"))
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
-    await must(["git", "-C", demo, "config", "bay.merge", "git merge --no-ff {target}"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", `git merge --no-ff "$YRD_TARGET"`], demo, env)
     log = join(root, "notified.log")
   })
 
@@ -1290,9 +1290,9 @@ describe("git bay CLI — issue tracking outbound: bay.issue.on-* commands run a
     await rm(root, { recursive: true, force: true })
   })
 
-  it("a merged PR runs on-merged with {name}/{pr}/{sha} — {sha} is the verified landed tip, and the outcome is journaled", async () => {
+  it("a merged PR exposes task/PR/SHA as environment data and journals the outcome", async () => {
     await must(
-      ["git", "-C", demo, "config", "bay.issue.on-merged", `echo "merged {name} {pr} {sha}" >> ${log}`],
+      ["git", "-C", demo, "config", "bay.issue.on-merged", `echo "merged $YRD_TASK $YRD_PR $YRD_SHA" >> ${log}`],
       demo,
       env,
     )
@@ -1312,9 +1312,9 @@ describe("git bay CLI — issue tracking outbound: bay.issue.on-* commands run a
     expect(merged!.data.sha).toBe(tipSha) // machine-truth on the event itself, not detail prose
   })
 
-  it("a rejected PR runs on-rejected with {code}/{detail}", async () => {
+  it("a rejected PR exposes the rejection code as environment data", async () => {
     await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
-    await must(["git", "-C", demo, "config", "bay.issue.on-rejected", `echo "rejected {name} {pr} {code}" >> ${log}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue.on-rejected", `echo "rejected $YRD_TASK $YRD_PR $YRD_CODE" >> ${log}`], demo, env)
     await openCommitPush("feat-red")
     const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
     expect(submit.stdout).toContain("bay: issue 'feat-red' notified (rejected)")
@@ -1342,7 +1342,7 @@ describe("git bay CLI — issue tracking outbound: bay.issue.on-* commands run a
   })
 
   it("an unnamed PR notifies nothing — there is no issue to notify", async () => {
-    await must(["git", "-C", demo, "config", "bay.issue.on-merged", `echo "merged {name}" >> ${log}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue.on-merged", `echo "merged $YRD_TASK" >> ${log}`], demo, env)
     await must(["git", "-C", demo, "switch", "-qc", "task/anon", "main"], demo, env)
     await writeFile(join(demo, "anon.txt"), "x\n", "utf8")
     await must(["git", "-C", demo, "add", "anon.txt"], demo, env)
@@ -1498,7 +1498,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
       expect(res.code, `${verb} -h`).toBe(0)
       expect(res.stdout, `${verb} -h`).toContain("Usage: git bay")
     }
-  })
+  }, PROCESS_TEST_TIMEOUT_MS)
 
   it("an unknown flag is a teaching refusal, never a silent no-op or a positional", async () => {
     await must(["git", "bay", "init"], demo, env)
@@ -1632,7 +1632,7 @@ describe("git bay CLI — batch integration from queue.batch-size", () => {
         demo,
         "config",
         "bay.merge",
-        "git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}",
+        `git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$YRD_TARGET"`,
       ],
       demo,
       env,
@@ -1708,7 +1708,7 @@ git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$target"
     await writeFile(gate, `#!/bin/sh\ntest ! -f bad.txt\n`, "utf8")
     await chmod(merge, 0o755)
     await chmod(gate, 0o755)
-    await must(["git", "-C", demo, "config", "bay.merge", `${merge} {target}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", `${merge} "$YRD_TARGET"`], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", gate], demo, env)
 
     await branchWithFiles(demo, env, "task/good", { "good.txt": "ok\n" })
@@ -1933,7 +1933,7 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     ;({ root, demo, env } = await makeFixture("bay-create-submit-"))
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
-    await must(["git", "-C", demo, "config", "bay.merge", "git merge --no-ff {target}"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", `git merge --no-ff "$YRD_TARGET"`], demo, env)
   })
 
   afterEach(async () => {

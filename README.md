@@ -278,10 +278,10 @@ Small repos can use git config:
 git config bay.check '<command>'          # line check step; exit 0 passes
 git config bay.check.runner local|waiting # local verdict or external launcher
 git config bay.provision '<command>'      # prepare scratch workspaces for checks
-git config bay.merge '<command>'          # merge override; {branch}, {base}, {pr}
+git config bay.merge 'git merge --no-ff "$YRD_TARGET"' # optional merge override
 git config bay.deploy '<command>'         # deploy step after merge; exit 0 passes
-git config bay.issue '<command>'          # validate bay names; {name}
-git config bay.review '<command>'         # review gate; {pr}, {branch}, {base}
+git config bay.issue 'gh issue view "$YRD_TASK"'        # validate task names
+git config bay.review '<command>'         # review gate
 git config bay.contest.cost.codex 'input:1.25,output:10,cached-input:0.125'
 git config bay.autoSubmit true|false      # default false
 git config bay.autoMerge true|false       # default true
@@ -292,9 +292,16 @@ No merge command is required. If unset, git bay uses native
 recorded as merged only when the submitted revision is an ancestor of the
 refreshed base.
 
+Configured command text is static. Runtime values are never substituted into
+shell source; they are passed as `YRD_*` environment variables. Merge commands
+receive `YRD_PR`, pinned `YRD_TARGET`, original `YRD_TARGET_REF`, `YRD_BASE`,
+`YRD_BASE_SHA`, and `YRD_SHA`. Deploy commands receive `YRD_PR`, `YRD_BASE`,
+and `YRD_SHA`. Task hooks receive `YRD_TASK` plus the applicable PR/verdict
+variables. Retired `{name}`/`{pr}`/`{target}` placeholders fail loudly.
+
 `bay.provision` runs inside disposable scratch workspaces before bayless checks
-and line preflights. The command receives `BAY_SCRATCH_PATH` and
-`BAY_SCRATCH_REF` in the environment. `yrd line provision [base]` runs the same
+and line preflights. The command receives `YRD_SCRATCH_PATH` and
+`YRD_SCRATCH_REF` in the environment. `yrd line provision [base]` runs the same
 provision hook against a scratch at the line base and releases it, so operators
 can verify that the line environment is runnable before queue work depends on
 it.
@@ -332,20 +339,19 @@ steps:
   check:
     run: bun run check
   review:
-    run: ./review-gate {pr}
+    run: ./review-gate "$YRD_PR"
   merge:
-    run: git merge --no-ff {branch}
+    run: git merge --no-ff "$YRD_TARGET"
   deploy:
     environment: staging
-    run: ./deploy.sh {base}
+    run: ./deploy.sh "$YRD_BASE"
 
 tasks:
-  validate: gh issue view {name}
-  onIntegrated: gh issue close {name} --comment "merged as {pr}"
+  validate: gh issue view "$YRD_TASK"
+  onIntegrated: gh issue close "$YRD_TASK" --comment "merged as $YRD_PR"
 ```
 
-Hook commands can use `{name}` for bay name, `{branch}` for source branch,
-`{base}` for base branch, and `{pr}` for PR id.
+Hooks use the same `YRD_*` environment contract as git config commands.
 
 Hooks and plugins are optional. git bay core is fully local; plugins may call
 hosted APIs when configured. Plugins can provide the same contracts for GitHub

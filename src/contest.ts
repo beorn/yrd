@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises"
 import { basename, join } from "node:path"
+import { runConfiguredCommand, type YrdCommandVariable } from "./command.ts"
 import { definePlugin } from "./core.ts"
 import type { BayEvent, BayPlugin, BayState, Cause, ConfigSource, GitbayEvent } from "./types.ts"
 import { createJsonlJournal } from "./journal.ts"
@@ -32,8 +33,12 @@ export type ContestCostRates = {
 }
 
 export function parseContestCostField(raw: string): keyof ContestCostRates {
-  const normalized = raw.trim().toLowerCase().replace(/[_\s]+/g, "-")
-  if (normalized === "input" || normalized === "input-tokens" || normalized === "prompt") return "inputTokensUsdPerMillion"
+  const normalized = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+  if (normalized === "input" || normalized === "input-tokens" || normalized === "prompt")
+    return "inputTokensUsdPerMillion"
   if (normalized === "cached-input" || normalized === "cached-input-tokens" || normalized === "cached-prompt") {
     return "cachedInputTokensUsdPerMillion"
   }
@@ -41,7 +46,8 @@ export function parseContestCostField(raw: string): keyof ContestCostRates {
     return "cacheCreationInputTokensUsdPerMillion"
   }
   if (normalized === "cache-read-input" || normalized === "cache-read") return "cacheReadInputTokensUsdPerMillion"
-  if (normalized === "output" || normalized === "output-tokens" || normalized === "completion") return "outputTokensUsdPerMillion"
+  if (normalized === "output" || normalized === "output-tokens" || normalized === "completion")
+    return "outputTokensUsdPerMillion"
   if (normalized === "reasoning-output" || normalized === "reasoning") return "reasoningOutputTokensUsdPerMillion"
   if (normalized === "total" || normalized === "total-tokens") return "totalTokensUsdPerMillion"
   throw new Error(`unknown cost field '${raw}'`)
@@ -438,15 +444,15 @@ export function extractMetrics(text: string, source: string): ContestMetrics {
   const visit = (value: unknown, keyHint = ""): void => {
     if (typeof value === "number" && Number.isFinite(value)) {
       const key = keyHint.toLowerCase().replace(/[_-]/g, "")
-      if (key === "inputtokens" || key === "prompttokens") metrics.inputTokens = Math.max(metrics.inputTokens ?? 0, value)
+      if (key === "inputtokens" || key === "prompttokens")
+        metrics.inputTokens = Math.max(metrics.inputTokens ?? 0, value)
       else if (key === "cachedinputtokens" || key === "cachedprompttokens") {
         metrics.cachedInputTokens = Math.max(metrics.cachedInputTokens ?? 0, value)
       } else if (key === "cachecreationinputtokens") {
         metrics.cacheCreationInputTokens = Math.max(metrics.cacheCreationInputTokens ?? 0, value)
       } else if (key === "cachereadinputtokens") {
         metrics.cacheReadInputTokens = Math.max(metrics.cacheReadInputTokens ?? 0, value)
-      }
-      else if (key === "outputtokens" || key === "completiontokens") {
+      } else if (key === "outputtokens" || key === "completiontokens") {
         metrics.outputTokens = Math.max(metrics.outputTokens ?? 0, value)
       } else if (key === "reasoningoutputtokens") {
         metrics.reasoningOutputTokens = Math.max(metrics.reasoningOutputTokens ?? 0, value)
@@ -505,7 +511,11 @@ function hasCostRates(rates: ContestCostRates): boolean {
   return Object.values(rates).some((value) => value !== undefined)
 }
 
-export function applyCostAdapter(metrics: ContestMetrics, rates: ContestCostRates | undefined, source: string): ContestMetrics {
+export function applyCostAdapter(
+  metrics: ContestMetrics,
+  rates: ContestCostRates | undefined,
+  source: string,
+): ContestMetrics {
   if (rates === undefined || !hasCostRates(rates) || metrics.costUsd !== undefined) return metrics
   const costUsd =
     costTerm(metrics.inputTokens, rates.inputTokensUsdPerMillion) +
@@ -540,14 +550,19 @@ export async function collectGitMetrics(bayPath: string, baseSha: string): Promi
 export async function runEvalCommand(command: string, cwd: string, env: Record<string, string>): Promise<ContestEval> {
   const started = Date.now()
   const startedAt = new Date(started).toISOString()
-  const result = await runCommand(["sh", "-c", command], cwd, env)
+  const result = await runConfiguredCommand({
+    command,
+    cwd,
+    purpose: "contest evaluation",
+    variables: env as Partial<Record<YrdCommandVariable, string>>,
+  })
   const finished = Date.now()
   return {
     command,
     startedAt,
     finishedAt: new Date(finished).toISOString(),
     durationMs: finished - started,
-    exitCode: result.code,
+    exitCode: result.exitCode,
     stdout: result.stdout,
     stderr: result.stderr,
   }
@@ -592,7 +607,14 @@ export async function runAttempt(params: {
     YRD_PROMPT: prompt,
     YRD_BAY: params.bayPath,
   }
-  const result = await runCommand(command, params.bayPath, env)
+  const result = params.agentCommands.has(params.agent)
+    ? await runConfiguredCommand({
+        command: command[2]!,
+        cwd: params.bayPath,
+        purpose: `contest agent ${params.agent}`,
+        variables: env,
+      }).then(({ exitCode: code, stdout, stderr }) => ({ code, stdout, stderr }))
+    : await runCommand(command, params.bayPath, env)
   const finished = Date.now()
   const finishedAt = new Date(finished).toISOString()
   const attemptDir = join(params.contestDir, params.id)
@@ -659,7 +681,8 @@ export function formatContest(record: ContestRecord): string {
         `${attempt.git.committed ? attempt.git.headSha?.slice(0, 12) : "no-commit"} ${basename(attempt.bayPath)}`,
     )
   }
-  if (record.promoted) lines.push(`promoted ${record.promoted.attempt}${record.promoted.pr ? ` as ${record.promoted.pr}` : ""}`)
+  if (record.promoted)
+    lines.push(`promoted ${record.promoted.attempt}${record.promoted.pr ? ` as ${record.promoted.pr}` : ""}`)
   return lines.join("\n")
 }
 

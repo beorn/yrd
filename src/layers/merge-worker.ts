@@ -81,8 +81,8 @@ export type MergeWorkerOptions = {
   /** Inline override; else `BAY_MERGE`, else `git config bay.merge`.
    *  Unset (§4: zero-config native merge) means `merge`/`integrate` default to a
    *  native `git merge --no-ff` — bay.merge is an override, never a
-   *  requirement. Run via `sh -c` with `{target}` and `{pr}` substituted
-   *  (`{changeset}` still substitutes too, so existing configs keep working). */
+   *  requirement. The shell source is static; merge context is exposed only
+   *  through YRD_PR, YRD_TARGET, YRD_TARGET_REF, YRD_BASE, and SHA variables. */
   mergeCommand?: string
   /** Optional post-merge deploy command. Inline > BAY_DEPLOY > git config
    *  bay.deploy > none. Failure records a deploy step verdict but never
@@ -193,7 +193,8 @@ function optionalStringArg(command: BayCommand, key: string, verb: string): stri
 function optionalNumberArg(command: BayCommand, key: string, verb: string): number | undefined {
   const value = command.args?.[key]
   if (value === undefined) return undefined
-  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`bay: ${verb}: '${key}' must be a finite number`)
+  if (typeof value !== "number" || !Number.isFinite(value))
+    throw new Error(`bay: ${verb}: '${key}' must be a finite number`)
   return value
 }
 
@@ -260,7 +261,11 @@ async function runCheckStep(
   const check = await resolveCheck(opts.check, opts.configCwd ?? mainRepo)
   if (check === undefined || check.trim() === "") {
     if (runner === "waiting") {
-      return { ok: false, code: "check-failed", detail: "bay.check.runner=waiting requires bay.check to launch the external check" }
+      return {
+        ok: false,
+        code: "check-failed",
+        detail: "bay.check.runner=waiting requires bay.check to launch the external check",
+      }
     }
     return { ok: true, skipped: true }
   }
@@ -302,7 +307,9 @@ function makeCheckRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorkspace
         events.push(await stepWaitingWithOutput(bay, opts, run, outcome, effect.cause!))
         return events
       }
-      events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!))
+      events.push(
+        await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!),
+      )
     }
     if (outcome.waiting === true) return events
     if (!outcome.ok) {
@@ -353,7 +360,9 @@ function makeCheckFinishHandler(): EffectHandler {
     const state = await bay.state()
     const pr = state.prs[d.pr]
     if (pr?.state !== "checking") {
-      throw new Error(`bay: check-finish: ${d.pr} is ${pr?.state ?? "unknown"} — only a parked check in 'checking' can be finished`)
+      throw new Error(
+        `bay: check-finish: ${d.pr} is ${pr?.state ?? "unknown"} — only a parked check in 'checking' can be finished`,
+      )
     }
     const waiting = await latestWaitingCheck(bay, d.pr)
     if (waiting === undefined) throw new Error(`bay: check-finish: no parked external check for ${d.pr}`)
@@ -423,7 +432,12 @@ function reduceMerge(bay: BayRuntime, state: BayState, command: BayCommand): Tra
  *  same completion a fused push's merge has always triggered, now shared by
  *  the standalone `merge`/`integrate` verbs too (a PR landed via `integrate`
  *  is exactly as done as one a push merged directly). */
-function closeMergedBay(bay: BayRuntime, state: BayState, target: string, cause: NonNullable<Effect["cause"]>): BayEvent[] {
+function closeMergedBay(
+  bay: BayRuntime,
+  state: BayState,
+  target: string,
+  cause: NonNullable<Effect["cause"]>,
+): BayEvent[] {
   for (const lease of Object.values(state.leases)) {
     if (lease.branch === target && lease.endedAt === undefined) {
       return [makeEvent(bay, "bay/closed", { bay: lease.id, via: "merged" }, cause)]
@@ -565,10 +579,17 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     const events: BayEvent[] = [stepStarted(bay, run, effect.cause!)]
     events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.detail, effect.cause!))
     if (!outcome.ok) {
-      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail }))
+      events.push(
+        stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, {
+          code: outcome.code,
+          detail: outcome.detail,
+        }),
+      )
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }))
+    events.push(
+      stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }),
+    )
     events.push(...closeMergedBay(bay, state, target, effect.cause!))
     return events
   }
@@ -580,7 +601,12 @@ function reduceDeploy(state: BayState, command: BayCommand): TransitionResult {
   const pr = requirePrArg(command, "deploy")
   const existing = state.prs[pr]
   if (!existing) throw new Error(`bay: deploy: no PR '${pr}' — git bay ls lists them`)
-  if (existing.state === "pushed" || existing.state === "submitted" || existing.state === "checking" || existing.state === "checked") {
+  if (
+    existing.state === "pushed" ||
+    existing.state === "submitted" ||
+    existing.state === "checking" ||
+    existing.state === "checked"
+  ) {
     throw new Error(`bay: deploy: ${pr} has not merged yet — git bay integrate ${pr} first`)
   }
   if (existing.state === "rejected") {
@@ -694,7 +720,16 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
             events.push(await stepWaitingWithOutput(bay, opts, run, outcome, effect.cause!))
             return events
           }
-          events.push(await stepFinishedWithOutput(bay, opts, run, outcome, outcome.ok ? undefined : outcome.detail, effect.cause!))
+          events.push(
+            await stepFinishedWithOutput(
+              bay,
+              opts,
+              run,
+              outcome,
+              outcome.ok ? undefined : outcome.detail,
+              effect.cause!,
+            ),
+          )
         }
         if (outcome.waiting === true) return events
         if (!outcome.ok) {
@@ -711,7 +746,9 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
       events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))
       freshCheckPassed = true
     } else if (pr.state !== "merging") {
-      throw new Error(`bay: integrate: ${d.pr} is ${pr.state}, not checking/merging — a reducer bug journaled a bad state`)
+      throw new Error(
+        `bay: integrate: ${d.pr} is ${pr.state}, not checking/merging — a reducer bug journaled a bad state`,
+      )
     }
 
     const mergeState = await bay.state()
@@ -726,10 +763,17 @@ function makeIntegrateRunHandler(opts: MergeWorkerOptions, scratch: ScratchWorks
     events.push(stepStarted(bay, mergeRun, effect.cause!))
     events.push(await stepFinishedWithOutput(bay, opts, mergeRun, outcome, outcome.detail, effect.cause!))
     if (!outcome.ok) {
-      events.push(stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, { code: outcome.code, detail: outcome.detail }))
+      events.push(
+        stateChangeEvent(bay, d.pr, "merging", "rejected", effect.cause!, {
+          code: outcome.code,
+          detail: outcome.detail,
+        }),
+      )
       return events
     }
-    events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }))
+    events.push(
+      stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }),
+    )
     events.push(...closeMergedBay(bay, mergeState, target, effect.cause!))
     return events
   }

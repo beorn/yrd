@@ -56,8 +56,8 @@ THIS REPOSITORY — a snapshot as of right now; re-run git bay guide for current
   repo            {{repo:/.+/}}
   state           .git/bay (initialized)
   check           (not set — pushes merge without a project check; set: git config bay.check '<command>')
-  merge           (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.merge '<command with {target}>')
-  issue           (not set — names are not checked against a tracker; set: git config bay.issue '<command with {name}>')
+  merge           (not set — merge/integrate use native git merge --no-ff; override: git config bay.merge 'git merge --no-ff "$YRD_TARGET"')
+  issue           (not set — names are not checked against a tracker; set: git config bay.issue 'gh issue view "$YRD_TASK"')
   open worktrees  0
   submitted PRs   0
 ```
@@ -69,6 +69,6 @@ $ git config bay.check "bun test"
 $ git bay guide
 ...
   check           bun test
-  merge           (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.merge '<command with {target}>')
+  merge           (not set — merge/integrate use native git merge --no-ff; override: git config bay.merge 'git merge --no-ff "$YRD_TARGET"')
 ...
 ```

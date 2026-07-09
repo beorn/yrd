@@ -181,7 +181,7 @@ export type StateChangeOpts = {
   code?: RejectionCode
   /** The verified landed tip for `to === "merged"` — the SHA the lying-merge
    *  guard proved an ancestor of the mainline. Machine-truth for issue
-   *  trackers' `{sha}` substitution, never parsed out of detail prose. */
+   *  trackers' YRD_SHA environment value, never parsed out of detail prose. */
   sha?: string
 }
 
@@ -205,7 +205,15 @@ export function stateChangeEvent(
   return makeEvent(
     bay,
     EV_CHANGED,
-    { pr, from, to, ...(opts.revision !== undefined ? { revision: opts.revision } : {}), ...(opts.code !== undefined ? { code: opts.code } : {}), ...(opts.detail !== undefined ? { detail: opts.detail } : {}), ...(opts.sha !== undefined ? { sha: opts.sha } : {}) },
+    {
+      pr,
+      from,
+      to,
+      ...(opts.revision !== undefined ? { revision: opts.revision } : {}),
+      ...(opts.code !== undefined ? { code: opts.code } : {}),
+      ...(opts.detail !== undefined ? { detail: opts.detail } : {}),
+      ...(opts.sha !== undefined ? { sha: opts.sha } : {}),
+    },
     cause,
   )
 }
@@ -239,12 +247,7 @@ export function prOpenedEvent(
 /** Reorder the queue slice without changing PR states or targets. The event
  *  intentionally carries a partial order: omitted existing PRs keep their
  *  relative order after the listed ids. */
-export function queueReorderedEvent(
-  bay: BayRuntime,
-  order: readonly PrId[],
-  cause: Cause,
-  detail?: string,
-): BayEvent {
+export function queueReorderedEvent(bay: BayRuntime, order: readonly PrId[], cause: Cause, detail?: string): BayEvent {
   return makeEvent(bay, EV_REORDERED, { order: [...order], ...(detail !== undefined ? { detail } : {}) }, cause)
 }
 

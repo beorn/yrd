@@ -1,7 +1,19 @@
-import type { BayCommand, BayEvent, BayPlugin, BayRuntime, BayState, Effect, EffectHandler, Layer, PrId, TransitionResult, WorkitemId } from "../types.ts"
+import type {
+  BayCommand,
+  BayEvent,
+  BayPlugin,
+  BayRuntime,
+  BayState,
+  Effect,
+  EffectHandler,
+  Layer,
+  PrId,
+  TransitionResult,
+  WorkitemId,
+} from "../types.ts"
 import { makeEvent } from "../core.ts"
+import { runConfiguredCommand } from "../command.ts"
 import { createGitConfigSource } from "../config.ts"
-import { repoScopedCleanEnv } from "../env.ts"
 import { tail } from "./pipeline.ts"
 
 /**
@@ -14,9 +26,9 @@ import { tail } from "./pipeline.ts"
  * Config (git config, `bay.` section — resolution order everywhere: inline >
  * BAY_* env > git config bay.* > unset):
  *
- *   bay.issue.on-merged    e.g.  gh issue close {name} --comment "merged as {sha} ({pr})"
- *   bay.issue.on-rejected  e.g.  gh issue comment {name} --body "PR {pr} rejected: {code} — {detail}"
- *   bay.issue.on-closed    e.g.  gh issue comment {name} --body "PR {pr} withdrawn"
+ *   bay.issue.on-merged    e.g. gh issue close "$YRD_TASK" --comment "merged as $YRD_SHA ($YRD_PR)"
+ *   bay.issue.on-rejected  e.g. gh issue comment "$YRD_TASK" --body "PR $YRD_PR rejected: $YRD_CODE"
+ *   bay.issue.on-closed    e.g. gh issue comment "$YRD_TASK" --body "PR $YRD_PR withdrawn"
  *
  * (The inbound half — `bay.issue` — is a door check the HOST runs before
  * dispatch, since reducers are pure; see resolveValidateCommand below and
@@ -25,7 +37,7 @@ import { tail } from "./pipeline.ts"
  * The host dispatches `issues-notify` after a dispatch whose events contain a
  * terminal `pr/changed` (merged/rejected/closed) for a NAMED PR. The reducer
  * validates and emits the notify effect; the effect handler resolves the
- * command, substitutes, runs it, and returns ONE `issues/notified` event with
+ * static command, supplies event data through YRD_* variables, and returns ONE `issues/notified` event with
  * the exit code — success and failure are both journaled data. Only a broken
  * host (no `sh`) throws. An unconfigured state is a non-event: the handler
  * returns no events, journaling nothing (docs/events.md § event families).
@@ -51,32 +63,6 @@ export type IssueTrackingOptions = {
   /** cwd for resolving `bay.issue.*` from git config; also the spawn cwd for
    *  the notify command. The CLI host passes the mainline repo. */
   mainRepo?: string
-}
-
-// ---------- pure template rendering (exported for tests) ----------
-
-const SUBSTITUTIONS = ["name", "pr", "sha", "code", "detail"] as const
-
-/** Render a notify template. Loud contract: a `{key}` the template references
- *  but the event cannot supply is a configuration mismatch, not an empty
- *  string — e.g. `{sha}` in on-rejected (rejections have no landed sha).
- *  Unknown `{word}` tokens pass through untouched (they may be the command's
- *  own syntax, e.g. a jq filter). */
-export function renderIssueCommand(template: string, subs: Partial<Record<(typeof SUBSTITUTIONS)[number], string>>): string {
-  let out = template
-  for (const key of SUBSTITUTIONS) {
-    const token = `{${key}}`
-    if (!out.includes(token)) continue
-    const value = subs[key]
-    if (value === undefined) {
-      throw new Error(
-        `bay: issue: template references ${token} but this event carries no ${key} — ` +
-          `fix the command for this state (git config bay.${NOTIFY_KEYS.merged.split(".")[0]}.…) or drop the token`,
-      )
-    }
-    out = out.replaceAll(token, value)
-  }
-  return out
 }
 
 /** The inbound validate command: `bay.issue`. ""/"none" mean unset
@@ -132,25 +118,19 @@ function makeNotifyRunHandler(opts: IssueTrackingOptions): EffectHandler {
     if (template === undefined || template.trim() === "" || template.trim() === "none") {
       return [] // unconfigured state: a non-event — nothing ran, nothing to record
     }
-    const command = renderIssueCommand(template, {
-      name: d.name,
-      pr: d.pr,
-      sha: d.sha,
-      code: d.code,
-      detail: d.detail,
-    })
-    const proc = Bun.spawn(["sh", "-c", command], {
+    const result = await runConfiguredCommand({
+      command: template,
       cwd: configCwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      env: repoScopedCleanEnv(),
+      purpose: `issue ${d.to}`,
+      variables: {
+        YRD_TASK: d.name,
+        YRD_PR: d.pr,
+        YRD_SHA: d.sha,
+        YRD_CODE: d.code,
+        YRD_DETAIL: d.detail,
+      },
     })
-    const [out, err, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ])
-    const said = tail(err !== "" ? err : out, 500)
+    const said = tail(result.stderr !== "" ? result.stderr : result.stdout, 500)
     return [
       makeEvent(
         bay,
@@ -159,8 +139,8 @@ function makeNotifyRunHandler(opts: IssueTrackingOptions): EffectHandler {
           pr: d.pr,
           name: d.name,
           on: d.to,
-          command,
-          code,
+          command: template,
+          code: result.exitCode,
           ...(said !== "" ? { detail: said } : {}),
         },
         effect.cause!,

@@ -70,12 +70,7 @@ export async function changedPaths(repo: string, base: string, target: string): 
 /** `git worktree add -b <branch> <path> <baseRef>` — throws the literal git
  *  stderr on failure (a stale gitlink, an existing path, a taken branch all
  *  surface verbatim, per design law 7 "name the remedy"). */
-export async function worktreeAdd(
-  repo: string,
-  branch: string,
-  path: string,
-  baseRef: string,
-): Promise<void> {
+export async function worktreeAdd(repo: string, branch: string, path: string, baseRef: string): Promise<void> {
   const res = await git(["-C", repo, "worktree", "add", "-b", branch, path, baseRef], repo)
   if (res.code !== 0) {
     throw new Error(`bay: git worktree add failed (exit ${res.code}):\n${res.stderr.trim()}`)
@@ -162,5 +157,18 @@ export async function setConfig(repo: string, key: string, value: string): Promi
   const res = await git(["-C", repo, "config", key, value], repo)
   if (res.code !== 0) {
     throw new Error(`bay: git config ${key} failed (exit ${res.code}):\n${res.stderr.trim()}`)
+  }
+}
+
+/** Write configuration for exactly one linked worktree. Git requires the
+ * repository extension before `--worktree` becomes a writable config scope. */
+export async function setWorktreeConfig(repo: string, key: string, value: string): Promise<void> {
+  const enabled = await git(["-C", repo, "config", "extensions.worktreeConfig", "true"], repo)
+  if (enabled.code !== 0) {
+    throw new Error(`bay: enabling extensions.worktreeConfig failed (exit ${enabled.code}):\n${enabled.stderr.trim()}`)
+  }
+  const res = await git(["-C", repo, "config", "--worktree", key, value], repo)
+  if (res.code !== 0) {
+    throw new Error(`bay: git config --worktree ${key} failed (exit ${res.code}):\n${res.stderr.trim()}`)
   }
 }

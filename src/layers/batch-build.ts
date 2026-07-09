@@ -3,6 +3,7 @@ import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
 import type { BatchLandEvidence } from "./pipeline.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
+import { runConfiguredCommand } from "../command.ts"
 import type {
   BayCommand,
   BayEvent,
@@ -17,7 +18,7 @@ import type {
   StepCommandOutput,
   TransitionResult,
 } from "../types.ts"
-import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
+import { git, resolveBaseRef } from "./git.ts"
 import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prOpenedEvent, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent, submittedPrs } from "./queue.ts"
 import { stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
@@ -422,7 +423,9 @@ function makeBatchBuildHandler(opts: BatchBuildOptions, scratch: ScratchWorkspac
 
     if (built.length > 0 && target !== undefined) {
       events.push(prOpenedEvent(bay, d.batch, target, `batch:${d.batch}`, "submit", true, cause))
-      events.push(queueReorderedEvent(bay, candidateFirstOrder(d.queueOrder, d.batch, built), cause, `batch ${d.batch}`))
+      events.push(
+        queueReorderedEvent(bay, candidateFirstOrder(d.queueOrder, d.batch, built), cause, `batch ${d.batch}`),
+      )
     }
 
     return events
@@ -440,30 +443,30 @@ async function runGateCommand(
   batch: PrId,
   subst: { pr?: PrId; target: string; memberTarget?: string },
 ): Promise<{ code: number; stdout: string; stderr: string; exitCode: number; durationMs: number }> {
-  let cmd = gateCommand.replaceAll("{batch}", batch).replaceAll("{target}", subst.target)
-  if (subst.pr !== undefined) {
-    cmd = cmd.replaceAll("{pr}", subst.pr).replaceAll("{member}", subst.pr)
-  }
-  const env = {
-    ...repoScopedCleanEnv(),
-    BAY_BATCH: batch,
-    BAY_BATCH_TARGET: subst.target,
-    ...(subst.pr !== undefined ? { BAY_BATCH_PR: subst.pr, BAY_BATCH_MEMBER: subst.pr } : {}),
-    ...(subst.memberTarget !== undefined ? { BAY_BATCH_MEMBER_TARGET: subst.memberTarget } : {}),
-  }
-  const start = Date.now()
-  const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe", env })
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-  return { code, stdout, stderr, exitCode: code, durationMs: Date.now() - start }
+  const result = await runConfiguredCommand({
+    command: gateCommand,
+    cwd,
+    purpose: "batch gate",
+    variables: {
+      YRD_BATCH: batch,
+      YRD_TARGET: subst.target,
+      YRD_PR: subst.pr,
+      YRD_MEMBER: subst.pr,
+      YRD_MEMBER_TARGET: subst.memberTarget,
+    },
+  })
+  return { code: result.exitCode, ...result }
 }
 
 type GateVerdict = { ok: boolean; detail?: string } & StepCommandOutput
 
-function gateVerdict(res: { code: number; stdout: string; stderr: string; exitCode: number; durationMs: number }): GateVerdict {
+function gateVerdict(res: {
+  code: number
+  stdout: string
+  stderr: string
+  exitCode: number
+  durationMs: number
+}): GateVerdict {
   const output = { exitCode: res.exitCode, durationMs: res.durationMs, stdout: res.stdout, stderr: res.stderr }
   if (res.code === 0) return { ok: true, ...output }
   const out = tail([res.stderr, res.stdout].filter((s) => s.trim() !== "").join("\n"))
@@ -585,7 +588,9 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       throw err
     }
     const baselineOutput = await collectStepRefs(opts.mainRepo, baselineRun.target, baseline)
-    const baselineError = baseline.ok ? undefined : stepError("check-failed", baseline.detail ?? "gate failed", baselineOutput)
+    const baselineError = baseline.ok
+      ? undefined
+      : stepError("check-failed", baseline.detail ?? "gate failed", baselineOutput)
     events.push(
       stepFinished(
         bay,
@@ -642,7 +647,9 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         throw err
       }
       const checkedOutput = await collectStepRefs(opts.mainRepo, prefixRun.target, checked)
-      const checkedError = checked.ok ? undefined : stepError("check-failed", checked.detail ?? "gate failed", checkedOutput)
+      const checkedError = checked.ok
+        ? undefined
+        : stepError("check-failed", checked.detail ?? "gate failed", checkedOutput)
       events.push(
         stepFinished(
           bay,

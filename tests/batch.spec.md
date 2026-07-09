@@ -10,7 +10,7 @@ $ git bay init
 bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git config bay.queue.batch-size 2
 $ git config bay.autoMerge false
-$ git config bay.merge 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}'
+$ git config bay.merge 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$YRD_TARGET"'
 $ git switch -qc task/a main && echo a > a.txt && git add a.txt && git commit -qm a && git switch -q main
 $ git switch -qc task/b main && echo b > b.txt && git add b.txt && git commit -qm b && git switch -q main
 $ git bay submit task/a
@@ -39,7 +39,7 @@ $ git bay init
 bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git config bay.queue.batch-size 2
 $ git config bay.autoMerge false
-$ git config bay.merge 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}'
+$ git config bay.merge 'git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$YRD_TARGET"'
 $ git switch -qc task/file main && echo file > dir && git add dir && git commit -qm file && git switch -q main
 $ git switch -qc task/nested main && mkdir -p dir && echo nested > dir/file.txt && git add dir/file.txt && git commit -qm nested && git switch -q main
 $ git bay submit task/file
@@ -77,7 +77,7 @@ $ git bay init
 bay: initialized (store: sqlite, events: .git/bay/events.jsonl)
 $ git config bay.queue.batch-size 2
 $ git config bay.autoMerge false
-$ git config bay.merge './merge-if-clean.sh {target}'
+$ git config bay.merge './merge-if-clean.sh "$YRD_TARGET"'
 $ git config bay.check 'test ! -f bad.txt'
 $ git switch -qc task/good main && echo ok > good.txt && git add good.txt && git commit -qm good && git switch -q main
 $ git switch -qc task/bad main && echo bad > bad.txt && git add bad.txt && git commit -qm bad && git switch -q main

@@ -1,7 +1,8 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { git, repoScopedCleanEnv } from "./layers/git.ts"
+import { runConfiguredCommand } from "./command.ts"
+import { git } from "./layers/git.ts"
 
 /**
  * Scratch workspaces — the intent-level seam between line code and raw
@@ -67,17 +68,16 @@ export function createScratchWorkspaces(opts: ScratchOptions): ScratchWorkspaces
   async function provision(path: string, ref: string): Promise<void> {
     const command = opts.provisionCommand
     if (command === undefined || command.trim() === "") return
-    const env = { ...repoScopedCleanEnv(), BAY_SCRATCH_PATH: path, BAY_SCRATCH_REF: ref }
-    const proc = Bun.spawn(["sh", "-c", command], { cwd: path, stdout: "pipe", stderr: "pipe", env })
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ])
-    if (code === 0) return
-    const out = tail([stderr, stdout].filter((s) => s.trim() !== "").join("\n"))
+    const result = await runConfiguredCommand({
+      command,
+      cwd: path,
+      purpose: "scratch provision",
+      variables: { YRD_SCRATCH_PATH: path, YRD_SCRATCH_REF: ref },
+    })
+    if (result.exitCode === 0) return
+    const out = tail([result.stderr, result.stdout].filter((s) => s.trim() !== "").join("\n"))
     throw new ProvisionError(
-      `bay: provision '${command}' failed (exit ${code}) in the scratch for '${ref}'${out === "" ? "" : `:\n${out}`}`,
+      `bay: provision '${command}' failed (exit ${result.exitCode}) in the scratch for '${ref}'${out === "" ? "" : `:\n${out}`}`,
     )
   }
 
