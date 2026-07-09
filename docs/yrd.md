@@ -62,7 +62,7 @@ yrd line audit [--json]
 yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
-yrd task compete <task> --agents codex,claude-opus --base main --bays 2
+yrd task compete <task> --agents codex,claude --base main --bays 2
 yrd contest show <contest> [--json]
 yrd contest select <contest> --winner <attempt>
 yrd contest promote <contest>
@@ -84,8 +84,9 @@ yrd line integrate [PR|name] --steps deploy
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
 `yrd contest ...` commands manage an existing contest lifecycle. Built-in
-competitors resolve through `ag`: `codex`, `claude`, and `claude-opus`. Custom
-competitors can be supplied with `--agent-cmd <name=command>`.
+competitors resolve through `ag`: `codex` runs `ag codex ...` and `claude` runs
+`ag claude ...`. Custom competitors can be supplied with
+`--agent-cmd <name=command>`.
 
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.

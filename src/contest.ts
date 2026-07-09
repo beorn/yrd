@@ -170,7 +170,7 @@ export function builtInAgentCommand(agent: string, prompt: string): string[] {
     ]
   }
   throw new Error(
-    `yrd: no built-in contest agent '${agent}' (built-ins: codex, claude, claude-opus). ` +
+    `yrd: no built-in contest agent '${agent}' (built-ins: codex, claude). ` +
       `Use --agent-cmd ${agent}='<command using $YRD_PROMPT>'`,
   )
 }

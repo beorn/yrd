@@ -30,7 +30,7 @@ const USAGE = `yrd — the software delivery yard
 USAGE
   yrd bay <verb> [args]   the Git-native bay (same implementation as \`git bay\`)
   yrd line <verb> [args]  integration line projection over the same bay state
-  yrd task compete <task> --agents codex,claude-opus [options]
+  yrd task compete <task> --agents codex,claude [options]
   yrd contest <verb> [args]
 
 Installed projections: bay, line, task, contest
@@ -51,10 +51,10 @@ Staged steps: deploy
 const TASK_USAGE = `yrd task — task intake projection
 
 USAGE
-  yrd task compete <task> [--agents codex,claude-opus] [--prompt <text>] [--prompt-file <path>]
+  yrd task compete <task> [--agents codex,claude] [--prompt <text>] [--prompt-file <path>]
                    [--agent-cmd <name=command>] [--eval <command>] [--base <ref>] [--bays <n>] [--json]
 
-Built-in contest agents: codex, claude, claude-opus
+Built-in contest agents: codex, claude
 Custom commands run with YRD_PROMPT, YRD_TASK, YRD_BAY, YRD_AGENT, and YRD_CONTEST_ATTEMPT in env.
 `
 
@@ -258,7 +258,7 @@ async function parseCompeteArgs(args: string[]): Promise<CompeteOptions & { bays
   let task: string | undefined
   let prompt: string | undefined
   let promptFile: string | undefined
-  let agents = ["codex", "claude-opus"]
+  let agents = ["codex", "claude"]
   let base = "main"
   let bays: number | undefined
   let json = false

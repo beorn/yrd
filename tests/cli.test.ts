@@ -354,6 +354,11 @@ describe("yrd CLI — line projection", () => {
     const help = await must([process.execPath, YRD_BIN, "--help"], demo, env)
     expect(help.stdout).toContain("Installed projections: bay, line, task, contest")
 
+    const taskHelp = await must([process.execPath, YRD_BIN, "task", "--help"], demo, env)
+    expect(taskHelp.stdout).toContain("--agents codex,claude")
+    expect(taskHelp.stdout).toContain("Built-in contest agents: codex, claude")
+    expect(taskHelp.stdout).not.toContain("claude-opus")
+
     const status = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
     expect(status.stdout).toContain("no open worktrees")
 
