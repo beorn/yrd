@@ -128,6 +128,7 @@ type RuntimeStep = {
 type InternalLineRuntime = LineRuntime<any> & {
   install(step: RuntimeStep): void
   configureBatch(config: BatchConfig): void
+  configureDefaultSteps(names: readonly string[]): void
 }
 
 function object(input: unknown, command: string): Record<string, unknown> {
@@ -524,7 +525,7 @@ export function withLine() {
         )
         if (active !== undefined) throw new Error(`yrd: line '${submissions[0]!.base}' is running '${active.id}'`)
 
-        const selected = selectedSteps(runtimeSteps, args.steps)
+        const selected = selectedSteps(runtimeSteps, args.steps ?? state.lines.defaultSteps)
         const integrated = integrationShape(submissions)
         validateSequence(selected, integrated !== undefined)
         const id = nextRunId(state.lines as LinesState)
@@ -830,6 +831,11 @@ export function withLine() {
       configureBatch(config) {
         ;(app.initialState.lines as LinesState).batchSize = normalizeBatchConfig(config)
       },
+      configureDefaultSteps(names) {
+        const selected = selectedSteps(runtimeSteps, names)
+        validateSequence(selected, false)
+        ;(app.initialState.lines as LinesState).defaultSteps = selected.map((step) => step.descriptor.name)
+      },
       steps() {
         return runtimeSteps.map((step) => step.descriptor)
       },
@@ -870,6 +876,24 @@ export function withLine() {
 export function withBatch(config: BatchConfig) {
   return <App extends AnyYrdApp & HasLine<any>>(app: App): App => {
     ;(app.line as InternalLineRuntime).configureBatch(config)
+    return app
+  }
+}
+
+/** Select the installed steps used when line.integrate omits --steps. Apply
+ * this after withStep()/withMerge() so unknown names fail during composition. */
+export function withDefaultSteps(names: readonly string[]) {
+  return <App extends AnyYrdApp & HasLine<any>>(app: App): App => {
+    try {
+      ;(app.line as InternalLineRuntime).configureDefaultSteps(names)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes("unknown step")) {
+        const name = /'([^']+)'/u.exec(message)?.[1] ?? "unknown"
+        throw new Error(`yrd: unknown default line step '${name}'`)
+      }
+      throw error
+    }
     return app
   }
 }

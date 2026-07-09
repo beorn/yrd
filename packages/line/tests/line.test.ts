@@ -3,6 +3,7 @@ import { createMemoryEventStore, createYrd, pipe, withEffects, type EffectOutcom
 import { withBays, type BayWorkspaceAdapter } from "@yrd/bay"
 import {
   withBatch,
+  withDefaultSteps,
   withLine,
   withMerge,
   withStep,
@@ -49,6 +50,7 @@ function workspace(): BayWorkspaceAdapter {
 function createLineApp(
   options: {
     batch?: false | number
+    defaultSteps?: readonly string[]
     check?: (input: StepExecution<SubmissionShape>) => EffectOutcome<CheckResult>
     merge?: (input: StepExecution<CheckedShape>) => EffectOutcome<{ commit: string; baseSha: string }>
     deploy?: (input: StepExecution<MergedShape>) => EffectOutcome<{ environment: string }>
@@ -81,6 +83,7 @@ function createLineApp(
         },
       { needsIntegration: true },
     ),
+    withDefaultSteps(options.defaultSteps ?? ["check", "merge", "deploy"]),
   )
 }
 
@@ -105,6 +108,18 @@ describe("withLine", () => {
 
   it("rejects a non-integer batch size", () => {
     expect(() => createLineApp({ batch: 1.5 })).toThrow("batch size must be false or a non-negative integer")
+  })
+
+  it("projects a validated default step sequence into state and uses it when --steps is omitted", async () => {
+    const app = createLineApp({ defaultSteps: ["check", "merge"] })
+    const submission = await submitBranch(app)
+
+    expect((await app.state()).lines.defaultSteps).toEqual(["check", "merge"])
+    expect((await app.line.integrate({ submission: submission.id }, runOptions)).steps.map((step) => step.name)).toEqual([
+      "check",
+      "merge",
+    ])
+    expect(() => createLineApp({ defaultSteps: ["missing"] })).toThrow("unknown default line step 'missing'")
   })
 
   it("registers typed steps in state and integrates the exact pinned revision", async () => {

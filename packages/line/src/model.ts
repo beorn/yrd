@@ -72,6 +72,7 @@ export type LineRun = {
 
 export type LinesState = {
   batchSize: number
+  defaultSteps?: StepName[]
   installed: Record<StepName, InstalledStep>
   runs: Record<LineRunId, LineRun>
 }
