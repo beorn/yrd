@@ -2,8 +2,8 @@ import { mkdtemp, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createGitbay, createJsonlJournal, definePlugin, pipe } from "../src/index.ts"
-import type { BayEvent, BayStore, Cause } from "../src/index.ts"
+import { createGitbay, createJsonlJournal, definePlugin, makeEvent, pipe } from "../src/index.ts"
+import type { BayEvent, BayRuntime, BayStore, Cause } from "../src/index.ts"
 
 // Fixed fake clock — every event gets the same timestamp; determinism comes
 // from journal append order (core.ts dispatch is journal-first), never from
@@ -112,6 +112,64 @@ describe("createGitbay — layer dispatch, journal durability, replay", () => {
 
     expect(state.slices.greet).toEqual(["greeted", "notified"])
   })
+
+  it("mints unique event and command ids across fresh runtimes over one journal", async () => {
+    const path = await tmpJournalPath()
+    const first = withRuntimeStampedEvent(createGitbay({ store: openStore(path), clock: CLOCK }))
+    const second = withRuntimeStampedEvent(createGitbay({ store: openStore(path), clock: CLOCK }))
+
+    await first.dispatch({ type: "stamp" })
+    await second.dispatch({ type: "stamp" })
+
+    const rows: BayEvent[] = []
+    for await (const row of createJsonlJournal(path).replay()) rows.push(row)
+    expect(new Set(rows.map((row) => row.id)).size).toBe(rows.length)
+    expect(new Set(rows.map((row) => row.cause.commandId)).size).toBe(rows.length)
+  })
+
+  it("never accepts a caller-supplied durable command id", async () => {
+    const bay = withRuntimeStampedEvent(createGitbay({ store: openStore(await tmpJournalPath()), clock: CLOCK }))
+
+    const { events } = await bay.dispatch({
+      type: "stamp",
+      cause: { commandId: "caller-owned", traceId: "trace-1", spanId: "span-1" },
+    })
+
+    expect(events[0]?.cause).toMatchObject({ traceId: "trace-1", spanId: "span-1" })
+    expect(events[0]?.cause.commandId).not.toBe("caller-owned")
+  })
+
+  it("rejects reducer state changes that are not represented by events", async () => {
+    const bay = pipe(createGitbay({ store: openStore(await tmpJournalPath()), clock: CLOCK }), withForgedState)
+
+    await expect(bay.dispatch({ type: "forge" })).rejects.toThrow(/state changes must be represented by events/)
+  })
+})
+
+function withRuntimeStampedEvent(bay: BayRuntime): BayRuntime {
+  return bay.use({
+    name: "runtime-stamped-event",
+    reduce(state, command, next) {
+      if (command.type !== "stamp") return next(state, command)
+      return {
+        state,
+        events: [makeEvent(bay, "gitbay/audited", { findings: [], clean: true }, command.cause!)],
+        effects: [],
+      }
+    },
+  })
+}
+
+const withForgedState = definePlugin({
+  name: "forged-state",
+  reduce(state, command, next) {
+    if (command.type !== "forge") return next(state, command)
+    return {
+      state: { ...state, slices: { ...state.slices, forged: true } },
+      events: [],
+      effects: [],
+    }
+  },
 })
 
 // Two effects from one dispatch: the SECOND handler must observe the FIRST

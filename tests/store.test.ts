@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { acquireWriterLock, resolveWriterLockPath, type WriterLock } from "../src/store/lock.ts"
@@ -14,6 +15,19 @@ async function makeDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "gitbay-store-test-"))
   dirs.push(dir)
   return dir
+}
+
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (true) {
+    try {
+      await access(path)
+      return
+    } catch {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`)
+      await Bun.sleep(10)
+    }
+  }
 }
 
 afterEach(async () => {
@@ -51,10 +65,7 @@ describe("acquireWriterLock", () => {
     const deadPid = dead.pid
     await dead.exited // guaranteed gone — process.kill(deadPid, 0) now throws ESRCH
 
-    await writeFile(
-      resolveWriterLockPath(dir),
-      JSON.stringify({ pid: deadPid, startedAt: new Date().toISOString() }),
-    )
+    await writeFile(resolveWriterLockPath(dir), JSON.stringify({ pid: deadPid, startedAt: new Date().toISOString() }))
 
     const lock = await acquireWriterLock(dir)
     locks.push(lock)
@@ -64,24 +75,54 @@ describe("acquireWriterLock", () => {
     expect(holder.pid).toBe(process.pid) // we now hold it
   })
 
-  it("staleMs reclaims an old lock even when the recorded pid is still alive", async () => {
+  it("never steals a live holder because diagnostic metadata looks old", async () => {
     const dir = await makeDir()
+    const ready = join(dir, "holder-ready")
+    const lockModule = fileURLToPath(new URL("../src/store/lock.ts", import.meta.url))
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--eval",
+        `import { acquireWriterLock } from ${JSON.stringify(lockModule)};
+         import { writeFile } from "node:fs/promises";
+         const lock = await acquireWriterLock(${JSON.stringify(dir)});
+         await writeFile(${JSON.stringify(ready)}, "ready");
+         await Bun.sleep(500);
+         await lock.release();`,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    )
+    await waitForFile(ready)
 
-    // Our own pid is live, but back-date startedAt well past staleMs.
     await writeFile(
       resolveWriterLockPath(dir),
-      JSON.stringify({ pid: process.pid, startedAt: new Date(Date.now() - 60_000).toISOString() }),
+      JSON.stringify({ pid: child.pid, startedAt: new Date(Date.now() - 60_000).toISOString() }),
     )
+    const opts = { staleMs: 1 } as Parameters<typeof acquireWriterLock>[1] & { staleMs: number }
+    let acquired: WriterLock | undefined
+    let error: unknown
+    try {
+      acquired = await acquireWriterLock(dir, opts)
+      locks.push(acquired)
+    } catch (cause) {
+      error = cause
+    }
+    const [childError, childExit] = await Promise.all([new Response(child.stderr).text(), child.exited])
 
-    const lock = await acquireWriterLock(dir, { staleMs: 1_000 })
-    locks.push(lock)
+    expect(childExit, childError).toBe(0)
+    expect(acquired).toBeUndefined()
+    expect(error).toBeInstanceOf(Error)
   })
 
-  it("a corrupt lock file (invalid JSON) refuses acquire, naming it corrupt", async () => {
+  it("repairs stale diagnostic metadata when no process holds the lock", async () => {
     const dir = await makeDir()
     await writeFile(resolveWriterLockPath(dir), "{not valid json")
 
-    await expect(acquireWriterLock(dir)).rejects.toThrow(/corrupt/)
+    const lock = await acquireWriterLock(dir)
+    locks.push(lock)
+
+    const holder = JSON.parse(await readFile(resolveWriterLockPath(dir), "utf8")) as { pid: number }
+    expect(holder.pid).toBe(process.pid)
   })
 
   it("release() drops the lock so a fresh acquire succeeds", async () => {
@@ -92,6 +133,16 @@ describe("acquireWriterLock", () => {
     const second = await acquireWriterLock(dir)
     locks.push(second)
   })
+
+  it("release keeps the stable lock inode instead of unlinking a successor's path", async () => {
+    const dir = await makeDir()
+    const lockPath = resolveWriterLockPath(dir)
+    const first = await acquireWriterLock(dir)
+
+    await first.release()
+
+    await access(lockPath)
+  })
 })
 
 describe("createSqliteStore", () => {
@@ -101,8 +152,20 @@ describe("createSqliteStore", () => {
     stores.push(store)
 
     const events: BayEvent[] = [
-      { id: "e1", ts: "2026-01-01T00:00:00.000Z", name: "bay/refreshed", cause: { commandId: "c1" }, data: { bay: "L1" } },
-      { id: "e2", ts: "2026-01-01T00:00:01.000Z", name: "bay/closed", cause: { commandId: "c2" }, data: { bay: "L1", via: "close" } },
+      {
+        id: "e1",
+        ts: "2026-01-01T00:00:00.000Z",
+        name: "bay/refreshed",
+        cause: { commandId: "c1" },
+        data: { bay: "L1" },
+      },
+      {
+        id: "e2",
+        ts: "2026-01-01T00:00:01.000Z",
+        name: "bay/closed",
+        cause: { commandId: "c2" },
+        data: { bay: "L1", via: "close" },
+      },
     ]
     for (const event of events) await store.journal.append(event)
 

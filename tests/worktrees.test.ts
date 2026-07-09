@@ -63,12 +63,17 @@ const withStubGit = definePlugin({
   },
 })
 
-async function buildStubBay(path: string): Promise<BayRuntime> {
+async function buildStubBay(path: string, idGen?: () => string): Promise<BayRuntime> {
   return pipe(
-    createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR }),
+    createGitbay({ store: openStore(path), clock: CLOCK, actor: ACTOR, idGen }),
     withStubGit, // registered first → its effect handlers shadow the real-git ones
     withWorktrees(),
   )
+}
+
+function sequentialIdGen(): () => string {
+  let next = 0
+  return () => `e${++next}`
 }
 
 function worktrees(state: BayState): Record<number, string> {
@@ -190,8 +195,8 @@ describe("withWorktrees — determinism", () => {
       return out
     }
 
-    const runA = await seq(await buildStubBay(await tmpJournalPath()))
-    const runB = await seq(await buildStubBay(await tmpJournalPath()))
+    const runA = await seq(await buildStubBay(await tmpJournalPath(), sequentialIdGen()))
+    const runB = await seq(await buildStubBay(await tmpJournalPath(), sequentialIdGen()))
     expect(runA).toEqual(runB)
     // and the events are genuinely populated, not two empty arrays
     expect(runA.map((e) => e.name)).toEqual([

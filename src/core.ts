@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import type {
   BayCommand,
   BayEvent,
@@ -12,19 +13,10 @@ import type {
   TransitionResult,
 } from "./types.ts"
 
-/** Default id source: a monotonic counter local to ONE createGitbay() runtime
- *  (never a module-level counter or wall-clock component — either would make
- *  two separately-built runtimes over the same command sequence diverge,
- *  breaking the "same commands + fixed clock → byte-identical events"
- *  determinism tests rely on). Uniqueness only needs to hold within one
- *  journal, and the single-writer lock already guarantees one runtime writes
- *  to a given journal at a time. */
+/** Production ids must remain unique across short-lived CLI processes.
+ *  Deterministic tests inject their own source through createGitbay(). */
 function makeDefaultIdGen(): () => string {
-  let n = 0
-  return () => {
-    n++
-    return `e${n}`
-  }
+  return () => randomUUID()
 }
 
 /**
@@ -97,9 +89,7 @@ export function createGitbay(opts: {
   function handlerFor(effect: Effect) {
     const handler = layers.map((l) => l.effects?.[effect.type]).find(Boolean)
     if (!handler) {
-      throw new Error(
-        `bay: no handler for effect '${effect.type}' — a layer emitted it but none executes it.`,
-      )
+      throw new Error(`bay: no handler for effect '${effect.type}' — a layer emitted it but none executes it.`)
     }
     return handler
   }
@@ -129,15 +119,22 @@ export function createGitbay(opts: {
       // spans) — minted here unless the caller (a host reading TRACEPARENT)
       // already supplied one. Every event this dispatch produces, from the
       // reducer AND from its effects, carries the SAME cause.
-      const cause: Cause = { commandId: idGen(), ...command.cause }
+      const cause: Cause = {
+        commandId: idGen(),
+        ...(command.cause?.traceId === undefined ? {} : { traceId: command.cause.traceId }),
+        ...(command.cause?.spanId === undefined ? {} : { spanId: command.cause.spanId }),
+      }
       const stamped: BayCommand = { ...command, cause }
 
       const state = await fold()
       const { state: nextState, events, effects } = reduceThroughLayers(state, stamped)
+      if (nextState !== state) {
+        throw new Error("bay: reducer state changes must be represented by events and folded by apply()")
+      }
       const causedEffects = effects.map((e) => ({ ...e, cause }))
       // Journal-first: events are durable before effects run (crash-safe resume).
       for (const event of events) await runtime.store.journal.append(event)
-      folded = events.reduce(applyEvent, nextState)
+      folded = events.reduce(applyEvent, state)
       // Each effect's events are journaled AND folded before the next effect
       // runs, so a later effect observes an earlier effect's facts through
       // state() — e.g. batch settle reading the merge effect's landed verdict
