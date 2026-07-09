@@ -24,15 +24,19 @@ task -> bay attempt(s) -> submission(s) -> line -> integrated result
                  \-> contest evaluation -> winning submission -> line
 ```
 
-- **Task**: a unit of intent, usually sourced from a tracker such as km beads
-  or GitHub issues.
-- **Bay**: an isolated workspace for one implementation attempt.
-- **Submission**: work handed from a bay to an intake target. In Git/GitHub
-  contexts this can still be called a PR.
+- **Task**: a unit of intent. Yrd is agnostic to the source: km bead, GitHub
+  issue, Linear ticket, local todo, or direct API call.
+- **Bay**: an isolated workspace for one implementation attempt on a task.
+- **Submission**: completed work from a bay, handed to an integration line. In
+  Git-native contexts this may be projected as a PR.
 - **Line**: the integration path for submissions: checks, review, merge, deploy,
   audit, and status.
 - **Contest**: multiple bays attempt the same real task; one winning submission
   is selected and promoted.
+
+`task` is the Yrd intake noun. `issue` is reserved for tracker adapters and
+external systems. `submission` is the Yrd integration noun. `PR` is reserved for
+Git Bay, GitHub, and other Git-facing projections.
 
 ## Command projections
 
@@ -67,10 +71,35 @@ yrd contest select <contest> --winner <attempt>
 yrd contest promote <contest>
 ```
 
+`yrd task compete <task>` creates a contest and launches bay attempts.
+`yrd contest ...` commands manage an existing contest lifecycle.
+
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
 `--retry` is an option on step-running commands, not a separate vocabulary
 branch.
+
+## Implementation Order
+
+The first Yrd cutover target is the integration lane: make `@ci` run through
+`yrd bay` + `yrd line` as soon as the line projection is usable. Contest mode is
+above that path and should not block the CI cutover.
+
+The first non-throwaway line slice is:
+
+1. define core submission and line-step event/state contracts;
+2. implement `yrd line integrate --steps check,merge` over the current Git Bay
+   integration logic;
+3. capture step logs/artifacts and reference them from `line/step/*/end`;
+4. make retry/resume journal-driven by skipping successful step results for the
+   same submission and commit;
+5. expose current line status/staleness from folded state;
+6. switch `@ci` to that line projection before building task intake or contest
+   mode.
+
+Repo-local docs and future `spec.md` files should be public-suitable product or
+API docs. Tentative reference, background research, and prior-art notes stay
+outside this repo under `hub/yrd/reference` or in `@yrd` beads.
 
 ## Package shape
 
@@ -79,7 +108,8 @@ The monorepo target is:
 - `@yrd/core`: records, event contracts, plugin composition, typed state shapes.
 - `@yrd/bay`: bay lifecycle and the Git-native implementation currently shipped
   by this repo.
-- `@yrd/line`: integration lines, queues, steps, merge/deploy execution.
+- `@yrd/line`: integration lines, queues, steps, merge/deploy execution,
+  artifacts, status, and resume.
 - `@yrd/task`: task intake from km beads, GitHub issues, or other trackers.
 - `@yrd/contest`: multiple attempts for one task and winner selection.
 - `@yrd/cli`: projections of installed plugins into commands and help.
@@ -104,14 +134,27 @@ withMerge(gitMerge())
 withStep("deploy", command("bun run deploy"))
 ```
 
+The runner is a seam: the first runner is a local command runner, but the line
+model must not require local child processes. Remote runners, container runners,
+or hosted CI adapters should satisfy the same step result contract.
+
 Step events map naturally to spans:
 
 ```text
-line/step/check/start { line, submission, attempt? }
+line/step/check/start { line, submission, attempt?, baseSha, headSha }
 line/step/check/end { success, exitCode?, durationMs, error?, artifacts? }
-line/step/deploy/start { line, submission }
-line/step/deploy/end { success, url?, durationMs, error? }
+line/step/deploy/start { line, submission, baseSha, headSha }
+line/step/deploy/end { success, url?, durationMs, error?, artifacts? }
 ```
+
+Artifacts include logs, coverage, reports, and build outputs. The default local
+artifact store can be a repository-local path; the event carries references, not
+inline blobs. A resumed line run folds the journal first and skips a successful
+step result only when it matches the same submission and commit.
+
+Human intervention is also a journaled fact. A future `line/override` event
+records who overrode what and why without pretending the line succeeded
+automatically.
 
 Batching belongs to the line plugin. `withBatch(false)`, `withBatch(0)`, and
 `withBatch(1)` disable batching; a number above one enables that batch size. A
@@ -155,7 +198,8 @@ Still coordinated separately:
 - package name changes from `git-bay` to Yrd-scoped package names
 - consuming-repo path and bead moves
 - full monorepo package split
-- `line`, `task`, and `contest` projections beyond the advertised CLI shape
+- `line` projection and `@ci` cutover
+- `task` and `contest` projections beyond the advertised CLI shape
 
 ## Reference
 

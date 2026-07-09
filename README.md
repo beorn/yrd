@@ -4,7 +4,7 @@
 
 The idea in one sentence more: anyone working in a local clone — human or agent — should get the integration safety a good team gets from GitHub (workspaces, PRs, checks, a merge queue, a full record), with plain git as the interface and nothing new to learn beyond the words GitHub already taught everyone.
 
-> **Yrd:** this repo is becoming the bay component of **Yrd**, the software delivery yard — `yrd bay …` and `git yrd …` work today as aliases of `git bay …`; see [docs/yrd.md](docs/yrd.md). Existing workflows are unchanged.
+> **Yrd:** this repo is becoming the bay component of **Yrd**, the software delivery yard — `yrd bay …` and `git yrd …` work today as aliases of `git bay …`; see [docs/yrd.md](docs/yrd.md). Existing workflows are unchanged. The next Yrd milestone is the line projection for CI/integration; contest mode comes later and does not block that cutover.
 
 ## Why you'd want it
 
@@ -69,7 +69,7 @@ Two things worth knowing that don't show up in the demo above:
 
 ## Layers
 
-git bay is built as an event-sourced core plus `with*()` layers — each layer registers verbs, events, a state slice, and effect handlers, and the whole tool is one `pipe()` composition. Remove a layer and the system degrades to the rung below instead of breaking (without worktrees, `adopt` + `submit` + `integrate` is a pure merge queue for people who bring their own branches). Each layer has its own page in [docs/](docs/):
+git bay is built as an event-sourced core plus `with*()` layers — each layer registers verbs, events, a state slice, and effect handlers, and the whole tool is one `pipe()` composition. Remove a layer and the system degrades to the rung below instead of breaking (without worktrees, `adopt` + `submit` + `integrate` is a pure merge queue for people who bring their own branches). In Yrd terms, these layers are being split into packages: `@yrd/core`, `@yrd/bay`, `@yrd/line`, `@yrd/task`, `@yrd/contest`, and `@yrd/cli`. The shipped code is mostly `@yrd/bay` plus the first line/integration machinery. Each layer has its own page in [docs/](docs/):
 
 | Layer | Tier | What it does |
 | --- | --- | --- |
@@ -91,26 +91,45 @@ pipe(
   withWorktrees({ pool }),
   withQueue(), withReceive(), withIntegrate(),
   withSubmodules(),                  // auto-armed when .gitmodules exists
-  withIssueTracking(config.issues),
+  withTaskIntake(config.tasks),
   withChecks(config.checks),
   withReviewGate(config.review),
   withStats(),
 )
 ```
 
-Configuration is unifying into one committed file whose sections mirror the layer names (today it's a few `git config bay.*` keys — `bay.check`, `bay.mergeCommand`, `bay.issues.validate` + `bay.issues.on-merged`/`on-rejected`/`on-closed` (`bay.tracker` = deprecated spelling of validate), `bay.queue.batch-size`, `bay.queue.regen-paths`; those retire when this lands):
+Yrd target package shape:
+
+| Package | Owns |
+| --- | --- |
+| `@yrd/core` | records, event contracts, plugin composition, typed state shapes |
+| `@yrd/bay` | bay lifecycle and the Git-native implementation shipped here |
+| `@yrd/line` | integration queues, steps, merge/deploy execution, artifacts, status, resume, CI cutover path |
+| `@yrd/task` | task intake from km beads, GitHub issues, and other trackers |
+| `@yrd/contest` | multiple attempts for one task and winner selection |
+| `@yrd/cli` | command projection from installed plugins |
+
+The immediate implementation target is `@yrd/line` well enough that `@ci` can
+switch from bespoke tent integration to Yrd bay+line operations. The contest
+package is later: useful, but not required for CI.
+
+Configuration is unifying into one committed file whose sections mirror the layer names (today it's a few `git config bay.*` keys — `bay.check`, `bay.mergeCommand`, `bay.issues.validate` + `bay.issues.on-merged`/`on-rejected`/`on-closed` (`bay.tracker` = deprecated spelling of validate), `bay.queue.batch-size`, `bay.queue.regen-paths`; those retire when this lands). In the Yrd config, `tasks` is the tracker-agnostic intake layer; GitHub issues are one adapter behind it:
 
 ```yaml
 store: sqlite                        # or: km — PRs as nodes, queue order = tree order
 worktrees: { pool: { prewarm: 2 } }
-issues:
+tasks:
   validate: gh issue view {name}
-  on-merged: gh issue close {name} --comment "merged as {sha} ({pr})"
-checks:
-  submit: bun run lint
-  integrate: bun run test
+  on-integrated: gh issue close {name} --comment "integrated as {sha} ({submission})"
+line:
+  steps:
+    check: bun run lint && bun run test
+    merge: git merge --ff-only {target}
+    deploy: bun run deploy
+  batch: 4
+  artifacts: .git/yrd/artifacts
 review: { required: false }
-queue: { limit: 10, batch-size: 4 }  # WIP limit + optional batch size
+queue: { limit: 10 }
 ```
 
 Two name systems, deliberately: config sections are nouns matching layers (settings); slash names like `bay/open` → `bay/opened` are actions and facts (requests and events — see [docs/events.md](docs/events.md)).
@@ -167,9 +186,17 @@ Unambiguous prefixes work (`git bay au` is `audit`; `o` is `open`); every pre-v0
 
 **Roadmap** (details in the layer pages):
 
-- **v0.4 — checks + pooling + config**: checks on lifecycle events; worktree pooling on by default; WIP limits; `bay.*` git-config keys unify into `.gitbay.yml`.
-- **v0.5 — review gate + RPC**: the approval state with `approve`/`reject`; a JSON-RPC adapter over the same core (ships when a real subscriber exists).
-- **Horizon**: native promotion (merge in a staging area instead of your main worktree), optional background service.
+- **Next — Yrd line + `@ci` cutover**: expose the current integration path as `yrd line integrate --steps check,merge`, emit line-step events, capture step artifacts/logs, support journal-driven resume, and move the CI integration lane onto it.
+- **Then — package split + config**: split toward `@yrd/core`, `@yrd/bay`, `@yrd/line`, `@yrd/task`, `@yrd/cli`; unify `bay.*` git-config keys into the Yrd config shape with `tasks` as the tracker-agnostic intake layer.
+- **Then — review/RPC/adapters**: review gate, JSON-RPC, km/ag/hab/GitHub adapters as real subscribers appear.
+- **Later — contest mode**: multiple agent/harness attempts for one real task with manual winner selection first.
+
+Repository docs are the product contract. `README.md`, `docs/`, and
+`tests/*.spec.md` should be public-suitable product/API/behavior docs. Any
+future repo-local `spec.md` should be an executable or final behavior-facing
+spec, not exploratory design. Tentative reference, background research, and
+prior-art notes belong outside this repo in `hub/yrd/reference` or in `@yrd`
+beads.
 
 ## The docs are tests
 
