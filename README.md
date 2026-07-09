@@ -230,7 +230,7 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 | --- | --- | --- | --- |
 | `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary: base, open PRs, last step verdicts, stale checks | no state change; exits `0` |
 | `yrd line audit [--json]` | repository from cwd | audit findings | no state change; exits `0` clean or `1` with findings |
-| `yrd line integrate [selector] [--steps <step,...>] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams output | runs registered steps; domain failures exit `1` |
+| `yrd line integrate [selector] [--steps check,merge,deploy] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams check/merge drain output | runs registered steps; deploy failures exit `1` without unmerging |
 | `yrd line watch [selector]` | optional PR/name | repeated integration output | keeps draining eligible work |
 
 ### Contest Ops
@@ -335,8 +335,10 @@ launchers, or repository-specific policy.
   them.
 - **Tasks** validate bay names and receive lifecycle callbacks for opened,
   submitted, rejected, merged, deployed, and closed PRs.
-- **Deployment** is a step over landed state. A deploy failure records a
-  verdict, can make the command exit nonzero, and cannot revoke `merged`.
+- **Deployment** is a step over landed state. `yrd line integrate <PR>
+  --steps deploy` runs `bay.deploy`; `--steps check,merge,deploy` lands then
+  deploys. A deploy failure records a verdict, exits nonzero, and cannot revoke
+  `merged`.
 - **Contests** sit above bays and before final integration. They compare real
   attempts, record logs/metrics/evals, and promote exactly one winner.
 

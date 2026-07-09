@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type { RejectionCode, StepCommandOutput } from "../types.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
 import { git, porcelainStatus, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
@@ -49,6 +50,72 @@ export async function runProjectCheck(check: string | undefined, cwd: string): P
   const metadata = { exitCode: code, durationMs: Date.now() - start, stdout: out, stderr: err }
   if (code !== 0) return { ok: false, detail: `check '${check}' failed (exit ${code}): ${tail(err || out)}`, ...metadata }
   return { ok: true, ...metadata }
+}
+
+// ---------- deploy ----------
+
+export type DeployOutcome =
+  | ({ ok: true; detail: string; skipped?: boolean; configHash?: string } & StepCommandOutput)
+  | ({ ok: false; code: "deploy-failed"; detail: string; configHash?: string } & StepCommandOutput)
+
+/** Resolve the optional post-merge deploy command: inline > BAY_DEPLOY >
+ *  git config bay.deploy > none. */
+export async function resolveDeployCommand(deployCommand: string | undefined, configCwd: string): Promise<string | undefined> {
+  const source = createGitConfigSource(configCwd)
+  return await resolveOption(deployCommand, "deploy", source)
+}
+
+export async function resolveDeployBaseRef(mainRepo: string): Promise<string> {
+  const branch = await git(["-C", mainRepo, "symbolic-ref", "--short", "HEAD"], mainRepo)
+  if (branch.code === 0 && branch.stdout.trim() !== "") return branch.stdout.trim()
+  return await resolveBaseRef(mainRepo)
+}
+
+export async function runDeploy(params: {
+  mainRepo?: string
+  pr: string
+  deployCommand?: string
+  configCwd?: string
+}): Promise<DeployOutcome> {
+  const configCwd = params.configCwd ?? params.mainRepo ?? process.cwd()
+  const deployCommand = await resolveDeployCommand(params.deployCommand, configCwd)
+  if (deployCommand === undefined || deployCommand.trim() === "") {
+    return { ok: true, skipped: true, detail: "deploy skipped — no bay.deploy configured", durationMs: 0, stdout: "", stderr: "" }
+  }
+  const configHash = createHash("sha256").update("deploy").update("\0").update(deployCommand.trim()).digest("hex")
+
+  const cwd = params.mainRepo ?? configCwd
+  const base = params.mainRepo !== undefined ? await resolveDeployBaseRef(params.mainRepo) : "HEAD"
+  let baseSha: string | undefined
+  if (params.mainRepo !== undefined) {
+    const resolved = await git(["-C", params.mainRepo, "rev-parse", "--verify", "--quiet", `${base}^{commit}`], params.mainRepo)
+    if (resolved.code === 0) baseSha = resolved.stdout.trim()
+  }
+  const sha = baseSha ?? ""
+  const cmd = deployCommand
+    .replaceAll("{base}", base)
+    .replaceAll("{target}", base)
+    .replaceAll("{pr}", params.pr)
+    .replaceAll("{sha}", sha)
+  const start = Date.now()
+  const proc = Bun.spawn(["sh", "-c", cmd], { cwd, stdout: "pipe", stderr: "pipe", env: repoScopedCleanEnv() })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+  const metadata: StepCommandOutput = {
+    exitCode: code,
+    durationMs: Date.now() - start,
+    stdout,
+    stderr,
+    ...(baseSha !== undefined ? { baseSha, headSha: baseSha } : {}),
+  }
+  if (code !== 0) {
+    return { ok: false, code: "deploy-failed", configHash, detail: `deploy '${deployCommand}' failed (exit ${code}): ${tail(stderr || stdout)}`, ...metadata }
+  }
+  const detail = tail(stdout) || `deployed ${base}${baseSha === undefined ? "" : `@${baseSha.slice(0, 12)}`}`
+  return { ok: true, configHash, detail, ...metadata }
 }
 
 // ---------- merge ----------

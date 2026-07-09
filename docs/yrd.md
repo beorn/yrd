@@ -59,7 +59,7 @@ yrd bay close
 
 yrd line status [PR|name] [--json]
 yrd line audit [--json]
-yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
+yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
 yrd task compete <task> --agents codex/claude --base main --bays 2
@@ -74,12 +74,11 @@ The current Git Bay CLI exposes the shipped v0.3 verbs documented in the README
 that implementation; shipped compatibility verbs stay available while the CLI
 converges.
 
-Staged line extensions:
+Staged line lifecycle commands:
 
 ```bash
 yrd line provision [<base>]
 yrd line deprovision [<base>]
-yrd line integrate [PR|name] --steps deploy
 ```
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
@@ -93,8 +92,8 @@ Custom competitors can be supplied with `--agent-cmd <name=command>`.
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.
 `--retry` is an option on step-running commands, not a separate vocabulary
-branch. The installed line sequence is `check,merge`; `deploy` is staged until
-remote runner shape and deployment records are real.
+branch. The installed local line sequence is `check,merge,deploy`. Deploy runs
+only after merge, records a step verdict, and cannot revoke `merged`.
 
 ## Implementation Order
 
@@ -105,7 +104,7 @@ manual-selection projection is installed, and line hardening remains the gating
 work for replacing the current `@ci` lane.
 
 The first line projection slice is installed: `yrd line integrate --steps
-check,merge` delegates to the current Git Bay integration logic, `yrd line
+check,merge,deploy` delegates to the current Git Bay integration logic, `yrd line
 status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
@@ -116,7 +115,8 @@ package.
 
 Remaining non-throwaway line work:
 
-1. finish core submission and line-step event/state contracts;
+1. finish core submission and line-step event/state contracts beyond local
+   check/merge/deploy;
 2. add the runner seam for remote/container/hosted execution;
 3. switch `@ci` to that line projection.
 

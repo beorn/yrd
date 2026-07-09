@@ -474,6 +474,87 @@ describe("yrd CLI — line projection", () => {
     expect(await readFile(stderr.path, "utf8")).toBe("check stderr\n")
   })
 
+  it("line integrate can deploy after merge and record deploy step artifacts", async () => {
+    await must(
+      [
+        "git",
+        "-C",
+        demo,
+        "config",
+        "bay.deploy",
+        "printf 'deploy {pr} {base} {sha}\\n' > deploy.log; printf 'deploy stdout\\n'",
+      ],
+      demo,
+      env,
+    )
+    await branchWithFiles(demo, env, "task/deploy-line", { "deploy.txt": "ship\n" })
+    const pr = (await must(["git", "bay", "adopt", "task/deploy-line", "--workitem", "deploy-line"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", pr], demo, env)
+
+    const integrated = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "check,merge,deploy"], demo, env)
+    expect(integrated.stdout).toContain(`bay: ${pr} submitted → checking`)
+    expect(integrated.stdout).toContain(`bay: ${pr} merging → merged`)
+    expect(integrated.stdout).toContain(`bay: ${pr} deploy → deployed — deploy stdout`)
+    expect(await readFile(join(demo, "deploy.log"), "utf8")).toMatch(new RegExp(`^deploy ${pr} main [0-9a-f]{40}\\n$`))
+
+    const journal = await readFile(join(demo, ".git/bay/events.jsonl"), "utf8")
+    const rows = journal
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            name: string
+            data: {
+              pr?: string
+              step?: string
+              ok?: boolean
+              configHash?: string
+              skipped?: boolean
+              baseSha?: string
+              headSha?: string
+              artifacts?: { name: string; path: string; bytes: number }[]
+            }
+          },
+      )
+    expect(rows.filter((row) => row.name === "line/step/finished").map((row) => row.data.step)).toEqual(["check", "merge", "deploy"])
+    const deployFinished = rows.find((row) => row.name === "line/step/finished" && row.data.step === "deploy")!
+    expect(deployFinished.data).toMatchObject({ pr, ok: true })
+    expect(deployFinished.data.configHash).toMatch(/^[0-9a-f]{64}$/)
+    expect(deployFinished.data.baseSha).toMatch(/^[0-9a-f]{40}$/)
+    expect(deployFinished.data.headSha).toBe(deployFinished.data.baseSha)
+    const deployStdout = deployFinished.data.artifacts!.find((artifact) => artifact.name === "stdout")!
+    expect(await readFile(deployStdout.path, "utf8")).toBe("deploy stdout\n")
+
+    await must(["git", "-C", demo, "config", "--unset", "bay.deploy"], demo, env)
+    const skipped = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "deploy"], demo, env)
+    expect(skipped.stdout).toContain(`bay: ${pr} deploy → skipped — deploy skipped`)
+  })
+
+  it("a failed deploy exits nonzero without unmerging the PR", async () => {
+    await must(["git", "-C", demo, "config", "bay.deploy", "echo deploy bad >&2; exit 9"], demo, env)
+    await branchWithFiles(demo, env, "task/deploy-red", { "deploy-red.txt": "ship\n" })
+    const pr = (await must(["git", "bay", "adopt", "task/deploy-red", "--workitem", "deploy-red"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", pr], demo, env)
+
+    const deployed = await run([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "check,merge,deploy"], demo, env)
+    expect(deployed.code).toBe(1)
+    expect(deployed.stdout).toContain(`bay: ${pr} merging → merged`)
+    expect(deployed.stdout).toContain(`bay: ${pr} deploy → failed`)
+    expect(deployed.stdout).toContain("deploy 'echo deploy bad >&2; exit 9' failed (exit 9): deploy bad")
+
+    const ls = await must(["git", "bay", "ls", pr, "--json"], demo, env)
+    expect((JSON.parse(ls.stdout) as { pr: { state: string } }).pr.state).toBe("merged")
+
+    const journal = await readFile(join(demo, ".git/bay/events.jsonl"), "utf8")
+    const rows = journal
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { name: string; data: { step?: string; ok?: boolean; error?: { code?: string; exitCode?: number } } })
+    const deployFinished = rows.find((row) => row.name === "line/step/finished" && row.data.step === "deploy")!
+    expect(deployFinished.data).toMatchObject({ ok: false, error: { code: "deploy-failed", exitCode: 9 } })
+  })
+
   it("line status JSON includes normalized error metadata for failed steps", async () => {
     await must(["git", "-C", demo, "config", "bay.check", "echo nope >&2; exit 7"], demo, env)
     await branchWithFiles(demo, env, "task/red-line", { "red.txt": "bad\n" })
@@ -518,7 +599,7 @@ describe("yrd CLI — line projection", () => {
 
     const deploy = await run([process.execPath, YRD_BIN, "line", "integrate", "--steps", "deploy"], demo, env)
     expect(deploy.code).toBe(2)
-    expect(deploy.stderr).toContain("step 'deploy' is staged, not installed yet")
+    expect(deploy.stderr).toContain("line integrate --steps deploy requires a PR or name")
   })
 })
 

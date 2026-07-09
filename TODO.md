@@ -26,6 +26,9 @@ repo in hub/yrd/reference or in @yrd beads.
   results, base/head SHAs, and checked-PR staleness reasons.
 - Human `yrd line status` renders that same folded line summary concisely:
   base, open PRs, step verdicts, artifact counts, and stale reasons.
+- `yrd line integrate --steps deploy` runs the configured post-merge
+  `bay.deploy` step, records `line/step` events and artifacts, exits nonzero
+  on deploy failure, and never changes a merged PR back out of `merged`.
 - Fresh bay state uses events.jsonl, index.sqlite, and prs.git; one-generation
   compatibility reads legacy journal.jsonl, bay.db, and repo.git when present.
 - `git bay submit <branch>` opens and submits an existing source branch without
@@ -65,7 +68,7 @@ yrd bay close
 
 yrd line status [PR|name] [--json]
 yrd line audit [--json]
-yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
+yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
 yrd line watch [PR|name] [--interval <sec>]
 
 yrd task compete <task> --agents codex/claude --base main --bays 2
@@ -82,8 +85,8 @@ Rules:
 - --retry is an option on step-running commands, not a separate command tree.
 - Keep git bay as the Git-native projection; do not add @yrd/git-bay unless
   there is a second non-Git bay implementation.
-- yrd line provision, yrd line deprovision, and deploy steps are staged until
-  line state, remote runners, and deployment records are real.
+- yrd line provision and yrd line deprovision are staged until line state and
+  remote runners are real.
 
 ## Next Work
 
@@ -97,7 +100,8 @@ Rules:
    - Keep winner selection manual-first; automatic ranking should be a plugin
      over recorded evidence, not hidden policy.
 2. Line hardening
-   - Finish core submission and line-step event/state contracts.
+   - Finish core submission and line-step event/state contracts beyond local
+     check/merge/deploy.
    - Broaden artifact/log capture beyond the local command runner as remote
      and hosted runners land.
    - Extend event-log-driven resume beyond successful checks as more step kinds

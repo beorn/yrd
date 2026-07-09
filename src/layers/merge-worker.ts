@@ -19,7 +19,7 @@ import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from 
 import { batchLandEvidence } from "./batch-build.ts"
 import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
-import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
+import { type CheckOutcome, resolveCheck, resolveDeployBaseRef, runDeploy, runMerge, runProjectCheck } from "./pipeline.ts"
 import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinished, stepStarted } from "./steps.ts"
 
 /**
@@ -51,6 +51,7 @@ import { hasReusableSuccessfulStep, skippedStepEvents, stepConfigHash, stepFinis
 
 const FX_CHECK_RUN = "check.run"
 const FX_MERGE_RUN = "merge.run"
+const FX_DEPLOY_RUN = "deploy.run"
 const FX_INTEGRATE_RUN = "integrate.run"
 const LAYER = "merge-worker"
 
@@ -61,6 +62,10 @@ export type MergeWorkerOptions = {
    *  requirement. Run via `sh -c` with `{target}` and `{pr}` substituted
    *  (`{changeset}` still substitutes too, so existing configs keep working). */
   mergeCommand?: string
+  /** Optional post-merge deploy command. Inline > BAY_DEPLOY > git config
+   *  bay.deploy > none. Failure records a deploy step verdict but never
+   *  changes the terminal merged PR state. */
+  deployCommand?: string
   /** ONE project check command for the standalone `check` verb and `integrate`'s
    *  check half (spec § Check provider). Inline > BAY_CHECK > git config
    *  bay.check > none (stage skipped with an explicit pass-through). */
@@ -262,7 +267,8 @@ async function stepFinishedWithOutput(
   bay: BayRuntime,
   opts: MergeWorkerOptions,
   run: StepRunData,
-  outcome: ({ ok: true } | { ok: false; code?: RejectionCode; detail?: string }) & StepCommandOutput & { configHash?: string },
+  outcome: ({ ok: true } | { ok: false; code?: RejectionCode | "deploy-failed"; detail?: string }) &
+    StepCommandOutput & { configHash?: string; skipped?: boolean },
   detail: string | undefined,
   cause: NonNullable<Effect["cause"]>,
 ): Promise<BayEvent> {
@@ -271,9 +277,21 @@ async function stepFinishedWithOutput(
   const artifacts = await writeStepArtifacts({ mainRepo, cause, run, output })
   const error =
     outcome.ok === false
-      ? stepError(outcome.code ?? (run.step === "check" ? "check-failed" : "merge-command-failed"), detail ?? "step failed", output)
+      ? stepError(
+          outcome.code ??
+            (run.step === "check" ? "check-failed" : run.step === "deploy" ? "deploy-failed" : "merge-command-failed"),
+          detail ?? "step failed",
+          output,
+        )
       : undefined
-  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(output, artifacts, error, { configHash: outcome.configHash }))
+  return stepFinished(
+    bay,
+    run,
+    outcome.ok,
+    detail,
+    cause,
+    stepMetadata(output, artifacts, error, { configHash: outcome.configHash, skipped: outcome.skipped }),
+  )
 }
 
 async function runMergeStep(
@@ -311,6 +329,46 @@ function makeMergeRunHandler(opts: MergeWorkerOptions): EffectHandler {
     events.push(stateChangeEvent(bay, d.pr, "merging", "merged", effect.cause!, { detail: outcome.detail, sha: outcome.sha }))
     events.push(...closeMergedBay(bay, state, target, effect.cause!))
     return events
+  }
+}
+
+// ---------- deploy <PR>: merged → merged plus line/step verdict ----------
+
+function reduceDeploy(state: BayState, command: BayCommand): TransitionResult {
+  const pr = requirePrArg(command, "deploy")
+  const existing = state.prs[pr]
+  if (!existing) throw new Error(`bay: deploy: no PR '${pr}' — git bay ls lists them`)
+  if (existing.state === "pushed" || existing.state === "submitted" || existing.state === "checking" || existing.state === "checked") {
+    throw new Error(`bay: deploy: ${pr} has not merged yet — git bay integrate ${pr} first`)
+  }
+  if (existing.state === "rejected") {
+    throw new Error(`bay: deploy: ${pr} was rejected — put it back in the queue: git bay retry ${pr}`)
+  }
+  if (existing.state === "closed") {
+    throw new Error(`bay: deploy: ${pr} was withdrawn — nothing to deploy`)
+  }
+  if (existing.state !== "merged") {
+    throw new Error(`bay: deploy: ${pr} is ${existing.state} — wait for the verdict (git bay ls ${pr})`)
+  }
+  return { state, events: [], effects: [{ type: FX_DEPLOY_RUN, data: { pr } }] }
+}
+
+function makeDeployRunHandler(opts: MergeWorkerOptions): EffectHandler {
+  return async (effect: Effect, bay: BayRuntime): Promise<BayEvent[]> => {
+    const d = effect.data as { pr: PrId }
+    const mainRepo = resolveMainRepo(opts)
+    const target = await resolveDeployBaseRef(mainRepo)
+    const run = { step: "deploy" as const, pr: d.pr, target }
+    const outcome = await runDeploy({
+      mainRepo: opts.mainRepo,
+      pr: d.pr,
+      deployCommand: opts.deployCommand,
+      configCwd: opts.configCwd,
+    })
+    return [
+      stepStarted(bay, run, effect.cause!),
+      await stepFinishedWithOutput(bay, opts, run, outcome, outcome.detail, effect.cause!),
+    ]
   }
 }
 
@@ -440,12 +498,14 @@ export function withMergeWorker(opts: MergeWorkerOptions = {}): BayPlugin {
       reduce(state, command, next) {
         if (command.type === "check") return reduceCheck(bay, state, command)
         if (command.type === "merge") return reduceMerge(bay, state, command)
+        if (command.type === "deploy") return reduceDeploy(state, command)
         if (command.type === "integrate") return reduceIntegrate(bay, state, command)
         return next(state, command)
       },
       effects: {
         [FX_CHECK_RUN]: makeCheckRunHandler(opts, scratch),
         [FX_MERGE_RUN]: makeMergeRunHandler(opts),
+        [FX_DEPLOY_RUN]: makeDeployRunHandler(opts),
         [FX_INTEGRATE_RUN]: makeIntegrateRunHandler(opts, scratch),
       },
     }

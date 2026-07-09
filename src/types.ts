@@ -105,6 +105,10 @@ export type RejectionCode =
   | "queue-full" // reserved: v0.4 WIP limit
   | "poison-retry" // reserved: a PR retried past a failure-count ceiling
 
+export type StepErrorCode =
+  | RejectionCode
+  | "deploy-failed" // bay.deploy failed after merge; records a line-step failure but never changes the terminal merged PR state
+
 /** Machine-readable reason a command was refused at the door (`gitbay/refused
  *  {code, detail}`) — never a PR state transition, just "no, and here is why".
  *  Closed on purpose, same rationale as RejectionCode. Only `pr-still-queued`
@@ -324,7 +328,7 @@ export type GitbayEvent =
  *  `step` stays a payload field (not a name segment) so the union stays closed
  *  and exhaustively foldable while steps become pluggable (withStep). */
 export type StepRunData = {
-  step: "check" | "merge"
+  step: "check" | "merge" | "deploy"
   target: string
   pr?: PrId
   batch?: PrId
@@ -349,7 +353,7 @@ export type StepCommandOutput = {
 }
 
 export type StepError = {
-  code: RejectionCode
+  code: StepErrorCode
   message: string
   exitCode?: number
 }

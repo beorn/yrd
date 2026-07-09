@@ -41,11 +41,10 @@ const LINE_USAGE = `yrd line — integration line projection
 USAGE
   yrd line status [PR|name] [--json]
   yrd line audit [--json]
-  yrd line integrate [PR|name] [--steps check,merge] [--retry] [--watch] [--interval <sec>]
+  yrd line integrate [PR|name] [--steps check,merge,deploy] [--retry] [--watch] [--interval <sec>]
   yrd line watch [PR|name] [--interval <sec>]
 
-Installed steps: check, merge
-Staged steps: deploy
+Installed steps: check, merge, deploy
 `
 
 const TASK_USAGE = `yrd task — task intake projection
@@ -90,7 +89,9 @@ function domainError(message: string): never {
   throw new Error(message.startsWith("yrd:") ? message : `yrd: ${message}`)
 }
 
-function parseSteps(raw: string | undefined): string[] {
+type LineStepName = "check" | "merge" | "deploy"
+
+function parseSteps(raw: string | undefined): LineStepName[] {
   if (raw === undefined || raw.trim() === "") return ["check", "merge"]
   const steps = raw
     .split(",")
@@ -101,19 +102,16 @@ function parseSteps(raw: string | undefined): string[] {
   for (const step of steps) {
     if (seen.has(step)) fail(`yrd: line integrate: duplicate step '${step}'`)
     seen.add(step)
-    if (step === "deploy") {
-      fail("yrd: line integrate: step 'deploy' is staged, not installed yet (installed: check, merge)")
-    }
-    if (step !== "check" && step !== "merge") {
-      fail(`yrd: line integrate: unknown step '${step}' (installed: check, merge; staged: deploy)`)
+    if (step !== "check" && step !== "merge" && step !== "deploy") {
+      fail(`yrd: line integrate: unknown step '${step}' (installed: check, merge, deploy)`)
     }
   }
-  return steps
+  return steps as LineStepName[]
 }
 
 type ParsedIntegrate = {
   target?: string
-  steps: string[]
+  steps: LineStepName[]
   retry: boolean
   passthrough: string[]
 }
@@ -132,7 +130,7 @@ type LineItemView = {
   target: string
   stale?: boolean
   staleReasons?: string[]
-  steps?: Partial<Record<"check" | "merge", LineStepView>>
+  steps?: Partial<Record<LineStepName, LineStepView>>
 }
 
 type LineSummaryView = {
@@ -235,7 +233,7 @@ function formatCounts(counts: Record<string, number> | undefined): string {
     .join(", ")
 }
 
-function formatStep(name: "check" | "merge", step: LineStepView | undefined): string {
+function formatStep(name: LineStepName, step: LineStepView | undefined): string {
   if (step === undefined) return `${name}=-`
   const status = step.skipped === true ? "skipped" : step.ok ? "ok" : "failed"
   const code = !step.ok && step.error?.code !== undefined ? `:${step.error.code}` : ""
@@ -247,9 +245,10 @@ function formatStep(name: "check" | "merge", step: LineStepView | undefined): st
 function formatLineItem(item: LineItemView): string {
   const check = formatStep("check", item.steps?.check)
   const merge = formatStep("merge", item.steps?.merge)
+  const deploy = formatStep("deploy", item.steps?.deploy)
   const staleReasons = item.stale === true ? item.staleReasons?.join("; ") || "yes" : ""
   const stale = staleReasons === "" ? "" : ` stale=${staleReasons}`
-  return `${item.pr} ${item.state} target=${item.target} ${check} ${merge}${stale}`
+  return `${item.pr} ${item.state} target=${item.target} ${check} ${merge} ${deploy}${stale}`
 }
 
 function formatLineSummary(line: LineSummaryView): string {
@@ -286,9 +285,25 @@ async function lineStatus(args: string[]): Promise<void> {
   console.log(formatLineStatus(JSON.parse(res.stdout) as LineStatusView))
 }
 
+function mergedPrFrom(output: string): string | undefined {
+  return output.match(/bay: (PR\d+) merging → merged\b/u)?.[1]
+}
+
+async function runGitBayAndWrite(args: string[], cwd: string): Promise<Awaited<ReturnType<typeof runCommand>>> {
+  const res = await runGitBay(args, cwd)
+  writeCaptured(res)
+  return res
+}
+
+async function runDeployStep(paths: Awaited<ReturnType<typeof resolveRepoPaths>>, target: string): Promise<void> {
+  const res = await runGitBayAndWrite(["deploy", target], paths.repo)
+  if (res.code !== 0) process.exit(res.code)
+}
+
 async function lineIntegrate(args: string[]): Promise<void> {
   const parsed = parseIntegrateArgs(args)
   const stepKey = parsed.steps.join(",")
+  const includesDeploy = parsed.steps.includes("deploy")
 
   if (parsed.retry) {
     if (parsed.target === undefined) fail("yrd: line integrate: --retry requires a PR or name")
@@ -297,6 +312,37 @@ async function lineIntegrate(args: string[]): Promise<void> {
     }
     if (parsed.passthrough.length > 0) fail("yrd: line integrate: --retry does not support --watch/--interval")
     await reenterGitBay(["retry", parsed.target])
+    return
+  }
+
+  if (includesDeploy) {
+    if (parsed.passthrough.length > 0) fail("yrd: line integrate: deploy does not support --watch/--interval yet")
+    if (parsed.steps.at(-1) !== "deploy") {
+      fail(`yrd: line integrate: deploy must be the final step (got '${stepKey}')`)
+    }
+    if (stepKey !== "deploy" && stepKey !== "merge,deploy" && stepKey !== "check,merge,deploy") {
+      fail(`yrd: line integrate: unsupported step order '${stepKey}' (installed sequence: check,merge,deploy)`)
+    }
+
+    const paths = await resolveRepoPaths()
+    if (stepKey === "deploy") {
+      if (parsed.target === undefined) fail("yrd: line integrate --steps deploy requires a PR or name")
+      await runDeployStep(paths, parsed.target)
+      return
+    }
+
+    if (stepKey === "merge,deploy") {
+      if (parsed.target === undefined) fail("yrd: line integrate --steps merge,deploy requires a PR or name")
+      const merged = await runGitBayAndWrite(["merge", parsed.target], paths.repo)
+      if (merged.code !== 0) process.exit(merged.code)
+      await runDeployStep(paths, parsed.target)
+      return
+    }
+
+    const integrated = await runGitBayAndWrite(["integrate", ...(parsed.target === undefined ? [] : [parsed.target])], paths.repo)
+    if (integrated.code !== 0) process.exit(integrated.code)
+    const deployTarget = parsed.target ?? mergedPrFrom(integrated.stdout)
+    if (deployTarget !== undefined) await runDeployStep(paths, deployTarget)
     return
   }
 
@@ -315,7 +361,7 @@ async function lineIntegrate(args: string[]): Promise<void> {
   }
 
   if (stepKey !== "check,merge") {
-    fail(`yrd: line integrate: unsupported step order '${stepKey}' (installed sequence: check,merge)`)
+    fail(`yrd: line integrate: unsupported step order '${stepKey}' (installed sequence: check,merge,deploy)`)
   }
 
   await reenterGitBay(["integrate", ...(parsed.target === undefined ? [] : [parsed.target]), ...parsed.passthrough])

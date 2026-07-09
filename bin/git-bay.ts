@@ -441,7 +441,7 @@ type LineItemStatus = {
   targetSha?: string
   stale: boolean
   staleReasons: string[]
-  steps: Partial<Record<"check" | "merge", StepStatus>>
+  steps: Partial<Record<"check" | "merge" | "deploy", StepStatus>>
 }
 
 async function resolveCommit(repo: string, ref: string): Promise<string | undefined> {
@@ -457,12 +457,12 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
 }> {
   const base = await resolveBaseRef(ctx.mainRepo)
   const baseSha = await resolveCommit(ctx.mainRepo, base)
-  const stepsByPr = new Map<PrId, Partial<Record<"check" | "merge", StepStatus>>>()
+  const stepsByPr = new Map<PrId, Partial<Record<"check" | "merge" | "deploy", StepStatus>>>()
   for await (const ev of bay.store.journal.replay()) {
     if (ev.name !== "line/step/finished") continue
     const d = ev.data as {
       pr?: PrId
-      step?: "check" | "merge"
+      step?: "check" | "merge" | "deploy"
       target?: string
       ok?: boolean
       detail?: string
@@ -475,7 +475,7 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
       error?: StepError
       artifacts?: unknown[]
     }
-    if (d.pr === undefined || (d.step !== "check" && d.step !== "merge") || d.target === undefined || d.ok === undefined) continue
+    if (d.pr === undefined || (d.step !== "check" && d.step !== "merge" && d.step !== "deploy") || d.target === undefined || d.ok === undefined) continue
     const current = stepsByPr.get(d.pr) ?? {}
     current[d.step] = {
       ok: d.ok,
@@ -1090,6 +1090,39 @@ async function verbMerge(ctx: Ctx, target: string | undefined): Promise<void> {
   })
 }
 
+function printDeployEvents(events: { name: string; data: Record<string, unknown> }[]): boolean {
+  let ok = true
+  for (const e of events) {
+    if (e.name !== "line/step/finished") continue
+    const d = e.data as { step?: string; pr?: string; ok?: boolean; detail?: string; skipped?: boolean }
+    if (d.step !== "deploy" || d.pr === undefined || d.ok === undefined) continue
+    if (d.skipped === true) {
+      console.log(`bay: ${d.pr} deploy → skipped${d.detail ? ` — ${d.detail}` : ""}`)
+      continue
+    }
+    if (d.ok) {
+      console.log(`bay: ${d.pr} deploy → deployed${d.detail ? ` — ${d.detail}` : ""}`)
+      continue
+    }
+    ok = false
+    console.log(`bay: ${d.pr} deploy → failed${d.detail ? ` — ${d.detail}` : ""}`)
+  }
+  return ok
+}
+
+async function verbDeploy(ctx: Ctx, target: string | undefined): Promise<void> {
+  if (!target) throw new Error("bay: deploy: a PR number or name is required — git bay ls lists them")
+  let ok = true
+  await withWriteBay(ctx, async (bay) => {
+    const state = await bay.state()
+    const prId = resolvePr(state, target)
+    prOrTeach(state, prId, "deploy")
+    const { events } = await bay.dispatch({ type: "deploy", args: { pr: prId } })
+    ok = printDeployEvents(events)
+  })
+  if (!ok) process.exit(1)
+}
+
 function queuedBatchAlreadyBuilt(state: BayState): boolean {
   const queued = submittedPrs(state)
   if (queued.length === 0) return false
@@ -1549,6 +1582,13 @@ async function main(): Promise<void> {
         throw new Error(`bay: integrate: --interval must be a positive number of seconds, got '${opts.interval ?? ""}'`)
       }
       await verbIntegrate(await requireBay(), target, opts.watch === true, interval)
+    })
+
+  program
+    .command("deploy <PR|name>", { hidden: true })
+    .description("run the configured post-merge deploy step for a merged PR")
+    .action(async (target: string) => {
+      await verbDeploy(await requireBay(), target)
     })
 
   program

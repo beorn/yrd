@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createGitConfigSource, resolveOption } from "../config.ts"
-import type { Cause, RejectionCode, StepArtifact, StepCommandOutput, StepError, StepFinishMetadata, StepRunData } from "../types.ts"
+import type { Cause, StepArtifact, StepCommandOutput, StepError, StepErrorCode, StepFinishMetadata, StepRunData } from "../types.ts"
 import { defaultBayDir, git, resolveBaseRef } from "./git.ts"
 
 function sanitizePart(raw: string | number | undefined): string {
@@ -56,7 +56,7 @@ export async function writeStepArtifacts(params: {
   return artifacts
 }
 
-export function stepError(code: RejectionCode, message: string, output: StepCommandOutput = {}): StepError {
+export function stepError(code: StepErrorCode, message: string, output: StepCommandOutput = {}): StepError {
   return {
     code,
     message,
@@ -68,12 +68,13 @@ export function stepMetadata(
   output: StepCommandOutput,
   artifacts: StepArtifact[],
   error?: StepError,
-  extra: Pick<StepFinishMetadata, "configHash"> = {},
+  extra: Pick<StepFinishMetadata, "configHash" | "skipped"> = {},
 ): StepFinishMetadata {
   return {
     ...(output.exitCode !== undefined ? { exitCode: output.exitCode } : {}),
     ...(output.durationMs !== undefined ? { durationMs: output.durationMs } : {}),
     ...(extra.configHash !== undefined ? { configHash: extra.configHash } : {}),
+    ...(extra.skipped !== undefined ? { skipped: extra.skipped } : {}),
     ...(error !== undefined ? { error } : {}),
     ...(artifacts.length > 0 ? { artifacts } : {}),
     ...(output.baseSha !== undefined ? { baseSha: output.baseSha } : {}),
