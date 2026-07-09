@@ -1,0 +1,17 @@
+{
+  "name": "@yrd/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@silvery/commander": "^0.21.0",
+    "@yrd/bay": "workspace:*",
+    "@yrd/contest": "workspace:*",
+    "@yrd/core": "workspace:*",
+    "@yrd/line": "workspace:*",
+    "@yrd/task": "workspace:*"
+  }
+}
