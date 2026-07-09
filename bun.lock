@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "git-bay",
+      "name": "@yrd/bay",
       "dependencies": {
         "@silvery/commander": "^0.21.0",
       },

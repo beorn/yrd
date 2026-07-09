@@ -14,8 +14,8 @@ research stay outside this repo in `hub/yrd/reference`.
 - `yrd line status|audit|integrate|watch` projects the current Git Bay
   integration state and check/merge machinery.
 - Compatibility commands remain: `git-bay`, `gitbay`, and `bun bay`.
-- Package metadata points at `github:beorn/yrd`, but the package name is still
-  `git-bay`.
+- Package metadata points at `github:beorn/yrd`; the current package identity is
+  `@yrd/bay`.
 - hh consumes this repo at `vendor/yrd`.
 
 ## Product Shape
@@ -100,8 +100,7 @@ Target packages:
      exploratory/background specs belong in `hub/yrd/reference` or in `@yrd`
      beads.
 4. **Package split + config**
-   - Cut package naming from `git-bay` toward Yrd-scoped packages while
-     preserving compatibility bins and Git subcommands.
+   - Preserve compatibility bins and Git subcommands while splitting packages.
    - Split the repo into `@yrd/core`, `@yrd/bay`, `@yrd/line`, `@yrd/task`,
      `@yrd/contest`, and `@yrd/cli` without changing behavior.
    - Promote current Git Bay internals into `@yrd/bay` and shared contracts

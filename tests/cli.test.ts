@@ -12,8 +12,8 @@ import { spawn } from "node:child_process"
  * the bay-owned repo's pre/post-receive hooks.
  */
 
-const BIN = new URL("../bin/git-bay.ts", import.meta.url).pathname
-const YRD_BIN = new URL("../bin/yrd.ts", import.meta.url).pathname
+const GIT_BAY_BIN = new URL("../bin/git-bay", import.meta.url).pathname
+const YRD_BIN = new URL("../bin/yrd", import.meta.url).pathname
 
 type Run = { code: number; stdout: string; stderr: string }
 
@@ -45,7 +45,7 @@ async function makeFixture(prefix: string): Promise<{ root: string; demo: string
   const shimDir = join(root, "shim")
   await must(["mkdir", "-p", shimDir], root, {})
   const shim = join(shimDir, "git-bay")
-  await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${BIN}" "$@"\n`, "utf8")
+  await writeFile(shim, `#!/bin/sh\nexec "${process.execPath}" "${GIT_BAY_BIN}" "$@"\n`, "utf8")
   await chmod(shim, 0o755)
 
   const env = {

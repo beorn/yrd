@@ -1,27 +1,27 @@
 {
-  "name": "git-bay",
+  "name": "@yrd/bay",
   "version": "0.0.1",
   "private": true,
-  "description": "Yrd bay — the Git-native bay implementation; git bay remains the compatibility command surface",
+  "description": "Yrd bay — the Git-native bay implementation; git bay remains a compatibility command surface",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/yrd",
   "type": "module",
   "bin": {
-    "yrd": "bin/yrd.ts",
-    "git-yrd": "bin/git-yrd.ts",
-    "git-bay": "bin/git-bay.ts",
-    "gitbay": "bin/git-bay.ts"
+    "yrd": "bin/yrd",
+    "git-yrd": "bin/git-yrd",
+    "git-bay": "bin/git-bay",
+    "gitbay": "bin/git-bay"
   },
   "exports": {
     ".": "./src/index.ts"
   },
   "scripts": {
-    "yrd": "bun ./bin/yrd.ts",
-    "git-yrd": "bun ./bin/git-yrd.ts",
-    "git-bay": "bun ./bin/git-bay.ts",
-    "gitbay": "bun ./bin/git-bay.ts",
-    "bay": "bun ./bin/git-bay.ts",
+    "yrd": "bun ./bin/yrd",
+    "git-yrd": "bun ./bin/git-yrd",
+    "git-bay": "bun ./bin/git-bay",
+    "gitbay": "bun ./bin/git-bay",
+    "bay": "bun ./bin/git-bay",
     "test": "bun --bun x vitest run",
     "check": "tsc --noEmit && bun --bun x vitest run",
     "spec": "PATH=\"$PWD/tests/bin:$PATH\" bun --bun x mdspec tests/gitbay.spec.md tests/batch.spec.md tests/refusals.spec.md tests/guide.spec.md"

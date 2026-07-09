@@ -207,7 +207,7 @@ commands remain installed.
 
 Still coordinated separately:
 
-- package name changes from `git-bay` to Yrd-scoped package names
+- published package/release policy for the Yrd-scoped packages
 - consuming-repo path and bead moves
 - full monorepo package split
 - line artifacts/status/resume hardening and `@ci` cutover
