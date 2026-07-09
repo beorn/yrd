@@ -82,10 +82,10 @@ export type MergeParams = {
    *  already-current), so the merge always lands the commit that existed the
    *  moment integration ran, not whatever the branch drifts to meanwhile. */
   target: string
-  /** Inline override for bay.mergeCommand; undefined defers to BAY_MERGE_COMMAND
-   *  then git config bay.mergeCommand, then (§4) the native default. */
+  /** Inline override for bay.merge; undefined defers to BAY_MERGE then git
+   *  config bay.merge, then (§4) the native default. */
   mergeCommand?: string
-  /** cwd for resolving bay.mergeCommand/bay.check from git config — defaults
+  /** cwd for resolving bay.merge/bay.check from git config — defaults
    *  to mainRepo, then process.cwd(). */
   configCwd?: string
   /** Inline override for bay.check — only consulted to NAME the selected gate
@@ -100,7 +100,7 @@ export type MergeParams = {
 
 /**
  * The audited landing trailer the NATIVE merge path stamps on every
- * main-moving merge commit it authors. A configured bay.mergeCommand authors
+ * main-moving merge commit it authors. A configured bay.merge command authors
  * its own commit, so evidence there is the command's responsibility (the
  * delegate host writes its own trailer convention); the native path is
  * gitbay's own main-mover and must be self-evidencing.
@@ -135,20 +135,20 @@ export function formatBayGateTrailer(fields: {
   return `Bay-Gate: pr=${fields.pr} target=${fields.target} base=${fields.base}${batchPart} check=${check}`
 }
 
-/** Resolve the configured merge command: inline > BAY_MERGE_COMMAND > git
- *  config bay.mergeCommand > undefined. Undefined now means "use the native
- *  default" (§4: bay.mergeCommand is an override, never a requirement) —
+/** Resolve the configured merge command: inline > BAY_MERGE > git config
+ *  bay.merge > undefined. Undefined now means "use the native default" (§4:
+ *  bay.merge is an override, never a requirement) —
  *  this no longer throws on a missing command. */
 export async function resolveMergeCommand(mergeCommand: string | undefined, configCwd: string): Promise<string | undefined> {
   const source = createGitConfigSource(configCwd)
-  return await resolveOption(mergeCommand, "mergeCommand", source)
+  return await resolveOption(mergeCommand, "merge", source)
 }
 
 /**
  * Land `target` onto `mainRepo`'s current branch and return the verdict —
  * never throws for a domain outcome (a failed check/merge/guard is data, not
  * a crash; only a broken host — no `sh`, no git, an unreadable mainRepo —
- * throws). Zero-config native merge (§4): when bay.mergeCommand is unset,
+ * throws). Zero-config native merge (§4): when bay.merge is unset,
  * this runs `git merge --no-ff` directly — the exact merge a plain `git push`
  * has always done, now shared by `merge`/`integrate` too. Either way, the
  * lying-merge guard (ancestry proof) runs after: a merge command's exit 0 is
@@ -189,7 +189,7 @@ export async function runMerge(params: MergeParams): Promise<MergeOutcome> {
     if (!mainRepo) {
       throw new Error(
         "bay: no merge command configured and no mainRepo to run a native merge in — set inline " +
-          "(mergeCommand), via BAY_MERGE_COMMAND, `git config bay.mergeCommand`, or pass mainRepo for the native default.",
+          "(mergeCommand), via BAY_MERGE, `git config bay.merge`, or pass mainRepo for the native default.",
       )
     }
     const dirty = (await porcelainStatus(mainRepo))

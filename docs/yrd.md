@@ -84,10 +84,11 @@ yrd line integrate [PR|name] --steps deploy
 
 `yrd task compete <task>` creates a contest and launches bay attempts.
 `yrd contest ...` commands manage an existing contest lifecycle. Built-in
-competitors use ag's provider-list vocabulary: `--agents codex/claude` is the
-yrd form of `ag codex/claude`, then yrd fans that list out into one isolated bay
-attempt per provider. Comma-separated lists remain accepted. Custom competitors
-can be supplied with `--agent-cmd <name=command>`.
+competitors use ag-style provider-list vocabulary: `--agents codex/claude` uses
+the same list syntax as `ag codex/claude`, but with contest semantics. Plain
+`ag codex/claude` selects one healthy provider seat; yrd fans the list out into
+one isolated bay attempt per provider. Comma-separated lists remain accepted.
+Custom competitors can be supplied with `--agent-cmd <name=command>`.
 
 For commands that accept zero or more steps, an omitted step list means "run the
 configured default sequence." `--steps` is the canonical narrowing flag.

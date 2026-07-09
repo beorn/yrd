@@ -266,7 +266,7 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     // Unique name integrates exactly that PR (a red merge command still proves
     // the name resolved to PR3 — the verdict lines carry the number). No
     // bay.check configured in this block, so the check half auto-passes.
-    const integrated = await run(["git", "bay", "integrate", "uniq"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    const integrated = await run(["git", "bay", "integrate", "uniq"], demo, { ...env, BAY_MERGE: "false" })
     expect(integrated.stdout).toContain("bay: PR3 submitted → checking")
     expect(integrated.stdout).toContain("bay: PR3 checking → checked")
     expect(integrated.stdout).toContain("bay: PR3 checked → merging")
@@ -304,7 +304,7 @@ describe("git bay CLI — PR numbers are sequential and addressable by name", ()
     expect(doubleCheck.code).toBe(1)
     expect(doubleCheck.stderr).toContain(`${id} is already checked`)
 
-    const merged = await must(["git", "bay", "merge", id], demo, { ...env, BAY_MERGE_COMMAND: "true" })
+    const merged = await must(["git", "bay", "merge", id], demo, { ...env, BAY_MERGE: "true" })
     expect(merged.stdout).toContain(`bay: ${id} checked → merging`)
     expect(merged.stdout).toContain(`bay: ${id} merging → merged`)
     const json2 = await must(["git", "bay", "ls", "--json"], demo, env)
@@ -449,6 +449,7 @@ describe("yrd CLI — line projection", () => {
     const taskHelp = await must([process.execPath, YRD_BIN, "task", "--help"], demo, env)
     expect(taskHelp.stdout).toContain("--agents codex/claude")
     expect(taskHelp.stdout).toContain("Built-in contest agents: codex, claude")
+    expect(taskHelp.stdout).toContain("Agent lists use ag-style provider-list syntax")
     expect(taskHelp.stdout).not.toContain("claude-opus")
 
     const status = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
@@ -548,7 +549,7 @@ describe("yrd CLI — contest projection", () => {
   }, 15_000)
 })
 
-describe("git bay CLI — issue tracking inbound: bay.issues.validate at open AND adopt (bay.tracker = deprecated spelling)", () => {
+describe("git bay CLI — issue tracking inbound: bay.issue at open AND adopt", () => {
   let root: string
   let demo: string
   let env: Record<string, string>
@@ -564,7 +565,7 @@ describe("git bay CLI — issue tracking inbound: bay.issues.validate at open AN
       "utf8",
     )
     await chmod(tracker, 0o755)
-    await must(["git", "-C", demo, "config", "bay.issues.validate", `${tracker} {name}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue", `${tracker} {name}`], demo, env)
   })
 
   afterEach(async () => {
@@ -581,26 +582,26 @@ describe("git bay CLI — issue tracking inbound: bay.issues.validate at open AN
     expect(res.code).toBe(1)
     expect(res.stderr).toContain("the tracker does not accept 'bogus-name'")
     expect(res.stderr).toContain("no such ticket: bogus-name")
-    expect(res.stderr).toContain("git config bay.issues.validate none")
+    expect(res.stderr).toContain("git config bay.issue none")
     const ls = await must(["git", "bay", "ls"], demo, env)
     expect(ls.stdout).toContain("no open worktrees") // nothing opened
   })
 
-  it("the deprecated bay.tracker spelling still validates (dual-read), and bay.issues.validate wins when both are set", async () => {
-    // Only the deprecated key set → it validates.
-    await must(["git", "-C", demo, "config", "--unset", "bay.issues.validate"], demo, env)
+  it("retired bay.tracker is ignored; bay.issue is the only inbound validation key", async () => {
+    await must(["git", "-C", demo, "config", "--unset", "bay.issue"], demo, env)
     await must(["git", "-C", demo, "config", "bay.tracker", `${tracker} {name}`], demo, env)
+    const ignored = await must(["git", "bay", "open", "ignored-tracker"], demo, env)
+    expect(ignored.stdout.trim()).toContain(".bays/wt1")
+    await must(["git", "bay", "close", "ignored-tracker"], demo, env)
+
+    await must(["git", "-C", demo, "config", "bay.issue", `${tracker} {name}`], demo, env)
     const refused = await run(["git", "bay", "open", "bogus-name"], demo, env)
     expect(refused.code).toBe(1)
     expect(refused.stderr).toContain("no such ticket: bogus-name")
-    // Modern key set too → it takes precedence (here: an accept-all overrides the refusing tracker).
-    await must(["git", "-C", demo, "config", "bay.issues.validate", "true"], demo, env)
-    const res = await must(["git", "bay", "open", "bogus-name"], demo, env)
-    expect(res.stdout.trim()).toContain(".bays/wt1")
   })
 
-  it("bay.issues.validate none skips the check", async () => {
-    await must(["git", "-C", demo, "config", "bay.issues.validate", "none"], demo, env)
+  it("bay.issue none skips the check", async () => {
+    await must(["git", "-C", demo, "config", "bay.issue", "none"], demo, env)
     const res = await must(["git", "bay", "open", "anything-goes"], demo, env)
     expect(res.stdout.trim()).toContain(".bays/wt1")
   })
@@ -626,7 +627,7 @@ describe("git bay CLI — issue tracking inbound: bay.issues.validate at open AN
   })
 })
 
-describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run and their outcomes are journaled", () => {
+describe("git bay CLI — issue tracking outbound: bay.issue.on-* commands run and their outcomes are journaled", () => {
   let root: string
   let demo: string
   let env: Record<string, string>
@@ -654,7 +655,7 @@ describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run 
     ;({ root, demo, env } = await makeFixture("bay-notify-"))
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
-    await must(["git", "-C", demo, "config", "bay.mergeCommand", "git merge --no-ff {target}"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", "git merge --no-ff {target}"], demo, env)
     log = join(root, "notified.log")
   })
 
@@ -664,7 +665,7 @@ describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run 
 
   it("a merged PR runs on-merged with {name}/{pr}/{sha} — {sha} is the verified landed tip, and the outcome is journaled", async () => {
     await must(
-      ["git", "-C", demo, "config", "bay.issues.on-merged", `echo "merged {name} {pr} {sha}" >> ${log}`],
+      ["git", "-C", demo, "config", "bay.issue.on-merged", `echo "merged {name} {pr} {sha}" >> ${log}`],
       demo,
       env,
     )
@@ -686,7 +687,7 @@ describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run 
 
   it("a rejected PR runs on-rejected with {code}/{detail}", async () => {
     await must(["git", "-C", demo, "config", "bay.check", "false"], demo, env)
-    await must(["git", "-C", demo, "config", "bay.issues.on-rejected", `echo "rejected {name} {pr} {code}" >> ${log}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue.on-rejected", `echo "rejected {name} {pr} {code}" >> ${log}`], demo, env)
     await openCommitPush("feat-red")
     const submit = await must(["git", "bay", "submit", "PR1"], demo, env)
     expect(submit.stdout).toContain("bay: issue 'feat-red' notified (rejected)")
@@ -696,7 +697,7 @@ describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run 
 
   it("a failing notify command NEVER fails the verb — the merge stands, stderr is loud, the exit code is journaled", async () => {
     await must(
-      ["git", "-C", demo, "config", "bay.issues.on-merged", `echo "tracker down" >&2; exit 5`],
+      ["git", "-C", demo, "config", "bay.issue.on-merged", `echo "tracker down" >&2; exit 5`],
       demo,
       env,
     )
@@ -714,7 +715,7 @@ describe("git bay CLI — issue tracking outbound: bay.issues.on-* commands run 
   })
 
   it("an unnamed PR notifies nothing — there is no issue to notify", async () => {
-    await must(["git", "-C", demo, "config", "bay.issues.on-merged", `echo "merged {name}" >> ${log}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.issue.on-merged", `echo "merged {name}" >> ${log}`], demo, env)
     await must(["git", "-C", demo, "switch", "-qc", "task/anon", "main"], demo, env)
     await writeFile(join(demo, "anon.txt"), "x\n", "utf8")
     await must(["git", "-C", demo, "add", "anon.txt"], demo, env)
@@ -770,7 +771,7 @@ describe("git bay CLI — every pre-rename verb still works, unadvertised", () =
     expect(requeue.stderr).toContain("bay: no PR or worktree named 'PR99'")
     // drain → integrate: walks the whole pipeline (no bay.check configured,
     // so check auto-passes; a red merge command rejects it).
-    const drain = await run(["git", "bay", "drain", "PR2"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    const drain = await run(["git", "bay", "drain", "PR2"], demo, { ...env, BAY_MERGE: "false" })
     expect(drain.stdout).toContain("bay: PR2 submitted → checking")
     expect(drain.stdout).toContain("bay: PR2 checking → checked")
     expect(drain.stdout).toContain("bay: PR2 checked → merging")
@@ -934,7 +935,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     // an ambiguous prefix of `init`, even though it IS one character short of it.
     // No bay.check configured, so the check half auto-passes before the red
     // merge command rejects it.
-    const inRun = await run(["git", "bay", "in", id1], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    const inRun = await run(["git", "bay", "in", id1], demo, { ...env, BAY_MERGE: "false" })
     expect(inRun.code).toBe(0)
     expect(inRun.stdout).toContain(`bay: ${id1} submitted → checking`)
     expect(inRun.stdout).toContain(`bay: ${id1} checked → merging`)
@@ -943,7 +944,7 @@ describe("git bay CLI — flag hygiene (dogfood find: `enqueue --help` became a 
     await must(["git", "-C", demo, "branch", "task/y"], demo, env)
     const id2 = (await must(["git", "bay", "adopt", "task/y"], demo, env)).stdout.trim()
     await must(["git", "bay", "submit", id2], demo, env)
-    const intRun = await run(["git", "bay", "int", id2], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    const intRun = await run(["git", "bay", "int", id2], demo, { ...env, BAY_MERGE: "false" })
     expect(intRun.code).toBe(0)
     expect(intRun.stdout).toContain(`bay: ${id2} submitted → checking`)
     expect(intRun.stdout).toContain(`bay: ${id2} checked → merging`)
@@ -1000,7 +1001,7 @@ describe("git bay CLI — batch integration from queue.batch-size", () => {
         "-C",
         demo,
         "config",
-        "bay.mergeCommand",
+        "bay.merge",
         "git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q {target}",
       ],
       demo,
@@ -1077,7 +1078,7 @@ git -c user.name=t -c user.email=t@example.invalid merge --no-ff -q "$target"
     await writeFile(gate, `#!/bin/sh\ntest ! -f bad.txt\n`, "utf8")
     await chmod(merge, 0o755)
     await chmod(gate, 0o755)
-    await must(["git", "-C", demo, "config", "bay.mergeCommand", `${merge} {target}`], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", `${merge} {target}`], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", gate], demo, env)
 
     await branchWithFiles(demo, env, "task/good", { "good.txt": "ok\n" })
@@ -1198,12 +1199,12 @@ describe("git bay CLI — state survives host hygiene (the 2026-07-07 .bay wipe 
   it("bare ls shows every non-merged PR — a rejected one is never invisible", async () => {
     await must(["git", "bay", "init"], demo, env)
     // Otherwise submit's own default auto-integrate would land the PR before
-    // the explicit integrate call below gets to reject it with BAY_MERGE_COMMAND=false.
+    // the explicit integrate call below gets to reject it with BAY_MERGE=false.
     await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
     await must(["git", "-C", demo, "branch", "task/x"], demo, env)
     const id = (await must(["git", "bay", "adopt", "task/x"], demo, env)).stdout.trim()
     await must(["git", "bay", "submit", id], demo, env) // pushed → submitted
-    await run(["git", "bay", "integrate"], demo, { ...env, BAY_MERGE_COMMAND: "false" })
+    await run(["git", "bay", "integrate"], demo, { ...env, BAY_MERGE: "false" })
     const ls = await must(["git", "bay", "ls"], demo, env)
     expect(ls.stdout).toContain(id)
     expect(ls.stdout).toContain("rejected")
@@ -1302,7 +1303,7 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     ;({ root, demo, env } = await makeFixture("bay-create-submit-"))
     await must(["git", "bay", "init"], demo, env)
     await must(["git", "-C", demo, "config", "bay.check", "true"], demo, env)
-    await must(["git", "-C", demo, "config", "bay.mergeCommand", "git merge --no-ff {target}"], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", "git merge --no-ff {target}"], demo, env)
   })
 
   afterEach(async () => {
@@ -1391,17 +1392,19 @@ describe("git bay CLI — push creates (pushed); submit asks to merge and auto-i
     expect(push.stderr).toMatch(/remote: bay: PR1 rejected — check 'false' failed \(exit 1\)/)
   })
 
-  it("bay.autoQueue=true makes a bare push behave exactly like -o submit (the pre-v0.3 legacy default, still honored for back-compat)", async () => {
+  it("retired bay.autoQueue is ignored; use bay.autoSubmit or -o submit for fused submit", async () => {
     await must(["git", "-C", demo, "config", "bay.autoQueue", "true"], demo, env)
-    const opened = await must(["git", "bay", "open", "auto-queued"], demo, env)
+    const opened = await must(["git", "bay", "open", "retired-autoqueue"], demo, env)
     const wtPath = opened.stdout.trim()
     await writeFile(join(wtPath, "h.txt"), "z\n", "utf8")
     await must(["git", "-C", wtPath, "add", "h.txt"], wtPath, env)
     await must(["git", "-C", wtPath, "commit", "-qm", "feat: h"], wtPath, env)
 
     const push = await must(["git", "-C", wtPath, "push"], wtPath, env) // NO -o option at all
-    expect(push.stderr).toMatch(/remote: bay: PR1 received — checks running/)
-    expect(push.stderr).toMatch(/remote: bay: PR1 merged onto main \(checks ✓\)/)
+    expect(push.stderr).toMatch(/remote: bay: PR1 opened — git bay submit PR1 when ready/)
+
+    const ls = await must(["git", "bay", "ls", "PR1"], demo, env)
+    expect(ls.stdout).toContain("PR1 pushed")
   })
 
   it("bay.autoSubmit=true makes a bare push submit too — with autoMerge still on by default, it ships all the way", async () => {
@@ -1463,7 +1466,7 @@ describe("git bay CLI — one merge seam (21002): retry re-runs the gates, never
     await writeFile(refuse, `#!/bin/sh\necho run >> ${calls}\necho "reviewer-not-author gate: refused" >&2\nexit 1\n`, "utf8")
     await chmod(refuse, 0o755)
     await must(["git", "-C", demo, "config", "bay.check", check], demo, env)
-    await must(["git", "-C", demo, "config", "bay.mergeCommand", refuse], demo, env)
+    await must(["git", "-C", demo, "config", "bay.merge", refuse], demo, env)
     await must(["git", "-C", demo, "config", "bay.autoMerge", "false"], demo, env)
 
     await branchWithFiles(demo, env, "task/a", { "a.txt": "a\n" })

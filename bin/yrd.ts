@@ -55,6 +55,7 @@ USAGE
                    [--agent-cmd <name=command>] [--eval <command>] [--base <ref>] [--bays <n>] [--json]
 
 Built-in contest agents: codex, claude
+Agent lists use ag-style provider-list syntax; yrd fans the list out into attempts.
 Custom commands run with YRD_PROMPT, YRD_TASK, YRD_BAY, YRD_AGENT, and YRD_CONTEST_ATTEMPT in env.
 `
 

@@ -238,7 +238,7 @@ describe("withMergeWorker — post-merge ancestry verify (the lying-merge guard,
   })
 })
 
-describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand unset)", () => {
+describe("withMergeWorker — zero-config native merge (§4: bay.merge unset)", () => {
   async function makeNativeRepo(): Promise<string> {
     const repo = await mkdtemp(join(tmpdir(), "gitbay-native-repo-"))
     const g = async (args: string[]) => {
@@ -255,8 +255,8 @@ describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand un
   }
 
   it("lands with a native git merge --no-ff and records 'merged <sha> onto <mainline>'", async () => {
-    const saved = process.env.BAY_MERGE_COMMAND
-    delete process.env.BAY_MERGE_COMMAND
+    const saved = process.env.BAY_MERGE
+    delete process.env.BAY_MERGE
     try {
       const repo = await makeNativeRepo()
       const bay = await buildMergeBay(await tmpJournalPath(), { mainRepo: repo }) // no mergeCommand at all
@@ -269,13 +269,13 @@ describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand un
       const log = await git(["-C", repo, "log", "--oneline", "-1"], repo)
       expect(log.stdout).toContain("bay: merge C-native (task/x)")
     } finally {
-      if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
+      if (saved !== undefined) process.env.BAY_MERGE = saved
     }
   })
 
   it("rejects with dirty-mainline when the mainline working tree has a staged (tracked) change", async () => {
-    const saved = process.env.BAY_MERGE_COMMAND
-    delete process.env.BAY_MERGE_COMMAND
+    const saved = process.env.BAY_MERGE
+    delete process.env.BAY_MERGE
     try {
       const repo = await makeNativeRepo()
       const { writeFile } = await import("node:fs/promises")
@@ -292,14 +292,14 @@ describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand un
       expect(rejected.data!.code).toBe("dirty-mainline")
       expect(detailOf(events, "rejected")).toMatch(/is dirty/)
     } finally {
-      if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
+      if (saved !== undefined) process.env.BAY_MERGE = saved
     }
   })
 
   it("stamps the audited Bay-Gate trailer (pr/target/base/check) on the native merge commit", async () => {
-    const savedMerge = process.env.BAY_MERGE_COMMAND
+    const savedMerge = process.env.BAY_MERGE
     const savedCheck = process.env.BAY_CHECK
-    delete process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_MERGE
     delete process.env.BAY_CHECK
     try {
       const repo = await makeNativeRepo()
@@ -317,15 +317,15 @@ describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand un
       expect((await git(["-C", repo, "rev-parse", "main^1"], repo)).stdout.trim()).toBe(base)
       expect((await git(["-C", repo, "rev-parse", "main^2"], repo)).stdout.trim()).toBe(target)
     } finally {
-      if (savedMerge !== undefined) process.env.BAY_MERGE_COMMAND = savedMerge
+      if (savedMerge !== undefined) process.env.BAY_MERGE = savedMerge
       if (savedCheck !== undefined) process.env.BAY_CHECK = savedCheck
     }
   })
 
   it("stamps check=none when no gate is configured — non-evidence auditors must reject, not a pass", async () => {
-    const savedMerge = process.env.BAY_MERGE_COMMAND
+    const savedMerge = process.env.BAY_MERGE
     const savedCheck = process.env.BAY_CHECK
-    delete process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_MERGE
     delete process.env.BAY_CHECK
     try {
       const repo = await makeNativeRepo()
@@ -337,7 +337,7 @@ describe("withMergeWorker — zero-config native merge (§4: bay.mergeCommand un
       const trailer = await git(["-C", repo, "log", "-1", "--format=%(trailers:key=Bay-Gate,valueonly=true)", "main"], repo)
       expect(trailer.stdout.trim()).toMatch(/^pr=C-nocheck target=[0-9a-f]{40} base=[0-9a-f]{40} check=none$/)
     } finally {
-      if (savedMerge !== undefined) process.env.BAY_MERGE_COMMAND = savedMerge
+      if (savedMerge !== undefined) process.env.BAY_MERGE = savedMerge
       if (savedCheck !== undefined) process.env.BAY_CHECK = savedCheck
     }
   })
@@ -554,11 +554,11 @@ describe("withMergeWorker — integrate: no-arg auto-pick (submitted + checked, 
 
 describe("withMergeWorker — no merge command configured and no mainRepo", () => {
   it("throws a loud error, and the checked→merging event stays durable", async () => {
-    const saved = process.env.BAY_MERGE_COMMAND
-    delete process.env.BAY_MERGE_COMMAND
+    const saved = process.env.BAY_MERGE
+    delete process.env.BAY_MERGE
     try {
       const path = await tmpJournalPath()
-      const configCwd = await mkdtemp(join(tmpdir(), "gitbay-noconfig-")) // not a git repo → bay.mergeCommand unset
+      const configCwd = await mkdtemp(join(tmpdir(), "gitbay-noconfig-")) // not a git repo → bay.merge unset
       const bay = await buildMergeBay(path, { configCwd })
       await seedChecked(bay, "t", "C-m")
 
@@ -569,15 +569,15 @@ describe("withMergeWorker — no merge command configured and no mainRepo", () =
       // ran and threw — so the PR is left `merging` (resumable), not lost.
       expect(stateOf(await bay.state(), "C-m")).toBe("merging")
     } finally {
-      if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
+      if (saved !== undefined) process.env.BAY_MERGE = saved
     }
   })
 })
 
 describe("withMergeWorker — resume-on-restart via replay + requeue", () => {
   it("a PR stuck in merging replays as merging and is resumed (requeue + integrate)", async () => {
-    const saved = process.env.BAY_MERGE_COMMAND
-    delete process.env.BAY_MERGE_COMMAND
+    const saved = process.env.BAY_MERGE
+    delete process.env.BAY_MERGE
     try {
       const path = await tmpJournalPath()
       const configCwd = await mkdtemp(join(tmpdir(), "gitbay-noconfig-"))
@@ -603,7 +603,7 @@ describe("withMergeWorker — resume-on-restart via replay + requeue", () => {
       await bay2.dispatch({ type: "integrate", args: { pr: "C-s" } })
       expect(stateOf(await bay2.state(), "C-s")).toBe("merged")
     } finally {
-      if (saved !== undefined) process.env.BAY_MERGE_COMMAND = saved
+      if (saved !== undefined) process.env.BAY_MERGE = saved
     }
   })
 })

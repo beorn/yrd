@@ -243,11 +243,12 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 | `yrd contest select <contest> --winner <attempt>` | contest id and attempt id | selected winner | records manual selection |
 | `yrd contest promote <contest>` | contest with selected winner | PR id or submit output | submits the winning attempt to the line |
 
-Contest competitors are commands. Built-in agent names use ag's provider-list
-vocabulary: `--agents codex/claude` is the yrd form of `ag codex/claude`, then
-yrd fans that list out into one isolated bay attempt per provider. Comma-
-separated lists still parse for compatibility. Custom competitors can provide
-an explicit command.
+Contest competitors are commands. Built-in agent names use ag-style
+provider-list vocabulary: `--agents codex/claude` uses the same list syntax as
+`ag codex/claude`, but with contest semantics. Plain `ag codex/claude` selects
+one healthy provider seat; yrd fans the list out into one isolated bay attempt
+per provider. Comma-separated lists still parse for compatibility. Custom
+competitors can provide an explicit command.
 
 ### Plain Git
 

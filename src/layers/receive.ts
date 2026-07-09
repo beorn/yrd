@@ -87,11 +87,10 @@ function reduceInit(bay: BayRuntime, state: BayState, opts: ReceiveOptions): Tra
  *  the PR (or resume a rejected one as its next revision), and drive it
  *  through the two independent auto-flow toggles the CLI host resolves before
  *  dispatch (docs/model.md § The auto-flow): `queued` is `bay.autoSubmit` (or
- *  a forcing push option, `-o submit`/`-o wait`, or legacy `bay.autoQueue`) —
- *  true fuses this push's creation/transition straight into `submitted`;
- *  false stops at `pushed`. `autoMerge` is `bay.autoMerge` (or legacy
- *  `bay.autoQueue`) — true additionally hands a submitted PR straight to the
- *  submit.run effect (check then merge, inline); false rests it at
+ *  a forcing push option, `-o submit`/`-o wait`) — true fuses this push's
+ *  creation/transition straight into `submitted`; false stops at `pushed`.
+ *  `autoMerge` is `bay.autoMerge` — true additionally hands a submitted PR
+ *  straight to the submit.run effect (check then merge, inline); false rests it at
  *  `submitted` for a manual `check`/`merge`/`integrate`. A bare push that
  *  neither flag turns on (queued: false/undefined) creates the PR in `pushed`
  *  and stops there: nothing runs until `git bay submit <PR>` (or a later
@@ -309,7 +308,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     events.push(stateChangeEvent(bay, d.pr, "checking", "checked", effect.cause!))
 
     // 2. Merge onto the mainline — the SAME runner integrate/merge use (§4:
-    //    zero-config native default; bay.mergeCommand remains the override,
+    //    zero-config native default; bay.merge remains the override,
     //    resolved identically for every path).
     events.push(stateChangeEvent(bay, d.pr, "checked", "merging", effect.cause!))
     const mergeRun = { step: "merge" as const, pr: d.pr, target: d.branch }

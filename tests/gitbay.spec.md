@@ -97,13 +97,12 @@ $ git bay ls PR2
 PR2 merged {{sha2}} onto main (checks: ✓)
 ```
 
-No `git config bay.mergeCommand` was ever set above — `merge`/`integrate` land
+No `git config bay.merge` was ever set above — `merge`/`integrate` land
 with a native `git merge --no-ff` by default (§4: zero-config native merge);
-`bay.mergeCommand` remains available as an override for a project that needs
-one. Nor did any of this need `-o submit`/`-o wait` — those push options (and
-legacy `bay.autoQueue`) still work exactly as before, fusing the *push* itself
-with the ask-to-merge; see [refusals.spec.md](refusals.spec.md) for `-o wait`
-in action.
+`bay.merge` remains available as an override for a project that needs
+one. Nor did any of this need `-o submit`/`-o wait` — those push options still
+fuse the *push* itself with the ask-to-merge; see
+[refusals.spec.md](refusals.spec.md) for `-o wait` in action.
 
 Assertions above are mdspec pattern-matches, not literals: `{{name:/regex/}}` for
 a captured value (age, sha) reused with bare `{{name}}` in later output, inline

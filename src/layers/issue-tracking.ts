@@ -14,13 +14,13 @@ import { tail } from "./pipeline.ts"
  * Config (git config, `bay.` section — resolution order everywhere: inline >
  * BAY_* env > git config bay.* > unset):
  *
- *   bay.issues.on-merged    e.g.  gh issue close {name} --comment "merged as {sha} ({pr})"
- *   bay.issues.on-rejected  e.g.  gh issue comment {name} --body "PR {pr} rejected: {code} — {detail}"
- *   bay.issues.on-closed    e.g.  gh issue comment {name} --body "PR {pr} withdrawn"
+ *   bay.issue.on-merged    e.g.  gh issue close {name} --comment "merged as {sha} ({pr})"
+ *   bay.issue.on-rejected  e.g.  gh issue comment {name} --body "PR {pr} rejected: {code} — {detail}"
+ *   bay.issue.on-closed    e.g.  gh issue comment {name} --body "PR {pr} withdrawn"
  *
- * (The inbound half — `bay.issues.validate`, with `bay.tracker` as the
- * deprecated spelling — is a door check the HOST runs before dispatch, since
- * reducers are pure; see resolveValidateCommand below and bin's open/adopt.)
+ * (The inbound half — `bay.issue` — is a door check the HOST runs before
+ * dispatch, since reducers are pure; see resolveValidateCommand below and
+ * bin's open/adopt.)
  *
  * The host dispatches `issues-notify` after a dispatch whose events contain a
  * terminal `pr/changed` (merged/rejected/closed) for a NAMED PR. The reducer
@@ -36,9 +36,9 @@ const FX_NOTIFY_RUN = "issues.notify-run"
 
 /** Terminal PR states the tracker can react to → their config keys. */
 const NOTIFY_KEYS = {
-  merged: "issues.on-merged",
-  rejected: "issues.on-rejected",
-  closed: "issues.on-closed",
+  merged: "issue.on-merged",
+  rejected: "issue.on-rejected",
+  closed: "issue.on-closed",
 } as const
 
 export type NotifiableState = keyof typeof NOTIFY_KEYS
@@ -48,7 +48,7 @@ export function notifyKeyFor(to: string): string | undefined {
 }
 
 export type IssueTrackingOptions = {
-  /** cwd for resolving `bay.issues.*` from git config; also the spawn cwd for
+  /** cwd for resolving `bay.issue.*` from git config; also the spawn cwd for
    *  the notify command. The CLI host passes the mainline repo. */
   mainRepo?: string
 }
@@ -70,7 +70,7 @@ export function renderIssueCommand(template: string, subs: Partial<Record<(typeo
     const value = subs[key]
     if (value === undefined) {
       throw new Error(
-        `bay: issues: template references ${token} but this event carries no ${key} — ` +
+        `bay: issue: template references ${token} but this event carries no ${key} — ` +
           `fix the command for this state (git config bay.${NOTIFY_KEYS.merged.split(".")[0]}.…) or drop the token`,
       )
     }
@@ -79,12 +79,11 @@ export function renderIssueCommand(template: string, subs: Partial<Record<(typeo
   return out
 }
 
-/** The inbound validate command: `bay.issues.validate`, falling back to the
- *  deprecated `bay.tracker` spelling. ""/"none" mean unset (explicit off). */
+/** The inbound validate command: `bay.issue`. ""/"none" mean unset
+ *  (explicit off). */
 export async function resolveValidateCommand(configCwd: string): Promise<string | undefined> {
   const source = createGitConfigSource(configCwd)
-  const modern = await source.get("issues.validate")
-  const value = modern !== undefined && modern.trim() !== "" ? modern : await source.get("tracker")
+  const value = await source.get("issue")
   if (value === undefined) return undefined
   const trimmed = value.trim()
   return trimmed === "" || trimmed === "none" ? undefined : trimmed

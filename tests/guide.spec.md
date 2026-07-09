@@ -19,7 +19,7 @@ RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
   - Manual control? git config bay.autoMerge false rests submit at submitted — then git bay check/merge or integrate <PR> yourself; git config bay.autoSubmit true makes a bare push submit too (and, with autoMerge still on, ship all the way).
-  - No git config bay.mergeCommand needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.mergeCommand only to override it.
+  - No git config bay.merge needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.merge only to override it.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
   - Done with a worktree? git bay close <bay|wt> refuses while its PR is still open — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
   - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
@@ -44,7 +44,7 @@ THIS DIRECTORY
 
 ## Inside an initialized repository — the live snapshot
 
-The second half is dynamic: the repository, whether the bay is initialized, the check, merge, and tracker commands as configured *right now*, and how busy the bay is. Unset config teaches the exact `git config` command that sets it.
+The second half is dynamic: the repository, whether the bay is initialized, the check, merge, and issue command as configured *right now*, and how busy the bay is. Unset config teaches the exact `git config` command that sets it.
 
 ```console
 $ git init -q demo && cd demo && git commit -qm init --allow-empty
@@ -56,8 +56,8 @@ THIS REPOSITORY — a snapshot as of right now; re-run git bay guide for current
   repo            {{repo:/.+/}}
   state           .git/bay (initialized)
   check           (not set — pushes merge without a project check; set: git config bay.check '<command>')
-  mergeCommand    (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.mergeCommand '<command with {target}>')
-  tracker         (not set — names are not checked against a tracker; set: git config bay.issues.validate '<command with {name}>')
+  merge           (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.merge '<command with {target}>')
+  issue           (not set — names are not checked against a tracker; set: git config bay.issue '<command with {name}>')
   open worktrees  0
   submitted PRs   0
 ```
@@ -69,6 +69,6 @@ $ git config bay.check "bun test"
 $ git bay guide
 ...
   check           bun test
-  mergeCommand    (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.mergeCommand '<command with {target}>')
+  merge           (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.merge '<command with {target}>')
 ...
 ```

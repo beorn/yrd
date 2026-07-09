@@ -55,9 +55,9 @@ const FX_INTEGRATE_RUN = "integrate.run"
 const LAYER = "merge-worker"
 
 export type MergeWorkerOptions = {
-  /** Inline override; else `BAY_MERGE_COMMAND`, else `git config bay.mergeCommand`.
+  /** Inline override; else `BAY_MERGE`, else `git config bay.merge`.
    *  Unset (§4: zero-config native merge) means `merge`/`integrate` default to a
-   *  native `git merge --no-ff` — bay.mergeCommand is an override, never a
+   *  native `git merge --no-ff` — bay.merge is an override, never a
    *  requirement. Run via `sh -c` with `{target}` and `{pr}` substituted
    *  (`{changeset}` still substitutes too, so existing configs keep working). */
   mergeCommand?: string
@@ -65,7 +65,7 @@ export type MergeWorkerOptions = {
    *  check half (spec § Check provider). Inline > BAY_CHECK > git config
    *  bay.check > none (stage skipped with an explicit pass-through). */
   check?: string
-  /** cwd for ambient (gitconfig) resolution of `bay.mergeCommand`/`bay.check`.
+  /** cwd for ambient (gitconfig) resolution of `bay.merge`/`bay.check`.
    *  Defaults to mainRepo, then process.cwd(). Not consulted at all when the
    *  matching option is inline. */
   configCwd?: string

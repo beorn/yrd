@@ -27,6 +27,9 @@ repo in hub/yrd/reference or in @yrd beads.
 - `git bay submit <branch>` opens and submits an existing source branch without
   first provisioning a bay; `submit --wait` forces integration even when
   `bay.autoMerge` is false.
+- Public config vocabulary uses `bay.issue`, `bay.merge`, `bay.autoSubmit`,
+  and `bay.autoMerge`; retired `bay.tracker`, `bay.mergeCommand`, and
+  `bay.autoQueue` are not read.
 - hh consumes this repo at vendor/yrd.
 
 ## Product Shape
@@ -113,8 +116,6 @@ Rules:
    - Add cwd-as-identifier and variadic targets.
    - Continue retiring old branch-intake vocabulary from public docs while
      keeping compatibility aliases callable.
-   - Clean config vocabulary: keep bay.issue and bay.merge as public keys, and
-     remove retired queue/config spellings.
 6. Package split + config
    - Split toward @yrd/core, @yrd/bay, @yrd/line, @yrd/task, @yrd/contest, and
      @yrd/cli without changing behavior.

@@ -34,8 +34,8 @@ export type RepoEntry = {
  * are four separate acts, like a real GitHub PR. `pushed` is where every PR is
  * born — a plain `git push` creates one and stops there by default
  * (`bay.autoSubmit` false, the default). `submit` (or a push that fuses
- * creation with the ask — `bay.autoSubmit true`, a forcing `-o submit`/`-o
- * wait`, or legacy `bay.autoQueue`) moves it to `submitted`, which is what
+ * creation with the ask — `bay.autoSubmit true` or a forcing `-o submit`/`-o
+ * wait`) moves it to `submitted`, which is what
  * starts the pipeline: `check` runs `submitted → checking → checked |
  * rejected`; `merge` runs `checked → merging → merged`; `integrate` is the
  * umbrella that walks a PR through both, one dispatch, start to finish
@@ -202,8 +202,8 @@ export type GitbayEvent =
   | {
       name: "pr/opened"
       // `queued`: true iff this creation was FUSED with an immediate
-      // ask-to-merge (`bay.autoSubmit`, a forcing `-o submit`/`-o wait` push,
-      // or legacy `bay.autoQueue`) — the fold plants the PR straight into
+      // ask-to-merge (`bay.autoSubmit` or a forcing `-o submit`/`-o wait`
+      // push) — the fold plants the PR straight into
       // `submitted` instead of `pushed` when true, so no separate
       // pr/changed{pushed→submitted} is needed for the fused case (only the
       // explicit `submit` verb on an already-`pushed` PR emits that
@@ -231,7 +231,7 @@ export type GitbayEvent =
   | {
       name: "issues/notified"
       // Outbound issue-tracking outcome (docs/layers/issue-tracking.md): the
-      // configured `bay.issues.on-<state>` command ran for a named PR's
+      // configured `bay.issue.on-<state>` command ran for a named PR's
       // terminal transition. `code` is the command's exit code — success and
       // failure are BOTH journaled, so a failed tracker close shows up in
       // stats instead of vanishing. No fold consumes this; it is audit data.

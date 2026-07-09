@@ -610,8 +610,8 @@ function relToMain(ctx: Ctx, path: string): string {
 }
 
 /** The inbound issue-tracking gate (docs/layers/issue-tracking.md § Inbound):
- *  when `bay.issues.validate` (or the deprecated `bay.tracker` spelling) is
- *  configured, the command must accept the workitem name (exit 0) before a
+ *  when `bay.issue` is configured, the command must accept the workitem name
+ *  (exit 0) before a
  *  worktree opens OR an existing branch is adopted under that name — the
  *  no-branch-without-a-live-workitem doctrine enforced at the front door,
  *  on every door. */
@@ -630,7 +630,7 @@ async function validateWorkitem(ctx: Ctx, verb: string, name: string): Promise<v
     const said = err.trim()
     throw new Error(
       `bay: ${verb}: the tracker does not accept '${name}' — ${cmd} exited ${code}${said ? `:\n${said}` : ""}\n` +
-        `Use a name your tracker knows, or disable the check: git config bay.issues.validate none`,
+        `Use a name your tracker knows, or disable the check: git config bay.issue none`,
     )
   }
 }
@@ -1162,17 +1162,14 @@ function readPushOptions(): string[] {
  *  push (or once per `submit` verb call, via the `pushOptions: []` default):
  *  `bay.autoSubmit` (default false) decides whether a push fuses creation
  *  with the ask-to-merge; `bay.autoMerge` (default true) decides whether a
- *  submitted PR immediately runs check-then-merge. Back-compat: if
- *  `bay.autoQueue` is explicitly set, it wins over both new keys and pins
- *  autoSubmit = autoMerge = its value (the pre-v0.3 bundled toggle). Push
- *  options force autoSubmit/autoMerge for THIS push only, on top of whatever
- *  config says: `-o submit` forces autoSubmit true; `-o wait` forces BOTH
- *  true (create, submit, and integrate, blocking for the verdict — in this
- *  synchronous-hook implementation `-o submit` and `-o wait` differ only in
- *  autoMerge, since the post-receive hook always runs to completion before
- *  git returns to the client either way; `-o wait`'s stronger "blocks"
- *  phrasing will earn a real distinction once an async execution path
- *  exists). */
+ *  submitted PR immediately runs check-then-merge. Push options force
+ *  autoSubmit/autoMerge for THIS push only, on top of whatever config says:
+ *  `-o submit` forces autoSubmit true; `-o wait` forces BOTH true (create,
+ *  submit, and integrate, blocking for the verdict — in this synchronous-hook
+ *  implementation `-o submit` and `-o wait` differ only in autoMerge, since
+ *  the post-receive hook always runs to completion before git returns to the
+ *  client either way; `-o wait`'s stronger "blocks" phrasing will earn a real
+ *  distinction once an async execution path exists). */
 async function resolveAutoFlow(ctx: Ctx, pushOptions: string[] = []): Promise<{ autoSubmit: boolean; autoMerge: boolean }> {
   if (pushOptions.includes("wait")) return { autoSubmit: true, autoMerge: true }
 
@@ -1184,13 +1181,8 @@ async function resolveAutoFlow(ctx: Ctx, pushOptions: string[] = []): Promise<{ 
     return v !== "false" && v !== "0"
   }
 
-  const legacy = parseBool(await source.get("autoQueue"))
-  let autoSubmit = legacy ?? false
-  let autoMerge = legacy ?? true
-  if (legacy === undefined) {
-    autoSubmit = parseBool(await source.get("autoSubmit")) ?? autoSubmit
-    autoMerge = parseBool(await source.get("autoMerge")) ?? autoMerge
-  }
+  let autoSubmit = parseBool(await source.get("autoSubmit")) ?? false
+  const autoMerge = parseBool(await source.get("autoMerge")) ?? true
   if (pushOptions.includes("submit")) autoSubmit = true
   return { autoSubmit, autoMerge }
 }
@@ -1246,7 +1238,7 @@ RULES
   - Work only inside your worktree, never in the repository's main checkout.
   - Read refusals fully: every refusal names the problem AND the exact fixing command. Run that command.
   - Manual control? git config bay.autoMerge false rests submit at submitted — then git bay check/merge or integrate <PR> yourself; git config bay.autoSubmit true makes a bare push submit too (and, with autoMerge still on, ship all the way).
-  - No git config bay.mergeCommand needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.mergeCommand only to override it.
+  - No git config bay.merge needed — git bay merge/integrate land with a native git merge --no-ff by default; set bay.merge only to override it.
   - Checks failed? Fix it, then: new commits -> git push again; no new commits (config/env fix) -> git bay retry <PR>.
   - Done with a worktree? git bay close <bay|wt> refuses while its PR is still open — integrate it, retry it, or git bay close --withdraw <bay|wt>. Uncommitted work always refuses too; commit or clean first, work is never deleted.
   - A merged PR is a closed door: its branch is finished — start the next piece of work with a fresh git bay open <name>.
@@ -1266,7 +1258,7 @@ MACHINE-READABLE
 Primed. Start: cd "$(git bay open <name>)"   (all verbs: git bay help)`
 
 /** The live half of `git bay guide`: what THIS repository's bay looks like —
- *  initialized or not, which check/merge/tracker commands are configured, how
+ *  initialized or not, which check/merge/issue commands are configured, how
  *  busy it is. Best-effort and read-only; outside a git repo it says so and
  *  teaches the first step instead of erroring (guide must never refuse). */
 async function guideContext(): Promise<string> {
@@ -1295,21 +1287,17 @@ async function guideContext(): Promise<string> {
       ? `  check           ${check}`
       : "  check           (not set — pushes merge without a project check; set: git config bay.check '<command>')",
   )
-  const mergeCommand = process.env.BAY_MERGE_COMMAND ?? (await source.get("mergeCommand").catch(() => undefined))
+  const mergeCommand = process.env.BAY_MERGE ?? (await source.get("merge").catch(() => undefined))
   lines.push(
     mergeCommand !== undefined && mergeCommand.trim() !== ""
-      ? `  mergeCommand    ${mergeCommand}`
-      : "  mergeCommand    (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.mergeCommand '<command with {target}>')",
+      ? `  merge           ${mergeCommand}`
+      : "  merge           (not set — merge/integrate land with a native git merge --no-ff; override: git config bay.merge '<command with {target}>')",
   )
-  const tracker =
-    process.env.BAY_ISSUES_VALIDATE ??
-    (await source.get("issues.validate").catch(() => undefined)) ??
-    process.env.BAY_TRACKER ??
-    (await source.get("tracker").catch(() => undefined))
+  const tracker = process.env.BAY_ISSUE ?? (await source.get("issue").catch(() => undefined))
   lines.push(
     tracker !== undefined && tracker.trim() !== ""
-      ? `  tracker         ${tracker}`
-      : "  tracker         (not set — names are not checked against a tracker; set: git config bay.issues.validate '<command with {name}>')",
+      ? `  issue           ${tracker}`
+      : "  issue           (not set — names are not checked against a tracker; set: git config bay.issue '<command with {name}>')",
   )
   if (existsSync(bayDir)) {
     const ctx: Ctx = {
@@ -1412,7 +1400,7 @@ async function main(): Promise<void> {
     .action(async (name: string, opts: { workitem?: boolean }) => {
       await verbOpen(await requireBay(), name, opts.workitem === false)
     })
-  hiddenOption(cmdOpen, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.issues.validate check)")
+  hiddenOption(cmdOpen, "--no-workitem", "legacy spelling: treat <name> as a plain label (skip the bay.issue check)")
 
   program
     .command("close <wt|name>")

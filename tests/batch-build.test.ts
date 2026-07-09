@@ -414,9 +414,9 @@ describe("withBatchBuild — per-member journal truth when the candidate lands (
 
 describe("withBatchBuild — Bay-Gate trailer on a native candidate landing (main-mover audit evidence)", () => {
   it("names the batch id, member count, and ejected members on the main-moving merge commit", async () => {
-    const savedMerge = process.env.BAY_MERGE_COMMAND
+    const savedMerge = process.env.BAY_MERGE
     const savedCheck = process.env.BAY_CHECK
-    delete process.env.BAY_MERGE_COMMAND
+    delete process.env.BAY_MERGE
     delete process.env.BAY_CHECK
     try {
       const repo = await makeRepo()
@@ -451,7 +451,7 @@ describe("withBatchBuild — Bay-Gate trailer on a native candidate landing (mai
       expect(await must(["-C", repo, "rev-parse", "main^1"], repo)).toBe(base)
       expect(await must(["-C", repo, "rev-parse", "main^2"], repo)).toBe(candidate)
     } finally {
-      if (savedMerge !== undefined) process.env.BAY_MERGE_COMMAND = savedMerge
+      if (savedMerge !== undefined) process.env.BAY_MERGE = savedMerge
       if (savedCheck !== undefined) process.env.BAY_CHECK = savedCheck
     }
   })

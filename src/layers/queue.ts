@@ -216,8 +216,8 @@ export function stateChangeEvent(
  *  where the PR came from: "push" (a worktree's plain git push, correlated to
  *  a bay) or "submit" (the explicit `adopt <branch>` verb — this absorbs what
  *  v0.2 recorded as a separate `adopt.recorded` row). `queued`: true iff this
- *  creation is FUSED with an immediate ask-to-merge (`bay.autoSubmit`, a
- *  forcing `-o submit`/`-o wait` push, or legacy `bay.autoQueue`) — the fold
+ *  creation is FUSED with an immediate ask-to-merge (`bay.autoSubmit` or a
+ *  forcing `-o submit`/`-o wait` push) — the fold
  *  plants the PR straight into `submitted` rather than `pushed` when true.
  *  Whether it then ALSO runs the check/merge pipeline immediately is a
  *  separate decision (`bay.autoMerge`) the receiver's submit path makes, not
