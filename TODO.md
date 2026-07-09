@@ -22,6 +22,8 @@ repo in hub/yrd/reference or in @yrd beads.
   `skipped: true`.
 - Line status JSON includes a folded line summary with open items, last step
   results, base/head SHAs, and checked-PR staleness reasons.
+- Human `yrd line status` renders that same folded line summary concisely:
+  base, open PRs, step verdicts, artifact counts, and stale reasons.
 - Fresh bay state uses events.jsonl, index.sqlite, and prs.git; one-generation
   compatibility reads legacy journal.jsonl, bay.db, and repo.git when present.
 - `git bay submit <branch>` opens and submits an existing source branch without
@@ -95,8 +97,6 @@ Rules:
      and hosted runners land.
    - Extend event-log-driven resume beyond successful checks as more step kinds
      land; keep merge non-skippable unless the line can prove a landed result.
-   - Extend folded line status beyond JSON into concise human output once @ci
-     has settled on the machine shape.
    - Add the runner seam for remote, container, or hosted test execution.
 3. @ci cutover
    - Switch @ci to yrd bay + yrd line once artifact capture, folded status, and
@@ -139,7 +139,8 @@ Rules:
 - Line runs capture artifacts/logs, expose folded status, and resume from the
   event log for the same submission and commit. Local command artifacts are
   installed, JSON folded status is installed, and normalized step errors are
-  installed. Successful check reuse is installed for matching
-  PR/base/head/config; broader step resume semantics remain.
+  installed. Human folded status is installed. Successful check reuse is
+  installed for matching PR/base/head/config; broader step resume semantics
+  remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

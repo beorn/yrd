@@ -370,12 +370,21 @@ describe("yrd CLI — line projection", () => {
     expect(lineItem.steps.check?.headSha).toMatch(/^[0-9a-f]{40}$/)
     expect(lineItem.steps.check?.artifacts).toHaveLength(2)
 
+    const humanStatus = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
+    expect(humanStatus.stdout).toContain("line ")
+    expect(humanStatus.stdout).toContain("@")
+    expect(humanStatus.stdout).toContain(`${pr} checked target=`)
+    expect(humanStatus.stdout).toContain("check=ok")
+    expect(humanStatus.stdout).toContain("merge=-")
+
     await must(["git", "-C", demo, "commit", "-qm", "base move", "--allow-empty"], demo, env)
     const staleStatus = await must([process.execPath, YRD_BIN, "line", "status", "--json"], demo, env)
     const staleLine = JSON.parse(staleStatus.stdout) as typeof line
     const staleItem = staleLine.line.items.find((item) => item.pr === pr)!
     expect(staleItem.stale).toBe(true)
     expect(staleItem.staleReasons).toContain("base changed since check")
+    const staleHumanStatus = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
+    expect(staleHumanStatus.stdout).toContain("stale=base changed since check")
 
     const merged = await must([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "merge"], demo, env)
     expect(merged.stdout).toContain(`bay: ${pr} checked → merging`)
@@ -453,7 +462,9 @@ describe("yrd CLI — line projection", () => {
     expect(taskHelp.stdout).not.toContain("claude-opus")
 
     const status = await must([process.execPath, YRD_BIN, "line", "status"], demo, env)
-    expect(status.stdout).toContain("no open worktrees")
+    expect(status.stdout).toContain("line ")
+    expect(status.stdout).toContain("@")
+    expect(status.stdout).toContain("no open PRs")
 
     const deploy = await run([process.execPath, YRD_BIN, "line", "integrate", "--steps", "deploy"], demo, env)
     expect(deploy.code).toBe(2)

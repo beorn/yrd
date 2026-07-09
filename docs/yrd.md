@@ -109,17 +109,16 @@ check,merge` delegates to the current Git Bay integration logic, `yrd line
 status`, `audit`, and `watch` expose the same queue and event-log-backed state,
 local step runs record exit code, duration, base/head SHAs, normalized failure
 metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
-folded open-line items with last step results and checked-PR staleness. That
-gives `@ci` a real command surface to start targeting, but not yet the full
-line package.
+folded open-line items with last step results and checked-PR staleness. Human
+`yrd line status` renders the same folded line summary concisely. That gives
+`@ci` a real command surface to start targeting, but not yet the full line
+package.
 
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts;
-2. extend folded line status into concise human output after the JSON shape is
-   proven;
-3. add the runner seam for remote/container/hosted execution;
-4. switch `@ci` to that line projection.
+2. add the runner seam for remote/container/hosted execution;
+3. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
 API docs. Tentative reference, background research, and prior-art notes stay

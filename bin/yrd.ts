@@ -118,6 +118,36 @@ type ParsedIntegrate = {
   passthrough: string[]
 }
 
+type LineStepView = {
+  ok: boolean
+  durationMs?: number
+  skipped?: boolean
+  error?: { code?: string; message?: string; exitCode?: number }
+  artifacts?: unknown[]
+}
+
+type LineItemView = {
+  pr: string
+  state: string
+  target: string
+  stale?: boolean
+  staleReasons?: string[]
+  steps?: Partial<Record<"check" | "merge", LineStepView>>
+}
+
+type LineSummaryView = {
+  base: string
+  baseSha?: string
+  counts?: Record<string, number>
+  items: LineItemView[]
+}
+
+type LineStatusView = {
+  line?: LineSummaryView | LineItemView
+  pr?: { id?: string; state?: string }
+  detail?: string
+}
+
 function parseIntegrateArgs(args: string[]): ParsedIntegrate {
   let target: string | undefined
   let stepsRaw: string | undefined
@@ -166,6 +196,96 @@ function parseIntegrateArgs(args: string[]): ParsedIntegrate {
   return { target, steps: parseSteps(stepsRaw), retry, passthrough }
 }
 
+function parseStatusArgs(args: string[]): { target?: string; json: boolean } {
+  let target: string | undefined
+  let json = false
+  for (const arg of args) {
+    if (arg === "--help" || arg === "-h") {
+      console.log(LINE_USAGE)
+      process.exit(0)
+    }
+    if (arg === "--json") {
+      json = true
+      continue
+    }
+    if (arg.startsWith("-")) fail(`yrd: line status: unknown option '${arg}'`)
+    if (target !== undefined) fail(`yrd: line status: unexpected extra argument '${arg}'`)
+    target = arg
+  }
+  return { target, json }
+}
+
+function writeCaptured(res: Awaited<ReturnType<typeof runCommand>>): void {
+  if (res.stdout !== "") process.stdout.write(res.stdout)
+  if (res.stderr !== "") process.stderr.write(res.stderr)
+}
+
+function requireCommandOk(res: Awaited<ReturnType<typeof runCommand>>): void {
+  if (res.code === 0) return
+  writeCaptured(res)
+  process.exit(res.code)
+}
+
+function formatCounts(counts: Record<string, number> | undefined): string {
+  if (counts === undefined) return ""
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([state, count]) => `${state}=${count}`)
+    .join(", ")
+}
+
+function formatStep(name: "check" | "merge", step: LineStepView | undefined): string {
+  if (step === undefined) return `${name}=-`
+  const status = step.skipped === true ? "skipped" : step.ok ? "ok" : "failed"
+  const code = !step.ok && step.error?.code !== undefined ? `:${step.error.code}` : ""
+  const duration = step.durationMs !== undefined ? ` ${step.durationMs}ms` : ""
+  const artifacts = Array.isArray(step.artifacts) && step.artifacts.length > 0 ? ` artifacts=${step.artifacts.length}` : ""
+  return `${name}=${status}${code}${duration}${artifacts}`
+}
+
+function formatLineItem(item: LineItemView): string {
+  const check = formatStep("check", item.steps?.check)
+  const merge = formatStep("merge", item.steps?.merge)
+  const staleReasons = item.stale === true ? item.staleReasons?.join("; ") || "yes" : ""
+  const stale = staleReasons === "" ? "" : ` stale=${staleReasons}`
+  return `${item.pr} ${item.state} target=${item.target} ${check} ${merge}${stale}`
+}
+
+function formatLineSummary(line: LineSummaryView): string {
+  const base = line.baseSha === undefined ? line.base : `${line.base}@${line.baseSha.slice(0, 12)}`
+  const counts = formatCounts(line.counts)
+  const countPart = counts === "" ? "" : ` (${counts})`
+  if (line.items.length === 0) return `line ${base} - no open PRs${countPart}`
+  const label = line.items.length === 1 ? "1 open PR" : `${line.items.length} open PRs`
+  return [`line ${base} - ${label}${countPart}`, ...line.items.map(formatLineItem)].join("\n")
+}
+
+function formatLineStatus(view: LineStatusView): string {
+  const line = view.line
+  if (line !== undefined) {
+    if ("items" in line) return formatLineSummary(line)
+    return formatLineItem(line)
+  }
+  const id = view.pr?.id ?? "PR?"
+  const state = view.pr?.state ?? "unknown"
+  const detail = view.detail === undefined || view.detail.trim() === "" ? "" : ` - ${view.detail.split("\n")[0]}`
+  return `${id} ${state} - not on the active line${detail}`
+}
+
+async function lineStatus(args: string[]): Promise<void> {
+  const parsed = parseStatusArgs(args)
+  const paths = await resolveRepoPaths()
+  const lsArgs = ["ls", ...(parsed.target === undefined ? [] : [parsed.target]), "--json"]
+  const res = await runGitBay(lsArgs, paths.repo)
+  requireCommandOk(res)
+  if (parsed.json) {
+    process.stdout.write(res.stdout)
+    return
+  }
+  console.log(formatLineStatus(JSON.parse(res.stdout) as LineStatusView))
+}
+
 async function lineIntegrate(args: string[]): Promise<void> {
   const parsed = parseIntegrateArgs(args)
   const stepKey = parsed.steps.join(",")
@@ -208,7 +328,7 @@ async function lineProjection(args: string[]): Promise<void> {
     return
   }
   if (command === "status") {
-    await reenterGitBay(["ls", ...args.slice(1)])
+    await lineStatus(args.slice(1))
     return
   }
   if (command === "audit") {

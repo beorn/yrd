@@ -229,7 +229,7 @@ The `status` alias resolves to `ls`; line state uses `yrd line status`.
 
 | Command | Input | Output | State / Exit |
 | --- | --- | --- | --- |
-| `yrd line status [selector...]` | zero or more PRs/names | queue and PR state | no state change; exits `0` |
+| `yrd line status [selector...]` | zero or more PRs/names; `--json` for machine output | folded line summary: base, open PRs, last step verdicts, stale checks | no state change; exits `0` |
 | `yrd line audit [--json]` | repository from cwd | audit findings | no state change; exits `0` clean or `1` with findings |
 | `yrd line integrate [selector] [--steps <step,...>] [--retry] [--watch]` | optional PR/name | step-by-step verdicts; `--watch` streams output | runs registered steps; domain failures exit `1` |
 | `yrd line watch [selector]` | optional PR/name | repeated integration output | keeps draining eligible work |
@@ -469,9 +469,10 @@ structured `error { code, message, exitCode? }` metadata on failures, and
 artifact references for captured stdout/stderr. Artifacts are stored as files;
 event rows carry references, not inline logs.
 
-`yrd line status --json` projects a folded `line` summary over the same event
-log: open PRs, current targets, last step results, artifact refs, and staleness
-when a checked PR's base or target commit has moved since its check.
+`yrd line status` projects a folded `line` summary over the same event log:
+base branch, open PRs, current targets, last step results, artifact refs, and
+staleness when a checked PR's base or target commit has moved since its check.
+`--json` emits the same projection as stable machine-readable data.
 
 On retry/resume, the line can reuse a previous successful check when the PR,
 target, base commit, head commit, and check config hash still match; the new
