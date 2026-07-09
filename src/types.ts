@@ -348,10 +348,16 @@ export type StepCommandOutput = {
   headSha?: string
 }
 
+export type StepError = {
+  code: RejectionCode
+  message: string
+  exitCode?: number
+}
+
 export type StepFinishMetadata = {
   exitCode?: number
   durationMs?: number
-  error?: string
+  error?: StepError
   artifacts?: StepArtifact[]
   baseSha?: string
   headSha?: string

@@ -105,21 +105,21 @@ work for replacing the current `@ci` lane.
 The first line projection slice is installed: `yrd line integrate --steps
 check,merge` delegates to the current Git Bay integration logic, `yrd line
 status`, `audit`, and `watch` expose the same queue and journal-backed state,
-local step runs record exit code, duration, base/head SHAs, and stdout/stderr
-artifacts, and `yrd line status --json` exposes folded open-line items with
-last step results and checked-PR staleness. That gives `@ci` a real command
-surface to start targeting, but not yet the full line package.
+local step runs record exit code, duration, base/head SHAs, normalized failure
+metadata, and stdout/stderr artifacts, and `yrd line status --json` exposes
+folded open-line items with last step results and checked-PR staleness. That
+gives `@ci` a real command surface to start targeting, but not yet the full
+line package.
 
 Remaining non-throwaway line work:
 
 1. finish core submission and line-step event/state contracts;
-2. add normalized error metadata to step events;
-3. make retry/resume journal-driven by skipping successful step results for the
+2. make retry/resume journal-driven by skipping successful step results for the
    same submission and commit;
-4. extend folded line status into concise human output after the JSON shape is
+3. extend folded line status into concise human output after the JSON shape is
    proven;
-5. add the runner seam for remote/container/hosted execution;
-6. switch `@ci` to that line projection.
+4. add the runner seam for remote/container/hosted execution;
+5. switch `@ci` to that line projection.
 
 Repo-local docs and future `spec.md` files should be public-suitable product or
 API docs. Tentative reference, background research, and prior-art notes stay
@@ -167,6 +167,7 @@ Step events map naturally to spans:
 ```text
 line/step/started { step, pr?, batch?, target, role?, index? }
 line/step/finished { step, pr?, batch?, target, ok, detail?, exitCode?, durationMs?, baseSha?, headSha?, error?, artifacts? }
+error { code, message, exitCode? }
 ```
 
 Artifacts include logs, coverage, reports, and build outputs. The default local

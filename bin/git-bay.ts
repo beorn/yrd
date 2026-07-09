@@ -14,7 +14,7 @@ import { Command } from "@silvery/commander/plain"
 import { colorizeHelp, shouldColorize } from "@silvery/commander"
 import { readFile, readdir, rename, rm } from "node:fs/promises"
 import { join } from "node:path"
-import type { BayCommand, BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest } from "../src/types.ts"
+import type { BayCommand, BayEvent, BayRuntime, BayState, Lease, LeaseId, PrId, PullRequest, StepError } from "../src/types.ts"
 import { isOpen } from "../src/types.ts"
 import { createGitbay } from "../src/core.ts"
 import { pipe } from "../src/pipe.ts"
@@ -426,6 +426,7 @@ type StepStatus = {
   durationMs?: number
   baseSha?: string
   headSha?: string
+  error?: StepError
   artifacts?: unknown[]
 }
 
@@ -465,6 +466,7 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
       durationMs?: number
       baseSha?: string
       headSha?: string
+      error?: StepError
       artifacts?: unknown[]
     }
     if (d.pr === undefined || (d.step !== "check" && d.step !== "merge") || d.target === undefined || d.ok === undefined) continue
@@ -478,6 +480,7 @@ async function lineStatus(ctx: Ctx, bay: BayRuntime, state: BayState): Promise<{
       ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
       ...(d.baseSha !== undefined ? { baseSha: d.baseSha } : {}),
       ...(d.headSha !== undefined ? { headSha: d.headSha } : {}),
+      ...(d.error !== undefined ? { error: d.error } : {}),
       ...(d.artifacts !== undefined ? { artifacts: d.artifacts } : {}),
     }
     stepsByPr.set(d.pr, current)

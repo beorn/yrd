@@ -459,7 +459,8 @@ contest/...      opened, attempt started/finished, selected, promoted
 ```
 
 `line/step/finished` rows include the step verdict plus available process
-metadata: `exitCode`, `durationMs`, `baseSha`, `headSha`, and artifact
+metadata: `exitCode`, `durationMs`, `baseSha`, `headSha`, structured
+`error { code, message, exitCode? }` metadata on failures, and artifact
 references for captured stdout/stderr. Artifacts are stored as files; journal
 rows carry references, not inline logs.
 

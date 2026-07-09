@@ -16,7 +16,7 @@ import type {
 import { makeEvent } from "../core.ts"
 import { nextPrId } from "../ids.ts"
 import { createGitConfigSource, resolveOption } from "../config.ts"
-import { collectStepRefs, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
+import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prForTarget, prOpenedEvent, stateChangeEvent } from "./queue.ts"
 import { defaultBayDir, git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
 import { resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
@@ -280,6 +280,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
       events.push(stepStarted(bay, run, effect.cause!))
       const checked = await runProjectCheck(check, cwd)
       const checkedOutput = await collectStepRefs(mainRepo, run.target, checked)
+      const error = checked.ok ? undefined : stepError("check-failed", checked.detail, checkedOutput)
       events.push(
         stepFinished(
           bay,
@@ -287,7 +288,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
           checked.ok,
           checked.ok ? undefined : checked.detail,
           effect.cause!,
-          stepMetadata(checkedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checkedOutput })),
+          stepMetadata(checkedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run, output: checkedOutput }), error),
         ),
       )
       if (!checked.ok) {
@@ -307,6 +308,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
     events.push(stepStarted(bay, mergeRun, effect.cause!))
     const merged = await runMerge({ mainRepo, pr: d.pr, target: d.branch, configCwd: mainRepo, check: opts.check })
     const mergedOutput = await collectStepRefs(mainRepo, mergeRun.target, merged)
+    const error = merged.ok ? undefined : stepError(merged.code, merged.detail, mergedOutput)
     events.push(
       stepFinished(
         bay,
@@ -314,7 +316,7 @@ function makeSubmitHandler(opts: ReceiveOptions) {
         merged.ok,
         merged.detail,
         effect.cause!,
-        stepMetadata(mergedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run: mergeRun, output: mergedOutput })),
+        stepMetadata(mergedOutput, await writeStepArtifacts({ bayDir, cause: effect.cause!, run: mergeRun, output: mergedOutput }), error),
       ),
     )
     if (!merged.ok) {

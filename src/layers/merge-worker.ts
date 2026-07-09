@@ -8,6 +8,7 @@ import type {
   EffectHandler,
   Layer,
   PrId,
+  RejectionCode,
   PullRequest,
   StepCommandOutput,
   StepRunData,
@@ -16,7 +17,7 @@ import type {
 import { makeEvent } from "../core.ts"
 import { createScratchWorkspaces, ProvisionError, type ScratchWorkspaces } from "../scratch.ts"
 import { batchLandEvidence } from "./batch-build.ts"
-import { collectStepRefs, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
+import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { integratablePrs, queueTarget, stateChangeEvent } from "./queue.ts"
 import { type CheckOutcome, resolveCheck, runMerge, runProjectCheck } from "./pipeline.ts"
 import { stepFinished, stepStarted } from "./steps.ts"
@@ -245,14 +246,18 @@ async function stepFinishedWithOutput(
   bay: BayRuntime,
   opts: MergeWorkerOptions,
   run: StepRunData,
-  outcome: { ok: boolean } & StepCommandOutput,
+  outcome: ({ ok: true } | { ok: false; code?: RejectionCode; detail?: string }) & StepCommandOutput,
   detail: string | undefined,
   cause: NonNullable<Effect["cause"]>,
 ): Promise<BayEvent> {
   const mainRepo = opts.mainRepo ?? opts.configCwd
   const output = mainRepo === undefined ? outcome : await collectStepRefs(mainRepo, run.target, outcome)
   const artifacts = await writeStepArtifacts({ mainRepo, cause, run, output })
-  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(output, artifacts))
+  const error =
+    outcome.ok === false
+      ? stepError(outcome.code ?? (run.step === "check" ? "check-failed" : "merge-command-failed"), detail ?? "step failed", output)
+      : undefined
+  return stepFinished(bay, run, outcome.ok, detail, cause, stepMetadata(output, artifacts, error))
 }
 
 async function runMergeStep(

@@ -414,6 +414,33 @@ describe("yrd CLI — line projection", () => {
     expect(await readFile(stderr.path, "utf8")).toBe("check stderr\n")
   })
 
+  it("line status JSON includes normalized error metadata for failed steps", async () => {
+    await must(["git", "-C", demo, "config", "bay.check", "echo nope >&2; exit 7"], demo, env)
+    await branchWithFiles(demo, env, "task/red-line", { "red.txt": "bad\n" })
+    const pr = (await must(["git", "bay", "adopt", "task/red-line", "--workitem", "red-line"], demo, env)).stdout.trim()
+    await must(["git", "bay", "submit", pr], demo, env)
+
+    const checked = await run([process.execPath, YRD_BIN, "line", "integrate", pr, "--steps", "check"], demo, env)
+    expect(checked.code).toBe(0)
+    expect(checked.stdout).toContain(`bay: ${pr} checking → rejected`)
+
+    const status = await must([process.execPath, YRD_BIN, "line", "status", "--json"], demo, env)
+    const line = JSON.parse(status.stdout) as {
+      line: {
+        items: {
+          pr: string
+          steps: { check?: { error?: { code: string; message: string; exitCode?: number } } }
+        }[]
+      }
+    }
+    const item = line.line.items.find((candidate) => candidate.pr === pr)!
+    expect(item.steps.check?.error).toMatchObject({
+      code: "check-failed",
+      message: expect.stringContaining("check 'echo nope >&2; exit 7' failed (exit 7): nope"),
+      exitCode: 7,
+    })
+  })
+
   it("line status projects to the bay state and unsupported steps teach", async () => {
     const help = await must([process.execPath, YRD_BIN, "--help"], demo, env)
     expect(help.stdout).toContain("Installed projections: bay, line, task, contest")

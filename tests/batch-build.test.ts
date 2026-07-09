@@ -194,7 +194,14 @@ describe("withBatchBuild — scratch candidate for the existing serial drain", (
     expect(eventsOf(events, "line/step/finished").map((e) => e.data)).toMatchObject([
       { step: "check", batch: "PR4", target: "HEAD", role: "baseline", ok: true },
       { batch: "PR4", pr: "PR1", target: "bay/batch-prefix/PR4/1-PR1", role: "prefix", ok: true },
-      { batch: "PR4", pr: "PR2", target: "bay/batch-prefix/PR4/2-PR2", role: "prefix", ok: false },
+      {
+        batch: "PR4",
+        pr: "PR2",
+        target: "bay/batch-prefix/PR4/2-PR2",
+        role: "prefix",
+        ok: false,
+        error: { code: "check-failed", exitCode: 1 },
+      },
     ])
     const ejected = eventsOf(events, "line/batch/isolated")
     expect(ejected).toHaveLength(1)

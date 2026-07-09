@@ -15,6 +15,8 @@ repo in hub/yrd/reference or in @yrd beads.
   first manual-selection contest projection over real bay attempts.
 - Local line step runs record exit code, duration, and stdout/stderr artifact
   references on `line/step/finished`.
+- Failed line step runs include normalized `error { code, message, exitCode? }`
+  metadata using the same rejection-code vocabulary as PR verdicts.
 - Line status JSON includes a folded line summary with open items, last step
   results, base/head SHAs, and checked-PR staleness reasons.
 - hh consumes this repo at vendor/yrd.
@@ -78,7 +80,6 @@ Rules:
      over recorded evidence, not hidden policy.
 2. Line hardening
    - Finish core submission and line-step event/state contracts.
-   - Add normalized error metadata to step events.
    - Broaden artifact/log capture beyond the local command runner as remote
      and hosted runners land.
    - Make --retry and process restart journal-driven by skipping successful
@@ -133,6 +134,7 @@ Rules:
   args, logs, and spans.
 - Line runs capture artifacts/logs, expose folded status, and resume from the
   journal for the same submission and commit. Local command artifacts are
-  installed and JSON folded status is installed; resume semantics remain.
+  installed, JSON folded status is installed, and normalized step errors are
+  installed; resume semantics remain.
 - Contest mode records attempts, artifacts, costs, traces, line results, and the
   chosen winner for a real task.

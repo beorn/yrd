@@ -18,7 +18,7 @@ import type {
   TransitionResult,
 } from "../types.ts"
 import { git, repoScopedCleanEnv, resolveBaseRef } from "./git.ts"
-import { collectStepRefs, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
+import { collectStepRefs, stepError, stepMetadata, writeStepArtifacts } from "./artifacts.ts"
 import { prOpenedEvent, queueOrder, queueReorderedEvent, queueTarget, stateChangeEvent, submittedPrs } from "./queue.ts"
 import { stepFinished, stepStarted } from "./steps.ts"
 
@@ -573,12 +573,13 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
       baseline = await checkBaseline(scratch, d.gateCommand, d.batch, record.base)
     } catch (err) {
       if (err instanceof ProvisionError) {
-        events.push(stepFinished(bay, baselineRun, false, err.message, cause))
+        events.push(stepFinished(bay, baselineRun, false, err.message, cause, { error: stepError("provision-failed", err.message) }))
         return [...events, refused("provision-failed", provisionRefusal(err))]
       }
       throw err
     }
     const baselineOutput = await collectStepRefs(opts.mainRepo, baselineRun.target, baseline)
+    const baselineError = baseline.ok ? undefined : stepError("check-failed", baseline.detail ?? "gate failed", baselineOutput)
     events.push(
       stepFinished(
         bay,
@@ -586,7 +587,11 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         baseline.ok,
         baseline.detail,
         cause,
-        stepMetadata(baselineOutput, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: baselineRun, output: baselineOutput })),
+        stepMetadata(
+          baselineOutput,
+          await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: baselineRun, output: baselineOutput }),
+          baselineError,
+        ),
       ),
     )
     if (!baseline.ok) {
@@ -619,12 +624,13 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
         checked = await checkPrefix(scratch, d.gateCommand, d.batch, prefix)
       } catch (err) {
         if (err instanceof ProvisionError) {
-          events.push(stepFinished(bay, prefixRun, false, err.message, cause))
+          events.push(stepFinished(bay, prefixRun, false, err.message, cause, { error: stepError("provision-failed", err.message) }))
           return [...events, refused("provision-failed", provisionRefusal(err))]
         }
         throw err
       }
       const checkedOutput = await collectStepRefs(opts.mainRepo, prefixRun.target, checked)
+      const checkedError = checked.ok ? undefined : stepError("check-failed", checked.detail ?? "gate failed", checkedOutput)
       events.push(
         stepFinished(
           bay,
@@ -632,7 +638,11 @@ function makeBatchBisectHandler(opts: BatchBuildOptions, scratch: ScratchWorkspa
           checked.ok,
           checked.detail,
           cause,
-          stepMetadata(checkedOutput, await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: prefixRun, output: checkedOutput })),
+          stepMetadata(
+            checkedOutput,
+            await writeStepArtifacts({ mainRepo: opts.mainRepo, cause, run: prefixRun, output: checkedOutput }),
+            checkedError,
+          ),
         ),
       )
       if (!checked.ok) {

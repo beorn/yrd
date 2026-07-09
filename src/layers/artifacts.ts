@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createGitConfigSource, resolveOption } from "../config.ts"
-import type { Cause, StepArtifact, StepCommandOutput, StepFinishMetadata, StepRunData } from "../types.ts"
+import type { Cause, RejectionCode, StepArtifact, StepCommandOutput, StepError, StepFinishMetadata, StepRunData } from "../types.ts"
 import { defaultBayDir, git, resolveBaseRef } from "./git.ts"
 
 function sanitizePart(raw: string | number | undefined): string {
@@ -56,10 +56,19 @@ export async function writeStepArtifacts(params: {
   return artifacts
 }
 
-export function stepMetadata(output: StepCommandOutput, artifacts: StepArtifact[]): StepFinishMetadata {
+export function stepError(code: RejectionCode, message: string, output: StepCommandOutput = {}): StepError {
+  return {
+    code,
+    message,
+    ...(output.exitCode !== undefined ? { exitCode: output.exitCode } : {}),
+  }
+}
+
+export function stepMetadata(output: StepCommandOutput, artifacts: StepArtifact[], error?: StepError): StepFinishMetadata {
   return {
     ...(output.exitCode !== undefined ? { exitCode: output.exitCode } : {}),
     ...(output.durationMs !== undefined ? { durationMs: output.durationMs } : {}),
+    ...(error !== undefined ? { error } : {}),
     ...(artifacts.length > 0 ? { artifacts } : {}),
     ...(output.baseSha !== undefined ? { baseSha: output.baseSha } : {}),
     ...(output.headSha !== undefined ? { headSha: output.headSha } : {}),

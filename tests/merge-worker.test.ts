@@ -71,6 +71,12 @@ describe("withMergeWorker — check: submitted → checking → checked | reject
 
     const { events } = await bay.dispatch({ type: "check", args: { pr: "C-y" } })
     expect(detailOf(events, "rejected")).toMatch(/check 'false' failed \(exit 1\)/)
+    const finished = events.find((e) => e.name === "line/step/finished")!
+    expect(finished.data!.error).toMatchObject({
+      code: "check-failed",
+      message: expect.stringContaining("check 'false' failed (exit 1)"),
+      exitCode: 1,
+    })
     const rejected = events.find((e) => e.name === "pr/changed" && e.data!.to === "rejected")!
     expect(rejected.data!.code).toBe("check-failed")
     expect(stateOf(await bay.state(), "C-y")).toBe("rejected")
@@ -164,6 +170,8 @@ describe("withMergeWorker — merge → rejected (non-zero is a domain outcome, 
 
     const { events } = await bay.dispatch({ type: "merge", args: { pr: "C-r" } }) // resolves, does NOT reject
     expect(detailOf(events, "rejected")).toBe("exit 1")
+    const finished = events.find((e) => e.name === "line/step/finished")!
+    expect(finished.data!.error).toMatchObject({ code: "merge-command-failed", message: "exit 1", exitCode: 1 })
     expect(stateOf(await bay.state(), "C-r")).toBe("rejected")
   })
 
