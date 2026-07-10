@@ -1,3 +1,8 @@
+/**
+ * @failure Core composition, command identity, event validation, or reactive projection violates journal authority.
+ * @level l1
+ * @consumer @yrd/core
+ */
 import { describe, expect, it } from "vitest"
 import * as z from "zod"
 import { createScope } from "@silvery/scope"
@@ -273,6 +278,7 @@ describe("Yrd domain objects", () => {
     parent.child = () => runtime
     const journal: Journal<unknown> = {
       async *read() {
+        yield* []
         throw new Error("injected replay failure")
       },
       async append() {

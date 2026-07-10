@@ -1,3 +1,8 @@
+/**
+ * @failure The default host composes incompatible definitions, state paths, receivers, or lifecycle ownership.
+ * @level l3
+ * @consumer @yrd/cli host
+ */
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -70,11 +75,6 @@ describe("createDefaultYrdApp", () => {
     expect(app.state().lines).toMatchObject({
       batchSize: 1,
       defaultSteps: ["security", "merge", "publish"],
-      installed: {
-        security: { index: 0, integrates: false, needsIntegration: false },
-        merge: { index: 1, integrates: true, needsIntegration: false },
-        publish: { index: 2, integrates: false, needsIntegration: true },
-      },
     })
     expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")

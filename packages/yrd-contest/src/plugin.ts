@@ -120,7 +120,7 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
       },
       project: projectContests,
       create(yrd) {
-        requireJobDefs(yrd.jobs, jobDefs)
+        yrd.jobs.requireDefinitions(jobDefs)
         const runtime = () => yrd.state() as unknown as DeepReadonly<ContestRuntimeState>
         return {
           contests: createContests({
@@ -389,7 +389,7 @@ function createContests(
     while (true) {
       const requested = requestedJobs(contestId, options.runtime())
       if (requested.length > 0) {
-        await runJobs(requested, concurrency, options.jobs, runOptions)
+        await options.jobs.runMany(requested, { ...runOptions, concurrency })
         continue
       }
       if (await finalizePromotion(contestId, options)) continue
@@ -409,7 +409,7 @@ function createContests(
     get,
     list() {
       return Object.keys(options.state().records)
-        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+        .toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true }))
         .map(required)
     },
     async compete(args) {
@@ -470,26 +470,6 @@ function addRequested(ids: Set<string>, state: DeepReadonly<ContestRuntimeState>
   if (id !== undefined && state.jobs.byId[id]?.status === "requested") ids.add(id)
 }
 
-async function runJobs(
-  ids: readonly string[],
-  concurrency: number,
-  jobs: Jobs,
-  options: ContestRunOptions,
-): Promise<void> {
-  for (let offset = 0; offset < ids.length; offset += concurrency) {
-    await Promise.all(
-      ids.slice(offset, offset + concurrency).map(async (id) => {
-        if (jobs.get(id)?.status !== "requested") return
-        try {
-          await jobs.run(id, options)
-        } catch (error) {
-          if (jobs.get(id)?.status === "requested") throw error
-        }
-      }),
-    )
-  }
-}
-
 async function finalizePromotion(contestId: string, options: Parameters<typeof createContests>[0]): Promise<boolean> {
   const state = options.runtime()
   const record = requiredContest(state.contests, contestId)
@@ -509,6 +489,7 @@ async function ensureExactPR(
 ): Promise<DeepReadonly<PR>> {
   let pr = prForBay(options.runtime().bays, pin.bay)
   if (pr === undefined || !exactPR(pr, pin, record.base) || pr.status === "rejected") {
+    // Promotion intake trusts the verified write-once pin and intentionally re-drives a rejected winner.
     await options.bays.intake({
       bay: pin.bay,
       headSha: pin.commit,
@@ -825,17 +806,6 @@ function definitionMap<Value extends object, Key extends keyof Value>(
 
 function normalizeGit(git: ContestGit): ContestGit {
   return Object.freeze({ revision: TextSchema.parse(git.revision), resolveCommit: git.resolveCommit.bind(git) })
-}
-
-function requireJobDefs(jobs: Jobs, definitions: JobDefs): void {
-  for (const expected of Object.values(definitions)) {
-    const installed = jobs.definition(expected.name)
-    if (installed.revision !== expected.revision) {
-      throw new Error(
-        `yrd: job definition '${expected.name}' revision '${installed.revision}' does not match Contest revision '${expected.revision}'`,
-      )
-    }
-  }
 }
 
 function nextId(prefix: string, records: Readonly<Record<string, unknown>>): string {

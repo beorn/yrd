@@ -1,3 +1,8 @@
+/**
+ * @failure Task references resolve through the wrong source, leak ambient process policy, or lose tracker identity.
+ * @level l1
+ * @consumer @yrd/task
+ */
 import { expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef } from "@yrd/core"
 import { createCommandTaskSource, createKmTaskSource, createTasks, withTasks } from "../src/index.ts"

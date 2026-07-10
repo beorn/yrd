@@ -4,6 +4,7 @@ import type { Yrd } from "@yrd/core"
 import type { HasJobs, JobCommands, JobsState } from "@yrd/job"
 import type { HasLine, LineAuditResult, LineCommands, LinesState } from "@yrd/line"
 import type { HasTasks } from "@yrd/task"
+import type { Scope } from "@silvery/scope"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
@@ -45,6 +46,5 @@ export type YrdCliIO = {
   concurrency?: number
   now?: () => number
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
-  signal?: AbortSignal
-  sleep?(milliseconds: number, signal?: AbortSignal): Promise<void>
+  scope?: Pick<Scope, "signal" | "sleep">
 }

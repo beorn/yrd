@@ -1,3 +1,8 @@
+/**
+ * @failure The ag runner loses process evidence, misreports metrics, or pins a revision it did not produce.
+ * @level l2
+ * @consumer @yrd/contest ag adapter
+ */
 import { fileURLToPath } from "node:url"
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -19,15 +24,15 @@ afterAll(() => systemProcess.close())
 const job = (id = "E1", attempt = 1) => ({ id, attempt, executor: "test", signal: new AbortController().signal })
 const argv = (value: string) => value.split(" ")
 
-function passed(result: Awaited<ReturnType<ContestRunnerDef["run"]>>) {
-  if (result.status !== "passed") throw new Error(`expected passed result, got ${result.status}`)
-  return result.output
+function passed(run: Awaited<ReturnType<ContestRunnerDef["run"]>>) {
+  if (run.status !== "passed") throw new Error(`expected passed result, got ${run.status}`)
+  return run.output
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
-  const result = await systemProcess.run({ argv: ["git", ...args], cwd, env: process.env })
-  if (result.exitCode !== 0) throw new Error(result.stderr || result.stdout)
-  return result.stdout.trim()
+  const completed = await systemProcess.run({ argv: ["git", ...args], cwd, env: process.env })
+  if (completed.exitCode !== 0) throw new Error(completed.stderr || completed.stdout)
+  return completed.stdout.trim()
 }
 
 async function repository(): Promise<{ root: string; repo: string; bay: Bay; baseSha: string }> {

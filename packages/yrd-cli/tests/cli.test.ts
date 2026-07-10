@@ -410,16 +410,14 @@ describe("runYrd", () => {
 
     const integrated = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "--steps", "--json"), integrated.io)).toBe(0)
-    expect(JSON.parse(integrated.stdout())).toMatchObject({
-      command: "line.integrate",
-      results: [{ id: "R1", prs: [{ id: "PR1" }], status: "passed", steps: [] }],
-    })
+    expect(JSON.parse(integrated.stdout())).toEqual({ command: "line.integrate", results: [] })
+    expect(app.state().bays.prs.PR1?.status).toBe("submitted")
 
     const idle = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "--json"), idle.io)).toBe(0)
     expect(JSON.parse(idle.stdout())).toMatchObject({
       command: "line.integrate",
-      results: [{ id: "R2", prs: [{ id: "PR1" }], steps: [{ name: "check" }, { name: "merge" }], status: "passed" }],
+      results: [{ id: "R1", prs: [{ id: "PR1" }], steps: [{ name: "check" }, { name: "merge" }], status: "passed" }],
     })
 
     const drained = outputIO()
@@ -599,10 +597,12 @@ describe("runYrd", () => {
     const controller = new AbortController()
     const sleeps: number[] = []
     const watch = outputIO({
-      signal: controller.signal,
-      sleep: async (milliseconds) => {
-        sleeps.push(milliseconds)
-        controller.abort()
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds)
+          controller.abort()
+        },
       },
     })
     expect(await runYrd(app, yrd("line", "integrate", "--watch", "--interval", "1"), watch.io)).toBe(0)

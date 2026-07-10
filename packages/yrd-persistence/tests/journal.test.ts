@@ -1,3 +1,8 @@
+/**
+ * @failure JSONL replay or append can accept corruption, expose torn frames, or violate cursor-CAS durability.
+ * @level l1
+ * @consumer @yrd/persistence
+ */
 import { createHash } from "node:crypto"
 import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -25,6 +30,11 @@ function frame(commandId: string, text = "hello") {
 
 async function directory() {
   return mkdtemp(join(tmpdir(), "yrd-journal-"))
+}
+
+function ids(prefix: string) {
+  let next = 0
+  return () => `${prefix}-${++next}`
 }
 
 describe("filesystem Journal", () => {
@@ -79,12 +89,8 @@ describe("filesystem Journal", () => {
           : { counter: state.counter }
       },
     })
-    const id = (prefix: string) => {
-      let next = 0
-      return () => `${prefix}-${++next}`
-    }
-    const appA = await createYrd(definition, { inject: { journal, id: id("a") } })
-    const appB = await createYrd(definition, { inject: { journal, id: id("b") } })
+    const appA = await createYrd(definition, { inject: { journal, id: ids("a") } })
+    const appB = await createYrd(definition, { inject: { journal, id: ids("b") } })
 
     await Promise.all(
       Array.from({ length: 20 }, (_, index) => {
@@ -102,17 +108,15 @@ describe("filesystem Journal", () => {
   it("does not expose an append until its data sync completes", async () => {
     const dir = await directory()
     await createJournal({ dir })
-    let enteredSync = () => {}
-    let releaseSync = () => {}
-    const syncEntered = new Promise<void>((resolve) => (enteredSync = resolve))
-    const syncRelease = new Promise<void>((resolve) => (releaseSync = resolve))
+    const syncEntered = Promise.withResolvers<void>()
+    const syncRelease = Promise.withResolvers<void>()
     const journal = await createJournal({
       dir,
       inject: {
         io: {
           async datasync(file) {
-            enteredSync()
-            await syncRelease
+            syncEntered.resolve()
+            await syncRelease.promise
             await file.datasync()
           },
         },
@@ -120,7 +124,7 @@ describe("filesystem Journal", () => {
     })
 
     const append = journal.append(frame("durable"), 0)
-    await syncEntered
+    await syncEntered.promise
     let readFinished = false
     const read = Array.fromAsync(journal.read()).finally(() => {
       readFinished = true
@@ -128,7 +132,7 @@ describe("filesystem Journal", () => {
     await Bun.sleep(25)
     expect(readFinished).toBe(false)
 
-    releaseSync()
+    syncRelease.resolve()
     const accepted = await append
     if (!accepted.appended) throw new Error("expected append")
     await expect(read).resolves.toEqual([{ cursor: accepted.cursor, values: [frame("durable")] }])

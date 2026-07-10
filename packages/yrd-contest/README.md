@@ -29,6 +29,12 @@ Definitions cannot be added or replaced after Yrd starts. Queued Jobs pin the
 definition revision they were created with and refuse to run after revision
 drift.
 
+Runner definitions and their launch arguments are trusted organizer
+configuration. Task text and competitor output are untrusted inputs, but Yrd
+does not sandbox flags deliberately installed by the operator. An adapter that
+accepts competitor definitions from another trust domain must validate or
+allowlist those flags before composition.
+
 ## Domain API
 
 `yrd.contests` is the methodful Contest domain object:

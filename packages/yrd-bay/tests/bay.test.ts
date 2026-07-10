@@ -1,3 +1,8 @@
+/**
+ * @failure Bay and PR lifecycle state diverges from durable Jobs or accepts invalid transitions.
+ * @level l2
+ * @consumer @yrd/bay
+ */
 import { describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Frame } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -7,6 +12,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
 const BASE = "a".repeat(40)
+const runtime = { executor: "local", leaseMs: 60_000 }
 
 function ids(): () => string {
   let value = 0
@@ -25,7 +31,7 @@ async function createApp(workspace: BayWorkspace) {
   })
 }
 
-async function createHarness() {
+function createWorkspaceHarness() {
   const workspace = { calls: [] as string[], dirty: false }
   const adapter: BayWorkspace = {
     revision: "test-workspace-v1",
@@ -47,7 +53,12 @@ async function createHarness() {
         : { status: "passed", output: { preservedRef: `refs/yrd/closed/${input.bay}` } }
     },
   }
-  return { app: await createApp(adapter), adapter, workspace }
+  return { adapter, workspace }
+}
+
+async function createHarness() {
+  const harness = createWorkspaceHarness()
+  return { ...harness, app: await createApp(harness.adapter) }
 }
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
@@ -140,12 +151,40 @@ describe("withBays", () => {
     await app.close()
   })
 
-  it("requires durable Jobs before Bay composition in TypeScript", async () => {
-    const { adapter } = await createHarness()
-    const jobs = createBayJobDefs(adapter)
-    if (false) {
-      // @ts-expect-error Bay workspaces require the explicit Jobs capability.
-      withBays({ jobs })(createYrdDef())
+  it("owns the complete bay and direct-branch submission flow", async () => {
+    const { app, workspace } = await createHarness()
+    await finishJob(app, await app.bays.open({ name: "domain-submit" }))
+    const resolved: string[] = []
+    const resolveRevision = async (ref: string): Promise<string | undefined> => {
+      resolved.push(ref)
+      return ref === "release/fix" ? HEAD_1 : undefined
     }
+
+    const bayPR = await app.bays.submitSelection("B1", { resolveRevision, run: runtime })
+    expect(bayPR).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_2, base: "main" })
+    expect(workspace.calls).toEqual([`provision:B1:current`, "refresh:B1"])
+
+    const branchPR = await app.bays.submitSelection("release/fix", {
+      base: "release/2.0",
+      resolveRevision,
+      run: runtime,
+    })
+    expect(branchPR).toMatchObject({ branch: "release/fix", status: "submitted", headSha: HEAD_1, base: "release/2.0" })
+    expect(resolved).toEqual(["release/fix"])
+
+    workspace.dirty = true
+    await finishJob(app, await app.bays.open({ name: "dirty-submit" }))
+    await expect(app.bays.submitSelection("B2", { resolveRevision, run: runtime })).rejects.toThrow("uncommitted work")
+    await app.close()
+  })
+
+  it("requires durable Jobs before Bay composition in TypeScript", () => {
+    const { adapter } = createWorkspaceHarness()
+    const jobs = createBayJobDefs(adapter)
+    const invalid = () => {
+      // @ts-expect-error Bay workspaces require the explicit Jobs capability.
+      return withBays({ jobs })(createYrdDef())
+    }
+    void invalid
   })
 })

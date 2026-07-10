@@ -3,7 +3,8 @@ import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, r
 import { basename, delimiter, dirname, join, resolve } from "node:path"
 import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
-import type { IntakePRArgs } from "./plugin.ts"
+import * as z from "zod"
+import { GitRefSchema, GitShaSchema } from "./model.ts"
 
 const RECEIVER_VERSION = 1 as const
 const RECEIPT_VERSION = 1 as const
@@ -18,18 +19,29 @@ type Environment = Record<string, string | undefined>
 type HookMode = "pre-receive" | "post-receive"
 type ReceiptState = "prepared" | "pending"
 
-export type ReceiverRefUpdate = { oldSha: string; newSha: string; ref: string }
-export type ReceiverTarget = { bay?: string; name?: string; base: string; baseSha: string }
-export type ReceiverReceipt = {
-  version: typeof RECEIPT_VERSION
-  id: string
-  receivedAt: string
-  ref: string
-  branch: string
-  oldSha: string
-  headSha: string
-  intake: IntakePRArgs & { branch: string; base: string; baseSha: string }
-}
+const TextSchema = z.string().trim().min(1)
+const ReceiverRefUpdateSchema = z
+  .object({ oldSha: z.string().regex(HEX_SHA), newSha: z.string().regex(HEX_SHA), ref: TextSchema })
+  .strict()
+const ReceiverTargetSchema = z
+  .object({ bay: TextSchema.optional(), name: TextSchema.optional(), base: GitRefSchema, baseSha: GitShaSchema })
+  .strict()
+const ReceiverReceiptSchema = z
+  .object({
+    version: z.literal(RECEIPT_VERSION),
+    id: z.string().regex(/^[0-9a-f]{64}$/u),
+    receivedAt: z.iso.datetime({ offset: true }),
+    ref: TextSchema,
+    branch: GitRefSchema,
+    oldSha: GitShaSchema,
+    headSha: GitShaSchema,
+    intake: ReceiverTargetSchema.extend({ branch: GitRefSchema, headSha: GitShaSchema }).strict(),
+  })
+  .strict()
+
+export type ReceiverRefUpdate = z.infer<typeof ReceiverRefUpdateSchema>
+export type ReceiverTarget = z.infer<typeof ReceiverTargetSchema>
+export type ReceiverReceipt = z.infer<typeof ReceiverReceiptSchema>
 export type GitPushReceiver = Readonly<{
   version: typeof RECEIVER_VERSION
   receiverPath: string
@@ -189,7 +201,7 @@ export function parseReceiverUpdates(input: string): ReceiverRefUpdate[] {
       check(HEX_SHA.test(oldSha) && HEX_SHA.test(newSha), `malformed commit id in receive line '${line}'`)
       check(!refs.has(ref), `duplicate update for '${ref}'`)
       refs.add(ref)
-      return { oldSha, newSha, ref }
+      return ReceiverRefUpdateSchema.parse({ oldSha, newSha, ref })
     })
 }
 
@@ -202,7 +214,8 @@ async function prepareReceiverUpdates(
   const created: string[] = []
   const receipts: ReceiverReceipt[] = []
   try {
-    for (const update of typeof input === "string" ? parseReceiverUpdates(input) : input) {
+    for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
+      const update = ReceiverRefUpdateSchema.parse(value)
       const { branch, target } = await authorize(receiver, update, options, "before")
       const receipt = makeReceipt(update, branch, target, clock)
       const stored = await storeReceipt(receiver, "prepared", receipt)
@@ -224,7 +237,8 @@ async function finalizeReceiverUpdates(
 ): Promise<ReceiverReceipt[]> {
   const clock = options.clock ?? (() => new Date().toISOString())
   const receipts: ReceiverReceipt[] = []
-  for (const update of typeof input === "string" ? parseReceiverUpdates(input) : input) {
+  for (const value of typeof input === "string" ? parseReceiverUpdates(input) : input) {
+    const update = ReceiverRefUpdateSchema.parse(value)
     const id = receiptId(update)
     const path = receiptPath(receiver, "prepared", id)
     let receipt: ReceiverReceipt
@@ -525,21 +539,9 @@ function validSha(sha: string, length: number, label: string, zero = false): voi
 }
 
 function normalizeTarget(target: ReceiverTarget, receiver: GitPushReceiver): ReceiverTarget {
-  for (const [label, value] of [
-    ["base", target.base],
-    ["baseSha", target.baseSha],
-    ["bay", target.bay],
-    ["name", target.name],
-  ] as const) {
-    if (value !== undefined) check(typeof value === "string" && value.trim(), `target ${label} must not be empty`)
-  }
-  validSha(target.baseSha, receiver.shaLength, "target baseSha")
-  return {
-    ...(target.bay === undefined ? {} : { bay: target.bay }),
-    ...(target.name === undefined ? {} : { name: target.name }),
-    base: target.base,
-    baseSha: target.baseSha,
-  }
+  const parsed = ReceiverTargetSchema.parse(target)
+  validSha(parsed.baseSha, receiver.shaLength, "target baseSha")
+  return parsed
 }
 
 async function refValue(receiver: GitPushReceiver, ref: string, env?: Environment): Promise<string | null> {
@@ -695,31 +697,10 @@ async function storeReceipt(
 }
 
 function validateReceipt(value: unknown, id: string, path: string): ReceiverReceipt {
-  check(
-    typeof value === "object" &&
-      value !== null &&
-      !Array.isArray(value) &&
-      typeof (value as { intake?: unknown }).intake === "object" &&
-      (value as { intake?: unknown }).intake !== null,
-    `malformed receipt at '${path}'`,
-  )
-  const receipt = value as unknown as ReceiverReceipt
-  const strings = [
-    receipt.id,
-    receipt.receivedAt,
-    receipt.ref,
-    receipt.branch,
-    receipt.oldSha,
-    receipt.headSha,
-    receipt.intake.branch,
-    receipt.intake.base,
-    receipt.intake.baseSha,
-    receipt.intake.headSha,
-  ]
-  check(
-    receipt.version === RECEIPT_VERSION && strings.every((item) => typeof item === "string") && receipt.id === id,
-    `malformed receipt at '${path}'`,
-  )
+  const parsed = ReceiverReceiptSchema.safeParse(value)
+  check(parsed.success, `malformed receipt at '${path}'`)
+  const receipt = parsed.data
+  check(receipt.id === id, `malformed receipt at '${path}'`)
   check(
     receiptId(updateOf(receipt)) === id && receipt.branch === receipt.intake.branch,
     `receipt identity mismatch at '${path}'`,
@@ -736,7 +717,7 @@ async function readReceipt(path: string, id: string): Promise<ReceiverReceipt> {
     return validateReceipt(JSON.parse(await readFile(path, "utf8")), id, path)
   } catch (cause) {
     if (cause instanceof SyntaxError) {
-      throw new Error(`yrd: receiver: invalid JSON in receipt '${path}': ${cause.message}`)
+      throw new Error(`yrd: receiver: invalid JSON in receipt '${path}': ${cause.message}`, { cause: cause })
     }
     throw cause
   }
@@ -781,7 +762,7 @@ async function receiptFiles(receiver: GitPushReceiver, state: ReceiptState): Pro
   const suffix = `.${state}.json`
   return (await readdir(receiver.inboxDir))
     .filter((name) => name.endsWith(suffix))
-    .sort()
+    .toSorted()
     .map((name) => join(receiver.inboxDir, name))
 }
 
@@ -819,10 +800,14 @@ async function recoverPrepared(
   }
 }
 
-function orderBranch(receipts: StoredReceipt[]): StoredReceipt[] {
-  const fallback = (left: StoredReceipt, right: StoredReceipt): number =>
+function receiptOrder(left: StoredReceipt, right: StoredReceipt): number {
+  return (
     left.receipt.receivedAt.localeCompare(right.receipt.receivedAt) || left.receipt.id.localeCompare(right.receipt.id)
-  const remaining = [...receipts].sort(fallback)
+  )
+}
+
+function orderBranch(receipts: StoredReceipt[]): StoredReceipt[] {
+  const remaining = [...receipts].toSorted(receiptOrder)
   const heads = new Set(receipts.map((item) => item.receipt.headSha))
   const ordered: StoredReceipt[] = []
   while (remaining.length > 0) {
@@ -847,6 +832,6 @@ async function pendingReceipts(receiver: GitPushReceiver, result: ReceiverDrainR
     }
   }
   return [...branches.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .toSorted(([left], [right]) => left.localeCompare(right))
     .flatMap(([, items]) => orderBranch(items))
 }

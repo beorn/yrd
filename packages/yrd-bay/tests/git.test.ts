@@ -1,3 +1,8 @@
+/**
+ * @failure Git work bays can escape their root, inherit ambient Git state, or lose submitted revisions.
+ * @level l2
+ * @consumer @yrd/bay Git workspace adapter
+ */
 import { existsSync } from "node:fs"
 import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -45,8 +50,8 @@ async function repository(): Promise<{ root: string; repo: string; intake: strin
   return { root, repo, intake }
 }
 
-async function createApp(workspace: BayWorkspace) {
-  const jobs = createBayJobDefs(workspace)
+async function createApp(adapter: BayWorkspace) {
+  const jobs = createBayJobDefs(adapter)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs }))
   return createYrd(definition, { inject: { journal: createMemoryJournal() } })
 }
@@ -114,6 +119,28 @@ describe("createGitWorkspace", () => {
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(existsSync(bay.path)).toBe(false)
     expect(await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"])).toMatchObject({ code: 0 })
+  })
+
+  it("does not overwrite an existing closed-bay preservation ref", async () => {
+    const { root, repo } = await repository()
+    await using process = createProcess()
+    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "preserve-ref" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+
+    await writeFile(join(repo, "new-main.txt"), "new main\n")
+    await git(repo, ["add", "new-main.txt"])
+    await git(repo, ["commit", "-qm", "move main"])
+    const existing = (await git(repo, ["rev-parse", "HEAD"])).stdout
+    await git(repo, ["update-ref", "refs/yrd/closed/B1", existing])
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "deprovision-failed" } })
+    expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(existing)
+    expect(existsSync(bay.path)).toBe(true)
   })
 
   it("provisions intake-enabled bays concurrently without racing the shared remote", async () => {

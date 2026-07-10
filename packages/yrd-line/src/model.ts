@@ -21,11 +21,16 @@ export const PRSnapshotSchema = z
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
 
-export const IntegrationProofSchema = z.object({ commit: GitShaSchema, baseSha: GitShaSchema }).strict()
+export const IntegrationProofSchema = z
+  .object({
+    commit: GitShaSchema,
+    // The base branch tip after integration, not the pre-integration base.
+    baseSha: GitShaSchema,
+  })
+  .strict()
 export type IntegrationProof = Readonly<z.infer<typeof IntegrationProofSchema>>
 
 export type PRShape = Readonly<{
-  prs: readonly PRSnapshot[]
   results: Readonly<Record<string, JsonValue>>
 }>
 
@@ -41,7 +46,6 @@ export type AddStepResult<Shape extends PRShape, Name extends string, Output ext
 export type InstalledStep = Readonly<{
   name: StepName
   title: string
-  index: number
   revision: string
   integrates: boolean
   needsIntegration: boolean
@@ -80,7 +84,6 @@ export type LineRun = Omit<LineRecord, "initialIntegration" | "steps" | "failure
 export type LinesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
-  installed: Readonly<Record<StepName, InstalledStep>>
   records: Readonly<Record<LineRunId, LineRecord>>
 }>
 
@@ -106,18 +109,19 @@ export const LineRecordSchema = z
     id: z.string().trim().min(1),
     prs: z.array(PRSnapshotSchema).min(1),
     base: GitRefSchema,
-    steps: z.array(
-      z
-        .object({
-          name: z.string().regex(/^[a-z][a-z0-9_-]*$/iu),
-          title: z.string().trim().min(1),
-          index: z.number().int().nonnegative(),
-          revision: z.string().trim().min(1),
-          integrates: z.boolean(),
-          needsIntegration: z.boolean(),
-        })
-        .strict(),
-    ),
+    steps: z
+      .array(
+        z
+          .object({
+            name: z.string().regex(/^[a-z][a-z0-9_-]*$/iu),
+            title: z.string().trim().min(1),
+            revision: z.string().trim().min(1),
+            integrates: z.boolean(),
+            needsIntegration: z.boolean(),
+          })
+          .strict(),
+      )
+      .min(1),
     initialIntegration: IntegrationProofSchema.optional(),
     startedAt: z.iso.datetime({ offset: true }),
     parent: z.string().trim().min(1).optional(),
@@ -130,12 +134,8 @@ export const LineRecordSchema = z
   .strict()
 
 export const Lines = Object.freeze({
-  empty(
-    installed: Readonly<Record<StepName, InstalledStep>>,
-    options: Readonly<{ batchSize: number; defaultSteps?: readonly StepName[] }>,
-  ): LinesState {
+  empty(options: Readonly<{ batchSize: number; defaultSteps?: readonly StepName[] }>): LinesState {
     return {
-      installed,
       batchSize: options.batchSize,
       ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
       records: {},

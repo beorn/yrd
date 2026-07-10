@@ -1,3 +1,8 @@
+/**
+ * @failure Child processes can outlive their Scope, buffer unbounded output, or report incomplete termination evidence.
+ * @level l1
+ * @consumer @yrd/process
+ */
 import { describe, expect, it } from "vitest"
 import { createProcess, type Spawn } from "@yrd/process"
 

@@ -1,3 +1,8 @@
+/**
+ * @failure Project configuration accepts ambiguous policy or resolves defaults differently from the CLI contract.
+ * @level l1
+ * @consumer @yrd/cli configuration
+ */
 import { describe, expect, it } from "vitest"
 import { loadYrdConfig, parseYrdConfig } from "../src/config.ts"
 

@@ -1,3 +1,8 @@
+/**
+ * @failure The PR receiver can accept unsafe refs, lose hook receipts, or duplicate intake after recovery.
+ * @level l3
+ * @consumer @yrd/bay Git push receiver
+ */
 import { createHash } from "node:crypto"
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -104,15 +109,20 @@ async function installHookHost(root: string, targets: Record<string, ReceiverTar
   return { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, YRD_TEST_TARGETS: targetFile }
 }
 
-async function push(fixture: Fixture, spec: string, env: Env): Promise<Result> {
-  return await run(["git", "-C", fixture.mainRepo, "push", fixture.receiver.receiverPath, spec], fixture.mainRepo, env)
+async function push(f: Fixture, spec: string, env: Env): Promise<Result> {
+  return await run(["git", "-C", f.mainRepo, "push", f.receiver.receiverPath, spec], f.mainRepo, env)
+}
+
+function receiverId(ref: string, oldSha: string, newSha: string): string {
+  return createHash("sha256").update(`${ref}\0${oldSha}\0${newSha}`).digest("hex")
 }
 
 async function inboxFiles(receiver: GitPushReceiver): Promise<string[]> {
-  return (await readdir(receiver.inboxDir)).filter((name) => name.endsWith(".json")).sort()
+  return (await readdir(receiver.inboxDir)).filter((name) => name.endsWith(".json")).toSorted()
 }
 
-describe("Git push receiver", () => {
+// Every case launches several real Git processes; budget for cold starts on loaded CI hosts.
+describe("Git push receiver", { timeout: 20_000 }, () => {
   it("sets up prs.git idempotently without replacing refs, objects, or managed hooks", async () => {
     const f = await fixture("setup")
     expect(f.receiver.receiverPath).toBe(join(await realpath(f.stateDir), "prs.git"))
@@ -273,11 +283,9 @@ describe("Git push receiver", () => {
     const first = await commit(f.mainRepo, "one.txt")
     const second = await commit(f.mainRepo, "two.txt")
     await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${second}:refs/yrd/test/order`)
-    const id = (ref: string, oldSha: string, newSha: string): string =>
-      createHash("sha256").update(`${ref}\0${oldSha}\0${newSha}`).digest("hex")
     const branch = Array.from({ length: 1_000 }, (_, index) => `task/order-${index}`).find((candidate) => {
       const ref = `refs/heads/${candidate}`
-      return id(ref, zero, first) > id(ref, first, second)
+      return receiverId(ref, zero, first) > receiverId(ref, first, second)
     })!
     const ref = `refs/heads/${branch}`
     const resolveTarget = async () => target(f.baseSha)

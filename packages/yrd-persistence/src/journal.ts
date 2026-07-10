@@ -71,7 +71,8 @@ export function createJournal(
       if (after > end || end > size) throw new RangeError(`yrd: journal range ${after}..${end} is outside 0..${size}`)
       if (after === end) return
 
-      using _span = log.span?.("read", { after, before: end, size })
+      using span = log.span?.("read", { after, before: end, size })
+      void span
       let frames = 0
       for await (const batch of decode(Bun.file(path).slice(after, end).stream(), after, path)) {
         frames += batch.values.length
@@ -83,7 +84,7 @@ export function createJournal(
           frames,
           warnBytes: WARN_BYTES,
           warnFrames: WARN_FRAMES,
-          action: "Implement the pre-created Yrd journal compaction bead before increasing these limits.",
+          action: "Implement @yrd/core/21012-monorepo/21060-journal-compaction-gc before increasing these limits.",
         })
       }
     },

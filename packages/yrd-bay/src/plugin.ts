@@ -8,7 +8,17 @@ import {
   type Frame,
   type YrdDef,
 } from "@yrd/core"
-import { createJobDef, type HasJobs, type JobContext, type JobDef, type JobResult, type JobTransition } from "@yrd/job"
+import {
+  createJobDef,
+  type HasJobs,
+  type Job,
+  type JobContext,
+  type JobDef,
+  type JobResult,
+  type Jobs,
+  type JobTransition,
+  type RunJobOptions,
+} from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
 import * as z from "zod"
 import {
@@ -89,6 +99,12 @@ const SubmitArgsSchema = z.union([
     .strict(),
 ])
 export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
+
+export type SubmitSelectionOptions = Readonly<{
+  base?: string
+  resolveRevision(ref: string): Promise<string | undefined>
+  run: RunJobOptions
+}>
 
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
 export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
@@ -204,6 +220,7 @@ export type Bays = Readonly<{
   refresh(args: RefreshBayArgs): Promise<Frame>
   intake(args: IntakePRArgs): Promise<Frame>
   submit(args: SubmitArgs): Promise<Frame>
+  submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
   close(args: CloseBayArgs): Promise<Frame>
 }>
 
@@ -211,13 +228,72 @@ export type HasBays = Readonly<{ bays: Bays }>
 
 type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close">
 
-export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, actions: BayActions): Bays {
+export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Jobs, actions: BayActions): Bays {
+  const execute = async (frame: Frame, options: RunJobOptions, action: string): Promise<void> => {
+    const results = await jobs.runMany(jobs.requested(frame), options)
+    const failed = results.find((job) => job.status !== "passed")
+    if (failed !== undefined) throw new Error(`yrd: ${action} ${failed.status}: ${jobDetail(failed)}`)
+  }
+
+  const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+    let snapshot = state()
+    let pr = resolvePR(snapshot, selector)
+    let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
+    if (pr?.status === "integrated") return pr
+
+    if (bay?.status === "active") {
+      const refreshed = await actions.refresh({ bay: bay.id })
+      await execute(refreshed, options.run, `bay '${bay.id}' refresh`)
+      snapshot = state()
+      bay = resolveBay(snapshot, bay.id)
+      if (bay === undefined) throw new Error(`yrd: bay '${selector}' disappeared after refresh`)
+      if (bay.dirty === true)
+        throw new Error(`yrd: bay '${bay.id}' has uncommitted work; commit or discard it before submit`)
+      if (bay.headSha === undefined) throw new Error(`yrd: bay '${bay.id}' has no committed head to submit`)
+      pr = prForBay(snapshot, bay.id)
+      if (pr === undefined || pr.headSha !== bay.headSha) {
+        await actions.intake({
+          bay: bay.id,
+          headSha: bay.headSha,
+          ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+        })
+        pr = prForBay(state(), bay.id)
+      }
+    }
+
+    if (pr?.status === "submitted") return pr
+    if (pr?.status === "pushed") {
+      await actions.submit({ pr: pr.id })
+      const submitted = resolvePR(state(), pr.id)
+      if (submitted === undefined) throw new Error(`yrd: PR '${pr.id}' disappeared after submit`)
+      return submitted
+    }
+
+    if (bay === undefined) {
+      const headSha = await options.resolveRevision(selector)
+      if (headSha === undefined) throw new Error(`yrd: no Git commit '${selector}'`)
+      await actions.submit({
+        branch: selector,
+        headSha,
+        ...(options.base === undefined ? {} : { base: options.base }),
+      })
+      const submitted = resolvePR(state(), selector)
+      if (submitted === undefined) throw new Error(`yrd: direct branch submit '${selector}' did not create a PR`)
+      return submitted
+    }
+
+    if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
+    if (pr === undefined) throw new Error(`yrd: bay '${bay.id}' intake did not create a PR`)
+    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
+  }
+
   return Object.freeze({
     state,
     get: (selector) => resolveBay(state(), selector),
     list: () => Object.freeze(Object.values(state().byId)),
     pr: (selector) => resolvePR(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
+    submitSelection,
     ...actions,
   })
 }
@@ -248,17 +324,10 @@ export function withBays(options: WithBaysOptions) {
       },
       project: projectBays,
       create(yrd) {
-        for (const expected of Object.values(options.jobs)) {
-          const installed = yrd.jobs.definition(expected.name)
-          if (installed.revision !== expected.revision) {
-            throw new Error(
-              `yrd: job definition '${expected.name}' revision '${installed.revision}' does not match Bay revision '${expected.revision}'`,
-            )
-          }
-        }
+        yrd.jobs.requireDefinitions(options.jobs)
         const state = computed(() => yrd.state().bays)
         return {
-          bays: createBays(state, {
+          bays: createBays(state, yrd.jobs, {
             open: (args) => yrd.command(commands.bay.open, args),
             refresh: (args) => yrd.command(commands.bay.refresh, args),
             intake: (args) => yrd.command(commands.bay.intake, args),
@@ -268,6 +337,13 @@ export function withBays(options: WithBaysOptions) {
         }
       },
     })
+}
+
+function jobDetail(job: DeepReadonly<Job>): string {
+  if (job.status === "failed") return job.error.message
+  if (job.status === "lost") return job.lostReason
+  if (job.status === "waiting") return job.detail ?? job.status
+  return job.status
 }
 
 function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
@@ -454,13 +530,16 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
 }
 
+function bayState(bays: BaysState): BayState {
+  return { bays }
+}
+
 function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   const current = state.bays
-  const save = (next: BaysState): BayState => ({ bays: next })
-  const saveBay = (bay: Bay): BayState => save({ ...current, byId: { ...current.byId, [bay.id]: bay } })
+  const saveBay = (bay: Bay): BayState => bayState({ ...current, byId: { ...current.byId, [bay.id]: bay } })
   const patchBay = (bay: Bay, patch: Partial<Bay>): BayState => saveBay({ ...bay, ...patch })
   const patchPR = (pr: PR, patch: Partial<PR>): BayState =>
-    save({ ...current, prs: { ...current.prs, [pr.id]: { ...pr, ...patch } } })
+    bayState({ ...current, prs: { ...current.prs, [pr.id]: { ...pr, ...patch } } })
   const data = applied.data as Record<string, unknown>
 
   switch (applied.name) {
@@ -509,7 +588,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               detail: undefined,
             }
       const next = { ...current, prs: { ...current.prs, [pr.id]: pr } }
-      return save(
+      return bayState(
         pushed.receipt === undefined
           ? next
           : {

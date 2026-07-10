@@ -170,7 +170,7 @@ export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspace {
         }
         const headSha = await git.commit(input.path, "HEAD")
         const preservedRef = `refs/yrd/closed/${input.bay}`
-        await git.run(repo, ["update-ref", preservedRef, headSha])
+        await git.run(repo, ["update-ref", preservedRef, headSha, "0".repeat(headSha.length)])
         await git.run(repo, ["worktree", "remove", input.path])
         return { status: "passed", output: { preservedRef } }
       } catch (cause) {

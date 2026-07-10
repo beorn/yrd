@@ -1,3 +1,8 @@
+/**
+ * @failure Git-backed Line steps can check one candidate and merge another or lose durable command evidence.
+ * @level l2
+ * @consumer @yrd/line Git step adapters
+ */
 import { existsSync } from "node:fs"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -9,10 +14,8 @@ import { withJobs } from "@yrd/job"
 import { createProcess, type Process } from "@yrd/process"
 import * as z from "zod"
 import {
-  CommandEvidenceSchema,
   GitCheckEvidenceSchema,
   configuredCommandStep,
-  configuredWaitingCommandStep,
   gitCheckStep,
   gitMergeStep,
   withLine,
@@ -150,7 +153,7 @@ describe("Line command adapters", () => {
       variables: () => ({ YRD_CUSTOM: "custom" }),
     })
     const result = await step(
-      { run: "R1", step: "check", index: 0, prs: [pr], shape: { prs: [pr], results: {} } },
+      { run: "R1", step: "check", index: 0, prs: [pr], shape: { results: {} } },
       { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal },
     )
     if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)

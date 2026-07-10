@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
-import { prForBay, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { LineRun } from "@yrd/line"
@@ -32,14 +32,7 @@ function stateOf(app: YrdCliApp): YrdCliState {
 }
 
 async function runJobs(app: YrdCliApp, ids: readonly string[], io: YrdCliIO): Promise<Job[]> {
-  const results: Job[] = []
-  for (const id of ids) {
-    let run = stateOf(app).jobs.byId[id]
-    if (run === undefined) throw new Error(`yrd: job '${id}' disappeared after it was requested`)
-    if (run.status === "requested") run = await app.jobs.run(id, runtimeOptions(io))
-    results.push(run)
-  }
-  return results
+  return [...(await app.jobs.runMany(ids, runtimeOptions(io)))]
 }
 
 function assertJobsPassed(runs: readonly Job[], action: string): void {
@@ -61,11 +54,13 @@ function within(parent: string, child: string): boolean {
 function currentBay(state: BaysState, cwd: string): Bay | undefined {
   return Object.values(state.byId)
     .filter((bay) => bay.path !== undefined && within(bay.path, cwd))
-    .sort((left, right) => (right.path?.length ?? 0) - (left.path?.length ?? 0))[0]
+    .toSorted((left, right) => (right.path?.length ?? 0) - (left.path?.length ?? 0))[0]
 }
 
 function sortedBays(state: BaysState): Bay[] {
-  return Object.values(state.byId).sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+  return Object.values(state.byId).toSorted((left, right) =>
+    left.id.localeCompare(right.id, undefined, { numeric: true }),
+  )
 }
 
 function unique<Value extends { id: string }>(values: readonly Value[]): Value[] {
@@ -195,59 +190,9 @@ async function closeBays(
   )
 }
 
-async function resolveRevision(ref: string, io: YrdCliIO): Promise<string> {
-  const resolved = await optionalRevision(ref, io)
-  if (resolved === undefined) refusal(`no Git commit '${ref}'`)
-  return resolved
-}
-
 async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | undefined> {
   const cwd = io.cwd ?? process.cwd()
   return io.resolveRevision?.(ref, cwd)
-}
-
-async function submitBay(app: YrdCliApp, selector: string, base: string | undefined, io: YrdCliIO): Promise<PR> {
-  let state = stateOf(app)
-  let pr = resolvePR(state.bays, selector)
-  let bay = resolveBay(state.bays, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(state.bays, pr.bay))
-  if (pr?.status === "integrated") return pr
-  if (bay?.status === "active") {
-    bay = await refreshBay(app, bay, io)
-    if (bay.dirty === true) refusal(`bay '${bay.id}' has uncommitted work; commit or discard it before submit`)
-    if (bay.headSha === undefined) refusal(`bay '${bay.id}' has no committed head to submit`)
-    state = stateOf(app)
-    pr = prForBay(state.bays, bay.id)
-    if (pr === undefined || pr.headSha !== bay.headSha) {
-      await app.bays.intake({
-        bay: bay.id,
-        headSha: bay.headSha,
-        ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
-      })
-      state = stateOf(app)
-      pr = prForBay(state.bays, bay.id)
-    }
-  }
-  if (pr?.status === "submitted") return pr
-  if (pr?.status === "pushed") {
-    await app.bays.submit({ pr: pr.id })
-    const submitted = app.bays.pr(pr.id)
-    if (submitted === undefined) throw new Error(`yrd: PR '${pr.id}' disappeared after submit`)
-    return submitted
-  }
-
-  if (bay === undefined) {
-    await app.bays.submit({
-      branch: selector,
-      headSha: await resolveRevision(selector, io),
-      ...(base === undefined ? {} : { base }),
-    })
-    const direct = app.bays.pr(selector)
-    if (direct === undefined) throw new Error(`yrd: direct branch submit '${selector}' did not create a PR`)
-    return direct
-  }
-  if (bay.status !== "active") refusal(`bay '${bay.id}' is ${bay.status}, not active`)
-  if (pr === undefined) throw new Error(`yrd: bay '${bay.id}' intake did not create a PR`)
-  refusal(`PR '${pr.id}' is ${pr.status}, not pushed`)
 }
 
 async function submitBays(
@@ -264,7 +209,11 @@ async function submitBays(
   const prs: PR[] = []
   const base = oneOfAliases(options.base, options.line, "base", "line")
   for (const selector of inferred) {
-    const pr = await submitBay(app, selector, base, io)
+    const pr = await app.bays.submitSelection(selector, {
+      ...(base === undefined ? {} : { base }),
+      resolveRevision: (ref) => optionalRevision(ref, io),
+      run: runtimeOptions(io),
+    })
     prs.push(pr)
   }
   const runs =
@@ -278,21 +227,6 @@ async function submitBays(
   return runs.some((run) => run.status === "failed") ? 1 : 0
 }
 
-function lineTargets(state: YrdCliState, selectors: readonly string[], retry: boolean): PR[] {
-  if (selectors.length > 0) {
-    return unique(
-      selectors.map((selector) => {
-        const pr = resolvePR(state.bays, selector)
-        if (pr === undefined) refusal(`no PR '${selector}'`)
-        return pr
-      }),
-    )
-  }
-  return Object.values(state.bays.prs)
-    .filter((pr) => pr.status === "submitted" || (retry && pr.status === "rejected"))
-    .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
-}
-
 async function integrateLines(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -300,10 +234,9 @@ async function integrateLines(
   io: YrdCliIO,
 ): Promise<readonly LineRun[]> {
   const steps = csv(options.steps)
-  const prs = lineTargets(stateOf(app), selectors, options.retry === true)
   return app.line.integrate(
     {
-      prs: prs.map((pr) => pr.id),
+      prs: [...selectors],
       ...(steps === undefined ? {} : { steps }),
       ...(options.retry === true ? { retry: true } : {}),
     },
@@ -334,7 +267,7 @@ async function lineStatus(
     if (bases.size === 0) bases.add("main")
   }
   const results: LineStatusResult[] = []
-  for (const base of [...bases].sort()) {
+  for (const base of [...bases].toSorted()) {
     const summary = app.line.status(base)
     const headSha = await optionalRevision(base, io)
     results.push({
@@ -421,30 +354,6 @@ function jsonRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function waitingLineRun(app: YrdCliApp, selector: string, stepName?: string): LineRun {
-  const direct = app.line.get(selector)
-  if (direct !== undefined) return direct
-  const state = stateOf(app)
-  const pr = resolvePR(state.bays, selector)
-  if (pr === undefined) refusal(`no line run or PR '${selector}'`)
-  const summary = app.line.status(pr.base)
-  const run = [...summary.waiting, ...summary.running]
-    .reverse()
-    .find(
-      (candidate) =>
-        candidate.prs.some((member) => member.id === pr.id) &&
-        candidate.steps.some((step) =>
-          stepName === undefined ? step.job?.status === "waiting" : step.name === stepName,
-        ),
-    )
-  if (run === undefined) {
-    refusal(
-      stepName === undefined ? `PR '${pr.id}' has no waiting step` : `PR '${pr.id}' has no active '${stepName}' step`,
-    )
-  }
-  return run
-}
-
 async function finishLine(
   app: YrdCliApp,
   selector: string,
@@ -463,26 +372,8 @@ async function finishLine(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.ok === options.fail) usage("line finish requires exactly one of --ok or --fail")
-  const run = waitingLineRun(app, selector, options.step)
-  const waiting = run.steps.filter((candidate) => candidate.job?.status === "waiting")
-  const step =
-    options.step === undefined
-      ? waiting.length === 1
-        ? waiting[0]
-        : undefined
-      : run.steps.find((candidate) => candidate.name === options.step)
-  if (options.step === undefined && waiting.length !== 1) {
-    usage(
-      waiting.length === 0
-        ? `line run '${run.id}' has no waiting step`
-        : `line run '${run.id}' has multiple waiting steps; use --step <name>`,
-    )
-  }
-  if (step?.job === undefined) {
-    refusal(`line run '${run.id}' step '${options.step ?? "unknown"}' has no durable job`)
-  }
-  const job = step.job
-  if (job.status !== "waiting") refusal(`line run '${run.id}' step '${step.name}' is ${job.status}, not waiting`)
+  const waiting = app.line.waiting(selector, options.step)
+  const job = waiting.step.job
   const recordedArtifacts = artifacts(options.artifact)
   const exitCode = positiveInteger(options.exitCode, "--exit-code")
   const durationMs = positiveInteger(options.durationMs, "--duration-ms")
@@ -496,52 +387,31 @@ async function finishLine(
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
   }
-  await app.jobs.finish(job.id, {
-    attempt: job.attempt,
-    executor: job.executor,
-    ...(options.token === undefined ? {} : { token: options.token }),
-    result:
-      options.ok === true
-        ? { status: "passed", output: evidence }
-        : {
-            status: "failed",
-            error: {
-              code: `${step.name}-failed`,
-              message: options.detail ?? `${step.name} failed externally`,
+  const resumed = await app.line.finish(
+    selector,
+    {
+      step: waiting.step.name,
+      ...(options.token === undefined ? {} : { token: options.token }),
+      result:
+        options.ok === true
+          ? { status: "passed", output: evidence }
+          : {
+              status: "failed",
+              error: {
+                code: `${waiting.step.name}-failed`,
+                message: options.detail ?? `${waiting.step.name} failed externally`,
+              },
+              output: evidence,
             },
-            output: evidence,
-          },
-  })
-  const resumed = await app.line.run(run.id, runtimeOptions(io))
+    },
+    runtimeOptions(io),
+  )
   await printResult(
     io,
     jsonEnabled(options),
     { command: "line.finish", run: resumed },
     `${resumed.id} ${resumed.status}`,
   )
-}
-
-async function sleep(milliseconds: number, io: YrdCliIO): Promise<void> {
-  if (io.sleep !== undefined) return io.sleep(milliseconds, io.signal)
-  await new Promise<void>((resolve) => {
-    if (io.signal?.aborted === true) {
-      resolve()
-      return
-    }
-    const timeout = setTimeout(resolve, milliseconds)
-    io.signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timeout)
-        resolve()
-      },
-      { once: true },
-    )
-  })
-}
-
-function aborted(io: YrdCliIO): boolean {
-  return io.signal?.aborted === true
 }
 
 async function watchLine(
@@ -555,6 +425,7 @@ async function watchLine(
     usage("--interval must be a positive number of seconds")
   }
   const interval = intervalSeconds * 1_000
+  const scope = io.scope ?? app.scope
   let exit: YrdCliExitCode = 0
   while (true) {
     const runs = await integrateLines(app, selectors, options, io)
@@ -564,9 +435,9 @@ async function watchLine(
       await printHuman(io, createElement(LineRunsView, { runs }))
     }
     if (runs.some((run) => run.status === "failed")) exit = 1
-    if (selectors.length > 0 || aborted(io)) return exit
-    await sleep(interval, io)
-    if (aborted(io)) return exit
+    if (selectors.length > 0 || scope.signal.aborted) return exit
+    await scope.sleep(interval)
+    if (scope.signal.aborted) return exit
   }
 }
 

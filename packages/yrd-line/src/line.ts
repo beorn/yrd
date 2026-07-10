@@ -20,6 +20,8 @@ import {
   type JobDefs,
   type JobError,
   type JobHandler,
+  type JobResult,
+  type JobWaiting,
   type JobsState,
   type RunJobOptions,
 } from "@yrd/job"
@@ -100,7 +102,6 @@ export type StepDef<Input extends PRShape, Output extends PRShape> = Readonly<{
   integrates: boolean
   needsIntegration: boolean
   job: JobDef<StepExecution, JsonValue>
-  project(shape: PRShape, output: JsonValue): PRShape
   readonly [inputShape]?: Input
   readonly [outputShape]?: Output
 }>
@@ -152,9 +153,6 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
     integrates: false,
     needsIntegration: options.needsIntegration ?? false,
     job,
-    project(shape, value) {
-      return { ...shape, results: { ...shape.results, [stepName]: value } }
-    },
   }) as StepDef<Shape, AddStepResult<Shape, Name, Output>>
 }
 
@@ -177,7 +175,6 @@ export function withMerge<Shape extends PRShape>(
     integrates: true,
     needsIntegration: false,
     job,
-    project: (shape, value) => ({ ...shape, integration: IntegrationProofSchema.parse(value) }),
   }) as StepDef<Shape, Shape & IntegratedShape>
 }
 
@@ -206,10 +203,23 @@ export type Line<Shape extends PRShape = PRShape> = Readonly<{
   steps(): readonly InstalledStep[]
   integrate(args: IntegrateArgs, options: RunJobOptions): Promise<readonly LineRun[]>
   run(run: LineRunId, options: RunJobOptions): Promise<LineRun>
+  waiting(selector: string, step?: string): WaitingLineStep
+  finish(selector: string, completion: FinishLineArgs, options: RunJobOptions): Promise<LineRun>
   recover(options: RunJobOptions & Readonly<{ recoveryTime: string; reason?: string }>): Promise<readonly LineRun[]>
   audit(): LineAuditResult
   get(run: LineRunId): LineRun | undefined
   status(base: string): LineSummary
+}>
+
+export type WaitingLineStep = Readonly<{
+  run: LineRun
+  step: LineStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
+}>
+
+export type FinishLineArgs = Readonly<{
+  step?: string
+  token?: string
+  result: Exclude<JobResult, JobWaiting>
 }>
 
 export type HasLine<Shape extends PRShape = PRShape> = Readonly<{ line: Line<Shape> }>
@@ -231,7 +241,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
   const batchSize = normalizeBatch(options.batch ?? 1)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
   validateSequence(defaults ?? steps, false)
-  const initial = Lines.empty(Object.freeze(Object.fromEntries(steps.map((step) => [step.name, descriptor(step)]))), {
+  const initial = Lines.empty({
     batchSize,
     ...(defaults === undefined ? {} : { defaultSteps: defaults.map((step) => step.name) }),
   })
@@ -258,14 +268,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
       },
       project: projectLines,
       create(yrd) {
-        for (const expected of Object.values(jobDefs)) {
-          const installed = yrd.jobs.definition(expected.name)
-          if (installed.revision !== expected.revision) {
-            throw new Error(
-              `yrd: job definition '${expected.name}' revision '${installed.revision}' does not match Line revision '${expected.revision}'`,
-            )
-          }
-        }
+        yrd.jobs.requireDefinitions(jobDefs)
         return {
           line: createLine(
             computed(() => yrd.state().lines),
@@ -286,7 +289,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
   return Object.freeze(install) as unknown as LinePlugin<FinalShape<Steps>>
 }
 
-type RuntimeStep = AnyStepDef & InstalledStep
+type RuntimeStep = AnyStepDef
 type LineActions = Readonly<{
   integrate(args: IntegrateArgs): Promise<Frame>
   advance(run: LineRunId): Promise<Frame>
@@ -301,6 +304,46 @@ function createLine<Shape extends PRShape>(
   steps: readonly RuntimeStep[],
 ): Line<Shape> {
   const current = (id: LineRunId): LineRun => materializeRun(Lines.record(state(), id), runtime().jobs)
+
+  const waiting = (selector: string, stepName?: string): WaitingLineStep => {
+    const snapshot = runtime()
+    const direct = snapshot.lines.records[selector]
+    let selected = direct === undefined ? undefined : materializeRun(direct, snapshot.jobs)
+    if (selected === undefined) {
+      const pr = resolvePR(snapshot.bays, selector)
+      if (pr === undefined) throw new Error(`yrd: no line run or PR '${selector}'`)
+      const summary = lineSummary(snapshot.lines, snapshot.jobs, pr.base)
+      selected = [...summary.waiting, ...summary.running]
+        .toReversed()
+        .find(
+          (candidate) =>
+            candidate.prs.some((member) => member.id === pr.id) &&
+            candidate.steps.some((step) =>
+              stepName === undefined ? step.job?.status === "waiting" : step.name === stepName,
+            ),
+        )
+      if (selected === undefined) {
+        throw new Error(`yrd: PR '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`)
+      }
+    }
+
+    const pending = selected.steps.filter((step) => step.job?.status === "waiting")
+    const step =
+      stepName === undefined
+        ? pending.length === 1
+          ? pending[0]
+          : undefined
+        : selected.steps.find((item) => item.name === stepName)
+    if (stepName === undefined && pending.length !== 1) {
+      throw new Error(
+        `yrd: line run '${selected.id}' ${pending.length === 0 ? "has no waiting step" : "has multiple waiting steps; select one"}`,
+      )
+    }
+    if (step?.job?.status !== "waiting") {
+      throw new Error(`yrd: line run '${selected.id}' has no waiting '${stepName ?? "unknown"}' step`)
+    }
+    return { run: selected, step: step as WaitingLineStep["step"] }
+  }
 
   const drive = async (id: LineRunId, options: RunJobOptions): Promise<LineRun> => {
     while (true) {
@@ -341,6 +384,7 @@ function createLine<Shape extends PRShape>(
     state,
     steps: () => steps.map(descriptor),
     async integrate(args, runOptions) {
+      if (args.steps?.length === 0) return []
       const snapshot = runtime()
       const prs = runnablePRs(snapshot, args)
       if (prs.length === 0) return []
@@ -351,9 +395,9 @@ function createLine<Shape extends PRShape>(
           ...(args.steps === undefined ? {} : { steps: args.steps }),
           ...(args.retry === true ? { retry: true } : {}),
         })
-        const event = started.events.find((applied) => applied.name === "line/run/started")
-        if (event === undefined) throw new Error("yrd: line integrate did not start a run")
-        const id = LineStartSchema.parse((event.data as { run?: unknown }).run).id
+        const startedEvent = started.events.find((applied) => applied.name === "line/run/started")
+        if (startedEvent === undefined) throw new Error("yrd: line integrate did not start a run")
+        const id = LineStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
         roots.push(id)
         await run(id, runOptions)
       }
@@ -361,6 +405,17 @@ function createLine<Shape extends PRShape>(
       return roots.flatMap((root) => lineTree(final.lines, final.jobs, root))
     },
     run,
+    waiting,
+    async finish(selector, completion, runOptions) {
+      const selected = waiting(selector, completion.step)
+      await jobs.finish(selected.step.job.id, {
+        attempt: selected.step.job.attempt,
+        executor: selected.step.job.executor,
+        ...(completion.token === undefined ? {} : { token: completion.token }),
+        result: completion.result,
+      })
+      return run(selected.run.id, runOptions)
+    },
     async recover(recoverOptions) {
       await jobs.recover({
         now: recoverOptions.recoveryTime,
@@ -389,6 +444,7 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
     visibility: "public",
     params: IntegrateArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: IntegrateArgs) {
+      if (args.steps?.length === 0) return { events: [] }
       const prs = runnablePRs(state, args)
       if (prs.length === 0) return { events: [] }
       const base = prs[0]?.base
@@ -465,7 +521,7 @@ function projectLines(state: DeepReadonly<LineState>, applied: Event): LineState
   if (applied.name === "line/run/failed") {
     const failed = LineFailedSchema.parse(applied.data)
     const record = state.lines.records[failed.run]
-    if (record === undefined) return state
+    if (record === undefined) throw new Error(`yrd: no line run '${failed.run}'`)
     return {
       lines: {
         ...state.lines,
@@ -481,20 +537,17 @@ function projectLines(state: DeepReadonly<LineState>, applied: Event): LineState
 
 function installSteps(definitions: readonly AnyStepDef[]): readonly RuntimeStep[] {
   const names = new Set<string>()
-  return Object.freeze(
-    definitions.map((step, index) => {
-      if (names.has(step.name)) throw new Error(`yrd: line step '${step.name}' is already installed`)
-      names.add(step.name)
-      return Object.freeze({ ...step, index }) as RuntimeStep
-    }),
-  )
+  for (const step of definitions) {
+    if (names.has(step.name)) throw new Error(`yrd: line step '${step.name}' is already installed`)
+    names.add(step.name)
+  }
+  return Object.freeze([...definitions])
 }
 
 function descriptor(step: RuntimeStep | LineStep): InstalledStep {
   return {
     name: step.name,
     title: step.title,
-    index: step.index,
     revision: step.revision,
     integrates: step.integrates,
     needsIntegration: step.needsIntegration,
@@ -669,8 +722,8 @@ function materializeRun(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<Job
 function lineJobs(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState>): Job[] {
   const result: Job[] = []
   let missing = false
-  for (const step of record.steps) {
-    const id = jobs.byKey[jobKey(record.id, step.index)]
+  for (const [index, step] of record.steps.entries()) {
+    const id = jobs.byKey[jobKey(record.id, index)]
     if (id === undefined) {
       missing = true
       continue
@@ -681,7 +734,7 @@ function lineJobs(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState
     const input = StepExecutionSchema.parse(job.input)
     if (
       input.run !== record.id ||
-      input.index !== step.index ||
+      input.index !== index ||
       input.step !== step.name ||
       job.definition !== `line.step.${step.name}` ||
       job.revision !== step.revision
@@ -726,7 +779,7 @@ function shapeThrough(
 function orderedLines(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsState>): LineRun[] {
   return Object.values(lines.records)
     .map((record) => materializeRun(record, jobs))
-    .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+    .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
 }
 
 function runningLine(
@@ -775,14 +828,6 @@ function lineSummary(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsSta
 
 function auditLines(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): LineAuditResult {
   const findings: LineAuditFinding[] = []
-  for (const [index, step] of steps.entries()) {
-    if (step.index === index) continue
-    findings.push({
-      code: "step-index-gap",
-      message: `line step '${step.name}' has index ${step.index}, expected ${index}`,
-      step: step.name,
-    })
-  }
   const installed = new Map(steps.map((step) => [step.name, step]))
   for (const record of Object.values(state.lines.records)) {
     for (const pr of record.prs) {
@@ -792,15 +837,6 @@ function auditLines(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeSt
         message: `line run '${record.id}' references missing PR '${pr.id}'`,
         run: record.id,
         pr: pr.id,
-      })
-    }
-    for (const [index, step] of record.steps.entries()) {
-      if (step.index === index) continue
-      findings.push({
-        code: "run-step-index-gap",
-        message: `line run '${record.id}' step '${step.name}' has index ${step.index}, expected ${index}`,
-        run: record.id,
-        step: step.name,
       })
     }
     let run: LineRun
@@ -858,7 +894,7 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
     selectors === undefined
       ? Object.values(state.prs)
           .filter((pr) => pr.status === "submitted" || (args.retry === true && pr.status === "rejected"))
-          .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+          .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
       : selectors.map((selector) => {
           const pr = resolvePR(state, selector)
           if (pr === undefined) throw new Error(`yrd: no PR '${selector}'`)
@@ -905,7 +941,7 @@ function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
 
 function prShape(prs: readonly PRSnapshot[]): PRShape {
   if (prs.length === 0) throw new Error("yrd: a line run requires at least one PR")
-  return { prs, results: {} }
+  return { results: {} }
 }
 
 function integratedPRShape(prs: readonly PR[]): IntegratedShape | undefined {

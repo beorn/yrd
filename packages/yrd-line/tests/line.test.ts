@@ -1,3 +1,8 @@
+/**
+ * @failure Line composition or projection can accept corrupt runs, lose pinned plans, or misstate integration results.
+ * @level l2
+ * @consumer @yrd/line
+ */
 import { describe, expect, expectTypeOf, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
@@ -132,6 +137,57 @@ describe("Line", () => {
     void invalid
   })
 
+  it("treats an explicit empty step selection as a true no-op", async () => {
+    await using app = await createLineApp()
+    const pr = await submitBranch(app, "task/no-steps")
+
+    const frame = await app.command(app.commands.line.integrate, { prs: [pr.id], steps: [] })
+    expect(frame.events).toEqual([])
+    await expect(app.line.integrate({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
+    expect(app.state().lines.records).toEqual({})
+    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+  })
+
+  it("keys a selected step suffix by run order rather than installed order", async () => {
+    await using app = await createLineApp()
+    const pr = await submitBranch(app, "task/selected-suffix")
+
+    const run = (await app.line.integrate({ prs: [pr.id], steps: ["merge", "deploy"] }, runtime))[0]
+
+    expect(run).toMatchObject({
+      status: "passed",
+      steps: [{ name: "merge" }, { name: "deploy" }],
+      shape: { integration: { commit: MERGED }, results: { deploy: { environment: "staging" } } },
+    })
+    expect(app.state().lines.records.R1?.steps).toEqual([
+      expect.not.objectContaining({ index: expect.anything() }),
+      expect.not.objectContaining({ index: expect.anything() }),
+    ])
+    expect(app.state().jobs.byKey).toMatchObject({ "line:R1:0": expect.any(String), "line:R1:1": expect.any(String) })
+  })
+
+  it("rejects a failure event for an unknown Line run as journal corruption", async () => {
+    const journal = createMemoryJournal([
+      {
+        cause: {
+          commandId: "corrupt-line-failure",
+          op: "line.advance",
+          operationHash: "0".repeat(64),
+        },
+        events: [
+          {
+            id: "corrupt-line-failure-event",
+            name: "line/run/failed",
+            ts: "2026-07-10T00:00:00.000Z",
+            data: { run: "R404", error: { code: "missing-run", message: "missing" } },
+          },
+        ],
+      },
+    ])
+
+    await expect(createLineApp({}, journal)).rejects.toThrow("no line run 'R404'")
+  })
+
   it("runs checks, merge, and deploy across base lines and derives every Job field", async () => {
     await using app = await createLineApp({
       batch: 2,
@@ -263,21 +319,40 @@ describe("Line", () => {
     const waiting = (await app.line.integrate({ prs: [remote.id] }, runtime))[0]!
     const waitingJob = waiting.steps[0]?.job
     if (waitingJob?.status !== "waiting") throw new Error("check did not wait")
+    expect(app.line.waiting(remote.id)).toMatchObject({
+      run: { id: waiting.id },
+      step: { name: "check", job: { id: waitingJob.id, status: "waiting" } },
+    })
 
     const next = await submitBranch(app, "task/next")
     expect((await app.line.integrate({ prs: [next.id] }, runtime))[0]).toMatchObject({ status: "passed" })
 
     await app.bays.intake({ branch: remote.branch, headSha: UPDATED, base: "main" })
-    await app.jobs.finish(waitingJob.id, {
-      attempt: waitingJob.attempt,
-      executor: waitingJob.executor,
-      token: waitingJob.token,
-      result: { status: "passed", output: { checked: true } },
-    })
-    expect(await app.line.run(waiting.id, runtime)).toMatchObject({
+    expect(
+      await app.line.finish(
+        remote.id,
+        {
+          step: "check",
+          token: waitingJob.token,
+          result: { status: "passed", output: { checked: true } },
+        },
+        runtime,
+      ),
+    ).toMatchObject({
       status: "failed",
       error: { code: "stale-pr" },
     })
+    await expect(
+      app.line.finish(
+        remote.id,
+        {
+          step: "check",
+          token: waitingJob.token,
+          result: { status: "passed", output: { checked: true } },
+        },
+        runtime,
+      ),
+    ).rejects.toThrow("no waiting 'check' step")
     expect(merges).toBe(1)
     expect(app.state().bays.prs[remote.id]).toMatchObject({ revision: 2, headSha: UPDATED, status: "pushed" })
   })
