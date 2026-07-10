@@ -61,9 +61,9 @@ describe("durable effects", () => {
     const app = pipe(bare, withEffects())
 
     expect(
-      app.commandRegistry.entries().map(({ path, command }) => ({
+      app.commandRegistry.entries.map(({ path, command }) => ({
         op: path.join("."),
-        visibility: command.visibility,
+        visibility: command.metadata.visibility,
       })),
     ).toEqual([{ op: "effect.transition", visibility: "internal" }])
 

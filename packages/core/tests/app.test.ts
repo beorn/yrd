@@ -25,6 +25,7 @@ function withCounter<App extends AnyYrdApp>(app: App): ExtendYrdApp<App, { count
       effects: [],
     }),
     {
+      title: "Increment counter",
       args: {
         parse(input) {
           const by = (input as { by?: unknown } | undefined)?.by
@@ -85,7 +86,16 @@ describe("Era2 Yrd app", () => {
 
     expect(app.commandRegistry.pathOf(increment)).toEqual(["counter", "increment"])
     expect(app.commandRegistry.commandAt("counter.increment")).toBe(increment)
-    expect(app.commandRegistry.entries().map(({ path }) => path.join("."))).toEqual(["counter.increment"])
+    expect(app.commandRegistry.entries.map(({ path }) => path.join("."))).toEqual(["counter.increment"])
+    expect(JSON.parse(JSON.stringify(app.commands))).toEqual({
+      counter: {
+        increment: {
+          kind: "command",
+          title: "Increment counter",
+          metadata: { visibility: "internal" },
+        },
+      },
+    })
 
     await app.command(increment, { by: 2 })
     const serialized = app.operation(increment, { by: 3 })

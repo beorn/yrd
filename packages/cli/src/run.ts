@@ -56,8 +56,8 @@ function installedCommand<Args>(
   if (path?.join(".") !== expectedPath) {
     configuration(`${expectedPath} is not registered to its command object reference`)
   }
-  if (command.visibility !== visibility) {
-    configuration(`${expectedPath} is ${command.visibility}, expected ${visibility}`)
+  if (command.metadata.visibility !== visibility) {
+    configuration(`${expectedPath} is ${command.metadata.visibility}, expected ${visibility}`)
   }
   return command
 }

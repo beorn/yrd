@@ -5,5 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@silvery/command": "^0.21.0"
   }
 }

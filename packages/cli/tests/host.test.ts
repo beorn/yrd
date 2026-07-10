@@ -73,9 +73,8 @@ describe("createDefaultYrdApp", () => {
       },
     })
     expect(
-      app.commandRegistry
-        .entries()
-        .filter((entry) => entry.command.visibility === "public")
+      app.commandRegistry.entries
+        .filter((entry) => entry.command.metadata.visibility === "public")
         .map((entry) => entry.path.join(".")),
     ).toEqual([
       "bay.open",

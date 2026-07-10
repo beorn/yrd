@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto"
 import { AsyncLocalStorage } from "node:async_hooks"
+import {
+  command as defineCommand,
+  createCommandRegistry as buildCommandRegistry,
+  isCommand,
+  type Command as SerializableCommand,
+  type CommandRegistry as SerializableCommandRegistry,
+  type CommandTree as SerializableCommandTree,
+} from "@silvery/command"
 
-const OP_REF = Symbol("yrd.op")
+const COMMAND_RUNTIME = Symbol("yrd.command.runtime")
 const EFFECT_REF = Symbol("yrd.effect")
 
 export type ArgsParser<Args> = {
@@ -14,14 +22,17 @@ export type OperationHandler<State extends object, Args> = (
   context: { cause: YrdCause; operation: SerializedOperation<Args> },
 ) => ApplyResult
 
-export type Command<Args = undefined, State extends object = object> = Readonly<{
-  [OP_REF]: true
+type CommandRuntime<State extends object, Args> = Readonly<{
   fn: OperationHandler<State, Args>
-  title?: string
-  description?: string
-  visibility: "public" | "internal"
   args?: ArgsParser<Args>
 }>
+
+export type Command<Args = undefined, State extends object = object> = Readonly<
+  Omit<SerializableCommand<any>, "metadata"> & {
+    metadata: Readonly<{ visibility: "public" | "internal" }>
+    [COMMAND_RUNTIME]: CommandRuntime<State, Args>
+  }
+>
 
 export type AnyCommand = Command<any, any>
 export type CommandTree = Record<string, unknown>
@@ -97,7 +108,7 @@ export type YrdEventStore = {
   close(): Promise<void>
 }
 
-type RegistryKind = "command" | "effect"
+type RegistryKind = "effect"
 type RegistryEntry<Kind extends RegistryKind, Value> = { path: readonly string[] } & {
   [Key in Kind]: Value
 }
@@ -109,8 +120,7 @@ type Registry<Kind extends RegistryKind, Value extends object> = {
   [Key in `${Kind}At`]: (path: string | readonly string[]) => Value | undefined
 }
 
-export type CommandRegistryEntry = RegistryEntry<"command", AnyCommand>
-export type CommandRegistry = Omit<Registry<"command", AnyCommand>, "register">
+export type CommandRegistry = SerializableCommandRegistry<AnyCommand>
 export type EffectRegistry = Registry<"effect", AnyFx>
 
 export type CommandRun = {
@@ -163,7 +173,17 @@ export function op<State extends object, Args>(
     args?: ArgsParser<Args>
   } = {},
 ): Command<Args, State> {
-  return Object.freeze({ visibility: "internal", ...definition, fn, [OP_REF]: true as const })
+  const declared = defineCommand({
+    title: definition.title ?? (fn.name || "Internal command"),
+    ...(definition.description === undefined ? {} : { description: definition.description }),
+    metadata: { visibility: definition.visibility ?? "internal" },
+  })
+  return Object.freeze(
+    Object.defineProperty({ ...declared }, COMMAND_RUNTIME, {
+      value: Object.freeze({ fn, ...(definition.args === undefined ? {} : { args: definition.args }) }),
+      enumerable: false,
+    }),
+  ) as Command<Args, State>
 }
 
 export function fx<Input, Output>(
@@ -194,8 +214,6 @@ function normalizePath(path: string | readonly string[]): string[] {
   }
   return parts
 }
-
-type MutableCommandRegistry = Registry<"command", AnyCommand>
 
 function createRegistry<Kind extends RegistryKind, Value extends object>(kind: Kind): Registry<Kind, Value> {
   const byPath = new Map<string, RegistryEntry<Kind, Value>>()
@@ -231,8 +249,12 @@ export function createEffectRegistry(): EffectRegistry {
   return createRegistry<"effect", AnyFx>("effect")
 }
 
-function isCommand(value: unknown): value is AnyCommand {
-  return typeof value === "object" && value !== null && OP_REF in value
+function isYrdCommand(value: unknown): value is AnyCommand {
+  return isCommand(value) && COMMAND_RUNTIME in value
+}
+
+function runtimeOf<Args, State extends object>(command: Command<Args, State>): CommandRuntime<State, Args> {
+  return command[COMMAND_RUNTIME]
 }
 
 function isNamespace(value: unknown): value is Record<string, unknown> {
@@ -241,7 +263,7 @@ function isNamespace(value: unknown): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null
 }
 
-function createCommandNamespace(registry: MutableCommandRegistry, path: readonly string[] = []): CommandTree {
+function createCommandNamespace(path: readonly string[] = []): CommandTree {
   const target: CommandTree = Object.create(null) as CommandTree
   return new Proxy(target, {
     set(namespace, key, value) {
@@ -250,15 +272,14 @@ function createCommandNamespace(registry: MutableCommandRegistry, path: readonly
       }
       const commandPath = [...path, key]
       if (Object.hasOwn(namespace, key)) {
-        const kind = isCommand(namespace[key]) ? "command" : "command namespace"
+        const kind = isYrdCommand(namespace[key]) ? "command" : "command namespace"
         throw new Error(`yrd: ${kind} '${commandPath.join(".")}' is already registered`)
       }
-      if (isCommand(value)) {
-        registry.register(commandPath, value)
-      } else if (!isNamespace(value)) {
+      if (!isYrdCommand(value) && !isNamespace(value)) {
         throw new Error(`yrd: command '${commandPath.join(".")}' must be created with op() or contain commands`)
-      } else {
-        const child = createCommandNamespace(registry, commandPath)
+      }
+      if (!isYrdCommand(value)) {
+        const child = createCommandNamespace(commandPath)
         Object.assign(child, value)
         value = child
       }
@@ -341,17 +362,19 @@ export function createYrd(options: {
 }): YrdApp<{}, {}> {
   const clock = options.clock ?? (() => new Date().toISOString())
   const idGen = options.idGen ?? randomUUID
-  const commandRegistry = createRegistry<"command", AnyCommand>("command")
+  const commands = createCommandNamespace()
+  const commandRegistry = () => buildCommandRegistry(commands as SerializableCommandTree) as CommandRegistry
   const effectRegistry = createEffectRegistry()
-  const commands = createCommandNamespace(commandRegistry)
 
   const app: YrdApp<Record<string, unknown>, CommandTree> = {
     initialState: {},
     commands,
-    commandRegistry,
+    get commandRegistry() {
+      return commandRegistry()
+    },
     effectRegistry,
     apply(state, invocation) {
-      return invocation.command.fn(state, invocation.args, {
+      return runtimeOf(invocation.command).fn(state, invocation.args, {
         cause: invocation.cause,
         operation: invocation.operation,
       })
@@ -367,9 +390,9 @@ export function createYrd(options: {
       })
     },
     operation(command, args) {
-      const path = commandRegistry.pathOf(command)
+      const path = commandRegistry().pathOf(command)
       if (path === undefined) {
-        throw new Error(`yrd: command '${command.title ?? command.fn.name ?? "unnamed"}' is not installed`)
+        throw new Error(`yrd: command '${command.title}' is not installed`)
       }
       return Object.freeze(args === undefined ? { op: path.join(".") } : { op: path.join("."), args: cloneJson(args) })
     },
@@ -382,12 +405,13 @@ export function createYrd(options: {
       }
       const path = normalizePath(serialized.op)
       const operationPath = path.join(".")
-      const command = commandRegistry.commandAt(path)
+      const command = commandRegistry().commandAt(path)
       if (command === undefined) throw new Error(`yrd: unknown command '${operationPath}'`)
+      const runtime = runtimeOf(command)
       const rawArgs = serialized.args === undefined ? undefined : cloneJson(serialized.args)
       let args = rawArgs
-      if (command.args !== undefined) {
-        args = command.args.parse(rawArgs)
+      if (runtime.args !== undefined) {
+        args = runtime.args.parse(rawArgs)
         if (args !== undefined) args = cloneJson(args)
       }
       const operation = Object.freeze(args === undefined ? { op: operationPath } : { op: operationPath, args })
