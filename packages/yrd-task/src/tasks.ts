@@ -38,10 +38,12 @@ export const Task = Object.freeze({
 })
 
 export function createTasks(options: TasksOptions = {}): Tasks {
-  const sourceById = new Map(
-    (options.sources ?? []).map((source) => [TaskRefSchema.shape.source.parse(source.id), source] as const),
-  )
-  if (sourceById.size !== (options.sources?.length ?? 0)) throw new Error("yrd: duplicate task source")
+  const sourceById = new Map<string, TaskSource>()
+  for (const source of options.sources ?? []) {
+    const id = TaskRefSchema.shape.source.parse(source.id)
+    if (sourceById.has(id)) throw new Error(`yrd: duplicate task source '${id}'`)
+    sourceById.set(id, source)
+  }
   const defaultSource = TaskRefSchema.shape.source.parse(options.defaultSource ?? "km")
 
   return {

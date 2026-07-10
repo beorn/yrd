@@ -4,12 +4,15 @@ import { createCommandTaskSource, createKmTaskSource, createTasks, withTasks } f
 
 it("resolves source-owned ids and composes without mutating its host", async () => {
   let argv: readonly string[] = []
+  let environment: NodeJS.ProcessEnv | undefined
   const source = createCommandTaskSource({
     id: "issues",
     command: ["issue", "show", "--json"],
+    env: { GIT_DIR: "/poison.git", YRD_JOB: "private", TASK_TEST_MARKER: "preserved" },
     process: {
       async run(request) {
         argv = request.argv
+        environment = request.env
         return {
           exitCode: 0,
           signal: null,
@@ -33,6 +36,14 @@ it("resolves source-owned ids and composes without mutating its host", async () 
     labels: ["bug"],
   })
   expect(argv).toEqual(["issue", "show", "--json", "release:2.0"])
+  expect(environment).toMatchObject({
+    TASK_TEST_MARKER: "preserved",
+    YRD_TASK_SOURCE: "issues",
+    YRD_TASK_ID: "release:2.0",
+  })
+  expect(environment).not.toHaveProperty("GIT_DIR")
+  expect(environment).not.toHaveProperty("YRD_JOB")
+  expect(() => createTasks({ sources: [source, source] })).toThrow("duplicate task source 'issues'")
   await expect(tasks.resolve({ source: "missing", id: "1" })).rejects.toThrow("no task source")
   await app.close()
 })
