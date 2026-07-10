@@ -1,0 +1,13 @@
+{
+  "name": "@yrd/process",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@silvery/scope": "^0.21.0",
+    "loggily": "^0.10.2"
+  }
+}
