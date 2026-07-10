@@ -15,7 +15,7 @@ import {
   type Event,
   type YrdDef,
 } from "@yrd/core"
-import { createJobDef, withJobs, type JobContext, type JobDef, type JobHandler, type JobResult } from "@yrd/job"
+import { createJobDef, withJobs, type JobContext, type JobDef, type JobHandler } from "@yrd/job"
 
 type Delivery = { message: string }
 type Receipt = { receipt: string }
@@ -129,7 +129,56 @@ describe("Jobs", () => {
 
     const app = await jobsApp(first)
     expect(app.jobs.definition("message.deliver")).toBe(first)
+    expect(() => app.jobs.requireDefinitions({ [first.name]: first })).not.toThrow()
+    expect(() => app.jobs.requireDefinitions({ [second.name]: second })).toThrow("does not match required revision")
     expect(() => app.jobs.definition("missing")).toThrow("no job definition 'missing'")
+    await app.close()
+  })
+
+  it("runs requested Jobs with bounded concurrency and preserves input order", async () => {
+    let active = 0
+    let peak = 0
+    const app = await jobsApp(
+      delivery(async ({ message }) => {
+        active++
+        peak = Math.max(peak, active)
+        await Bun.sleep(5)
+        active--
+        return { status: "passed", output: { receipt: `ok:${message}` } }
+      }),
+    )
+    const first = await app.command(app.commands.sender.send, { message: "first" })
+    const second = await app.command(app.commands.sender.send, { message: "second" })
+    const jobIds = [...app.jobs.requested(first), ...app.jobs.requested(second)]
+
+    const jobs = await app.jobs.runMany(jobIds, { executor: "worker", leaseMs: 60_000, concurrency: 2 })
+
+    expect(jobs).toMatchObject([
+      { id: jobIds[0], status: "passed", output: { receipt: "ok:first" } },
+      { id: jobIds[1], status: "passed", output: { receipt: "ok:second" } },
+    ])
+    expect(peak).toBe(2)
+    await app.close()
+  })
+
+  it("does not hide a settlement append failure after runMany starts a Job", async () => {
+    const memory = createMemoryJournal()
+    let appends = 0
+    const journal = {
+      read: memory.read,
+      append(value: Parameters<typeof memory.append>[0], cursor: number) {
+        appends++
+        return appends === 3 ? Promise.reject(new Error("settlement append failed")) : memory.append(value, cursor)
+      },
+    }
+    const app = await jobsApp(delivery(), { journal })
+    const frame = await app.command(app.commands.sender.send, { message: "hello" })
+    const [id] = app.jobs.requested(frame)
+
+    await expect(app.jobs.runMany([id!], { executor: "worker", leaseMs: 60_000 })).rejects.toThrow(
+      "settlement append failed",
+    )
+    expect(app.jobs.get(id!)).toMatchObject({ status: "running", attempt: 1 })
     await app.close()
   })
 
@@ -275,14 +324,12 @@ describe("Jobs", () => {
   })
 
   it("renews a lease through the Job run scope", async () => {
-    let release = () => {}
-    let signalStarted = () => {}
-    const gate = new Promise<void>((resolve) => (release = resolve))
-    const started = new Promise<void>((resolve) => (signalStarted = resolve))
+    const gate = Promise.withResolvers<void>()
+    const started = Promise.withResolvers<void>()
     const app = await jobsApp(
       delivery(async () => {
-        signalStarted()
-        await gate
+        started.resolve()
+        await gate.promise
         return { status: "passed", output: { receipt: "slow-ok" } }
       }),
       { id: ids("send", "J1") },
@@ -298,12 +345,12 @@ describe("Jobs", () => {
         heartbeatMs: 5,
         now: () => (now += 10),
       })
-      await started
+      await started.promise
       await vi.advanceTimersByTimeAsync(20)
-      release()
+      gate.resolve()
       await expect(running).resolves.toMatchObject({ status: "passed", attempt: 1 })
     } finally {
-      release()
+      gate.resolve()
       vi.useRealTimers()
     }
 

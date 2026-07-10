@@ -20,5 +20,6 @@ export type {
   JobsOptions,
   JobsState,
   JobTransition,
+  RunManyJobOptions,
   RunJobOptions,
 } from "./jobs.ts"

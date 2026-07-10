@@ -228,6 +228,8 @@ export type RunJobOptions = Readonly<{
   now?: () => number
 }>
 
+export type RunManyJobOptions = RunJobOptions & Readonly<{ concurrency?: number }>
+
 export type JobCompletion<Output extends JsonValue = JsonValue> = Readonly<{
   attempt: number
   executor: string
@@ -240,8 +242,10 @@ export type JobDefs = Readonly<Record<string, JobDef>>
 export type Jobs = Readonly<{
   state: ReadSignal<DeepReadonly<JobsState>>
   definition(name: string): JobDef
+  requireDefinitions(definitions: JobDefs): void
   get(id: string): DeepReadonly<Job> | undefined
   run(id: string, options: RunJobOptions): Promise<Job>
+  runMany(ids: readonly string[], options: RunManyJobOptions): Promise<readonly Job[]>
   finish(id: string, completion: JobCompletion): Promise<Job>
   retry(id: string): Promise<Job>
   recover(options: Readonly<{ now: string; reason?: string }>): Promise<readonly string[]>
@@ -311,71 +315,111 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     return job
   }
 
+  const run = async (id: string, runOptions: RunJobOptions): Promise<Job> => {
+    const parsed = RunOptionsSchema.parse({
+      executor: runOptions.executor,
+      leaseMs: runOptions.leaseMs,
+      heartbeatMs: runOptions.heartbeatMs,
+    })
+    const heartbeatMs = parsed.heartbeatMs ?? Math.max(1, Math.floor(parsed.leaseMs / 3))
+    const requested = current(id)
+    requireStatus(requested, "requested", "requested")
+    const installed = definitionFor(requested)
+    const attempt = requested.attempt + 1
+    const now = runOptions.now ?? Date.now
+
+    await commit({
+      type: "start",
+      id,
+      attempt,
+      executor: parsed.executor,
+      leaseExpiresAt: lease(now, parsed.leaseMs),
+    })
+    const started = current(id)
+    if (!Job.owns(started, attempt, parsed.executor, "running")) return started
+
+    const scope = options.scope.child(`job:${id}:${attempt}`)
+    const outcome = await executeWithHeartbeat(
+      scope,
+      () => installed.execute(requested.input, { id, attempt, executor: parsed.executor, signal: scope.signal }),
+      heartbeatMs,
+      async () => {
+        const active = current(id)
+        if (!Job.owns(active, attempt, parsed.executor, "running")) return
+        await commit({
+          type: "heartbeat",
+          id,
+          attempt,
+          executor: parsed.executor,
+          leaseExpiresAt: lease(now, parsed.leaseMs),
+        })
+      },
+    )
+
+    const active = current(id)
+    if (!Job.owns(active, attempt, parsed.executor, "running")) return active
+    const result = outcome.heartbeatError ? failed("heartbeat-failed", outcome.heartbeatError) : outcome.result
+    await commit(settlement(id, attempt, parsed.executor, result))
+    return current(id)
+  }
+
   return {
     state,
     definition,
+
+    requireDefinitions(required) {
+      for (const [name, expected] of Object.entries(required)) {
+        const installed = definition(name)
+        if (installed.revision !== expected.revision) {
+          throw new Error(
+            `yrd: installed job definition '${name}' revision '${installed.revision}' does not match required revision '${expected.revision}'`,
+          )
+        }
+      }
+    },
 
     get(id) {
       return state().byId[id]
     },
 
-    async run(id, runOptions) {
-      const parsed = RunOptionsSchema.parse({
-        executor: runOptions.executor,
-        leaseMs: runOptions.leaseMs,
-        heartbeatMs: runOptions.heartbeatMs,
-      })
-      const heartbeatMs = parsed.heartbeatMs ?? Math.max(1, Math.floor(parsed.leaseMs / 3))
-      const requested = current(id)
-      requireStatus(requested, "requested", "requested")
-      const definition = definitionFor(requested)
-      const attempt = requested.attempt + 1
-      const now = runOptions.now ?? Date.now
+    run,
 
-      await commit({
-        type: "start",
-        id,
-        attempt,
-        executor: parsed.executor,
-        leaseExpiresAt: lease(now, parsed.leaseMs),
-      })
-      const started = current(id)
-      if (!Job.owns(started, attempt, parsed.executor, "running")) return started
-
-      const scope = options.scope.child(`job:${id}:${attempt}`)
-      const execution = await executeWithHeartbeat(
-        scope,
-        () => definition.execute(requested.input, { id, attempt, executor: parsed.executor, signal: scope.signal }),
-        heartbeatMs,
-        async () => {
-          const active = current(id)
-          if (!Job.owns(active, attempt, parsed.executor, "running")) return
-          await commit({
-            type: "heartbeat",
-            id,
-            attempt,
-            executor: parsed.executor,
-            leaseExpiresAt: lease(now, parsed.leaseMs),
-          })
-        },
-      )
-
-      const active = current(id)
-      if (!Job.owns(active, attempt, parsed.executor, "running")) return active
-      const result = execution.heartbeatError ? failed("heartbeat-failed", execution.heartbeatError) : execution.result
-      await commit(settlement(id, attempt, parsed.executor, result))
-      return current(id)
+    async runMany(ids, runManyOptions) {
+      if (new Set(ids).size !== ids.length) throw new Error("yrd: Jobs.runMany requires unique Job ids")
+      const concurrency = z
+        .number()
+        .int()
+        .positive()
+        .parse(runManyOptions.concurrency ?? 1)
+      const runOptions: RunJobOptions = {
+        executor: runManyOptions.executor,
+        leaseMs: runManyOptions.leaseMs,
+        ...(runManyOptions.heartbeatMs === undefined ? {} : { heartbeatMs: runManyOptions.heartbeatMs }),
+        ...(runManyOptions.now === undefined ? {} : { now: runManyOptions.now }),
+      }
+      const results: Job[] = []
+      for (let offset = 0; offset < ids.length; offset += concurrency) {
+        const batch = await Promise.all(
+          ids.slice(offset, offset + concurrency).map(async (id) => {
+            const job = current(id)
+            if (job.status !== "requested") return job
+            return run(id, runOptions)
+          }),
+        )
+        results.push(...batch)
+      }
+      return results
     },
 
     async finish(id, completion) {
       const job = current(id)
-      const definition = definitionFor(job)
+      const installedDefinition = definitionFor(job)
       const metadata = CompletionSchema.parse({
         attempt: completion.attempt,
         executor: completion.executor,
         token: completion.token,
       })
-      const result = jobTerminalResultSchema(definition.output).parse(completion.result)
+      const result = jobTerminalResultSchema(installedDefinition.output).parse(completion.result)
       await commit({ type: "finish", id, ...metadata, result })
       return current(id)
     },
