@@ -26,6 +26,7 @@ import {
   type RunJobOptions,
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
+import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   IntegrationProofSchema,
@@ -280,6 +281,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
               isolate: (run, part) => yrd.command(commands.line.isolate, { run, part }),
             },
             steps,
+            yrd.log.child("line"),
           ),
         }
       },
@@ -302,6 +304,7 @@ function createLine<Shape extends PRShape>(
   jobs: HasJobs["jobs"],
   actions: LineActions,
   steps: readonly RuntimeStep[],
+  log: ConditionalLogger,
 ): Line<Shape> {
   const current = (id: LineRunId): LineRun => materializeRun(Lines.record(state(), id), runtime().jobs)
 
@@ -364,6 +367,7 @@ function createLine<Shape extends PRShape>(
   }
 
   const run = async (id: LineRunId, options: RunJobOptions): Promise<LineRun> => {
+    using _span = log.span?.("run", { id })
     const settled = await drive(id, options)
     if (!bisectable(settled)) return settled
     for (const part of [0, 1] as const) {
@@ -384,6 +388,7 @@ function createLine<Shape extends PRShape>(
     state,
     steps: () => steps.map(descriptor),
     async integrate(args, runOptions) {
+      using _span = log.span?.("integrate", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
       const snapshot = runtime()
       const prs = runnablePRs(snapshot, args)
@@ -407,6 +412,7 @@ function createLine<Shape extends PRShape>(
     run,
     waiting,
     async finish(selector, completion, runOptions) {
+      using _span = log.span?.("finish", { selector, step: completion.step })
       const selected = waiting(selector, completion.step)
       await jobs.finish(selected.step.job.id, {
         attempt: selected.step.job.attempt,
@@ -417,6 +423,7 @@ function createLine<Shape extends PRShape>(
       return run(selected.run.id, runOptions)
     },
     async recover(recoverOptions) {
+      using _span = log.span?.("recover", { at: recoverOptions.recoveryTime })
       await jobs.recover({
         now: recoverOptions.recoveryTime,
         ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),

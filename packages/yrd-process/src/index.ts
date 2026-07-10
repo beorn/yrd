@@ -59,7 +59,7 @@ export function createProcess(
   }> = {},
 ): Process {
   const scope = options.inject?.scope?.child("process") ?? createScope("process")
-  const log = options.inject?.log ?? createLogger("yrd:process")
+  const log = options.inject?.log?.child("process") ?? createLogger("yrd:process")
   const now = options.inject?.now ?? performance.now.bind(performance)
   const spawn = options.inject?.spawn ?? spawnProcess
   const cwd = options.cwd ?? process.cwd()

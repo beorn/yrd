@@ -135,27 +135,43 @@ describe("Jobs", () => {
     await app.close()
   })
 
-  it("runs requested Jobs with bounded concurrency and preserves input order", async () => {
+  it("refills bounded concurrency slots and preserves input order", async () => {
     let active = 0
     let peak = 0
+    const first = Promise.withResolvers<void>()
+    const slow = Promise.withResolvers<void>()
+    const started: string[] = []
     const app = await jobsApp(
       delivery(async ({ message }) => {
+        started.push(message)
         active++
         peak = Math.max(peak, active)
-        await Bun.sleep(5)
+        if (message === "first") await first.promise
+        if (message === "slow") await slow.promise
         active--
         return { status: "passed", output: { receipt: `ok:${message}` } }
       }),
     )
-    const first = await app.command(app.commands.sender.send, { message: "first" })
-    const second = await app.command(app.commands.sender.send, { message: "second" })
-    const jobIds = [...app.jobs.requested(first), ...app.jobs.requested(second)]
+    const firstFrame = await app.command(app.commands.sender.send, { message: "first" })
+    const slowFrame = await app.command(app.commands.sender.send, { message: "slow" })
+    const thirdFrame = await app.command(app.commands.sender.send, { message: "third" })
+    const jobIds = [
+      ...app.jobs.requested(firstFrame),
+      ...app.jobs.requested(slowFrame),
+      ...app.jobs.requested(thirdFrame),
+    ]
 
-    const jobs = await app.jobs.runMany(jobIds, { executor: "worker", leaseMs: 60_000, concurrency: 2 })
+    const running = app.jobs.runMany(jobIds, { executor: "worker", leaseMs: 60_000, concurrency: 2 })
+    await vi.waitFor(() => expect(started).toEqual(["first", "slow"]))
+    first.resolve()
+    await vi.waitFor(() => expect(started).toEqual(["first", "slow", "third"]))
+    slow.resolve()
+    const jobs = await running
 
     expect(jobs).toMatchObject([
       { id: jobIds[0], status: "passed", output: { receipt: "ok:first" } },
-      { id: jobIds[1], status: "passed", output: { receipt: "ok:second" } },
+      { id: jobIds[1], status: "passed", output: { receipt: "ok:slow" } },
+      { id: jobIds[2], status: "passed", output: { receipt: "ok:third" } },
     ])
     expect(peak).toBe(2)
     await app.close()
@@ -286,6 +302,29 @@ describe("Jobs", () => {
     await app.close()
   })
 
+  it("finishes pinned waiting work after a compatible definition revision changes", async () => {
+    const journal = createMemoryJournal()
+    const waiting = delivery(
+      async () => ({ status: "waiting", token: "remote-1", url: "https://runner.invalid/jobs/1" }),
+      "transport-v1",
+    )
+    const original = await jobsApp(waiting, { journal, id: ids("send", "J1") })
+    await original.command(original.commands.sender.send, { message: "remote" })
+    await original.jobs.run("J1", { executor: "launcher", leaseMs: 60_000 })
+    await original.close()
+
+    const resumed = await jobsApp(delivery(undefined, "transport-v2"), { journal })
+    await expect(
+      resumed.jobs.finish("J1", {
+        attempt: 1,
+        executor: "launcher",
+        token: "remote-1",
+        result: { status: "passed", output: { receipt: "remote-ok" } },
+      }),
+    ).resolves.toMatchObject({ status: "passed", revision: "transport-v1", output: { receipt: "remote-ok" } })
+    await resumed.close()
+  })
+
   it("recovers only the observed expired lease, then retries as a new attempt", async () => {
     const app = await jobsApp(delivery(), { id: ids("send", "J1") })
     await app.command(app.commands.sender.send, { message: "recover" })
@@ -358,6 +397,56 @@ describe("Jobs", () => {
       .filter(({ name }) => name === "job/transitioned")
       .map(({ data }) => data as { type: string })
     expect(transitions.filter(({ type }) => type === "heartbeat").length).toBeGreaterThanOrEqual(2)
+    await app.close()
+  })
+
+  it("aborts an executor after heartbeat observes lost ownership", async () => {
+    const started = Promise.withResolvers<void>()
+    const aborted = Promise.withResolvers<void>()
+    const app = await jobsApp(
+      delivery(async (_input, context) => {
+        started.resolve()
+        await new Promise<void>((resolve) => {
+          context.signal.addEventListener(
+            "abort",
+            () => {
+              aborted.resolve()
+              resolve()
+            },
+            { once: true },
+          )
+        })
+        return { status: "passed", output: { receipt: "too-late" } }
+      }),
+      { id: ids("send", "J1") },
+    )
+    await app.command(app.commands.sender.send, { message: "slow" })
+
+    vi.useFakeTimers()
+    try {
+      const running = app.jobs.run("J1", {
+        executor: "worker-1",
+        leaseMs: 20,
+        heartbeatMs: 5,
+        now: () => 0,
+      })
+      await started.promise
+      const job = app.jobs.get("J1")
+      if (job?.status !== "running") throw new Error("job did not start")
+      await app.command(app.commands.job.transition, {
+        type: "lose",
+        id: job.id,
+        attempt: job.attempt,
+        executor: job.executor,
+        leaseExpiresAt: job.leaseExpiresAt,
+        reason: "lease transferred",
+      })
+      await vi.advanceTimersByTimeAsync(5)
+      await aborted.promise
+      await expect(running).resolves.toMatchObject({ status: "lost", lostReason: "lease transferred" })
+    } finally {
+      vi.useRealTimers()
+    }
     await app.close()
   })
 })

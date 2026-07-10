@@ -25,11 +25,7 @@ const deliver = createJobDef({
   },
 })
 
-const definition = pipe(
-  createYrdDef(),
-  withJobs({ definitions: { [deliver.name]: deliver } }),
-  withMessages(deliver),
-)
+const definition = pipe(createYrdDef(), withJobs({ definitions: { [deliver.name]: deliver } }), withMessages(deliver))
 ```
 
 `deliver.request(input, {key})` is a serializable `job/requested` event draft.
@@ -53,8 +49,8 @@ yrd.jobs.requested(frame)
 
 `requireDefinitions()` verifies that a composing domain sees the exact Job
 revisions it supplied. `runMany()` executes requested Jobs with bounded
-concurrency, preserves input order, and returns already-advanced Jobs without
-starting a second attempt.
+concurrency, refills each free worker slot, preserves input order, and returns
+already-advanced Jobs without starting a second attempt.
 
 ## Lifecycle
 
@@ -67,6 +63,8 @@ requested -> running -> passed
 
 `run()` starts the next attempt, heartbeats its lease, executes the pinned
 definition, and settles only while the same executor still owns that attempt.
+Losing ownership aborts the handler's `JobContext.signal` instead of allowing a
+stale external operation to keep running.
 `recover()` marks an expired running lease as lost only if a concurrent
 heartbeat has not changed it. `retry()` returns a failed or lost Job to
 `requested`; the same Job id is retained.
@@ -88,7 +86,10 @@ contract. It reads the final JSON line containing `token` and optional `url`,
 remote-job parsers.
 
 Finish it with the exact executor, attempt, and token. Stale attempts, wrong
-owners, and wrong tokens are refused without appending a transition.
+owners, and wrong tokens are refused without appending a transition. Revision
+drift still blocks a not-yet-started Job, but it does not strand already waiting
+work: completion is validated against the stable output contract registered
+under the pinned definition name.
 
 ## Delivery Semantics
 

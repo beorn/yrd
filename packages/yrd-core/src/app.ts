@@ -55,7 +55,7 @@ export type CommandOptions = Readonly<{
   spanId?: string
 }>
 
-export type CommandDefinition<State extends object, Args extends JsonValue | undefined> = Readonly<{
+export type CommandDef<State extends object, Args extends JsonValue | undefined> = Readonly<{
   title: string
   description?: string
   visibility?: "public" | "internal"
@@ -130,13 +130,13 @@ export type YrdOf<Def> =
   Def extends YrdDef<infer State, infer Commands, infer Features> ? Yrd<State, Commands> & Features : never
 
 export function command<State extends object>(
-  definition: CommandDefinition<State, undefined> & Readonly<{ params?: never }>,
+  definition: CommandDef<State, undefined> & Readonly<{ params?: never }>,
 ): Command<undefined, State>
 export function command<State extends object, Args extends JsonValue>(
-  definition: CommandDefinition<State, Args> & Readonly<{ params: ParamSchema<Args> }>,
+  definition: CommandDef<State, Args> & Readonly<{ params: ParamSchema<Args> }>,
 ): Command<Args, State>
 export function command<State extends object, Args extends JsonValue | undefined>(
-  definition: CommandDefinition<State, Args>,
+  definition: CommandDef<State, Args>,
 ): Command<Args, State> {
   const node = createCommandNode({
     title: definition.title,
@@ -155,7 +155,7 @@ export function command<State extends object, Args extends JsonValue | undefined
 }
 
 export function createYrdDef(): YrdDef {
-  return buildDefinition({
+  return buildDef({
     initialState: {},
     commands: {},
     events: {},
@@ -179,7 +179,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const journal = options.inject.journal
   const clock = options.inject.clock ?? (() => new Date().toISOString())
   const id = options.inject.id ?? randomUUID
-  const log = options.inject.log ?? createLogger("yrd:core")
+  const log = options.inject.log ?? createLogger("yrd")
+  const coreLog = log.child("core")
   const scope = options.inject.scope?.child("yrd") ?? createScope("yrd")
   const commands = definition.commands as Commands
   const registry = createCommandTreeRegistry(
@@ -205,7 +206,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const active = new Set<Promise<unknown>>()
 
   const fold = async (base: Projection): Promise<Projection> => {
-    using _span = log.span?.("replay", { after: base.cursor })
+    using _span = coreLog.span?.("replay", { after: base.cursor })
     let next = base
     for await (const batch of journal.read(base.cursor)) {
       if (batch.cursor <= next.cursor) throw new Error("yrd: journal cursor did not advance")
@@ -366,7 +367,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 }
 
-function buildDefinition<State extends object, Commands extends CommandTree, Features extends object>(values: {
+function buildDef<State extends object, Commands extends CommandTree, Features extends object>(values: {
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
@@ -389,7 +390,7 @@ function buildDefinition<State extends object, Commands extends CommandTree, Fea
       const events = mergeFields(values.events, contribution.events ?? {}, "event")
       const previousFields = Object.keys(values.initialState)
       const owned = Object.keys(addedState)
-      return buildDefinition<State & AddedState, Commands & AddedCommands, Features & AddedFeatures>({
+      return buildDef<State & AddedState, Commands & AddedCommands, Features & AddedFeatures>({
         initialState,
         commands,
         events,

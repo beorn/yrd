@@ -82,14 +82,17 @@ database.
 
 ```ts
 type Journal<Value> = {
-  read(after?: number, before?: number): AsyncIterable<{
+  read(
+    after?: number,
+    before?: number,
+  ): AsyncIterable<{
     cursor: number
     values: readonly Value[]
   }>
-  append(value: Value, expectedCursor: number): Promise<
-    | { appended: true; cursor: number }
-    | { appended: false; cursor: number }
-  >
+  append(
+    value: Value,
+    expectedCursor: number,
+  ): Promise<{ appended: true; cursor: number } | { appended: false; cursor: number }>
 }
 ```
 

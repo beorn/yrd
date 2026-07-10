@@ -51,7 +51,7 @@ export function createJournal(
   const path = join(options.dir, "events.jsonl")
   const exclusive = options.inject?.exclusive ?? createExclusive(options.dir, options.lock)
   const io: JournalIO = { ...defaultIO, ...options.inject?.io }
-  const log = options.inject?.log ?? createLogger("yrd:journal")
+  const log = options.inject?.log?.child("journal") ?? createLogger("yrd:journal")
 
   return {
     async *read(after = 0, before) {

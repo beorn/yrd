@@ -12,6 +12,7 @@ import {
 } from "@yrd/core"
 import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
+import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   JobErrorSchema,
@@ -263,6 +264,7 @@ export type CreateJobsOptions = Readonly<{
   state: ReadSignal<DeepReadonly<JobsState>>
   transition(change: JobTransition): Promise<Frame>
   scope: JobScope
+  log: ConditionalLogger
 }>
 
 const RunOptionsSchema = z
@@ -328,6 +330,11 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     const heartbeatMs = parsed.heartbeatMs ?? Math.max(1, Math.floor(parsed.leaseMs / 3))
     const requested = current(id)
     requireStatus(requested, "requested", "requested")
+    using _span = options.log.span?.("run", {
+      id,
+      definition: requested.definition,
+      attempt: requested.attempt + 1,
+    })
     const installed = definitionFor(requested)
     const attempt = requested.attempt + 1
     const now = runOptions.now ?? Date.now
@@ -349,7 +356,9 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       heartbeatMs,
       async () => {
         const active = current(id)
-        if (!Job.owns(active, attempt, parsed.executor, "running")) return
+        if (!Job.owns(active, attempt, parsed.executor, "running")) {
+          throw new Error(`yrd: job '${id}' lost execution ownership`)
+        }
         await commit({
           type: "heartbeat",
           id,
@@ -402,28 +411,29 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         ...(runManyOptions.now === undefined ? {} : { now: runManyOptions.now }),
       }
       const results: Job[] = []
-      for (let offset = 0; offset < ids.length; offset += concurrency) {
-        const batch = await Promise.all(
-          ids.slice(offset, offset + concurrency).map(async (id) => {
-            const job = current(id)
-            if (job.status !== "requested") return job
-            return run(id, runOptions)
-          }),
-        )
-        results.push(...batch)
+      let next = 0
+      const worker = async (): Promise<void> => {
+        while (next < ids.length) {
+          const index = next++
+          const id = ids[index]!
+          const job = current(id)
+          results[index] = job.status === "requested" ? await run(id, runOptions) : job
+        }
       }
+      await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker))
       return results
     },
 
     async finish(id, completion) {
       const job = current(id)
-      const installedDefinition = definitionFor(job)
+      // A revision pins execution behavior. Its output contract remains stable under the definition name.
+      const installedDef = definition(job.definition)
       const metadata = CompletionSchema.parse({
         attempt: completion.attempt,
         executor: completion.executor,
         token: completion.token,
       })
-      const result = jobTerminalResultSchema(installedDefinition.output).parse(completion.result)
+      const result = jobTerminalResultSchema(installedDef.output).parse(completion.result)
       await commit({ type: "finish", id, ...metadata, result })
       return current(id)
     },
@@ -505,6 +515,7 @@ export function withJobs(options: JobsOptions = {}) {
             state: computed(() => yrd.state().jobs),
             transition: (change) => yrd.command(transition, change),
             scope: yrd.scope,
+            log: yrd.log.child("jobs"),
           }),
         }
       },
@@ -570,6 +581,7 @@ async function executeWithHeartbeat(
           await heartbeat()
         } catch (error) {
           heartbeatError = error
+          await scope.disposeAsync()
         }
       }
       return undefined
