@@ -1,10 +1,5 @@
 {
   "extends": "../../tsconfig.json",
-  "compilerOptions": {
-    "paths": {
-      "@vitest/expect": ["../../../termless/node_modules/@vitest/expect/dist/index.d.ts"]
-    }
-  },
   "include": [
     "src",
     "tests",
