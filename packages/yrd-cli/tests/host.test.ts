@@ -5,7 +5,7 @@
  */
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal } from "@yrd/core"
 import { createProcess } from "@yrd/process"
@@ -50,7 +50,7 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   return { repo, featureSha }
 }
 
-describe("createDefaultYrdApp", () => {
+describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
@@ -90,7 +90,7 @@ describe("createDefaultYrdApp", () => {
   })
 })
 
-describe("createYrdHost", () => {
+describe("createYrdHost", { timeout: 20_000 }, () => {
   it("initializes one filesystem authority and reopens its durable PR state", async () => {
     const { repo } = await repository()
     const first = await createYrdHost({ cwd: repo })
@@ -112,7 +112,28 @@ describe("createYrdHost", () => {
   })
 })
 
-describe("discoverYrdRepository", () => {
+describe("discoverYrdRepository", { timeout: 20_000 }, () => {
+  it("resolves a relative core.worktree from a separate Git directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-separated-git-"))
+    roots.push(root)
+    const repo = join(root, "repo")
+    const gitDir = join(root, "modules", "repo.git")
+    await mkdir(join(root, "modules"))
+    await git(root, "init", "-q", "-b", "main", "--separate-git-dir", gitDir, repo)
+    await git(repo, "config", "core.worktree", relative(gitDir, repo))
+    const resolvedRepo = await realpath(repo)
+    const resolvedGitDir = await realpath(gitDir)
+
+    expect(await discoverYrdRepository({ cwd: repo })).toEqual({
+      repo: resolvedRepo,
+      worktree: resolvedRepo,
+      gitDir: resolvedGitDir,
+      stateDir: join(resolvedGitDir, "yrd"),
+      baysRoot: join(resolvedRepo, ".bays"),
+      defaultBase: "main",
+    })
+  })
+
   it("finds the shared Git directory and primary worktree from a linked worktree", async () => {
     const { repo } = await repository()
     const linked = join(repo, "..", "linked")

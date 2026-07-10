@@ -81,6 +81,24 @@ async function configureIntake(git: Git, path: string, remote: string): Promise<
   await git.run(path, ["config", "--worktree", "push.default", "current"])
 }
 
+async function prepareWorktreeConfig(git: Git, repo: string, required: boolean): Promise<void> {
+  const configured = await git.run(repo, ["config", "--local", "--get", "core.worktree"], true)
+  if (configured.code !== 0 && !required) return
+
+  const enabled = await git.mutateConfig(repo, ["config", "extensions.worktreeConfig", "true"])
+  if (enabled.code !== 0) throw new Error(enabled.stderr || "could not enable worktree config")
+  if (configured.code !== 0) return
+
+  const worktree = configured.stdout.trim()
+  if (worktree === "") throw new Error("Git core.worktree is empty")
+  const moved = await git.mutateConfig(repo, ["config", "--worktree", "core.worktree", worktree])
+  if (moved.code !== 0) throw new Error(moved.stderr || "could not set primary worktree config")
+  const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "core.worktree"])
+  if (removed.code === 0) return
+  const remaining = await git.run(repo, ["config", "--local", "--get", "core.worktree"], true)
+  if (remaining.code === 0) throw new Error(removed.stderr || "could not remove shared core.worktree config")
+}
+
 async function ignoreInRepositoryBays(git: Git, repo: string, baysRoot: string): Promise<void> {
   const local = relative(repo, baysRoot)
   if (local === "" || local === ".." || local.startsWith(`..${sep}`) || isAbsolute(local)) return
@@ -104,7 +122,7 @@ export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspace {
   return {
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v1", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({ implementation: "yrd-git-workspace-v2", repo, baysRoot, intakeRemote: options.intakeRemote }),
       )
       .digest("hex"),
 
@@ -117,6 +135,7 @@ export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspace {
           throw new Error(`workspace path '${path}' already exists; inspect or remove it explicitly`)
         }
         await ignoreInRepositoryBays(git, repo, baysRoot)
+        await prepareWorktreeConfig(git, repo, options.intakeRemote !== undefined)
         if (input.from === undefined) {
           await git.run(repo, ["worktree", "add", "-b", input.branch, path, baseSha])
         } else {
@@ -125,10 +144,6 @@ export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspace {
         }
         const headSha = await git.commit(path, "HEAD")
         if (options.intakeRemote !== undefined) {
-          const configured = await git.mutateConfig(repo, ["config", "extensions.worktreeConfig", "true"])
-          if (configured.code !== 0) {
-            throw new Error(configured.stderr.trim() || configured.stdout.trim() || "could not enable worktree config")
-          }
           await configureIntake(git, path, options.intakeRemote)
         }
         return { status: "passed", output: { path, headSha, baseSha } }

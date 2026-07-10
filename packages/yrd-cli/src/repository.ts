@@ -54,6 +54,16 @@ function primaryWorktree(output: string): Readonly<{ path: string; branch?: stri
   return { path: resolve(path), ...(branch === undefined ? {} : { branch }) }
 }
 
+async function configuredWorktree(
+  process: RepositoryProcess,
+  worktree: string,
+  gitDir: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  const configured = value(await git(process, worktree, env, ["config", "--get", "core.worktree"], true))
+  return configured === undefined ? undefined : resolve(gitDir, configured)
+}
+
 async function defaultBranch(
   process: RepositoryProcess,
   repo: string,
@@ -98,7 +108,7 @@ export async function discoverYrdRepository(
     const worktrees = await git(runner, worktree, env, ["worktree", "list", "--porcelain"])
     const primary = primaryWorktree(worktrees.stdout)
     if (primary === undefined) throw new Error("yrd: Git did not report a primary worktree")
-    const repo = primary.path
+    const repo = (await configuredWorktree(runner, worktree, gitDir, env)) ?? primary.path
     return {
       repo,
       worktree: resolve(worktree),

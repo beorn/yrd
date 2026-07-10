@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs"
 import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Frame } from "@yrd/core"
 import { withJobs } from "@yrd/job"
@@ -165,6 +165,31 @@ describe("createGitWorkspace", () => {
         stdout: "bay",
       })
     }
+  })
+
+  it("moves a separate worktree path out of common config before adding a bay", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-git-workspace-separated-"))
+    roots.push(root)
+    const repo = join(root, "repo")
+    const gitDir = join(root, "repo.git")
+    const intake = join(root, "prs.git")
+    await Bun.$`git init -q -b main --separate-git-dir ${gitDir} ${repo}`
+    await git(repo, ["config", "core.worktree", relative(gitDir, repo)])
+    await git(repo, ["config", "user.name", "Yrd Test"])
+    await git(repo, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(repo, "README.md"), "initial\n")
+    await git(repo, ["add", "README.md"])
+    await git(repo, ["commit", "-qm", "initial"])
+    await Bun.$`git init -q --bare ${intake}`
+    await using process = createProcess()
+    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }))
+
+    await runRequested(app, await app.bays.open({ name: "separate-worktree" }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", path: join(root, "bays", "B1") })
+    expect((await git(repo, ["config", "--get", "extensions.worktreeConfig"])).stdout).toBe("true")
+    expect((await git(repo, ["config", "--local", "--get", "core.worktree"], true)).code).not.toBe(0)
+    expect((await git(repo, ["config", "--worktree", "--get", "core.worktree"])).stdout).toBe(relative(gitDir, repo))
   })
 
   it("opens an existing branch without inventing an adopt operation", async () => {
