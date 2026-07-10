@@ -8,7 +8,6 @@
   },
   "dependencies": {
     "@silvery/commands": "^0.21.0",
-    "@silvery/create": "^0.21.0",
     "@silvery/scope": "^0.21.0",
     "@silvery/signals": "^0.21.0",
     "canonicalize": "^3.0.0",
