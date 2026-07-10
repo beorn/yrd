@@ -209,18 +209,18 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   return Object.freeze({ run, commit })
 }
 
-async function withScratch<Output extends JsonValue>(
+async function withScratch(
   git: Git,
   repo: string,
   ref: string,
   parent: string,
-  run: (path: string) => Promise<JobResult<Output>>,
-): Promise<JobResult<Output>> {
+  run: (path: string) => Promise<JobResult<GitCheckEvidence>>,
+): Promise<JobResult<GitCheckEvidence>> {
   await mkdir(parent, { recursive: true })
   const root = await mkdtemp(join(await realpath(parent), "yrd-line-"))
   const path = join(root, "worktree")
   let added = false
-  let outcome: JobResult<Output> | undefined
+  let outcome: JobResult<GitCheckEvidence> | undefined
   let operationFailure: unknown
   try {
     await git.run(repo, ["worktree", "add", "--detach", path, ref])
