@@ -235,9 +235,11 @@ export type JobCompletion<Output extends JsonValue = JsonValue> = Readonly<{
   result: Exclude<JobResult<Output>, JobWaiting>
 }>
 
+export type JobDefs = Readonly<Record<string, JobDef>>
+
 export type Jobs = Readonly<{
   state: ReadSignal<DeepReadonly<JobsState>>
-  add<Input extends JsonValue, Output extends JsonValue>(definition: JobDef<Input, Output>): JobDef<Input, Output>
+  definition(name: string): JobDef
   get(id: string): DeepReadonly<Job> | undefined
   run(id: string, options: RunJobOptions): Promise<Job>
   finish(id: string, completion: JobCompletion): Promise<Job>
@@ -249,6 +251,7 @@ export type Jobs = Readonly<{
 type JobScope = Scope
 
 export type CreateJobsOptions = Readonly<{
+  definitions: JobDefs
   state: ReadSignal<DeepReadonly<JobsState>>
   transition(change: JobTransition): Promise<Frame>
   scope: JobScope
@@ -282,19 +285,24 @@ const RecoverOptionsSchema = z
   .strict()
 
 export function createJobs(options: CreateJobsOptions): Jobs {
-  const definitions = new Map<string, JobDef>()
+  const definitions = new Map(Object.entries(options.definitions))
   const state = options.state
   const commit = options.transition
 
+  const definition = (name: string): JobDef => {
+    const found = definitions.get(name)
+    if (found === undefined) throw new Error(`yrd: no job definition '${name}'`)
+    return found
+  }
+
   const definitionFor = (job: Job): JobDef => {
-    const definition = definitions.get(job.definition)
-    if (definition === undefined) throw new Error(`yrd: no job definition '${job.definition}'`)
-    if (definition.revision !== job.revision) {
+    const found = definition(job.definition)
+    if (found.revision !== job.revision) {
       throw new Error(
-        `yrd: job '${job.id}' definition revision '${job.revision}' does not match installed revision '${definition.revision}'`,
+        `yrd: job '${job.id}' definition revision '${job.revision}' does not match installed revision '${found.revision}'`,
       )
     }
-    return definition
+    return found
   }
 
   const current = (id: string): Job => {
@@ -305,14 +313,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
 
   return {
     state,
-
-    add(definition) {
-      if (definitions.has(definition.name)) {
-        throw new Error(`yrd: duplicate job definition '${definition.name}'`)
-      }
-      definitions.set(definition.name, definition as JobDef)
-      return definition
-    },
+    definition,
 
     get(id) {
       return state().byId[id]
@@ -424,7 +425,12 @@ export type JobCommands = Readonly<{
 
 export type HasJobs = Readonly<{ jobs: Jobs }>
 
-export function withJobs() {
+export type JobsOptions = Readonly<{
+  definitions?: JobDefs | readonly JobDefs[]
+}>
+
+export function withJobs(options: JobsOptions = {}) {
+  const definitions = mergeJobDefs(options.definitions)
   const transition = command({
     title: "Transition job",
     params: JobTransitionSchema,
@@ -447,6 +453,7 @@ export function withJobs() {
       create(yrd) {
         return {
           jobs: createJobs({
+            definitions,
             state: computed(() => yrd.state().jobs),
             transition: (change) => yrd.command(transition, change),
             scope: yrd.scope,
@@ -454,6 +461,21 @@ export function withJobs() {
         }
       },
     })
+}
+
+function mergeJobDefs(input: JobsOptions["definitions"]): JobDefs {
+  const groups: readonly JobDefs[] = input === undefined ? [] : Array.isArray(input) ? input : [input as JobDefs]
+  const definitions: Record<string, JobDef> = {}
+  for (const group of groups) {
+    for (const [name, definition] of Object.entries(group)) {
+      if (name !== definition.name) {
+        throw new Error(`yrd: job definition '${definition.name}' is registered as '${name}'`)
+      }
+      if (Object.hasOwn(definitions, name)) throw new Error(`yrd: duplicate job definition '${name}'`)
+      definitions[name] = definition
+    }
+  }
+  return Object.freeze(definitions)
 }
 
 function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): { jobs: JobsState } {

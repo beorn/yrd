@@ -73,7 +73,7 @@ async function jobsApp(
     id?: () => string
   } = {},
 ) {
-  const definition = pipe(createYrdDef(), withJobs(), withSender(job))
+  const definition = pipe(createYrdDef(), withJobs({ definitions: { [job.name]: job } }), withSender(job))
   const app = await createYrd(definition, {
     inject: {
       journal: options.journal ?? createMemoryJournal(),
@@ -81,7 +81,6 @@ async function jobsApp(
       id: options.id,
     },
   })
-  app.jobs.add(job)
   return app
 }
 
@@ -121,6 +120,19 @@ describe("JobDef", () => {
 })
 
 describe("Jobs", () => {
+  it("freezes definitions at composition and rejects duplicate paths", async () => {
+    const first = delivery()
+    const second = delivery(undefined, "transport-v2")
+    expect(() => withJobs({ definitions: [{ [first.name]: first }, { [second.name]: second }] })).toThrow(
+      "duplicate job definition 'message.deliver'",
+    )
+
+    const app = await jobsApp(first)
+    expect(app.jobs.definition("message.deliver")).toBe(first)
+    expect(() => app.jobs.definition("missing")).toThrow("no job definition 'missing'")
+    await app.close()
+  })
+
   it("projects request IDs and keys, executes once, and replays the same state", async () => {
     const journal = createMemoryJournal()
     let tick = 0
