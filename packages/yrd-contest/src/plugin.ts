@@ -165,8 +165,9 @@ function createContestCommands(
       )
       if (duplicate !== undefined) throw new Error(`yrd: duplicate competitor identity '${duplicate.id}'`)
       for (const competitor of competitors) {
-        if (!runners.has(competitor.harness))
+        if (!runners.has(competitor.harness)) {
           throw new Error(`yrd: no contest runner '${competitor.harness}' is installed`)
+        }
       }
 
       const evaluatorIds = args.evaluators ?? [...evaluators.keys()]
@@ -321,12 +322,14 @@ function createContestCommands(
       const promotion = record.promotion
       if (promotion === undefined) throw new Error(`yrd: contest '${record.id}' has no promotion request`)
       if (promotion.result !== undefined) {
-        if (promotion.result.pr !== args.pr)
+        if (promotion.result.pr !== args.pr) {
           throw new Error(`yrd: contest '${record.id}' was promoted as '${promotion.result.pr}'`)
+        }
         return { events: [] }
       }
-      if (record.selection?.attempt !== promotion.attempt)
+      if (record.selection?.attempt !== promotion.attempt) {
         throw new Error("yrd: contest selection changed during promotion")
+      }
       const verification = jobByKey(state, promotionKey(record.id))
       if (verification?.status !== "passed") throw new Error(`yrd: contest promotion verification has not passed`)
       const verified = PromotionVerifiedSchema.parse(verification.output)
@@ -454,8 +457,9 @@ function requestedJobs(contestId: string, state: DeepReadonly<ContestRuntimeStat
     const bay = attemptBay(state, attempt)
     if (bay?.jobId !== undefined && state.jobs.byId[bay.jobId]?.status === "requested") ids.add(bay.jobId)
     addRequested(ids, state, attemptRunnerKey(record.id, attempt.id))
-    for (const evaluator of record.evaluators)
+    for (const evaluator of record.evaluators) {
       addRequested(ids, state, attemptEvaluatorKey(record.id, attempt.id, evaluator.id))
+    }
   }
   addRequested(ids, state, promotionKey(record.id))
   return [...ids]

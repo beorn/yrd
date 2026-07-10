@@ -70,7 +70,7 @@ export const EvaluatorResultSchema = z
     verdict: z.enum(["passed", "failed"]),
     summary: z.string().optional(),
     artifacts: z.array(ContestArtifactSchema),
-    scores: z.record(z.string(), z.number().finite()).optional(),
+    scores: z.record(z.string(), z.number()).optional(),
   })
   .strict()
 export type EvaluatorResult = DeepReadonly<z.infer<typeof EvaluatorResultSchema>>
