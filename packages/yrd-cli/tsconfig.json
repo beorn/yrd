@@ -1,12 +1,4 @@
 {
   "extends": "../../tsconfig.json",
-  "include": [
-    "src",
-    "tests",
-    "../../../silvery/packages/ag-react/src/jsx.d.ts",
-    "../../../silvery/packages/ag-react/src/react-reconciler.d.ts",
-    "../../../silvery/packages/ag-react/src/ui/image/upng-js.d.ts",
-    "../../../termless/src/view/gifenc.d.ts",
-    "../../../termless/src/view/upng.d.ts"
-  ]
+  "include": ["src", "tests"]
 }

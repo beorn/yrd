@@ -21,7 +21,10 @@
     "git-yrd": "bun ./bin/git-yrd",
     "git-bay": "bun ./bin/git-bay",
     "test": "bun --bun x vitest run",
-    "check": "tsc --noEmit && bun --bun x vitest run"
+    "typecheck": "tsc --noEmit",
+    "typecheck:hh": "tsc --noEmit -p tsconfig.hh.json",
+    "check": "bun run typecheck && bun --bun x vitest run",
+    "check:hh": "bun run typecheck:hh && bun --bun x vitest run"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

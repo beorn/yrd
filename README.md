@@ -25,6 +25,9 @@ separate skin or a hidden line namespace.
 The project is `beorn/yrd`, the CLI distribution is `git-yrd`, the package
 scope is `@yrd`, and its owned public domain is `yrd.dev`.
 
+The implementation model and package boundaries are documented in
+[ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Why Yrd
 
 A busy local repository has the same integration hazards as a busy hosted
@@ -111,12 +114,14 @@ Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 | **PR**          | Local pull request containing one immutable submitted revision      |
 | **Line**        | Ordered integration process attached to a base branch               |
 | **Step**        | Typed line transition such as check, review, merge, or deploy       |
+| **Job**         | Durable executable work; retries are attempts on the same Job       |
 | **Contest**     | Multiple bays implementing the same task for real selection         |
 | **Attempt**     | One competitor's bay, Git pin, metrics, and evaluation evidence     |
 | **Base branch** | Branch a line integrates into, such as `main` or `release/2.0`      |
 
-Task is the Yrd noun. Issue is adapter vocabulary. PR is the Git-facing work
-package; Yrd does not add a second public synonym for it.
+Task is intent. An Operation is a serializable command. A Step configures work
+on a Line; a Job durably executes that work. Issue is adapter vocabulary. PR is
+the Git-facing work package; Yrd does not add a second public synonym for it.
 
 A line is more than a branch: it is the configured integration process that
 sits on a base branch. Lines do not need a separate create command. A PR creates
@@ -150,7 +155,7 @@ The same commands are available under `yrd bay`.
 | Command   | Input                                  | Output and state                                                            |
 | --------- | -------------------------------------- | --------------------------------------------------------------------------- |
 | `open`    | New bay name; optional source and base | Prints the worktree path; creates and provisions a named bay                |
-| `refresh` | Zero or more bays                      | Refreshes Git head/base/dirty facts and lease state                         |
+| `refresh` | Zero or more bays                      | Refreshes Git head, base, dirty, path, and workspace status                  |
 | `submit`  | Bays, PRs, or source branches          | Creates or advances PRs to `submitted`; `--wait` runs the line              |
 | `close`   | Zero or more bays                      | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR |
 
@@ -174,18 +179,16 @@ yrd line provision [base] [--json]
 yrd line deprovision [base] [--json]
 yrd line integrate [selector...] [--steps [step...]] [--retry] [--watch]
 yrd line finish <selector> [--step <name>] (--ok | --fail) [evidence options]
-yrd line watch [selector...] [--steps [step...]] [--retry]
 ```
 
 | Command       | Input                                  | Output and state                                                                                             |
 | ------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `status`      | PRs or base branches                   | Summary counts plus PR state, target, age, touched age, run time, step result, logs, artifacts, and bay path |
-| `audit`       | Repository                             | Projection and installed-step findings; no state change                                                      |
+| `audit`       | Repository                             | Journal, projection, pinned-plan, and installed-step findings; no state change                               |
 | `provision`   | Optional base                          | Resolves and validates line environment resources                                                            |
 | `deprovision` | Optional base                          | Releases resources owned by the installed line adapter                                                       |
-| `integrate`   | Zero or more eligible PRs              | Runs the configured steps and prints durable run verdicts                                                    |
-| `finish`      | One waiting PR/step plus token/verdict | Completes a remote step and resumes its exact run                                                            |
-| `watch`       | Optional PR set                        | Repeatedly drains runnable work until cancelled                                                              |
+| `integrate`   | Zero or more eligible PRs              | Runs configured steps; `--watch` keeps draining until cancelled                                              |
+| `finish`      | One waiting PR/step plus token/verdict | Records external evidence and resumes that exact durable run                                                 |
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. `--retry` re-enters rejected work; it is
@@ -232,28 +235,46 @@ read stdin except the hidden Git receive-hook entrypoint.
 
 ## Lines and Steps
 
-Steps are plugins and typed state transitions, not a workflow-language DSL.
-`withStep()` preserves the current shape. `withMerge()` changes it to an
-integrated shape. A post-merge step therefore cannot be composed before merge
-without a type error.
+Steps are immutable definitions and typed state transitions, not a
+workflow-language DSL. `withStep()` preserves the current shape. `withMerge()`
+changes it to an integrated shape. A post-merge step therefore cannot be
+composed before merge without a type error.
 
 ```ts
-const app = pipe(
-  createYrd({ store }),
-  withEffects(),
-  withTasks({ sources }),
-  withBays({ workspace }),
-  withLine(),
-  withStep("check", checkRunner),
-  withStep("coderabbit", reviewRunner),
-  withMerge(gitMergeRunner),
-  withStep("deploy", deployRunner, { needsIntegration: true }),
+const bayJobs = createBayJobDefs(workspace)
+const check = withStep("check", checkRunner, { revision: "check-v1" })
+const review = withStep("coderabbit", reviewRunner, {
+  revision: "coderabbit-v1",
+})
+const merge = withMerge(gitMergeRunner, { revision: "git-merge-v1" })
+const deploy = withStep(
+  "deploy",
+  deployRunner,
+  {
+    revision: "deploy-v1",
+    needsIntegration: true,
+  },
 )
+const line = withLine({ steps: [check, review, merge, deploy] as const })
+const contests = withContests({ runners, evaluators, git })
+
+const base = pipe(
+  createYrdDef(),
+  withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
+  withTasks({ sources }),
+  withBays({ jobs: bayJobs }),
+)
+
+await using yrd = await createYrd(contests(line(base)), {
+  inject: { journal, scope, log },
+})
 ```
 
-Every installed step becomes state, configuration, CLI selection, events, and
-status evidence through the same registration. Merge is not hardcoded pipeline
-policy; `withMerge()` is the typed transition that supplies integration proof.
+`withLine()` installs the ordered descriptors and exposes the fixed Job
+definitions that the root installs once through `withJobs()`. Every step then
+becomes state, CLI selection, events, and status evidence through the same
+definition. Merge is not hardcoded pipeline policy; `withMerge()` is the typed
+transition that supplies integration proof.
 
 The default `.yrd.yml` adapter turns arbitrary shell-backed names into the same
 plugins:
@@ -292,15 +313,21 @@ A waiting command launches work elsewhere and prints one final JSON object:
 ```
 
 Yrd records the token and URL, releases the writer lock, and continues
-integrating unrelated PRs. The remote system or an operator completes it with:
+checking unrelated PRs. The remote system or an operator completes it with:
 
 ```bash
 yrd line finish PR7 --step coderabbit --ok --token run-123 \
   --artifact report=https://ci.example/runs/123/report
 ```
 
-Long jobs therefore use the same durable effect contract as local commands.
+Long jobs therefore use the same durable job contract as local commands.
 They do not require a second queue or a second line.
+
+Each check pins its candidate to the then-current base. Several PRs may wait on
+remote work concurrently, but only one candidate can move a base branch first.
+If another candidate then reaches merge, Yrd rejects its stale proof instead of
+landing untested work; `line integrate PR7 --retry` rebuilds and rechecks it on
+the new base.
 
 ### Batching
 
@@ -325,20 +352,53 @@ Yrd stores local authority under the primary worktree's common Git directory:
 ```text
 .git/yrd/
   events.jsonl       append-only authority
-  writer.lock        cross-process single-writer lease
+  writer.lock        short cross-process append lock
   prs.git/           bare PR ref/object receiver
   receiver-inbox/    crash-safe receive-hook handoff
   artifacts/         command, evaluator, and contest evidence
 ```
 
-`events.jsonl` is the source of truth. Startup folds it into Bay, PR, Line,
-Effect, and Contest state. There is no second mutable database or read-model
+`events.jsonl` is the source of truth. Each command appends one versioned,
+checksummed transaction frame as one JSONL record, containing both its domain
+events and Job requests. Startup folds committed frames into Bay, PR, Line,
+Job, and Contest state. An unterminated final frame is uncommitted and is
+truncated under the writer lock; malformed newline-committed frames are
+reported as corruption. There is no second mutable database or read-model
 cache to reconcile.
 
-Effects are the single durable job lifecycle: requested, running, waiting,
-passed, failed, or lost. Line steps and contest attempts retain effect ids and
-derive operational status and evidence from those effects. This prevents three
-competing retry/recovery implementations.
+Callers may supply a stable command id. Yrd records that id plus a hash of the
+serialized operation in every event. Repeating the same id and operation
+returns the already committed result; reusing the id for different arguments
+is refused. The Git receiver uses its receipt id this way, so replay after a
+lost response cannot create a second PR revision.
+
+Jobs are the single durable executable lifecycle: requested, running, waiting,
+passed, failed, or lost. `withJobs()` installs that authority when the
+application needs executable work. Line and Contest records retain domain
+facts; their Job ids, status, attempts, timing, and evidence are derived from
+typed Job inputs and results. This prevents three competing retry and recovery
+implementations.
+
+Job requests pin the definition revision used to create them. Pending execution
+is refused if current plugin code has a different revision. Line runs also pin
+their complete ordered step descriptors, so historical status remains readable
+after config changes and `line audit` reports unavailable pending plans.
+
+Yrd owns the Job record and imports backend lifecycle events. Running work has
+an expiring, heartbeated executor lease; crashed work becomes `lost` and can be
+retried. A `waiting` Job has no launcher lease and remains durable until a
+token-matched finish arrives.
+
+Execution is **at least once** across crashes: an executor may perform an
+external side effect before its settlement frame is committed. Yrd accepts only
+one settlement for a Job attempt, but a backend must deduplicate effects by the
+stable Job id and fence stale attempts. Configured commands receive `YRD_JOB`,
+`YRD_ATTEMPT`, and `YRD_EXECUTOR` for that purpose. Yrd never guesses that a
+side effect did or did not happen.
+
+[`@yrd/core`](packages/yrd-core/README.md) documents Operations, transaction
+frames, projection, and the Journal contract. [`@yrd/job`](packages/yrd-job/README.md)
+documents Job states, leases, waiting work, retries, and backend idempotency.
 
 `prs.git` is a Git object/ref receiver, not the state store. Its pre-receive
 hook validates updates; its post-receive hook leaves an atomic receipt that is
@@ -356,14 +416,17 @@ The low-level packages remain usable by a single developer with no agent fleet.
 
 ## Packages
 
-| Package        | Responsibility                                                          |
-| -------------- | ----------------------------------------------------------------------- |
-| `@yrd/core`    | Event authority, serialized operations, effect jobs, plugin composition |
-| `@yrd/task`    | Task references, snapshots, and source adapters                         |
-| `@yrd/bay`     | Work bays, PR intake, Git workspace, and receive hooks                  |
-| `@yrd/line`    | Typed steps, merge proof, waiting jobs, batching, and status            |
-| `@yrd/contest` | Competitors, evaluators, selection, metrics, and exact promotion        |
-| `@yrd/cli`     | `yrd`, `git-yrd`, and `git-bay` command projections                     |
+| Package            | Responsibility                                                   |
+| ------------------ | ---------------------------------------------------------------- |
+| `@yrd/core`        | Immutable composition, Operations, Frames, projection, Journal   |
+| `@yrd/persistence` | Checksummed JSONL Journal and cross-process append exclusion      |
+| `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
+| `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |
+| `@yrd/task`        | Task references, snapshots, and source adapters                  |
+| `@yrd/bay`         | Work bays, PR intake, Git workspace, and receive hooks           |
+| `@yrd/line`        | Typed steps, merge proof, waiting jobs, batching, and status     |
+| `@yrd/contest`     | Competitors, evaluators, selection, metrics, exact promotion     |
+| `@yrd/cli`         | `yrd`, `git-yrd`, and `git-bay` command projections              |
 
 The app is composed from `with*` plugins. Consumers can replace task sources,
 Git workspace adapters, step runners, evaluators, Git resolution, and line
@@ -377,6 +440,9 @@ bun check
 ```
 
 `bun yrd` always runs `./bin/yrd`, so it exercises the development version.
+When Yrd is source-linked under the hh vendor workspace, use `bun check:hh`;
+that explicit config supplies sibling source declarations without leaking them
+into standalone package resolution.
 The focused Vitest files under each package are executable contracts for the
 same public flows. [TODO.md](TODO.md) contains only open acceptance work and
 post-cutover fixes; background research stays outside the public repository.

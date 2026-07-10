@@ -1,112 +1,84 @@
 # `@yrd/core`
 
-`@yrd/core` supplies Yrd's command, event, projection, and Journal contracts.
-It knows nothing about Jobs, Git, bays, lines, contests, files, or the CLI.
+`@yrd/core` supplies Yrd's immutable definition, command, event, projection,
+runtime, and Journal contracts. It knows nothing about Jobs, Git, bays, lines,
+contests, files, or the CLI.
 
-## Objects
+## Definition And Runtime
 
-`createYrdDef()` returns an immutable definition object. Domain plugins call
-`definition.extend()` to add state, commands, event schemas, a projector, and
-one runtime feature object.
-
-`createYrd()` validates and replays the injected Journal before returning a
-plain runtime object:
-
-```ts
-const definition = pipe(createYrdDef(), withMessages())
-const yrd = await createYrd(definition, {
-  inject: { journal, scope, log, clock, id },
-})
-
-await yrd.command(yrd.commands.message.send, { text: "hello" })
-const state = await yrd.state()
-await yrd.close()
-```
-
-Use `await using` when the caller owns the runtime:
-
-```ts
-await using yrd = await createYrd(definition, { inject: { journal } })
-```
-
-## Plugin Shape
+`createYrdDef()` creates an immutable definition. A domain plugin extends it
+with an initial state slice, command tree, event schemas, projector, and
+methodful runtime feature:
 
 ```ts
 function withMessages() {
-  const send = command(
-    (_state: MessageState, args: { text: string }) => ({
+  const send = command({
+    title: "Send message",
+    visibility: "public",
+    params: z.object({ text: z.string().min(1) }),
+    apply: (_state: MessageState, args) => ({
       events: [event("message/sent", args)],
     }),
-    {
-      title: "Send message",
-      visibility: "public",
-      params: z.object({ text: z.string().min(1) }),
-    },
-  )
+  })
 
-  return <Def extends AnyYrdDef>(definition: Def) =>
+  return <State extends object, Commands extends CommandTree, Features extends object>(
+    definition: YrdDef<State, Commands, Features>,
+  ) =>
     definition.extend({
       initialState: { messages: [] as string[] },
       commands: { message: { send } },
       events: { "message/sent": z.object({ text: z.string() }) },
       project(state, applied) {
         if (applied.name !== "message/sent") return state
-        return { ...state, messages: [...state.messages, applied.data.text] }
+        const data = applied.data as { text: string }
+        return { messages: [...state.messages, data.text] }
       },
-      create(yrd) {
-        return {
-          messages: {
-            async list() {
-              return (await yrd.state()).messages
-            },
-          },
-        }
-      },
+      create: (yrd) => ({
+        messages: Object.freeze({
+          list: () => yrd.state().messages,
+          send: (text: string) => yrd.command(send, { text }),
+        }),
+      }),
     })
 }
+
+const definition = pipe(createYrdDef(), withMessages())
+await using yrd = await createYrd(definition, { inject: { journal, scope, log } })
+await yrd.messages.send("hello")
 ```
 
-The returned `yrd.messages` is a methodful plain object. Pure projection and
-validation helpers stay inside the plugin rather than becoming a flat public
-utility API.
+Composition is synchronous. `createYrd()` asynchronously replays the injected
+Journal and returns one frozen runtime. Plugins never mutate a running app.
 
 ## Command Contract
 
-An Operation is JSON data:
+An Operation is serializable JSON:
 
 ```json
 { "op": "message.send", "args": { "text": "hello" } }
 ```
 
-`@silvery/commands` owns the command tree and parameter-schema shape. Core
-adds:
+Commands synchronously decide event drafts from one immutable state snapshot.
+Core validates arguments and event payloads with Zod, adds a command id and
+canonical operation hash, projects the candidate state, and appends one atomic
+Frame. External work must be requested as data and executed after commit.
 
-- public versus internal visibility;
-- stable caller-supplied command ids;
-- a canonical operation hash;
-- one atomic Frame per accepted command;
-- exact retry deduplication;
-- projection before append.
+`command()` accepts a command object reference for trusted in-process calls.
+`invoke()` accepts a public serialized Operation. Supplying a stable
+`commandId` makes retries exact: the same operation returns its committed Frame;
+different arguments under that id are refused.
 
-Command handlers are synchronous state decisions. They return only event
-drafts. External work is represented by domain events, such as
-`job/requested`, and runs after commit.
+## Reactive State
 
-## State
-
-`await yrd.state()` incrementally replays new frames before returning. It is
-the ordinary read API and is safe for another process's recent writes.
-
-`yrd.snapshot` is a synchronous read signal containing the newest state this
-runtime has observed. Commands and `state()` publish it after successful
-replay or append.
+`yrd.state` is a synchronous `ReadSignal<DeepReadonly<State>>`. Domain objects
+derive narrower signals with `computed()`. `await yrd.refresh()` replays Frames
+written by another process and publishes the newest snapshot. Commands refresh
+before deciding and publish after a successful append.
 
 All state is rebuildable from the Journal. There is no mutable projection
 database.
 
 ## Journal Contract
-
-Core depends on one small object:
 
 ```ts
 type Journal<Value> = {
@@ -121,9 +93,6 @@ type Journal<Value> = {
 }
 ```
 
-Append is optimistic compare-and-append. On conflict, Core catches up and runs
-the pure command decision again. This removes writer leases, hidden async
-context, and duplicated memory/filesystem queues from Core.
-
-`createMemoryJournal()` is the focused-test implementation. Filesystem
-durability belongs to `@yrd/persistence`.
+Append is optimistic compare-and-append. On conflict, Core catches up and reruns
+the pure command decision. `createMemoryJournal()` is the focused-test adapter;
+filesystem durability belongs to `@yrd/persistence`.

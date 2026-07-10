@@ -9,18 +9,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
-    "types": ["bun"],
-    "paths": {
-      "@vitest/expect": ["../termless/node_modules/@vitest/expect/dist/index.d.ts"]
-    }
+    "types": ["bun"]
   },
-  "include": [
-    "bin",
-    "packages",
-    "../silvery/packages/ag-react/src/jsx.d.ts",
-    "../silvery/packages/ag-react/src/react-reconciler.d.ts",
-    "../silvery/packages/ag-react/src/ui/image/upng-js.d.ts",
-    "../termless/src/view/gifenc.d.ts",
-    "../termless/src/view/upng.d.ts"
-  ]
+  "include": ["bin", "packages"]
 }

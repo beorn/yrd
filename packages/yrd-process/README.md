@@ -21,7 +21,14 @@ The factory passes either its configured environment or the request's explicit
 replacement environment. Domain adapters own policy such as stripping ambient
 `GIT_*` and `YRD_*` variables. Every run gets a child Scope; parent disposal,
 an explicit abort signal, and timeout all terminate the same child process.
-Timing and diagnostics use Loggily spans.
+Termination sends `SIGTERM`, then escalates to `SIGKILL` after a configurable
+grace period (5 seconds by default). Captured stdout and stderr are each bounded
+to 16 MiB by default; exceeding either limit terminates the child and rejects
+the run. Timing and diagnostics use Loggily spans.
+
+Hosts may set `maxOutputBytes` and `killGraceMs` when creating the Process.
+Domain packages do not raise those limits locally or add a second process
+wrapper.
 
 Tests and alternate hosts may inject `scope`, `log`, `now`, and `spawn`. Domain
 packages receive a `Process`; they do not call `Bun.spawn` themselves.

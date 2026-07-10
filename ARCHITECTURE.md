@@ -1,0 +1,185 @@
+# Yrd Architecture
+
+Yrd is composed from a small set of plain objects created by factory
+functions. Those objects have methods. Their state, commands, events, and
+results remain ordinary serializable data.
+
+The distinction is deliberate:
+
+- a `Job` is data and can cross a process boundary;
+- `Jobs` is the object returned by the Jobs factory and owns Job operations;
+- a transition helper may be pure, but it stays behind `Jobs` unless another
+  domain genuinely needs it.
+
+Yrd does not use classes, service locators, hidden globals, or one exported
+function per implementation detail.
+
+## Domain Objects
+
+| Object | Created by | Responsibility | Main surface |
+| --- | --- | --- | --- |
+| `YrdDef` | `createYrdDef()` | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()` |
+| `Yrd` | `createYrd()` | Command validation, idempotency, event projection, reactive state, and feature access | `state`, `refresh()`, `operation()`, `command()`, `invoke()`, `events()`, `close()` |
+| `Journal` | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency | `read()`, `append()` |
+| `Process` | `createProcess()` | Scope-owned argv execution with bounded evidence and termination escalation | `run()`, `close()` |
+| `Jobs` | `withJobs()` | Durable execution, leases, waiting work, retries, and recovery | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
+| `Tasks` | `withTasks()` | Resolve task references through configured sources | `sources`, `ref()`, `resolve()` |
+| `Bays` | `withBays()` | Query and operate on isolated work bays and local PRs | `state`, `get()`, `list()`, `pr()`, `prs()`, `open()`, `refresh()`, `intake()`, `submit()`, `submitSelection()`, `close()` |
+| `Line` | `withLine()` | Integrate PRs through configured steps and expose evidence | `state`, `steps()`, `integrate()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()` |
+| `Contests` | `withContests()` | Run, evaluate, select, and promote competing implementations | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `select()`, `promote()`, `run()` |
+
+`Process`, `Git`, task sources, workspaces, runners, evaluators, clocks, ids,
+loggers, and scopes are injected capabilities. A capability may be one
+function or a small plain object; it is not a global singleton.
+
+## Domain Data
+
+The objects above operate on plain records:
+
+| Record | Meaning |
+| --- | --- |
+| `Operation` | Serializable request naming one registered command and its arguments |
+| `Event` | Validated fact emitted by a command |
+| `Frame` | One command cause and all events committed for it atomically |
+| `Task` | Versioned unit of intent from a configured task source |
+| `Bay` | Isolated worktree and its current Git facts |
+| `PR` | Immutable submitted revision offered to a base branch |
+| `Job` | Durable executable lifecycle and evidence |
+| `LineRun` | Pinned PR set, base, step plan, and integration facts |
+| `Step` | Configured typed transition in a Line |
+| `Contest` | Task, competitors, attempts, selection, and promotion facts |
+| `Artifact` | Named evidence with a path or URL and media type |
+
+Persisted records contain JSON data only. Zod schemas validate every untyped
+boundary: CLI/config input, commands, events, Job input/output, adapter output,
+and journal frames. Internal code does not repeatedly re-validate values that
+have already crossed a named boundary.
+
+## Composition
+
+Composition is synchronous and immutable. Async resources are created first
+and injected when the final runtime is built.
+
+```ts
+const bayJobs = createBayJobDefs(workspace)
+const check = withStep("check", checkRunner, { revision: "check-v1" })
+const merge = withMerge(mergeRunner, { revision: "merge-v1" })
+const deploy = withStep("deploy", deployRunner, {
+  revision: "deploy-v1",
+  needsIntegration: true,
+})
+const line = withLine({ steps: [check, merge, deploy] as const })
+const contests = withContests({ runners, evaluators, git })
+
+const base = pipe(
+  createYrdDef(),
+  withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
+  withTasks({ sources }),
+  withBays({ jobs: bayJobs }),
+)
+
+const journal = await createJournal({ dir: stateDir })
+await using yrd = await createYrd(contests(line(base)), {
+  inject: { journal, scope, log, clock, id },
+})
+```
+
+Each `with*` returns a new `YrdDef`. It may add one state slice, command tree,
+event schemas, projector, and one methodful feature object. Prerequisites are
+encoded in its input type, so composition order is checked by TypeScript.
+
+Plugins do not mutate an existing runtime, patch methods, attach private
+symbols, or discover dependencies through a registry after startup.
+
+## Command Flow
+
+```text
+Operation
+  -> Zod command params
+  -> command against a state snapshot
+  -> Event drafts
+  -> Zod event schemas
+  -> project candidate state
+  -> Journal.append(frame, expectedCursor)
+  -> publish snapshot signal
+```
+
+Commands are synchronous state decisions. External work is requested as a Job
+event and executed after the frame commits. This keeps cursor-conflict retries
+safe: Yrd can refresh state and run the decision again without repeating an
+external side effect.
+
+Silvery's command-tree contracts supply command metadata, lookup, and argument
+schemas. Yrd adds durable command identity and event projection; it does not
+maintain a parallel command registry.
+
+## Journal Authority
+
+`Journal` has two operations:
+
+```ts
+journal.read(afterCursor)
+journal.append(frame, expectedCursor)
+```
+
+`append` is compare-and-append. A stale cursor returns the current cursor; Yrd
+replays committed frames and reruns the pure command decision. The filesystem
+adapter takes its OS lock only for repair, comparison, append, and data sync.
+There is no writer-lease API and no hidden async execution context.
+
+The filesystem format is checksummed JSONL. `Bun.JSONL.parseChunk` parses
+complete byte batches; Zod decodes frames. A final unterminated record is
+uncommitted and ignored by readers, then truncated under the next append lock.
+A malformed newline-terminated record is committed corruption and fails loud.
+
+`yrd.state` is the synchronous reactive signal for the latest state this
+runtime has observed. `await yrd.refresh()` incrementally catches up with Frames
+another process appended, then publishes the newer snapshot through that same
+signal. Commands refresh before deciding and publish after append.
+
+The Journal warns at 10 MiB or 10,000 replayed frames. Compaction is explicit
+as-needed work; the warning links to
+`@yrd/core/21012-monorepo/21060-journal-compaction-gc`.
+
+## Layers
+
+```text
+CLI / Git command projection
+  -> Contest / Line / Bay / Task objects
+  -> Jobs
+  -> Yrd Core
+  -> Journal interface
+  -> Filesystem persistence adapter
+```
+
+Dependencies point down. Core has no knowledge of Jobs, Git, bays, lines,
+contests, the filesystem, or the CLI. Persistence implements Core's Journal
+interface. Domain packages depend on Core and on the lower domain objects they
+actually use.
+
+## Lifecycle and Observability
+
+Every runtime owns a child `Scope`. Timers, subprocesses, subscriptions, and
+temporary resources belong to that scope or one of its children. Package code
+does not create unmanaged timers.
+
+All diagnostic output and timing uses Loggily namespaces and spans. Domain
+results remain return values and events; CLI formatting is a presentation
+layer over those values, not a second logging path.
+
+## Design Tests
+
+Review a change against these questions:
+
+1. Is this operation discoverable as a method on one of the objects above?
+2. Is a new abstraction replacing real duplication, or only renaming a helper?
+3. Is untyped data validated once at a named Zod boundary?
+4. Is every dependency explicit in a factory argument or `inject` object?
+5. Is every long-lived resource owned by a Scope?
+6. Can the top-level composition be read as the architecture?
+7. Can a command retry after a Journal cursor conflict without repeating an
+   external effect?
+
+If a change needs many new exported functions, a manager/controller class, a
+second state representation, or a second command/event system, the object
+model is missing a method or the change is at the wrong layer.

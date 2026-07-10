@@ -8,35 +8,38 @@ public repository.
 
 ### Core
 
-- [x] Use the public `@silvery/command` tree as operation metadata while
-      preserving Yrd's serialized `{ op, args }`, `apply()`, and `state()` contract.
-- [ ] Keep one durable effect/job transition machine for local, remote,
+- [x] Use Silvery's command tree as operation metadata while preserving Yrd's
+      serialized `{ op, args }`, `apply()`, and signal-backed state contract.
+- [x] Keep one durable Job transition machine for local, remote,
       waiting, lost, and retried work.
-- [ ] Prove replay equivalence and cross-process single-writer authority.
+- [x] Prove replay equivalence, command-atomic checksummed frames, exact command
+      retry deduplication, and cross-process single-writer authority.
+- [x] Pin Job definition revisions and complete Line step descriptors so
+      pending work refuses config drift while historical runs remain readable.
 
 ### Bay and PR Intake
 
-- [ ] Verify open, refresh, direct-branch submit, pushed-revision intake,
+- [x] Verify open, refresh, direct-branch submit, pushed-revision intake,
       withdraw, and close against real Git repositories.
-- [ ] Verify `prs.git` receive hooks recover a crash between receive and event
+- [x] Verify `prs.git` receive hooks recover a crash between receive and event
       intake without duplicating a PR revision.
-- [ ] Keep `git bay` and `yrd bay` as argv projections of the same commands.
+- [x] Keep `git bay` and `yrd bay` as argv projections of the same commands.
 
 ### Line
 
-- [ ] Derive step lifecycle and evidence from the shared effect authority; line
-      state retains only integration facts and effect ids.
-- [ ] Verify arbitrary configured names before and after `withMerge()`.
-- [ ] Verify exact candidate landing, stale-base refusal, waiting/finish,
+- [x] Derive step lifecycle and evidence from the shared Job authority; Line
+      records retain only immutable run facts.
+- [x] Verify arbitrary configured names before and after `withMerge()`.
+- [x] Verify exact candidate landing, stale-base refusal, waiting/finish,
       multiple base branches, deploy evidence, and recursive batch bisection.
 - [ ] Dogfood `yrd line status` against the live hh queue and verify links,
       `AGE`, `TOUCHED`, `RUN`, narrow-terminal layout, and `--json` parity.
 
 ### Contest
 
-- [ ] Derive attempt, evaluation, and promotion lifecycle from shared effects;
-      contest state retains task, competitors, pins, selection, and effect ids.
-- [ ] Run a real `ag` Codex versus Claude contest on one task.
+- [x] Derive attempt, evaluation, and promotion lifecycle from shared Jobs;
+      Contest records retain only task, competitor, Bay, selection, and pin facts.
+- [ ] Run a real `ag` Codex versus Claude Opus contest on one task.
 - [ ] Verify wall time, tokens, reported USD cost, artifacts, held-out results,
       manual selection, immutable ref verification, and exact winner promotion.
 
