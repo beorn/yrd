@@ -23,6 +23,21 @@ export const JobWaitingSchema = z
   .strict()
 export type JobWaiting = z.infer<typeof JobWaitingSchema>
 
+export const JobLaunchSchema = JobWaitingSchema.omit({ status: true, checkpoint: true })
+export type JobLaunch = z.infer<typeof JobLaunchSchema>
+
+export function parseJobLaunch(stdout: string): JobLaunch {
+  for (const line of stdout.trim().split(/\r?\n/u).reverse()) {
+    try {
+      return JobLaunchSchema.parse(JSON.parse(line))
+    } catch (error) {
+      if (error instanceof SyntaxError) continue
+      throw error
+    }
+  }
+  throw new Error("waiting job launcher must print a JSON object containing token")
+}
+
 export type JobResult<Output extends JsonValue = JsonValue> =
   | Readonly<{ status: "passed"; output: Output }>
   | Readonly<{ status: "failed"; error: JobError; output?: Output }>

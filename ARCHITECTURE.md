@@ -26,7 +26,7 @@ function per implementation detail.
 | `Tasks` | `withTasks()` | Resolve task references through configured sources | `sources`, `ref()`, `resolve()` |
 | `Bays` | `withBays()` | Query and operate on isolated work bays and local PRs | `state`, `get()`, `list()`, `pr()`, `prs()`, `open()`, `refresh()`, `intake()`, `submit()`, `submitSelection()`, `close()` |
 | `Line` | `withLine()` | Integrate PRs through configured steps and expose evidence | `state`, `steps()`, `integrate()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()` |
-| `Contests` | `withContests()` | Run, evaluate, select, and promote competing implementations | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `select()`, `promote()`, `run()` |
+| `Contests` | `withContests()` | Run, evaluate, select, and promote competing implementations | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `select()`, `promote()` |
 
 `Process`, `Git`, task sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -48,6 +48,7 @@ The objects above operate on plain records:
 | `LineRun` | Pinned PR set, base, step plan, and integration facts |
 | `Step` | Configured typed transition in a Line |
 | `Contest` | Task, competitors, attempts, selection, and promotion facts |
+| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |
 | `Artifact` | Named evidence with a path or URL and media type |
 
 Persisted records contain JSON data only. Zod schemas validate every untyped

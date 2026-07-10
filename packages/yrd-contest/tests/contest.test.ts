@@ -58,15 +58,20 @@ function outputFor(attempt: string, model: string, bay: string, branch: string):
   }
 }
 
-function fixtures(options: { waitingRunner?: string; waitingEvaluator?: boolean } = {}) {
+function fixtures(options: { waitingRunner?: string; waitingEvaluator?: boolean; waitingAdvisory?: boolean } = {}) {
   const pins = new Map<string, string>([["main", BASE_SHA]])
-  const control = { waitingEvaluator: options.waitingEvaluator ?? false }
+  const control = {
+    waitingEvaluator: options.waitingEvaluator ?? false,
+    evaluatorVerdict: "passed" as "passed" | "failed",
+  }
   let active = 0
   let maxActive = 0
+  let runnerCalls = 0
   const runner: ContestRunnerDef = {
     harness: "ag",
     revision: "ag-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
+      runnerCalls += 1
       active += 1
       maxActive = Math.max(maxActive, active)
       await Promise.resolve()
@@ -92,7 +97,12 @@ function fixtures(options: { waitingRunner?: string; waitingEvaluator?: boolean 
       }
       return {
         status: "passed",
-        output: { verdict: "passed", summary: "private tests passed", artifacts: [], scores: { tests: 1 } },
+        output: {
+          verdict: control.evaluatorVerdict,
+          summary: `private tests ${control.evaluatorVerdict}`,
+          artifacts: [],
+          scores: { tests: control.evaluatorVerdict === "passed" ? 1 : 0 },
+        },
       }
     },
   }
@@ -101,11 +111,14 @@ function fixtures(options: { waitingRunner?: string; waitingEvaluator?: boolean 
     revision: "review-v1",
     authority: "advisory",
     evaluate(input) {
+      if (options.waitingAdvisory === true && input.attempt === "A2") {
+        return { status: "waiting", token: "review-A2" }
+      }
       return { status: "passed", output: { verdict: input.attempt === "A2" ? "failed" : "passed", artifacts: [] } }
     },
   }
   const git: ContestGit = { revision: "git-v1", resolveCommit: (ref) => pins.get(ref) }
-  return { pins, control, runner, heldOut, advisory, git, maxActive: () => maxActive }
+  return { pins, control, runner, heldOut, advisory, git, maxActive: () => maxActive, runnerCalls: () => runnerCalls }
 }
 
 async function createApp(journal: Journal<unknown>, setup = fixtures()) {
@@ -148,7 +161,7 @@ describe("Contests", () => {
     const app = await createApp(journal, setup)
     await startContest(app)
 
-    const ready = await app.contests.run("C1", runtime)
+    const ready = await app.contests.evaluate("C1", runtime)
     expect(setup.maxActive()).toBe(1)
     expect(ready).toMatchObject({ id: "C1", status: "ready", attemptOrder: ["A1", "A2"] })
     expect(ready.attempts.A1).toMatchObject({
@@ -156,11 +169,11 @@ describe("Contests", () => {
       runner: { status: "passed" },
       pin: { commit: CODEX_SHA, bay: "B1" },
       wallTimeMs: 12_000,
-      evaluations: { "held-out": { job: { status: "passed" }, result: { verdict: "passed" } } },
+      evaluations: { "held-out": { runs: [{ job: { status: "passed" }, result: { verdict: "passed" } }] } },
     })
     expect(ready.attempts.A2).toMatchObject({
       status: "passing",
-      evaluations: { review: { job: { status: "passed" }, result: { verdict: "failed" } } },
+      evaluations: { review: { runs: [{ job: { status: "passed" }, result: { verdict: "failed" } }] } },
     })
 
     const durable = app.state().contests.records.C1!
@@ -199,12 +212,11 @@ describe("Contests", () => {
     const setup = fixtures()
     await using app = await createApp(createMemoryJournal(), setup)
     await startContest(app)
-    await app.contests.run("C1", runtime)
+    await app.contests.evaluate("C1", runtime)
     await app.contests.select({ contest: "C1", attempt: "A1" })
-    await app.command(app.commands.contest.promote, { contest: "C1" })
     setup.pins.set("refs/yrd/attempts/C1/A1", CLAUDE_SHA)
 
-    expect(await app.contests.run("C1", runtime)).toMatchObject({
+    expect(await app.contests.promote({ contest: "C1" }, runtime)).toMatchObject({
       status: "promotion-failed",
       promotion: { job: { status: "failed", error: { code: "pin-moved" } } },
     })
@@ -215,7 +227,7 @@ describe("Contests", () => {
     const setup = fixtures({ waitingRunner: "claude", waitingEvaluator: true })
     await using app = await createApp(createMemoryJournal(), setup)
     await startContest(app)
-    expect(await app.contests.run("C1", runtime)).toMatchObject({
+    expect(await app.contests.evaluate("C1", runtime)).toMatchObject({
       attempts: { A2: { status: "waiting", runner: { status: "waiting", attempt: 1, token: "remote-A2" } } },
     })
 
@@ -229,11 +241,13 @@ describe("Contests", () => {
       token: runner.token,
       result: { status: "passed", output },
     })
-    expect(await app.contests.run("C1", runtime)).toMatchObject({
-      attempts: { A2: { status: "waiting", evaluations: { "held-out": { job: { status: "waiting", attempt: 1 } } } } },
+    expect(await app.contests.evaluate("C1", runtime)).toMatchObject({
+      attempts: {
+        A2: { status: "waiting", evaluations: { "held-out": { runs: [{ job: { status: "waiting", attempt: 1 } }] } } },
+      },
     })
 
-    const evaluation = app.contests.get("C1")?.attempts.A2?.evaluations["held-out"]?.job
+    const evaluation = app.contests.get("C1")?.attempts.A2?.evaluations["held-out"]?.runs.at(-1)?.job
     if (evaluation?.status !== "waiting") throw new Error("evaluation did not remain waiting")
     expect(await app.jobs.recover({ now: "1970-01-01T00:01:01.000Z" })).toEqual([])
     await app.jobs.finish(evaluation.id, {
@@ -243,15 +257,65 @@ describe("Contests", () => {
       result: { status: "failed", error: { code: "remote-timeout", message: "remote evaluator timed out" } },
     })
     expect(app.contests.get("C1")).toMatchObject({
-      attempts: { A2: { status: "failed", evaluations: { "held-out": { job: { status: "failed", attempt: 1 } } } } },
+      attempts: {
+        A2: { status: "failed", evaluations: { "held-out": { runs: [{ job: { status: "failed", attempt: 1 } }] } } },
+      },
     })
 
     setup.control.waitingEvaluator = false
-    await app.jobs.retry(evaluation.id)
-    const retried = await app.contests.run("C1", runtime)
+    const retried = await app.contests.evaluate("C1", { ...runtime, retry: true })
     expect(retried.attempts.A2).toMatchObject({
       status: "passing",
-      evaluations: { "held-out": { job: { id: evaluation.id, status: "passed", attempt: 2 } } },
+      evaluations: { "held-out": { runs: [{ job: { id: evaluation.id, status: "passed", attempt: 2 } }] } },
     })
+  })
+
+  it("requires every attempt to finish evaluation before selection", async () => {
+    const setup = fixtures({ waitingAdvisory: true })
+    await using app = await createApp(createMemoryJournal(), setup)
+    await startContest(app)
+
+    const running = await app.contests.evaluate("C1", runtime)
+    expect(running).toMatchObject({
+      status: "running",
+      attempts: { A1: { status: "passing" }, A2: { status: "passing" } },
+    })
+    await expect(app.contests.select({ contest: "C1", attempt: "A1" })).rejects.toThrow("not ready")
+  })
+
+  it("re-evaluates failed verdicts with new Jobs while preserving prior evidence and runner pins", async () => {
+    const setup = fixtures()
+    setup.control.evaluatorVerdict = "failed"
+    const journal = createMemoryJournal()
+    const app = await createApp(journal, setup)
+    await startContest(app)
+
+    const rejected = await app.contests.evaluate("C1", runtime)
+    expect(rejected.attempts.A1).toMatchObject({ status: "rejected" })
+    const first = rejected.attempts.A1?.evaluations["held-out"]?.runs[0]?.job
+    if (first === undefined) throw new Error("first held-out evaluation was not recorded")
+
+    setup.control.evaluatorVerdict = "passed"
+    const passing = await app.contests.evaluate("C1", { ...runtime, retry: true })
+    expect(passing.attempts.A1).toMatchObject({
+      status: "passing",
+      evaluations: {
+        "held-out": {
+          runs: [
+            { generation: 1, job: { id: first.id }, result: { verdict: "failed" } },
+            { generation: 2, job: { status: "passed" }, result: { verdict: "passed" } },
+          ],
+        },
+      },
+    })
+    expect(app.jobs.get(first.id)).toMatchObject({ status: "passed", output: { verdict: "failed" } })
+    expect(setup.runnerCalls()).toBe(2)
+    const selected = await app.contests.select({ contest: "C1", attempt: "A1" })
+    await expect(app.contests.evaluate("C1", runtime)).rejects.toThrow("evaluations are frozen")
+    await expect(app.contests.evaluate("C1", { ...runtime, retry: true })).rejects.toThrow("evaluations are frozen")
+    await app.close()
+
+    await using replay = await createApp(journal, setup)
+    expect(replay.contests.get("C1")).toEqual(selected)
   })
 })

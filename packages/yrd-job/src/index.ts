@@ -1,10 +1,18 @@
-export { createJobDef, JobErrorSchema, JobRequestSchema, JobWaitingSchema } from "./job.ts"
+export {
+  createJobDef,
+  JobErrorSchema,
+  JobLaunchSchema,
+  JobRequestSchema,
+  JobWaitingSchema,
+  parseJobLaunch,
+} from "./job.ts"
 export type {
   CreateJobDefOptions,
   JobContext,
   JobDef,
   JobError,
   JobHandler,
+  JobLaunch,
   JobRequest,
   JobResult,
   JobWaiting,

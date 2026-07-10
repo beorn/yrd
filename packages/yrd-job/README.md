@@ -82,6 +82,11 @@ return {
 }
 ```
 
+Command-backed adapters use `parseJobLaunch(stdout)` for the shared launcher
+contract. It reads the final JSON line containing `token` and optional `url`,
+`detail`, and `artifacts`; Line and Contest therefore do not maintain separate
+remote-job parsers.
+
 Finish it with the exact executor, attempt, and token. Stale attempts, wrong
 owners, and wrong tokens are refused without appending a transition.
 

@@ -87,17 +87,49 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   }
 }
 
-function lineStepRevision(repo: string, stateDir: string, name: string, config: YrdStepConfig): string {
+function lineStepRevision(
+  repo: string,
+  stateDir: string,
+  name: string,
+  config: YrdStepConfig,
+  checkoutParent?: string,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
-        implementation: "yrd-line-command-v2",
+        implementation: checkoutParent === undefined ? "yrd-line-command-v2" : "yrd-line-command-v3",
         repo,
         stateDir,
+        ...(checkoutParent === undefined ? {} : { checkoutParent }),
         name,
         run: config.run,
         runner: config.runner,
         environment: config.environment,
+      }),
+    )
+    .digest("hex")
+}
+
+function contestEvaluatorRevision(
+  repo: string,
+  stateDir: string,
+  checkoutParent: string,
+  name: string,
+  config: YrdStepConfig,
+  timeoutMs: number,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        implementation: "yrd-contest-command-v3",
+        repo,
+        stateDir,
+        checkoutParent,
+        name,
+        run: config.run,
+        runner: config.runner,
+        environment: config.environment,
+        timeoutMs,
       }),
     )
     .digest("hex")
@@ -116,6 +148,7 @@ function candidateStep(
   process: Pick<Process, "run">,
   repo: string,
   stateDir: string,
+  checkoutParent: string,
   name: string,
   config: YrdStepConfig,
 ): RuntimeStep {
@@ -126,12 +159,13 @@ function candidateStep(
         inject: { process },
         repo,
         command: stepCommand(name, config),
+        checkoutParent,
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
         runner: config.runner,
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
-      { revision: lineStepRevision(repo, stateDir, name, config) },
+      { revision: lineStepRevision(repo, stateDir, name, config, checkoutParent) },
     ),
   )
 }
@@ -169,7 +203,9 @@ function configuredLineSteps(options: DefaultYrdAppOptions): readonly RuntimeSte
         }),
       )
     }
-    if (!integrated) return candidateStep(options.process, options.repo, options.stateDir, name, config)
+    if (!integrated) {
+      return candidateStep(options.process, options.repo, options.stateDir, options.baysRoot, name, config)
+    }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
         revision: lineStepRevision(options.repo, options.stateDir, name, config),
@@ -222,9 +258,19 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
       if (step === undefined) throw new Error(`yrd: contest evaluator '${id}' has no step configuration`)
       return createHeldOutCommandEvaluator({
         id,
-        revision: lineStepRevision(options.repo, options.stateDir, `contest-evaluator:${id}`, step),
+        revision: contestEvaluatorRevision(
+          options.repo,
+          options.stateDir,
+          options.baysRoot,
+          id,
+          step,
+          options.config.contest.timeoutMs,
+        ),
         command: ["sh", "-c", stepCommand(id, step)],
         timeoutMs: options.config.contest.timeoutMs,
+        runner: step.runner,
+        ...(step.environment === undefined ? {} : { targetEnvironment: step.environment }),
+        checkoutParent: options.baysRoot,
         artifactRoot: join(options.stateDir, "artifacts"),
         resolveBayPath: (bay) => bayPath(options.baysRoot, bay),
         inject: { process: options.process },
@@ -256,12 +302,12 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
   validateConfig(options.config)
   const workspace =
     options.workspace ??
-    createGitWorkspace({
+    (await createGitWorkspace({
       repo: options.repo,
       baysRoot: options.baysRoot,
       process: options.process,
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
-    })
+    }))
   const bayJobs = createBayJobDefs(workspace)
   const line = withLine({
     steps: configuredLineSteps(options),

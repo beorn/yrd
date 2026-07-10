@@ -219,6 +219,10 @@ export const Job = Object.freeze({
   owns(job: Job, attempt: number, executor: string, status: Job["status"]): boolean {
     return job.status === status && job.attempt === attempt && "executor" in job && job.executor === executor
   },
+
+  terminal(job: DeepReadonly<Job>): boolean {
+    return job.status === "passed" || job.status === "failed" || job.status === "lost"
+  },
 })
 
 export type RunJobOptions = Readonly<{

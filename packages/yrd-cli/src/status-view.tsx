@@ -1,7 +1,17 @@
 import { pathToFileURL } from "node:url"
 import type { Bay, PR } from "@yrd/bay"
-import type { Contest } from "@yrd/contest"
+import type { Contest, ContestEvaluation, ContestEvaluationRun } from "@yrd/contest"
 import { Box, Link, Table, Text } from "silvery"
+
+type EvaluationRow = Readonly<{
+  attempt: string
+  state: string
+  evaluator: string
+  verdict: string
+  summary: string
+  evidenceLabel: string
+  evidenceHref?: string
+}>
 
 export function formatDuration(milliseconds: number): string {
   const ms = Math.max(0, milliseconds)
@@ -42,6 +52,66 @@ export function StatusValue({ value, href }: { value: string; href?: string }) {
       {value}
     </Text>
   )
+}
+
+function latestEvaluation(evaluation: ContestEvaluation | undefined): ContestEvaluationRun | undefined {
+  return evaluation?.runs.at(-1)
+}
+
+function evaluatorVerdict(evaluation: ContestEvaluation | undefined): string {
+  const current = latestEvaluation(evaluation)
+  if (current?.result !== undefined) return current.result.verdict
+  const status = current?.job.status
+  return status === undefined || status === "requested" ? "queued" : status
+}
+
+function evaluatorSummary(evaluation: ContestEvaluation | undefined): string {
+  const current = latestEvaluation(evaluation)
+  if (current?.result?.summary !== undefined) return current.result.summary
+  const job = current?.job
+  if (job?.status === "failed") return job.error.message
+  if (job?.status === "lost") return job.lostReason
+  if (job !== undefined && "detail" in job && job.detail !== undefined) return job.detail
+  return "-"
+}
+
+function primaryEvidence(evaluation: ContestEvaluation | undefined):
+  | Readonly<{
+      label: string
+      href: string
+    }>
+  | undefined {
+  const current = latestEvaluation(evaluation)
+  const artifacts = current?.result?.artifacts ?? []
+  const artifact = artifacts.find(({ kind }) => kind === "evaluator-manifest") ?? artifacts[0]
+  if (artifact !== undefined) {
+    const additional = artifacts.length - 1
+    return { label: additional === 0 ? artifact.kind : `${artifact.kind} +${additional}`, href: artifact.uri }
+  }
+  const job = current?.job
+  return job !== undefined && "url" in job && job.url !== undefined ? { label: "job", href: job.url } : undefined
+}
+
+function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
+  return contest.attemptOrder.flatMap((id) => {
+    const attempt = contest.attempts[id]
+    if (attempt === undefined) throw new Error(`yrd: contest '${contest.id}' lost attempt '${id}'`)
+    return contest.evaluators
+      .filter(({ authority }) => authority === "held-out")
+      .map(({ id: evaluator }) => {
+        const evaluation = attempt.evaluations[evaluator]
+        const evidence = primaryEvidence(evaluation)
+        return {
+          attempt: id,
+          state: attempt.status,
+          evaluator,
+          verdict: evaluatorVerdict(evaluation),
+          summary: evaluatorSummary(evaluation),
+          evidenceLabel: evidence?.label ?? "-",
+          ...(evidence === undefined ? {} : { evidenceHref: evidence.href }),
+        }
+      })
+  })
 }
 
 export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
@@ -122,6 +192,7 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
       pin: attempt.pin?.commit.slice(0, 12) ?? "-",
     }
   })
+  const evaluations = heldOutEvaluationRows(contest)
   return (
     <Box flexDirection="column">
       <Table
@@ -152,7 +223,7 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
           data={attempts}
           padding={1}
           columns={[
-            { header: "ATTEMPT", key: "id" },
+            { header: "ATTEMPT", key: "id", minWidth: 8 },
             { header: "AGENT", key: "model", grow: true },
             { header: "HARNESS", key: "harness" },
             {
@@ -178,6 +249,43 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
           ]}
         />
       </Box>
+      {evaluations.length > 0 && (
+        <Box marginTop={1}>
+          <Table
+            data={evaluations}
+            padding={1}
+            columns={[
+              { header: "ATTEMPT", key: "attempt", minWidth: 8 },
+              {
+                header: "STATE",
+                key: "state",
+                minWidth: 10,
+                render: (row) => <StatusValue value={row.state} />,
+              },
+              { header: "EVALUATOR", key: "evaluator" },
+              {
+                header: "VERDICT",
+                key: "verdict",
+                minWidth: 8,
+                render: (row) => <StatusValue value={row.verdict} />,
+              },
+              { header: "SUMMARY", key: "summary", grow: true },
+              {
+                header: "EVIDENCE",
+                key: "evidenceLabel",
+                render: (row) =>
+                  row.evidenceHref === undefined ? (
+                    row.evidenceLabel
+                  ) : (
+                    <Link href={row.evidenceHref} minWidth={0} maxWidth="100%" wrap="truncate">
+                      {row.evidenceLabel}
+                    </Link>
+                  ),
+              },
+            ]}
+          />
+        </Box>
+      )}
     </Box>
   )
 }

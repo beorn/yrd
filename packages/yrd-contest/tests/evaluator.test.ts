@@ -3,7 +3,7 @@
  * @level l2
  * @consumer @yrd/contest held-out evaluator adapters
  */
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -171,6 +171,43 @@ describe("held-out command evaluator", () => {
       process: { exitCode: 0, durationMs: 125 },
       result: { verdict: "passed" },
     })
+  })
+
+  it("materializes the detached checkout under the injected trusted parent", async () => {
+    const checkoutParent = join(await temporaryRoot("yrd-evaluator-checkouts-"), "nested")
+    const { evaluator, fake } = await fixture({}, { checkoutParent })
+
+    expect(await evaluator.evaluate(input(), context)).toMatchObject({ status: "passed" })
+    const materialize = fake.requests.find((request) => request.argv.slice(0, 3).join(" ") === "git worktree add")
+    expect(materialize?.argv.at(-2)).toMatch(new RegExp(`^${await realpath(checkoutParent)}/yrd-evaluator-`))
+  })
+
+  it("launches configured waiting evaluators with the target environment and durable remote identity", async () => {
+    const launch = {
+      token: "remote-evaluation-7",
+      url: "https://ci.example.test/evaluations/7",
+      detail: "queued on secure runner",
+    }
+    const { evaluator, fake } = await fixture(
+      { command: processResult(0, `${JSON.stringify(launch)}\n`, "", 40) },
+      { runner: "waiting", targetEnvironment: "staging" },
+    )
+
+    expect(await evaluator.evaluate(input(), context)).toMatchObject({ status: "waiting", ...launch })
+    const command = fake.requests.find((request) => request.argv[0] !== "git")
+    expect(command?.env).toMatchObject({ YRD_ENVIRONMENT: "staging" })
+  })
+
+  it("reports checkout provisioning failures as job failures before evaluation", async () => {
+    const checkoutParent = join(await temporaryRoot("yrd-evaluator-parent-file-"), "not-a-directory")
+    await writeFile(checkoutParent, "file\n")
+    const { evaluator, fake } = await fixture({}, { checkoutParent })
+
+    expect(await evaluator.evaluate(input(), context)).toMatchObject({
+      status: "failed",
+      error: { code: "pin-checkout-create-failed" },
+    })
+    expect(fake.requests.some((request) => request.argv[0] !== "git")).toBe(false)
   })
 
   it("returns a failed verdict, not an infrastructure error, with nonzero-exit evidence", async () => {

@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { JsonSchema, type JsonValue } from "@yrd/core"
-import type { JobResult } from "@yrd/job"
+import type { JsonValue } from "@yrd/core"
+import { parseJobLaunch, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
@@ -54,15 +54,6 @@ const RETIRED_PLACEHOLDERS = new Map([
   ["{target}", "$YRD_TARGET"],
   ["{base}", "$YRD_BASE"],
 ])
-
-const WaitingLaunchSchema = z
-  .object({
-    token: z.string().trim().min(1),
-    url: z.string().min(1).optional(),
-    detail: z.string().optional(),
-    artifacts: z.array(JsonSchema).optional(),
-  })
-  .strict()
 
 export function configuredCommandStep<Shape extends PRShape>(
   options: ConfiguredCommandOptions<Shape>,
@@ -136,7 +127,7 @@ function configuredCommand<Shape extends PRShape>(
     }
     if (!waiting) return { status: "passed", output: evidence }
     try {
-      const launch = waitingLaunch(result.stdout)
+      const launch = parseJobLaunch(result.stdout)
       return {
         status: "waiting",
         token: launch.token,
@@ -198,18 +189,6 @@ async function writeArtifacts(
   return artifacts
 }
 
-function waitingLaunch(stdout: string): z.infer<typeof WaitingLaunchSchema> {
-  for (const line of stdout.trim().split(/\r?\n/u).reverse()) {
-    try {
-      return WaitingLaunchSchema.parse(JSON.parse(line))
-    } catch (error) {
-      if (error instanceof SyntaxError) continue
-      throw error
-    }
-  }
-  throw new Error("waiting step launcher must print a JSON object containing token")
-}
-
 type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
 type Git = ReturnType<typeof createGit>
 
@@ -230,23 +209,50 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   return Object.freeze({ run, commit })
 }
 
-async function withScratch<Result>(
+async function withScratch<Output extends JsonValue>(
   git: Git,
   repo: string,
   ref: string,
-  run: (path: string) => Promise<Result>,
-): Promise<Result> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-line-"))
+  parent: string,
+  run: (path: string) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
+  await mkdir(parent, { recursive: true })
+  const root = await mkdtemp(join(await realpath(parent), "yrd-line-"))
   const path = join(root, "worktree")
   let added = false
+  let outcome: JobResult<Output> | undefined
+  let operationFailure: unknown
   try {
     await git.run(repo, ["worktree", "add", "--detach", path, ref])
     added = true
-    return await run(path)
-  } finally {
-    if (added) await git.run(repo, ["worktree", "remove", "--force", path], true)
-    await rm(root, { recursive: true, force: true })
+    outcome = await run(path)
+  } catch (cause) {
+    operationFailure = cause
   }
+
+  let cleanupFailure: string | undefined
+  let removed = !added
+  if (added) {
+    try {
+      const cleanup = await git.run(repo, ["worktree", "remove", "--force", path], true)
+      if (cleanup.code === 0) removed = true
+      else cleanupFailure = cleanup.stderr || cleanup.stdout || "could not remove scratch worktree"
+    } catch (cause) {
+      cleanupFailure = messageOf(cause)
+    }
+  }
+  if (removed) {
+    try {
+      await rm(root, { recursive: true, force: true })
+    } catch (cause) {
+      cleanupFailure ??= messageOf(cause)
+    }
+  }
+
+  if (operationFailure !== undefined) throw operationFailure
+  if (outcome === undefined) throw new Error("scratch worktree produced no result")
+  if (outcome.status === "failed" || cleanupFailure === undefined) return outcome
+  return failed("scratch-cleanup-failed", cleanupFailure)
 }
 
 async function prepareCandidate(git: Git, path: string, input: StepExecution): Promise<JobResult<string>> {
@@ -264,6 +270,7 @@ export type GitCheckOptions = ProcessDependency &
   Readonly<{
     repo: string
     command: string
+    checkoutParent?: string
     artifactRoot?: string
     purpose?: string
     runner?: "local" | "waiting"
@@ -287,41 +294,47 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
       const branch = primaryPR(input).base
       await git.run(repo, ["check-ref-format", "--branch", branch])
       const baseSha = await git.commit(repo, `refs/heads/${branch}`)
-      return await withScratch(git, repo, baseSha, async (path): Promise<JobResult<GitCheckEvidence>> => {
-        const candidate = await prepareCandidate(git, path, input)
-        if (candidate.status === "failed") return { status: "failed", error: candidate.error }
-        if (candidate.status === "waiting") throw new Error("candidate preparation cannot wait")
-        const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
-        await pinCandidate(git, repo, candidateRef, candidate.output)
-        const configured: ConfiguredCommandOptions<PRShape> = {
-          inject: options.inject,
-          command: options.command,
-          cwd: path,
-          purpose,
-          artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
-          ...(options.env === undefined ? {} : { env: options.env }),
-          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-          variables: () => ({
-            YRD_BASE_SHA: baseSha,
-            YRD_CANDIDATE_SHA: candidate.output,
-            ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
-          }),
-        }
-        const runner =
-          options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
-        const outcome = await runner({ ...input, targetSha: candidate.output }, context)
-        const evidence = { baseSha, candidateSha: candidate.output, candidateRef }
-        if (outcome.status === "passed") {
-          return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
-        }
-        if (outcome.status === "waiting") {
-          return {
-            ...outcome,
-            checkpoint: GitCheckEvidenceSchema.parse({ ...(outcome.checkpoint as CommandEvidence), ...evidence }),
+      return await withScratch(
+        git,
+        repo,
+        baseSha,
+        options.checkoutParent ?? tmpdir(),
+        async (path): Promise<JobResult<GitCheckEvidence>> => {
+          const candidate = await prepareCandidate(git, path, input)
+          if (candidate.status === "failed") return { status: "failed", error: candidate.error }
+          if (candidate.status === "waiting") throw new Error("candidate preparation cannot wait")
+          const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
+          await pinCandidate(git, repo, candidateRef, candidate.output)
+          const configured: ConfiguredCommandOptions<PRShape> = {
+            inject: options.inject,
+            command: options.command,
+            cwd: path,
+            purpose,
+            artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+            ...(options.env === undefined ? {} : { env: options.env }),
+            ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+            variables: () => ({
+              YRD_BASE_SHA: baseSha,
+              YRD_CANDIDATE_SHA: candidate.output,
+              ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
+            }),
           }
-        }
-        return { status: "failed", error: outcome.error }
-      })
+          const runner =
+            options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
+          const outcome = await runner({ ...input, targetSha: candidate.output }, context)
+          const evidence = { baseSha, candidateSha: candidate.output, candidateRef }
+          if (outcome.status === "passed") {
+            return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
+          }
+          if (outcome.status === "waiting") {
+            return {
+              ...outcome,
+              checkpoint: GitCheckEvidenceSchema.parse({ ...(outcome.checkpoint as CommandEvidence), ...evidence }),
+            }
+          }
+          return { status: "failed", error: outcome.error }
+        },
+      )
     } catch (cause) {
       return failed("check-failed", messageOf(cause))
     }

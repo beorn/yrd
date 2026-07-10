@@ -228,9 +228,9 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("contest", "--help"), yrdHelp.io)).toBe(0)
     expect(yrdHelp.stdout()).toContain("Usage: yrd contest")
     expect(yrdHelp.stdout()).toContain("show")
+    expect(yrdHelp.stdout()).toContain("evaluate")
     expect(yrdHelp.stdout()).toContain("select")
     expect(yrdHelp.stdout()).toContain("promote")
-    expect(yrdHelp.stdout()).not.toMatch(/^\s+evaluate \[/mu)
     expect(yrdHelp.stdout()).not.toMatch(/^\s+run \[/mu)
     expect(yrdHelp.stdout()).not.toMatch(/^\s+help /mu)
   })
@@ -517,9 +517,21 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("codex")
     expect(human.stdout()).toContain("claude")
 
+    const evaluate = outputIO()
+    expect(await runYrd(app, yrd("contest", "evaluate", "C1", "--json"), evaluate.io)).toBe(0)
+    expect(JSON.parse(evaluate.stdout())).toMatchObject({
+      command: "contest.evaluate",
+      contest: { id: "C1", status: "ready" },
+    })
+
     const select = outputIO()
     expect(await runYrd(app, yrd("contest", "select", "C1", "--winner", "A1", "--json"), select.io)).toBe(0)
     expect(JSON.parse(select.stdout())).toMatchObject({ contest: { selection: { attempt: "A1", method: "manual" } } })
+
+    const frozen = outputIO()
+    expect(await runYrd(app, yrd("contest", "evaluate", "C1", "--retry"), frozen.io)).toBe(1)
+    expect(frozen.stdout()).toBe("")
+    expect(frozen.stderr()).toContain("evaluations are frozen")
 
     const promote = outputIO()
     expect(await runYrd(app, yrd("contest", "promote", "C1", "--json"), promote.io)).toBe(0)

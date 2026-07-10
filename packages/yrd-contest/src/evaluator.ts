@@ -1,7 +1,7 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import type { JobContext } from "@yrd/job"
+import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process, ProcessResult } from "@yrd/process"
 import type { ContestEvaluatorDef, ContestEvaluatorInput, EvaluatorResult } from "./types.ts"
 import {
@@ -29,6 +29,9 @@ export type HeldOutCommandEvaluatorOptions = Readonly<{
   command: readonly string[]
   resolveBayPath(bay: string, input: ContestEvaluatorInput, context: JobContext): string | Promise<string>
   timeoutMs?: number
+  runner?: "local" | "waiting"
+  targetEnvironment?: string
+  checkoutParent?: string | ((input: ContestEvaluatorInput, context: JobContext) => string | Promise<string>)
   artifactRoot?: string | ((input: ContestEvaluatorInput, context: JobContext) => string | Promise<string>)
   environment?: (input: ContestEvaluatorInput, context: JobContext) => NodeJS.ProcessEnv
   inject: Readonly<{ process: Pick<Process, "run">; env?: NodeJS.ProcessEnv }>
@@ -60,6 +63,7 @@ function validatePin(input: ContestEvaluatorInput): Failure | undefined {
 function evaluatorEnvironment(
   base: NodeJS.ProcessEnv,
   id: string,
+  targetEnvironment: string | undefined,
   input: ContestEvaluatorInput,
   context: JobContext,
   extra: NodeJS.ProcessEnv = {},
@@ -76,6 +80,7 @@ function evaluatorEnvironment(
     YRD_PIN_COMMIT: input.pin.commit.toLowerCase(),
     YRD_PIN_REF: input.pin.ref,
     ...(input.pin.baseSha === undefined ? {} : { YRD_BASE_SHA: input.pin.baseSha }),
+    ...(targetEnvironment === undefined ? {} : { YRD_ENVIRONMENT: targetEnvironment }),
     YRD_JOB: context.id,
     YRD_JOB_ATTEMPT: String(context.attempt),
   })
@@ -121,6 +126,54 @@ async function writeEvidence(
   return accepted({ verdict, summary, artifacts: [...streams.value, ...manifest.value] })
 }
 
+async function writeWaitingEvidence(
+  root: string,
+  evaluator: string,
+  input: ContestEvaluatorInput,
+  context: JobContext,
+  checkout: string,
+  processResult: ProcessResult,
+): Promise<Checked<JobResult<EvaluatorResult>>> {
+  if (processResult.exitCode !== 0) {
+    const detail = (processResult.stderr || processResult.stdout).trim()
+    return rejected(
+      "evaluator-launcher-failed",
+      `${evaluator} launcher exited ${processResult.exitCode}${detail === "" ? "" : `: ${detail}`}`,
+    )
+  }
+  const parsed = await attempt("evaluator-launcher-invalid", () => parseJobLaunch(processResult.stdout))
+  if (!parsed.ok) return parsed
+  const dir = join(root, "contests", pathKey(input, context, evaluator), `attempt-${context.attempt}`)
+  const artifacts = await captureArtifacts(dir, [
+    { kind: "stdout", file: "stdout.log", content: processResult.stdout, mediaType: "text/plain" },
+    { kind: "stderr", file: "stderr.log", content: processResult.stderr, mediaType: "text/plain" },
+    jsonArtifact("evaluator-launch-manifest", "launch.json", {
+      schema: "yrd.contest.command-evaluator-launch.v1",
+      evaluator: { id: evaluator, authority: "held-out" },
+      contest: input.contest,
+      attempt: input.attempt,
+      task: input.task.ref,
+      competitor: input.competitor,
+      pin: input.pin,
+      checkout: { path: checkout, commit: input.pin.commit.toLowerCase(), detached: true },
+      process: { exitCode: processResult.exitCode, durationMs: processResult.durationMs },
+      launch: parsed.value,
+    }),
+  ])
+  if (!artifacts.ok) return artifacts
+  return accepted({
+    status: "waiting",
+    ...parsed.value,
+    artifacts: [...artifacts.value, ...(parsed.value.artifacts ?? [])],
+    checkpoint: {
+      evaluator,
+      contest: input.contest,
+      attempt: input.attempt,
+      pin: input.pin,
+    },
+  })
+}
+
 async function resolveArtifactRoot(
   configured: HeldOutCommandEvaluatorOptions["artifactRoot"],
   git: Git,
@@ -135,6 +188,19 @@ async function resolveArtifactRoot(
   return attempt("artifact-root-invalid", async () => {
     const value = typeof configured === "function" ? await configured(input, context) : configured
     return resolve(nonEmpty(value, "held-out evaluator artifact root"))
+  })
+}
+
+async function resolveCheckoutParent(
+  configured: HeldOutCommandEvaluatorOptions["checkoutParent"],
+  input: ContestEvaluatorInput,
+  context: JobContext,
+): Promise<Checked<string>> {
+  return attempt("pin-checkout-create-failed", async () => {
+    const value = typeof configured === "function" ? await configured(input, context) : (configured ?? tmpdir())
+    const parent = nonEmpty(value, "held-out evaluator checkout parent")
+    await mkdir(parent, { recursive: true })
+    return realpath(parent)
   })
 }
 
@@ -206,6 +272,13 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
   const command = commandArgv(options.command)
   const process = options.inject.process
   const baseEnv = options.inject.env ?? globalThis.process.env
+  const runner = options.runner ?? "local"
+  if (runner !== "local" && runner !== "waiting")
+    throw new Error("yrd: held-out evaluator runner must be local or waiting")
+  const targetEnvironment =
+    options.targetEnvironment === undefined
+      ? undefined
+      : nonEmpty(options.targetEnvironment, "held-out evaluator target environment")
   if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0)) {
     throw new Error("yrd: held-out evaluator timeoutMs must be a positive integer")
   }
@@ -224,24 +297,26 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
       const extraEnv = await attempt("evaluator-environment-invalid", () => options.environment?.(input, context) ?? {})
       if (!extraEnv.ok) return failed(extraEnv.error.code, extraEnv.error.message)
       const bayPath = bay.value
-      const env = evaluatorEnvironment(baseEnv, id, input, context, extraEnv.value)
+      const env = evaluatorEnvironment(baseEnv, id, targetEnvironment, input, context, extraEnv.value)
       const git = createGit(process, env, context.signal)
       const pinFailure = await verifyAttemptPin(git, bayPath, input)
       if (pinFailure !== undefined) return failed(pinFailure.code, pinFailure.message)
       const artifacts = await resolveArtifactRoot(options.artifactRoot, git, bayPath, input, context)
       if (!artifacts.ok) return failed(artifacts.error.code, artifacts.error.message)
-      const temporary = await attempt("pin-checkout-create-failed", () => mkdtemp(join(tmpdir(), "yrd-evaluator-")))
+      const parent = await resolveCheckoutParent(options.checkoutParent, input, context)
+      if (!parent.ok) return failed(parent.error.code, parent.error.message)
+      const temporary = await attempt("pin-checkout-create-failed", () => mkdtemp(join(parent.value, "yrd-evaluator-")))
       if (!temporary.ok) return failed(temporary.error.code, temporary.error.message)
       const temporaryRoot = temporary.value
       const checkout = join(temporaryRoot, "checkout")
       let worktreeAdded = false
       let cleanupFailure: Failure | undefined
-      let operation: Checked<EvaluatorResult> = rejected("evaluator-missing-result", "Evaluator produced no evidence")
+      let operation: JobResult<EvaluatorResult> = failed("evaluator-missing-result", "Evaluator produced no evidence")
       try {
         const add = await git.run(bayPath, ["worktree", "add", "--detach", checkout, input.pin.commit])
         const addFailure = git.failure(add, "pin-checkout-create-failed", "Could not materialize the pinned checkout")
         if (addFailure !== undefined) {
-          operation = rejected(addFailure.code, addFailure.message)
+          operation = failed(addFailure.code, addFailure.message)
         } else {
           worktreeAdded = true
           const evaluated = await evaluateCheckout(
@@ -254,9 +329,17 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
             options.timeoutMs,
             context.signal,
           )
-          operation = evaluated.ok
-            ? await writeEvidence(artifacts.value, id, input, context, checkout, evaluated.value)
-            : evaluated
+          if (!evaluated.ok) {
+            operation = failed(evaluated.error.code, evaluated.error.message)
+          } else if (runner === "waiting") {
+            const waiting = await writeWaitingEvidence(artifacts.value, id, input, context, checkout, evaluated.value)
+            operation = waiting.ok ? waiting.value : failed(waiting.error.code, waiting.error.message)
+          } else {
+            const evidence = await writeEvidence(artifacts.value, id, input, context, checkout, evaluated.value)
+            operation = evidence.ok
+              ? { status: "passed", output: evidence.value }
+              : failed(evidence.error.code, evidence.error.message)
+          }
         }
       } finally {
         if (worktreeAdded) {
@@ -274,13 +357,22 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
           cleanupFailure ??= { code: "pin-checkout-cleanup-failed", message: errorMessage(error) }
         }
       }
-      if (!operation.ok) return failed(operation.error.code, operation.error.message)
+      if (operation.status === "failed") return operation
       if (cleanupFailure !== undefined) {
-        const manifest = operation.value.artifacts.find((artifact) => artifact.kind === "evaluator-manifest")
-        const suffix = manifest === undefined ? "" : `. Artifacts: ${manifest.uri}`
+        const manifest =
+          operation.status === "passed"
+            ? operation.output.artifacts.find((artifact) => artifact.kind === "evaluator-manifest")
+            : undefined
+        const runnerUrl = operation.status === "waiting" ? operation.url : undefined
+        const suffix =
+          manifest !== undefined
+            ? `. Artifacts: ${manifest.uri}`
+            : runnerUrl === undefined
+              ? ""
+              : `. Runner: ${runnerUrl}`
         return failed(cleanupFailure.code, `${cleanupFailure.message}${suffix}`)
       }
-      return { status: "passed", output: operation.value }
+      return operation
     },
   }
 }

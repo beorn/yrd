@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto"
 import {
-  command as createCommandNode,
-  createCommandTreeRegistry,
+  commandNode as createCommandNode,
+  createCommandRegistry as createCommandTreeRegistry,
   type Availability,
   type CommandNode,
-  type CommandTree as SilveryCommandTree,
+  type CommandNodeTree as SilveryCommandTree,
   type ParamSchema,
-  type SerializableCommandRegistry,
-} from "@silvery/commands"
+  type CommandRegistry as SerializableCommandRegistry,
+} from "@silvery/command"
 import { createScope, type Scope } from "@silvery/scope"
 import { signal, type ReadSignal } from "@silvery/signals"
 import { createLogger, type ConditionalLogger } from "loggily"

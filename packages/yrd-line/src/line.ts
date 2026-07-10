@@ -14,8 +14,8 @@ import {
 } from "@yrd/core"
 import {
   createJobDef,
+  Job,
   type HasJobs,
-  type Job,
   type JobDef,
   type JobDefs,
   type JobError,
@@ -677,7 +677,7 @@ function materializeRun(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<Job
       ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
     }),
   )
-  const cursor = steps.findIndex((step) => step.job === undefined || !terminalJob(step.job))
+  const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
   const failed = steps.find((step) => step.job?.status === "failed" || step.job?.status === "lost")?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
   const passed = steps.every((step) => step.job?.status === "passed")
@@ -748,10 +748,6 @@ function lineJobs(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState
 
 function jobKey(run: LineRunId, index: number): string {
   return `line:${run}:${index}`
-}
-
-function terminalJob(job: Job): boolean {
-  return job.status === "passed" || job.status === "failed" || job.status === "lost"
 }
 
 function shapeThrough(
@@ -997,7 +993,7 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: LineRun): boolean 
   if (run.error?.code === "stale-pr") return false
   const index = run.steps.findLastIndex((step) => step.job !== undefined)
   const step = run.steps[index]
-  if (step?.job === undefined || !terminalJob(step.job)) return false
+  if (step?.job === undefined || !Job.terminal(step.job)) return false
   if (step.job.status === "passed") {
     if (run.steps[index + 1]?.job === undefined && index + 1 < run.steps.length) return true
     if (!step.integrates || run.integration === undefined) return false

@@ -86,7 +86,19 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(run.status).toBe("passed")
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
+    const evaluatorRevision = app.jobs.definition("contest.evaluator.security").revision
     await app.close()
+
+    const changedTimeout = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config: { ...config, contest: { ...config.contest, timeoutMs: 120_000 } },
+    })
+    expect(changedTimeout.jobs.definition("contest.evaluator.security").revision).not.toBe(evaluatorRevision)
+    await changedTimeout.close()
   })
 })
 

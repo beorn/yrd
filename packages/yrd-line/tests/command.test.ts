@@ -4,14 +4,14 @@
  * @consumer @yrd/line Git step adapters
  */
 import { existsSync } from "node:fs"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createProcess, type Process } from "@yrd/process"
+import { createProcess, type Process, type ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import {
   GitCheckEvidenceSchema,
@@ -81,7 +81,7 @@ async function checkedLine(
   process: Pick<Process, "run">,
   repo: string,
   command: string,
-  options: Readonly<{ batch?: number; waiting?: boolean }> = {},
+  options: Readonly<{ batch?: number; waiting?: boolean; checkoutParent?: string }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
   const check = withStep(
@@ -91,6 +91,7 @@ async function checkedLine(
       repo,
       command,
       ...(options.waiting ? { runner: "waiting" as const } : {}),
+      ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
     }),
     { revision: `check:${command}:${options.waiting === true}`, output: GitCheckEvidenceSchema },
   )
@@ -127,6 +128,52 @@ describe("Line command adapters", () => {
     await expectLanded(repo, evidence)
     expect(evidence.exitCode).toBe(0)
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("checked\n")
+  })
+
+  it("materializes candidate checks under the injected trusted parent", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const parentRoot = await mkdtemp(join(tmpdir(), "yrd-line-checkouts-"))
+    const checkoutParent = join(parentRoot, "nested")
+    roots.push(parentRoot)
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, "pwd", { checkoutParent })
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const job = run.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toMatch(
+      new RegExp(`^${await realpath(checkoutParent)}/yrd-line-`),
+    )
+  })
+
+  it("fails the check when its detached scratch worktree cannot be removed", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const cleanupFailure: ProcessResult = {
+      exitCode: 1,
+      signal: null,
+      stdout: "",
+      stderr: "cleanup denied",
+      durationMs: 1,
+      timedOut: false,
+    }
+    const guarded = {
+      run(request: Parameters<Process["run"]>[0]) {
+        return request.argv.includes("remove") && request.argv.includes("worktree")
+          ? Promise.resolve(cleanupFailure)
+          : process.run(request)
+      },
+    }
+    await using app = await checkedLine(guarded, repo, "test -f feature.txt")
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
+    })
   })
 
   it("passes exact YRD_* variables while scrubbing ambient YRD_* and GIT_* values", async () => {

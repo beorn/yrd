@@ -198,11 +198,14 @@ export type ContestRecord = DeepReadonly<z.infer<typeof ContestRecordSchema>>
 
 export type ContestsState = Readonly<{ records: Readonly<Record<string, ContestRecord>> }>
 
+export type ContestEvaluationRun =
+  | Readonly<{ generation: number; job: Extract<Job, { status: "passed" }>; result: EvaluatorResult }>
+  | Readonly<{ generation: number; job: Exclude<Job, { status: "passed" }>; result?: never }>
+
 export type ContestEvaluation = Readonly<{
   evaluator: string
   authority: "held-out" | "advisory"
-  job?: Job
-  result?: EvaluatorResult
+  runs: readonly ContestEvaluationRun[]
 }>
 
 export type ContestAttemptStatus =
@@ -277,14 +280,14 @@ export type ContestRuntimeState = ContestState & ContestHostState
 export type ContestCommands = Readonly<{
   task: Readonly<{ compete: Command<CompeteArgs, ContestRuntimeState> }>
   contest: Readonly<{
-    request: Command<Readonly<{ contest: string }>, ContestRuntimeState>
+    request: Command<Readonly<{ contest: string; retry?: boolean }>, ContestRuntimeState>
     select: Command<ContestSelectArgs, ContestRuntimeState>
     promote: Command<ContestPromoteArgs, ContestRuntimeState>
     finalize: Command<Readonly<{ contest: string; pr: string }>, ContestRuntimeState>
   }>
 }>
 
-export type ContestRunOptions = RunJobOptions & Readonly<{ concurrency: number }>
+export type ContestEvaluateOptions = RunJobOptions & Readonly<{ concurrency: number; retry?: boolean }>
 
 export type Contests = Readonly<{
   state: ReadSignal<DeepReadonly<ContestsState>>
@@ -293,15 +296,15 @@ export type Contests = Readonly<{
   list(): readonly Contest[]
   compete(args: CompeteArgs): Promise<Contest>
   select(args: ContestSelectArgs): Promise<Contest>
-  promote(args: ContestPromoteArgs, options: ContestRunOptions): Promise<Contest>
-  run(contest: string, options: ContestRunOptions): Promise<Contest>
+  evaluate(contest: string, options: ContestEvaluateOptions): Promise<Contest>
+  promote(args: ContestPromoteArgs, options: ContestEvaluateOptions): Promise<Contest>
 }>
 
 export type HasContests = Readonly<{ contests: Contests }>
 
 export type ContestActions = Readonly<{
   compete(args: CompeteArgs): Promise<Frame>
-  request(contest: string): Promise<Frame>
+  request(contest: string, retry?: boolean): Promise<Frame>
   select(args: ContestSelectArgs): Promise<Frame>
   promote(args: ContestPromoteArgs): Promise<Frame>
   finalize(contest: string, pr: string): Promise<Frame>

@@ -9,7 +9,7 @@ import {
   type EventDraft,
   type YrdDef,
 } from "@yrd/core"
-import { createJobDef, type HasJobs, type Job, type JobDef, type JobDefs, type JobResult, type Jobs } from "@yrd/job"
+import { createJobDef, Job, type HasJobs, type JobDef, type JobDefs, type JobResult, type Jobs } from "@yrd/job"
 import type { HasTasks } from "@yrd/task"
 import { computed } from "@silvery/signals"
 import * as z from "zod"
@@ -35,6 +35,7 @@ import {
   type ContestAttemptRecord,
   type ContestCommands,
   type ContestEvaluation,
+  type ContestEvaluationRun,
   type ContestEvaluatorDef,
   type ContestEvaluatorInput,
   type ContestGit,
@@ -42,7 +43,7 @@ import {
   type ContestRecord,
   type ContestRunnerDef,
   type ContestRunnerInput,
-  type ContestRunOptions,
+  type ContestEvaluateOptions,
   type Contests,
   type ContestsState,
   type ContestRuntimeState,
@@ -55,7 +56,7 @@ import {
 
 const TextSchema = z.string().trim().min(1)
 const DefIdSchema = z.string().regex(/^[a-z][a-z0-9._-]*$/iu)
-const RequestArgsSchema = z.object({ contest: TextSchema }).strict()
+const RequestArgsSchema = z.object({ contest: TextSchema, retry: z.boolean().optional() }).strict()
 const FinalizeArgsSchema = z.object({ contest: TextSchema, pr: TextSchema }).strict()
 const OpenedRecordSchema = ContestRecordSchema.omit({ createdAt: true, selection: true, promotion: true })
 const OpenedSchema = z.object({ contest: OpenedRecordSchema }).strict()
@@ -133,7 +134,8 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
             signal: yrd.scope.signal,
             actions: {
               compete: (args) => yrd.command(commands.task.compete, args),
-              request: (contest) => yrd.command(commands.contest.request, { contest }),
+              request: (contest, retry) =>
+                yrd.command(commands.contest.request, { contest, ...(retry === undefined ? {} : { retry }) }),
               select: (args) => yrd.command(commands.contest.select, args),
               promote: (args) => yrd.command(commands.contest.promote, args),
               finalize: (contest, pr) => yrd.command(commands.contest.finalize, { contest, pr }),
@@ -221,6 +223,9 @@ function createContestCommands(
     params: RequestArgsSchema,
     apply(state: DeepReadonly<ContestRuntimeState>, args) {
       const record = requiredContest(state.contests, args.contest)
+      if (record.selection !== undefined) {
+        throw new Error(`yrd: contest '${record.id}' is selected; evaluations are frozen`)
+      }
       const events: EventDraft[] = []
       for (const attemptId of record.attemptOrder) {
         const attempt = requiredAttempt(record, attemptId)
@@ -249,8 +254,11 @@ function createContestCommands(
         const output = passedRunnerOutput(runner)
         if (output === undefined) continue
         for (const spec of record.evaluators) {
-          const key = attemptEvaluatorKey(record.id, attempt.id, spec.id)
-          if (jobByKey(state, key) !== undefined) continue
+          const history = evaluationJobs(state, record.id, attempt.id, spec.id)
+          const latest = history.at(-1)
+          if (latest !== undefined && (args.retry !== true || !failedEvaluationVerdict(latest))) continue
+          const generation = history.length + 1
+          const key = attemptEvaluatorKey(record.id, attempt.id, spec.id, generation)
           const definition = evaluatorJobs.get(spec.id)
           if (definition === undefined) throw new Error(`yrd: no contest evaluator '${spec.id}'`)
           events.push(
@@ -281,7 +289,14 @@ function createContestCommands(
       if (record.promotion !== undefined) {
         throw new Error(`yrd: contest '${record.id}' already requested promotion; selection is frozen`)
       }
-      const attempt = contestView(record, state).attempts[args.attempt]
+      if (record.selection !== undefined) {
+        throw new Error(`yrd: contest '${record.id}' is already selected; selection is frozen`)
+      }
+      const contest = contestView(record, state)
+      if (contest.status !== "ready") {
+        throw new Error(`yrd: contest '${record.id}' is ${contest.status}, not ready for selection`)
+      }
+      const attempt = contest.attempts[args.attempt]
       if (attempt === undefined) throw new Error(`yrd: contest '${record.id}' has no attempt '${args.attempt}'`)
       if (attempt.status !== "passing") {
         throw new Error(`yrd: contest attempt '${attempt.id}' is ${attempt.status}, not passing`)
@@ -382,10 +397,12 @@ function createContests(
     return contest
   }
 
-  const run = async (id: string, runOptions: ContestRunOptions): Promise<Contest> => {
+  const advance = async (id: string, runOptions: ContestEvaluateOptions): Promise<Contest> => {
     const contestId = TextSchema.parse(id)
     const concurrency = z.number().int().positive().parse(runOptions.concurrency)
+    let retry = runOptions.retry === true
     await ensureBays(contestId, options)
+    if (retry) await retryFailedJobs(contestId, options)
     while (true) {
       const requested = requestedJobs(contestId, options.runtime())
       if (requested.length > 0) {
@@ -393,7 +410,9 @@ function createContests(
         continue
       }
       if (await finalizePromotion(contestId, options)) continue
-      const frame = await options.actions.request(contestId)
+      if (required(contestId).selection !== undefined) return required(contestId)
+      const frame = await options.actions.request(contestId, retry)
+      retry = false
       if (options.jobs.requested(frame).length === 0) return required(contestId)
     }
   }
@@ -422,12 +441,33 @@ function createContests(
       await options.actions.select(args)
       return required(args.contest)
     },
+    async evaluate(id, runOptions) {
+      const contest = required(TextSchema.parse(id))
+      if (contest.selection !== undefined) {
+        throw new Error(`yrd: contest '${contest.id}' is selected; evaluations are frozen`)
+      }
+      return await advance(id, runOptions)
+    },
     async promote(args, runOptions) {
       await options.actions.promote(args)
-      return run(args.contest, runOptions)
+      return advance(args.contest, { ...runOptions, retry: false })
     },
-    run,
   })
+}
+
+async function retryFailedJobs(contestId: string, options: Parameters<typeof createContests>[0]): Promise<void> {
+  const state = options.runtime()
+  const record = requiredContest(state.contests, contestId)
+  const ids = new Set<string>()
+  for (const attemptId of record.attemptOrder) {
+    const runner = jobByKey(state, attemptRunnerKey(record.id, attemptId))
+    if (runner?.status === "failed" || runner?.status === "lost") ids.add(runner.id)
+    for (const evaluator of record.evaluators) {
+      const latest = evaluationJobs(state, record.id, attemptId, evaluator.id).at(-1)
+      if (latest?.status === "failed" || latest?.status === "lost") ids.add(latest.id)
+    }
+  }
+  for (const id of ids) await options.jobs.retry(id)
 }
 
 async function ensureBays(contestId: string, options: Parameters<typeof createContests>[0]): Promise<void> {
@@ -458,7 +498,8 @@ function requestedJobs(contestId: string, state: DeepReadonly<ContestRuntimeStat
     if (bay?.jobId !== undefined && state.jobs.byId[bay.jobId]?.status === "requested") ids.add(bay.jobId)
     addRequested(ids, state, attemptRunnerKey(record.id, attempt.id))
     for (const evaluator of record.evaluators) {
-      addRequested(ids, state, attemptEvaluatorKey(record.id, attempt.id, evaluator.id))
+      const current = evaluationJobs(state, record.id, attempt.id, evaluator.id).at(-1)
+      if (current?.status === "requested") ids.add(current.id)
     }
   }
   addRequested(ids, state, promotionKey(record.id))
@@ -586,7 +627,14 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
   else if (record.selection !== undefined) status = "selected"
   else {
     const values = Object.values(attempts)
-    const terminal = values.every((attempt) => ["passing", "rejected", "failed", "lost"].includes(attempt.status))
+    const terminal =
+      values.every((attempt) => ["passing", "rejected", "failed", "lost"].includes(attempt.status)) &&
+      values.every((attempt) =>
+        record.evaluators.every((evaluator) => {
+          const latest = attempt.evaluations[evaluator.id]?.runs.at(-1)
+          return latest !== undefined && Job.terminal(latest.job)
+        }),
+      )
     status = terminal ? (values.some((attempt) => attempt.status === "passing") ? "ready" : "failed") : "running"
   }
   return {
@@ -614,13 +662,16 @@ function attemptView(
   const output = passedRunnerOutput(runner)
   const evaluations = Object.fromEntries(
     record.evaluators.map((spec) => {
-      const job = jobByKey(state, attemptEvaluatorKey(record.id, attempt.id, spec.id))
-      const result = job?.status === "passed" ? EvaluatorResultSchema.parse(job.output) : undefined
+      const runs = evaluationJobs(state, record.id, attempt.id, spec.id).map((job, index): ContestEvaluationRun => {
+        if (job.status === "passed") {
+          return { generation: index + 1, job, result: EvaluatorResultSchema.parse(job.output) }
+        }
+        return { generation: index + 1, job }
+      })
       const evaluation: ContestEvaluation = {
         evaluator: spec.id,
         authority: spec.authority,
-        ...(job === undefined ? {} : { job }),
-        ...(result === undefined ? {} : { result }),
+        runs,
       }
       return [spec.id, evaluation]
     }),
@@ -662,11 +713,12 @@ function attemptStatus(
   if (runner.status === "lost") return "lost"
   if (runner.status === "failed" || output === undefined) return "failed"
   const heldOut = Object.values(evaluations).filter(({ authority }) => authority === "held-out")
-  if (heldOut.some(({ job }) => job?.status === "lost")) return "lost"
-  if (heldOut.some(({ job }) => job?.status === "failed")) return "failed"
-  if (heldOut.some(({ job }) => job?.status === "waiting")) return "waiting"
-  if (heldOut.some(({ job }) => job?.status !== "passed")) return "evaluating"
-  return heldOut.some(({ result }) => result?.verdict !== "passed") ? "rejected" : "passing"
+  const latest = heldOut.map(({ runs }) => runs.at(-1))
+  if (latest.some((run) => run?.job.status === "lost")) return "lost"
+  if (latest.some((run) => run?.job.status === "failed")) return "failed"
+  if (latest.some((run) => run?.job.status === "waiting")) return "waiting"
+  if (latest.some((run) => run?.job.status !== "passed")) return "evaluating"
+  return latest.some((run) => run?.result?.verdict !== "passed") ? "rejected" : "passing"
 }
 
 function requiredContest(state: DeepReadonly<ContestsState>, id: string): DeepReadonly<ContestRecord> {
@@ -710,6 +762,24 @@ function baySnapshot(bay: DeepReadonly<Bay>) {
 function jobByKey(state: DeepReadonly<Pick<ContestRuntimeState, "jobs">>, key: string): DeepReadonly<Job> | undefined {
   const id = state.jobs.byKey[key]
   return id === undefined ? undefined : state.jobs.byId[id]
+}
+
+function evaluationJobs(
+  state: DeepReadonly<Pick<ContestRuntimeState, "jobs">>,
+  contest: string,
+  attempt: string,
+  evaluator: string,
+): readonly DeepReadonly<Job>[] {
+  const jobs: DeepReadonly<Job>[] = []
+  for (let generation = 1; ; generation += 1) {
+    const job = jobByKey(state, attemptEvaluatorKey(contest, attempt, evaluator, generation))
+    if (job === undefined) return jobs
+    jobs.push(job)
+  }
+}
+
+function failedEvaluationVerdict(job: DeepReadonly<Job>): boolean {
+  return job.status === "passed" && EvaluatorResultSchema.parse(job.output).verdict !== "passed"
 }
 
 function passedRunnerOutput(job: DeepReadonly<Job> | undefined): AttemptRunOutput | undefined {
@@ -819,8 +889,9 @@ function attemptRunnerKey(contest: string, attempt: string): string {
   return `contest:${contest}:attempt:${attempt}:runner`
 }
 
-function attemptEvaluatorKey(contest: string, attempt: string, evaluator: string): string {
-  return `contest:${contest}:attempt:${attempt}:evaluator:${evaluator}`
+function attemptEvaluatorKey(contest: string, attempt: string, evaluator: string, generation = 1): string {
+  const base = `contest:${contest}:attempt:${attempt}:evaluator:${evaluator}`
+  return generation === 1 ? base : `${base}:generation:${generation}`
 }
 
 function promotionKey(contest: string): string {

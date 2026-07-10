@@ -462,10 +462,10 @@ function competitors(
   }))
 }
 
-async function runContest(app: YrdCliApp, contest: string, io: YrdCliIO): Promise<Contest> {
+async function advanceContest(app: YrdCliApp, contest: string, io: YrdCliIO, retry = false): Promise<Contest> {
   const concurrency = io.concurrency ?? 8
   if (!Number.isInteger(concurrency) || concurrency < 1) usage("contest concurrency must be a positive integer")
-  return app.contests.run(contest, { ...runtimeOptions(io), concurrency })
+  return app.contests.evaluate(contest, { ...runtimeOptions(io), concurrency, retry })
 }
 
 async function competeTask(
@@ -486,7 +486,7 @@ async function competeTask(
     base: base.base,
     baseSha: base.sha,
   })
-  const contest = await runContest(app, opened.id, io)
+  const contest = await advanceContest(app, opened.id, io)
   await printResult(
     io,
     jsonEnabled(options),
@@ -505,6 +505,22 @@ async function showContest(app: YrdCliApp, id: string, options: JsonOption, io: 
     { command: "contest.show", contest },
     createElement(ContestStatusView, { contest }),
   )
+}
+
+async function evaluateContest(
+  app: YrdCliApp,
+  id: string,
+  options: { retry?: boolean; json?: boolean },
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const contest = await advanceContest(app, id, io, options.retry === true)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "contest.evaluate", contest },
+    createElement(ContestStatusView, { contest }),
+  )
+  return contest.status === "failed" ? 1 : 0
 }
 
 async function selectContest(
@@ -705,6 +721,12 @@ function buildProgram(
 
   const contest = program.command("contest").description("inspect and choose immutable contest attempts")
   contest.helpCommand(false)
+  contest
+    .command("evaluate <contest>")
+    .description("run missing evaluations for pinned attempts")
+    .option("--retry", "retry failed work or re-evaluate failed verdicts")
+    .option("--json", "emit stable JSON")
+    .action(async (contestId, options) => setExit(await evaluateContest(app, contestId, options, io)))
   contest
     .command("show <contest>")
     .description("show recorded attempts, metrics, evidence, and selection")

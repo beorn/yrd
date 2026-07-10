@@ -117,6 +117,7 @@ Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 | **Job**         | Durable executable work; retries are attempts on the same Job       |
 | **Contest**     | Multiple bays implementing the same task for real selection         |
 | **Attempt**     | One competitor's bay, Git pin, metrics, and evaluation evidence     |
+| **Evaluation run** | One evaluator Job against an immutable attempt pin               |
 | **Base branch** | Branch a line integrates into, such as `main` or `release/2.0`      |
 
 Task is intent. An Operation is a serializable command. A Step configures work
@@ -204,6 +205,7 @@ opens its detailed runner URL when one exists.
 ```text
 yrd task compete <task> -a <harness-and-models> [--prompt <text>]
 yrd contest show <contest> [--json]
+yrd contest evaluate <contest> [--retry] [--json]
 yrd contest select <contest> --winner <attempt> [--by <actor>] [--reason <text>]
 yrd contest promote <contest> [--json]
 ```
@@ -217,9 +219,18 @@ Yrd records wall time, token counts, reported USD cost, stdout/stderr,
 artifacts, the write-once attempt ref, and evaluator results. Missing provider
 metrics remain missing; Yrd does not guess cost.
 
-Selection is manual and explicit. Promotion resolves the selected write-once
-ref again, verifies that it still names the evaluated commit, and submits that
-exact commit as a PR. A moving branch cannot replace the winner.
+`contest evaluate` resumes missing work against the recorded attempt pins.
+`--retry` returns failed or lost infrastructure Jobs to `requested` and retains
+their Job ids. A completed evaluator Job with a failed candidate verdict gets a
+new Evaluation run instead. It never reruns a competitor whose implementation
+is already pinned. Each Evaluation run has its own definition revision, timing,
+verdict, and artifacts; earlier runs remain immutable.
+
+Selection is manual and explicit, and is available only after every configured
+evaluation is terminal. It freezes further evaluation. Promotion resolves the
+selected write-once ref again, verifies that it still names the evaluated
+commit, and submits that exact commit as a PR. A moving branch cannot replace
+the winner.
 
 ## Exit Codes
 
@@ -286,7 +297,7 @@ line:
   steps: [check, coderabbit, sec-check, merge, deploy]
 
 steps:
-  check: bun test
+  check: bun run test
   coderabbit:
     run: launch-coderabbit
     runner: waiting
@@ -304,6 +315,15 @@ Names before `merge` run against the checked candidate. Names after `merge` run
 against the integrated commit. The TypeScript API enforces this statically; the
 YAML adapter validates the same ordering while composing plugins.
 
+Local pre-merge checks and held-out evaluators use detached scratch worktrees
+under the configured bays root. The configured command owns dependency
+provisioning, so it can verify the candidate's own lockfile instead of borrowing
+mutable host packages. This repository uses `bun install --frozen-lockfile
+--ignore-scripts` before invoking its installed Vitest. Local execution is not
+a security sandbox: candidate code still runs with the operator-configured
+process privileges; use a remote or isolated Process adapter for a stronger
+trust boundary.
+
 ### Remote Runners
 
 A waiting command launches work elsewhere and prints one final JSON object:
@@ -313,7 +333,9 @@ A waiting command launches work elsewhere and prints one final JSON object:
 ```
 
 Yrd records the token and URL, releases the writer lock, and continues
-checking unrelated PRs. The remote system or an operator completes it with:
+checking unrelated PRs or Contest attempts. Line steps and Contest evaluators
+share this Job launcher contract. The remote system or an operator completes a
+Line step with:
 
 ```bash
 yrd line finish PR7 --step coderabbit --ok --token run-123 \
@@ -379,6 +401,12 @@ facts; their Job ids, status, attempts, timing, and evidence are derived from
 typed Job inputs and results. This prevents three competing retry and recovery
 implementations.
 
+A Job retry is infrastructure recovery for the same failed or lost Job and
+keeps its id. A Contest re-evaluation is different: an evaluator may complete
+successfully while returning a failed candidate verdict. Yrd records a new
+Evaluation Job generation for that case and derives the complete run history
+from Jobs, without adding another lifecycle store.
+
 Job requests pin the definition revision used to create them. Pending execution
 is refused if current plugin code has a different revision. Line runs also pin
 their complete ordered step descriptors, so historical status remains readable
@@ -403,6 +431,9 @@ documents Job states, leases, waiting work, retries, and backend idempotency.
 `prs.git` is a Git object/ref receiver, not the state store. Its pre-receive
 hook validates updates; its post-receive hook leaves an atomic receipt that is
 deduplicated with the PR intake event. The inbox exists only for crash recovery.
+The `bay` receiver is a push default only inside provisioned Work Bays. Host
+startup removes the legacy shared `remote.pushDefault=bay` setting if present,
+so plain `git push` in the primary worktree continues to use its normal remote.
 
 ## Integration Boundaries
 
