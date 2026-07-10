@@ -468,9 +468,14 @@ administration without forking the core.
 ```bash
 bun yrd --help
 bun check
+bun run build
 ```
 
 `bun yrd` always runs `./bin/yrd`, so it exercises the development version.
+`bun run build` emits one bundled CLI implementation plus the three tiny argv
+projection bins under `dist/`. The `git-yrd` package includes only that built
+distribution and public docs; local bays, tests, and repository work state are
+excluded from its tarball.
 When Yrd is source-linked under the hh vendor workspace, use `bun check:hh`;
 that explicit config supplies sibling source declarations without leaking them
 into standalone package resolution.

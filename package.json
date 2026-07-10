@@ -11,15 +11,23 @@
   "workspaces": [
     "packages/*"
   ],
+  "files": [
+    "ARCHITECTURE.md",
+    "LICENSE",
+    "README.md",
+    "dist"
+  ],
   "bin": {
-    "yrd": "bin/yrd",
-    "git-yrd": "bin/git-yrd",
-    "git-bay": "bin/git-bay"
+    "yrd": "dist/bin/yrd",
+    "git-yrd": "dist/bin/git-yrd",
+    "git-bay": "dist/bin/git-bay"
   },
   "scripts": {
     "yrd": "bun ./bin/yrd",
     "git-yrd": "bun ./bin/git-yrd",
     "git-bay": "bun ./bin/git-bay",
+    "build": "bun ./scripts/build.ts",
+    "prepack": "bun run build",
     "test": "NODE_ENV=test bun --bun x vitest run",
     "typecheck": "tsc --noEmit",
     "typecheck:hh": "tsc --noEmit -p tsconfig.hh.json",
@@ -33,8 +41,13 @@
     "vitest": "4.1.9"
   },
   "dependencies": {
+    "@silvery/command": "^0.21.0",
     "@silvery/commander": "^0.21.0",
+    "@silvery/scope": "^0.21.0",
+    "@silvery/signals": "^0.21.0",
+    "loggily": "^0.10.2",
     "react": "^19.2.0",
-    "silvery": "^0.21.0"
+    "silvery": "^0.21.0",
+    "zod": "^4.4.3"
   }
 }

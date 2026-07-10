@@ -5,9 +5,14 @@
     "": {
       "name": "git-yrd",
       "dependencies": {
+        "@silvery/command": "^0.21.0",
         "@silvery/commander": "^0.21.0",
+        "@silvery/scope": "^0.21.0",
+        "@silvery/signals": "^0.21.0",
+        "loggily": "^0.10.2",
         "react": "^19.2.0",
         "silvery": "^0.21.0",
+        "zod": "^4.4.3",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
