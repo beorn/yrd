@@ -81,6 +81,21 @@ async function configureIntake(git: Git, path: string, remote: string): Promise<
   await git.run(path, ["config", "--worktree", "push.default", "current"])
 }
 
+async function removeLegacySharedPushDefault(git: Git, repo: string): Promise<void> {
+  const configured = await git.run(repo, ["config", "--local", "--get", "remote.pushDefault"], true)
+  if (configured.code === 1) return
+  if (configured.code !== 0) throw new Error(configured.stderr || "could not inspect the shared push default")
+  if (configured.stdout.trim() !== "bay") return
+  const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "remote.pushDefault"])
+  if (removed.code === 0) return
+  const remaining = await git.run(repo, ["config", "--local", "--get", "remote.pushDefault"], true)
+  if (remaining.code === 1 || remaining.stdout.trim() !== "bay") return
+  throw new Error(
+    removed.stderr.trim() ||
+      "could not remove legacy shared remote.pushDefault=bay; run 'git config --local --unset-all remote.pushDefault'",
+  )
+}
+
 async function prepareWorktreeConfig(git: Git, repo: string, required: boolean): Promise<void> {
   const configured = await git.run(repo, ["config", "--local", "--get", "core.worktree"], true)
   if (configured.code !== 0 && !required) return
@@ -115,14 +130,18 @@ async function ignoreInRepositoryBays(git: Git, repo: string, baysRoot: string):
   await appendFile(exclude, `\n/${escaped}/\n`, { encoding: "utf8", mode: 0o600 })
 }
 
-export function createGitWorkspace(options: GitWorkspaceOptions): BayWorkspace {
+export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
   const git = createGit(options.process, options.env ?? process.env)
+  if (options.intakeRemote !== undefined) {
+    // Older Yrd versions set this in shared config, making plain `git push` target the Bay receiver.
+    await removeLegacySharedPushDefault(git, repo)
+  }
   return {
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v2", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({ implementation: "yrd-git-workspace-v3", repo, baysRoot, intakeRemote: options.intakeRemote }),
       )
       .digest("hex"),
 

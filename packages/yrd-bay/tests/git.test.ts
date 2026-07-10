@@ -10,7 +10,7 @@ import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Frame } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createProcess } from "@yrd/process"
+import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -62,15 +62,19 @@ async function runRequested(app: Awaited<ReturnType<typeof createApp>>, frame: F
   await app.jobs.run(id, { executor: "local", leaseMs: 60_000 })
 }
 
-function workspace(process: ReturnType<typeof createProcess>, options: Omit<GitWorkspaceOptions, "process">) {
+async function workspace(process: ReturnType<typeof createProcess>, options: Omit<GitWorkspaceOptions, "process">) {
   return createGitWorkspace({ ...options, process })
+}
+
+function processResult(exitCode: number, stderr = ""): ProcessResult {
+  return { exitCode, signal: null, stdout: "", stderr, durationMs: 1, timedOut: false }
 }
 
 describe("createGitWorkspace", () => {
   it("keeps the repository clean with the default in-repository bays root", async () => {
     const { repo } = await repository()
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo }))
+    await using app = await createApp(await workspace(process, { repo }))
 
     await runRequested(app, await app.bays.open({ name: "clean-main" }))
 
@@ -87,7 +91,7 @@ describe("createGitWorkspace", () => {
         GIT_WORK_TREE: join(root, "poison-worktree"),
       },
     })
-    await using app = await createApp(workspace(runner, { repo, baysRoot: join(root, "bays") }))
+    await using app = await createApp(await workspace(runner, { repo, baysRoot: join(root, "bays") }))
 
     await runRequested(app, await app.bays.open({ name: "clean-git-env" }))
 
@@ -97,7 +101,9 @@ describe("createGitWorkspace", () => {
   it("uses worktree-local push defaults and preserves dirty work until a clean close", async () => {
     const { root, repo, intake } = await repository()
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }))
+    await using app = await createApp(
+      await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
+    )
 
     await runRequested(app, await app.bays.open({ name: "safe-push" }))
     const bay = app.bays.get("B1")
@@ -121,10 +127,57 @@ describe("createGitWorkspace", () => {
     expect(await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"])).toMatchObject({ code: 0 })
   })
 
+  it("removes a legacy shared bay push default while keeping the Bay-local receiver", async () => {
+    const { root, repo, intake } = await repository()
+    await git(repo, ["config", "--local", "remote.pushDefault", "bay"])
+    await using process = createProcess()
+    const adapter = await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake })
+
+    expect((await git(repo, ["config", "--local", "--get", "remote.pushDefault"], true)).code).toBe(1)
+
+    const provisioned = await adapter.provision(
+      {
+        bay: "B1",
+        name: "migrate-push-default",
+        branch: "task/migrate-push-default",
+        base: "main",
+      },
+      {
+        id: "provision-B1",
+        attempt: 1,
+        executor: "test",
+        signal: new AbortController().signal,
+      },
+    )
+
+    if (provisioned.status === "failed") throw new Error(provisioned.error.message)
+    if (provisioned.status !== "passed") throw new Error("Bay provisioning unexpectedly waited")
+    expect(await git(provisioned.output.path, ["config", "--worktree", "--get", "remote.pushDefault"])).toMatchObject({
+      stdout: "bay",
+    })
+  })
+
+  it("fails loud when the shared push default cannot be inspected", async () => {
+    const process = {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        const args = request.argv.slice(3)
+        if (args.join(" ") === "config --local --get core.worktree") return processResult(1)
+        if (args.join(" ") === "config --local --get remote.pushDefault") {
+          return processResult(2, "could not read config")
+        }
+        return processResult(0)
+      },
+    }
+
+    await expect(createGitWorkspace({ repo: "/repo", intakeRemote: "/repo/prs.git", process })).rejects.toThrow(
+      "could not read config",
+    )
+  })
+
   it("does not overwrite an existing closed-bay preservation ref", async () => {
     const { root, repo } = await repository()
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays") }))
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
     await runRequested(app, await app.bays.open({ name: "preserve-ref" }))
     const bay = app.bays.get("B1")
@@ -146,7 +199,9 @@ describe("createGitWorkspace", () => {
   it("provisions intake-enabled bays concurrently without racing the shared remote", async () => {
     const { root, repo, intake } = await repository()
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }))
+    await using app = await createApp(
+      await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
+    )
 
     const [first, second] = await Promise.all([
       app.bays.open({ name: "parallel-one" }),
@@ -182,7 +237,9 @@ describe("createGitWorkspace", () => {
     await git(repo, ["commit", "-qm", "initial"])
     await Bun.$`git init -q --bare ${intake}`
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }))
+    await using app = await createApp(
+      await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
+    )
 
     await runRequested(app, await app.bays.open({ name: "separate-worktree" }))
 
@@ -196,7 +253,7 @@ describe("createGitWorkspace", () => {
     const { root, repo } = await repository()
     await git(repo, ["branch", "release-fix"])
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays") }))
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
     await runRequested(app, await app.bays.open({ name: "repair-release", from: "release-fix" }))
     const bay = app.bays.get("B1")
@@ -208,7 +265,7 @@ describe("createGitWorkspace", () => {
   it("refreshes the committed head and reports uncommitted work", async () => {
     const { root, repo } = await repository()
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays") }))
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
     await runRequested(app, await app.bays.open({ name: "refresh-head" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
@@ -227,7 +284,7 @@ describe("createGitWorkspace", () => {
     const { root, repo } = await repository()
     const pinned = (await git(repo, ["rev-parse", "main"])).stdout
     await using process = createProcess()
-    await using app = await createApp(workspace(process, { repo, baysRoot: join(root, "bays") }))
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
     const opened = await app.bays.open({ name: "pinned-base", base: "main", baseSha: pinned })
 
     await writeFile(join(repo, "later.txt"), "base moved\n")
