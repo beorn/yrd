@@ -1,21 +1,14 @@
 import { isAbsolute, relative, resolve } from "node:path"
-import { pathToFileURL } from "node:url"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { createElement } from "react"
 import { resolveBay, resolveSubmission, submissionForBay, type Bay, type BaysState, type Submission } from "@yrd/bay"
-import type { Contest, ContestWork, ContestsState } from "@yrd/contest"
+import type { Contest, ContestsState } from "@yrd/contest"
 import type { Command, CommandRun, EffectRun, EffectsState } from "@yrd/core"
-import type { LineRun, LineSummary, LinesState, StepEvidence } from "@yrd/line"
-import type { TaskRef, TasksState } from "@yrd/task"
-import {
-  classifyFailure,
-  configuration,
-  diagnostic,
-  printResult,
-  refusal,
-  resolveInvocation,
-  stableJson,
-  usage,
-} from "./invocation.ts"
+import type { LineRun, LinesState } from "@yrd/line"
+import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
+import { LineRunsView, LineStatusView, SubmissionResultView, type LineStatusResult } from "./line-status-view.tsx"
+import { diagnostic, printHuman, printResult } from "./output.tsx"
+import { BayStatusView, ContestStatusView } from "./status-view.tsx"
 import type {
   LineAuditFinding,
   LineAuditResult,
@@ -29,7 +22,6 @@ type CliState = {
   effects: EffectsState
   bays: BaysState
   lines: LinesState
-  tasks: TasksState
   contests: ContestsState
 }
 
@@ -179,7 +171,12 @@ async function openBay(
   if (typeof id !== "string") throw new Error("yrd: bay.open did not identify the opened bay")
   const bay = resolveBay((await stateOf(app)).bays, id)
   if (bay?.path === undefined || bay.status !== "active") refusal(`bay '${id}' did not become active`)
-  printResult(io, jsonEnabled(options), { command: "bay.open", bay }, bay.path)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.open", bay },
+    createElement(BayStatusView, { bays: [bay] }),
+  )
 }
 
 async function refreshBays(
@@ -194,11 +191,11 @@ async function refreshBays(
   for (const bay of bays) {
     refreshed.push(await refreshBay(app, bay, io))
   }
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "bay.refresh", bays: refreshed },
-    refreshed.map((bay) => `${bay.id} refreshed`).join("\n"),
+    createElement(BayStatusView, { bays: refreshed }),
   )
 }
 
@@ -228,11 +225,11 @@ async function closeBays(
     if (current === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after close`)
     closed.push(current)
   }
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "bay.close", bays: closed },
-    closed.map((bay) => `${bay.id} ${bay.status}`).join("\n"),
+    createElement(BayStatusView, { bays: closed }),
   )
 }
 
@@ -327,14 +324,11 @@ async function submitBays(
     options.wait === true
       ? await app.line.integrate({ submissions: submissions.map((submission) => submission.id) }, runtimeOptions(io))
       : []
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "bay.submit", submissions, ...(runs.length === 0 ? {} : { runs }) },
-    [
-      ...submissions.map((submission) => `${submission.id} ${submission.status}`),
-      ...runs.map((run) => `${run.id} ${run.status}`),
-    ].join("\n"),
+    createElement(SubmissionResultView, { submissions, runs }),
   )
   return runs.some((run) => run.status === "failed") ? 1 : 0
 }
@@ -373,160 +367,6 @@ async function integrateLines(
   )
 }
 
-function humanRuns(runs: readonly LineRun[]): string {
-  return runs.length === 0
-    ? "line idle"
-    : runs
-        .map(
-          (run) =>
-            `${run.id} ${run.submissions.map((submission) => submission.id).join(",")} ${run.status} ${run.steps.map((step) => `${step.name}=${step.status}`).join(" ")}`,
-        )
-        .join("\n")
-}
-
-type Cell = string | Readonly<{ label: string; href: string }>
-type LineStatusResult = LineSummary & { submissions: Submission[] }
-
-function cellText(cell: Cell): string {
-  return typeof cell === "string" ? cell : cell.label
-}
-
-function table(headers: readonly string[], rows: readonly (readonly Cell[])[], io: YrdCliIO): string {
-  const widths = headers.map((header, column) =>
-    Math.max(header.length, ...rows.map((row) => cellText(row[column] ?? "").length)),
-  )
-  const render = (row: readonly Cell[]) =>
-    row
-      .map((cell, column) => {
-        const text = cellText(cell)
-        const label = text.padEnd(widths[column]!)
-        return typeof cell === "string" || io.hyperlink === undefined ? label : io.hyperlink(label, cell.href)
-      })
-      .join("  ")
-      .trimEnd()
-  return [render(headers), render(widths.map((width) => "-".repeat(width))), ...rows.map(render)].join("\n")
-}
-
-function elapsed(milliseconds: number): string {
-  const ms = Math.max(0, milliseconds)
-  if (ms < 1_000) return `${Math.round(ms)}ms`
-  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`
-  return `${Math.floor(ms / 86_400_000)}d`
-}
-
-function age(timestamp: string | undefined, now: number): string {
-  if (timestamp === undefined) return "-"
-  const time = Date.parse(timestamp)
-  return Number.isFinite(time) ? elapsed(now - time) : "-"
-}
-
-function latest(...timestamps: (string | undefined)[]): string | undefined {
-  return timestamps.filter((value): value is string => value !== undefined).sort().at(-1)
-}
-
-function latestRun(submission: Submission, summary: LineSummary): LineRun | undefined {
-  return [...summary.running, ...summary.waiting, ...summary.finished]
-    .filter((run) => run.submissions.some((member) => member.id === submission.id))
-    .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
-    .at(-1)
-}
-
-function relevantStep(run: LineRun | undefined): StepEvidence | undefined {
-  if (run === undefined) return undefined
-  return (
-    [...run.steps].reverse().find((step) => step.status === "failed") ??
-    [...run.steps].reverse().find((step) => ["requested", "running", "waiting", "lost"].includes(step.status)) ??
-    [...run.steps].reverse().find((step) => step.status !== "queued")
-  )
-}
-
-function stepArtifacts(step: StepEvidence | undefined): readonly unknown[] {
-  if (step?.artifacts !== undefined) return step.artifacts
-  const output = step?.output
-  if (typeof output !== "object" || output === null || !("artifacts" in output)) return []
-  return Array.isArray(output.artifacts) ? output.artifacts : []
-}
-
-function artifactHref(artifact: unknown): string | undefined {
-  if (typeof artifact !== "object" || artifact === null) return undefined
-  const value = "uri" in artifact ? artifact.uri : "path" in artifact ? artifact.path : undefined
-  if (typeof value !== "string" || value === "") return undefined
-  return /^[a-z][a-z0-9+.-]*:/iu.test(value) ? value : pathToFileURL(resolve(value)).href
-}
-
-function lineState(submission: Submission, run: LineRun | undefined): string {
-  if (run?.status === "running") return "checking"
-  if (run?.status === "waiting") return "waiting"
-  return submission.status
-}
-
-function humanLineStatus(state: CliState, results: readonly LineStatusResult[], selected: Set<string>, io: YrdCliIO): string {
-  const now = io.now?.() ?? Date.now()
-  return results
-    .map((result) => {
-      const all = Object.values(state.bays.submissions).filter((submission) => submission.base === result.base)
-      const active = all.filter((submission) => {
-        const status = lineState(submission, latestRun(submission, result))
-        return status === "checking" || status === "waiting"
-      }).length
-      const open = all.filter((submission) => submission.status !== "integrated" && submission.status !== "withdrawn").length
-      const integrated = all.filter((submission) => submission.status === "integrated").length
-      const rejected = all.filter((submission) => submission.status === "rejected").length
-      const baseSha = all.map((submission) => submission.baseSha).find((sha) => sha !== undefined)
-      const summary = table(
-        ["LINE", "OPEN", "ACTIVE", "INTEGRATED", "REJECTED"],
-        [[`${result.base}${baseSha === undefined ? "" : `@${baseSha.slice(0, 12)}`}`, String(open), String(active), String(integrated), String(rejected)]],
-        io,
-      )
-      const visible = result.submissions.filter(
-        (submission) => selected.has(submission.id) || (submission.status !== "integrated" && submission.status !== "withdrawn"),
-      )
-      if (visible.length === 0) return `${summary}\n\nNo open PRs.`
-      const rows = visible.map((submission): Cell[] => {
-        const run = latestRun(submission, result)
-        const step = relevantStep(run)
-        const bay = submission.bay === undefined ? undefined : state.bays.bays[submission.bay]
-        const path = bay?.path
-        const revision = submission.revisions.at(-1)
-        const last = latest(
-          revision?.pushedAt,
-          submission.submittedAt,
-          submission.rejectedAt,
-          submission.integratedAt,
-          submission.withdrawnAt,
-          run?.startedAt,
-          run?.finishedAt,
-          ...((run?.steps ?? []).flatMap((item) => [item.startedAt, item.finishedAt])),
-        )
-        const runTime = run === undefined ? "-" : elapsed((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt))
-        const evidence = stepArtifacts(step)
-        const firstArtifact = artifactHref(evidence[0])
-        const pr: Cell = path === undefined ? submission.id : { label: submission.id, href: pathToFileURL(path).href }
-        return [
-          pr,
-          lineState(submission, run),
-          submission.base,
-          age(submission.submittedAt ?? revision?.pushedAt, now),
-          age(last, now),
-          runTime,
-          step?.name ?? "-",
-          step?.error?.code ?? step?.detail ?? step?.status ?? "-",
-          step?.url === undefined ? "-" : { label: "open", href: step.url },
-          evidence.length === 0
-            ? "-"
-            : firstArtifact === undefined
-              ? String(evidence.length)
-              : { label: String(evidence.length), href: firstArtifact },
-          path === undefined ? "-" : { label: path, href: pathToFileURL(path).href },
-        ]
-      })
-      return `${summary}\n\n${table(["PR", "STATE", "TARGET", "AGE", "TOUCHED", "RUN", "STEP", "RESULT", "LOG", "ART", "PATH"], rows, io)}`
-    })
-    .join("\n\n")
-}
-
 async function lineStatus(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -559,11 +399,16 @@ async function lineStatus(
       ),
     })
   }
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "line.status", results },
-    humanLineStatus(state, results, selected, io),
+    createElement(LineStatusView, {
+      state: state.bays,
+      results,
+      selected,
+      now: io.now?.() ?? Date.now(),
+    }),
   )
 }
 
@@ -605,7 +450,7 @@ function localLineAudit(state: CliState): LineAuditResult {
 async function lineAudit(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
   const administration = app.line as typeof app.line & YrdCliLineAdministration
   const result = administration.audit === undefined ? localLineAudit(await stateOf(app)) : await administration.audit()
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "line.audit", ...result },
@@ -627,7 +472,7 @@ async function lineAdministration(
   const capability = administration[action]
   if (capability === undefined) configuration(`line.${action} capability is not installed`)
   const result = await capability.call(administration, base)
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: `line.${action}`, base: base ?? "main", result },
@@ -670,9 +515,7 @@ async function waitingLineRun(app: YrdCliApp, selector: string, stepName?: strin
     .find(
       (candidate) =>
         candidate.submissions.some((member) => member.id === submission.id) &&
-        candidate.steps.some((step) =>
-          stepName === undefined ? step.status === "waiting" : step.name === stepName,
-        ),
+        candidate.steps.some((step) => (stepName === undefined ? step.status === "waiting" : step.name === stepName)),
     )
   if (run === undefined) {
     refusal(
@@ -731,7 +574,7 @@ async function finishLine(
   const exitCode = positiveInteger(options.exitCode, "--exit-code")
   const durationMs = positiveInteger(options.durationMs, "--duration-ms")
   const evidence = {
-    ...(jsonRecord(effectRun.checkpoint) ?? {}),
+    ...jsonRecord(effectRun.checkpoint),
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.url === undefined ? {} : { url: options.url }),
     ...(effectRun.artifacts === undefined && recordedArtifacts === undefined
@@ -740,8 +583,9 @@ async function finishLine(
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
   }
-  const finish = installedCommand(app, "effect.finish", app.commands.effect.finish, "internal")
-  await app.command(finish, {
+  const transition = installedCommand(app, "effect.transition", app.commands.effect.transition, "internal")
+  await app.command(transition, {
+    type: "finish",
     id: effectRun.id,
     attempt: effectRun.attempt,
     ...(options.token === undefined ? {} : { token: options.token }),
@@ -758,7 +602,12 @@ async function finishLine(
           },
   })
   const resumed = await app.line.run(run.id, runtimeOptions(io))
-  printResult(io, jsonEnabled(options), { command: "line.finish", run: resumed }, `${resumed.id} ${resumed.status}`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.finish", run: resumed },
+    `${resumed.id} ${resumed.status}`,
+  )
 }
 
 async function sleep(milliseconds: number, io: YrdCliIO): Promise<void> {
@@ -798,24 +647,13 @@ async function watchLine(
     if (jsonEnabled(options)) {
       for (const run of runs) io.stdout(stableJson({ command: "line.watch", run }))
     } else if (runs.length > 0) {
-      io.stdout(`${humanRuns(runs)}\n`)
+      await printHuman(io, createElement(LineRunsView, { runs }))
     }
     if (runs.some((run) => run.status === "failed")) exit = 1
     if (selectors.length > 0 || aborted(io)) return exit
     await sleep(interval, io)
     if (aborted(io)) return exit
   }
-}
-
-async function taskRef(app: YrdCliApp, input: string): Promise<TaskRef> {
-  const separator = input.indexOf(":")
-  if (separator > 0 && separator < input.length - 1) {
-    return { source: input.slice(0, separator), id: input.slice(separator + 1) }
-  }
-  const matches = (await app.tasks.list()).filter((task) => task.ref.id === input)
-  if (matches.length === 1) return matches[0]!.ref
-  if (matches.length > 1) usage(`task '${input}' is ambiguous; use source:id`)
-  usage(`task '${input}' is not recorded; use source:id for source intake`)
 }
 
 function competitors(
@@ -839,34 +677,10 @@ function competitors(
   }))
 }
 
-async function drainContest(app: YrdCliApp, contest: string, io: YrdCliIO): Promise<Contest> {
-  const limit = io.concurrency ?? 8
-  if (!Number.isInteger(limit) || limit < 1) usage("contest concurrency must be a positive integer")
-  const order: readonly ContestWork["kind"][] = ["bay", "runner", "evaluator", "promotion"]
-  for (let cycle = 0; cycle < 100; cycle += 1) {
-    const work = await app.contestEffects.reconcile(contest)
-    const requested = work.filter((item) => item.status === "requested")
-    if (requested.length === 0) return await app.contests.show(contest)
-    const kind = order.find((candidate) => requested.some((item) => item.kind === candidate))
-    if (kind === undefined) throw new Error(`yrd: contest '${contest}' exposed an unknown work kind`)
-    const wave = requested.filter((item) => item.kind === kind)
-    const failures: unknown[] = []
-    for (let offset = 0; offset < wave.length; offset += limit) {
-      const outcomes = await Promise.all(
-        wave.slice(offset, offset + limit).map(async (item) => {
-          try {
-            await app.effectRuns.run(item.effect, runtimeOptions(io))
-            return undefined
-          } catch (error) {
-            return error
-          }
-        }),
-      )
-      failures.push(...outcomes.filter((error) => error !== undefined))
-    }
-    if (failures.length > 0) throw failures[0]
-  }
-  throw new Error(`yrd: contest '${contest}' did not settle after 100 reconciliation cycles`)
+async function runContest(app: YrdCliApp, contest: string, io: YrdCliIO): Promise<Contest> {
+  const concurrency = io.concurrency ?? 8
+  if (!Number.isInteger(concurrency) || concurrency < 1) usage("contest concurrency must be a positive integer")
+  return await app.contests.run(contest, { ...runtimeOptions(io), concurrency })
 }
 
 function contestId(command: CommandRun): string {
@@ -884,35 +698,33 @@ async function competeTask(
 ): Promise<YrdCliExitCode> {
   if (options.agents === undefined) usage("task compete requires --agents <list>")
   if (options.prompt !== undefined && options.prompt.trim() === "") usage("--prompt requires non-empty text")
-  const ref = await taskRef(app, taskInput)
-  let task = await app.tasks.get(ref)
-  if (task === undefined) task = await app.tasks.intake(ref)
+  const task = await app.tasks.resolve(app.tasks.ref(taskInput))
   const requestedBase = oneOfAliases(options.base, options.line, "base", "line")
   const base = await app.contests.resolveBase(requestedBase)
   const command = await invokePublic(app, "task.compete", app.commands.task.compete, {
-    task: task.ref,
+    task,
     competitors: competitors(options.agents, options.prompt),
     ...(csv(options.evaluators) === undefined ? {} : { evaluators: csv(options.evaluators) }),
     base: base.base,
     baseSha: base.sha,
   })
-  const contest = await drainContest(app, contestId(command), io)
-  printResult(
+  const contest = await runContest(app, contestId(command), io)
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "task.compete", contest },
-    `${contest.id} ${contest.status}\n${contest.attemptOrder.map((id) => `${id} ${contest.attempts[id]!.status}`).join("\n")}`,
+    createElement(ContestStatusView, { contest }),
   )
   return contest.status === "failed" ? 1 : 0
 }
 
 async function showContest(app: YrdCliApp, id: string, options: JsonOption, io: YrdCliIO): Promise<void> {
   const contest = await app.contests.show(id)
-  printResult(
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "contest.show", contest },
-    `${contest.id} ${contest.status}\n${contest.attemptOrder.map((attempt) => `${attempt} ${contest.attempts[attempt]!.status}`).join("\n")}`,
+    createElement(ContestStatusView, { contest }),
   )
 }
 
@@ -930,17 +742,22 @@ async function selectContest(
     ...(options.reason === undefined ? {} : { reason: options.reason }),
   })
   const contest = await app.contests.show(id)
-  printResult(io, jsonEnabled(options), { command: "contest.select", contest }, `${id} selected ${options.winner}`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "contest.select", contest },
+    createElement(ContestStatusView, { contest }),
+  )
 }
 
 async function promoteContest(app: YrdCliApp, id: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
   await invokePublic(app, "contest.promote", app.commands.contest.promote, { contest: id })
-  const contest = await drainContest(app, id, io)
-  printResult(
+  const contest = await runContest(app, id, io)
+  await printResult(
     io,
     jsonEnabled(options),
     { command: "contest.promote", contest },
-    `${id} ${contest.promotion?.status ?? contest.status}`,
+    createElement(ContestStatusView, { contest }),
   )
   return contest.status === "promotion-failed" ? 1 : 0
 }
@@ -949,27 +766,33 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
 
-function configurePlainOutput(command: CliCommand, io: YrdCliIO, output: { wroteError: boolean }): void {
-  const identity = (text: string) => text
-  command.configureHelp({
-    styleTitle: identity,
-    styleCommandText: identity,
-    styleOptionText: identity,
-    styleSubcommandText: identity,
-    styleArgumentText: identity,
-    styleDescriptionText: identity,
-    styleCommandDescription: identity,
-  })
+function configureOutput(command: CliCommand, io: YrdCliIO, output: { wroteError: boolean }): void {
   command.configureOutput({
     writeOut: (text) => io.stdout(text),
     writeErr: (text) => {
       output.wroteError = true
       io.stderr(text)
     },
-    getOutHasColors: () => false,
-    getErrHasColors: () => false,
+    getOutHasColors: () => io.color === true,
+    getErrHasColors: () => io.color === true,
   })
-  for (const child of command.commands) configurePlainOutput(child as unknown as CliCommand, io, output)
+  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
+}
+
+function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
+  const bay = projection === "bay" ? name : `${name} bay`
+  const examples: [string, string][] = [
+    [`$ ${bay} open fix --from topic`, "open from an existing source branch"],
+    [`$ ${bay} submit --wait`, "submit the current bay and run its line"],
+  ]
+  if (projection === "root") {
+    examples.push(
+      [`$ ${name} line status`, "inspect active PRs and evidence"],
+      [`$ ${name} line integrate --steps check,merge`, "run selected integration steps"],
+      [`$ ${name} task compete km:T1 -a codex/claude`, "run a real-task contest"],
+    )
+  }
+  program.addHelpSection("Examples:", examples)
 }
 
 function buildProgram(
@@ -990,13 +813,6 @@ function buildProgram(
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
-  program.configureOutput({
-    writeOut: (text) => io.stdout(text),
-    writeErr: (text) => {
-      commanderOutput.wroteError = true
-      io.stderr(text)
-    },
-  })
 
   const bay = projection === "bay" ? program : program.command("bay").description("operate isolated Git work bays")
   bay.helpCommand(false)
@@ -1030,7 +846,8 @@ function buildProgram(
     .action(async (selectors, options) => await closeBays(app, selectors, options, io))
 
   if (projection === "bay") {
-    configurePlainOutput(program, io, commanderOutput)
+    addExamples(program, name, projection)
+    configureOutput(program, io, commanderOutput)
     return program
   }
 
@@ -1070,7 +887,12 @@ function buildProgram(
         return
       }
       const runs = await integrateLines(app, selectors, options, io)
-      printResult(io, jsonEnabled(options), { command: "line.integrate", results: runs }, humanRuns(runs))
+      await printResult(
+        io,
+        jsonEnabled(options),
+        { command: "line.integrate", results: runs },
+        createElement(LineRunsView, { runs }),
+      )
       setExit(runs.some((run) => run.status === "failed") ? 1 : 0)
     })
   line
@@ -1101,7 +923,7 @@ function buildProgram(
   task
     .command("compete <task>")
     .description("run multiple model and harness competitors on one real task")
-    .option("--agents <agents>", "ag-style competitor list")
+    .option("-a, --agents <agents>", "ag-style competitor list")
     .option("--prompt <text>", "additional implementation instructions")
     .option("--evaluators [evaluator...]", "evaluator ids, comma-separated or repeated")
     .option("--base <branch>", "base branch")
@@ -1130,7 +952,8 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(app, contestId, options, io)))
 
-  configurePlainOutput(program, io, commanderOutput)
+  addExamples(program, name, projection)
+  configureOutput(program, io, commanderOutput)
   return program
 }
 
@@ -1151,11 +974,11 @@ export async function runYrd(app: YrdCliApp, argv: readonly string[], io: YrdCli
   } catch (error) {
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
-      if (!commanderOutput.wroteError) diagnostic(io, invocation.name, error)
+      if (!commanderOutput.wroteError) await diagnostic(io, invocation.name, error)
       return 2
     }
     const code = classifyFailure(error)
-    diagnostic(io, invocation.name, error)
+    await diagnostic(io, invocation.name, error)
     return code
   }
 }

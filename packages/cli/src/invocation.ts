@@ -1,5 +1,5 @@
 import { basename } from "node:path"
-import type { YrdCliExitCode, YrdCliIO } from "./types.ts"
+import type { YrdCliExitCode } from "./types.ts"
 
 export type Invocation = Readonly<{
   name: string
@@ -23,7 +23,7 @@ function executableName(value: string | undefined): string {
 }
 
 function presentation(executable: string): Pick<Invocation, "name" | "projection"> | undefined {
-  if (executable === "git-bay" || executable === "gitbay") return { name: "git bay", projection: "bay" }
+  if (executable === "git-bay") return { name: "git bay", projection: "bay" }
   if (executable === "git-yrd") return { name: "git yrd", projection: "root" }
   if (executable === "yrd") return { name: "yrd", projection: "root" }
   return undefined
@@ -61,15 +61,6 @@ function stableValue(value: unknown): unknown {
       .filter((key) => object[key] !== undefined)
       .map((key) => [key, stableValue(object[key])]),
   )
-}
-
-export function printResult(io: YrdCliIO, json: boolean, value: unknown, human: string): void {
-  io.stdout(json ? stableJson(value) : human.endsWith("\n") ? human : `${human}\n`)
-}
-
-export function diagnostic(io: YrdCliIO, program: string, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error)
-  io.stderr(`${program}: ${message.replace(/^yrd:\s*/u, "")}\n`)
 }
 
 const INFRASTRUCTURE =

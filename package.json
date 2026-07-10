@@ -1,11 +1,12 @@
 {
-  "name": "yrd",
+  "name": "git-yrd",
   "version": "0.0.1",
   "private": true,
   "description": "Composable software-development orchestration for tasks, bays, integration lines, and contests",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",
   "repository": "github:beorn/yrd",
+  "homepage": "https://yrd.dev",
   "type": "module",
   "workspaces": [
     "packages/*"
@@ -28,6 +29,8 @@
     "vitest": "4.1.9"
   },
   "dependencies": {
-    "@silvery/commander": "^0.21.0"
+    "@silvery/commander": "^0.21.0",
+    "react": "^19.2.0",
+    "silvery": "^0.21.0"
   }
 }

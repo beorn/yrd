@@ -30,7 +30,10 @@ export type YrdCliApp = AnyYrdApp & HasEffects & HasBays & HasLine & HasTasks & 
 export type YrdCliIO = {
   stdout(text: string): void
   stderr(text: string): void
-  hyperlink?(label: string, target: string): string
+  /** Human output is rendered by Silvery. Tests and pipes omit color; the
+   * process host supplies terminal capabilities. */
+  color?: boolean
+  columns?: number
   cwd?: string
   executor?: string
   leaseMs?: number

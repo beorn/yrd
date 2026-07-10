@@ -47,12 +47,13 @@ describe("createDefaultYrdApp", () => {
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      line: { base: "main", batch: 1, steps: ["security", "merge", "publish"] },
       steps: {
-        check: { run: "test -f feature.txt", runner: "local" },
+        security: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
+        publish: { run: "test -f feature.txt", runner: "local" },
       },
-      contest: { concurrency: 2, timeoutMs: 60_000, evaluators: ["check"] },
+      contest: { concurrency: 2, timeoutMs: 60_000, evaluators: ["security"] },
     }
     const app = createDefaultYrdApp({
       repo,
@@ -64,10 +65,11 @@ describe("createDefaultYrdApp", () => {
 
     expect((await app.state()).lines).toMatchObject({
       batchSize: 1,
-      defaultSteps: ["check", "merge"],
+      defaultSteps: ["security", "merge", "publish"],
       installed: {
-        check: { index: 0, kind: "step" },
-        merge: { index: 1, kind: "merge" },
+        security: { index: 0, integrates: false, needsIntegration: false },
+        merge: { index: 1, integrates: true, needsIntegration: false },
+        publish: { index: 2, integrates: false, needsIntegration: true },
       },
     })
     expect(
@@ -88,28 +90,9 @@ describe("createDefaultYrdApp", () => {
 
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
     const run = await app.line.integrate({ submission: "PR1" }, { executor: "test", leaseMs: 60_000 })
-    expect(run).toMatchObject({ status: "passed", selected: ["check", "merge"] })
+    expect(run).toMatchObject({ status: "passed", selected: ["security", "merge", "publish"] })
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     await app.close()
-  })
-
-  it("refuses data config that names a transition the built-in plugin did not install", async () => {
-    const { repo } = await repository()
-    const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["security"] },
-      steps: { security: { run: "security-check", runner: "local" } },
-      contest: { concurrency: 2, timeoutMs: 60_000, evaluators: ["security"] },
-    }
-
-    expect(() =>
-      createDefaultYrdApp({
-        repo,
-        stateDir: join(repo, ".git", "yrd"),
-        baysRoot: join(repo, ".bays"),
-        store: createMemoryEventStore(),
-        config,
-      }),
-    ).toThrow("step 'security' requires a custom withStep() composition")
   })
 })
 
@@ -120,7 +103,6 @@ describe("createYrdHost", () => {
 
     expect(first.repository).toMatchObject({ repo, stateDir: join(repo, ".git", "yrd") })
     expect(first.receiver.receiverPath).toBe(join(repo, ".git", "yrd", "prs.git"))
-    expect(await Bun.file(join(repo, ".git", "yrd", "index.sqlite")).exists()).toBe(true)
     expect(await Bun.file(join(first.receiver.receiverPath, "hooks", "pre-receive")).exists()).toBe(true)
     const administration = first.app.line as typeof first.app.line & {
       provision(base?: string): Promise<unknown>

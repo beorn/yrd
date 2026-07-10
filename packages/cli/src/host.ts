@@ -22,15 +22,15 @@ import {
 import {
   createYrd,
   createYrdEventStore,
-  from,
+  pipe,
   withEffects,
   type AnyYrdApp,
   type HasEffects,
   type YrdEventStore,
 } from "@yrd/core"
 import {
+  configuredCommandStep,
   configuredWaitingCommandStep,
-  deployCommandStep,
   gitCheckStep,
   gitMergeStep,
   withBatch,
@@ -49,12 +49,12 @@ import { withBays } from "@yrd/bay"
 import { withContests } from "@yrd/contest"
 import type { ResolvedYrdProjectConfig, YrdStepConfig } from "./config.ts"
 import { loadYrdConfig } from "./config.ts"
-import { classifyFailure, diagnostic, resolveInvocation } from "./invocation.ts"
+import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrd } from "./run.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliLineAdministration } from "./types.ts"
 
-const BUILTIN_STEPS = new Set(["check", "review", "merge", "deploy"])
 type RuntimeLineApp = AnyYrdApp & HasEffects & HasTasks & HasBays & HasLine
 
 export type DefaultYrdAppOptions = Readonly<{
@@ -72,13 +72,7 @@ export type DefaultYrdAppOptions = Readonly<{
 }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
-  for (const name of Object.keys(config.steps)) {
-    if (!BUILTIN_STEPS.has(name)) {
-      throw new Error(`yrd: step '${name}' requires a custom withStep() composition`)
-    }
-  }
   for (const name of config.line.steps) {
-    if (!BUILTIN_STEPS.has(name)) throw new Error(`yrd: step '${name}' requires a custom withStep() composition`)
     if (name !== "merge" && config.steps[name]?.run === undefined) {
       throw new Error(`yrd: default line step '${name}' requires steps.${name}.run`)
     }
@@ -102,29 +96,23 @@ function gitCandidateStep(repo: string, stateDir: string, name: string, config: 
   })
 }
 
-function deployStep(
+function integratedCommandStep(
   repo: string,
   stateDir: string,
+  name: string,
   config: YrdStepConfig,
 ): StepRunner<IntegratedShape, CommandEvidence> {
   const options = {
     command: config.run!,
     cwd: repo,
-    purpose: "deploy",
+    purpose: name,
     artifactRoot: join(stateDir, "artifacts"),
     variables: (input: StepExecution<IntegratedShape>) => ({
       YRD_INTEGRATED_SHA: input.shape.integration.commit,
       ...(config.environment === undefined ? {} : { YRD_ENVIRONMENT: config.environment }),
     }),
   }
-  return config.runner === "waiting"
-    ? configuredWaitingCommandStep(options)
-    : deployCommandStep({
-        command: options.command,
-        cwd: options.cwd,
-        artifactRoot: options.artifactRoot,
-        variables: options.variables,
-      })
+  return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
 
 function cleanEnvironment(): NodeJS.ProcessEnv {
@@ -161,31 +149,33 @@ export function createDefaultYrdApp(options: DefaultYrdAppOptions): YrdCliApp {
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     })
   const taskSources = options.taskSources ?? [createKmTaskSource({ cwd: options.repo })]
-  const base = from(createYrd({ store: options.store }))
-    .then(withEffects())
-    .then(withTasks({ sources: taskSources }))
-    .then(withBays({ workspace, defaultBase: options.config.line.base }))
-    .then(withLine())
-    .then(withBatch(options.config.line.batch))
-    .build()
-  let lineApp = withStep(
-    "check",
-    gitCandidateStep(options.repo, options.stateDir, "check", options.config.steps.check!),
-  )(base) as unknown as RuntimeLineApp
-  const review = options.config.steps.review
-  if (review?.run !== undefined) {
-    lineApp = withStep("review", gitCandidateStep(options.repo, options.stateDir, "review", review))(
-      lineApp,
-    ) as unknown as RuntimeLineApp
-  }
-  lineApp = withMerge(gitMergeStep({ repo: options.repo, command: options.config.steps.merge?.run }))(
-    lineApp,
-  ) as unknown as RuntimeLineApp
-  const deploy = options.config.steps.deploy
-  if (deploy?.run !== undefined) {
-    lineApp = withStep("deploy", deployStep(options.repo, options.stateDir, deploy), { needsIntegration: true })(
-      lineApp as unknown as AnyYrdApp & HasBays & HasLine<IntegratedShape>,
-    ) as unknown as RuntimeLineApp
+  const base = pipe(
+    createYrd({ store: options.store }),
+    withEffects(),
+    withTasks({ sources: taskSources }),
+    withBays({ workspace, defaultBase: options.config.line.base }),
+    withLine(),
+    withBatch(options.config.line.batch),
+  )
+  let lineApp = base as unknown as RuntimeLineApp
+  let integrated = false
+  for (const name of options.config.line.steps) {
+    if (name === "merge") {
+      lineApp = withMerge(gitMergeStep({ repo: options.repo, command: options.config.steps.merge?.run }))(
+        lineApp,
+      ) as unknown as RuntimeLineApp
+      integrated = true
+      continue
+    }
+    const configured = options.config.steps[name]!
+    lineApp = integrated
+      ? (withStep(name, integratedCommandStep(options.repo, options.stateDir, name, configured), {
+          needsIntegration: true,
+        })(lineApp as unknown as AnyYrdApp & HasBays & HasLine<IntegratedShape>) as unknown as RuntimeLineApp)
+      : (withStep(
+          name,
+          gitCandidateStep(options.repo, options.stateDir, name, configured),
+        )(lineApp) as unknown as RuntimeLineApp)
   }
   lineApp = withDefaultSteps(options.config.line.steps)(lineApp)
 
@@ -207,19 +197,18 @@ export function createDefaultYrdApp(options: DefaultYrdAppOptions): YrdCliApp {
         },
       })
     })
-  const runners =
-    options.contestRunners ??
-    [
-      createAgContestRunner({
-        command: ["ag"],
-        timeoutMs: options.config.contest.timeoutMs,
-        artifactRoot: join(options.stateDir, "artifacts"),
-      }),
-    ]
+  const runners = options.contestRunners ?? [
+    createAgContestRunner({
+      command: ["ag"],
+      timeoutMs: options.config.contest.timeoutMs,
+      artifactRoot: join(options.stateDir, "artifacts"),
+    }),
+  ]
   app = withContests({
     runners,
     evaluators,
     git: options.contestGit ?? localContestGit(options.repo),
+    defaultBase: options.config.line.base,
   })(lineApp) as YrdCliApp
   return app
 }
@@ -330,15 +319,12 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
 }
 
 function defaultIO(): YrdCliIO {
+  const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   return {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
-    ...(process.stdout.isTTY
-      ? {
-          hyperlink: (label: string, target: string) =>
-            `\u001B]8;;${target.replace(/[\u001B\u0007]/gu, "")}\u001B\\${label}\u001B]8;;\u001B\\`,
-        }
-      : {}),
+    color,
+    columns: process.stdout.columns,
     cwd: process.cwd(),
   }
 }
@@ -352,14 +338,14 @@ export async function runYrdProcess(
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
     const mode = invocation.args[1]
     if (mode !== "pre-receive" && mode !== "post-receive") {
-      diagnostic(io, invocation.name, new Error("receiver-hook requires pre-receive or post-receive"))
+      await diagnostic(io, invocation.name, new Error("receiver-hook requires pre-receive or post-receive"))
       return 2
     }
     try {
       await runReceiverHook(mode, process.env)
       return 0
     } catch (error) {
-      diagnostic(io, invocation.name, error)
+      await diagnostic(io, invocation.name, error)
       return 1
     }
   }
@@ -372,7 +358,7 @@ export async function runYrdProcess(
       concurrency: io.concurrency ?? host.config.contest.concurrency,
     })
   } catch (error) {
-    diagnostic(io, invocation.name, error)
+    await diagnostic(io, invocation.name, error)
     return classifyFailure(error)
   } finally {
     await host?.close()

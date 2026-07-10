@@ -12,6 +12,8 @@
     "@yrd/contest": "workspace:*",
     "@yrd/core": "workspace:*",
     "@yrd/line": "workspace:*",
-    "@yrd/task": "workspace:*"
+    "@yrd/task": "workspace:*",
+    "react": "^19.2.0",
+    "silvery": "^0.21.0"
   }
 }

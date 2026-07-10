@@ -143,7 +143,7 @@ function createApp(
       idGen: ids(),
     }),
     withEffects(),
-    withTasks(),
+    withTasks({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Task one" }) }] }),
     withBays({
       workspace: workspace({ dirty: options.dirtyBay, refreshedHead: options.refreshedHead, probe: options.probe }),
       defaultBase: "main",
@@ -221,9 +221,12 @@ describe("runYrd", () => {
     expect(gitHelp.stdout()).not.toMatch(/^\s+contest /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+help /mu)
 
-    const opened = outputIO()
+    const opened = outputIO({ color: true, columns: 64 })
     expect(await runYrd(app, gitBay("open", "from-git"), opened.io)).toBe(0)
-    expect(opened.stdout()).toBe("/repo/.bays/B1\n")
+    expect(opened.stdout()).toContain("BAY")
+    expect(opened.stdout()).toContain("STATUS")
+    expect(opened.stdout()).toContain("PATH")
+    expect(opened.stdout()).toContain("file:///repo/.bays/B1")
 
     const yrdHelp = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), yrdHelp.io)).toBe(0)
@@ -238,9 +241,9 @@ describe("runYrd", () => {
 
   it("opens, refreshes, and closes bays through installed command refs while driving effects", async () => {
     const app = createApp()
-    const open = outputIO()
+    const open = outputIO({ color: true, columns: 64 })
     expect(await runYrd(app, yrd("bay", "open", "fix-readme", "--from", "topic/readme"), open.io)).toBe(0)
-    expect(open.stdout()).toBe("/repo/.bays/B1\n")
+    expect(open.stdout()).toContain("file:///repo/.bays/B1")
 
     const state = await app.state()
     expect(state.bays.bays.B1).toMatchObject({
@@ -253,13 +256,15 @@ describe("runYrd", () => {
 
     const refresh = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("bay", "refresh"), refresh.io)).toBe(0)
-    expect(refresh.stdout()).toBe("B1 refreshed\n")
+    expect(refresh.stdout()).toContain("B1")
+    expect(refresh.stdout()).toContain("active")
     const refreshed = await app.state()
     expect(refreshed.effects.runs[refreshed.bays.bays.B1!.effectId!]?.status).toBe("passed")
 
     const close = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("bay", "close"), close.io)).toBe(0)
-    expect(close.stdout()).toBe("B1 closed\n")
+    expect(close.stdout()).toContain("B1")
+    expect(close.stdout()).toContain("closed")
     expect((await app.state()).bays.bays.B1?.status).toBe("closed")
   })
 
@@ -330,6 +335,13 @@ describe("runYrd", () => {
     expect(JSON.parse(submit.stdout())).toMatchObject({
       submissions: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA, status: "submitted" }],
     })
+
+    const human = outputIO({ columns: 64 })
+    expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0"), human.io)).toBe(0)
+    expect(human.stdout()).toContain("PR")
+    expect(human.stdout()).toContain("STATUS")
+    expect(human.stdout()).toContain("topic/direct")
+    expect(human.stdout()).toContain("release/2.0")
   })
 
   it("finishes a waiting line effect and resumes the same durable run", async () => {
@@ -339,17 +351,13 @@ describe("runYrd", () => {
     const integrate = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "PR1"), integrate.io)).toBe(0)
     expect((await app.line.get("R1"))?.status).toBe("waiting")
-    const waiting = outputIO({ hyperlink: (label, target) => `[${label.trim()}](${target})` })
+    const waiting = outputIO({ color: true })
     expect(await runYrd(app, yrd("line", "status", "PR1"), waiting.io)).toBe(0)
-    expect(waiting.stdout()).toContain("[open](https://ci.invalid/run/1)")
+    expect(waiting.stdout()).toContain("https://ci.invalid/run/1")
 
     const finish = outputIO()
     expect(
-      await runYrd(
-        app,
-        yrd("line", "finish", "PR1", "--ok", "--token", "remote-check", "--json"),
-        finish.io,
-      ),
+      await runYrd(app, yrd("line", "finish", "PR1", "--ok", "--token", "remote-check", "--json"), finish.io),
     ).toBe(0)
     expect(JSON.parse(finish.stdout())).toMatchObject({ command: "line.finish", run: { id: "R1", status: "passed" } })
     expect((await app.line.get("R1"))?.shape).toMatchObject({
@@ -390,9 +398,9 @@ describe("runYrd", () => {
       status: "rejected",
       detail: "private tests failed",
     })
-    const status = outputIO({ hyperlink: (label, target) => `[${label.trim()}](${target})` })
+    const status = outputIO({ color: true })
     expect(await runYrd(app, yrd("line", "status", "PR1"), status.io)).toBe(0)
-    expect(status.stdout()).toContain("[1](file:///tmp/private-tests.log)")
+    expect(status.stdout()).toContain("file:///tmp/private-tests.log")
   })
 
   it("preserves zero-selector and explicitly empty step selection semantics", async () => {
@@ -441,10 +449,9 @@ describe("runYrd", () => {
     const app = createApp()
     await openAndSubmit(app)
     await app.line.integrate({ submission: "PR1" }, { executor: "test", leaseMs: 60_000, now: () => 0 })
-    await app.tasks.record({ ref: { source: "km", id: "T1" }, title: "Task one" })
     const base = await app.contests.resolveBase()
     await app.command(app.commands.task.compete, {
-      task: { source: "km", id: "T1" },
+      task: { ref: { source: "km", id: "T1" }, title: "Task one" },
       competitors: [
         { model: "codex", harness: "ag", config: { prompt: "Implement it" } },
         { model: "claude", harness: "ag", config: { prompt: "Implement it" } },
@@ -463,12 +470,13 @@ describe("runYrd", () => {
 
     const human = outputIO({
       now: () => Date.parse("2026-07-09T12:01:00.000Z"),
-      hyperlink: (label, target) => `[${label.trim()}](${target})`,
+      color: true,
+      columns: 64,
     })
     expect(await runYrd(app, yrd("line", "status", "PR1"), human.io)).toBe(0)
-    expect(human.stdout()).toMatch(/PR\s+STATE\s+TARGET\s+AGE\s+TOUCHED\s+RUN/u)
-    expect(human.stdout()).toContain("[PR1](file:///repo/.bays/B1)")
-    expect(human.stdout()).toContain("[/repo/.bays/B1](file:///repo/.bays/B1)")
+    expect(human.stdout()).toContain("TOUCHED")
+    expect(human.stdout()).toContain("PATH")
+    expect(human.stdout()).toContain("file:///repo/.bays/B1")
 
     const show = outputIO()
     expect(await runYrd(app, yrd("contest", "show", "C1", "--json"), show.io)).toBe(0)
@@ -479,21 +487,25 @@ describe("runYrd", () => {
   it("runs a real task contest to durable evidence, then selects and promotes the exact winner", async () => {
     const baseResolutions: string[] = []
     const app = createApp({ baseResolutions })
-    await app.tasks.record({ ref: { source: "km", id: "T1" }, title: "Task one" })
-
     const compete = outputIO()
     expect(
-      await runYrd(
-        app,
-        yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"),
-        compete.io,
-      ),
+      await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
     ).toBe(0)
     expect(JSON.parse(compete.stdout())).toMatchObject({
       command: "task.compete",
       contest: { id: "C1", status: "ready", attemptOrder: ["A1", "A2"], base: "main", baseSha: BASE_SHA },
     })
     expect(baseResolutions).toEqual(["main"])
+
+    const human = outputIO({ columns: 96, color: true })
+    expect(await runYrd(app, yrd("contest", "show", "C1"), human.io)).toBe(0)
+    expect(human.stdout()).toContain("ATTEMPT")
+    expect(human.stdout()).toContain("AGENT")
+    expect(human.stdout()).toContain("TIME")
+    expect(human.stdout()).toContain("TOKENS")
+    expect(human.stdout()).toContain("COST")
+    expect(human.stdout()).toContain("codex")
+    expect(human.stdout()).toContain("claude")
 
     const select = outputIO()
     expect(await runYrd(app, yrd("contest", "select", "C1", "--winner", "A1", "--json"), select.io)).toBe(0)
@@ -510,16 +522,9 @@ describe("runYrd", () => {
   it("runs independent Bay, runner, and evaluator work concurrently within ordered reconciliation waves", async () => {
     const probe = overlapProbe()
     const app = createApp({ probe })
-    await app.tasks.record({ ref: { source: "km", id: "T1" }, title: "Task one" })
     const compete = outputIO({ concurrency: 2 })
 
-    expect(
-      await runYrd(
-        app,
-        yrd("task", "compete", "km:T1", "--agents", "ag codex/claude"),
-        compete.io,
-      ),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude"), compete.io)).toBe(0)
     expect(probe.max("bay")).toBe(2)
     expect(probe.max("runner")).toBe(2)
     expect(probe.max("evaluator")).toBe(2)
