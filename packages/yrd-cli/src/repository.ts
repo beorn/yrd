@@ -1,0 +1,113 @@
+import { join, resolve } from "node:path"
+import { createProcess, type Process, type ProcessResult } from "@yrd/process"
+
+export type YrdRepository = Readonly<{
+  repo: string
+  worktree: string
+  gitDir: string
+  stateDir: string
+  baysRoot: string
+  defaultBase: string
+}>
+
+type RepositoryProcess = Pick<Process, "run">
+
+function cleanEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith("GIT_")))
+}
+
+async function git(
+  process: RepositoryProcess,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  args: readonly string[],
+  allowFailure = false,
+): Promise<ProcessResult> {
+  const result = await process.run({ argv: ["git", "-C", cwd, ...args], cwd, env })
+  if (!Number.isSafeInteger(result.exitCode)) throw new Error("yrd: Git returned an invalid exit code")
+  if (!allowFailure && result.exitCode !== 0) {
+    throw new Error(
+      result.stderr.trim() || result.stdout.trim() || `yrd: git ${args.join(" ")} exited ${result.exitCode}`,
+    )
+  }
+  return result
+}
+
+function value(result: Pick<ProcessResult, "exitCode" | "stdout">): string | undefined {
+  if (result.exitCode !== 0) return undefined
+  const text = result.stdout.trim()
+  return text === "" ? undefined : text
+}
+
+function primaryWorktree(output: string): Readonly<{ path: string; branch?: string }> | undefined {
+  const first = output.split(/\n\n+/u)[0]
+  if (first === undefined) return undefined
+  const fields = new Map(
+    first
+      .split("\n")
+      .filter((line) => line.includes(" "))
+      .map((line) => [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)]),
+  )
+  const path = fields.get("worktree")
+  if (path === undefined || path === "") return undefined
+  const branch = fields.get("branch")
+  return { path: resolve(path), ...(branch === undefined ? {} : { branch }) }
+}
+
+async function defaultBranch(
+  process: RepositoryProcess,
+  repo: string,
+  env: NodeJS.ProcessEnv,
+  primaryBranch?: string,
+): Promise<string> {
+  const remote = value(
+    await git(process, repo, env, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], true),
+  )
+  if (remote !== undefined) return remote.startsWith("origin/") ? remote.slice("origin/".length) : remote
+  if (primaryBranch?.startsWith("refs/heads/") === true) return primaryBranch.slice("refs/heads/".length)
+  const configured = value(await git(process, repo, env, ["config", "--get", "init.defaultBranch"], true))
+  if (configured !== undefined) return configured
+  const main = await git(process, repo, env, ["show-ref", "--verify", "--quiet", "refs/heads/main"], true)
+  if (main.exitCode === 0) return "main"
+  const current = value(await git(process, repo, env, ["branch", "--show-current"], true))
+  return current ?? "main"
+}
+
+/** Resolve one shared Yrd authority even when invoked from a linked worktree.
+ * Inherited Git hook variables are stripped before every discovery command. */
+export async function discoverYrdRepository(
+  options: {
+    cwd?: string
+    env?: NodeJS.ProcessEnv
+    process?: RepositoryProcess
+  } = {},
+): Promise<YrdRepository> {
+  const cwd = resolve(options.cwd ?? process.cwd())
+  const owned = options.process === undefined ? createProcess({ cwd, env: options.env }) : undefined
+  const runner = options.process ?? owned
+  if (runner === undefined) throw new Error("yrd: repository discovery has no Process")
+  const env = cleanEnvironment(options.env ?? process.env)
+  try {
+    const top = await git(runner, cwd, env, ["rev-parse", "--path-format=absolute", "--show-toplevel"], true)
+    const worktree = value(top)
+    if (worktree === undefined) throw new Error(`yrd: '${cwd}' is not inside a Git worktree`)
+    const common = await git(runner, worktree, env, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    const gitDirValue = value(common)
+    if (gitDirValue === undefined) throw new Error("yrd: Git returned an empty common directory")
+    const gitDir = resolve(worktree, gitDirValue)
+    const worktrees = await git(runner, worktree, env, ["worktree", "list", "--porcelain"])
+    const primary = primaryWorktree(worktrees.stdout)
+    if (primary === undefined) throw new Error("yrd: Git did not report a primary worktree")
+    const repo = primary.path
+    return {
+      repo,
+      worktree: resolve(worktree),
+      gitDir,
+      stateDir: join(gitDir, "yrd"),
+      baysRoot: join(repo, ".bays"),
+      defaultBase: await defaultBranch(runner, repo, env, primary.branch),
+    }
+  } finally {
+    await owned?.close()
+  }
+}

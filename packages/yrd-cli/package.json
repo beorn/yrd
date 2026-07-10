@@ -1,0 +1,25 @@
+{
+  "name": "@yrd/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@silvery/commander": "^0.21.0",
+    "@silvery/scope": "^0.21.0",
+    "@yrd/bay": "workspace:*",
+    "@yrd/contest": "workspace:*",
+    "@yrd/core": "workspace:*",
+    "@yrd/job": "workspace:*",
+    "@yrd/line": "workspace:*",
+    "@yrd/persistence": "workspace:*",
+    "@yrd/process": "workspace:*",
+    "@yrd/task": "workspace:*",
+    "loggily": "^0.10.2",
+    "react": "^19.2.0",
+    "silvery": "^0.21.0",
+    "zod": "^4.4.3"
+  }
+}
