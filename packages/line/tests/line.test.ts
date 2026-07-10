@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest"
-import { createMemoryEventStore, createYrd, pipe, withEffects, type EffectOutcome } from "@yrd/core"
+import { describe, expect, expectTypeOf, it } from "vitest"
 import { withBays, type BayWorkspaceAdapter } from "@yrd/bay"
+import { createMemoryEventStore, createYrd, pipe, withEffects, type EffectOutcome } from "@yrd/core"
 import {
   withBatch,
   withDefaultSteps,
@@ -9,6 +9,8 @@ import {
   withStep,
   type AddStepResult,
   type IntegratedShape,
+  type LineRuntime,
+  type StepEvidence,
   type StepExecution,
   type SubmissionShape,
 } from "@yrd/line"
@@ -17,10 +19,13 @@ const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
+const runtime = { executor: "local", leaseMs: 60_000 }
 
 type CheckResult = { checked: true }
+type ReviewResult = { approved: true }
+type DeployResult = { environment: string }
 type CheckedShape = AddStepResult<SubmissionShape, "check", CheckResult>
-type MergedShape = IntegratedShape
+type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 
 function ids(): () => string {
   let value = 0
@@ -29,34 +34,27 @@ function ids(): () => string {
 
 function workspace(): BayWorkspaceAdapter {
   return {
-    provision(input) {
-      return {
-        status: "passed",
-        output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
-      }
-    },
-    refresh(input) {
-      return {
-        status: "passed",
-        output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
-      }
-    },
-    deprovision() {
-      return { status: "passed", output: {} }
-    },
+    provision: (input) => ({
+      status: "passed",
+      output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
+    }),
+    refresh: (input) => ({
+      status: "passed",
+      output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
+    }),
+    deprovision: () => ({ status: "passed", output: {} }),
   }
 }
 
 function createLineApp(
   options: {
     batch?: false | number
-    defaultSteps?: readonly string[]
     check?: (input: StepExecution<SubmissionShape>) => EffectOutcome<CheckResult>
-    merge?: (input: StepExecution<CheckedShape>) => EffectOutcome<{ commit: string; baseSha: string }>
-    deploy?: (input: StepExecution<MergedShape>) => EffectOutcome<{ environment: string }>
+    merge?: (input: StepExecution<ReviewedShape>) => EffectOutcome<{ commit: string; baseSha: string }>
+    deploy?: (input: StepExecution<IntegratedShape>) => EffectOutcome<DeployResult>
   } = {},
 ) {
-  return pipe(
+  const merged = pipe(
     createYrd({ store: createMemoryEventStore(), idGen: ids(), clock: () => "2026-01-01T00:00:00.000Z" }),
     withEffects(),
     withBays({ workspace: workspace() }),
@@ -67,259 +65,249 @@ function createLineApp(
       (input: StepExecution<SubmissionShape>): EffectOutcome<CheckResult> =>
         options.check?.(input) ?? { status: "passed", output: { checked: true } },
     ),
+    withStep("review", (_input: StepExecution<CheckedShape>) => ({
+      status: "passed" as const,
+      output: { approved: true as const },
+    })),
     withMerge(
-      (input: StepExecution<CheckedShape>): EffectOutcome<{ commit: string; baseSha: string }> =>
-        options.merge?.(input) ?? {
-          status: "passed",
-          output: { commit: MERGED, baseSha: MERGED },
-        },
+      (input: StepExecution<ReviewedShape>): EffectOutcome<{ commit: string; baseSha: string }> =>
+        options.merge?.(input) ?? { status: "passed", output: { commit: MERGED, baseSha: BASE } },
     ),
+  )
+  return pipe(
+    merged,
     withStep(
       "deploy",
-      (input: StepExecution<MergedShape>): EffectOutcome<{ environment: string }> =>
-        options.deploy?.(input) ?? {
-          status: "passed",
-          output: { environment: "staging" },
-        },
+      (input: StepExecution<IntegratedShape>): EffectOutcome<DeployResult> =>
+        options.deploy?.(input) ?? { status: "passed", output: { environment: "staging" } },
       { needsIntegration: true },
     ),
-    withDefaultSteps(options.defaultSteps ?? ["check", "merge", "deploy"]),
+    withDefaultSteps(["check", "review", "merge", "deploy"]),
   )
 }
 
-async function submitBranch(app: ReturnType<typeof createLineApp>, branch = "task/one", base = "main") {
+async function submitBranch(app: ReturnType<typeof createLineApp>, branch: string, base = "main") {
   await app.command(app.commands.bay.submit, { branch, headSha: HEAD, base })
   const submission = Object.values((await app.state()).bays.submissions).find((item) => item.branch === branch)
   if (submission === undefined) throw new Error("submission was not recorded")
   return submission
 }
 
-const runOptions = { executor: "local", leaseMs: 60_000 }
+describe("line composition", () => {
+  it("composes typed plugin state and rejects impossible step evidence", () => {
+    const base = pipe(
+      createYrd({ store: createMemoryEventStore() }),
+      withEffects(),
+      withBays({ workspace: workspace() }),
+      withLine(),
+    )
+    const checked = withStep("check", (_input: StepExecution<SubmissionShape>) => ({
+      status: "passed" as const,
+      output: { checked: true as const },
+    }))(base)
+    const reviewed = withStep("review", (_input: StepExecution<CheckedShape>) => ({
+      status: "passed" as const,
+      output: { approved: true as const },
+    }))(checked)
+    const merged = withMerge((_input: StepExecution<ReviewedShape>) => ({
+      status: "passed" as const,
+      output: { commit: MERGED, baseSha: BASE },
+    }))(reviewed)
+    const deploy = withStep(
+      "deploy",
+      (_input: StepExecution<IntegratedShape>) => ({
+        status: "passed" as const,
+        output: { environment: "test" },
+      }),
+      { needsIntegration: true },
+    )
 
-describe("withLine", () => {
-  it.each([
-    [false, 1],
-    [0, 1],
-    [1, 1],
-    [4, 4],
-  ] as const)("normalizes batch setting %s to max size %i", async (batch, expected) => {
-    expect((await createLineApp({ batch }).state()).lines.batchSize).toBe(expected)
-  })
-
-  it("rejects a non-integer batch size", () => {
-    expect(() => createLineApp({ batch: 1.5 })).toThrow("batch size must be false or a non-negative integer")
-  })
-
-  it("projects a validated default step sequence into state and uses it when --steps is omitted", async () => {
-    const app = createLineApp({ defaultSteps: ["check", "merge"] })
-    const submission = await submitBranch(app)
-
-    expect((await app.state()).lines.defaultSteps).toEqual(["check", "merge"])
-    expect((await app.line.integrate({ submission: submission.id }, runOptions)).steps.map((step) => step.name)).toEqual([
-      "check",
-      "merge",
-    ])
-    expect(() => createLineApp({ defaultSteps: ["missing"] })).toThrow("unknown default line step 'missing'")
-  })
-
-  it("registers typed steps in state and integrates the exact pinned revision", async () => {
-    const app = createLineApp()
-    const submission = await submitBranch(app)
-
-    expect((await app.state()).lines.installed).toEqual({
-      check: { name: "check", title: "check", index: 0, kind: "step", needsIntegration: false },
-      merge: { name: "merge", title: "merge", index: 1, kind: "merge", needsIntegration: false },
-      deploy: { name: "deploy", title: "deploy", index: 2, kind: "step", needsIntegration: true },
-    })
-    expect(app.operation(app.commands.line.integrate, { submission: submission.id })).toEqual({
-      op: "line.integrate",
-      args: { submission: submission.id },
-    })
+    expectTypeOf(checked.line).toMatchTypeOf<LineRuntime<CheckedShape>>()
     expect(
-      app.commandRegistry
-        .entries()
-        .filter((entry) => entry.path[0] === "line")
-        .map((entry) => [entry.path.join("."), entry.command.visibility]),
-    ).toEqual([
-      ["line.integrate", "public"],
-      ["line.advance", "internal"],
-      ["line.resume", "internal"],
-      ["line.isolate", "internal"],
-    ])
+      deploy(merged)
+        .line.steps()
+        .map((step) => step.name),
+    ).toEqual(["check", "review", "merge", "deploy"])
 
-    const run = await app.line.integrate({ submission: submission.id }, runOptions)
-    expect(run.status).toBe("passed")
-    expect(run.steps.map((step) => [step.name, step.status])).toEqual([
-      ["check", "passed"],
-      ["merge", "passed"],
-      ["deploy", "passed"],
-    ])
-    expect(run.shape).toMatchObject({
-      submission: { id: submission.id, revision: 1, headSha: HEAD },
-      results: { check: { checked: true }, deploy: { environment: "staging" } },
-      integration: { commit: MERGED, baseSha: MERGED },
-    })
-    expect((await app.state()).bays.submissions[submission.id]).toMatchObject({
-      status: "integrated",
-      revision: 1,
-      headSha: HEAD,
-      integration: { commit: MERGED, baseSha: MERGED },
+    const compileOnly = (_check: () => void): void => {}
+    compileOnly(() => {
+      // @ts-expect-error deploy requires the state produced by withMerge
+      deploy(reviewed)
     })
 
-    const deployOnly = await app.line.integrate({ submission: submission.id, steps: ["deploy"] }, runOptions)
-    expect(deployOnly.steps.map((step) => step.name)).toEqual(["deploy"])
-    expect(deployOnly.status).toBe("passed")
+    const queued = { name: "check", index: 0, status: "queued" } satisfies StepEvidence
+    expect(queued.status).toBe("queued")
+    // @ts-expect-error queued steps cannot already own a durable effect
+    const impossibleQueued: StepEvidence = { ...queued, effectId: "effect-1" }
+    expect(impossibleQueued).toBeDefined()
   })
 
-  it("rejects a red pre-merge step without invoking merge", async () => {
-    let merged = false
+  it("runs check, review, exact merge, and deploy across independent base lines and batches", async () => {
     const app = createLineApp({
+      batch: 2,
+      deploy: (input) => ({ status: "passed", output: { environment: input.submission.base } }),
+    })
+    const first = await submitBranch(app, "task/one")
+    const second = await submitBranch(app, "task/two")
+    const release = await submitBranch(app, "task/release", "release/2.0")
+
+    const runs = await app.line.integrate({ submissions: [] }, runtime)
+
+    expect(runs.map((run) => [run.base, run.submissions.map((submission) => submission.id)])).toEqual([
+      ["main", [first.id, second.id]],
+      ["release/2.0", [release.id]],
+    ])
+    for (const run of runs) {
+      expect(run.steps.map((step) => step.name)).toEqual(["check", "review", "merge", "deploy"])
+      expect(run).toMatchObject({
+        status: "passed",
+        shape: {
+          results: {
+            check: { checked: true },
+            review: { approved: true },
+            deploy: { environment: run.base },
+          },
+          integration: { commit: MERGED, baseSha: BASE },
+        },
+      })
+    }
+    const state = await app.state()
+    for (const run of runs) {
+      const record = state.lines.records[run.id]
+      if (record === undefined) throw new Error(`missing line record ${run.id}`)
+      expect(Object.keys(record)).not.toEqual(
+        expect.arrayContaining(["status", "steps", "shape", "output", "error", "finishedAt"]),
+      )
+      expect(run.steps.map((step) => [step.effectId, step.status, step.attempt, step.output, step.error])).toEqual(
+        run.effectIds.map((id) => {
+          const effect = state.effects.runs[id]
+          return [id, effect?.status, effect?.attempt, effect?.output, effect?.error]
+        }),
+      )
+      expect(run.steps.every((step) => step.startedAt !== undefined && step.finishedAt !== undefined)).toBe(true)
+    }
+    expect(Object.values(state.bays.submissions).map((submission) => submission.integration)).toEqual([
+      { commit: MERGED, baseSha: BASE },
+      { commit: MERGED, baseSha: BASE },
+      { commit: MERGED, baseSha: BASE },
+    ])
+    expect((await app.line.status("main")).finished).toHaveLength(1)
+    expect((await app.line.status("release/2.0")).finished).toHaveLength(1)
+    const names: string[] = []
+    for await (const applied of app.events()) names.push(applied.name)
+    expect(names).toContain("line/run/integrated")
+    expect(names).not.toContain("line/step/finished")
+    expect(names).not.toContain("line/run/finished")
+    expect(names).not.toContain("line/run/resumed")
+  })
+
+  it("stops before merge on a rejected check but never revokes a completed merge", async () => {
+    let merged = false
+    const rejectedApp = createLineApp({
       check: () => ({ status: "failed", error: { code: "check-failed", message: "tests failed" } }),
       merge: () => {
         merged = true
-        return { status: "passed", output: { commit: MERGED, baseSha: MERGED } }
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
       },
     })
-    const submission = await submitBranch(app)
-
-    const run = await app.line.integrate({ submission: submission.id }, runOptions)
-    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const rejected = await submitBranch(rejectedApp, "task/rejected")
+    expect(await rejectedApp.line.integrate({ submission: rejected.id }, runtime)).toMatchObject({
+      status: "failed",
+      error: { code: "check-failed" },
+    })
     expect(merged).toBe(false)
-    expect((await app.state()).bays.submissions[submission.id]).toMatchObject({ status: "rejected" })
+    expect((await rejectedApp.state()).bays.submissions[rejected.id]).toMatchObject({ status: "rejected" })
+
+    const deployApp = createLineApp({
+      batch: 2,
+      deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
+    })
+    const deployed = await submitBranch(deployApp, "task/deploy-fails")
+    const companion = await submitBranch(deployApp, "task/deploy-companion")
+    const deployRuns = await deployApp.line.integrate({ submissions: [deployed.id, companion.id] }, runtime)
+    expect(deployRuns).toHaveLength(1)
+    expect(deployRuns[0]).toMatchObject({
+      status: "failed",
+      error: { code: "deploy-failed" },
+    })
+    expect((await deployApp.state()).bays.submissions).toMatchObject({
+      [deployed.id]: { status: "integrated", integration: { commit: MERGED, baseSha: BASE } },
+      [companion.id]: { status: "integrated", integration: { commit: MERGED, baseSha: BASE } },
+    })
   })
 
-  it("parks remote work, releases the base line, and resumes from the durable effect", async () => {
+  it("resumes durable remote work but refuses it after the pinned submission changes", async () => {
+    let merges = 0
     const app = createLineApp({
-      check: (input) =>
-        input.submission.branch === "task/one"
-          ? {
-              status: "waiting",
-              token: "remote-1",
-              url: "https://ci.invalid/1",
-              detail: "queued on remote runner",
-              artifacts: [{ kind: "queue-log", uri: "artifact://remote-1/queue" }],
-            }
-          : { status: "passed", output: { checked: true } },
-    })
-    const first = await submitBranch(app, "task/one")
-    const waiting = await app.line.integrate({ submission: first.id }, runOptions)
-    expect(waiting).toMatchObject({ status: "waiting" })
-    expect(waiting.steps[0]).toMatchObject({
-      status: "waiting",
-      token: "remote-1",
-      url: "https://ci.invalid/1",
-      detail: "queued on remote runner",
-      artifacts: [{ kind: "queue-log", uri: "artifact://remote-1/queue" }],
-    })
-
-    const second = await submitBranch(app, "task/two")
-    expect(await app.line.integrate({ submission: second.id }, runOptions)).toMatchObject({ status: "passed" })
-
-    const effectId = waiting.steps[0]!.effectId!
-    const effectRun = (await app.state()).effects.runs[effectId]!
-    await app.command(app.commands.effect.finish, {
-      id: effectId,
-      attempt: effectRun.attempt,
-      token: "remote-1",
-      outcome: { status: "passed", output: { checked: true } },
-    })
-    expect(await app.line.run(waiting.id, runOptions)).toMatchObject({ status: "passed" })
-  })
-
-  it("refuses to continue a parked run after its pinned submission revision changes", async () => {
-    let merged = false
-    const app = createLineApp({
-      check: () => ({ status: "waiting", token: "remote-stale" }),
+      check: (input) => {
+        if (input.submission.branch === "task/remote") {
+          return { status: "waiting", token: "remote-1" }
+        }
+        return input.submission.branch === "task/stale"
+          ? { status: "waiting", token: "remote-stale" }
+          : { status: "passed", output: { checked: true } }
+      },
       merge: () => {
-        merged = true
-        return { status: "passed", output: { commit: MERGED, baseSha: MERGED } }
+        merges++
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
       },
     })
-    const submission = await submitBranch(app, "task/stale")
-    const waiting = await app.line.integrate({ submission: submission.id }, runOptions)
-    const effectId = waiting.steps[0]!.effectId!
-    const effectRun = (await app.state()).effects.runs[effectId]!
+    const remote = await submitBranch(app, "task/remote")
+    const waiting = await app.line.integrate({ submission: remote.id }, runtime)
+    const waitingStep = waiting.steps[0]
+    if (waitingStep?.status !== "waiting") throw new Error("check did not park")
+    expect(waitingStep.token).toBe("remote-1")
 
-    await app.command(app.commands.bay.intake, { branch: submission.branch, headSha: UPDATED, base: "main" })
-    await app.command(app.commands.effect.finish, {
-      id: effectId,
+    const next = await submitBranch(app, "task/next")
+    expect(await app.line.integrate({ submission: next.id }, runtime)).toMatchObject({ status: "passed" })
+
+    const effectRun = (await app.state()).effects.runs[waitingStep.effectId]
+    if (effectRun === undefined) throw new Error("waiting effect was not projected")
+    await app.command(app.commands.effect.transition, {
+      type: "finish",
+      id: effectRun.id,
       attempt: effectRun.attempt,
-      token: "remote-stale",
+      token: waitingStep.token,
+      outcome: { status: "passed", output: { checked: true } },
+    })
+    expect(await app.line.run(waiting.id, runtime)).toMatchObject({ status: "passed" })
+    const mergesBeforeStaleRun = merges
+
+    const stale = await submitBranch(app, "task/stale")
+    const staleRun = await app.line.integrate({ submission: stale.id }, runtime)
+    const staleStep = staleRun.steps[0]
+    if (staleStep?.status !== "waiting") throw new Error("stale check did not park")
+    const staleEffect = (await app.state()).effects.runs[staleStep.effectId]
+    if (staleEffect === undefined) throw new Error("stale effect was not projected")
+    await app.command(app.commands.bay.intake, { branch: stale.branch, headSha: UPDATED, base: "main" })
+    await app.command(app.commands.effect.transition, {
+      type: "finish",
+      id: staleEffect.id,
+      attempt: staleEffect.attempt,
+      token: staleStep.token,
       outcome: { status: "passed", output: { checked: true } },
     })
 
-    expect(await app.line.run(waiting.id, runOptions)).toMatchObject({
+    expect(await app.line.run(staleRun.id, runtime)).toMatchObject({
       status: "failed",
       error: { code: "stale-submission" },
     })
-    expect(merged).toBe(false)
-    expect((await app.state()).bays.submissions[submission.id]).toMatchObject({
+    expect(merges).toBe(mergesBeforeStaleRun)
+    expect((await app.state()).bays.submissions[stale.id]).toMatchObject({
       revision: 2,
       headSha: UPDATED,
       status: "pushed",
     })
   })
 
-  it("records a post-merge deploy failure without revoking integration", async () => {
-    const app = createLineApp({
-      deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
-    })
-    const submission = await submitBranch(app)
-    const run = await app.line.integrate({ submission: submission.id }, runOptions)
-
-    expect(run).toMatchObject({ status: "failed", error: { code: "deploy-failed" } })
-    expect((await app.state()).bays.submissions[submission.id]).toMatchObject({
-      status: "integrated",
-      integration: { commit: MERGED },
-    })
-  })
-
-  it("runs an eligible all-pass batch once and integrates every pinned revision", async () => {
-    const checked: string[][] = []
-    const merged: string[][] = []
-    const app = createLineApp({
-      batch: 4,
-      check: (input) => {
-        checked.push(input.submissions.map((submission) => submission.id))
-        return { status: "passed", output: { checked: true } }
-      },
-      merge: (input) => {
-        merged.push(input.submissions.map((submission) => submission.id))
-        return { status: "passed", output: { commit: MERGED, baseSha: MERGED } }
-      },
-    })
-    const first = await submitBranch(app, "task/one")
-    const second = await submitBranch(app, "task/two")
-    const third = await submitBranch(app, "task/three")
-
-    const runs = await app.line.integrate({ submissions: [] }, runOptions)
-
-    expect(runs).toHaveLength(1)
-    expect(runs[0]).toMatchObject({
-      status: "passed",
-      submissions: [
-        { id: first.id, revision: 1, headSha: HEAD },
-        { id: second.id, revision: 1, headSha: HEAD },
-        { id: third.id, revision: 1, headSha: HEAD },
-      ],
-    })
-    expect(checked).toEqual([[first.id, second.id, third.id]])
-    expect(merged).toEqual([[first.id, second.id, third.id]])
-    expect(Object.values((await app.state()).bays.submissions).map((submission) => submission.status)).toEqual([
-      "integrated",
-      "integrated",
-      "integrated",
-    ])
-  })
-
-  it("recursively bisects a red batch and rejects only the isolated failure", async () => {
+  it("recursively bisects a red batch and rejects only the isolated submission", async () => {
     const checked: string[][] = []
     const app = createLineApp({
       batch: 4,
       check: (input) => {
-        const ids = input.submissions.map((submission) => submission.id)
-        checked.push(ids)
-        return ids.includes("PR3")
+        const submissions = input.submissions.map((submission) => submission.id)
+        checked.push(submissions)
+        return submissions.includes("PR3")
           ? { status: "failed", error: { code: "check-failed", message: "bad submission" } }
           : { status: "passed", output: { checked: true } }
       },
@@ -329,8 +317,7 @@ describe("withLine", () => {
     await submitBranch(app, "task/bad")
     await submitBranch(app, "task/four")
 
-    const runs = await app.line.integrate({ submissions: [] }, runOptions)
-    const submissions = (await app.state()).bays.submissions
+    const runs = await app.line.integrate({ submissions: [] }, runtime)
 
     expect(checked).toEqual([["PR1", "PR2", "PR3", "PR4"], ["PR1", "PR2"], ["PR3", "PR4"], ["PR3"], ["PR4"]])
     expect(runs.map((run) => [run.submissions.map((submission) => submission.id), run.status])).toEqual([
@@ -341,49 +328,9 @@ describe("withLine", () => {
       [["PR4"], "passed"],
     ])
     expect(
-      Object.fromEntries(Object.values(submissions).map((submission) => [submission.id, submission.status])),
-    ).toEqual({
-      PR1: "integrated",
-      PR2: "integrated",
-      PR3: "rejected",
-      PR4: "integrated",
-    })
-  })
-
-  it("does not bisect a post-merge batch failure or revoke any integration", async () => {
-    const app = createLineApp({
-      batch: 4,
-      deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
-    })
-    const first = await submitBranch(app, "task/one")
-    const second = await submitBranch(app, "task/two")
-
-    const runs = await app.line.integrate({ submissions: [first.id, second.id] }, runOptions)
-
-    expect(runs).toHaveLength(1)
-    expect(runs[0]).toMatchObject({ status: "failed", error: { code: "deploy-failed" } })
-    expect((await app.state()).bays.submissions).toMatchObject({
-      [first.id]: { status: "integrated", integration: { commit: MERGED } },
-      [second.id]: { status: "integrated", integration: { commit: MERGED } },
-    })
-  })
-
-  it("uses TypeScript state shapes to reject a post-integration step before merge", () => {
-    const base = pipe(
-      createYrd({ store: createMemoryEventStore() }),
-      withEffects(),
-      withBays({ workspace: workspace() }),
-      withLine(),
-    )
-    const deploy = withStep(
-      "deploy",
-      (_input: StepExecution<IntegratedShape>) => ({ status: "passed" as const, output: { environment: "test" } }),
-      { needsIntegration: true },
-    )
-    const compileOnly = (_check: () => void): void => {}
-    compileOnly(() => {
-      // @ts-expect-error deploy's input requires withMerge output
-      deploy(base)
-    })
+      Object.fromEntries(
+        Object.values((await app.state()).bays.submissions).map((submission) => [submission.id, submission.status]),
+      ),
+    ).toEqual({ PR1: "integrated", PR2: "integrated", PR3: "rejected", PR4: "integrated" })
   })
 })

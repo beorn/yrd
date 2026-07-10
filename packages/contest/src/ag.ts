@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto"
-import { mkdir, realpath, writeFile } from "node:fs/promises"
+import { realpath } from "node:fs/promises"
 import { resolve, join } from "node:path"
-import { pathToFileURL } from "node:url"
 import type { EffectOutcome } from "@yrd/core"
 import type {
   AttemptRunOutput,
@@ -14,22 +12,29 @@ import type {
   TokenCounts,
   UsdCost,
 } from "./types.ts"
+import {
+  FULL_SHA,
+  accepted,
+  attempt,
+  captureArtifacts,
+  createGit,
+  execute,
+  executionEnvironment,
+  failed,
+  jsonArtifact,
+  rejected,
+  spawnProcess,
+  type Checked,
+  type Failure,
+  type Git,
+  type ProcessRequest,
+  type ProcessResult,
+  type ProcessRunner,
+} from "./execution.ts"
 
-export type AgProcessRequest = Readonly<{
-  kind: "agent" | "git"
-  argv: readonly string[]
-  cwd: string
-  env: NodeJS.ProcessEnv
-  signal?: AbortSignal
-}>
-
-export type AgProcessResult = Readonly<{
-  exitCode: number
-  stdout: string
-  stderr: string
-}>
-
-export type AgProcessRunner = (request: AgProcessRequest) => Promise<AgProcessResult>
+export type AgProcessRequest = ProcessRequest<"agent" | "git">
+export type AgProcessResult = ProcessResult
+export type AgProcessRunner = ProcessRunner<"agent" | "git">
 
 export type AgContestLaunch = Readonly<{
   provider: string
@@ -55,8 +60,6 @@ export type AgContestRunnerOptions = Readonly<{
   resolveLaunch?: (input: ContestRunnerInput) => AgContestLaunch
 }>
 
-type Failure = Readonly<{ code: string; message: string }>
-type Checked<Result> = { ok: true; value: Result } | { ok: false; error: Failure }
 type Metric =
   | Readonly<{ kind: "reported"; value: number; source: string }>
   | Readonly<{ kind: "missing"; reason: string }>
@@ -77,11 +80,10 @@ type MetricsEvidence = Readonly<{
 
 type RawArtifacts = Readonly<{
   artifacts: readonly ContestArtifact[]
-  manifestPath: string
+  dir: string
   metrics: MetricsEvidence
 }>
 
-const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
 const REF_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/u
 const TOKEN_FIELDS = {
   input: ["input_tokens", "inputTokens"],
@@ -90,27 +92,6 @@ const TOKEN_FIELDS = {
   cacheWrite: ["cache_creation_input_tokens", "cache_write_input_tokens", "cacheWriteTokens"],
   reasoning: ["reasoning_output_tokens", "reasoning_tokens", "reasoningTokens"],
 } as const
-
-const defaultProcess: AgProcessRunner = async (request) => {
-  const child = Bun.spawn([...request.argv], {
-    cwd: request.cwd,
-    env: request.env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    signal: request.signal,
-  })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  return { exitCode, stdout, stderr }
-}
-
-function failed(code: string, message: string): EffectOutcome<AttemptRunOutput> {
-  return { status: "failed", error: { code, message } }
-}
 
 function text(value: JsonValue | undefined, label: string): string | undefined {
   if (value === undefined) return undefined
@@ -172,15 +153,7 @@ function defaultLaunch(input: ContestRunnerInput): AgContestLaunch {
       `yrd: Ag provider '${provider}' has no known one-shot contract; configure args or inject resolveLaunch`,
     )
   }
-  return {
-    provider,
-    ...(account === undefined ? {} : { account }),
-    ...(tier === undefined ? {} : { tier }),
-    ...(effort === undefined ? {} : { effort }),
-    ...(instructions === undefined ? {} : { instructions }),
-    yolo,
-    args,
-  }
+  return { provider, account, tier, effort, instructions, yolo, args }
 }
 
 function validateCommand(command: readonly string[]): readonly string[] {
@@ -191,9 +164,7 @@ function validateCommand(command: readonly string[]): readonly string[] {
 }
 
 function modelArg(input: ContestRunnerInput, provider: string): readonly string[] {
-  return inferredProvider(input.competitor.model) === provider && input.competitor.model === provider
-    ? []
-    : ["--model", input.competitor.model]
+  return input.competitor.model === provider ? [] : ["--model", input.competitor.model]
 }
 
 function launchArgv(command: readonly string[], input: ContestRunnerInput, launch: AgContestLaunch): readonly string[] {
@@ -234,23 +205,12 @@ function taskPrompt(input: ContestRunnerInput, instructions?: string): string {
   return lines.join("\n")
 }
 
-function executionEnvironment(
+function agEnvironment(
   input: ContestRunnerInput,
   context: EffectAdapterContext,
   extra: NodeJS.ProcessEnv = {},
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key.startsWith("GIT_") || key.startsWith("YRD_")) continue
-    env[key] = value
-  }
-  for (const [key, value] of Object.entries(extra)) {
-    if (key.startsWith("GIT_") || key.startsWith("YRD_")) continue
-    env[key] = value
-  }
-  return {
-    ...env,
-    GIT_TERMINAL_PROMPT: "0",
+  return executionEnvironment(extra, {
     YRD_CONTEST: input.contest,
     YRD_ATTEMPT: input.attempt,
     YRD_TASK_SOURCE: input.task.ref.source,
@@ -260,164 +220,70 @@ function executionEnvironment(
     YRD_BASE: input.base,
     ...(input.bay.baseSha === undefined ? {} : { YRD_BASE_SHA: input.bay.baseSha }),
     YRD_EFFECT: context.id,
-  }
-}
-
-async function execute(
-  runner: AgProcessRunner,
-  request: AgProcessRequest,
-  timeoutMs?: number,
-): Promise<Checked<AgProcessResult>> {
-  const controller = timeoutMs === undefined ? undefined : new AbortController()
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    const running = runner(controller === undefined ? request : { ...request, signal: controller.signal })
-    const value =
-      timeoutMs === undefined
-        ? await running
-        : await Promise.race([
-            running,
-            new Promise<never>((_resolve, reject) => {
-              timer = setTimeout(() => {
-                controller!.abort()
-                reject(new Error(`timed out after ${timeoutMs}ms`))
-              }, timeoutMs)
-            }),
-          ])
-    return { ok: true, value }
-  } catch (error) {
-    return {
-      ok: false,
-      error: {
-        code: controller?.signal.aborted === true ? `${request.kind}-timeout` : `${request.kind}-spawn-failed`,
-        message: error instanceof Error ? error.message : String(error),
-      },
-    }
-  } finally {
-    if (timer !== undefined) clearTimeout(timer)
-  }
-}
-
-async function git(
-  runner: AgProcessRunner,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  args: readonly string[],
-): Promise<Checked<AgProcessResult>> {
-  return await execute(runner, { kind: "git", argv: ["git", ...args], cwd, env })
-}
-
-function output(result: AgProcessResult): string {
-  return result.stdout.trim() || result.stderr.trim()
-}
-
-function gitFailure(result: Checked<AgProcessResult>, code: string, action: string): Failure | undefined {
-  if (!result.ok) return { code, message: `${action}: ${result.error.message}` }
-  if (result.value.exitCode !== 0) {
-    return { code, message: `${action}: ${output(result.value) || `Git exited ${result.value.exitCode}`}` }
-  }
-  return undefined
+  })
 }
 
 async function workspacePreflight(
-  runner: AgProcessRunner,
+  git: Git,
   input: ContestRunnerInput,
-  env: NodeJS.ProcessEnv,
 ): Promise<Checked<{ cwd: string; commonGitDir: string; head: string; baseSha: string }>> {
   if (input.bay.status !== "active") {
-    return { ok: false, error: { code: "bay-not-active", message: `Bay '${input.bay.id}' is ${input.bay.status}` } }
+    return rejected("bay-not-active", `Bay '${input.bay.id}' is ${input.bay.status}`)
   }
   if (input.bay.path === undefined) {
-    return { ok: false, error: { code: "bay-path-missing", message: `Bay '${input.bay.id}' has no workspace path` } }
+    return rejected("bay-path-missing", `Bay '${input.bay.id}' has no workspace path`)
   }
-  if (input.bay.baseSha === undefined || !SHA.test(input.bay.baseSha)) {
-    return {
-      ok: false,
-      error: { code: "bay-base-missing", message: `Bay '${input.bay.id}' has no valid pinned base commit` },
-    }
+  if (input.bay.baseSha === undefined || !FULL_SHA.test(input.bay.baseSha)) {
+    return rejected("bay-base-missing", `Bay '${input.bay.id}' has no valid pinned base commit`)
   }
   if (input.bay.dirty === true) {
-    return {
-      ok: false,
-      error: { code: "bay-dirty", message: `Bay '${input.bay.id}' was dirty at its last refresh` },
-    }
+    return rejected("bay-dirty", `Bay '${input.bay.id}' was dirty at its last refresh`)
   }
-  let cwd: string
-  try {
-    cwd = await realpath(input.bay.path)
-  } catch (error) {
-    return {
-      ok: false,
-      error: { code: "bay-path-invalid", message: error instanceof Error ? error.message : String(error) },
-    }
+  const bayPath = input.bay.path
+  const path = await attempt("bay-path-invalid", () => realpath(bayPath))
+  if (!path.ok) return path
+  const cwd = path.value
+  const top = await git.text(
+    cwd,
+    ["rev-parse", "--show-toplevel"],
+    "git-workspace-invalid",
+    "Could not resolve Bay Git root",
+  )
+  if (!top.ok) return top
+  const topPath = await attempt("git-workspace-invalid", () => realpath(top.value))
+  if (!topPath.ok) return topPath
+  if (topPath.value !== cwd) {
+    return rejected("bay-workspace-mismatch", `Bay path '${cwd}' resolves to Git worktree '${topPath.value}'`)
   }
-  const top = await git(runner, cwd, env, ["rev-parse", "--show-toplevel"])
-  const topFailure = gitFailure(top, "git-workspace-invalid", "Could not resolve Bay Git root")
-  if (topFailure !== undefined) return { ok: false, error: topFailure }
-  let topPath: string
-  try {
-    topPath = await realpath(top.ok ? top.value.stdout.trim() : "")
-  } catch (error) {
-    return {
-      ok: false,
-      error: { code: "git-workspace-invalid", message: error instanceof Error ? error.message : String(error) },
-    }
+  const branch = await git.branch(cwd, "bay-branch-invalid", "Could not resolve Bay branch")
+  if (!branch.ok) return branch
+  if (branch.value !== input.bay.branch) {
+    return rejected(
+      "bay-branch-mismatch",
+      `Bay '${input.bay.id}' expected branch '${input.bay.branch}', found '${branch.value}'`,
+    )
   }
-  if (topPath !== cwd) {
-    return {
-      ok: false,
-      error: { code: "bay-workspace-mismatch", message: `Bay path '${cwd}' resolves to Git worktree '${topPath}'` },
-    }
+  const head = await git.commit(cwd, "HEAD", "bay-head-invalid", "Could not resolve Bay HEAD")
+  if (!head.ok) return head
+  if (input.bay.headSha !== undefined && input.bay.headSha.toLowerCase() !== head.value) {
+    return rejected(
+      "bay-head-mismatch",
+      `Bay '${input.bay.id}' expected HEAD ${input.bay.headSha}, found ${head.value}`,
+    )
   }
-  const branch = await git(runner, cwd, env, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-  const branchFailure = gitFailure(branch, "bay-branch-invalid", "Could not resolve Bay branch")
-  if (branchFailure !== undefined) return { ok: false, error: branchFailure }
-  const actualBranch = branch.ok ? branch.value.stdout.trim() : ""
-  if (actualBranch !== input.bay.branch) {
-    return {
-      ok: false,
-      error: {
-        code: "bay-branch-mismatch",
-        message: `Bay '${input.bay.id}' expected branch '${input.bay.branch}', found '${actualBranch}'`,
-      },
-    }
+  const base = await git.commit(cwd, input.bay.baseSha, "bay-base-invalid", "Could not resolve pinned Bay base")
+  if (!base.ok) return base
+  const basedOn = await git.run(cwd, ["merge-base", "--is-ancestor", base.value, head.value])
+  const basedOnFailure = git.failure(basedOn, "bay-base-diverged", "Bay HEAD does not descend from its pinned base")
+  if (basedOnFailure !== undefined) return rejected(basedOnFailure.code, basedOnFailure.message)
+  const clean = await git.clean(cwd, "git-status-failed", "Could not verify initial worktree state")
+  if (!clean.ok) return clean
+  if (!clean.value) {
+    return rejected("bay-dirty", `Bay '${input.bay.id}' contains uncommitted work before Ag launch`)
   }
-  const head = await git(runner, cwd, env, ["rev-parse", "--verify", "HEAD^{commit}"])
-  const headFailure = gitFailure(head, "bay-head-invalid", "Could not resolve Bay HEAD")
-  if (headFailure !== undefined) return { ok: false, error: headFailure }
-  const headSha = head.ok ? head.value.stdout.trim().toLowerCase() : ""
-  if (!SHA.test(headSha)) {
-    return { ok: false, error: { code: "bay-head-invalid", message: `Git returned invalid commit '${headSha}'` } }
-  }
-  if (input.bay.headSha !== undefined && input.bay.headSha.toLowerCase() !== headSha) {
-    return {
-      ok: false,
-      error: {
-        code: "bay-head-mismatch",
-        message: `Bay '${input.bay.id}' expected HEAD ${input.bay.headSha}, found ${headSha}`,
-      },
-    }
-  }
-  const baseObject = await git(runner, cwd, env, ["cat-file", "-e", `${input.bay.baseSha}^{commit}`])
-  const baseFailure = gitFailure(baseObject, "bay-base-invalid", "Could not resolve pinned Bay base")
-  if (baseFailure !== undefined) return { ok: false, error: baseFailure }
-  const basedOn = await git(runner, cwd, env, ["merge-base", "--is-ancestor", input.bay.baseSha, headSha])
-  const basedOnFailure = gitFailure(basedOn, "bay-base-diverged", "Bay HEAD does not descend from its pinned base")
-  if (basedOnFailure !== undefined) return { ok: false, error: basedOnFailure }
-  const clean = await git(runner, cwd, env, ["status", "--porcelain=v1", "--untracked-files=all"])
-  const cleanFailure = gitFailure(clean, "git-status-failed", "Could not verify initial worktree state")
-  if (cleanFailure !== undefined) return { ok: false, error: cleanFailure }
-  if (clean.ok && clean.value.stdout.trim() !== "") {
-    return {
-      ok: false,
-      error: { code: "bay-dirty", message: `Bay '${input.bay.id}' contains uncommitted work before Ag launch` },
-    }
-  }
-  const common = await git(runner, cwd, env, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
-  const commonFailure = gitFailure(common, "git-common-dir-invalid", "Could not resolve Git common directory")
-  if (commonFailure !== undefined) return { ok: false, error: commonFailure }
-  const commonGitDir = resolve(cwd, common.ok ? common.value.stdout.trim() : "")
-  return { ok: true, value: { cwd, commonGitDir, head: headSha, baseSha: input.bay.baseSha } }
+  const common = await git.commonDir(cwd, "Could not resolve Git common directory")
+  if (!common.ok) return common
+  return accepted({ cwd, commonGitDir: common.value, head: head.value, baseSha: base.value })
 }
 
 function jsonRecords(stdout: string): { transcript: string; records: readonly Record<string, unknown>[] } {
@@ -484,8 +350,7 @@ function missing(label: string): Metric {
 function metrics(records: readonly Record<string, unknown>[], provider: string): MetricsEvidence {
   const values: Partial<Record<keyof typeof TOKEN_FIELDS, Metric>> = {}
   let reportedCost: number | undefined
-  for (let index = 0; index < records.length; index++) {
-    const record = records[index]!
+  for (const [index, record] of records.entries()) {
     const source = `ag:${provider}:stdout-jsonl:${index + 1}`
     for (const candidate of usageCandidates(record)) {
       for (const [name, keys] of Object.entries(TOKEN_FIELDS) as [keyof typeof TOKEN_FIELDS, readonly string[]][]) {
@@ -522,15 +387,6 @@ function metrics(records: readonly Record<string, unknown>[], provider: string):
   }
 }
 
-function digest(content: string): string {
-  return `sha256:${createHash("sha256").update(content).digest("hex")}`
-}
-
-async function artifact(kind: string, path: string, content: string, mediaType: string): Promise<ContestArtifact> {
-  await writeFile(path, content, { flag: "wx" })
-  return { kind, uri: pathToFileURL(path).href, digest: digest(content), mediaType }
-}
-
 async function rawArtifacts(
   root: string,
   input: ContestRunnerInput,
@@ -539,23 +395,15 @@ async function rawArtifacts(
   result: AgProcessResult,
 ): Promise<Checked<RawArtifacts>> {
   const dir = join(root, "contests", input.contest, input.attempt, `attempt-${context.attempt}`)
-  try {
-    await mkdir(dir, { recursive: true })
-    const parsed = jsonRecords(result.stdout)
-    const evidence = metrics(parsed.records, provider)
-    const artifacts = await Promise.all([
-      artifact("stdout", join(dir, "stdout.log"), result.stdout, "text/plain"),
-      artifact("stderr", join(dir, "stderr.log"), result.stderr, "text/plain"),
-      artifact("transcript", join(dir, "transcript.jsonl"), parsed.transcript, "application/x-ndjson"),
-      artifact("metrics", join(dir, "metrics.json"), `${JSON.stringify(evidence, null, 2)}\n`, "application/json"),
-    ])
-    return { ok: true, value: { artifacts, manifestPath: join(dir, "manifest.json"), metrics: evidence } }
-  } catch (error) {
-    return {
-      ok: false,
-      error: { code: "artifact-write-failed", message: error instanceof Error ? error.message : String(error) },
-    }
-  }
+  const parsed = jsonRecords(result.stdout)
+  const evidence = metrics(parsed.records, provider)
+  const artifacts = await captureArtifacts(dir, [
+    { kind: "stdout", file: "stdout.log", content: result.stdout, mediaType: "text/plain" },
+    { kind: "stderr", file: "stderr.log", content: result.stderr, mediaType: "text/plain" },
+    { kind: "transcript", file: "transcript.jsonl", content: parsed.transcript, mediaType: "application/x-ndjson" },
+    jsonArtifact("metrics", "metrics.json", evidence),
+  ])
+  return artifacts.ok ? accepted({ artifacts: artifacts.value, dir, metrics: evidence }) : artifacts
 }
 
 async function failureWithManifest(
@@ -563,105 +411,72 @@ async function failureWithManifest(
   failure: Failure,
   result: AgProcessResult,
 ): Promise<EffectOutcome<AttemptRunOutput>> {
-  const manifest = {
-    schema: "yrd.ag.run.v1",
-    status: "failed",
-    error: failure,
-    process: { exitCode: result.exitCode },
-    artifacts: raw.artifacts,
-    metrics: raw.metrics,
+  const manifest = await captureArtifacts(raw.dir, [
+    jsonArtifact("run-manifest", "manifest.json", {
+      schema: "yrd.ag.run.v1",
+      status: "failed",
+      error: failure,
+      process: { exitCode: result.exitCode },
+      artifacts: raw.artifacts,
+      metrics: raw.metrics,
+    }),
+  ])
+  if (!manifest.ok) {
+    return failed(failure.code, `${failure.message}. Artifact manifest failed: ${manifest.error.message}`)
   }
-  try {
-    await writeFile(raw.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" })
-    return failed(failure.code, `${failure.message}. Artifacts: ${pathToFileURL(raw.manifestPath).href}`)
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    return failed(failure.code, `${failure.message}. Artifact manifest failed: ${detail}`)
-  }
+  const artifact = manifest.value[0]
+  return artifact === undefined
+    ? failed(failure.code, `${failure.message}. Artifact manifest failed: no artifact was written`)
+    : failed(failure.code, `${failure.message}. Artifacts: ${artifact.uri}`)
 }
 
 async function verifyResult(
-  runner: AgProcessRunner,
+  git: Git,
   input: ContestRunnerInput,
-  env: NodeJS.ProcessEnv,
   cwd: string,
   before: string,
 ): Promise<Checked<string>> {
-  const branch = await git(runner, cwd, env, ["symbolic-ref", "--quiet", "--short", "HEAD"])
-  const branchFailure = gitFailure(branch, "bay-branch-invalid", "Could not verify final Bay branch")
-  if (branchFailure !== undefined) return { ok: false, error: branchFailure }
-  const finalBranch = branch.ok ? branch.value.stdout.trim() : ""
-  if (finalBranch !== input.bay.branch) {
-    return {
-      ok: false,
-      error: { code: "bay-branch-changed", message: `Agent changed branch to '${finalBranch}'` },
-    }
+  const branch = await git.branch(cwd, "bay-branch-invalid", "Could not verify final Bay branch")
+  if (!branch.ok) return branch
+  if (branch.value !== input.bay.branch) {
+    return rejected("bay-branch-changed", `Agent changed branch to '${branch.value}'`)
   }
-  const head = await git(runner, cwd, env, ["rev-parse", "--verify", "HEAD^{commit}"])
-  const headFailure = gitFailure(head, "git-result-invalid", "Could not resolve result commit")
-  if (headFailure !== undefined) return { ok: false, error: headFailure }
-  const commit = head.ok ? head.value.stdout.trim().toLowerCase() : ""
-  if (!SHA.test(commit))
-    return { ok: false, error: { code: "git-result-invalid", message: `Invalid commit '${commit}'` } }
-  if (commit === before) {
-    return { ok: false, error: { code: "no-commit", message: "Ag exited successfully without producing a new commit" } }
+  const head = await git.commit(cwd, "HEAD", "git-result-invalid", "Could not resolve result commit")
+  if (!head.ok) return head
+  if (head.value === before) {
+    return rejected("no-commit", "Ag exited successfully without producing a new commit")
   }
-  const ancestor = await git(runner, cwd, env, ["merge-base", "--is-ancestor", before, commit])
-  const ancestorFailure = gitFailure(ancestor, "history-rewritten", "Result commit does not descend from Bay HEAD")
-  if (ancestorFailure !== undefined) return { ok: false, error: ancestorFailure }
-  const status = await git(runner, cwd, env, ["status", "--porcelain=v1", "--untracked-files=all"])
-  const statusFailure = gitFailure(status, "git-status-failed", "Could not verify final worktree state")
-  if (statusFailure !== undefined) return { ok: false, error: statusFailure }
-  if (status.ok && status.value.stdout.trim() !== "") {
-    return {
-      ok: false,
-      error: { code: "dirty-workspace", message: "Agent left changes outside the committed result" },
-    }
+  const ancestor = await git.run(cwd, ["merge-base", "--is-ancestor", before, head.value])
+  const ancestorFailure = git.failure(ancestor, "history-rewritten", "Result commit does not descend from Bay HEAD")
+  if (ancestorFailure !== undefined) return rejected(ancestorFailure.code, ancestorFailure.message)
+  const clean = await git.clean(cwd, "git-status-failed", "Could not verify final worktree state")
+  if (!clean.ok) return clean
+  if (!clean.value) {
+    return rejected("dirty-workspace", "Agent left changes outside the committed result")
   }
-  return { ok: true, value: commit }
+  return head
 }
 
-async function pinAttempt(
-  runner: AgProcessRunner,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-  ref: string,
-  commit: string,
-): Promise<Checked<undefined>> {
-  const existing = await git(runner, cwd, env, ["show-ref", "--verify", "--quiet", ref])
+async function pinAttempt(git: Git, cwd: string, ref: string, commit: string): Promise<Checked<undefined>> {
+  const existing = await git.run(cwd, ["show-ref", "--verify", "--quiet", ref])
   if (!existing.ok) return existing
   if (existing.value.exitCode === 0) {
-    const resolved = await git(runner, cwd, env, ["rev-parse", "--verify", `${ref}^{commit}`])
-    const resolveFailure = gitFailure(resolved, "attempt-ref-read-failed", `Could not resolve attempt ref '${ref}'`)
-    if (resolveFailure !== undefined) return { ok: false, error: resolveFailure }
-    const pinned = resolved.ok ? resolved.value.stdout.trim().toLowerCase() : ""
-    return pinned === commit
-      ? { ok: true, value: undefined }
-      : {
-          ok: false,
-          error: { code: "attempt-ref-conflict", message: `Write-once ref '${ref}' already pins ${pinned}` },
-        }
+    const pinned = await git.commit(cwd, ref, "attempt-ref-read-failed", `Could not resolve attempt ref '${ref}'`)
+    if (!pinned.ok) return pinned
+    return pinned.value === commit
+      ? accepted(undefined)
+      : rejected("attempt-ref-conflict", `Write-once ref '${ref}' already pins ${pinned.value}`)
   }
   if (existing.value.exitCode !== 1) {
-    return {
-      ok: false,
-      error: { code: "attempt-ref-read-failed", message: output(existing.value) || "Could not inspect attempt ref" },
-    }
+    return rejected("attempt-ref-read-failed", git.output(existing.value))
   }
-  const create = await git(runner, cwd, env, ["update-ref", "--create-reflog", ref, commit, "0".repeat(commit.length)])
+  const create = await git.run(cwd, ["update-ref", "--create-reflog", ref, commit, "0".repeat(commit.length)])
   if (!create.ok) return create
-  if (create.value.exitCode === 0) return { ok: true, value: undefined }
-  const raced = await git(runner, cwd, env, ["rev-parse", "--verify", `${ref}^{commit}`])
-  if (raced.ok && raced.value.exitCode === 0) {
-    if (raced.value.stdout.trim().toLowerCase() === commit) return { ok: true, value: undefined }
-  }
-  return {
-    ok: false,
-    error: {
-      code: "attempt-ref-conflict",
-      message: output(create.value) || `Could not create write-once ref '${ref}'`,
-    },
-  }
+  if (create.value.exitCode === 0) return accepted(undefined)
+  const raced = await git.commit(cwd, ref, "attempt-ref-read-failed", `Could not resolve raced ref '${ref}'`)
+  return raced.ok && raced.value === commit
+    ? accepted(undefined)
+    : rejected("attempt-ref-conflict", git.output(create.value))
 }
 
 function validateIdentity(input: ContestRunnerInput): Failure | undefined {
@@ -676,7 +491,7 @@ function validateIdentity(input: ContestRunnerInput): Failure | undefined {
 
 export function createAgContestRunner(options: AgContestRunnerOptions = {}): ContestRunnerAdapter {
   const harness = options.harness ?? "ag"
-  const runner = options.process ?? defaultProcess
+  const runner: AgProcessRunner = options.process ?? spawnProcess
   const now = options.now ?? Date.now
   const timeoutMs = options.timeoutMs ?? 30 * 60_000
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
@@ -693,34 +508,28 @@ export function createAgContestRunner(options: AgContestRunnerOptions = {}): Con
           `Ag adapter '${harness}' cannot run competitor harness '${input.competitor.harness}'`,
         )
       }
-      let command: readonly string[]
-      let launch: AgContestLaunch
-      try {
-        command = validateCommand(options.command ?? ["ag"])
-        launch = (options.resolveLaunch ?? defaultLaunch)(input)
+      const configured = await attempt("ag-config-invalid", () => {
+        const command = validateCommand(options.command ?? ["ag"])
+        const launch = (options.resolveLaunch ?? defaultLaunch)(input)
         if (launch.provider.trim() === "" || launch.args.some((arg) => arg === "" || arg === "--")) {
           throw new Error("yrd: Ag launch must have a provider and must leave the '--' prompt boundary to Yrd")
         }
-      } catch (error) {
-        return failed("ag-config-invalid", error instanceof Error ? error.message : String(error))
-      }
-      let extraEnv: NodeJS.ProcessEnv = {}
-      try {
-        extraEnv = options.environment?.(input, context) ?? {}
-      } catch (error) {
-        return failed("ag-environment-invalid", error instanceof Error ? error.message : String(error))
-      }
-      const env = executionEnvironment(input, context, extraEnv)
-      const preflight = await workspacePreflight(runner, input, env)
+        return { command, launch }
+      })
+      if (!configured.ok) return failed(configured.error.code, configured.error.message)
+      const { command, launch } = configured.value
+      const extraEnv = await attempt("ag-environment-invalid", () => options.environment?.(input, context) ?? {})
+      if (!extraEnv.ok) return failed(extraEnv.error.code, extraEnv.error.message)
+      const env = agEnvironment(input, context, extraEnv.value)
+      const git = createGit(runner, env)
+      const preflight = await workspacePreflight(git, input)
       if (!preflight.ok) return failed(preflight.error.code, preflight.error.message)
-      let artifactRoot: string
-      try {
+      const artifactRoot = await attempt("artifact-root-invalid", async () => {
         const configuredRoot =
           typeof options.artifactRoot === "function" ? await options.artifactRoot(input, context) : options.artifactRoot
-        artifactRoot = resolve(configuredRoot ?? join(preflight.value.commonGitDir, "yrd", "artifacts"))
-      } catch (error) {
-        return failed("artifact-root-invalid", error instanceof Error ? error.message : String(error))
-      }
+        return resolve(configuredRoot ?? join(preflight.value.commonGitDir, "yrd", "artifacts"))
+      })
+      if (!artifactRoot.ok) return failed(artifactRoot.error.code, artifactRoot.error.message)
       const startedAt = now()
       const processResult = await execute(
         runner,
@@ -736,12 +545,12 @@ export function createAgContestRunner(options: AgContestRunnerOptions = {}): Con
       const agResult = processResult.ok
         ? processResult.value
         : { exitCode: -1, stdout: "", stderr: processResult.error.message }
-      const captured = await rawArtifacts(artifactRoot, input, context, launch.provider, agResult)
+      const captured = await rawArtifacts(artifactRoot.value, input, context, launch.provider, agResult)
       if (!captured.ok) return failed(captured.error.code, captured.error.message)
-      if (!processResult.ok) return await failureWithManifest(captured.value, processResult.error, agResult)
+      if (!processResult.ok) return failureWithManifest(captured.value, processResult.error, agResult)
       if (agResult.exitCode !== 0) {
         const detail = agResult.stderr.trim() || agResult.stdout.trim()
-        return await failureWithManifest(
+        return failureWithManifest(
           captured.value,
           {
             code: "ag-process-failed",
@@ -750,11 +559,11 @@ export function createAgContestRunner(options: AgContestRunnerOptions = {}): Con
           agResult,
         )
       }
-      const verified = await verifyResult(runner, input, env, preflight.value.cwd, preflight.value.head)
-      if (!verified.ok) return await failureWithManifest(captured.value, verified.error, agResult)
+      const verified = await verifyResult(git, input, preflight.value.cwd, preflight.value.head)
+      if (!verified.ok) return failureWithManifest(captured.value, verified.error, agResult)
       const ref = `refs/yrd/attempts/${input.contest}/${input.attempt}`
-      const pinned = await pinAttempt(runner, preflight.value.cwd, env, ref, verified.value)
-      if (!pinned.ok) return await failureWithManifest(captured.value, pinned.error, agResult)
+      const pinned = await pinAttempt(git, preflight.value.cwd, ref, verified.value)
+      if (!pinned.ok) return failureWithManifest(captured.value, pinned.error, agResult)
       const gitArtifact: ContestArtifact = { kind: "git-commit", uri: `git:${verified.value}` }
       return {
         status: "passed",

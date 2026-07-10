@@ -5,4 +5,4 @@ import type { Task as TaskValue } from "./types.ts"
 export const Task = TaskDomain
 export { withTasks }
 export type Task = TaskValue
-export type { HasTasks, TaskCommands, TaskIntake, TaskRef, TasksState, TaskSource, WithTasksOptions } from "./types.ts"
+export type { HasTasks, TaskRef, TaskResolver, TaskSource, WithTasksOptions } from "./types.ts"

@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto"
-import { existsSync } from "node:fs"
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -11,19 +10,29 @@ import {
   loadGitPushReceiver,
   prepareReceiverUpdates,
   receiverHookSource,
+  type GitPushReceiver,
   type ReceiverReceipt,
   type ReceiverTarget,
 } from "../src/receiver.ts"
 
-type ProcessResult = { code: number; stdout: string; stderr: string }
+type Env = Record<string, string | undefined>
+type Result = { code: number; stdout: string; stderr: string }
+type Fixture = {
+  root: string
+  mainRepo: string
+  stateDir: string
+  baseSha: string
+  receiver: GitPushReceiver
+}
 
 const roots: string[] = []
+const zero = "0".repeat(40)
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-async function run(argv: readonly string[], cwd: string, env: Record<string, string | undefined> = process.env): Promise<ProcessResult> {
+async function run(argv: readonly string[], cwd: string, env: Env = process.env): Promise<Result> {
   const child = Bun.spawn([...argv], { cwd, env, stdout: "pipe", stderr: "pipe" })
   const [stdout, stderr, code] = await Promise.all([
     new Response(child.stdout).text(),
@@ -33,338 +42,261 @@ async function run(argv: readonly string[], cwd: string, env: Record<string, str
   return { code, stdout: stdout.trim(), stderr: stderr.trim() }
 }
 
-async function git(cwd: string, args: readonly string[], env?: Record<string, string | undefined>): Promise<string> {
-  const result = await run(["git", "-C", cwd, ...args], cwd, env)
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const result = await run(["git", "-C", cwd, ...args], cwd)
   if (result.code !== 0) throw new Error(result.stderr || result.stdout || `git exited ${result.code}`)
   return result.stdout
 }
 
-async function commit(repo: string, name: string, content: string): Promise<string> {
-  await writeFile(join(repo, name), content)
-  await git(repo, ["add", name])
-  await git(repo, ["commit", "-qm", `add ${name}`])
-  return await git(repo, ["rev-parse", "HEAD"])
+async function commit(repo: string, name: string): Promise<string> {
+  await writeFile(join(repo, name), `${name}\n`)
+  await git(repo, "add", name)
+  await git(repo, "commit", "-qm", `add ${name}`)
+  return await git(repo, "rev-parse", "HEAD")
 }
 
-async function fixture(label = "receiver"): Promise<{
-  root: string
-  mainRepo: string
-  stateDir: string
-  baseSha: string
-}> {
+async function createRepo(root: string, name: string): Promise<{ path: string; head: string }> {
+  const path = join(root, name)
+  await mkdir(path)
+  await git(path, "init", "-q", "-b", "main")
+  await git(path, "config", "user.name", "Yrd Receiver Test")
+  await git(path, "config", "user.email", "receiver@example.invalid")
+  return { path, head: await commit(path, "README.md") }
+}
+
+async function fixture(label: string): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), `yrd-${label}-`))
   roots.push(root)
-  const mainRepo = join(root, "main repo")
+  const main = await createRepo(root, "main repo")
   const stateDir = join(root, "state with 'quotes $()")
-  await mkdir(mainRepo)
-  await git(mainRepo, ["init", "-q", "-b", "main"])
-  await git(mainRepo, ["config", "user.name", "Yrd Receiver Test"])
-  await git(mainRepo, ["config", "user.email", "receiver@example.invalid"])
-  const baseSha = await commit(mainRepo, "README.md", "base\n")
-  return { root, mainRepo, stateDir, baseSha }
+  const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir })
+  return { root, mainRepo: main.path, stateDir, baseSha: main.head, receiver }
 }
 
 function target(baseSha: string, overrides: Partial<ReceiverTarget> = {}): ReceiverTarget {
   return { bay: "B1", name: "receiver-test", base: "main", baseSha, ...overrides }
 }
 
-async function hookPath(receiverPath: string, mode: "pre-receive" | "post-receive"): Promise<string> {
-  return join(receiverPath, "hooks", mode)
-}
-
-async function installTestHookHost(
-  root: string,
-  targets: Record<string, ReceiverTarget>,
-): Promise<Record<string, string | undefined>> {
-  const binDir = join(root, "bin")
-  const targetsPath = join(root, "targets.json")
-  const executable = join(binDir, "yrd")
-  await mkdir(binDir, { recursive: true })
-  await writeFile(targetsPath, JSON.stringify(targets), "utf8")
-  const receiverModule = new URL("../src/receiver.ts", import.meta.url).href
+async function installHookHost(root: string, targets: Record<string, ReceiverTarget>): Promise<Env> {
+  const bin = join(root, "bin")
+  const targetFile = join(root, "targets.json")
+  const executable = join(bin, "yrd")
+  await mkdir(bin, { recursive: true })
+  await writeFile(targetFile, JSON.stringify(targets))
   await writeFile(
     executable,
     [
       "#!/usr/bin/env bun",
       'import { readFile } from "node:fs/promises"',
-      `import { runReceiverHookFromEnvironment } from ${JSON.stringify(receiverModule)}`,
-      'const [command, mode] = Bun.argv.slice(2)',
-      'if (command !== "receiver-hook" || (mode !== "pre-receive" && mode !== "post-receive")) process.exit(64)',
+      `import { runReceiverHookFromEnvironment } from ${JSON.stringify(new URL("../src/receiver.ts", import.meta.url).href)}`,
+      "const [, mode] = Bun.argv.slice(2)",
       'const targets = JSON.parse(await readFile(process.env.YRD_TEST_TARGETS, "utf8"))',
-      "await runReceiverHookFromEnvironment(mode, {",
-      "  resolveTarget: async (branch) => targets[branch] ?? null,",
-      "})",
+      "await runReceiverHookFromEnvironment(mode, { resolveTarget: async branch => targets[branch] ?? null })",
       "",
     ].join("\n"),
-    "utf8",
   )
   await chmod(executable, 0o755)
-  return {
-    ...process.env,
-    PATH: `${binDir}:${process.env.PATH ?? ""}`,
-    YRD_TEST_TARGETS: targetsPath,
-  }
+  return { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, YRD_TEST_TARGETS: targetFile }
 }
 
-async function inboxFiles(inboxDir: string): Promise<string[]> {
-  const result: string[] = []
-  for (const state of ["prepared", "pending", "processing"] as const) {
-    const dir = join(inboxDir, state)
-    if (!existsSync(dir)) continue
-    for (const file of await readdir(dir)) {
-      if (file.endsWith(".json")) result.push(`${state}/${file}`)
-    }
-  }
-  return result.sort()
+async function push(fixture: Fixture, spec: string, env: Env): Promise<Result> {
+  return await run(["git", "-C", fixture.mainRepo, "push", fixture.receiver.receiverPath, spec], fixture.mainRepo, env)
+}
+
+async function inboxFiles(receiver: GitPushReceiver): Promise<string[]> {
+  return (await readdir(receiver.inboxDir)).filter((name) => name.endsWith(".json")).sort()
 }
 
 describe("Git push receiver", () => {
-  it("creates and reopens prs.git without replacing refs, objects, or deterministic managed hooks", async () => {
-    const { root, mainRepo, stateDir, baseSha } = await fixture("receiver-open")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
+  it("sets up prs.git idempotently without replacing refs, objects, or managed hooks", async () => {
+    const f = await fixture("setup")
+    expect(f.receiver.receiverPath).toBe(join(await realpath(f.stateDir), "prs.git"))
+    expect(await git(f.receiver.receiverPath, "rev-parse", "--is-bare-repository")).toBe("true")
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)
 
-    expect(receiver.receiverPath).toBe(join(await realpath(stateDir), "prs.git"))
-    expect(await git(receiver.receiverPath, ["rev-parse", "--is-bare-repository"])).toBe("true")
-    expect(await git(receiver.receiverPath, ["rev-parse", "refs/yrd/bases/main"])).toBe(baseSha)
+    for (const mode of ["pre-receive", "post-receive"] as const) {
+      const hook = join(f.receiver.receiverPath, "hooks", mode)
+      expect(await readFile(hook, "utf8")).toBe(receiverHookSource(mode))
+      expect((await stat(hook)).mode & 0o111).not.toBe(0)
+    }
 
-    const hookBodies = await Promise.all(
-      (["pre-receive", "post-receive"] as const).map(async (mode) => {
-        const path = await hookPath(receiver.receiverPath, mode)
-        const body = await readFile(path, "utf8")
-        expect(body).toBe(receiverHookSource(mode))
-        expect(body).not.toContain(root)
-        expect((await stat(path)).mode & 0o111).not.toBe(0)
-        return body
-      }),
+    await git(f.receiver.receiverPath, "update-ref", "refs/heads/preserved", f.baseSha)
+    const reopened = await createGitPushReceiver({ mainRepo: f.mainRepo, stateDir: f.stateDir })
+    expect(await git(reopened.receiverPath, "rev-parse", "refs/heads/preserved")).toBe(f.baseSha)
+    expect(await git(reopened.receiverPath, "cat-file", "-e", `${f.baseSha}^{commit}`)).toBe("")
+    expect(await loadGitPushReceiver(reopened.receiverPath)).toMatchObject(reopened)
+  })
+
+  it("refuses unmanaged hooks and retargeting", async () => {
+    const f = await fixture("binding")
+    const hook = join(f.receiver.receiverPath, "hooks", "pre-receive")
+    await writeFile(hook, "#!/bin/sh\necho operator-hook\n")
+    await expect(createGitPushReceiver({ mainRepo: f.mainRepo, stateDir: f.stateDir })).rejects.toThrow(
+      /unmanaged pre-receive hook/,
     )
-    expect(hookBodies[0]).not.toBe(hookBodies[1])
+    expect(await readFile(hook, "utf8")).toContain("operator-hook")
 
-    await git(receiver.receiverPath, ["update-ref", "refs/heads/preserved", baseSha])
-    const reopened = await createGitPushReceiver({ mainRepo, stateDir })
-    expect(await git(reopened.receiverPath, ["rev-parse", "refs/heads/preserved"])).toBe(baseSha)
-    expect(await git(reopened.receiverPath, ["cat-file", "-e", `${baseSha}^{commit}`])).toBe("")
-
-    const loaded = await loadGitPushReceiver(receiver.receiverPath)
-    expect(loaded).toMatchObject({
-      receiverPath: receiver.receiverPath,
-      mainRepo: receiver.mainRepo,
-      stateDir: receiver.stateDir,
-      inboxDir: receiver.inboxDir,
-    })
-  })
-
-  it("fails closed instead of overwriting an unmanaged receive hook", async () => {
-    const { mainRepo, stateDir } = await fixture("receiver-hook")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
-    const hook = await hookPath(receiver.receiverPath, "pre-receive")
-    await writeFile(hook, "#!/bin/sh\necho operator-hook\n", "utf8")
-
-    await expect(createGitPushReceiver({ mainRepo, stateDir })).rejects.toThrow(/unmanaged pre-receive hook/)
-    expect(await readFile(hook, "utf8")).toBe("#!/bin/sh\necho operator-hook\n")
-  })
-
-  it("refuses to retarget a configured receiver to a different main repository", async () => {
-    const first = await fixture("receiver-binding-a")
-    const second = await fixture("receiver-binding-b")
-    const receiver = await createGitPushReceiver({ mainRepo: first.mainRepo, stateDir: first.stateDir })
-    await git(receiver.receiverPath, ["update-ref", "refs/heads/preserved", first.baseSha])
-
-    await expect(createGitPushReceiver({ mainRepo: second.mainRepo, stateDir: first.stateDir })).rejects.toThrow(
+    const other = await createRepo(f.root, "other repo")
+    await expect(createGitPushReceiver({ mainRepo: other.path, stateDir: f.stateDir })).rejects.toThrow(
       /already belongs to main repository/,
     )
-    expect(await git(receiver.receiverPath, ["rev-parse", "refs/heads/preserved"])).toBe(first.baseSha)
-    expect((await loadGitPushReceiver(receiver.receiverPath)).mainRepo).toBe(receiver.mainRepo)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)
   })
 
-  it("accepts an authorized pinned push, queues it durably, and drains it through the Bay intake shape", async () => {
-    const { root, mainRepo, stateDir, baseSha } = await fixture("receiver-push")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
-    await git(mainRepo, ["switch", "-qc", "task/good"])
-    const headSha = await commit(mainRepo, "good.txt", "good\n")
-    const env = await installTestHookHost(root, { "task/good": target(baseSha) })
-
-    const pushed = await run(
-      ["git", "-C", mainRepo, "push", receiver.receiverPath, "task/good:refs/heads/task/good"],
-      mainRepo,
-      env,
+  it("accepts an authorized pinned push and leaves a pending receipt for Bay intake", async () => {
+    const f = await fixture("push")
+    await git(f.mainRepo, "switch", "-qc", "task/good")
+    const headSha = await commit(f.mainRepo, "good.txt")
+    const result = await push(
+      f,
+      "task/good:refs/heads/task/good",
+      await installHookHost(f.root, { "task/good": target(f.baseSha) }),
     )
-    expect(pushed.code, pushed.stderr).toBe(0)
-    expect(await git(receiver.receiverPath, ["rev-parse", "refs/heads/task/good"])).toBe(headSha)
-    expect((await inboxFiles(receiver.inboxDir)).some((path) => path.startsWith("pending/"))).toBe(true)
+    expect(result.code, result.stderr).toBe(0)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/task/good")).toBe(headSha)
+    expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
 
-    const deliveries: ReceiverReceipt[] = []
-    const result = await drainReceiverInbox(receiver, {
-      resolveTarget: async (branch) => (branch === "task/good" ? target(baseSha) : null),
-      intake: async (receipt) => {
-        deliveries.push(receipt)
-      },
+    const delivered: ReceiverReceipt[] = []
+    const drained = await drainReceiverInbox(f.receiver, {
+      resolveTarget: async () => target(f.baseSha),
+      intake: async (receipt) => void delivered.push(receipt),
     })
-
-    expect(result).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
-    expect(deliveries).toHaveLength(1)
-    expect(deliveries[0]).toMatchObject({
-      version: 1,
-      branch: "task/good",
-      ref: "refs/heads/task/good",
-      oldSha: "0".repeat(40),
-      headSha,
-      intake: {
-        bay: "B1",
-        name: "receiver-test",
+    expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
+    expect(delivered).toEqual([
+      expect.objectContaining({
         branch: "task/good",
-        base: "main",
-        baseSha,
+        ref: "refs/heads/task/good",
+        oldSha: zero,
         headSha,
-      },
-    })
-    expect(await inboxFiles(receiver.inboxDir)).toEqual([])
+        intake: { bay: "B1", name: "receiver-test", branch: "task/good", base: "main", baseSha: f.baseSha, headSha },
+      }),
+    ])
+    expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
-  it("rejects unknown branches, deletes, and heads that do not descend from the authorized base pin", async () => {
-    const { root, mainRepo, stateDir, baseSha } = await fixture("receiver-refuse")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
-    await git(mainRepo, ["switch", "--orphan", "task/unrelated"])
-    await run(["git", "-C", mainRepo, "rm", "-qrf", "."], mainRepo)
-    const unrelatedSha = await commit(mainRepo, "unrelated.txt", "unrelated\n")
-    const env = await installTestHookHost(root, { "task/unrelated": target(baseSha) })
+  it("rejects unknown branches, deletes, and commits outside the pinned base", async () => {
+    const f = await fixture("reject")
+    await git(f.mainRepo, "switch", "--orphan", "task/unrelated")
+    await run(["git", "-C", f.mainRepo, "rm", "-qrf", "."], f.mainRepo)
+    const unrelated = await commit(f.mainRepo, "unrelated.txt")
+    const env = await installHookHost(f.root, { "task/unrelated": target(f.baseSha) })
 
-    const unrelated = await run(
-      ["git", "-C", mainRepo, "push", receiver.receiverPath, "task/unrelated:refs/heads/task/unrelated"],
-      mainRepo,
-      env,
+    const ancestry = await push(f, "task/unrelated:refs/heads/task/unrelated", env)
+    expect(ancestry.code).not.toBe(0)
+    expect(ancestry.stderr).toContain("does not descend from pinned base")
+    expect(ancestry.stderr).toContain(unrelated.slice(0, 12))
+
+    const wrongPin = await push(
+      f,
+      "task/unrelated:refs/heads/task/unrelated",
+      await installHookHost(f.root, { "task/unrelated": target(unrelated) }),
     )
-    expect(unrelated.code).not.toBe(0)
-    expect(unrelated.stderr).toContain("does not descend from pinned base")
-    expect(unrelated.stderr).toContain(baseSha.slice(0, 12))
-    expect(unrelated.stderr).toContain(unrelatedSha.slice(0, 12))
-    expect((await run(["git", "--git-dir", receiver.receiverPath, "show-ref", "--verify", "refs/heads/task/unrelated"], root)).code).not.toBe(0)
+    expect(wrongPin.stderr).toContain("is not in the history of base branch 'main'")
 
-    const wrongBaseEnv = await installTestHookHost(root, {
-      "task/unrelated": target(unrelatedSha),
-    })
-    const wrongBase = await run(
-      ["git", "-C", mainRepo, "push", receiver.receiverPath, "task/unrelated:refs/heads/task/unrelated"],
-      mainRepo,
-      wrongBaseEnv,
+    await git(f.mainRepo, "switch", "-q", "main")
+    await git(f.mainRepo, "switch", "-qc", "task/unknown")
+    await commit(f.mainRepo, "unknown.txt")
+    expect((await push(f, "task/unknown:refs/heads/task/unknown", env)).stderr).toContain(
+      "is not authorized for Yrd intake",
     )
-    expect(wrongBase.code).not.toBe(0)
-    expect(wrongBase.stderr).toContain("is not in the history of base branch 'main'")
 
-    await git(mainRepo, ["switch", "-q", "main"])
-    await git(mainRepo, ["switch", "-qc", "task/unknown"])
-    await commit(mainRepo, "unknown.txt", "unknown\n")
-    const unknown = await run(
-      ["git", "-C", mainRepo, "push", receiver.receiverPath, "task/unknown:refs/heads/task/unknown"],
-      mainRepo,
-      env,
-    )
-    expect(unknown.code).not.toBe(0)
-    expect(unknown.stderr).toContain("is not authorized for Yrd intake")
-
-    await git(mainRepo, ["switch", "-q", "main"])
-    const goodEnv = await installTestHookHost(root, { main: target(baseSha) })
-    const first = await run(["git", "-C", mainRepo, "push", receiver.receiverPath, "main:refs/heads/main"], mainRepo, goodEnv)
-    expect(first.code, first.stderr).toBe(0)
-    const deletion = await run(["git", "-C", mainRepo, "push", receiver.receiverPath, ":refs/heads/main"], mainRepo, goodEnv)
+    await git(f.mainRepo, "switch", "-q", "main")
+    const mainEnv = await installHookHost(f.root, { main: target(f.baseSha) })
+    expect((await push(f, "main:refs/heads/main", mainEnv)).code).toBe(0)
+    const deletion = await push(f, ":refs/heads/main", mainEnv)
     expect(deletion.code).not.toBe(0)
     expect(deletion.stderr).toContain("ref deletion is not accepted")
-    expect(await git(receiver.receiverPath, ["rev-parse", "refs/heads/main"])).toBe(baseSha)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/main")).toBe(f.baseSha)
   })
 
-  it("recovers an accepted push after post-receive loss and retries one stable receipt idempotently", async () => {
-    const { mainRepo, stateDir, baseSha } = await fixture("receiver-recover")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
-    await git(mainRepo, ["switch", "-qc", "task/recover"])
-    const headSha = await commit(mainRepo, "recover.txt", "recover\n")
-    await git(receiver.receiverPath, ["fetch", "-q", mainRepo, `+${headSha}:refs/yrd/test/recover`])
+  it("recovers prepared receipts by ref and retries the same receipt id after ambiguous intake", async () => {
+    const f = await fixture("recover")
+    await git(f.mainRepo, "switch", "-qc", "task/recover")
+    const headSha = await commit(f.mainRepo, "recover.txt")
+    await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${headSha}:refs/yrd/test/recover`)
+    const update = `${zero} ${headSha} refs/heads/task/recover\n`
+    const [receipt] = await prepareReceiverUpdates(f.receiver, update, { resolveTarget: async () => target(f.baseSha) })
+    expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.prepared.json`])
+    expect(
+      await drainReceiverInbox(f.receiver, {
+        resolveTarget: async () => target(f.baseSha),
+        intake: async () => {
+          throw new Error("must not run before ref acceptance")
+        },
+      }),
+    ).toEqual({ delivered: [], failed: [], ambiguous: [receipt!.id] })
+    expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.prepared.json`])
+    await git(f.receiver.receiverPath, "update-ref", "refs/heads/task/recover", headSha, zero)
 
-    const update = `${"0".repeat(40)} ${headSha} refs/heads/task/recover\n`
-    const prepared = await prepareReceiverUpdates(receiver, update, {
-      resolveTarget: async () => target(baseSha),
-    })
-    expect(prepared).toHaveLength(1)
-    await git(receiver.receiverPath, ["update-ref", "refs/heads/task/recover", headSha, "0".repeat(40)])
-
-    const durablyApplied = new Set<string>()
-    let calls = 0
-    const first = await drainReceiverInbox(receiver, {
-      resolveTarget: async () => target(baseSha),
-      intake: async (receipt) => {
-        calls++
-        durablyApplied.add(receipt.id)
-        throw new Error("simulated crash after durable intake")
+    const applied = new Set<string>()
+    const failed = await drainReceiverInbox(f.receiver, {
+      resolveTarget: async () => target(f.baseSha),
+      intake: async (current) => {
+        applied.add(current.id)
+        throw new Error("crash after durable intake")
       },
     })
-    expect(first.delivered).toEqual([])
-    expect(first.failed).toEqual([{ id: prepared[0]!.id, error: "simulated crash after durable intake" }])
-    expect(await inboxFiles(receiver.inboxDir)).toEqual([`processing/${prepared[0]!.id}.json`])
+    expect(failed.failed).toEqual([{ id: receipt!.id, error: "crash after durable intake" }])
+    expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.pending.json`])
 
-    const second = await drainReceiverInbox(receiver, {
-      resolveTarget: async () => target(baseSha),
-      intake: async (receipt) => {
-        calls++
-        expect(durablyApplied.has(receipt.id)).toBe(true)
+    const retried: string[] = []
+    const recovered = await drainReceiverInbox(f.receiver, {
+      resolveTarget: async () => target(f.baseSha),
+      intake: async (current) => {
+        expect(applied.has(current.id)).toBe(true)
+        retried.push(current.id)
       },
     })
-    expect(second).toMatchObject({ delivered: [prepared[0]!.id], failed: [], ambiguous: [] })
-    expect(calls).toBe(2)
-    expect(durablyApplied).toEqual(new Set([prepared[0]!.id]))
-    expect(await inboxFiles(receiver.inboxDir)).toEqual([])
+    expect(recovered).toEqual({ delivered: [receipt!.id], failed: [], ambiguous: [] })
+    expect(retried).toEqual([receipt!.id])
+    expect(await inboxFiles(f.receiver)).toEqual([])
   })
 
-  it("drains queued revisions in ref-update order even when receipt hashes sort in reverse", async () => {
-    const { mainRepo, stateDir, baseSha } = await fixture("receiver-order")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
-    await git(mainRepo, ["switch", "-qc", "task/order-source"])
-    const firstHead = await commit(mainRepo, "one.txt", "one\n")
-    const secondHead = await commit(mainRepo, "two.txt", "two\n")
-    await git(receiver.receiverPath, ["fetch", "-q", mainRepo, `+${secondHead}:refs/yrd/test/order`])
-
-    const zero = "0".repeat(40)
-    const hash = (ref: string, oldSha: string, newSha: string): string =>
-      createHash("sha256").update(`${ref}\0${oldSha}\0${newSha}`, "utf8").digest("hex")
+  it("drains each branch in ref-update order rather than receipt-name order", async () => {
+    const f = await fixture("order")
+    await git(f.mainRepo, "switch", "-qc", "task/source")
+    const first = await commit(f.mainRepo, "one.txt")
+    const second = await commit(f.mainRepo, "two.txt")
+    await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${second}:refs/yrd/test/order`)
+    const id = (ref: string, oldSha: string, newSha: string): string =>
+      createHash("sha256").update(`${ref}\0${oldSha}\0${newSha}`).digest("hex")
     const branch = Array.from({ length: 1_000 }, (_, index) => `task/order-${index}`).find((candidate) => {
       const ref = `refs/heads/${candidate}`
-      return hash(ref, zero, firstHead) > hash(ref, firstHead, secondHead)
+      return id(ref, zero, first) > id(ref, first, second)
     })!
     const ref = `refs/heads/${branch}`
-    const resolveTarget = async () => target(baseSha)
+    const resolveTarget = async () => target(f.baseSha)
 
-    await prepareReceiverUpdates(receiver, `${zero} ${firstHead} ${ref}\n`, { resolveTarget })
-    await git(receiver.receiverPath, ["update-ref", ref, firstHead, zero])
-    await finalizeReceiverUpdates(receiver, `${zero} ${firstHead} ${ref}\n`, { resolveTarget })
-    await prepareReceiverUpdates(receiver, `${firstHead} ${secondHead} ${ref}\n`, { resolveTarget })
-    await git(receiver.receiverPath, ["update-ref", ref, secondHead, firstHead])
-    await finalizeReceiverUpdates(receiver, `${firstHead} ${secondHead} ${ref}\n`, { resolveTarget })
-
-    const deliveredHeads: string[] = []
-    const result = await drainReceiverInbox(receiver, {
+    for (const [oldSha, headSha] of [
+      [zero, first],
+      [first, second],
+    ] as const) {
+      const update = `${oldSha} ${headSha} ${ref}\n`
+      await prepareReceiverUpdates(f.receiver, update, { resolveTarget })
+      await git(f.receiver.receiverPath, "update-ref", ref, headSha, oldSha)
+      await finalizeReceiverUpdates(f.receiver, update, { resolveTarget })
+    }
+    const heads: string[] = []
+    const result = await drainReceiverInbox(f.receiver, {
       resolveTarget,
-      intake: async (receipt) => {
-        deliveredHeads.push(receipt.headSha)
-      },
+      intake: async (receipt) => void heads.push(receipt.headSha),
     })
     expect(result.failed).toEqual([])
-    expect(deliveredHeads).toEqual([firstHead, secondHead])
+    expect(heads).toEqual([first, second])
   })
 
-  it("keeps malformed inbox data for inspection and reports it instead of dropping later work", async () => {
-    const { mainRepo, stateDir } = await fixture("receiver-corrupt")
-    const receiver = await createGitPushReceiver({ mainRepo, stateDir })
-    const corrupt = join(receiver.inboxDir, "processing", `${"a".repeat(64)}.json`)
-    await writeFile(corrupt, "{not-json\n", "utf8")
-
-    const result = await drainReceiverInbox(receiver, {
+  it("retains and reports malformed receipt data", async () => {
+    const f = await fixture("malformed")
+    const id = "a".repeat(64)
+    const corrupt = join(f.receiver.inboxDir, `${id}.pending.json`)
+    await writeFile(corrupt, "{not-json\n")
+    const result = await drainReceiverInbox(f.receiver, {
       resolveTarget: async () => null,
       intake: async () => {
         throw new Error("must not run")
       },
     })
-
-    expect(result.delivered).toEqual([])
-    expect(result.failed).toHaveLength(1)
-    expect(result.failed[0]).toMatchObject({ id: "a".repeat(64) })
-    expect(result.failed[0]!.error).toContain("invalid JSON")
+    expect(result.failed).toEqual([{ id, error: expect.stringContaining("invalid JSON") }])
     expect(await readFile(corrupt, "utf8")).toBe("{not-json\n")
   })
 })

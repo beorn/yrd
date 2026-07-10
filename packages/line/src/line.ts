@@ -1,3 +1,4 @@
+import { resolveSubmission, type BaysState, type HasBays, type Submission } from "@yrd/bay"
 import {
   effect,
   event,
@@ -9,29 +10,108 @@ import {
   type EffectError,
   type EffectFunction,
   type EffectOutcome,
+  type EffectRequest,
   type EffectRun,
+  type EffectRunOptions,
+  type EffectsState,
   type EventDraft,
   type ExtendYrdApp,
   type Fx,
   type HasEffects,
   type YrdEvent,
 } from "@yrd/core"
-import { resolveSubmission, type BaysState, type HasBays, type Submission } from "@yrd/bay"
 import {
-  emptyLinesState,
-  lineSummary,
+  Lines,
   type AddStepResult,
   type BatchConfig,
   type InstalledStep,
   type IntegratedShape,
   type IntegrationProof,
+  type LineRecord,
   type LineRun,
   type LineRunId,
   type LinesState,
   type LineSummary,
+  type StepEvidence,
   type SubmissionShape,
   type SubmissionSnapshot,
 } from "./model.ts"
+
+/** Install the line state machine, command surface, projection, and runtime. */
+export function withLine() {
+  return <App extends AnyYrdApp & HasEffects & HasBays>(app: App): LinesApp<App, SubmissionShape> => {
+    const initial = Lines.empty()
+    Object.assign(app.initialState, { lines: initial })
+    const registry = createStepRegistry(app, initial)
+    const commands = createLineCommands(registry)
+    Object.assign(app.commands, { line: commands })
+
+    const project = app.project
+    app.project = (state, applied) => {
+      const projected = project(state, applied)
+      const current = (projected as { lines: LinesState }).lines
+      const effects = (projected as { effects: EffectsState }).effects.runs
+      const lines = projectLine(current, applied, effects, registry)
+      return lines === current ? projected : { ...projected, lines }
+    }
+
+    Object.assign(app, { line: createLineRuntime(app, registry, commands) })
+    return app as unknown as LinesApp<App, SubmissionShape>
+  }
+}
+
+/** Register an ordered state transition. Each result becomes part of the next step's input shape. */
+export function withStep<const Name extends string, Shape extends SubmissionShape, Output>(
+  name: Name,
+  runner: StepRunner<Shape, Output>,
+  options: StepOptions = {},
+) {
+  return <App extends AnyYrdApp & HasBays & HasLine<Shape>>(
+    app: App,
+  ): ReplaceLine<App, AddStepResult<Shape, Name, Output>> => {
+    registryOf(app).register({
+      descriptor: {
+        name,
+        title: options.title ?? name,
+        integrates: false,
+        needsIntegration: options.needsIntegration ?? false,
+      },
+      effect: stepEffect(app, runner, options.title ?? name),
+      apply: (shape, output) => ({ ...shape, results: { ...shape.results, [name]: output } }),
+    })
+    return app as unknown as ReplaceLine<App, AddStepResult<Shape, Name, Output>>
+  }
+}
+
+/** Register the one transition allowed to produce durable integration proof. */
+export function withMerge<Shape extends SubmissionShape>(runner: StepRunner<Shape, IntegrationProof>) {
+  return <App extends AnyYrdApp & HasBays & HasLine<Shape>>(app: App): ReplaceLine<App, Shape & IntegratedShape> => {
+    registryOf(app).register({
+      descriptor: { name: "merge", title: "merge", integrates: true, needsIntegration: false },
+      effect: stepEffect(app, runner, "merge"),
+      apply: (shape, output) => ({ ...shape, integration: parseIntegrationProof(output) }),
+    })
+    return app as unknown as ReplaceLine<App, Shape & IntegratedShape>
+  }
+}
+
+/** Configure the largest candidate evaluated as one batch. false, 0, and 1 are serial. */
+export function withBatch(config: BatchConfig) {
+  return <App extends AnyYrdApp & HasLineSurface>(app: App): App => {
+    app.initialState.lines.batchSize = normalizeBatch(config)
+    return app
+  }
+}
+
+/** Select the installed steps used when line.integrate omits --steps. */
+export function withDefaultSteps(names: readonly string[]) {
+  return <App extends AnyYrdApp & HasLineSurface>(app: App): App => {
+    const selected = registryOf(app).select(names)
+    validateSequence(selected, false)
+    app.initialState.lines.defaultSteps = selected.map((step) => step.descriptor.name)
+    return app
+  }
+}
 
 export type StepExecution<Shape extends SubmissionShape = SubmissionShape> = {
   run: LineRunId
@@ -69,32 +149,17 @@ export type BatchIntegrateArgs = IntegrateOptions & {
 }
 
 export type IntegrateArgs = SingleIntegrateArgs | BatchIntegrateArgs
-
-type AdvanceArgs = { run: LineRunId }
-type IsolateArgs = AdvanceArgs & { part: 0 | 1 }
-
-type LineCommands = {
-  line: {
-    integrate: Command<IntegrateArgs, { lines: LinesState; bays: BaysState }>
-    advance: Command<AdvanceArgs, { lines: LinesState; effects: { runs: Record<string, EffectRun> } }>
-    resume: Command<AdvanceArgs, { lines: LinesState; effects: { runs: Record<string, EffectRun> } }>
-    isolate: Command<IsolateArgs, { lines: LinesState }>
-  }
-}
-
-export type LineRunOptions = {
-  executor: string
-  leaseMs: number
-  now?: () => number
-}
+export type LineRunOptions = EffectRunOptions
 
 export type IntegrateLine = {
   (args: SingleIntegrateArgs, options: LineRunOptions): Promise<LineRun>
   (args: BatchIntegrateArgs, options: LineRunOptions): Promise<LineRun[]>
 }
 
+declare const lineShape: unique symbol
+
 export type LineRuntime<Shape extends SubmissionShape = SubmissionShape> = {
-  readonly output: Shape
+  readonly [lineShape]?: Shape
   steps(): readonly InstalledStep[]
   integrate: IntegrateLine
   run(run: LineRunId, options: LineRunOptions): Promise<LineRun>
@@ -109,6 +174,17 @@ export type HasLine<Shape extends SubmissionShape = SubmissionShape> = {
   line: LineRuntime<Shape>
 }
 
+type AdvanceArgs = { run: LineRunId }
+type IsolateArgs = AdvanceArgs & { part: 0 | 1 }
+
+type LineCommands = {
+  line: {
+    integrate: Command<IntegrateArgs, { lines: LinesState; bays: BaysState }>
+    advance: Command<AdvanceArgs, { lines: LinesState; effects: EffectsState }>
+    isolate: Command<IsolateArgs, { lines: LinesState }>
+  }
+}
+
 type LinesApp<App extends AnyYrdApp, Shape extends SubmissionShape> = ExtendYrdApp<
   App,
   { lines: LinesState },
@@ -118,149 +194,508 @@ type LinesApp<App extends AnyYrdApp, Shape extends SubmissionShape> = ExtendYrdA
 }
 
 type ReplaceLine<App, Shape extends SubmissionShape> = Omit<App, "line"> & { line: LineRuntime<Shape> }
+type HasLineSurface = Omit<HasLine, "line"> & { line: Omit<LineRuntime, typeof lineShape> }
 
-type RuntimeStep = {
-  descriptor: InstalledStep
-  effect: Fx<StepExecution<any>, EffectOutcome<any>>
-  apply(shape: SubmissionShape | IntegratedShape, output: unknown): SubmissionShape | IntegratedShape
+type RuntimeState = { lines: LinesState; bays: BaysState; effects: EffectsState }
+type LineStart = Omit<LineRecord, "effectIds" | "startedAt">
+type StepDefinition = {
+  descriptor: Omit<InstalledStep, "index">
+  effect: Fx<StepExecution, EffectOutcome<unknown>>
+  apply(shape: SubmissionShape, output: unknown): SubmissionShape
+}
+type RuntimeStep = Omit<StepDefinition, "descriptor"> & { descriptor: InstalledStep }
+type StepRegistry = {
+  register(step: StepDefinition): void
+  entries(): readonly RuntimeStep[]
+  select(names?: readonly string[]): RuntimeStep[]
+  require(name: string): RuntimeStep
 }
 
-type InternalLineRuntime = LineRuntime<any> & {
-  install(step: RuntimeStep): void
-  configureBatch(config: BatchConfig): void
-  configureDefaultSteps(names: readonly string[]): void
-}
+const registryKey = Symbol("yrd.line.registry")
+type InternalLineRuntime = LineRuntime & { [registryKey]: StepRegistry }
 
-function object(input: unknown, command: string): Record<string, unknown> {
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    throw new Error(`yrd: ${command}: arguments must be an object`)
+function createStepRegistry(app: AnyYrdApp & HasEffects, initial: LinesState): StepRegistry {
+  const steps = new Map<string, RuntimeStep>()
+  const entries = (): RuntimeStep[] => [...steps.values()]
+  const requireStep = (name: string): RuntimeStep => {
+    const step = steps.get(name)
+    if (step === undefined) throw new Error(`yrd: line step '${name}' is not installed`)
+    return step
   }
-  return input as Record<string, unknown>
-}
 
-function requiredString(input: Record<string, unknown>, field: string, command: string): string {
-  const value = input[field]
-  if (typeof value !== "string" || value.trim() === "") throw new Error(`yrd: ${command}: '${field}' is required`)
-  return value
-}
-
-function parseIntegrate(input: unknown): IntegrateArgs {
-  const args = object(input, "line.integrate")
-  const submission = args.submission
-  const submissions = args.submissions
-  if (submission !== undefined && submissions !== undefined) {
-    throw new Error("yrd: line.integrate: use either 'submission' or 'submissions', not both")
+  const select = (names?: readonly string[]): RuntimeStep[] => {
+    if (names === undefined) return entries()
+    const selected = new Set(names)
+    if (selected.size !== names.length) throw new Error("yrd: line.integrate: duplicate step name")
+    for (const name of selected) requireStep(name)
+    return entries().filter((step) => selected.has(step.descriptor.name))
   }
-  if (submission !== undefined && (typeof submission !== "string" || submission.trim() === "")) {
-    throw new Error("yrd: line.integrate: 'submission' must be a non-empty string")
-  }
-  if (
-    submissions !== undefined &&
-    (!Array.isArray(submissions) ||
-      submissions.some((selector) => typeof selector !== "string" || selector.trim() === ""))
-  ) {
-    throw new Error("yrd: line.integrate: 'submissions' must be an array of non-empty strings")
-  }
-  const steps = args.steps
-  if (steps !== undefined && (!Array.isArray(steps) || steps.some((step) => typeof step !== "string" || step === ""))) {
-    throw new Error("yrd: line.integrate: 'steps' must be an array of step names")
-  }
-  if (args.retry !== undefined && typeof args.retry !== "boolean") {
-    throw new Error("yrd: line.integrate: 'retry' must be boolean")
-  }
-  const options = {
-    ...(steps === undefined ? {} : { steps: [...steps] as string[] }),
-    ...(args.retry === true ? { retry: true } : {}),
-  }
-  return submission === undefined
-    ? { ...options, ...(submissions === undefined ? {} : { submissions: [...submissions] as string[] }) }
-    : { ...options, submission }
-}
 
-function parseAdvance(input: unknown): AdvanceArgs {
-  const args = object(input, "line.advance")
-  return { run: requiredString(args, "run", "line.advance") }
-}
-
-function parseIsolate(input: unknown): IsolateArgs {
-  const args = object(input, "line.isolate")
-  if (args.part !== 0 && args.part !== 1) throw new Error("yrd: line.isolate: 'part' must be 0 or 1")
-  return { run: requiredString(args, "run", "line.isolate"), part: args.part }
-}
-
-function linesOf(state: unknown): LinesState {
-  return (state as { lines: LinesState }).lines
-}
-
-function effectsOf(state: unknown): Record<string, EffectRun> {
-  return (state as { effects: { runs: Record<string, EffectRun> } }).effects.runs
-}
-
-function nextRunId(state: LinesState): LineRunId {
-  let largest = 0
-  for (const id of Object.keys(state.runs)) {
-    const match = /^R(\d+)$/u.exec(id)
-    if (match !== null) largest = Math.max(largest, Number(match[1]))
-  }
-  return `R${largest + 1}`
-}
-
-function snapshot(submission: Submission): SubmissionSnapshot {
   return {
-    id: submission.id,
-    ...(submission.bay === undefined ? {} : { bay: submission.bay }),
-    ...(submission.name === undefined ? {} : { name: submission.name }),
-    branch: submission.branch,
-    base: submission.base,
-    revision: submission.revision,
-    headSha: submission.headSha,
-    ...(submission.baseSha === undefined ? {} : { baseSha: submission.baseSha }),
+    register(step) {
+      const name = step.descriptor.name
+      if (!/^[a-z][a-z0-9_-]*$/iu.test(name)) throw new Error(`yrd: invalid line step name '${name}'`)
+      if (steps.has(name)) throw new Error(`yrd: line step '${name}' is already installed`)
+      const descriptor = { ...step.descriptor, index: steps.size }
+      const installed = { ...step, descriptor }
+      app.effectRuns.register(["line", "step", name], installed.effect)
+      steps.set(name, installed)
+      initial.installed[name] = descriptor
+    },
+    entries,
+    select,
+    require: requireStep,
   }
 }
 
-function normalizeBatchConfig(config: BatchConfig): number {
-  if (config === false) return 1
-  if (!Number.isInteger(config) || config < 0) {
-    throw new Error("yrd: batch size must be false or a non-negative integer")
-  }
-  return config <= 1 ? 1 : config
+function registryOf(app: HasLineSurface): StepRegistry {
+  return (app.line as InternalLineRuntime)[registryKey]
 }
 
-function submissionShape(submissions: readonly SubmissionSnapshot[]): SubmissionShape {
+function stepEffect<Shape extends SubmissionShape, Output>(
+  app: AnyYrdApp & HasBays,
+  runner: StepRunner<Shape, Output>,
+  title: string,
+): Fx<StepExecution, EffectOutcome<unknown>> {
+  return fx(
+    async (input, context) => {
+      const stale = pinnedSubmissionError((await stateOf(app)).bays, input.submissions)
+      return stale === undefined
+        ? await runner(input as StepExecution<Shape>, context)
+        : { status: "failed", error: stale }
+    },
+    { title },
+  )
+}
+
+function createLineCommands(registry: StepRegistry): LineCommands["line"] {
+  const integrate = op(
+    (state: DeepReadonly<{ lines: LinesState; bays: BaysState }>, args: IntegrateArgs) => {
+      const lines = state.lines as LinesState
+      const submissions = requestedSubmissions(state.bays as BaysState, args)
+      if (submissions.length === 0) return { events: [], effects: [] }
+      const base = submissions[0]?.base
+      if (base === undefined) throw new Error("yrd: a line run requires at least one submission")
+      if (submissions.some((submission) => submission.base !== base)) {
+        throw new Error("yrd: one line candidate cannot span multiple base branches")
+      }
+      if (submissions.length > lines.batchSize) {
+        throw new Error(
+          `yrd: line candidate has ${submissions.length} submissions; configured batch size is ${lines.batchSize}`,
+        )
+      }
+      const active = Lines.running(lines, base)
+      if (active !== undefined) throw new Error(`yrd: line '${base}' is running '${active.id}'`)
+
+      const selected = registry.select(args.steps ?? lines.defaultSteps)
+      const integrated = integratedSubmissionShape(submissions)
+      validateSequence(selected, integrated !== undefined)
+      const snapshots = submissions.map(snapshot)
+      const shape = integrated ?? submissionShape(snapshots)
+      return startRun(Lines.nextId(lines), snapshots, selected, shape, integrated?.integration)
+    },
+    { title: "Integrate submission", visibility: "public", args: { parse: parseIntegrate } },
+  )
+
+  const advance = op(
+    (state: DeepReadonly<{ lines: LinesState; effects: EffectsState }>, args: AdvanceArgs) => {
+      const lines = state.lines as LinesState
+      const record = Lines.record(lines, args.run)
+      const name = record.selected[record.cursor]
+      if (name === undefined) return { events: [], effects: [] }
+      const effectId = record.effectIds[record.cursor]
+      if (effectId === undefined) {
+        throw new Error(`yrd: line run '${record.id}' has no requested step at index ${record.cursor}`)
+      }
+      const effectRun = state.effects.runs[effectId] as EffectRun | undefined
+      if (effectRun === undefined) throw new Error(`yrd: line run '${record.id}' lost effect '${effectId}'`)
+      if (effectRun.status === "requested" || effectRun.status === "running" || effectRun.status === "waiting") {
+        throw new Error(`yrd: line run '${record.id}' step '${name}' is ${effectRun.status}`)
+      }
+      if (Lines.running(lines, record.base, record.id) !== undefined) return { events: [], effects: [] }
+
+      const step = registry.require(name)
+      const events: EventDraft[] = [event("line/run/advanced", { run: record.id, index: record.cursor })]
+      if (effectRun.status !== "passed") {
+        const error = effectFailure(effectRun)
+        if (record.integration === undefined && record.submissions.length === 1) {
+          const submission = record.submissions[0]
+          if (submission !== undefined) {
+            events.push(
+              event("submission/rejected", {
+                submission: submission.id,
+                revision: submission.revision,
+                detail: error.message,
+              }),
+            )
+          }
+        }
+        return { events, effects: [] }
+      }
+
+      const shape = shapeThrough(record, state.effects.runs as Record<string, EffectRun>, registry, record.cursor + 1)
+      if (step.descriptor.integrates) {
+        if (!isIntegrated(shape))
+          throw new Error(`yrd: merge step '${step.descriptor.name}' produced no integration proof`)
+        events.push(event("line/run/integrated", { run: record.id, integration: shape.integration }))
+        for (const submission of record.submissions) {
+          events.push(
+            event("submission/integrated", {
+              submission: submission.id,
+              revision: submission.revision,
+              headSha: submission.headSha,
+              commit: shape.integration.commit,
+              baseSha: shape.integration.baseSha,
+            }),
+          )
+        }
+      }
+
+      const nextIndex = record.cursor + 1
+      const nextName = record.selected[nextIndex]
+      if (nextName === undefined) return { events, effects: [] }
+      const next = registry.require(nextName)
+      return { events, effects: [requestStep(next, record, nextIndex, shape)] }
+    },
+    { title: "Advance line run", visibility: "internal" },
+  )
+
+  const isolate = op(
+    (state: DeepReadonly<{ lines: LinesState }>, args: IsolateArgs) => {
+      const lines = state.lines as LinesState
+      const parent = Lines.require(lines, args.run)
+      if (Lines.child(lines, parent.id, args.part) !== undefined) return { events: [], effects: [] }
+      if (!bisectable(parent)) throw new Error(`yrd: line run '${parent.id}' is not a failed pre-merge batch`)
+      const active = Lines.running(lines, parent.base)
+      if (active !== undefined) throw new Error(`yrd: line '${parent.base}' is running '${active.id}'`)
+
+      const pivot = Math.ceil(parent.submissions.length / 2)
+      const submissions = args.part === 0 ? parent.submissions.slice(0, pivot) : parent.submissions.slice(pivot)
+      if (submissions.length === 0) throw new Error(`yrd: line run '${parent.id}' has no isolation part ${args.part}`)
+      const selected = parent.selected.map((name) => registry.require(name))
+      const started = startRun(Lines.nextId(lines), submissions, selected, submissionShape(submissions), undefined, {
+        parent: parent.id,
+        isolationPart: args.part,
+      })
+      return {
+        events: [
+          event("line/batch/isolated", {
+            parent: parent.id,
+            run: started.run.id,
+            part: args.part,
+            submissions: submissions.map((submission) => submission.id),
+          }),
+          ...started.events,
+        ],
+        effects: started.effects,
+      }
+    },
+    { title: "Isolate failed line batch", visibility: "internal" },
+  )
+
+  return { integrate, advance, isolate }
+}
+
+function createLineRuntime(
+  app: AnyYrdApp & HasEffects & HasBays,
+  registry: StepRegistry,
+  commands: LineCommands["line"],
+): InternalLineRuntime {
+  const start = async (args: IntegrateArgs): Promise<LineRunId> => {
+    const result = await app.command(commands.integrate, args)
+    const started = result.events.find((applied) => applied.name === "line/run/started")
+    if (started === undefined) throw new Error("yrd: line integrate did not start a run")
+    return (started.data as { run: LineStart }).run.id
+  }
+
+  const drive = async (id: LineRunId, options: LineRunOptions): Promise<LineRun> => {
+    while (true) {
+      const state = await stateOf(app)
+      const run = Lines.require(state.lines, id)
+      const record = Lines.record(state.lines, id)
+      const effectId = record.effectIds[record.cursor]
+      if (effectId === undefined) {
+        if (Lines.terminal(run)) return run
+        throw new Error(`yrd: line run '${id}' has no effect at index ${record.cursor}`)
+      }
+      const effectRun = state.effects.runs[effectId]
+      if (effectRun === undefined) throw new Error(`yrd: line run '${id}' lost effect '${effectId}'`)
+      if (effectRun.status === "requested") {
+        await app.effectRuns.run(effectId, options)
+        continue
+      }
+      if (effectRun.status === "running" || effectRun.status === "waiting") return run
+      const advanced = await app.command(commands.advance, { run: id })
+      if (advanced.events.length === 0) return Lines.require((await stateOf(app)).lines, id)
+    }
+  }
+
+  const run = async (id: LineRunId, options: LineRunOptions): Promise<LineRun> => {
+    const settled = await drive(id, options)
+    if (!bisectable(settled)) return settled
+    for (const part of [0, 1] as const) {
+      let child = Lines.child((await stateOf(app)).lines, settled.id, part)
+      if (child === undefined) {
+        await app.command(commands.isolate, { run: settled.id, part })
+        child = Lines.child((await stateOf(app)).lines, settled.id, part)
+      }
+      if (child === undefined) throw new Error(`yrd: line run '${settled.id}' did not create isolation part ${part}`)
+      await run(child.id, options)
+    }
+    return Lines.require((await stateOf(app)).lines, id)
+  }
+
+  const integrate = (async (args: IntegrateArgs, options: LineRunOptions): Promise<LineRun | LineRun[]> => {
+    if (typeof args.submission === "string") return await run(await start(args), options)
+
+    const state = await stateOf(app)
+    const submissions = requestedSubmissions(state.bays, args)
+    if (submissions.length === 0) return []
+    const roots: LineRunId[] = []
+    for (const candidate of partitionCandidates(submissions, state.lines.batchSize)) {
+      const id = await start({
+        submissions: candidate.map((submission) => submission.id),
+        ...(args.steps === undefined ? {} : { steps: args.steps }),
+        ...(args.retry === true ? { retry: true } : {}),
+      })
+      roots.push(id)
+      await run(id, options)
+    }
+    const lines = (await stateOf(app)).lines
+    return roots.flatMap((root) => Lines.tree(lines, root))
+  }) as IntegrateLine
+
+  return {
+    [registryKey]: registry,
+    steps: () => registry.entries().map((step) => step.descriptor),
+    integrate,
+    run,
+    async recover(options) {
+      await app.effectRuns.recover({
+        now: options.recoveryTime,
+        ...(options.reason === undefined ? {} : { reason: options.reason }),
+      })
+      const recovered: LineRun[] = []
+      for (const candidate of Lines.ordered((await stateOf(app)).lines)) {
+        if (Lines.terminal(candidate) && !pendingAdvance(candidate) && !bisectable(candidate)) continue
+        recovered.push(await run(candidate.id, options))
+      }
+      return recovered
+    },
+    async get(id) {
+      return (await stateOf(app)).lines.runs[id]
+    },
+    async status(base) {
+      return Lines.summary((await stateOf(app)).lines, base)
+    },
+  }
+}
+
+function projectLine(
+  state: LinesState,
+  applied: YrdEvent,
+  effectRuns: Record<string, EffectRun>,
+  registry: StepRegistry,
+): LinesState {
+  const data = applied.data as Record<string, unknown>
+  let record: LineRecord | undefined
+
+  if (applied.name === "line/run/started") {
+    const started = data.run as LineStart
+    record = { ...started, effectIds: [], startedAt: applied.ts }
+  } else if (applied.name === "line/run/advanced") {
+    const current = state.records[data.run as string]
+    if (current === undefined) return state
+    const index = data.index as number
+    if (index !== current.cursor) throw new Error(`yrd: line run '${current.id}' advanced out of order`)
+    record = { ...current, cursor: index + 1 }
+  } else if (applied.name === "line/run/integrated") {
+    const current = state.records[data.run as string]
+    if (current === undefined) return state
+    record = { ...current, integration: data.integration as IntegrationProof }
+  } else if (applied.name.startsWith("effect/")) {
+    const id = data.id as string
+    const effectRun = effectRuns[id]
+    if (effectRun === undefined || !effectRun.effect.startsWith("line.step.")) return state
+    const input = effectRun.input as { run?: unknown; step?: unknown; index?: unknown }
+    if (typeof input.run !== "string" || typeof input.index !== "number") return state
+    const current = state.records[input.run]
+    if (current === undefined || current.selected[input.index] !== input.step) return state
+    if (applied.name === "effect/requested") {
+      const existing = current.effectIds[input.index]
+      if (existing !== undefined && existing !== id) {
+        throw new Error(`yrd: line run '${current.id}' step ${input.index} requested twice`)
+      }
+      if (existing === undefined && input.index !== current.effectIds.length) {
+        throw new Error(`yrd: line run '${current.id}' requested step ${input.index} out of order`)
+      }
+      record = existing === id ? current : { ...current, effectIds: [...current.effectIds, id] }
+    } else {
+      if (current.effectIds[input.index] !== id) return state
+      record = current
+    }
+  }
+
+  if (record === undefined) return state
+  const run = materializeRun(record, effectRuns, registry, state.runs[record.id], applied)
+  return {
+    ...state,
+    records: { ...state.records, [record.id]: record },
+    runs: { ...state.runs, [record.id]: run },
+  }
+}
+
+function materializeRun(
+  record: LineRecord,
+  effects: Record<string, EffectRun>,
+  registry: StepRegistry,
+  previous: LineRun | undefined,
+  applied: YrdEvent,
+): LineRun {
+  const steps = record.selected.map((name, index) =>
+    materializeStep(name, index, record.effectIds[index], effects, previous?.steps[index], applied),
+  )
+  const failure = steps.find((step) => step.status === "failed" || step.status === "lost")
+  const waiting = steps.some((step) => step.status === "waiting")
+  const passed = steps.every((step) => step.status === "passed") && record.cursor === steps.length
+  const status = failure === undefined ? (waiting ? "waiting" : passed ? "passed" : "running") : "failed"
+  const finishedAt =
+    status === "failed" ? failure?.finishedAt : status === "passed" ? steps.at(-1)?.finishedAt : undefined
+  return {
+    ...record,
+    status,
+    steps,
+    shape: shapeThrough(record, effects, registry),
+    ...(finishedAt === undefined ? (steps.length === 0 ? { finishedAt: record.startedAt } : {}) : { finishedAt }),
+    ...(failure?.error === undefined ? {} : { error: failure.error }),
+  }
+}
+
+function materializeStep(
+  name: string,
+  index: number,
+  effectId: string | undefined,
+  effects: Record<string, EffectRun>,
+  previous: StepEvidence | undefined,
+  applied: YrdEvent,
+): StepEvidence {
+  if (effectId === undefined) return { name, index, status: "queued" }
+  const run = effects[effectId]
+  if (run === undefined) throw new Error(`yrd: line step '${name}' lost effect '${effectId}'`)
+  if (run.status === "requested") return { name, index, status: "requested", effectId }
+
+  const currentEvent = (applied.data as { id?: unknown }).id === effectId
+  const startedAt = currentEvent && applied.name === "effect/started" ? applied.ts : previous?.startedAt
+  const finishedAt =
+    currentEvent && (applied.name === "effect/finished" || applied.name === "effect/lost")
+      ? applied.ts
+      : previous?.finishedAt
+  if (startedAt === undefined) throw new Error(`yrd: line effect '${effectId}' was never started`)
+  const execution = { name, index, effectId, attempt: run.attempt, startedAt }
+  if (run.status === "running") return { ...execution, status: "running" }
+  const remote = {
+    token: run.token,
+    url: run.url,
+    detail: run.detail,
+    artifacts: run.artifacts,
+    checkpoint: run.checkpoint,
+  }
+  if (run.status === "waiting") {
+    if (run.token === undefined) throw new Error(`yrd: waiting line effect '${effectId}' has no token`)
+    return { ...execution, ...remote, status: "waiting", token: run.token }
+  }
+  if (finishedAt === undefined) throw new Error(`yrd: terminal line effect '${effectId}' has no finish time`)
+  const terminal = { ...execution, ...remote, finishedAt }
+  if (run.status === "passed") return { ...terminal, status: "passed", output: run.output }
+  return {
+    ...terminal,
+    status: run.status,
+    ...(run.output === undefined ? {} : { output: run.output }),
+    error: effectFailure(run),
+  }
+}
+
+function startRun(
+  id: LineRunId,
+  submissions: readonly SubmissionSnapshot[],
+  selected: readonly RuntimeStep[],
+  shape: SubmissionShape,
+  integration?: IntegrationProof,
+  lineage: { parent?: LineRunId; isolationPart?: 0 | 1 } = {},
+): {
+  run: LineStart
+  events: EventDraft[]
+  effects: EffectRequest<StepExecution, EffectOutcome<unknown>>[]
+} {
   const submission = submissions[0]
   if (submission === undefined) throw new Error("yrd: a line run requires at least one submission")
-  return { submission, submissions: [...submissions], results: {} }
-}
-
-function integrationShape(submissions: readonly Submission[]): IntegratedShape | undefined {
-  const integrated = submissions.filter((submission) => submission.status === "integrated")
-  if (integrated.length === 0) return undefined
-  if (integrated.length !== submissions.length) {
-    throw new Error("yrd: a line candidate cannot mix integrated and unintegrated submissions")
+  const run: LineStart = {
+    id,
+    submission,
+    submissions: [...submissions],
+    base: submission.base,
+    selected: selected.map((step) => step.descriptor.name),
+    cursor: 0,
+    ...(integration === undefined ? {} : { integration }),
+    ...lineage,
   }
-  const proof = integrated[0]?.integration
-  if (proof === undefined) throw new Error(`yrd: integrated submission '${integrated[0]!.id}' has no integration proof`)
-  if (
-    integrated.some(
-      (submission) =>
-        submission.integration?.commit !== proof.commit || submission.integration?.baseSha !== proof.baseSha,
-    )
-  ) {
-    throw new Error("yrd: integrated submissions with different landing commits cannot share a line candidate")
-  }
-  const snapshots = submissions.map(snapshot)
   return {
-    submission: snapshots[0]!,
-    submissions: snapshots,
-    results: {},
-    integration: proof,
+    run,
+    events: [event("line/run/started", { run })],
+    effects: selected[0] === undefined ? [] : [requestStep(selected[0], run, 0, shape)],
   }
 }
 
-function eligibleSubmissions(state: BaysState, retry: boolean): Submission[] {
-  return Object.values(state.submissions)
-    .filter((submission) => submission.status === "submitted" || (retry && submission.status === "rejected"))
-    .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+function requestStep(
+  step: RuntimeStep,
+  run: Pick<LineRecord, "id" | "submission" | "submissions">,
+  index: number,
+  shape: SubmissionShape,
+): EffectRequest<StepExecution, EffectOutcome<unknown>> {
+  return effect(
+    step.effect,
+    {
+      run: run.id,
+      step: step.descriptor.name,
+      index,
+      submission: run.submission,
+      submissions: run.submissions,
+      shape,
+    },
+    `line:${run.id}:${index}`,
+  )
+}
+
+function shapeThrough(
+  record: LineRecord,
+  effects: Record<string, EffectRun>,
+  registry: StepRegistry,
+  limit = record.selected.length,
+): SubmissionShape {
+  const hasMerge = record.selected.some((name) => registry.require(name).descriptor.integrates)
+  let shape: SubmissionShape = {
+    ...submissionShape(record.submissions),
+    ...(record.integration === undefined || hasMerge ? {} : { integration: record.integration }),
+  }
+  for (let index = 0; index < Math.min(limit, record.selected.length); index++) {
+    const name = record.selected[index]
+    const run = effects[record.effectIds[index] ?? ""]
+    if (name === undefined || run?.status !== "passed") break
+    shape = registry.require(name).apply(shape, run.output)
+  }
+  return shape
+}
+
+function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: boolean): void {
+  let integrated = alreadyIntegrated
+  for (const step of steps) {
+    if (step.descriptor.needsIntegration && !integrated) {
+      throw new Error(`yrd: line step '${step.descriptor.name}' requires integration output before it can run`)
+    }
+    if (!step.descriptor.integrates) continue
+    if (integrated) throw new Error("yrd: merge step cannot run after the submission is already integrated")
+    integrated = true
+  }
 }
 
 function requestedSubmissions(state: BaysState, args: IntegrateArgs): Submission[] {
@@ -272,7 +707,12 @@ function requestedSubmissions(state: BaysState, args: IntegrateArgs): Submission
         : args.submissions
   const submissions =
     selectors === undefined
-      ? eligibleSubmissions(state, args.retry === true)
+      ? Object.values(state.submissions)
+          .filter(
+            (submission) =>
+              submission.status === "submitted" || (args.retry === true && submission.status === "rejected"),
+          )
+          .sort((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
       : selectors.map((selector) => {
           const submission = resolveSubmission(state, selector)
           if (submission === undefined) throw new Error(`yrd: no submission '${selector}'`)
@@ -290,6 +730,58 @@ function requestedSubmissions(state: BaysState, args: IntegrateArgs): Submission
     }
   }
   return submissions
+}
+
+function partitionCandidates(submissions: readonly Submission[], batchSize: number): Submission[][] {
+  const groups = new Map<string, Submission[]>()
+  for (const submission of submissions) {
+    const proof = submission.integration
+    const key = `${submission.base}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
+    const group = groups.get(key)
+    if (group === undefined) groups.set(key, [submission])
+    else group.push(submission)
+  }
+  const candidates: Submission[][] = []
+  for (const group of groups.values()) {
+    for (let index = 0; index < group.length; index += batchSize) candidates.push(group.slice(index, index + batchSize))
+  }
+  return candidates
+}
+
+function snapshot(submission: Submission): SubmissionSnapshot {
+  return {
+    id: submission.id,
+    ...(submission.bay === undefined ? {} : { bay: submission.bay }),
+    ...(submission.name === undefined ? {} : { name: submission.name }),
+    branch: submission.branch,
+    base: submission.base,
+    revision: submission.revision,
+    headSha: submission.headSha,
+    ...(submission.baseSha === undefined ? {} : { baseSha: submission.baseSha }),
+  }
+}
+
+function submissionShape(submissions: readonly SubmissionSnapshot[]): SubmissionShape {
+  const submission = submissions[0]
+  if (submission === undefined) throw new Error("yrd: a line run requires at least one submission")
+  return { submission, submissions: [...submissions], results: {} }
+}
+
+function integratedSubmissionShape(submissions: readonly Submission[]): IntegratedShape | undefined {
+  if (submissions.every((submission) => submission.status !== "integrated")) return undefined
+  const proof = submissions[0]?.integration
+  if (
+    proof === undefined ||
+    submissions.some(
+      (submission) =>
+        submission.status !== "integrated" ||
+        submission.integration?.commit !== proof.commit ||
+        submission.integration?.baseSha !== proof.baseSha,
+    )
+  ) {
+    throw new Error("yrd: every submission in a line candidate must share one integration proof")
+  }
+  return { ...submissionShape(submissions.map(snapshot)), integration: proof }
 }
 
 function pinnedSubmissionError(state: BaysState, snapshots: readonly SubmissionSnapshot[]): EffectError | undefined {
@@ -310,24 +802,41 @@ function pinnedSubmissionError(state: BaysState, snapshots: readonly SubmissionS
   return undefined
 }
 
-function guardPinnedSubmissions<Shape extends SubmissionShape, Output>(
-  app: AnyYrdApp & HasBays,
-  runner: StepRunner<Shape, Output>,
-): StepRunner<Shape, Output> {
-  return async (input, context) => {
-    const stale = pinnedSubmissionError((await app.state()).bays, input.submissions)
-    return stale === undefined ? await runner(input, context) : { status: "failed", error: stale }
+function normalizeBatch(config: BatchConfig): number {
+  if (config === false) return 1
+  if (!Number.isInteger(config) || config < 0) {
+    throw new Error("yrd: batch size must be false or a non-negative integer")
   }
+  return config <= 1 ? 1 : config
 }
 
-function requiredRun(state: LinesState, id: LineRunId): LineRun {
-  const run = state.runs[id]
-  if (run === undefined) throw new Error(`yrd: no line run '${id}'`)
-  return run
+function bisectable(run: LineRun): boolean {
+  const failed = run.steps.findIndex((step) => step.status === "failed" || step.status === "lost")
+  return (
+    run.status === "failed" &&
+    failed >= 0 &&
+    run.cursor > failed &&
+    !isIntegrated(run.shape) &&
+    run.submissions.length > 1
+  )
 }
 
-function terminal(run: LineRun): boolean {
-  return run.status === "passed" || run.status === "failed"
+function pendingAdvance(run: LineRun): boolean {
+  const step = run.steps[run.cursor]
+  return step?.status === "passed" || step?.status === "failed" || step?.status === "lost"
+}
+
+function isIntegrated(shape: SubmissionShape): shape is IntegratedShape {
+  return "integration" in shape
+}
+
+function effectFailure(run: EffectRun): EffectError {
+  return run.error ?? { code: "effect-lost", message: run.lostReason ?? "step executor was lost" }
+}
+
+function parseIntegrationProof(input: unknown): IntegrationProof {
+  const value = object(input, "merge output")
+  return { commit: fullSha(value.commit, "commit"), baseSha: fullSha(value.baseSha, "baseSha") }
 }
 
 function fullSha(value: unknown, field: string): string {
@@ -337,613 +846,47 @@ function fullSha(value: unknown, field: string): string {
   return value
 }
 
-function integrationProof(input: unknown): IntegrationProof {
-  const value = object(input, "merge output")
-  return { commit: fullSha(value.commit, "commit"), baseSha: fullSha(value.baseSha, "baseSha") }
+function parseIntegrate(input: unknown): IntegrateArgs {
+  const args = object(input, "line.integrate")
+  const submission = args.submission
+  const submissions = optionalStrings(
+    args.submissions,
+    "yrd: line.integrate: 'submissions' must be an array of non-empty strings",
+  )
+  if (submission !== undefined && submissions !== undefined) {
+    throw new Error("yrd: line.integrate: use either 'submission' or 'submissions', not both")
+  }
+  if (submission !== undefined && (typeof submission !== "string" || submission.trim() === "")) {
+    throw new Error("yrd: line.integrate: 'submission' must be a non-empty string")
+  }
+  const steps = optionalStrings(args.steps, "yrd: line.integrate: 'steps' must be an array of step names")
+  if (args.retry !== undefined && typeof args.retry !== "boolean") {
+    throw new Error("yrd: line.integrate: 'retry' must be boolean")
+  }
+  const options = {
+    ...(steps === undefined ? {} : { steps }),
+    ...(args.retry === true ? { retry: true } : {}),
+  }
+  return submission === undefined
+    ? { ...options, ...(submissions === undefined ? {} : { submissions }) }
+    : { ...options, submission }
 }
 
-function failure(run: EffectRun): EffectError {
-  return run.error ?? { code: "effect-lost", message: run.lostReason ?? "step executor was lost" }
+function object(input: unknown, command: string): Record<string, unknown> {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new Error(`yrd: ${command}: arguments must be an object`)
+  }
+  return input as Record<string, unknown>
 }
 
-function replaceRun(state: LinesState, run: LineRun): LinesState {
-  return { ...state, runs: { ...state.runs, [run.id]: run } }
+function optionalStrings(value: unknown, error: string): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+    throw new Error(error)
+  }
+  return [...value] as string[]
 }
 
-function projectLineState(state: LinesState, applied: YrdEvent, effectRuns: Record<string, EffectRun>): LinesState {
-  const data = applied.data as Record<string, unknown>
-  if (applied.name === "line/run/started") {
-    const run = data.run as unknown as LineRun
-    return replaceRun(state, { ...run, startedAt: applied.ts })
-  }
-  if (applied.name === "line/run/resumed") {
-    const run = state.runs[data.run as string]
-    return run === undefined ? state : replaceRun(state, { ...run, status: "running" })
-  }
-  if (applied.name === "line/step/finished") {
-    const run = state.runs[data.run as string]
-    if (run === undefined) return state
-    const index = data.index as number
-    const current = run.steps[index]
-    if (current === undefined) return state
-    const passed = data.status === "passed"
-    const step = {
-      ...current,
-      status: passed ? ("passed" as const) : data.status === "lost" ? ("lost" as const) : ("failed" as const),
-      finishedAt: applied.ts,
-      ...(data.output === undefined ? {} : { output: data.output }),
-      ...(data.error === undefined ? {} : { error: data.error as EffectError }),
-    }
-    const steps = [...run.steps]
-    steps[index] = step
-    return replaceRun(state, {
-      ...run,
-      steps,
-      cursor: index + 1,
-      ...(data.shape === undefined ? {} : { shape: data.shape as SubmissionShape | IntegratedShape }),
-    })
-  }
-  if (applied.name === "line/run/finished") {
-    const run = state.runs[data.run as string]
-    if (run === undefined) return state
-    return replaceRun(state, {
-      ...run,
-      status: data.status === "passed" ? "passed" : "failed",
-      finishedAt: applied.ts,
-      ...(data.error === undefined ? {} : { error: data.error as EffectError }),
-    })
-  }
-  if (!applied.name.startsWith("effect/")) return state
-
-  const id = data.id as string
-  const effectRun = effectRuns[id]
-  if (effectRun === undefined || !effectRun.effect.startsWith("line.step.")) return state
-  const input = effectRun.input as StepExecution
-  const run = state.runs[input.run]
-  const current = run?.steps[input.index]
-  if (run === undefined || current === undefined) return state
-  const steps = [...run.steps]
-  let nextRun = run
-  if (applied.name === "effect/requested") {
-    steps[input.index] = { ...current, status: "requested", effectId: id }
-  } else if (applied.name === "effect/started" || applied.name === "effect/heartbeat") {
-    steps[input.index] = {
-      ...current,
-      status: "running",
-      effectId: id,
-      attempt: effectRun.attempt,
-      startedAt: current.startedAt ?? applied.ts,
-    }
-    nextRun = { ...run, status: "running" }
-  } else if (applied.name === "effect/waiting") {
-    steps[input.index] = {
-      ...current,
-      status: "waiting",
-      effectId: id,
-      attempt: effectRun.attempt,
-      token: effectRun.token,
-      url: effectRun.url,
-      detail: effectRun.detail,
-      artifacts: effectRun.artifacts,
-      checkpoint: effectRun.checkpoint,
-    }
-    nextRun = { ...run, status: "waiting" }
-  } else {
-    return state
-  }
-  return replaceRun(state, { ...nextRun, steps })
-}
-
-function selectedSteps(steps: readonly RuntimeStep[], requested: readonly string[] | undefined): RuntimeStep[] {
-  if (requested === undefined) return [...steps]
-  const names = new Set(requested)
-  if (names.size !== requested.length) throw new Error("yrd: line.integrate: duplicate step name")
-  for (const name of names) {
-    if (!steps.some((step) => step.descriptor.name === name))
-      throw new Error(`yrd: line.integrate: unknown step '${name}'`)
-  }
-  return steps.filter((step) => names.has(step.descriptor.name))
-}
-
-function validateSequence(steps: readonly RuntimeStep[], integrated: boolean): void {
-  let hasIntegration = integrated
-  for (const step of steps) {
-    if (step.descriptor.needsIntegration && !hasIntegration) {
-      throw new Error(`yrd: line step '${step.descriptor.name}' requires integration output before it can run`)
-    }
-    if (step.descriptor.kind === "merge") {
-      if (hasIntegration) throw new Error("yrd: merge step cannot run after the submission is already integrated")
-      hasIntegration = true
-    }
-  }
-}
-
-export function withLine() {
-  return <App extends AnyYrdApp & HasEffects & HasBays>(app: App): LinesApp<App, SubmissionShape> => {
-    Object.assign(app.initialState, { lines: emptyLinesState() })
-    const runtimeSteps: RuntimeStep[] = []
-
-    const requestFor = (
-      step: RuntimeStep,
-      run: Pick<LineRun, "id" | "submission" | "submissions">,
-      index: number,
-      shape: SubmissionShape | IntegratedShape,
-    ) =>
-      effect(
-        step.effect,
-        {
-          run: run.id,
-          step: step.descriptor.name,
-          index,
-          submission: run.submission,
-          submissions: run.submissions,
-          shape,
-        },
-        `line:${run.id}:${index}`,
-      )
-
-    const createRun = (
-      id: LineRunId,
-      submissions: readonly SubmissionSnapshot[],
-      selected: readonly RuntimeStep[],
-      shape: SubmissionShape | IntegratedShape,
-      lineage: { parent?: LineRunId; isolationPart?: 0 | 1 } = {},
-    ): Omit<LineRun, "startedAt"> => ({
-      id,
-      submission: submissions[0]!,
-      submissions: [...submissions],
-      base: submissions[0]!.base,
-      status: "running",
-      selected: selected.map((step) => step.descriptor.name),
-      cursor: 0,
-      steps: selected.map((step, index) => ({ name: step.descriptor.name, index, status: "queued" })),
-      shape,
-      ...lineage,
-    })
-
-    const startRun = (run: Omit<LineRun, "startedAt">, selected: readonly RuntimeStep[]) => {
-      const events: EventDraft[] = [event("line/run/started", { run })]
-      if (selected.length === 0) events.push(event("line/run/finished", { run: run.id, status: "passed" }))
-      return {
-        events,
-        effects: selected.length === 0 ? [] : [requestFor(selected[0]!, run, 0, run.shape)],
-      }
-    }
-
-    const integrate = op(
-      (state: DeepReadonly<{ lines: LinesState; bays: BaysState }>, args: IntegrateArgs) => {
-        const submissions = requestedSubmissions(state.bays as BaysState, args)
-        if (submissions.length === 0) return { events: [], effects: [] }
-        const bases = new Set(submissions.map((submission) => submission.base))
-        if (bases.size !== 1) throw new Error("yrd: one line candidate cannot span multiple base branches")
-        if (submissions.length > state.lines.batchSize) {
-          throw new Error(
-            `yrd: line candidate has ${submissions.length} submissions; configured batch size is ${state.lines.batchSize}`,
-          )
-        }
-        const active = Object.values(state.lines.runs).find(
-          (run) => run.base === submissions[0]!.base && run.status === "running",
-        )
-        if (active !== undefined) throw new Error(`yrd: line '${submissions[0]!.base}' is running '${active.id}'`)
-
-        const selected = selectedSteps(runtimeSteps, args.steps ?? state.lines.defaultSteps)
-        const integrated = integrationShape(submissions)
-        validateSequence(selected, integrated !== undefined)
-        const id = nextRunId(state.lines as LinesState)
-        const snapshots = submissions.map(snapshot)
-        const shape = integrated ?? submissionShape(snapshots)
-        return startRun(createRun(id, snapshots, selected, shape), selected)
-      },
-      { title: "Integrate submission", visibility: "public", args: { parse: parseIntegrate } },
-    )
-
-    const advance = op(
-      (state: DeepReadonly<{ lines: LinesState; effects: { runs: Record<string, EffectRun> } }>, args: AdvanceArgs) => {
-        const run = requiredRun(state.lines as LinesState, args.run)
-        if (terminal(run)) return { events: [], effects: [] }
-        const stepEvidence = run.steps[run.cursor]
-        if (stepEvidence === undefined || stepEvidence.effectId === undefined) {
-          throw new Error(`yrd: line run '${run.id}' has no requested step at index ${run.cursor}`)
-        }
-        const effectRun = effectsOf(state)[stepEvidence.effectId]
-        if (effectRun === undefined) throw new Error(`yrd: line run '${run.id}' lost effect '${stepEvidence.effectId}'`)
-        if (effectRun.status === "requested" || effectRun.status === "running" || effectRun.status === "waiting") {
-          throw new Error(`yrd: line run '${run.id}' step '${stepEvidence.name}' is ${effectRun.status}`)
-        }
-        const installed = runtimeSteps.find((step) => step.descriptor.name === stepEvidence.name)
-        if (installed === undefined) throw new Error(`yrd: line step '${stepEvidence.name}' is no longer installed`)
-
-        if (effectRun.status !== "passed") {
-          const error = failure(effectRun as EffectRun)
-          const events: EventDraft[] = [
-            event("line/step/finished", {
-              run: run.id,
-              step: stepEvidence.name,
-              index: run.cursor,
-              status: effectRun.status,
-              error,
-              ...(effectRun.output === undefined ? {} : { output: effectRun.output }),
-            }),
-            event("line/run/finished", { run: run.id, status: "failed", error }),
-          ]
-          if (!("integration" in run.shape) && run.submissions.length === 1) {
-            events.push(
-              event("submission/rejected", {
-                submission: run.submissions[0]!.id,
-                revision: run.submissions[0]!.revision,
-                detail: error.message,
-              }),
-            )
-          }
-          return { events, effects: [] }
-        }
-
-        const shape = installed.apply(run.shape, effectRun.output)
-        const events: EventDraft[] = [
-          event("line/step/finished", {
-            run: run.id,
-            step: stepEvidence.name,
-            index: run.cursor,
-            status: "passed",
-            output: effectRun.output,
-            shape,
-          }),
-        ]
-        if (installed.descriptor.kind === "merge") {
-          const proof = (shape as IntegratedShape).integration
-          for (const submission of run.submissions) {
-            events.push(
-              event("submission/integrated", {
-                submission: submission.id,
-                revision: submission.revision,
-                headSha: submission.headSha,
-                commit: proof.commit,
-                baseSha: proof.baseSha,
-              }),
-            )
-          }
-        }
-        const nextIndex = run.cursor + 1
-        const next = runtimeSteps.find((step) => step.descriptor.name === run.selected[nextIndex])
-        if (next === undefined) {
-          events.push(event("line/run/finished", { run: run.id, status: "passed" }))
-          return { events, effects: [] }
-        }
-        return {
-          events,
-          effects: [requestFor(next, run, nextIndex, shape)],
-        }
-      },
-      { title: "Advance line run", visibility: "internal", args: { parse: parseAdvance } },
-    )
-
-    const resume = op(
-      (state: DeepReadonly<{ lines: LinesState; effects: { runs: Record<string, EffectRun> } }>, args: AdvanceArgs) => {
-        const run = requiredRun(state.lines as LinesState, args.run)
-        if (run.status !== "waiting") return { events: [], effects: [] }
-        const step = run.steps[run.cursor]
-        const effectRun = step?.effectId === undefined ? undefined : effectsOf(state)[step.effectId]
-        if (effectRun === undefined || effectRun.status === "waiting" || effectRun.status === "running") {
-          return { events: [], effects: [] }
-        }
-        const active = Object.values(state.lines.runs).find(
-          (candidate) => candidate.id !== run.id && candidate.base === run.base && candidate.status === "running",
-        )
-        return active === undefined
-          ? { events: [event("line/run/resumed", { run: run.id })], effects: [] }
-          : { events: [], effects: [] }
-      },
-      { title: "Resume line run", visibility: "internal", args: { parse: parseAdvance } },
-    )
-
-    const isolate = op(
-      (state: DeepReadonly<{ lines: LinesState }>, args: IsolateArgs) => {
-        const parent = requiredRun(state.lines as LinesState, args.run)
-        const existing = Object.values(state.lines.runs).find(
-          (candidate) => candidate.parent === parent.id && candidate.isolationPart === args.part,
-        )
-        if (existing !== undefined) return { events: [], effects: [] }
-        if (parent.status !== "failed" || "integration" in parent.shape || parent.submissions.length < 2) {
-          throw new Error(`yrd: line run '${parent.id}' is not a failed pre-merge batch`)
-        }
-        const active = Object.values(state.lines.runs).find(
-          (candidate) => candidate.base === parent.base && candidate.status === "running",
-        )
-        if (active !== undefined) throw new Error(`yrd: line '${parent.base}' is running '${active.id}'`)
-
-        const pivot = Math.ceil(parent.submissions.length / 2)
-        const submissions = args.part === 0 ? parent.submissions.slice(0, pivot) : parent.submissions.slice(pivot)
-        if (submissions.length === 0) throw new Error(`yrd: line run '${parent.id}' has no isolation part ${args.part}`)
-        const selected = parent.selected.map((name) => {
-          const step = runtimeSteps.find((candidate) => candidate.descriptor.name === name)
-          if (step === undefined) throw new Error(`yrd: line step '${name}' is no longer installed`)
-          return step
-        })
-        const id = nextRunId(state.lines as LinesState)
-        const child = createRun(id, submissions, selected, submissionShape(submissions), {
-          parent: parent.id,
-          isolationPart: args.part,
-        })
-        const started = startRun(child, selected)
-        return {
-          events: [
-            event("line/batch/isolated", {
-              parent: parent.id,
-              run: child.id,
-              part: args.part,
-              submissions: submissions.map((submission) => submission.id),
-            }),
-            ...started.events,
-          ],
-          effects: started.effects,
-        }
-      },
-      { title: "Isolate failed line batch", visibility: "internal", args: { parse: parseIsolate } },
-    )
-
-    Object.assign(app.commands, { line: { integrate, advance, resume, isolate } })
-
-    const project = app.project
-    app.project = (state, applied) => {
-      const projected = project(state, applied)
-      const current = linesOf(projected)
-      const next = projectLineState(current, applied, effectsOf(projected))
-      return next === current ? projected : { ...projected, lines: next }
-    }
-
-    const startedRun = (events: readonly YrdEvent[]): LineRunId | undefined => {
-      const row = events.find((applied) => applied.name === "line/run/started")
-      return row === undefined ? undefined : ((row.data as { run: LineRun }).run.id as LineRunId)
-    }
-
-    const childRun = (state: LinesState, parent: LineRunId, part: 0 | 1): LineRun | undefined =>
-      Object.values(state.runs).find((run) => run.parent === parent && run.isolationPart === part)
-
-    const runIdOrder = (left: LineRun, right: LineRun): number => {
-      const leftNumber = Number(/^R(\d+)$/u.exec(left.id)?.[1] ?? Number.MAX_SAFE_INTEGER)
-      const rightNumber = Number(/^R(\d+)$/u.exec(right.id)?.[1] ?? Number.MAX_SAFE_INTEGER)
-      return leftNumber - rightNumber || left.id.localeCompare(right.id)
-    }
-
-    const runTree = (state: LinesState, root: LineRunId): LineRun[] => {
-      const result: LineRun[] = []
-      const visit = (id: LineRunId): void => {
-        const run = state.runs[id]
-        if (run === undefined) return
-        result.push(run)
-        for (const child of Object.values(state.runs)
-          .filter((candidate) => candidate.parent === id)
-          .sort(runIdOrder)) {
-          visit(child.id)
-        }
-      }
-      visit(root)
-      return result
-    }
-
-    const partitionCandidates = (submissions: readonly Submission[], batchSize: number): Submission[][] => {
-      const groups = new Map<string, Submission[]>()
-      for (const submission of submissions) {
-        const proof = submission.integration
-        const key = `${submission.base}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
-        const group = groups.get(key)
-        if (group === undefined) groups.set(key, [submission])
-        else group.push(submission)
-      }
-      const candidates: Submission[][] = []
-      for (const group of groups.values()) {
-        for (let index = 0; index < group.length; index += batchSize) {
-          candidates.push(group.slice(index, index + batchSize))
-        }
-      }
-      return candidates
-    }
-
-    let runtime: InternalLineRuntime
-
-    const driveRun = async (id: LineRunId, options: LineRunOptions): Promise<LineRun> => {
-      while (true) {
-        const state = await app.state()
-        const run = requiredRun(state.lines, id)
-        if (terminal(run)) return run
-        const step = run.steps[run.cursor]
-        if (step === undefined) {
-          await app.command(advance, { run: id })
-          continue
-        }
-        if (step.effectId === undefined) throw new Error(`yrd: line run '${id}' has no effect for '${step.name}'`)
-        const effectRun = state.effects.runs[step.effectId]
-        if (effectRun === undefined) throw new Error(`yrd: line run '${id}' lost effect '${step.effectId}'`)
-        if (effectRun.status === "requested") {
-          await app.effectRuns.run(step.effectId, options)
-          continue
-        }
-        if (effectRun.status === "running" || effectRun.status === "waiting") {
-          return requiredRun((await app.state()).lines, id)
-        }
-        if (run.status === "waiting") {
-          const resumed = await app.command(resume, { run: id })
-          if (resumed.events.length === 0) return requiredRun((await app.state()).lines, id)
-        }
-        await app.command(advance, { run: id })
-      }
-    }
-
-    const settleRun = async (id: LineRunId, options: LineRunOptions): Promise<LineRun> => {
-      const settled = await driveRun(id, options)
-      if (settled.status !== "failed" || "integration" in settled.shape || settled.submissions.length < 2) {
-        return settled
-      }
-      for (const part of [0, 1] as const) {
-        let child = childRun((await app.state()).lines, settled.id, part)
-        if (child === undefined) {
-          const isolated = await app.command(isolate, { run: settled.id, part })
-          const childId = startedRun(isolated.events)
-          child =
-            childId === undefined ? childRun((await app.state()).lines, settled.id, part) : await runtime.get(childId)
-        }
-        if (child === undefined) throw new Error(`yrd: line run '${settled.id}' did not create isolation part ${part}`)
-        await settleRun(child.id, options)
-      }
-      return requiredRun((await app.state()).lines, id)
-    }
-
-    const integrateRuntime = (async (args: IntegrateArgs, options: LineRunOptions): Promise<LineRun | LineRun[]> => {
-      if (typeof args.submission === "string") {
-        const started = await app.command(integrate, args)
-        const id = startedRun(started.events)
-        if (id === undefined) throw new Error("yrd: line integrate did not start a run")
-        return await runtime.run(id, options)
-      }
-
-      const state = await app.state()
-      const submissions = requestedSubmissions(state.bays, args)
-      if (submissions.length === 0) return []
-      const roots: LineRunId[] = []
-      for (const candidate of partitionCandidates(submissions, state.lines.batchSize)) {
-        const started = await app.command(integrate, {
-          submissions: candidate.map((submission) => submission.id),
-          ...(args.steps === undefined ? {} : { steps: args.steps }),
-          ...(args.retry === true ? { retry: true } : {}),
-        })
-        const id = startedRun(started.events)
-        if (id === undefined) throw new Error("yrd: line integrate did not start a run")
-        roots.push(id)
-        await runtime.run(id, options)
-      }
-      const lines = (await app.state()).lines
-      return roots.flatMap((root) => runTree(lines, root))
-    }) as IntegrateLine
-
-    runtime = {
-      output: undefined as unknown as SubmissionShape,
-      install(step) {
-        if (!/^[a-z][a-z0-9_-]*$/iu.test(step.descriptor.name)) {
-          throw new Error(`yrd: invalid line step name '${step.descriptor.name}'`)
-        }
-        if (runtimeSteps.some((installed) => installed.descriptor.name === step.descriptor.name)) {
-          throw new Error(`yrd: line step '${step.descriptor.name}' is already installed`)
-        }
-        const descriptor = { ...step.descriptor, index: runtimeSteps.length }
-        const installed = { ...step, descriptor }
-        runtimeSteps.push(installed)
-        app.effectRuns.register(["line", "step", descriptor.name], installed.effect)
-        ;(app.initialState.lines as LinesState).installed[descriptor.name] = descriptor
-      },
-      configureBatch(config) {
-        ;(app.initialState.lines as LinesState).batchSize = normalizeBatchConfig(config)
-      },
-      configureDefaultSteps(names) {
-        const selected = selectedSteps(runtimeSteps, names)
-        validateSequence(selected, false)
-        ;(app.initialState.lines as LinesState).defaultSteps = selected.map((step) => step.descriptor.name)
-      },
-      steps() {
-        return runtimeSteps.map((step) => step.descriptor)
-      },
-      integrate: integrateRuntime,
-      async run(id, options) {
-        return await settleRun(id, options)
-      },
-      async recover(options) {
-        await app.effectRuns.recover({
-          now: options.recoveryTime,
-          ...(options.reason === undefined ? {} : { reason: options.reason }),
-        })
-        const state = await app.state()
-        const recovered: LineRun[] = []
-        for (const run of Object.values((state.lines as LinesState).runs).sort(runIdOrder)) {
-          if (
-            terminal(run) &&
-            !(run.status === "failed" && !("integration" in run.shape) && run.submissions.length > 1)
-          ) {
-            continue
-          }
-          recovered.push(await runtime.run(run.id, options))
-        }
-        return recovered
-      },
-      async get(id) {
-        return (await app.state()).lines.runs[id]
-      },
-      async status(base) {
-        return lineSummary((await app.state()).lines, base)
-      },
-    }
-    Object.assign(app, { line: runtime })
-    return app as unknown as LinesApp<App, SubmissionShape>
-  }
-}
-
-export function withBatch(config: BatchConfig) {
-  return <App extends AnyYrdApp & HasLine<any>>(app: App): App => {
-    ;(app.line as InternalLineRuntime).configureBatch(config)
-    return app
-  }
-}
-
-/** Select the installed steps used when line.integrate omits --steps. Apply
- * this after withStep()/withMerge() so unknown names fail during composition. */
-export function withDefaultSteps(names: readonly string[]) {
-  return <App extends AnyYrdApp & HasLine<any>>(app: App): App => {
-    try {
-      ;(app.line as InternalLineRuntime).configureDefaultSteps(names)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (message.includes("unknown step")) {
-        const name = /'([^']+)'/u.exec(message)?.[1] ?? "unknown"
-        throw new Error(`yrd: unknown default line step '${name}'`)
-      }
-      throw error
-    }
-    return app
-  }
-}
-
-export function withStep<const Name extends string, Shape extends SubmissionShape, Output>(
-  name: Name,
-  runner: StepRunner<Shape, Output>,
-  options: StepOptions = {},
-) {
-  return <App extends AnyYrdApp & HasBays & HasLine<Shape>>(
-    app: App,
-  ): ReplaceLine<App, AddStepResult<Shape, Name, Output>> => {
-    const step = fx(guardPinnedSubmissions(app, runner), { title: options.title ?? name })
-    const runtime = app.line as InternalLineRuntime
-    runtime.install({
-      descriptor: {
-        name,
-        title: options.title ?? name,
-        index: runtime.steps().length,
-        kind: "step",
-        needsIntegration: options.needsIntegration ?? false,
-      },
-      effect: step,
-      apply(shape, output) {
-        return { ...shape, results: { ...shape.results, [name]: output } }
-      },
-    })
-    return app as unknown as ReplaceLine<App, AddStepResult<Shape, Name, Output>>
-  }
-}
-
-export function withMerge<Shape extends SubmissionShape>(runner: StepRunner<Shape, IntegrationProof>) {
-  return <App extends AnyYrdApp & HasBays & HasLine<Shape>>(app: App): ReplaceLine<App, Shape & IntegratedShape> => {
-    const merge = fx(guardPinnedSubmissions(app, runner), { title: "merge" })
-    const runtime = app.line as InternalLineRuntime
-    runtime.install({
-      descriptor: {
-        name: "merge",
-        title: "merge",
-        index: runtime.steps().length,
-        kind: "merge",
-        needsIntegration: false,
-      },
-      effect: merge,
-      apply(shape, output) {
-        return { ...shape, integration: integrationProof(output) }
-      },
-    })
-    return app as unknown as ReplaceLine<App, Shape & IntegratedShape>
-  }
+async function stateOf(app: AnyYrdApp): Promise<RuntimeState> {
+  return (await app.state()) as RuntimeState
 }

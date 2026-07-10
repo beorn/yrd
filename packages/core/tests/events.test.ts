@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -27,35 +27,33 @@ async function storeDir(): Promise<string> {
   return root
 }
 
+type SequenceState = { issued: number[] }
 type SequenceCommands = {
-  sequence: {
-    allocate: Command<undefined, { sequence: { issued: number[] } }>
-  }
+  sequence: { allocate: Command<undefined, { sequence: SequenceState }> }
 }
 
-function withSequence<A extends AnyYrdApp>(
-  app: A,
-): ExtendYrdApp<A, { sequence: { issued: number[] } }, SequenceCommands> {
+function withSequence<App extends AnyYrdApp>(
+  app: App,
+): ExtendYrdApp<App, { sequence: SequenceState }, SequenceCommands> {
   Object.assign(app.initialState, { sequence: { issued: [] } })
-  const allocate = op(
-    (state: DeepReadonly<{ sequence: { issued: number[] } }>, _args: undefined) => ({
-      events: [event("sequence/allocated", { number: state.sequence.issued.length + 1 })],
-      effects: [],
-    }),
-    { title: "Allocate" },
-  )
+  const allocate = op((state: DeepReadonly<{ sequence: SequenceState }>, _args: undefined) => ({
+    events: [event("sequence/allocated", { number: state.sequence.issued.length + 1 })],
+    effects: [],
+  }))
   Object.assign(app.commands, { sequence: { allocate } })
+
   const project = app.project
   app.project = (state, applied) => {
-    if (applied.name !== "sequence/allocated") return project(state, applied)
-    const current = (state as { sequence: { issued: number[] } }).sequence.issued
-    return { ...state, sequence: { issued: [...current, (applied.data as { number: number }).number] } }
+    const projected = project(state, applied)
+    if (applied.name !== "sequence/allocated") return projected
+    const sequence = (projected as { sequence: SequenceState }).sequence
+    return { ...projected, sequence: { issued: [...sequence.issued, (applied.data as { number: number }).number] } }
   }
-  return app as ExtendYrdApp<A, { sequence: { issued: number[] } }, SequenceCommands>
+  return app as ExtendYrdApp<App, { sequence: SequenceState }, SequenceCommands>
 }
 
 describe("Era2 filesystem event store", () => {
-  it("refuses append outside the scoped writer capability", async () => {
+  it("scopes append authority and serializes concurrent writers", async () => {
     const store = await createYrdEventStore({ dir: await storeDir() })
     const applied: YrdEvent = {
       id: "e1",
@@ -64,14 +62,6 @@ describe("Era2 filesystem event store", () => {
       cause: { commandId: "c1", op: "test.write" },
       data: {},
     }
-
-    await expect(store.append([applied])).rejects.toThrow("append requires an active writer lease")
-    await store.withWriter(() => store.append([applied]))
-    await expect(Array.fromAsync(store.replay())).resolves.toEqual([applied])
-  })
-
-  it("queues concurrent callers without leaking writer authority across async contexts", async () => {
-    const store = await createYrdEventStore({ dir: await storeDir() })
     let releaseFirst!: () => void
     let markStarted!: () => void
     const started = new Promise<void>((resolve) => {
@@ -82,8 +72,10 @@ describe("Era2 filesystem event store", () => {
     })
     const order: string[] = []
 
+    await expect(store.append([applied])).rejects.toThrow("append requires an active writer lease")
     const first = store.withWriter(async () => {
       order.push("first:start")
+      await store.append([applied])
       markStarted()
       await release
       order.push("first:end")
@@ -100,6 +92,8 @@ describe("Era2 filesystem event store", () => {
     releaseFirst()
     await Promise.all([first, second, nested])
     expect(order).toEqual(["first:start", "first:end", "second"])
+    await expect(Array.fromAsync(store.replay())).resolves.toEqual([applied])
+    await store.close()
   })
 
   it("serializes fold -> apply -> append across independent app instances", async () => {
@@ -115,39 +109,10 @@ describe("Era2 filesystem event store", () => {
     )
 
     expect((await appA.state()).sequence.issued).toEqual(Array.from({ length: 20 }, (_, index) => index + 1))
+    await Promise.all([appA.close(), appB.close()])
   })
 
-  it("maintains a rebuildable SQLite index over the authoritative event log", async () => {
-    const dir = await storeDir()
-    const store = await createYrdEventStore({ dir })
-    const app = pipe(
-      createYrd({
-        store,
-        idGen: (() => {
-          let id = 0
-          return () => `id-${++id}`
-        })(),
-      }),
-      withSequence,
-    )
-    await app.command(app.commands.sequence.allocate, undefined)
-    await app.command(app.commands.sequence.allocate, undefined)
-
-    expect(store.index.query({ name: "sequence/allocated" })).toMatchObject([
-      { seq: 1, name: "sequence/allocated", data: { number: 1 } },
-      { seq: 2, name: "sequence/allocated", data: { number: 2 } },
-    ])
-    await store.close()
-    await rm(join(dir, "index.sqlite"), { force: true })
-    await rm(join(dir, "index.sqlite-wal"), { force: true })
-    await rm(join(dir, "index.sqlite-shm"), { force: true })
-
-    const rebuilt = await createYrdEventStore({ dir })
-    expect(rebuilt.index.query({ op: "sequence.allocate" }).map((entry) => entry.id)).toEqual(["id-2", "id-4"])
-    await rebuilt.close()
-  })
-
-  it("refuses duplicate durable event identities while rebuilding the index", async () => {
+  it("refuses duplicate identities and malformed event envelopes on replay", async () => {
     const dir = await storeDir()
     const event = {
       id: "duplicate",
@@ -157,16 +122,15 @@ describe("Era2 filesystem event store", () => {
       data: {},
     }
     await writeFile(join(dir, "events.jsonl"), `${JSON.stringify(event)}\n${JSON.stringify(event)}\n`)
-    await expect(createYrdEventStore({ dir })).rejects.toThrow("duplicate event id 'duplicate'")
-  })
+    const duplicates = await createYrdEventStore({ dir })
+    await expect(Array.fromAsync(duplicates.replay())).rejects.toThrow("duplicate event id 'duplicate'")
+    await duplicates.close()
 
-  it("validates the event authority before opening or mutating an existing index", async () => {
-    const dir = await storeDir()
+    const malformedDir = await storeDir()
     const legacy = { id: "old", name: "bay/opened", ts: "2026-01-01T00:00:00.000Z", data: {} }
-    await writeFile(join(dir, "events.jsonl"), `${JSON.stringify(legacy)}\n`)
-    await writeFile(join(dir, "index.sqlite"), "legacy index must remain byte-identical")
-
-    await expect(createYrdEventStore({ dir })).rejects.toThrow("invalid event envelope")
-    expect(await readFile(join(dir, "index.sqlite"), "utf8")).toBe("legacy index must remain byte-identical")
+    await writeFile(join(malformedDir, "events.jsonl"), `${JSON.stringify(legacy)}\n`)
+    const malformed = await createYrdEventStore({ dir: malformedDir })
+    await expect(Array.fromAsync(malformed.replay())).rejects.toThrow("invalid event envelope")
+    await malformed.close()
   })
 })

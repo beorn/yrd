@@ -14,13 +14,14 @@ import {
   withMerge,
   withStep,
   type AddStepResult,
-  type CommandEvidence,
   type GitCheckEvidence,
   type StepExecution,
   type SubmissionShape,
 } from "@yrd/line"
 
 const roots: string[] = []
+const runtime = { executor: "local", leaseMs: 60_000 }
+type Checked = AddStepResult<SubmissionShape, "check", GitCheckEvidence>
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -37,7 +38,9 @@ async function git(repo: string, args: string[]): Promise<string> {
   return stdout.trim()
 }
 
-async function repository(): Promise<{ repo: string; featureSha: string }> {
+async function repository<const Names extends readonly string[]>(
+  ...names: Names
+): Promise<{ repo: string } & Record<Names[number], string>> {
   const root = await mkdtemp(join(tmpdir(), "yrd-line-git-"))
   roots.push(root)
   const repo = join(root, "repo")
@@ -47,38 +50,16 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   await writeFile(join(repo, "README.md"), "main\n")
   await git(repo, ["add", "README.md"])
   await git(repo, ["commit", "-qm", "main"])
-  await git(repo, ["switch", "-qc", "task/feature"])
-  await writeFile(join(repo, "feature.txt"), "feature\n")
-  await git(repo, ["add", "feature.txt"])
-  await git(repo, ["commit", "-qm", "feature"])
-  const featureSha = await git(repo, ["rev-parse", "HEAD"])
-  await git(repo, ["switch", "-q", "main"])
-  return { repo, featureSha }
-}
-
-async function batchRepository(): Promise<{ repo: string; firstSha: string; secondSha: string }> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-line-batch-git-"))
-  roots.push(root)
-  const repo = join(root, "repo")
-  await Bun.$`git init -q -b main ${repo}`
-  await git(repo, ["config", "user.name", "Yrd Test"])
-  await git(repo, ["config", "user.email", "yrd@example.invalid"])
-  await writeFile(join(repo, "README.md"), "main\n")
-  await git(repo, ["add", "README.md"])
-  await git(repo, ["commit", "-qm", "main"])
-  await git(repo, ["switch", "-qc", "task/one"])
-  await writeFile(join(repo, "one.txt"), "one\n")
-  await git(repo, ["add", "one.txt"])
-  await git(repo, ["commit", "-qm", "one"])
-  const firstSha = await git(repo, ["rev-parse", "HEAD"])
-  await git(repo, ["switch", "-q", "main"])
-  await git(repo, ["switch", "-qc", "task/two"])
-  await writeFile(join(repo, "two.txt"), "two\n")
-  await git(repo, ["add", "two.txt"])
-  await git(repo, ["commit", "-qm", "two"])
-  const secondSha = await git(repo, ["rev-parse", "HEAD"])
-  await git(repo, ["switch", "-q", "main"])
-  return { repo, firstSha, secondSha }
+  const shas: Record<string, string> = {}
+  for (const name of names) {
+    await git(repo, ["switch", "-qc", `task/${name}`])
+    await writeFile(join(repo, `${name}.txt`), `${name}\n`)
+    await git(repo, ["add", `${name}.txt`])
+    await git(repo, ["commit", "-qm", name])
+    shas[name] = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+  }
+  return { repo, ...shas } as { repo: string } & Record<Names[number], string>
 }
 
 const unusedWorkspace: BayWorkspaceAdapter = {
@@ -87,30 +68,38 @@ const unusedWorkspace: BayWorkspaceAdapter = {
   deprovision: () => ({ status: "passed", output: {} }),
 }
 
+function checkedLine(repo: string, command: string, options: { batch?: number; waiting?: boolean } = {}) {
+  return pipe(
+    createYrd({ store: createMemoryEventStore() }),
+    withEffects(),
+    withBays({ workspace: unusedWorkspace }),
+    withLine(),
+    withBatch(options.batch ?? 1),
+    withStep("check", gitCheckStep({ repo, command, ...(options.waiting ? { runner: "waiting" as const } : {}) })),
+    withMerge(gitMergeStep<Checked>({ repo })),
+  )
+}
+
+async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<void> {
+  expect(await git(repo, ["rev-parse", "main"])).toBe(evidence.candidateSha)
+  expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
+}
+
 describe("line command adapters", () => {
-  it("checks the pinned submission tree, captures durable artifacts, and lands into a clean checked-out base", async () => {
-    const { repo, featureSha } = await repository()
-    type Checked = AddStepResult<SubmissionShape, "check", CommandEvidence>
-    const app = pipe(
-      createYrd({ store: createMemoryEventStore() }),
-      withEffects(),
-      withBays({ workspace: unusedWorkspace }),
-      withLine(),
-      withStep("check", gitCheckStep({ repo, command: "test -f feature.txt && echo checked" })),
-      withMerge(gitMergeStep<Checked>({ repo })),
-    )
+  it("lands the exact audited candidate and its durable artifacts", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const app = checkedLine(repo, 'git config user.name "Changed After Check" && test -f feature.txt && echo checked')
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = await app.line.integrate({ submission: "PR1" }, { executor: "local", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, runtime)
     expect(run.status).toBe("passed")
     expect(await readFile(join(repo, "feature.txt"), "utf8")).toBe("feature\n")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
-    expect(await git(repo, ["merge-base", "--is-ancestor", featureSha, "main"])).toBe("")
 
-    const evidence = run.steps[0]?.output as CommandEvidence
+    const evidence = run.steps[0]?.output as GitCheckEvidence
+    await expectLanded(repo, evidence)
     expect(evidence.exitCode).toBe(0)
     expect(evidence.artifacts).toHaveLength(1)
-    expect(existsSync(evidence.artifacts[0]!.path)).toBe(true)
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("checked\n")
   })
 
@@ -123,88 +112,83 @@ describe("line command adapters", () => {
       }),
     ).toThrow("placeholder {target} is retired; use $YRD_TARGET")
 
-    const runner = configuredCommandStep<SubmissionShape>({
-      command: 'test "$YRD_SUBMISSION" = "PR1"',
-      cwd: ".",
-      purpose: "check",
-    })
-    expect(typeof runner).toBe("function")
+    expect(
+      configuredCommandStep<SubmissionShape>({
+        command: 'test "$YRD_SUBMISSION" = "PR1"',
+        cwd: ".",
+        purpose: "check",
+      }),
+    ).toBeTypeOf("function")
+    expect(() => gitMergeStep({ repo: ".", command: "git merge task/feature" })).toThrow("withMerge")
   })
 
   it("checks and lands one combined Git candidate for a passing batch", async () => {
-    const { repo, firstSha, secondSha } = await batchRepository()
-    type Checked = AddStepResult<SubmissionShape, "check", CommandEvidence>
-    const app = pipe(
-      createYrd({ store: createMemoryEventStore() }),
-      withEffects(),
-      withBays({ workspace: unusedWorkspace }),
-      withLine(),
-      withBatch(2),
-      withStep("check", gitCheckStep({ repo, command: "test -f one.txt && test -f two.txt && echo checked-batch" })),
-      withMerge(gitMergeStep<Checked>({ repo })),
+    const { repo, one: firstSha, two: secondSha } = await repository("one", "two")
+    const app = checkedLine(
+      repo,
+      'git config user.name "Changed After Batch Check" && test -f one.txt && test -f two.txt && echo checked-batch',
+      { batch: 2 },
     )
     await app.command(app.commands.bay.submit, { branch: "task/one", headSha: firstSha, base: "main" })
     await app.command(app.commands.bay.submit, { branch: "task/two", headSha: secondSha, base: "main" })
+    await git(repo, ["switch", "-q", "--detach", "main"])
 
-    const runs = await app.line.integrate({ submissions: ["PR1", "PR2"] }, { executor: "local", leaseMs: 60_000 })
+    const runs = await app.line.integrate({ submissions: ["PR1", "PR2"] }, runtime)
+    await git(repo, ["switch", "-q", "main"])
 
     expect(runs).toHaveLength(1)
     expect(runs[0]).toMatchObject({ status: "passed", submissions: [{ headSha: firstSha }, { headSha: secondSha }] })
+    const evidence = runs[0]!.steps[0]!.output as GitCheckEvidence
+    await expectLanded(repo, evidence)
     expect(await readFile(join(repo, "one.txt"), "utf8")).toBe("one\n")
     expect(await readFile(join(repo, "two.txt"), "utf8")).toBe("two\n")
-    expect(await git(repo, ["merge-base", "--is-ancestor", firstSha, "main"])).toBe("")
-    expect(await git(repo, ["merge-base", "--is-ancestor", secondSha, "main"])).toBe("")
   })
 
-  it("parks a remote check with an immutable checkpoint and pinned candidate ref", async () => {
-    const { repo, featureSha } = await repository()
-    const app = pipe(
-      createYrd({ store: createMemoryEventStore() }),
-      withEffects(),
-      withBays({ workspace: unusedWorkspace }),
-      withLine(),
-      withStep(
-        "check",
-        gitCheckStep({
-          repo,
-          runner: "waiting",
-          command:
-            `printf '%s\\n' '{"token":"ci-1","url":"https://ci.invalid/1",` +
-            `"detail":"queued","artifacts":[{"name":"remote","uri":"artifact://ci-1"}]}'`,
-        }),
-      ),
+  it("preserves waiting evidence and lands its pinned candidate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const app = checkedLine(
+      repo,
+      `printf '%s\\n' '{"token":"ci-1","url":"https://ci.invalid/1","detail":"queued",` +
+        `"artifacts":[{"name":"remote","uri":"artifact://ci-1"}]}'`,
+      { waiting: true },
     )
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = await app.line.integrate({ submission: "PR1" }, { executor: "local", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, runtime)
 
-    expect(run).toMatchObject({
+    expect(run.steps[0]).toMatchObject({
       status: "waiting",
-      steps: [
-        {
-          status: "waiting",
-          token: "ci-1",
-          url: "https://ci.invalid/1",
-          detail: "queued",
-          checkpoint: {
-            baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
-            candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
-            candidateRef: "refs/yrd/candidates/R1/check/attempt-1",
-          },
-        },
-      ],
+      token: "ci-1",
+      url: "https://ci.invalid/1",
+      detail: "queued",
+      checkpoint: {
+        candidateRef: "refs/yrd/candidates/R1/check/attempt-1",
+      },
     })
-    const checkpoint = run.steps[0]!.checkpoint as GitCheckEvidence
-    expect(await git(repo, ["rev-parse", checkpoint.candidateRef!])).toBe(checkpoint.candidateSha)
+    const step = run.steps[0]!
+    const checkpoint = step.checkpoint as GitCheckEvidence
+    expect(await git(repo, ["rev-parse", checkpoint.candidateRef])).toBe(checkpoint.candidateSha)
     expect(checkpoint.artifacts.some((artifact) => artifact.name === "stdout")).toBe(true)
-    expect(run.steps[0]!.artifacts).toEqual(
+    expect(step.artifacts).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: "remote", uri: "artifact://ci-1" })]),
     )
+    await git(repo, ["config", "user.name", "Changed After Waiting Check"])
+    await app.command(app.commands.effect.transition, {
+      type: "finish",
+      id: step.effectId!,
+      attempt: step.attempt!,
+      token: step.token!,
+      outcome: { status: "passed", output: { ...checkpoint, artifacts: step.artifacts } },
+    })
+
+    const finished = await app.line.run(run.id, runtime)
+    expect(finished.status).toBe("passed")
+    await expectLanded(repo, checkpoint)
+    expect((finished.steps[0]!.output as GitCheckEvidence).artifacts).toEqual(step.artifacts)
   })
 
   it("refuses merge when the base moves after the checked candidate", async () => {
-    const { repo, featureSha } = await repository()
-    type Checked = AddStepResult<SubmissionShape, "check", GitCheckEvidence>
+    const { repo, feature: featureSha } = await repository("feature")
     type Moved = AddStepResult<Checked, "move-base", { moved: true }>
     const app = pipe(
       createYrd({ store: createMemoryEventStore() }),
@@ -222,7 +206,7 @@ describe("line command adapters", () => {
     )
     await app.command(app.commands.bay.submit, { branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = await app.line.integrate({ submission: "PR1" }, { executor: "local", leaseMs: 60_000 })
+    const run = await app.line.integrate({ submission: "PR1" }, runtime)
 
     expect(run).toMatchObject({ status: "failed", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)

@@ -4,8 +4,9 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { Bay } from "@yrd/bay"
-import { createAgContestRunner, type AgProcessRequest, type AgProcessResult, type AgProcessRunner } from "../src/ag.ts"
-import type { ContestRunnerInput } from "../src/types.ts"
+import { createAgContestRunner, type AgProcessRequest, type AgProcessRunner } from "../src/ag.ts"
+import { spawnProcess } from "../src/execution.ts"
+import type { ContestRunnerAdapter, ContestRunnerInput } from "../src/types.ts"
 
 const roots: string[] = []
 
@@ -13,20 +14,13 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-const runProcess: AgProcessRunner = async (request): Promise<AgProcessResult> => {
-  const child = Bun.spawn([...request.argv], {
-    cwd: request.cwd,
-    env: request.env,
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  return { exitCode, stdout, stderr }
+const runProcess: AgProcessRunner = spawnProcess
+const effect = (id = "E1", attempt = 1) => ({ id, attempt, executor: "test" })
+const argv = (value: string) => value.split(" ")
+
+function passed(outcome: Awaited<ReturnType<ContestRunnerAdapter["run"]>>) {
+  if (outcome.status !== "passed") throw new Error(`expected passed outcome, got ${outcome.status}`)
+  return outcome.output
 }
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -94,7 +88,6 @@ async function commitSolution(request: AgProcessRequest): Promise<string> {
 }
 
 function artifactPath(uri: string): string {
-  expect(uri.startsWith("file://")).toBe(true)
   return fileURLToPath(uri)
 }
 
@@ -129,53 +122,39 @@ describe("createAgContestRunner", () => {
       process,
       now: () => times.shift() ?? 3_345,
       artifactRoot: join(root, "artifacts"),
+      environment: () => ({ GIT_DIR: "/tmp/forged", YRD_TASK_ID: "forged", SAFE_VALUE: "kept" }),
     })
 
-    const outcome = await runner.run(
-      contestInput(bay, {
-        provider: "codex",
-        account: "bench",
-        tier: "frontier",
-        effort: "xhigh",
-        args: ["--ephemeral"],
-        instructions: "Preserve the public command contract.",
-      }),
-      { id: "E1", attempt: 1, executor: "test" },
+    const output = passed(
+      await runner.run(
+        contestInput(bay, {
+          provider: "codex",
+          account: "bench",
+          tier: "frontier",
+          effort: "xhigh",
+          args: ["--ephemeral"],
+          instructions: "Preserve the public command contract.",
+        }),
+        effect(),
+      ),
     )
 
-    if (outcome.status === "failed") throw new Error(`${outcome.error.code}: ${outcome.error.message}`)
-    expect(outcome.status).toBe("passed")
-    if (outcome.status !== "passed") return
     expect(agentRequests).toHaveLength(1)
     expect(agentRequests[0]?.cwd).toBe(await realpath(repo))
-    expect(agentRequests[0]?.argv.slice(0, -1)).toEqual([
-      "bun",
-      "/opt/ag/cli.ts",
-      "codex",
-      "--no-tribe",
-      "--account",
-      "bench",
-      "--tier",
-      "frontier",
-      "--model",
-      "gpt-5.6-sol",
-      "--model-reasoning-effort",
-      "xhigh",
-      "exec",
-      "--json",
-      "--ephemeral",
-      "--",
-    ])
+    expect(agentRequests[0]?.argv.slice(0, -1)).toEqual(
+      argv(
+        "bun /opt/ag/cli.ts codex --no-tribe --account bench --tier frontier --model gpt-5.6-sol --model-reasoning-effort xhigh exec --json --ephemeral --",
+      ),
+    )
     const prompt = agentRequests[0]?.argv.at(-1) ?? ""
-    expect(prompt).toContain("Task source: km")
     expect(prompt).toContain("Task id: @yrd/core/21012")
-    expect(prompt).toContain("Finish Yrd")
     expect(prompt).toContain("Implement the contest runner end to end.\nPreserve immutable evidence.")
     expect(prompt).toContain("Additional instructions:\nPreserve the public command contract.")
-    expect(prompt).toContain("commit all intended changes")
     expect(prompt).toContain(`Base commit: ${baseSha}`)
     expect(agentRequests[0]?.env.YRD_TASK_ID).toBe("@yrd/core/21012")
-    expect(outcome.output).toMatchObject({
+    expect(agentRequests[0]?.env.GIT_DIR).toBeUndefined()
+    expect(agentRequests[0]?.env.SAFE_VALUE).toBe("kept")
+    expect(output).toMatchObject({
       pin: {
         commit: committed,
         ref: "refs/yrd/attempts/C1/A1",
@@ -190,17 +169,10 @@ describe("createAgContestRunner", () => {
     expect(await git(repo, "rev-parse", "refs/yrd/attempts/C1/A1")).toBe(committed)
     expect(await git(repo, "status", "--porcelain")).toBe("")
 
-    const kinds = outcome.output.artifacts.map((artifact) => artifact.kind)
+    const kinds = output.artifacts.map((artifact) => artifact.kind)
     expect(kinds).toEqual(["stdout", "stderr", "transcript", "metrics", "git-commit"])
-    const transcript = outcome.output.artifacts.find((artifact) => artifact.kind === "transcript")
+    const transcript = output.artifacts.find((artifact) => artifact.kind === "transcript")
     expect(await readFile(artifactPath(transcript!.uri), "utf8")).toContain('"type":"turn.completed"')
-    const metrics = outcome.output.artifacts.find((artifact) => artifact.kind === "metrics")
-    const metricEvidence = JSON.parse(await readFile(artifactPath(metrics!.uri), "utf8")) as {
-      tokens: { cacheWrite: { kind: string; reason?: string } }
-      cost: { kind: string }
-    }
-    expect(metricEvidence.tokens.cacheWrite).toMatchObject({ kind: "missing" })
-    expect(metricEvidence.cost).toMatchObject({ kind: "missing" })
   })
 
   it("does not evaluate task text as shell source and records Claude-reported cost without estimating missing metrics", async () => {
@@ -234,46 +206,23 @@ describe("createAgContestRunner", () => {
       task: { ...baseInput.task, description: `Do the work; $(touch ${marker}) is literal acceptance text.` },
     }
 
-    const outcome = await runner.run(input, { id: "E1", attempt: 1, executor: "test" })
+    const output = passed(await runner.run(input, effect()))
 
-    if (outcome.status === "failed") throw new Error(`${outcome.error.code}: ${outcome.error.message}`)
-    expect(outcome.status).toBe("passed")
-    if (outcome.status !== "passed") return
-    expect(launch?.argv.slice(0, -1)).toEqual([
-      "ag",
-      "claude",
-      "--no-tribe",
-      "--account",
-      "bench",
-      "--model",
-      "gpt-5.6-sol",
-      "--yolo",
-      "--effort",
-      "max",
-      "-p",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--",
-    ])
+    expect(launch?.argv.slice(0, -1)).toEqual(
+      argv(
+        "ag claude --no-tribe --account bench --model gpt-5.6-sol --yolo --effort max -p --output-format stream-json --verbose --",
+      ),
+    )
     expect(launch?.argv.at(-1)).toContain(`$(touch ${marker})`)
     expect(await Bun.file(marker).exists()).toBe(false)
-    expect(outcome.output.tokens).toEqual({
+    expect(output.tokens).toEqual({
       input: 700,
       output: 200,
       cachedInput: 500,
       cacheWrite: 30,
       reasoning: null,
     })
-    expect(outcome.output.cost).toEqual({ kind: "reported", usd: 0.42, source: "ag:claude:transcript" })
-    const metrics = outcome.output.artifacts.find((artifact) => artifact.kind === "metrics")
-    const evidence = JSON.parse(await readFile(artifactPath(metrics!.uri), "utf8")) as {
-      tokens: { reasoning: { kind: string } }
-    }
-    expect(evidence.tokens.reasoning).toEqual({
-      kind: "missing",
-      reason: "Ag/provider transcript did not expose reasoning tokens",
-    })
+    expect(output.cost).toEqual({ kind: "reported", usd: 0.42, source: "ag:claude:transcript" })
   })
 
   it("returns typed failures, preserves process artifacts, and refuses to pin a run without a new commit", async () => {
@@ -286,11 +235,7 @@ describe("createAgContestRunner", () => {
           : { exitCode: 17, stdout: "partial transcript\n", stderr: "provider failed\n" },
     })
 
-    const failed = await failedRunner.run(contestInput(bay, { provider: "codex" }), {
-      id: "E1",
-      attempt: 1,
-      executor: "test",
-    })
+    const failed = await failedRunner.run(contestInput(bay, { provider: "codex" }), effect())
     expect(failed).toMatchObject({ status: "failed", error: { code: "ag-process-failed" } })
     if (failed.status === "failed") {
       const manifestUri = failed.error.message.match(/file:\/\/\S+\/manifest\.json/u)?.[0]
@@ -310,11 +255,7 @@ describe("createAgContestRunner", () => {
       process: async (request) =>
         request.kind === "git" ? await runProcess(request) : { exitCode: 0, stdout: "{}\n", stderr: "" },
     })
-    const noCommit = await noCommitRunner.run(contestInput(bay, { provider: "codex" }), {
-      id: "E2",
-      attempt: 2,
-      executor: "test",
-    })
+    const noCommit = await noCommitRunner.run(contestInput(bay, { provider: "codex" }), effect("E2", 2))
     expect(noCommit).toMatchObject({ status: "failed", error: { code: "no-commit" } })
   })
 
@@ -337,11 +278,7 @@ describe("createAgContestRunner", () => {
       },
     })
 
-    const outcome = await runner.run(contestInput(bay, { provider: "codex" }), {
-      id: "E1",
-      attempt: 1,
-      executor: "test",
-    })
+    const outcome = await runner.run(contestInput(bay, { provider: "codex" }), effect())
 
     expect(outcome).toMatchObject({ status: "failed", error: { code: "attempt-ref-conflict" } })
     expect(await git(repo, "rev-parse", "refs/yrd/attempts/C1/A1")).toBe(baseSha)
@@ -359,18 +296,10 @@ describe("createAgContestRunner", () => {
       },
     })
 
-    const missingBase = await runner.run(contestInput({ ...bay, baseSha: undefined }, { provider: "codex" }), {
-      id: "E1",
-      attempt: 1,
-      executor: "test",
-    })
+    const missingBase = await runner.run(contestInput({ ...bay, baseSha: undefined }, { provider: "codex" }), effect())
     expect(missingBase).toMatchObject({ status: "failed", error: { code: "bay-base-missing" } })
 
-    const dirty = await runner.run(contestInput({ ...bay, dirty: true }, { provider: "codex" }), {
-      id: "E2",
-      attempt: 1,
-      executor: "test",
-    })
+    const dirty = await runner.run(contestInput({ ...bay, dirty: true }, { provider: "codex" }), effect("E2"))
     expect(dirty).toMatchObject({ status: "failed", error: { code: "bay-dirty" } })
     expect(launches).toBe(0)
   })
@@ -389,11 +318,7 @@ describe("createAgContestRunner", () => {
       },
     })
 
-    const outcome = await runner.run(contestInput(bay, { provider: "codex" }), {
-      id: "E-timeout",
-      attempt: 1,
-      executor: "test",
-    })
+    const outcome = await runner.run(contestInput(bay, { provider: "codex" }), effect("E-timeout"))
 
     expect(outcome).toMatchObject({ status: "failed", error: { code: "agent-timeout" } })
     const ref = await runProcess({

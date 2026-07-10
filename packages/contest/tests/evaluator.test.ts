@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   createHeldOutCommandEvaluator,
+  type HeldOutCommandEvaluatorOptions,
   type EvaluatorProcessRequest,
   type EvaluatorProcessResult,
 } from "../src/evaluator.ts"
@@ -53,6 +54,7 @@ const context: EffectAdapterContext = { id: "effect-C1-A1-tests", attempt: 2, ex
 
 type FakeOptions = Readonly<{
   command?: EvaluatorProcessResult
+  cleanup?: EvaluatorProcessResult
   refSha?: string
   checkoutSha?: string
 }>
@@ -71,6 +73,9 @@ function fakeProcess(options: FakeOptions = {}): {
       }
 
       const args = request.argv.slice(1)
+      if (args[0] === "worktree" && args[1] === "remove" && options.cleanup !== undefined) {
+        return options.cleanup
+      }
       if (args[0] === "rev-parse" && args.includes("refs/yrd/attempts/C1/A1^{commit}")) {
         return { exitCode: 0, stdout: `${options.refSha ?? PINNED_SHA}\n`, stderr: "" }
       }
@@ -81,6 +86,25 @@ function fakeProcess(options: FakeOptions = {}): {
       return { exitCode: 0, stdout: "", stderr: "" }
     },
   }
+}
+
+async function fixture(fakeOptions: FakeOptions = {}, options: Partial<HeldOutCommandEvaluatorOptions> = {}) {
+  const bayPath = await temporaryRoot("yrd-evaluator-bay-")
+  const artifactRoot = await temporaryRoot("yrd-evaluator-artifacts-")
+  const resolvedBays: string[] = []
+  const fake = fakeProcess(fakeOptions)
+  const evaluator = createHeldOutCommandEvaluator({
+    id: "held-out-tests",
+    command: ["tests"],
+    resolveBayPath: (bay) => {
+      resolvedBays.push(bay)
+      return bayPath
+    },
+    artifactRoot,
+    process: fake.process,
+    ...options,
+  })
+  return { artifactRoot, bayPath, evaluator, fake, resolvedBays }
 }
 
 async function artifactText(
@@ -95,25 +119,19 @@ async function artifactText(
 
 describe("held-out command evaluator", () => {
   it("verifies the write-once ref, evaluates a detached checkout at the pinned SHA, and records evidence", async () => {
-    const bayPath = await temporaryRoot("yrd-evaluator-bay-")
-    const artifactRoot = await temporaryRoot("yrd-evaluator-artifacts-")
-    const fake = fakeProcess()
     const times = [1_000, 1_125]
-    const evaluator = createHeldOutCommandEvaluator({
-      id: "held-out-tests",
-      command: ["bun", "run", "test:focused", "--", "literal; $(touch /tmp/nope)"],
-      resolveBayPath: async (bay) => {
-        expect(bay).toBe("contest-C1-A1")
-        return bayPath
+    const { bayPath, evaluator, fake, resolvedBays } = await fixture(
+      {},
+      {
+        command: ["bun", "run", "test:focused", "--", "literal; $(touch /tmp/nope)"],
+        now: () => times.shift() ?? 1_125,
       },
-      artifactRoot,
-      process: fake.process,
-      now: () => times.shift() ?? 1_125,
-    })
+    )
 
     const result = await evaluator.evaluate(input(), context)
 
     expect(result).toMatchObject({ status: "passed", output: { verdict: "passed" } })
+    expect(resolvedBays).toEqual(["contest-C1-A1"])
     const refCheck = fake.requests.find(
       (request) => request.kind === "git" && request.argv.includes("refs/yrd/attempts/C1/A1^{commit}"),
     )
@@ -151,18 +169,14 @@ describe("held-out command evaluator", () => {
   })
 
   it("returns a failed verdict, not an infrastructure error, with nonzero-exit evidence", async () => {
-    const bayPath = await temporaryRoot("yrd-evaluator-bay-")
-    const artifactRoot = await temporaryRoot("yrd-evaluator-artifacts-")
-    const fake = fakeProcess({ command: { exitCode: 17, stdout: "3 passed, 1 failed\n", stderr: "assertion failed\n" } })
     const times = [500, 950]
-    const evaluator = createHeldOutCommandEvaluator({
-      id: "held-out-tests",
-      command: ["test-runner", "--json=false"],
-      resolveBayPath: () => bayPath,
-      artifactRoot,
-      process: fake.process,
-      now: () => times.shift() ?? 950,
-    })
+    const { evaluator } = await fixture(
+      { command: { exitCode: 17, stdout: "3 passed, 1 failed\n", stderr: "assertion failed\n" } },
+      {
+        command: ["test-runner", "--json=false"],
+        now: () => times.shift() ?? 950,
+      },
+    )
 
     const result = await evaluator.evaluate(input(), context)
 
@@ -181,20 +195,28 @@ describe("held-out command evaluator", () => {
     })
   })
 
+  it("writes produced stdout and stderr before reporting cleanup failure", async () => {
+    const { artifactRoot, evaluator } = await fixture({
+      command: { exitCode: 0, stdout: "durable stdout\n", stderr: "durable stderr\n" },
+      cleanup: { exitCode: 1, stdout: "", stderr: "cleanup denied" },
+    })
+
+    const result = await evaluator.evaluate(input(), context)
+
+    expect(result).toMatchObject({ status: "failed", error: { code: "pin-checkout-cleanup-failed" } })
+    const stdout = await Array.fromAsync(new Bun.Glob("**/stdout.log").scan({ cwd: artifactRoot, absolute: true }))
+    const stderr = await Array.fromAsync(new Bun.Glob("**/stderr.log").scan({ cwd: artifactRoot, absolute: true }))
+    expect(stdout).toHaveLength(1)
+    expect(stderr).toHaveLength(1)
+    expect(await readFile(stdout[0]!, "utf8")).toBe("durable stdout\n")
+    expect(await readFile(stderr[0]!, "utf8")).toBe("durable stderr\n")
+  })
+
   it.each([
     ["moved attempt ref", { refSha: MOVED_SHA }, "pin-ref-mismatch"],
     ["wrong detached checkout", { checkoutSha: MOVED_SHA }, "pin-checkout-mismatch"],
   ])("fails closed before evaluation for a %s", async (_case, fakeOptions, code) => {
-    const bayPath = await temporaryRoot("yrd-evaluator-bay-")
-    const artifactRoot = await temporaryRoot("yrd-evaluator-artifacts-")
-    const fake = fakeProcess(fakeOptions)
-    const evaluator = createHeldOutCommandEvaluator({
-      id: "held-out-tests",
-      command: ["tests"],
-      resolveBayPath: () => bayPath,
-      artifactRoot,
-      process: fake.process,
-    })
+    const { evaluator, fake } = await fixture(fakeOptions)
 
     const result = await evaluator.evaluate(input(), context)
 
@@ -203,15 +225,14 @@ describe("held-out command evaluator", () => {
   })
 
   it("turns an invalid environment provider into a typed effect failure", async () => {
-    const bayPath = await temporaryRoot("yrd-evaluator-bay-")
-    const evaluator = createHeldOutCommandEvaluator({
-      id: "held-out-tests",
-      command: ["tests"],
-      resolveBayPath: () => bayPath,
-      environment() {
-        throw new Error("secret provider unavailable")
+    const { evaluator } = await fixture(
+      {},
+      {
+        environment() {
+          throw new Error("secret provider unavailable")
+        },
       },
-    })
+    )
 
     expect(await evaluator.evaluate(input(), context)).toMatchObject({
       status: "failed",

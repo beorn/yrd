@@ -4,12 +4,11 @@ import { mkdir, open } from "node:fs/promises"
 import { createInterface } from "node:readline"
 import { join } from "node:path"
 import type { YrdEvent, YrdEventStore } from "../app.ts"
-import { createYrdEventIndex, type YrdEventIndex } from "./index.ts"
 import { acquireWriterLock, type WriterLockOptions } from "./lock.ts"
 
 const EVENTS_FILE = "events.jsonl"
 
-export type YrdFilesystemEventStore = YrdEventStore & { index: YrdEventIndex }
+export type YrdFilesystemEventStore = YrdEventStore
 
 export async function createYrdEventStore(options: {
   dir: string
@@ -31,6 +30,7 @@ export async function createYrdEventStore(options: {
     if (!existsSync(path)) return
     const lines = createInterface({ input: createReadStream(path, "utf8"), crlfDelay: Infinity })
     let lineNo = 0
+    const ids = new Set<string>()
     for await (const line of lines) {
       lineNo++
       if (line.trim() === "") continue
@@ -52,30 +52,14 @@ export async function createYrdEventStore(options: {
       ) {
         throw new Error(`yrd: event journal corrupt at ${path}:${lineNo} - invalid event envelope`)
       }
-      yield parsed as YrdEvent
+      const event = parsed as YrdEvent
+      if (ids.has(event.id)) throw new Error(`yrd: event journal contains duplicate event id '${event.id}'`)
+      ids.add(event.id)
+      yield event
     }
   }
-
-  const initialLock = await acquireWriterLock(options.dir, lockOptions)
-  let initializedIndex: ReturnType<typeof createYrdEventIndex> | undefined
-  try {
-    const events = await Array.fromAsync(replay())
-    const candidate = createYrdEventIndex(options.dir)
-    try {
-      candidate.rebuild(events)
-      initializedIndex = candidate
-    } catch (error) {
-      candidate.close()
-      throw error
-    }
-  } finally {
-    await initialLock.release()
-  }
-  if (initializedIndex === undefined) throw new Error("yrd: event index failed to initialize")
-  const index = initializedIndex
 
   return {
-    index,
     replay,
     async append(events) {
       assertOpen()
@@ -87,11 +71,6 @@ export async function createYrdEventStore(options: {
         await file.datasync()
       } finally {
         await file.close()
-      }
-      try {
-        index.record(events)
-      } catch {
-        index.rebuild(await Array.fromAsync(replay()))
       }
     },
     async read(run) {
@@ -125,7 +104,6 @@ export async function createYrdEventStore(options: {
     },
     close() {
       closed = true
-      index.close()
       return Promise.resolve()
     },
   }

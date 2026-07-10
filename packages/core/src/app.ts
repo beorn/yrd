@@ -97,23 +97,21 @@ export type YrdEventStore = {
   close(): Promise<void>
 }
 
-export type CommandRegistryEntry = {
-  path: readonly string[]
-  command: AnyCommand
+type RegistryKind = "command" | "effect"
+type RegistryEntry<Kind extends RegistryKind, Value> = { path: readonly string[] } & {
+  [Key in Kind]: Value
+}
+type Registry<Kind extends RegistryKind, Value extends object> = {
+  register(path: readonly string[], value: Value): void
+  pathOf(value: Value): readonly string[] | undefined
+  entries(): readonly RegistryEntry<Kind, Value>[]
+} & {
+  [Key in `${Kind}At`]: (path: string | readonly string[]) => Value | undefined
 }
 
-export type CommandRegistry = {
-  commandAt(path: string | readonly string[]): AnyCommand | undefined
-  pathOf(command: AnyCommand): readonly string[] | undefined
-  entries(): readonly CommandRegistryEntry[]
-}
-
-export type EffectRegistry = {
-  register(path: readonly string[], effect: AnyFx): void
-  effectAt(path: string | readonly string[]): AnyFx | undefined
-  pathOf(effect: AnyFx): readonly string[] | undefined
-  entries(): readonly { path: readonly string[]; effect: AnyFx }[]
-}
+export type CommandRegistryEntry = RegistryEntry<"command", AnyCommand>
+export type CommandRegistry = Omit<Registry<"command", AnyCommand>, "register">
+export type EffectRegistry = Registry<"effect", AnyFx>
 
 export type CommandRun = {
   events: YrdEvent[]
@@ -170,10 +168,7 @@ export function op<State extends object, Args>(
 
 export function fx<Input, Output>(
   fn: EffectFunction<Input, Output>,
-  definition: {
-    title?: string
-    description?: string
-  } = {},
+  definition: { title?: string; description?: string } = {},
 ): Fx<Input, Output> {
   return Object.freeze({ ...definition, fn, [EFFECT_REF]: true as const })
 }
@@ -200,63 +195,40 @@ function normalizePath(path: string | readonly string[]): string[] {
   return parts
 }
 
-type MutableCommandRegistry = CommandRegistry & {
-  register(path: readonly string[], command: AnyCommand): void
-}
+type MutableCommandRegistry = Registry<"command", AnyCommand>
 
-function createCommandRegistry(): MutableCommandRegistry {
-  const byPath = new Map<string, CommandRegistryEntry>()
-  const byCommand = new WeakMap<object, readonly string[]>()
+function createRegistry<Kind extends RegistryKind, Value extends object>(kind: Kind): Registry<Kind, Value> {
+  const byPath = new Map<string, RegistryEntry<Kind, Value>>()
+  const byValue = new WeakMap<Value, readonly string[]>()
+  const at = `${kind}At` as `${Kind}At`
 
   return {
-    register(pathInput, command) {
+    register(pathInput: readonly string[], value: Value) {
       const path = normalizePath(pathInput)
       const key = path.join(".")
-      if (byPath.has(key)) throw new Error(`yrd: command '${key}' is already registered`)
-      if (byCommand.has(command)) {
-        throw new Error(`yrd: command '${byCommand.get(command)!.join(".")}' cannot also register as '${key}'`)
+      if (byPath.has(key)) throw new Error(`yrd: ${kind} '${key}' is already registered`)
+      const previous = byValue.get(value)
+      if (previous !== undefined) {
+        throw new Error(`yrd: ${kind} '${previous.join(".")}' cannot also register as '${key}'`)
       }
       const frozenPath = Object.freeze(path)
-      byPath.set(key, { path: frozenPath, command })
-      byCommand.set(command, frozenPath)
+      byPath.set(key, { path: frozenPath, [kind]: value } as RegistryEntry<Kind, Value>)
+      byValue.set(value, frozenPath)
     },
-    commandAt(path) {
-      return byPath.get(normalizePath(path).join("."))?.command
+    [at](pathInput: string | readonly string[]) {
+      return byPath.get(normalizePath(pathInput).join("."))?.[kind]
     },
-    pathOf(command) {
-      return byCommand.get(command)
+    pathOf(value: Value) {
+      return byValue.get(value)
     },
     entries() {
       return [...byPath.values()]
     },
-  }
+  } as unknown as Registry<Kind, Value>
 }
 
 export function createEffectRegistry(): EffectRegistry {
-  const byPath = new Map<string, { path: readonly string[]; effect: AnyFx }>()
-  const byEffect = new WeakMap<object, readonly string[]>()
-  return {
-    register(pathInput, ref) {
-      const path = normalizePath(pathInput)
-      const key = path.join(".")
-      if (byPath.has(key)) throw new Error(`yrd: effect '${key}' is already registered`)
-      if (byEffect.has(ref)) {
-        throw new Error(`yrd: effect '${byEffect.get(ref)!.join(".")}' cannot also register as '${key}'`)
-      }
-      const frozenPath = Object.freeze(path)
-      byPath.set(key, { path: frozenPath, effect: ref })
-      byEffect.set(ref, frozenPath)
-    },
-    effectAt(path) {
-      return byPath.get(normalizePath(path).join("."))?.effect
-    },
-    pathOf(ref) {
-      return byEffect.get(ref)
-    },
-    entries() {
-      return [...byPath.values()]
-    },
-  }
+  return createRegistry<"effect", AnyFx>("effect")
 }
 
 function isCommand(value: unknown): value is AnyCommand {
@@ -283,17 +255,14 @@ function createCommandNamespace(registry: MutableCommandRegistry, path: readonly
       }
       if (isCommand(value)) {
         registry.register(commandPath, value)
-        namespace[key] = value
-        return true
-      }
-      if (!isNamespace(value)) {
+      } else if (!isNamespace(value)) {
         throw new Error(`yrd: command '${commandPath.join(".")}' must be created with op() or contain commands`)
+      } else {
+        const child = createCommandNamespace(registry, commandPath)
+        Object.assign(child, value)
+        value = child
       }
-      const child = createCommandNamespace(registry, commandPath)
-      for (const [childKey, childValue] of Object.entries(value)) {
-        Reflect.set(child, childKey, childValue)
-      }
-      namespace[key] = child
+      namespace[key] = value
       return true
     },
     deleteProperty(_namespace, key) {
@@ -318,19 +287,15 @@ function cloneJson<Value>(value: Value, path = "$", seen = new Set<object>()): V
   seen.add(value)
   try {
     if (Array.isArray(value)) {
-      return value.map((item, index) => cloneJson(item, `${path}[${index}]`, seen)) as Value
+      return Array.from(value, (item, index) => cloneJson(item, `${path}[${index}]`, seen)) as Value
     }
     if (!isNamespace(value)) throw new Error(`yrd: operation value '${path}' must be a plain object`)
-    const copy: Record<string, unknown> = {}
-    for (const [key, child] of Object.entries(value)) copy[key] = cloneJson(child, `${path}.${key}`, seen)
-    return copy as Value
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, cloneJson(child, `${path}.${key}`, seen)]),
+    ) as Value
   } finally {
     seen.delete(value)
   }
-}
-
-function clone<State>(value: State): State {
-  return structuredClone(value)
 }
 
 function deepFreeze<Value>(value: Value): DeepReadonly<Value> {
@@ -339,41 +304,33 @@ function deepFreeze<Value>(value: Value): DeepReadonly<Value> {
   return Object.freeze(value) as DeepReadonly<Value>
 }
 
-function parseArgs<Args>(command: Command<Args, any>, input: unknown): Args {
-  const parsed = command.args === undefined ? (input as Args) : command.args.parse(input)
-  return parsed === undefined ? parsed : cloneJson(parsed)
-}
-
 export function createMemoryEventStore(initial: readonly YrdEvent[] = []): YrdEventStore {
-  const events = initial.map(clone)
+  const events = [...structuredClone(initial)]
   let writer = Promise.resolve()
   const writerScope = new AsyncLocalStorage<boolean>()
   return {
     async *replay() {
-      for (const applied of events) yield clone(applied)
+      for (const applied of events) yield structuredClone(applied)
     },
     async append(next) {
       if (writerScope.getStore() !== true) throw new Error("yrd: append requires an active writer lease")
-      events.push(...next.map(clone))
+      events.push(...structuredClone(next))
     },
     async read(run) {
-      if (writerScope.getStore() === true) return await run()
+      if (writerScope.getStore() === true) return run()
       await writer
-      return await run()
+      return run()
     },
     withWriter(run) {
       if (writerScope.getStore() === true) return Promise.reject(new Error("yrd: nested writer lease is not allowed"))
-      const execute = () => writerScope.run(true, run)
-      const result = writer.then(execute, execute)
+      const result = writer.then(() => writerScope.run(true, run))
       writer = result.then(
         () => undefined,
         () => undefined,
       )
       return result
     },
-    close() {
-      return Promise.resolve()
-    },
+    async close() {},
   }
 }
 
@@ -384,7 +341,7 @@ export function createYrd(options: {
 }): YrdApp<{}, {}> {
   const clock = options.clock ?? (() => new Date().toISOString())
   const idGen = options.idGen ?? randomUUID
-  const commandRegistry = createCommandRegistry()
+  const commandRegistry = createRegistry<"command", AnyCommand>("command")
   const effectRegistry = createEffectRegistry()
   const commands = createCommandNamespace(commandRegistry)
 
@@ -402,9 +359,9 @@ export function createYrd(options: {
     project(state) {
       return state
     },
-    async state() {
-      return await options.store.read(async () => {
-        let state = clone(app.initialState)
+    state() {
+      return options.store.read(async () => {
+        let state = structuredClone(app.initialState)
         for await (const applied of options.store.replay()) state = app.project(state, applied)
         return state
       })
@@ -428,7 +385,11 @@ export function createYrd(options: {
       const command = commandRegistry.commandAt(path)
       if (command === undefined) throw new Error(`yrd: unknown command '${operationPath}'`)
       const rawArgs = serialized.args === undefined ? undefined : cloneJson(serialized.args)
-      const args = parseArgs(command, rawArgs)
+      let args = rawArgs
+      if (command.args !== undefined) {
+        args = command.args.parse(rawArgs)
+        if (args !== undefined) args = cloneJson(args)
+      }
       const operation = Object.freeze(args === undefined ? { op: operationPath } : { op: operationPath, args })
       const cause: YrdCause = {
         commandId: idGen(),
@@ -436,8 +397,8 @@ export function createYrd(options: {
         ...(traceOptions?.traceId === undefined ? {} : { traceId: traceOptions.traceId }),
         ...(traceOptions?.spanId === undefined ? {} : { spanId: traceOptions.spanId }),
       }
-      return await options.store.withWriter(async () => {
-        const state = deepFreeze(clone(await app.state()))
+      return options.store.withWriter(async () => {
+        const state = deepFreeze(structuredClone(await app.state()))
         const result = app.apply(state, { operation, command, args, cause })
         const effectIds: string[] = []
         const effectEvents = result.effects.map((request) => {

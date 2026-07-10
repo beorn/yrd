@@ -96,7 +96,7 @@ function writeHolder(fd: number): void {
 function busyError(lockPath: string): Error {
   const pid = readHolderPid(lockPath)
   const holder = pid === undefined ? "another process" : `pid ${pid}`
-  return new Error(`bay: another bay writer is running (${holder}); stop it before retrying (${lockPath})`)
+  return new Error(`yrd: another writer is running (${holder}); stop it before retrying (${lockPath})`)
 }
 
 function readHolderPid(lockPath: string): number | undefined {
@@ -122,6 +122,6 @@ function getFlock(): FlockSymbol {
     cachedFlock = library.symbols as unknown as FlockSymbol
     return cachedFlock
   } catch (cause) {
-    throw new Error(`bay: failed to load POSIX flock from ${libcPath}`, { cause })
+    throw new Error(`yrd: failed to load POSIX flock from ${libcPath}`, { cause })
   }
 }
