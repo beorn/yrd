@@ -1,0 +1,17 @@
+{
+  "name": "@yrd/bay",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@silvery/signals": "^0.21.0",
+    "@yrd/core": "workspace:*",
+    "@yrd/job": "workspace:*",
+    "@yrd/persistence": "workspace:*",
+    "@yrd/process": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}
