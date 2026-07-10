@@ -166,7 +166,8 @@ does not create unmanaged timers.
 
 All diagnostic output and timing uses Loggily namespaces and spans. Domain
 results remain return values and events; CLI formatting is a presentation
-layer over those values, not a second logging path.
+layer over those values, not a second logging path. Core replay spans report
+their frame count, event count, and cursor range along with Loggily's duration.
 
 ## Design Tests
 

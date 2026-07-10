@@ -206,13 +206,21 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const active = new Set<Promise<unknown>>()
 
   const fold = async (base: Projection): Promise<Projection> => {
-    using _span = coreLog.span?.("replay", { after: base.cursor })
+    using span = coreLog.span?.("replay", { after: base.cursor })
     let next = base
+    let frames = 0
+    let events = 0
     for await (const batch of journal.read(base.cursor)) {
       if (batch.cursor <= next.cursor) throw new Error("yrd: journal cursor did not advance")
-      for (const value of batch.values) next = projectFrame(next, FrameDomain.parse(value))
+      for (const value of batch.values) {
+        const frame = FrameDomain.parse(value)
+        frames += 1
+        events += frame.events.length
+        next = projectFrame(next, frame)
+      }
       next = { ...next, cursor: batch.cursor }
     }
+    if (span) Object.assign(span.spanData, { frames, events, fromCursor: base.cursor, toCursor: next.cursor })
     return next
   }
 

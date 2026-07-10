@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest"
 import * as z from "zod"
 import { createScope } from "@silvery/scope"
+import { createLogger, type Event as LogEvent } from "loggily"
 import {
   command,
   createMemoryJournal,
@@ -88,6 +89,11 @@ describe("Yrd domain objects", () => {
   })
 
   it("replays before exposing state and refreshes ordinary reads", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
     const journal = createMemoryJournal()
     const definition = withCounter()(createYrdDef())
     const writer = await createYrd(definition, {
@@ -103,11 +109,15 @@ describe("Yrd domain objects", () => {
     const reader = await createYrd(definition, {
       inject: {
         journal,
+        log,
         clock: () => "2026-07-09T12:00:00.000Z",
         id: ids("reader-command", "reader-event"),
       },
     })
     expect(reader.state().counter.value).toBe(4)
+    expect(events.find((event) => event.kind === "span" && event.namespace === "test:core:replay")).toMatchObject({
+      props: { frames: 1, events: 1, fromCursor: 0, toCursor: 1 },
+    })
 
     await writer.command(writer.commands.counter.add, { by: 2 })
     expect(reader.state().counter.value).toBe(4)
