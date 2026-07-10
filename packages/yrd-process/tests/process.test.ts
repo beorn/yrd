@@ -6,10 +6,14 @@ describe("Process", () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH, GIT_DIR: "leak", YRD_JOB: "leak" } })
     const result = await process.run({
       argv: ["sh", "-c", 'printf "%s:%s" "$GIT_DIR" "$YRD_JOB"; printf error >&2'],
-      env: { YRD_JOB: "job-1" },
+    })
+    const isolated = await process.run({
+      argv: ["sh", "-c", 'printf "%s:%s" "$GIT_DIR" "$YRD_JOB"'],
+      env: { PATH: Bun.env.PATH, YRD_JOB: "job-1" },
     })
 
-    expect(result).toMatchObject({ exitCode: 0, stdout: ":job-1", stderr: "error", timedOut: false })
+    expect(result).toMatchObject({ exitCode: 0, stdout: "leak:leak", stderr: "error", timedOut: false })
+    expect(isolated.stdout).toBe(":job-1")
     expect(result.durationMs).toBeGreaterThanOrEqual(0)
   })
 

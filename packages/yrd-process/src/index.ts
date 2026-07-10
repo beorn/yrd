@@ -60,7 +60,7 @@ export function createProcess(
   const now = options.inject?.now ?? performance.now.bind(performance)
   const spawn = options.inject?.spawn ?? spawnProcess
   const cwd = options.cwd ?? process.cwd()
-  const env = cleanEnv(options.env ?? process.env)
+  const env = definedEnv(options.env ?? process.env)
 
   const close = () => scope.disposeAsync()
   return {
@@ -81,7 +81,7 @@ export function createProcess(
       try {
         const child = spawn(request.argv, {
           cwd: request.cwd ?? cwd,
-          env: { ...env, ...definedEnv(request.env) },
+          env: request.env === undefined ? env : definedEnv(request.env),
           stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
           stdout: "pipe",
           stderr: "pipe",
@@ -126,15 +126,6 @@ export function createProcess(
 
 function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
   return Bun.spawn([...argv], options)
-}
-
-function cleanEnv(input: NodeJS.ProcessEnv): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(input).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined && !entry[0].startsWith("GIT_") && !entry[0].startsWith("YRD_"),
-    ),
-  )
 }
 
 function definedEnv(input: NodeJS.ProcessEnv | undefined): Record<string, string> {
