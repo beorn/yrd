@@ -535,7 +535,12 @@ export async function runYrdProcess(
     }
   }
 
-  if (invocation.args.length === 0 || invocation.args.some((argument) => argument === "--help" || argument === "-h")) {
+  if (
+    invocation.args.length === 0 ||
+    invocation.args.some(
+      (argument) => argument === "--help" || argument === "-h" || argument === "--version" || argument === "-V",
+    )
+  ) {
     return runYrdHelp(argv, io)
   }
 

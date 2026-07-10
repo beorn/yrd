@@ -10,6 +10,7 @@ import { LineRunsView, LineStatusView, PRResultView, type LineStatusResult } fro
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
+import { YRD_VERSION } from "./version.ts"
 
 type RuntimeOptions = {
   executor: string
@@ -676,6 +677,7 @@ function buildProgram(
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
+  if (projection === "root") program.version(YRD_VERSION, "-V, --version")
 
   const bay = projection === "bay" ? program : program.command("bay").description("operate isolated Git work bays")
   bay.helpCommand(false)
