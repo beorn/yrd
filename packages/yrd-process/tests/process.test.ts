@@ -25,6 +25,17 @@ describe("Process", () => {
     expect(result.signal).not.toBeNull()
   })
 
+  it("links an external cancellation signal to the child process", async () => {
+    await using process = createProcess({ env: { PATH: Bun.env.PATH } })
+    const controller = new AbortController()
+    const running = process.run({ argv: ["sh", "-c", "sleep 10"], signal: controller.signal })
+    controller.abort()
+
+    const result = await running
+    expect(result).toMatchObject({ timedOut: false })
+    expect(result.signal).not.toBeNull()
+  })
+
   it("refuses work after close", async () => {
     const process = createProcess()
     await process.close()

@@ -7,6 +7,7 @@ export type ProcessRequest = Readonly<{
   env?: NodeJS.ProcessEnv
   stdin?: string | Uint8Array
   timeoutMs?: number
+  signal?: AbortSignal
 }>
 
 export type ProcessResult = Readonly<{
@@ -74,6 +75,7 @@ export function createProcess(
       }
 
       const runScope = scope.child(request.argv[0])
+      const signal = request.signal === undefined ? runScope.signal : AbortSignal.any([runScope.signal, request.signal])
       const started = now()
       let timedOut = false
       let cancelTimeout: (() => void) | undefined
@@ -85,7 +87,7 @@ export function createProcess(
           stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
           stdout: "pipe",
           stderr: "pipe",
-          signal: runScope.signal,
+          signal,
         })
         if (request.timeoutMs !== undefined) {
           cancelTimeout = runScope.timeout(() => {

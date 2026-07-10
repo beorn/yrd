@@ -10,16 +10,18 @@ const result = await process.run({
   argv: ["git", "status", "--porcelain"],
   cwd: repo,
   timeoutMs: 30_000,
+  signal: job.signal,
 })
 ```
 
 `run()` always returns `exitCode`, `signal`, `stdout`, `stderr`, `durationMs`,
 and `timedOut`. It executes argv directly without a shell.
 
-The factory removes inherited `GIT_*` and `YRD_*` variables, then applies the
-request's explicit environment. Every run gets a child Scope; timeout,
-cancellation, and process termination therefore share one lifecycle. Timing
-and diagnostics use Loggily spans.
+The factory passes either its configured environment or the request's explicit
+replacement environment. Domain adapters own policy such as stripping ambient
+`GIT_*` and `YRD_*` variables. Every run gets a child Scope; parent disposal,
+an explicit abort signal, and timeout all terminate the same child process.
+Timing and diagnostics use Loggily spans.
 
 Tests and alternate hosts may inject `scope`, `log`, `now`, and `spawn`. Domain
 packages receive a `Process`; they do not call `Bun.spawn` themselves.
