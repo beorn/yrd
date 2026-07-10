@@ -1,0 +1,7 @@
+steps:
+  verify: bun --bun x vitest run
+
+contest:
+  concurrency: 2
+  timeoutMs: 1800000
+  evaluators: [verify]
