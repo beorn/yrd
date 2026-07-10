@@ -19,7 +19,7 @@
     "@yrd/task": "workspace:*",
     "loggily": "^0.10.2",
     "react": "^19.2.0",
-    "silvery": "^0.21.0",
+    "silvery": "^0.21.1",
     "zod": "^4.4.3"
   }
 }
