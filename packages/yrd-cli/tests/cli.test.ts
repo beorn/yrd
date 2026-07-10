@@ -481,6 +481,8 @@ describe("runYrd", () => {
       resolveRevision: async () => MERGED_SHA,
     })
     expect(await runYrd(app, yrd("line", "status", "PR1"), human.io)).toBe(0)
+    expect(human.stdout()).toContain("PR1")
+    expect(human.stdout()).toContain("integrated")
     expect(human.stdout()).toContain("TOUCHED")
     expect(human.stdout()).toContain("PATH")
     expect(human.stdout()).toContain(MERGED_SHA.slice(0, 12))

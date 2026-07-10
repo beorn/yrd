@@ -33,14 +33,14 @@ function age(timestamp: string | undefined, now: number): string {
 function latest(...timestamps: (string | undefined)[]): string | undefined {
   return timestamps
     .filter((value): value is string => value !== undefined)
-    .sort()
+    .toSorted()
     .at(-1)
 }
 
 function latestRun(pr: PR, summary: LineSummary): LineRun | undefined {
   return [...summary.running, ...summary.waiting, ...summary.finished]
     .filter((run) => run.prs.some((member) => member.id === pr.id))
-    .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+    .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
 }
 
@@ -50,10 +50,11 @@ function jobStatus(step: LineStep): Job["status"] | "queued" {
 
 function relevantStep(run: LineRun | undefined): LineStep | undefined {
   if (run === undefined) return undefined
+  const latestFirst = run.steps.toReversed()
   return (
-    [...run.steps].reverse().find((step) => jobStatus(step) === "failed") ??
-    [...run.steps].reverse().find((step) => ["requested", "running", "waiting", "lost"].includes(jobStatus(step))) ??
-    [...run.steps].reverse().find((step) => jobStatus(step) !== "queued")
+    latestFirst.find((step) => jobStatus(step) === "failed") ??
+    latestFirst.find((step) => ["requested", "running", "waiting", "lost"].includes(jobStatus(step))) ??
+    latestFirst.find((step) => jobStatus(step) !== "queued")
   )
 }
 
@@ -188,12 +189,13 @@ function detailColumns(): TableColumn<Row>[] {
     {
       header: "PR",
       key: "pr",
+      minWidth: 6,
       render: (row) => (row.prHref === undefined ? row.pr : <CellLink href={row.prHref}>{row.pr}</CellLink>),
     },
     {
       header: "STATE",
       key: "state",
-      minWidth: 8,
+      minWidth: 11,
       render: (row) => <StatusValue value={row.state} href={row.log} />,
     },
     { header: "TARGET", key: "target" },
