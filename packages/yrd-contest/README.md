@@ -115,7 +115,9 @@ detached checkout, and waits for token-fenced completion of the evaluator Job.
 Complete it through `yrd contest finish`; the generic Job transition command is
 not exposed. A launched waiting Job remains finishable after configuration
 revision drift because its pinned identity and stable output contract still
-fence completion.
+fence completion. `--fail` means the evaluator completed and rejected the
+candidate; `--error <code>` means the evaluator infrastructure failed and makes
+that durable Job eligible for `contest evaluate --retry`.
 
 The local command evaluator materializes the immutable pin as a detached
 scratch worktree. Its checkout parent is injected by the host, and the

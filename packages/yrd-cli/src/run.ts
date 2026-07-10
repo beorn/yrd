@@ -531,6 +531,7 @@ async function finishContest(
     evaluator?: string
     ok?: boolean
     fail?: boolean
+    error?: string
     token?: string
     detail?: string
     artifact?: unknown
@@ -538,22 +539,37 @@ async function finishContest(
   },
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.ok === options.fail) usage("contest finish requires exactly one of --ok or --fail")
+  const errorCode = options.error?.trim()
+  if (options.error !== undefined && errorCode === "") usage("contest finish --error requires a non-empty code")
+  const outcomes = Number(options.ok === true) + Number(options.fail === true) + Number(errorCode !== undefined)
+  if (outcomes !== 1) usage("contest finish requires exactly one of --ok, --fail, or --error")
   if (options.token === undefined || options.token === "") usage("contest finish requires --token <token>")
   const recordedArtifacts = artifacts(options.artifact)?.map(({ name, uri }) => ({ kind: name, uri })) ?? []
+  if (errorCode !== undefined && recordedArtifacts.length > 0) {
+    usage("contest finish --artifact records evaluator verdict evidence and cannot be used with --error")
+  }
   const contest = await app.contests.finish({
     contest: id,
     ...(options.attempt === undefined ? {} : { attempt: options.attempt }),
     ...(options.evaluator === undefined ? {} : { evaluator: options.evaluator }),
     token: options.token,
-    result: {
-      status: "passed",
-      output: {
-        verdict: options.ok === true ? "passed" : "failed",
-        ...(options.detail === undefined ? {} : { summary: options.detail }),
-        artifacts: recordedArtifacts,
-      },
-    },
+    result:
+      errorCode === undefined
+        ? {
+            status: "passed",
+            output: {
+              verdict: options.ok === true ? "passed" : "failed",
+              ...(options.detail === undefined ? {} : { summary: options.detail }),
+              artifacts: recordedArtifacts,
+            },
+          }
+        : {
+            status: "failed",
+            error: {
+              code: errorCode,
+              message: options.detail?.trim() || `remote evaluator failed (${errorCode})`,
+            },
+          },
   })
   await printResult(
     io,
@@ -775,6 +791,7 @@ function buildProgram(
     .option("--evaluator <evaluator>", "evaluator id")
     .option("--ok", "record a passing evaluator verdict")
     .option("--fail", "record a failing evaluator verdict")
+    .option("--error <code>", "record an evaluator infrastructure failure")
     .option("--token <token>", "waiting-job correlation token")
     .option("--detail <text>", "human-readable result summary")
     .option("--artifact [artifact...]", "artifact name=path-or-url")

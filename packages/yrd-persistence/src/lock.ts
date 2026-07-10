@@ -100,5 +100,5 @@ function busy(path: string): Error {
   } catch {
     // Diagnostic data never decides lock ownership.
   }
-  return new Error(`yrd: journal is busy (${owner}; ${path})`)
+  return new Error(`yrd: writer lock is busy (${owner}; ${path})`)
 }

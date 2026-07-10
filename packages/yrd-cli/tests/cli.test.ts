@@ -203,6 +203,21 @@ function gitBay(...args: string[]): string[] {
   return ["git", "bay", ...args]
 }
 
+function finishRemoteEvaluator(...args: string[]): string[] {
+  return yrd(
+    "contest",
+    "finish",
+    "C1",
+    "--attempt",
+    "A2",
+    "--evaluator",
+    "held-out",
+    ...args,
+    "--token",
+    "remote-evaluator-A2",
+  )
+}
+
 async function openAndSubmit(app: TestApp): Promise<void> {
   const open = outputIO()
   expect(await runYrd(app, yrd("bay", "open", "one"), open.io)).toBe(0)
@@ -567,17 +582,8 @@ describe("runYrd", () => {
     expect(
       await runYrd(
         app,
-        yrd(
-          "contest",
-          "finish",
-          "C1",
-          "--attempt",
-          "A2",
-          "--evaluator",
-          "held-out",
+        finishRemoteEvaluator(
           "--fail",
-          "--token",
-          "remote-evaluator-A2",
           "--detail",
           "private tests failed",
           "--artifact",
@@ -597,6 +603,49 @@ describe("runYrd", () => {
             evaluations: {
               "held-out": {
                 runs: [{ job: { status: "passed" }, result: { verdict: "failed", summary: "private tests failed" } }],
+              },
+            },
+          },
+        },
+      },
+    })
+  })
+
+  it("records remote evaluator infrastructure failure separately from a failed verdict", async () => {
+    const app = await createApp({ waitingEvaluator: "A2" })
+    expect(
+      await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"), outputIO().io),
+    ).toBe(0)
+
+    const ambiguous = outputIO()
+    expect(await runYrd(app, finishRemoteEvaluator("--fail", "--error", "remote-timeout"), ambiguous.io)).toBe(2)
+    expect(ambiguous.stderr()).toContain("exactly one of --ok, --fail, or --error")
+
+    const finish = outputIO()
+    expect(
+      await runYrd(
+        app,
+        finishRemoteEvaluator("--error", "remote-timeout", "--detail", "remote evaluator timed out", "--json"),
+        finish.io,
+      ),
+    ).toBe(0)
+    expect(JSON.parse(finish.stdout())).toMatchObject({
+      command: "contest.finish",
+      contest: {
+        status: "ready",
+        attempts: {
+          A2: {
+            status: "failed",
+            evaluations: {
+              "held-out": {
+                runs: [
+                  {
+                    job: {
+                      status: "failed",
+                      error: { code: "remote-timeout", message: "remote evaluator timed out" },
+                    },
+                  },
+                ],
               },
             },
           },

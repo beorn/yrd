@@ -8,9 +8,11 @@ import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal } from "@yrd/core"
+import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
+import { classifyFailure } from "../src/invocation.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
 
 const roots: string[] = []
@@ -103,6 +105,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("classifies writer-lock contention as an infrastructure failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-lock-exit-"))
+    roots.push(root)
+    const exclusive = createExclusive(root, { timeoutMs: 0 })
+
+    await exclusive.run(async () => {
+      let failure: unknown
+      try {
+        await exclusive.run(async () => undefined)
+      } catch (error) {
+        failure = error
+      }
+      expect(failure).toBeInstanceOf(Error)
+      expect((failure as Error).message).toContain("writer lock is busy")
+      expect(classifyFailure(failure)).toBe(3)
+    })
+  })
+
   it("prints help outside Git without initializing a repository host", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-help-"))
     roots.push(root)

@@ -214,7 +214,7 @@ yrd task compete <task> -a <harness-and-models> [--prompt <text>]
 yrd contest show <contest> [--json]
 yrd contest evaluate <contest> [--retry] [--json]
 yrd contest finish <contest> [--attempt <attempt>] [--evaluator <id>]
-  (--ok | --fail) --token <token> [evidence options]
+  (--ok | --fail | --error <code>) --token <token> [evidence options]
 yrd contest select <contest> --winner <attempt> [--by <actor>] [--reason <text>]
 yrd contest promote <contest> [--json]
 ```
@@ -239,8 +239,11 @@ generation rows in human status.
 `contest finish` records one token-fenced remote evaluator verdict. If the
 attempt or evaluator is omitted, it must identify the only waiting evaluation;
 otherwise Yrd asks for the missing selector. `--fail` records a failed candidate
-verdict, not an infrastructure failure, so the completion command itself still
-succeeds.
+verdict from a successful evaluator run. `--error <code>` records an evaluator
+infrastructure failure instead, with `--detail` as its message; retry can then
+return that same durable Job to `requested`. Verdict artifacts belong to
+`--ok`/`--fail`; infrastructure launch evidence is retained from the waiting
+Job. Recording either external outcome is itself a successful finish command.
 
 Selection is manual and explicit, and is available only after every configured
 evaluation is terminal. It freezes further evaluation. Promotion resolves the
@@ -362,6 +365,14 @@ yrd contest finish C2 --attempt A2 --evaluator sec-check --ok \
   --token run-456 --artifact report=https://ci.example/runs/456/report
 ```
 
+If the evaluator service itself failed, record the infrastructure outcome
+instead of turning it into a candidate verdict:
+
+```bash
+yrd contest finish C2 --attempt A2 --evaluator sec-check \
+  --error runner-timeout --detail "runner timed out" --token run-456
+```
+
 Long jobs therefore use the same durable job contract as local commands.
 They do not require a second queue or a second line.
 
@@ -409,10 +420,10 @@ reported as corruption. There is no second mutable database or read-model
 cache to reconcile.
 
 Callers may supply a stable command id. Yrd records that id plus a hash of the
-serialized operation in every event. Repeating the same id and operation
-returns the already committed result; reusing the id for different arguments
-is refused. The Git receiver uses its receipt id this way, so replay after a
-lost response cannot create a second PR revision.
+serialized operation in each transaction Frame's cause. Repeating the same id
+and operation returns the already committed result; reusing the id for
+different arguments is refused. The Git receiver uses its receipt id this way,
+so replay after a lost response cannot create a second PR revision.
 
 Jobs are the single durable executable lifecycle: requested, running, waiting,
 passed, failed, or lost. `withJobs()` installs that authority when the
