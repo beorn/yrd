@@ -134,6 +134,34 @@ describe("discoverYrdRepository", { timeout: 20_000 }, () => {
     })
   })
 
+  it("reads the primary config.worktree when invoked from a linked bay", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-separated-linked-"))
+    roots.push(root)
+    const repo = join(root, "repo")
+    const linked = join(root, "bay")
+    const gitDir = join(root, "modules", "repo.git")
+    const worktree = relative(gitDir, repo)
+    await mkdir(join(root, "modules"))
+    await git(root, "init", "-q", "-b", "main", "--separate-git-dir", gitDir, repo)
+    await git(repo, "config", "core.worktree", worktree)
+    await git(repo, "config", "user.name", "Yrd Test")
+    await git(repo, "config", "user.email", "yrd@example.invalid")
+    await writeFile(join(repo, "README.md"), "main\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "main")
+    await git(repo, "config", "extensions.worktreeConfig", "true")
+    await git(repo, "config", "--worktree", "core.worktree", worktree)
+    await git(repo, "config", "--local", "--unset-all", "core.worktree")
+    await git(repo, "worktree", "add", "-qb", "task/bay", linked)
+
+    expect(await discoverYrdRepository({ cwd: linked })).toMatchObject({
+      repo: await realpath(repo),
+      worktree: await realpath(linked),
+      gitDir: await realpath(gitDir),
+      baysRoot: join(await realpath(repo), ".bays"),
+    })
+  })
+
   it("finds the shared Git directory and primary worktree from a linked worktree", async () => {
     const { repo } = await repository()
     const linked = join(repo, "..", "linked")

@@ -60,8 +60,13 @@ async function configuredWorktree(
   gitDir: string,
   env: NodeJS.ProcessEnv,
 ): Promise<string | undefined> {
-  const configured = value(await git(process, worktree, env, ["config", "--get", "core.worktree"], true))
-  return configured === undefined ? undefined : resolve(gitDir, configured)
+  for (const file of ["config.worktree", "config"]) {
+    const configured = value(
+      await git(process, worktree, env, ["config", "--file", join(gitDir, file), "--get", "core.worktree"], true),
+    )
+    if (configured !== undefined) return resolve(gitDir, configured)
+  }
+  return undefined
 }
 
 async function defaultBranch(
