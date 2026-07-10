@@ -174,6 +174,30 @@ describe("createGitWorkspace", () => {
     )
   })
 
+  it("fails loud when shared worktree configuration cannot be inspected", async () => {
+    const { root, repo } = await repository()
+    await using actual = createProcess()
+    const process = {
+      run(request: ProcessRequest): Promise<ProcessResult> {
+        if (request.argv.slice(3).join(" ") === "config --local --get core.worktree") {
+          return Promise.resolve(processResult(2, "could not read worktree config"))
+        }
+        return actual.run(request)
+      },
+    }
+    const adapter = await createGitWorkspace({ repo, baysRoot: join(root, "bays"), process })
+
+    await expect(
+      adapter.provision(
+        { bay: "B1", name: "broken-config", branch: "task/broken-config", base: "main" },
+        { id: "provision-B1", attempt: 1, executor: "test", signal: new AbortController().signal },
+      ),
+    ).resolves.toMatchObject({
+      status: "failed",
+      error: { code: "provision-failed", message: expect.stringContaining("could not read worktree config") },
+    })
+  })
+
   it("does not overwrite an existing closed-bay preservation ref", async () => {
     const { root, repo } = await repository()
     await using process = createProcess()

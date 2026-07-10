@@ -81,15 +81,22 @@ async function configureIntake(git: Git, path: string, remote: string): Promise<
   await git.run(path, ["config", "--worktree", "push.default", "current"])
 }
 
+async function localConfig(git: Git, repo: string, key: string): Promise<string | undefined> {
+  const configured = await git.run(repo, ["config", "--local", "--get", key], true)
+  if (configured.code === 1) return undefined
+  if (configured.code !== 0) {
+    throw new Error(configured.stderr.trim() || `could not inspect shared ${key} config`)
+  }
+  return configured.stdout.trim()
+}
+
 async function removeLegacySharedPushDefault(git: Git, repo: string): Promise<void> {
-  const configured = await git.run(repo, ["config", "--local", "--get", "remote.pushDefault"], true)
-  if (configured.code === 1) return
-  if (configured.code !== 0) throw new Error(configured.stderr || "could not inspect the shared push default")
-  if (configured.stdout.trim() !== "bay") return
+  const configured = await localConfig(git, repo, "remote.pushDefault")
+  if (configured !== "bay") return
   const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "remote.pushDefault"])
   if (removed.code === 0) return
-  const remaining = await git.run(repo, ["config", "--local", "--get", "remote.pushDefault"], true)
-  if (remaining.code === 1 || remaining.stdout.trim() !== "bay") return
+  const remaining = await localConfig(git, repo, "remote.pushDefault")
+  if (remaining !== "bay") return
   throw new Error(
     removed.stderr.trim() ||
       "could not remove legacy shared remote.pushDefault=bay; run 'git config --local --unset-all remote.pushDefault'",
@@ -97,21 +104,20 @@ async function removeLegacySharedPushDefault(git: Git, repo: string): Promise<vo
 }
 
 async function prepareWorktreeConfig(git: Git, repo: string, required: boolean): Promise<void> {
-  const configured = await git.run(repo, ["config", "--local", "--get", "core.worktree"], true)
-  if (configured.code !== 0 && !required) return
+  const configured = await localConfig(git, repo, "core.worktree")
+  if (configured === undefined && !required) return
 
   const enabled = await git.mutateConfig(repo, ["config", "extensions.worktreeConfig", "true"])
   if (enabled.code !== 0) throw new Error(enabled.stderr || "could not enable worktree config")
-  if (configured.code !== 0) return
+  if (configured === undefined) return
 
-  const worktree = configured.stdout.trim()
-  if (worktree === "") throw new Error("Git core.worktree is empty")
-  const moved = await git.mutateConfig(repo, ["config", "--worktree", "core.worktree", worktree])
+  if (configured === "") throw new Error("Git core.worktree is empty")
+  const moved = await git.mutateConfig(repo, ["config", "--worktree", "core.worktree", configured])
   if (moved.code !== 0) throw new Error(moved.stderr || "could not set primary worktree config")
   const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "core.worktree"])
   if (removed.code === 0) return
-  const remaining = await git.run(repo, ["config", "--local", "--get", "core.worktree"], true)
-  if (remaining.code === 0) throw new Error(removed.stderr || "could not remove shared core.worktree config")
+  const remaining = await localConfig(git, repo, "core.worktree")
+  if (remaining !== undefined) throw new Error(removed.stderr || "could not remove shared core.worktree config")
 }
 
 async function ignoreInRepositoryBays(git: Git, repo: string, baysRoot: string): Promise<void> {
