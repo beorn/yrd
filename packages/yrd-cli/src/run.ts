@@ -115,13 +115,23 @@ function jsonEnabled(options: JsonOption): boolean {
 async function openBay(
   app: YrdCliApp,
   name: string,
-  options: { from?: string; head?: string; base?: string; line?: string; json?: boolean },
+  options: {
+    from?: string
+    head?: string
+    base?: string
+    line?: string
+    task?: string
+    actor?: string
+    json?: boolean
+  },
   io: YrdCliIO,
 ): Promise<void> {
   const from = oneOfAliases(options.from, options.head, "from", "head")
   const base = oneOfAliases(options.base, options.line, "base", "line")
   const frame = await app.bays.open({
     name,
+    ...(options.task === undefined ? {} : { task: options.task }),
+    ...(options.actor === undefined ? {} : { actor: options.actor }),
     ...(from === undefined ? {} : { from }),
     ...(base === undefined ? {} : { base }),
   })
@@ -676,6 +686,8 @@ function buildProgram(
     .option("--head <branch>", "alias for --from")
     .option("--base <branch>", "select the base branch")
     .option("--line <branch>", "alias for --base")
+    .option("--task <ref>", "link a tracker-neutral task reference")
+    .option("--actor <id>", "record the worker or implementation identity")
     .option("--json", "emit stable JSON")
     .action(async (workName, options) => openBay(installed(), workName, options, io))
   bay
@@ -846,9 +858,9 @@ async function executeYrd(
       if (!commanderOutput.wroteError) await diagnostic(io, invocation.name, error)
       return 2
     }
-    const code = classifyFailure(error)
+    const { exitCode } = classifyFailure(error)
     await diagnostic(io, invocation.name, error)
-    return code
+    return exitCode
   }
 }
 

@@ -139,8 +139,8 @@ another process appended, then publishes the newer snapshot through that same
 signal. Commands refresh before deciding and publish after append.
 
 The Journal warns at 10 MiB or 10,000 replayed frames. Compaction is explicit
-as-needed work; the warning links to
-`@yrd/core/21012-monorepo/21060-journal-compaction-gc`.
+as-needed work; the warning tells operators to implement compaction and GC
+before raising either guardrail.
 
 ## Layers
 
@@ -168,6 +168,11 @@ All diagnostic output and timing uses Loggily namespaces and spans. Domain
 results remain return values and events; CLI formatting is a presentation
 layer over those values, not a second logging path. Core replay spans report
 their frame count, event count, and cursor range along with Loggily's duration.
+
+Expected failures cross package boundaries as one serializable `FailureFact`
+with `kind`, stable `code`, and `message`. The CLI has one pure projection from
+that fact to its exit verdict. It never infers machine behavior from error
+text; an untyped exception is an infrastructure failure.
 
 ## Design Tests
 

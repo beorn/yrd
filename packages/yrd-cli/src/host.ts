@@ -21,7 +21,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
+import { createYrd, createYrdDef, pipe, raiseFailure, type Journal } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
@@ -71,18 +71,30 @@ export type DefaultYrdAppOptions = Readonly<{
 function validateConfig(config: ResolvedYrdProjectConfig): void {
   for (const name of config.line.steps) {
     if (name !== "merge" && config.steps[name]?.run === undefined) {
-      throw new Error(`yrd: default line step '${name}' requires steps.${name}.run`)
+      raiseFailure(
+        "configuration",
+        "step-command-missing",
+        `yrd: default line step '${name}' requires steps.${name}.run`,
+      )
     }
   }
-  if (config.steps.merge?.runner === "waiting") throw new Error("yrd: merge cannot use a waiting runner")
+  if (config.steps.merge?.runner === "waiting") {
+    raiseFailure("configuration", "merge-runner-invalid", "yrd: merge cannot use a waiting runner")
+  }
   if (config.steps.merge?.run !== undefined) {
-    throw new Error(
+    raiseFailure(
+      "configuration",
+      "merge-command-unsupported",
       "yrd: steps.merge.run is not supported by the default Git line; compose withMerge() for a custom merge",
     )
   }
   for (const evaluator of config.contest.evaluators) {
     if (config.steps[evaluator]?.run === undefined) {
-      throw new Error(`yrd: contest evaluator '${evaluator}' requires a configured step command`)
+      raiseFailure(
+        "configuration",
+        "evaluator-command-missing",
+        `yrd: contest evaluator '${evaluator}' requires a configured step command`,
+      )
     }
   }
 }
@@ -519,7 +531,7 @@ export async function runYrdProcess(
       return 0
     } catch (error) {
       await diagnostic(io, invocation.name, error)
-      return classifyFailure(error)
+      return classifyFailure(error).exitCode
     }
   }
 
@@ -543,7 +555,7 @@ export async function runYrdProcess(
     )
   } catch (error) {
     await diagnostic(io, invocation.name, error)
-    return classifyFailure(error)
+    return classifyFailure(error).exitCode
   } finally {
     await host?.close()
   }

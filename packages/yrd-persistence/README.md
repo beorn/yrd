@@ -56,7 +56,7 @@ const journal = await createJournal({
 ## Growth Guardrail
 
 Replay logs a warning when the file reaches 10 MiB or an initial replay reaches
-10,000 Frames. The warning points to
-`@yrd/core/21012-monorepo/21060-journal-compaction-gc`, the pre-created P4
-compaction and GC bead. These thresholds are reminders to implement compaction,
-not configuration knobs to raise when replay becomes slow.
+10,000 Frames. The warning explicitly directs operators to implement
+compaction and GC before raising either limit. These thresholds are reminders
+to solve measured growth, not configuration knobs to raise when replay becomes
+slow.

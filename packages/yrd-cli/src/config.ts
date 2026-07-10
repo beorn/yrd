@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
+import { asFailure, createFailure } from "@yrd/core"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
@@ -48,8 +49,8 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) return parsed.data
   const issue = parsed.error.issues[0]
-  if (issue === undefined) throw new Error("yrd: config is invalid")
-  throw configError(issue)
+  const message = issue === undefined ? "yrd: config is invalid" : configError(issue).message
+  throw createFailure({ kind: "configuration", code: "invalid-config", message })
 }
 
 function configError(issue: z.core.$ZodIssue): Error {
@@ -83,7 +84,12 @@ export async function loadYrdConfig(options: {
 }): Promise<{ path?: string; config: ResolvedYrdProjectConfig }> {
   const path = join(options.repo, ".yrd.yml")
   const source = await (options.read ?? defaultRead)(path)
-  const parsed = parseYrdConfig(source === undefined ? undefined : Bun.YAML.parse(source))
+  let parsed: YrdProjectConfig
+  try {
+    parsed = parseYrdConfig(source === undefined ? undefined : Bun.YAML.parse(source))
+  } catch (error) {
+    throw asFailure(error, { kind: "configuration", code: "invalid-config" })
+  }
   const steps = { ...parsed.steps }
   steps.check ??= { run: 'git diff --check "$YRD_BASE_SHA"..HEAD', runner: "local" }
   steps.merge ??= { runner: "local" }

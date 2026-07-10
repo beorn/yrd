@@ -3,6 +3,7 @@ import {
   command,
   event,
   JsonSchema,
+  raiseFailure,
   type Command,
   type CommandTree,
   type DeepReadonly,
@@ -314,7 +315,9 @@ function createLine<Shape extends PRShape>(
     let selected = direct === undefined ? undefined : materializeRun(direct, snapshot.jobs)
     if (selected === undefined) {
       const pr = resolvePR(snapshot.bays, selector)
-      if (pr === undefined) throw new Error(`yrd: no line run or PR '${selector}'`)
+      if (pr === undefined) {
+        raiseFailure("refusal", "line-selection-missing", `yrd: no line run or PR '${selector}'`)
+      }
       const summary = lineSummary(snapshot.lines, snapshot.jobs, pr.base)
       selected = [...summary.waiting, ...summary.running]
         .toReversed()
@@ -326,7 +329,11 @@ function createLine<Shape extends PRShape>(
             ),
         )
       if (selected === undefined) {
-        throw new Error(`yrd: PR '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`)
+        raiseFailure(
+          "refusal",
+          "line-step-not-waiting",
+          `yrd: PR '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`,
+        )
       }
     }
 
@@ -338,12 +345,18 @@ function createLine<Shape extends PRShape>(
           : undefined
         : selected.steps.find((item) => item.name === stepName)
     if (stepName === undefined && pending.length !== 1) {
-      throw new Error(
+      raiseFailure(
+        "refusal",
+        pending.length === 0 ? "line-step-not-waiting" : "line-step-ambiguous",
         `yrd: line run '${selected.id}' ${pending.length === 0 ? "has no waiting step" : "has multiple waiting steps; select one"}`,
       )
     }
     if (step?.job?.status !== "waiting") {
-      throw new Error(`yrd: line run '${selected.id}' has no waiting '${stepName ?? "unknown"}' step`)
+      raiseFailure(
+        "refusal",
+        "line-step-not-waiting",
+        `yrd: line run '${selected.id}' has no waiting '${stepName ?? "unknown"}' step`,
+      )
     }
     return { run: selected, step: step as WaitingLineStep["step"] }
   }
@@ -900,18 +913,20 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
           .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
       : selectors.map((selector) => {
           const pr = resolvePR(state, selector)
-          if (pr === undefined) throw new Error(`yrd: no PR '${selector}'`)
+          if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
           return pr
         })
   const ids = new Set<string>()
   for (const pr of prs) {
-    if (ids.has(pr.id)) throw new Error(`yrd: line.integrate: duplicate PR '${pr.id}'`)
+    if (ids.has(pr.id)) {
+      raiseFailure("usage", "duplicate-pr", `yrd: line.integrate: duplicate PR '${pr.id}'`)
+    }
     ids.add(pr.id)
     if (pr.status === "rejected" && args.retry !== true) {
-      throw new Error(`yrd: PR '${pr.id}' is rejected; retry=true is required`)
+      raiseFailure("refusal", "retry-required", `yrd: PR '${pr.id}' is rejected; retry=true is required`)
     }
     if (pr.status !== "submitted" && pr.status !== "rejected" && pr.status !== "integrated") {
-      throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not ready for the line`)
+      raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${pr.status}, not ready for the line`)
     }
   }
   return prs

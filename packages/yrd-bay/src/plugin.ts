@@ -1,6 +1,7 @@
 import {
   command,
   event,
+  raiseFailure,
   type Command,
   type CommandTree,
   type DeepReadonly,
@@ -232,7 +233,9 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
   const execute = async (frame: Frame, options: RunJobOptions, action: string): Promise<void> => {
     const results = await jobs.runMany(jobs.requested(frame), options)
     const failed = results.find((job) => job.status !== "passed")
-    if (failed !== undefined) throw new Error(`yrd: ${action} ${failed.status}: ${jobDetail(failed)}`)
+    if (failed !== undefined) {
+      raiseFailure("infrastructure", "bay-job-failed", `yrd: ${action} ${failed.status}: ${jobDetail(failed)}`)
+    }
   }
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
@@ -246,10 +249,19 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
       await execute(refreshed, options.run, `bay '${bay.id}' refresh`)
       snapshot = state()
       bay = resolveBay(snapshot, bay.id)
-      if (bay === undefined) throw new Error(`yrd: bay '${selector}' disappeared after refresh`)
-      if (bay.dirty === true)
-        throw new Error(`yrd: bay '${bay.id}' has uncommitted work; commit or discard it before submit`)
-      if (bay.headSha === undefined) throw new Error(`yrd: bay '${bay.id}' has no committed head to submit`)
+      if (bay === undefined) {
+        raiseFailure("infrastructure", "bay-state-invalid", `yrd: bay '${selector}' disappeared after refresh`)
+      }
+      if (bay.dirty === true) {
+        raiseFailure(
+          "refusal",
+          "bay-dirty",
+          `yrd: bay '${bay.id}' has uncommitted work; commit or discard it before submit`,
+        )
+      }
+      if (bay.headSha === undefined) {
+        raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
+      }
       pr = prForBay(snapshot, bay.id)
       if (pr === undefined || pr.headSha !== bay.headSha) {
         await actions.intake({
@@ -265,26 +277,40 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
     if (pr?.status === "pushed") {
       await actions.submit({ pr: pr.id })
       const submitted = resolvePR(state(), pr.id)
-      if (submitted === undefined) throw new Error(`yrd: PR '${pr.id}' disappeared after submit`)
+      if (submitted === undefined) {
+        raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
+      }
       return submitted
     }
 
     if (bay === undefined) {
       const headSha = await options.resolveRevision(selector)
-      if (headSha === undefined) throw new Error(`yrd: no Git commit '${selector}'`)
+      if (headSha === undefined) {
+        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
+      }
       await actions.submit({
         branch: selector,
         headSha,
         ...(options.base === undefined ? {} : { base: options.base }),
       })
       const submitted = resolvePR(state(), selector)
-      if (submitted === undefined) throw new Error(`yrd: direct branch submit '${selector}' did not create a PR`)
+      if (submitted === undefined) {
+        raiseFailure(
+          "infrastructure",
+          "pr-state-invalid",
+          `yrd: direct branch submit '${selector}' did not create a PR`,
+        )
+      }
       return submitted
     }
 
-    if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
-    if (pr === undefined) throw new Error(`yrd: bay '${bay.id}' intake did not create a PR`)
-    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
+    if (bay.status !== "active") {
+      raiseFailure("refusal", "bay-not-active", `yrd: bay '${bay.id}' is ${bay.status}, not active`)
+    }
+    if (pr === undefined) {
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: bay '${bay.id}' intake did not create a PR`)
+    }
+    raiseFailure("refusal", "pr-not-pushed", `yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
   }
 
   return Object.freeze({

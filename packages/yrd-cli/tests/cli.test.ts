@@ -292,6 +292,29 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
+  it("records tracker-neutral task and actor links when opening a bay", async () => {
+    const app = await createApp()
+    const output = outputIO({ color: true, columns: 96 })
+
+    expect(
+      await runYrd(
+        app,
+        yrd("bay", "open", "linked-work", "--task", "github:beorn/yrd#42", "--actor", "codex:apex"),
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    expect(app.state().bays.byId.B1).toMatchObject({
+      name: "linked-work",
+      task: "github:beorn/yrd#42",
+      actor: "codex:apex",
+    })
+    expect(output.stdout()).toContain("TASK")
+    expect(output.stdout()).toContain("github:beorn/yrd#42")
+    expect(output.stdout()).toContain("ACTOR")
+    expect(output.stdout()).toContain("codex:apex")
+  })
+
   it("submits inferred bays and runs selected line steps instead of merely enqueueing jobs", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -678,9 +701,23 @@ describe("runYrd", () => {
     expect(refusal.stdout()).toBe("")
     expect(refusal.stderr()).toContain("no bay 'missing'")
 
+    const missingPR = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR404"), missingPR.io)).toBe(1)
+    expect(missingPR.stderr()).toContain("no PR 'PR404'")
+
+    const missingWaitingRun = outputIO()
+    expect(await runYrd(app, yrd("line", "finish", "PR404", "--ok"), missingWaitingRun.io)).toBe(1)
+    expect(missingWaitingRun.stderr()).toContain("no line run or PR 'PR404'")
+
     const unsupported = outputIO()
     expect(await runYrd(app, yrd("line", "provision"), unsupported.io)).toBe(2)
     expect(unsupported.stderr()).toContain("line.provision capability is not installed")
+
+    const missingTaskSource = outputIO()
+    expect(
+      await runYrd(app, yrd("task", "compete", "github:42", "--agents", "ag codex/claude"), missingTaskSource.io),
+    ).toBe(2)
+    expect(missingTaskSource.stderr()).toContain("no task source 'github' is registered")
 
     const infrastructure = outputIO({
       resolveRevision: async () => {

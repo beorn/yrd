@@ -1,4 +1,5 @@
 import { basename } from "node:path"
+import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
 import type { YrdCliExitCode } from "./types.ts"
 
 export type Invocation = Readonly<{
@@ -7,15 +8,7 @@ export type Invocation = Readonly<{
   projection: "root" | "bay"
 }>
 
-export type CliFailure = Error & Readonly<{ name: "CliFailure"; exitCode: YrdCliExitCode }>
-
-function cliFailure(exitCode: YrdCliExitCode, message: string): CliFailure {
-  return Object.assign(new Error(message), { name: "CliFailure" as const, exitCode })
-}
-
-function isCliFailure(error: unknown): error is CliFailure {
-  return error instanceof Error && error.name === "CliFailure" && "exitCode" in error
-}
+export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: FailureFact }>
 
 function executableName(value: string | undefined): string {
   if (value === undefined) return ""
@@ -63,28 +56,28 @@ function stableValue(value: unknown): unknown {
   )
 }
 
-const INFRASTRUCTURE =
-  /(?:corrupt|event log|writer lock|lock (?:failed|failure|timed out)|append requires|sqlite|database|git unavailable|eacces|enoent|epipe|i\/o)/iu
-const CONFIGURATION =
-  /(?:capability is not installed|no handler registered|no .* (?:runner|evaluator|source) .* registered|requires at least one .* evaluator|configured|configuration|invalid .* step name|unknown step)/iu
-
-export function classifyFailure(error: unknown): YrdCliExitCode {
-  if (isCliFailure(error)) return error.exitCode
-  const message = error instanceof Error ? error.message : String(error)
-  if (INFRASTRUCTURE.test(message)) return 3
-  if (CONFIGURATION.test(message)) return 2
-  if (message.startsWith("yrd:")) return 1
-  return 3
+export function classifyFailure(error: unknown): FailureVerdict {
+  const failure =
+    failureFact(error) ??
+    Object.freeze({
+      kind: "infrastructure" as const,
+      code: "unexpected",
+      message: error instanceof Error ? error.message : String(error),
+    })
+  const exitCode = (
+    failure.kind === "refusal" ? 1 : failure.kind === "usage" || failure.kind === "configuration" ? 2 : 3
+  ) satisfies YrdCliExitCode
+  return Object.freeze({ exitCode, failure })
 }
 
 export function usage(message: string): never {
-  throw cliFailure(2, message)
+  raiseFailure("usage", "invalid-usage", message)
 }
 
 export function configuration(message: string): never {
-  throw cliFailure(2, message)
+  raiseFailure("configuration", "invalid-configuration", message)
 }
 
 export function refusal(message: string): never {
-  throw cliFailure(1, message)
+  raiseFailure("refusal", "request-refused", message)
 }

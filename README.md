@@ -152,7 +152,8 @@ links for bay paths, logs, and artifacts.
 ### Bay Operations
 
 ```text
-git bay open <name> [--from <branch>] [--base <branch>] [--json]
+git bay open <name> [--from <branch>] [--base <branch>]
+  [--task <ref>] [--actor <id>] [--json]
 git bay refresh [selector...] [--json]
 git bay submit [selector...] [--wait] [--base <branch>] [--json]
 git bay close [selector...] [--withdraw] [--json]
@@ -160,15 +161,21 @@ git bay close [selector...] [--withdraw] [--json]
 
 The same commands are available under `yrd bay`.
 
-| Command   | Input                                  | Output and state                                                            |
-| --------- | -------------------------------------- | --------------------------------------------------------------------------- |
-| `open`    | New bay name; optional source and base | Prints the worktree path; creates and provisions a named bay                |
-| `refresh` | Zero or more bays                      | Refreshes Git head, base, dirty, path, and workspace status                 |
-| `submit`  | Bays, PRs, or source branches          | Creates or advances PRs to `submitted`; `--wait` runs the line              |
-| `close`   | Zero or more bays                      | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR |
+| Command   | Input                                                | Output and state                                                            |
+| --------- | ---------------------------------------------------- | --------------------------------------------------------------------------- |
+| `open`    | New bay name; optional source, base, task, and actor | Prints the worktree path; creates and provisions a named bay                |
+| `refresh` | Zero or more bays                                    | Refreshes Git head, base, dirty, path, and workspace status                 |
+| `submit`  | Bays, PRs, or source branches                        | Creates or advances PRs to `submitted`; `--wait` runs the line              |
+| `close`   | Zero or more bays                                    | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR |
 
 `--head` is an alias for `--from`. `--line` is an alias for `--base`. The
 canonical words are source branch (`--from`) and base branch (`--base`).
+
+`--task` stores an opaque tracker-neutral reference such as `km:@yrd/core/42`
+or `github:beorn/yrd#42`. `--actor` records the worker or implementation
+identity. Yrd preserves these links but does not import tracker lifecycle or
+fleet policy. Actor attribution does not launch a process; an explicit composed
+runner, such as Contest's `ag` runner, mans the Bay.
 
 `open --from` uses an existing branch; there is no `adopt` command. Direct
 branch submission does not provision a worktree:
@@ -177,6 +184,30 @@ branch submission does not provision a worktree:
 git bay open release-fix --from fix/release --base release/2.0
 git bay submit fix/release --base release/2.0
 ```
+
+#### Manning an Ordinary Bay
+
+Yrd attributes an ordinary Bay to an actor but does not assign, launch, lease,
+or resume that actor. The caller owns those policies. A human, Tent, or another
+Hab app composes the workflow explicitly:
+
+```bash
+# Claim github:beorn/yrd#42 in the caller's task system first.
+yrd bay open fix-42 --task github:beorn/yrd#42 --actor @agent/3
+
+cd /path/printed/by/yrd
+ag code codex --new --name @agent/3 -- "Implement github:beorn/yrd#42 and commit the result."
+
+cd -
+yrd bay submit fix-42
+yrd line integrate fix-42
+```
+
+Contest is different because launching comparable implementations is part of
+its domain contract: `task compete` creates the Bays and its configured runner
+launches each competitor. If two non-Contest callers later need the same
+manning lifecycle, their shared behavior can be extracted above Yrd instead of
+turning actor attribution into a hidden side effect of `bay open`.
 
 ### Line Operations
 
@@ -262,6 +293,11 @@ the winner.
 
 Diagnostics go to stderr. Human and JSON results go to stdout. Commands do not
 read stdin except the hidden Git receive-hook entrypoint.
+
+Expected failures carry one serializable `{ kind, code, message }` fact. The
+CLI projects its exit code from `kind`; changing diagnostic wording cannot
+silently change automation behavior. An untyped exception is treated as an
+infrastructure failure and fails loud with exit `3`.
 
 ## Lines and Steps
 

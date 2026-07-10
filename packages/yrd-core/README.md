@@ -68,6 +68,20 @@ Frame. External work must be requested as data and executed after commit.
 `commandId` makes retries exact: the same operation returns its committed Frame;
 different arguments under that id are refused.
 
+## Failure Contract
+
+Expected cross-package failures carry one JSON-safe `FailureFact`:
+
+```ts
+{ kind: "refusal", code: "command-id-conflict", message: "..." }
+```
+
+Use `createFailure()`, `asFailure()`, or `raiseFailure()` at the boundary that
+knows the failure kind. `usage`, `configuration`, `refusal`, and
+`infrastructure` are stable machine categories; `code` identifies the specific
+condition and `message` remains presentation text. Untyped exceptions are not
+silently inferred from their wording by downstream callers.
+
 ## Reactive State
 
 `yrd.state` is a synchronous `ReadSignal<DeepReadonly<State>>`. Domain objects

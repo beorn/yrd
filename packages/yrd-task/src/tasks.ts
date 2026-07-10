@@ -1,4 +1,4 @@
-import type { CommandTree, YrdDef } from "@yrd/core"
+import { raiseFailure, type CommandTree, type YrdDef } from "@yrd/core"
 import * as z from "zod"
 
 const TextSchema = z.string().trim().min(1)
@@ -41,7 +41,9 @@ export function createTasks(options: TasksOptions = {}): Tasks {
   const sourceById = new Map<string, TaskSource>()
   for (const source of options.sources ?? []) {
     const id = TaskRefSchema.shape.source.parse(source.id)
-    if (sourceById.has(id)) throw new Error(`yrd: duplicate task source '${id}'`)
+    if (sourceById.has(id)) {
+      raiseFailure("configuration", "task-source-duplicate", `yrd: duplicate task source '${id}'`)
+    }
     sourceById.set(id, source)
   }
   const defaultSource = TaskRefSchema.shape.source.parse(options.defaultSource ?? "km")
@@ -57,12 +59,16 @@ export function createTasks(options: TasksOptions = {}): Tasks {
     async resolve(ref) {
       const canonical = TaskRefSchema.parse(ref)
       const source = sourceById.get(canonical.source)
-      if (!source) throw new Error(`yrd: no task source '${canonical.source}' is registered`)
+      if (!source) {
+        raiseFailure("configuration", "task-source-missing", `yrd: no task source '${canonical.source}' is registered`)
+      }
       const value = await source.resolve(canonical)
-      if (!value) throw new Error(`yrd: task '${canonical.source}:${canonical.id}' was not found`)
+      if (!value) {
+        raiseFailure("refusal", "task-not-found", `yrd: task '${canonical.source}:${canonical.id}' was not found`)
+      }
       const task = Task.parse(value)
       if (task.ref.source !== canonical.source || task.ref.id !== canonical.id) {
-        throw new Error(`yrd: task source '${source.id}' returned the wrong task`)
+        raiseFailure("infrastructure", "task-source-invalid", `yrd: task source '${source.id}' returned the wrong task`)
       }
       return task
     },

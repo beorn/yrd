@@ -3,6 +3,7 @@ import {
   command,
   event,
   Operation,
+  raiseFailure,
   type CommandTree,
   type DeepReadonly,
   type Event,
@@ -398,7 +399,7 @@ function createContests(
   }
   const required = (id: string): Contest => {
     const contest = get(id)
-    if (contest === undefined) throw new Error(`yrd: no contest '${id}'`)
+    if (contest === undefined) raiseFailure("refusal", "contest-not-found", `yrd: no contest '${id}'`)
     return contest
   }
 
@@ -422,13 +423,22 @@ function createContests(
         })
       }
     }
-    if (matches.length === 0) {
-      throw new Error(`yrd: contest '${contest.id}' has no matching waiting evaluation`)
+    const match = matches[0]
+    if (match === undefined) {
+      raiseFailure(
+        "refusal",
+        "evaluation-not-waiting",
+        `yrd: contest '${contest.id}' has no matching waiting evaluation`,
+      )
     }
     if (matches.length > 1) {
-      throw new Error(`yrd: contest '${contest.id}' has multiple waiting evaluations; select an attempt and evaluator`)
+      raiseFailure(
+        "refusal",
+        "evaluation-ambiguous",
+        `yrd: contest '${contest.id}' has multiple waiting evaluations; select an attempt and evaluator`,
+      )
     }
-    return matches[0]!
+    return match
   }
 
   const advance = async (id: string, runOptions: ContestEvaluateOptions): Promise<Contest> => {
@@ -456,7 +466,9 @@ function createContests(
     async resolveBase(input) {
       const base = input ?? options.defaultBase
       const resolved = await options.git.resolveCommit(base, options.signal)
-      if (resolved === undefined) throw new Error(`yrd: no Git commit '${base}'`)
+      if (resolved === undefined) {
+        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${base}'`)
+      }
       return { base, sha: GitRevisionPinSchema.shape.commit.parse(resolved.toLowerCase()) }
     },
     get,
@@ -481,7 +493,7 @@ function createContests(
       using _span = options.log.span?.("evaluate", { contest: id, retry: runOptions.retry === true })
       const contest = required(TextSchema.parse(id))
       if (contest.selection !== undefined) {
-        throw new Error(`yrd: contest '${contest.id}' is selected; evaluations are frozen`)
+        raiseFailure("refusal", "contest-frozen", `yrd: contest '${contest.id}' is selected; evaluations are frozen`)
       }
       return await advance(id, runOptions)
     },

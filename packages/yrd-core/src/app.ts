@@ -24,6 +24,7 @@ import {
   type JsonValue,
   type Operation,
 } from "./domain.ts"
+import { asFailure, raiseFailure } from "./failure.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
 import type { Cursor, Journal } from "./journal.ts"
 
@@ -145,10 +146,14 @@ export function command<State extends object, Args extends JsonValue | undefined
     ...(definition.isAvailable === undefined ? {} : { isAvailable: definition.isAvailable }),
     metadata: Object.freeze({ visibility: definition.visibility ?? "internal" }),
     run(context, args) {
-      return definition.apply(context.state, args, {
-        cause: context.cause,
-        operation: context.operation,
-      })
+      try {
+        return definition.apply(context.state, args, {
+          cause: context.cause,
+          operation: context.operation,
+        })
+      } catch (error) {
+        throw asFailure(error, { kind: "refusal", code: "command-refused" })
+      }
     },
   })
   return Object.freeze(node)
@@ -266,17 +271,26 @@ export async function createYrd<State extends object, Commands extends CommandTr
     visibility: "public" | "trusted",
   ): Promise<Frame> => {
     assertOpen()
-    const parsed = OperationDomain.parse(input)
+    let parsed: Operation
+    try {
+      parsed = OperationDomain.parse(input)
+    } catch (error) {
+      throw asFailure(error, { kind: "usage", code: "invalid-operation" })
+    }
     const registered = registry.commandAt(parsed.op)
-    if (registered === undefined) throw new Error(`yrd: unknown command '${parsed.op}'`)
+    if (registered === undefined) {
+      raiseFailure("usage", "unknown-command", `yrd: unknown command '${parsed.op}'`)
+    }
     const selected = registered as unknown as RuntimeCommand
     if (visibility === "public" && selected.metadata?.visibility !== "public") {
-      throw new Error(`yrd: internal command '${parsed.op}' is not publicly available`)
+      raiseFailure("usage", "internal-command", `yrd: internal command '${parsed.op}' is not publicly available`)
     }
 
     const canonical = canonicalOperation(selected, parsed.op, parsed.args)
     const commandId = trace?.commandId ?? id()
-    if (commandId.length === 0) throw new Error("yrd: command id must not be empty")
+    if (commandId.length === 0) {
+      raiseFailure("usage", "invalid-command-id", "yrd: command id must not be empty")
+    }
     const cause = CauseSchema.parse({
       commandId,
       op: canonical.op,
@@ -290,7 +304,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
       const receipt = current.receipts.get(commandId)
       if (receipt !== undefined) {
         if (receipt.cause.operationHash !== cause.operationHash) {
-          throw new Error(`yrd: command id '${commandId}' was already used for a different operation`)
+          raiseFailure(
+            "refusal",
+            "command-id-conflict",
+            `yrd: command id '${commandId}' was already used for a different operation`,
+          )
         }
         publish(current)
         return receipt
@@ -299,13 +317,21 @@ export async function createYrd<State extends object, Commands extends CommandTr
       const context = { state: current.state, cause, operation: canonical }
       const unavailable = unavailableReason(selected.isAvailable?.(context))
       if (unavailable !== null) {
-        throw new Error(`yrd: command '${parsed.op}' is unavailable${unavailable ? `: ${unavailable}` : ""}`)
+        raiseFailure(
+          "refusal",
+          "command-unavailable",
+          `yrd: command '${parsed.op}' is unavailable${unavailable ? `: ${unavailable}` : ""}`,
+        )
       }
       const result = selected.run(context, canonical.args)
-      if (isThenable(result)) throw new TypeError(`yrd: command '${parsed.op}' must be synchronous`)
+      if (isThenable(result)) {
+        raiseFailure("configuration", "async-command", `yrd: command '${parsed.op}' must be synchronous`)
+      }
       const events = result.events.map((draft) => {
         const schema = definition.events[draft.name]
-        if (schema === undefined) throw new Error(`yrd: no event definition for '${draft.name}'`)
+        if (schema === undefined) {
+          raiseFailure("configuration", "event-not-installed", `yrd: no event definition for '${draft.name}'`)
+        }
         return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: schema.parse(draft.data) })
       })
       const frame = FrameDomain.parse({ cause, events })
@@ -500,9 +526,13 @@ function canonicalOperation(command: RuntimeCommand, op: string, args: JsonValue
   const input = args ?? {}
   const missing = command.params.missing?.(input)
   if (missing !== undefined && missing.length > 0) {
-    throw new Error(`yrd: command '${op}' requires ${missing.join(", ")}`)
+    raiseFailure("usage", "missing-arguments", `yrd: command '${op}' requires ${missing.join(", ")}`)
   }
-  return OperationDomain.parse({ op, args: parseParams(command.params, input) })
+  try {
+    return OperationDomain.parse({ op, args: parseParams(command.params, input) })
+  } catch (error) {
+    throw asFailure(error, { kind: "usage", code: "invalid-arguments" })
+  }
 }
 
 function parseParams(schema: ParamSchema<unknown>, value: unknown): unknown {
@@ -524,6 +554,8 @@ function serialize<Args extends JsonValue | undefined, State extends object>(
   args: Args,
 ): Operation<Args> {
   const path = registry.pathOf(selected as unknown as AnyCommand)
-  if (path === undefined) throw new Error("yrd: command is not installed")
+  if (path === undefined) {
+    raiseFailure("configuration", "command-not-installed", "yrd: command is not installed")
+  }
   return canonicalOperation(selected as unknown as RuntimeCommand, path.join("."), args) as Operation<Args>
 }

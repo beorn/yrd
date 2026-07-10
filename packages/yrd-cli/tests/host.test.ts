@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createMemoryJournal } from "@yrd/core"
+import { createFailure, createMemoryJournal } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
@@ -105,6 +105,29 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("classifies typed failure facts without scraping their messages", () => {
+    const failure = createFailure({
+      kind: "configuration",
+      code: "runner-missing",
+      message: "wording may change without changing the verdict",
+    })
+    const verdict = classifyFailure(failure)
+
+    expect(verdict).toEqual({
+      exitCode: 2,
+      failure: {
+        kind: "configuration",
+        code: "runner-missing",
+        message: "wording may change without changing the verdict",
+      },
+    })
+    expect(JSON.parse(JSON.stringify(verdict))).toEqual(verdict)
+    expect(classifyFailure(new Error("yrd: no bay 'message-shaped-but-untyped'"))).toMatchObject({
+      exitCode: 3,
+      failure: { kind: "infrastructure", code: "unexpected" },
+    })
+  })
+
   it("classifies writer-lock contention as an infrastructure failure", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-lock-exit-"))
     roots.push(root)
@@ -119,7 +142,10 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }
       expect(failure).toBeInstanceOf(Error)
       expect((failure as Error).message).toContain("writer lock is busy")
-      expect(classifyFailure(failure)).toBe(3)
+      expect(classifyFailure(failure)).toMatchObject({
+        exitCode: 3,
+        failure: { kind: "infrastructure", code: "unexpected" },
+      })
     })
   })
 

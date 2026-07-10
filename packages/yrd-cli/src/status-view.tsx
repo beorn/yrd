@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url"
 import type { Bay, PR } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
-import { Box, Link, Table, Text } from "silvery"
+import { Box, Link, Table, Text, type TableColumn } from "silvery"
 
 type EvaluationRow = Readonly<{
   attempt: string
@@ -113,35 +113,37 @@ function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
 }
 
 export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
-  return (
-    <Table
-      data={bays}
-      columns={[
-        { header: "BAY", key: "id" },
-        {
-          header: "STATUS",
-          key: "status",
-          minWidth: 11,
-          render: (bay) => <StatusValue value={bay.status} />,
-        },
-        { header: "BRANCH", key: "branch", grow: true },
-        { header: "BASE", key: "base" },
-        {
-          header: "PATH",
-          key: "path",
-          grow: true,
-          render: (bay) =>
-            bay.path === undefined ? (
-              "-"
-            ) : (
-              <Link href={pathToFileURL(bay.path).href} minWidth={0} maxWidth="100%" wrap="truncate">
-                {bay.path}
-              </Link>
-            ),
-        },
-      ]}
-    />
-  )
+  const columns: TableColumn<Bay>[] = [
+    { header: "BAY", key: "id" },
+    {
+      header: "STATUS",
+      key: "status",
+      minWidth: 11,
+      render: (bay) => <StatusValue value={bay.status} />,
+    },
+    ...(bays.some((bay) => bay.task !== undefined)
+      ? ([{ header: "TASK", key: "task", grow: true }] satisfies TableColumn<Bay>[])
+      : []),
+    ...(bays.some((bay) => bay.actor !== undefined)
+      ? ([{ header: "ACTOR", key: "actor" }] satisfies TableColumn<Bay>[])
+      : []),
+    { header: "BRANCH", key: "branch", grow: true },
+    { header: "BASE", key: "base" },
+    {
+      header: "PATH",
+      key: "path",
+      grow: true,
+      render: (bay) =>
+        bay.path === undefined ? (
+          "-"
+        ) : (
+          <Link href={pathToFileURL(bay.path).href} minWidth={0} maxWidth="100%" wrap="truncate">
+            {bay.path}
+          </Link>
+        ),
+    },
+  ]
+  return <Table data={bays} columns={columns} />
 }
 
 export function PRStatusView({ prs }: { prs: readonly PR[] }) {

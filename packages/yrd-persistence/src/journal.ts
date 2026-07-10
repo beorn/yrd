@@ -84,7 +84,7 @@ export function createJournal(
           frames,
           warnBytes: WARN_BYTES,
           warnFrames: WARN_FRAMES,
-          action: "Implement @yrd/core/21012-monorepo/21060-journal-compaction-gc before increasing these limits.",
+          action: "Implement journal compaction and GC before increasing these limits.",
         })
       }
     },
