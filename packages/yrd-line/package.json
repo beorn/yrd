@@ -1,0 +1,16 @@
+{
+  "name": "@yrd/line",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@yrd/bay": "workspace:*",
+    "@yrd/core": "workspace:*",
+    "@yrd/job": "workspace:*",
+    "@yrd/process": "workspace:*",
+    "zod": "^4.4.3"
+  }
+}
