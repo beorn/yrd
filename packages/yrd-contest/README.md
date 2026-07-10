@@ -61,6 +61,15 @@ const reevaluated = await yrd.contests.evaluate(contest.id, {
   retry: true,
 })
 
+const waiting = yrd.contests.waiting(contest.id, "A2", "security")
+await yrd.contests.finish({
+  contest: contest.id,
+  attempt: waiting.attempt,
+  evaluator: waiting.evaluator,
+  token: waiting.job.token,
+  result: { status: "passed", output: { verdict: "passed", artifacts: [] } },
+})
+
 await yrd.contests.select({ contest: ready.id, attempt: "A2" })
 const promoted = await yrd.contests.promote(
   { contest: ready.id },
@@ -73,7 +82,8 @@ evaluation-run, and promotion evidence is the actual shared `Job`; Contest
 does not copy Job lifecycle state into a second record. `retry: true` retries a
 failed or lost infrastructure Job under the same id. A completed evaluator Job
 whose candidate verdict failed creates a new evaluator Job generation instead.
-Earlier evidence remains immutable, and a pinned competitor is never rerun.
+Earlier evidence remains immutable, appears as separate human-status rows, and
+a pinned competitor is never rerun.
 
 The public command tree exposes `task.compete`, `contest.select`, and
 `contest.promote`. The CLI also projects the methodful `evaluate()` operation
@@ -102,6 +112,10 @@ A configured evaluator with `runner: waiting` uses the same launcher JSON as a
 waiting Line step: the final stdout line contains `token` and optional `url`,
 `detail`, and `artifacts`. Yrd records that launch evidence, cleans the local
 detached checkout, and waits for token-fenced completion of the evaluator Job.
+Complete it through `yrd contest finish`; the generic Job transition command is
+not exposed. A launched waiting Job remains finishable after configuration
+revision drift because its pinned identity and stable output contract still
+fence completion.
 
 The local command evaluator materializes the immutable pin as a detached
 scratch worktree. Its checkout parent is injected by the host, and the

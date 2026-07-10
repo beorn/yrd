@@ -310,6 +310,7 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
       const temporaryRoot = temporary.value
       const checkout = join(temporaryRoot, "checkout")
       let worktreeAdded = false
+      let worktreeRemoved = true
       let cleanupFailure: Failure | undefined
       let operation: JobResult<EvaluatorResult> = failed("evaluator-missing-result", "Evaluator produced no evidence")
       try {
@@ -319,6 +320,7 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
           operation = failed(addFailure.code, addFailure.message)
         } else {
           worktreeAdded = true
+          worktreeRemoved = false
           const evaluated = await evaluateCheckout(
             git,
             process,
@@ -349,27 +351,27 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
             "pin-checkout-cleanup-failed",
             "Could not remove evaluator checkout",
           )
-          if (removeFailure !== undefined) cleanupFailure = removeFailure
+          if (removeFailure === undefined) worktreeRemoved = true
+          else cleanupFailure = removeFailure
         }
-        try {
-          await rm(temporaryRoot, { recursive: true, force: true })
-        } catch (error) {
-          cleanupFailure ??= { code: "pin-checkout-cleanup-failed", message: errorMessage(error) }
+        if (worktreeRemoved) {
+          try {
+            await rm(temporaryRoot, { recursive: true, force: true })
+          } catch (error) {
+            cleanupFailure ??= { code: "pin-checkout-cleanup-failed", message: errorMessage(error) }
+          }
         }
       }
       if (operation.status === "failed") return operation
       if (cleanupFailure !== undefined) {
-        const manifest =
-          operation.status === "passed"
-            ? operation.output.artifacts.find((artifact) => artifact.kind === "evaluator-manifest")
-            : undefined
-        const runnerUrl = operation.status === "waiting" ? operation.url : undefined
-        const suffix =
-          manifest !== undefined
-            ? `. Artifacts: ${manifest.uri}`
-            : runnerUrl === undefined
-              ? ""
-              : `. Runner: ${runnerUrl}`
+        if (operation.status === "waiting") {
+          const detail = [operation.detail, `Local checkout cleanup failed: ${cleanupFailure.message}`]
+            .filter((value): value is string => value !== undefined)
+            .join(". ")
+          return { ...operation, detail }
+        }
+        const manifest = operation.output.artifacts.find((artifact) => artifact.kind === "evaluator-manifest")
+        const suffix = manifest === undefined ? "" : `. Artifacts: ${manifest.uri}`
         return failed(cleanupFailure.code, `${cleanupFailure.message}${suffix}`)
       }
       return operation

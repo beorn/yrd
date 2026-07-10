@@ -60,34 +60,41 @@ by making the normal workflow create named bays and durable PRs from the start.
 
 ## Quick Start
 
-The CLI initializes `.git/yrd/` on first use.
+The CLI initializes `.git/yrd/` on the first repository-backed command. Help is
+repository-independent and never creates Yrd state.
 
 ```console
 $ cd my-repository
 $ git bay open fix-release
-/work/my-repository/.bays/B1
+BAY    STATUS    BRANCH                    BASE    PATH
+B1     active    task/fix-release          main    /work/my-repository/.bays/B1
 
 $ cd /work/my-repository/.bays/B1
 $ ...edit and test...
 $ git commit -am "fix: release ordering"
 
 $ git bay submit --wait
-PR1 submitted
-R1 passed
+PR     STATUS       BRANCH                 BASE    REV    HEAD
+PR1    submitted    task/fix-release       main      1    a13f09b1c821
+
+RUN    PRS    STATE     STEPS
+R1     PR1    passed    check=passed merge=passed
 
 $ yrd line status
 LINE                            OPEN    ACTIVE    INTEGRATED    REJECTED
 main@91803b2137d8                 0         0             1         0
 
 $ git bay close
-B1 closed
+BAY    STATUS    BRANCH                    BASE    PATH
+B1     closed    task/fix-release          main    /work/my-repository/.bays/B1
 ```
 
 Without `--wait`, submit is a handoff and an integrator runs the line:
 
 ```console
 $ git bay submit
-PR2 submitted
+PR     STATUS       BRANCH                 BASE    REV    HEAD
+PR2    submitted    task/another-fix       main      1    b7144cc7d201
 
 $ yrd line integrate PR2
 RUN     PRS             STATE       STEPS
@@ -107,18 +114,18 @@ Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 
 ## Concepts
 
-| Concept         | Meaning                                                             |
-| --------------- | ------------------------------------------------------------------- |
-| **Task**        | Unit of intent from km, GitHub, another tracker, or a direct caller |
-| **Work Bay**    | Named isolated Git worktree for one implementation attempt          |
-| **PR**          | Local pull request containing one immutable submitted revision      |
-| **Line**        | Ordered integration process attached to a base branch               |
-| **Step**        | Typed line transition such as check, review, merge, or deploy       |
-| **Job**         | Durable executable work; retries are attempts on the same Job       |
-| **Contest**     | Multiple bays implementing the same task for real selection         |
-| **Attempt**     | One competitor's bay, Git pin, metrics, and evaluation evidence     |
-| **Evaluation run** | One evaluator Job against an immutable attempt pin               |
-| **Base branch** | Branch a line integrates into, such as `main` or `release/2.0`      |
+| Concept            | Meaning                                                             |
+| ------------------ | ------------------------------------------------------------------- |
+| **Task**           | Unit of intent from km, GitHub, another tracker, or a direct caller |
+| **Work Bay**       | Named isolated Git worktree for one implementation attempt          |
+| **PR**             | Local pull request containing one immutable submitted revision      |
+| **Line**           | Ordered integration process attached to a base branch               |
+| **Step**           | Typed line transition such as check, review, merge, or deploy       |
+| **Job**            | Durable executable work; retries are attempts on the same Job       |
+| **Contest**        | Multiple bays implementing the same task for real selection         |
+| **Attempt**        | One competitor's bay, Git pin, metrics, and evaluation evidence     |
+| **Evaluation run** | One evaluator Job against an immutable attempt pin                  |
+| **Base branch**    | Branch a line integrates into, such as `main` or `release/2.0`      |
 
 Task is intent. An Operation is a serializable command. A Step configures work
 on a Line; a Job durably executes that work. Issue is adapter vocabulary. PR is
@@ -156,7 +163,7 @@ The same commands are available under `yrd bay`.
 | Command   | Input                                  | Output and state                                                            |
 | --------- | -------------------------------------- | --------------------------------------------------------------------------- |
 | `open`    | New bay name; optional source and base | Prints the worktree path; creates and provisions a named bay                |
-| `refresh` | Zero or more bays                      | Refreshes Git head, base, dirty, path, and workspace status                  |
+| `refresh` | Zero or more bays                      | Refreshes Git head, base, dirty, path, and workspace status                 |
 | `submit`  | Bays, PRs, or source branches          | Creates or advances PRs to `submitted`; `--wait` runs the line              |
 | `close`   | Zero or more bays                      | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR |
 
@@ -206,6 +213,8 @@ opens its detailed runner URL when one exists.
 yrd task compete <task> -a <harness-and-models> [--prompt <text>]
 yrd contest show <contest> [--json]
 yrd contest evaluate <contest> [--retry] [--json]
+yrd contest finish <contest> [--attempt <attempt>] [--evaluator <id>]
+  (--ok | --fail) --token <token> [evidence options]
 yrd contest select <contest> --winner <attempt> [--by <actor>] [--reason <text>]
 yrd contest promote <contest> [--json]
 ```
@@ -219,12 +228,19 @@ Yrd records wall time, token counts, reported USD cost, stdout/stderr,
 artifacts, the write-once attempt ref, and evaluator results. Missing provider
 metrics remain missing; Yrd does not guess cost.
 
-`contest evaluate` resumes missing work against the recorded attempt pins.
-`--retry` returns failed or lost infrastructure Jobs to `requested` and retains
-their Job ids. A completed evaluator Job with a failed candidate verdict gets a
-new Evaluation run instead. It never reruns a competitor whose implementation
-is already pinned. Each Evaluation run has its own definition revision, timing,
-verdict, and artifacts; earlier runs remain immutable.
+`contest evaluate` resumes missing competitor and evaluator work. It never
+reruns a competitor whose implementation is already pinned. `--retry` returns
+failed or lost infrastructure Jobs to `requested` and retains their Job ids. A
+completed evaluator Job with a failed candidate verdict gets a new Evaluation
+run instead. Each Evaluation run has its own definition revision, timing,
+verdict, and artifacts; earlier runs remain immutable and appear as separate
+generation rows in human status.
+
+`contest finish` records one token-fenced remote evaluator verdict. If the
+attempt or evaluator is omitted, it must identify the only waiting evaluation;
+otherwise Yrd asks for the missing selector. `--fail` records a failed candidate
+verdict, not an infrastructure failure, so the completion command itself still
+succeeds.
 
 Selection is manual and explicit, and is available only after every configured
 evaluation is terminal. It freezes further evaluation. Promotion resolves the
@@ -234,12 +250,12 @@ the winner.
 
 ## Exit Codes
 
-| Code | Meaning                                                                                   |
-| ---- | ----------------------------------------------------------------------------------------- |
-| `0`  | Command completed; a recorded external fail is still a successful `line finish` operation |
-| `1`  | Valid request refused or workflow ended unsuccessfully                                    |
-| `2`  | Usage or configuration error                                                              |
-| `3`  | Infrastructure, lock, Git, or durable-state failure                                       |
+| Code | Meaning                                                                                        |
+| ---- | ---------------------------------------------------------------------------------------------- |
+| `0`  | Command completed; recording an external failed verdict is still a successful finish operation |
+| `1`  | Valid request refused or workflow ended unsuccessfully                                         |
+| `2`  | Usage or configuration error                                                                   |
+| `3`  | Infrastructure, lock, Git, or durable-state failure                                            |
 
 Diagnostics go to stderr. Human and JSON results go to stdout. Commands do not
 read stdin except the hidden Git receive-hook entrypoint.
@@ -258,14 +274,10 @@ const review = withStep("coderabbit", reviewRunner, {
   revision: "coderabbit-v1",
 })
 const merge = withMerge(gitMergeRunner, { revision: "git-merge-v1" })
-const deploy = withStep(
-  "deploy",
-  deployRunner,
-  {
-    revision: "deploy-v1",
-    needsIntegration: true,
-  },
-)
+const deploy = withStep("deploy", deployRunner, {
+  revision: "deploy-v1",
+  needsIntegration: true,
+})
 const line = withLine({ steps: [check, review, merge, deploy] as const })
 const contests = withContests({ runners, evaluators, git })
 
@@ -342,6 +354,14 @@ yrd line finish PR7 --step coderabbit --ok --token run-123 \
   --artifact report=https://ci.example/runs/123/report
 ```
 
+The same runner contract completes a Contest evaluator without exposing the
+generic Job transition surface:
+
+```bash
+yrd contest finish C2 --attempt A2 --evaluator sec-check --ok \
+  --token run-456 --artifact report=https://ci.example/runs/456/report
+```
+
 Long jobs therefore use the same durable job contract as local commands.
 They do not require a second queue or a second line.
 
@@ -408,9 +428,12 @@ Evaluation Job generation for that case and derives the complete run history
 from Jobs, without adding another lifecycle store.
 
 Job requests pin the definition revision used to create them. Pending execution
-is refused if current plugin code has a different revision. Line runs also pin
-their complete ordered step descriptors, so historical status remains readable
-after config changes and `line audit` reports unavailable pending plans.
+is refused if current plugin code has a different revision. A waiting Job may
+still finish after revision drift because its token, attempt, executor, and
+stable definition output contract fence that already-launched work. Line runs
+also pin their complete ordered step descriptors, so historical status remains
+readable after config changes and `line audit` reports unavailable pending
+plans.
 
 Yrd owns the Job record and imports backend lifecycle events. Running work has
 an expiring, heartbeated executor lease; crashed work becomes `lost` and can be
@@ -450,7 +473,7 @@ The low-level packages remain usable by a single developer with no agent fleet.
 | Package            | Responsibility                                                   |
 | ------------------ | ---------------------------------------------------------------- |
 | `@yrd/core`        | Immutable composition, Operations, Frames, projection, Journal   |
-| `@yrd/persistence` | Checksummed JSONL Journal and cross-process append exclusion      |
+| `@yrd/persistence` | Checksummed JSONL Journal and cross-process append exclusion     |
 | `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
 | `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |
 | `@yrd/task`        | Task references, snapshots, and source adapters                  |

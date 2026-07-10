@@ -76,7 +76,7 @@ function workspace(options: { dirty?: boolean; refreshedHead?: string; probe?: O
   }
 }
 
-function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[]) {
+function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waitingEvaluator?: string) {
   const pins = new Map<string, string>()
   const runner: ContestRunnerDef = {
     harness: "ag",
@@ -102,8 +102,15 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[]) {
     id: "held-out",
     revision: "held-out-v1",
     authority: "held-out",
-    async evaluate() {
+    async evaluate(input) {
       await probe?.pause("evaluator")
+      if (input.attempt === waitingEvaluator) {
+        return {
+          status: "waiting",
+          token: `remote-evaluator-${input.attempt}`,
+          url: `https://ci.invalid/evaluations/${input.attempt}`,
+        }
+      }
       return { status: "passed", output: { verdict: "passed", artifacts: [] } }
     },
   }
@@ -127,9 +134,10 @@ async function createApp(
     probe?: OverlapProbe
     baseResolutions?: string[]
     batch?: false | number
+    waitingEvaluator?: string
   } = {},
 ) {
-  const contest = contestAdapters(options.probe, options.baseResolutions)
+  const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
   const bayJobs = createBayJobDefs(
     workspace({ dirty: options.dirtyBay, refreshedHead: options.refreshedHead, probe: options.probe }),
   )
@@ -229,6 +237,7 @@ describe("runYrd", () => {
     expect(yrdHelp.stdout()).toContain("Usage: yrd contest")
     expect(yrdHelp.stdout()).toContain("show")
     expect(yrdHelp.stdout()).toContain("evaluate")
+    expect(yrdHelp.stdout()).toContain("finish")
     expect(yrdHelp.stdout()).toContain("select")
     expect(yrdHelp.stdout()).toContain("promote")
     expect(yrdHelp.stdout()).not.toMatch(/^\s+run \[/mu)
@@ -538,6 +547,61 @@ describe("runYrd", () => {
     expect(JSON.parse(promote.stdout())).toMatchObject({
       command: "contest.promote",
       contest: { status: "promoted", promotion: { attempt: "A1", job: { status: "passed" } } },
+    })
+  })
+
+  it("finishes a waiting remote evaluator through the Contest surface", async () => {
+    const app = await createApp({ waitingEvaluator: "A2" })
+    const compete = outputIO()
+    expect(
+      await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
+    ).toBe(0)
+    expect(JSON.parse(compete.stdout())).toMatchObject({
+      contest: {
+        status: "running",
+        attempts: { A2: { status: "waiting" } },
+      },
+    })
+
+    const finish = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "contest",
+          "finish",
+          "C1",
+          "--attempt",
+          "A2",
+          "--evaluator",
+          "held-out",
+          "--fail",
+          "--token",
+          "remote-evaluator-A2",
+          "--detail",
+          "private tests failed",
+          "--artifact",
+          "report=https://ci.invalid/evaluations/A2/report",
+          "--json",
+        ),
+        finish.io,
+      ),
+    ).toBe(0)
+    expect(JSON.parse(finish.stdout())).toMatchObject({
+      command: "contest.finish",
+      contest: {
+        status: "ready",
+        attempts: {
+          A2: {
+            status: "rejected",
+            evaluations: {
+              "held-out": {
+                runs: [{ job: { status: "passed" }, result: { verdict: "failed", summary: "private tests failed" } }],
+              },
+            },
+          },
+        },
+      },
     })
   })
 

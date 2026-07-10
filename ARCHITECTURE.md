@@ -16,17 +16,17 @@ function per implementation detail.
 
 ## Domain Objects
 
-| Object | Created by | Responsibility | Main surface |
-| --- | --- | --- | --- |
-| `YrdDef` | `createYrdDef()` | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()` |
-| `Yrd` | `createYrd()` | Command validation, idempotency, event projection, reactive state, and feature access | `state`, `refresh()`, `operation()`, `command()`, `invoke()`, `events()`, `close()` |
-| `Journal` | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency | `read()`, `append()` |
-| `Process` | `createProcess()` | Scope-owned argv execution with bounded evidence and termination escalation | `run()`, `close()` |
-| `Jobs` | `withJobs()` | Durable execution, leases, waiting work, retries, and recovery | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
-| `Tasks` | `withTasks()` | Resolve task references through configured sources | `sources`, `ref()`, `resolve()` |
-| `Bays` | `withBays()` | Query and operate on isolated work bays and local PRs | `state`, `get()`, `list()`, `pr()`, `prs()`, `open()`, `refresh()`, `intake()`, `submit()`, `submitSelection()`, `close()` |
-| `Line` | `withLine()` | Integrate PRs through configured steps and expose evidence | `state`, `steps()`, `integrate()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()` |
-| `Contests` | `withContests()` | Run, evaluate, select, and promote competing implementations | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `select()`, `promote()` |
+| Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                      |
+| ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                        |
+| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `operation()`, `command()`, `invoke()`, `events()`, `close()`                                               |
+| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                              |
+| `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                |
+| `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
+| `Tasks`    | `withTasks()`                                | Resolve task references through configured sources                                         | `sources`, `ref()`, `resolve()`                                                                                                   |
+| `Bays`     | `withBays()`                                 | Query and operate on isolated work bays and local PRs                                      | `state`, `get()`, `list()`, `pr()`, `prs()`, `open()`, `refresh()`, `intake()`, `submit()`, `submitSelection()`, `close()`        |
+| `Line`     | `withLine()`                                 | Integrate PRs through configured steps and expose evidence                                 | `state`, `steps()`, `integrate()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()`                  |
+| `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
 
 `Process`, `Git`, task sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -36,20 +36,20 @@ function or a small plain object; it is not a global singleton.
 
 The objects above operate on plain records:
 
-| Record | Meaning |
-| --- | --- |
-| `Operation` | Serializable request naming one registered command and its arguments |
-| `Event` | Validated fact emitted by a command |
-| `Frame` | One command cause and all events committed for it atomically |
-| `Task` | Versioned unit of intent from a configured task source |
-| `Bay` | Isolated worktree and its current Git facts |
-| `PR` | Immutable submitted revision offered to a base branch |
-| `Job` | Durable executable lifecycle and evidence |
-| `LineRun` | Pinned PR set, base, step plan, and integration facts |
-| `Step` | Configured typed transition in a Line |
-| `Contest` | Task, competitors, attempts, selection, and promotion facts |
+| Record                 | Meaning                                                                   |
+| ---------------------- | ------------------------------------------------------------------------- |
+| `Operation`            | Serializable request naming one registered command and its arguments      |
+| `Event`                | Validated fact emitted by a command                                       |
+| `Frame`                | One command cause and all events committed for it atomically              |
+| `Task`                 | Versioned unit of intent from a configured task source                    |
+| `Bay`                  | Isolated worktree and its current Git facts                               |
+| `PR`                   | Immutable submitted revision offered to a base branch                     |
+| `Job`                  | Durable executable lifecycle and evidence                                 |
+| `LineRun`              | Pinned PR set, base, step plan, and integration facts                     |
+| `Step`                 | Configured typed transition in a Line                                     |
+| `Contest`              | Task, competitors, attempts, selection, and promotion facts               |
 | `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |
-| `Artifact` | Named evidence with a path or URL and media type |
+| `Artifact`             | Named evidence with a path or URL and media type                          |
 
 Persisted records contain JSON data only. Zod schemas validate every untyped
 boundary: CLI/config input, commands, events, Job input/output, adapter output,

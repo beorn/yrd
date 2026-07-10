@@ -12,6 +12,7 @@ import {
 import { createJobDef, Job, type HasJobs, type JobDef, type JobDefs, type JobResult, type Jobs } from "@yrd/job"
 import type { HasTasks } from "@yrd/task"
 import { computed } from "@silvery/signals"
+import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   AttemptRunOutputSchema,
@@ -38,6 +39,7 @@ import {
   type ContestEvaluationRun,
   type ContestEvaluatorDef,
   type ContestEvaluatorInput,
+  type ContestFinishArgs,
   type ContestGit,
   type ContestPromotion,
   type ContestRecord,
@@ -48,6 +50,7 @@ import {
   type ContestsState,
   type ContestRuntimeState,
   type ContestSelectArgs,
+  type ContestWaitingEvaluation,
   type CompeteArgs,
   type EvaluatorResult,
   type HasContests,
@@ -132,6 +135,7 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
             git,
             defaultBase,
             signal: yrd.scope.signal,
+            log: yrd.log.child("contests"),
             actions: {
               compete: (args) => yrd.command(commands.task.compete, args),
               request: (contest, retry) =>
@@ -383,6 +387,7 @@ function createContests(
     git: ContestGit
     defaultBase: string
     signal: AbortSignal
+    log: ConditionalLogger
     actions: ContestActions
   }>,
 ): Contests {
@@ -395,6 +400,35 @@ function createContests(
     const contest = get(id)
     if (contest === undefined) throw new Error(`yrd: no contest '${id}'`)
     return contest
+  }
+
+  const waiting = (id: string, selectedAttempt?: string, selectedEvaluator?: string): ContestWaitingEvaluation => {
+    const contest = required(TextSchema.parse(id))
+    const matches: ContestWaitingEvaluation[] = []
+    for (const attemptId of contest.attemptOrder) {
+      if (selectedAttempt !== undefined && attemptId !== selectedAttempt) continue
+      const attempt = contest.attempts[attemptId]
+      if (attempt === undefined) throw new Error(`yrd: contest '${contest.id}' lost attempt '${attemptId}'`)
+      for (const evaluator of contest.evaluators) {
+        if (selectedEvaluator !== undefined && evaluator.id !== selectedEvaluator) continue
+        const run = attempt.evaluations[evaluator.id]?.runs.at(-1)
+        if (run?.job.status !== "waiting") continue
+        matches.push({
+          contest: contest.id,
+          attempt: attempt.id,
+          evaluator: evaluator.id,
+          generation: run.generation,
+          job: run.job,
+        })
+      }
+    }
+    if (matches.length === 0) {
+      throw new Error(`yrd: contest '${contest.id}' has no matching waiting evaluation`)
+    }
+    if (matches.length > 1) {
+      throw new Error(`yrd: contest '${contest.id}' has multiple waiting evaluations; select an attempt and evaluator`)
+    }
+    return matches[0]!
   }
 
   const advance = async (id: string, runOptions: ContestEvaluateOptions): Promise<Contest> => {
@@ -432,23 +466,44 @@ function createContests(
         .map(required)
     },
     async compete(args) {
+      using _span = options.log.span?.("compete", { task: args.task.ref, competitors: args.competitors.length })
       const frame = await options.actions.compete(args)
       const opened = frame.events.find(({ name }) => name === "contest/opened")
       if (opened === undefined) throw new Error("yrd: task.compete did not open a contest")
       return required(OpenedSchema.parse(opened.data).contest.id)
     },
     async select(args) {
+      using _span = options.log.span?.("select", { contest: args.contest, attempt: args.attempt })
       await options.actions.select(args)
       return required(args.contest)
     },
     async evaluate(id, runOptions) {
+      using _span = options.log.span?.("evaluate", { contest: id, retry: runOptions.retry === true })
       const contest = required(TextSchema.parse(id))
       if (contest.selection !== undefined) {
         throw new Error(`yrd: contest '${contest.id}' is selected; evaluations are frozen`)
       }
       return await advance(id, runOptions)
     },
+    waiting,
+    async finish(args: ContestFinishArgs) {
+      using _span = options.log.span?.("finish", {
+        contest: args.contest,
+        attempt: args.attempt,
+        evaluator: args.evaluator,
+      })
+      const current = waiting(args.contest, args.attempt, args.evaluator)
+      const token = TextSchema.parse(args.token)
+      await options.jobs.finish(current.job.id, {
+        attempt: current.job.attempt,
+        executor: current.job.executor,
+        token,
+        result: args.result,
+      })
+      return required(current.contest)
+    },
     async promote(args, runOptions) {
+      using _span = options.log.span?.("promote", { contest: args.contest })
       await options.actions.promote(args)
       return advance(args.contest, { ...runOptions, retry: false })
     },
@@ -492,6 +547,10 @@ async function ensureBays(contestId: string, options: Parameters<typeof createCo
 function requestedJobs(contestId: string, state: DeepReadonly<ContestRuntimeState>): readonly string[] {
   const record = requiredContest(state.contests, contestId)
   const ids = new Set<string>()
+  if (record.selection !== undefined) {
+    addRequested(ids, state, promotionKey(record.id))
+    return [...ids]
+  }
   for (const attemptId of record.attemptOrder) {
     const attempt = requiredAttempt(record, attemptId)
     const bay = attemptBay(state, attempt)
@@ -627,14 +686,14 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
   else if (record.selection !== undefined) status = "selected"
   else {
     const values = Object.values(attempts)
-    const terminal =
-      values.every((attempt) => ["passing", "rejected", "failed", "lost"].includes(attempt.status)) &&
-      values.every((attempt) =>
-        record.evaluators.every((evaluator) => {
-          const latest = attempt.evaluations[evaluator.id]?.runs.at(-1)
-          return latest !== undefined && Job.terminal(latest.job)
-        }),
-      )
+    const terminal = values.every((attempt) => {
+      if (!["passing", "rejected", "failed", "lost"].includes(attempt.status)) return false
+      if (attempt.runner?.status !== "passed") return true
+      return record.evaluators.every((evaluator) => {
+        const latest = attempt.evaluations[evaluator.id]?.runs.at(-1)
+        return latest !== undefined && Job.terminal(latest.job)
+      })
+    })
     status = terminal ? (values.some((attempt) => attempt.status === "passing") ? "ready" : "failed") : "running"
   }
   return {
@@ -705,8 +764,9 @@ function attemptStatus(
   output: AttemptRunOutput | undefined,
   evaluations: Readonly<Record<string, ContestEvaluation>>,
 ): ContestAttempt["status"] {
-  if (bay === undefined || bay.status === "opening" || runner === undefined) return "preparing"
+  if (bay === undefined || bay.status === "opening") return "preparing"
   if (bay.status !== "active") return "failed"
+  if (runner === undefined) return "preparing"
   if (runner.status === "requested") return "queued"
   if (runner.status === "running") return "running"
   if (runner.status === "waiting") return "waiting"

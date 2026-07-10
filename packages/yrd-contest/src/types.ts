@@ -289,6 +289,22 @@ export type ContestCommands = Readonly<{
 
 export type ContestEvaluateOptions = RunJobOptions & Readonly<{ concurrency: number; retry?: boolean }>
 
+export type ContestWaitingEvaluation = Readonly<{
+  contest: string
+  attempt: string
+  evaluator: string
+  generation: number
+  job: Extract<Job, { status: "waiting" }>
+}>
+
+export type ContestFinishArgs = Readonly<{
+  contest: string
+  attempt?: string
+  evaluator?: string
+  token: string
+  result: Exclude<JobResult<EvaluatorResult>, { status: "waiting" }>
+}>
+
 export type Contests = Readonly<{
   state: ReadSignal<DeepReadonly<ContestsState>>
   resolveBase(base?: string): Promise<Readonly<{ base: string; sha: string }>>
@@ -297,6 +313,8 @@ export type Contests = Readonly<{
   compete(args: CompeteArgs): Promise<Contest>
   select(args: ContestSelectArgs): Promise<Contest>
   evaluate(contest: string, options: ContestEvaluateOptions): Promise<Contest>
+  waiting(contest: string, attempt?: string, evaluator?: string): ContestWaitingEvaluation
+  finish(args: ContestFinishArgs): Promise<Contest>
   promote(args: ContestPromoteArgs, options: ContestEvaluateOptions): Promise<Contest>
 }>
 

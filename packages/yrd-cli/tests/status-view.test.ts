@@ -96,6 +96,7 @@ function attempt(
 }
 
 function contestFixture(): Contest {
+  const a1OldManifest = artifact("A1/old", "evaluator-manifest", "manifest.json")
   const a1Manifest = artifact("A1", "evaluator-manifest", "manifest.json")
   const a1Stdout = artifact("A1", "stdout", "stdout.log")
   const a1GateStdout = artifact("A1/gate", "stdout", "stdout.log")
@@ -116,7 +117,14 @@ function contestFixture(): Contest {
     attemptOrder: ["A1", "A2"],
     attempts: {
       A1: attempt("A1", "passing", {
-        verify: evaluation("verify", "passed", "verify exited 0", [a1Stdout, a1Manifest]),
+        verify: {
+          evaluator: "verify",
+          authority: "held-out",
+          runs: [
+            settledRun("verify", 1, "failed", "old private failure", [a1OldManifest]),
+            settledRun("verify", 2, "passed", "verify exited 0", [a1Stdout, a1Manifest]),
+          ],
+        },
         gate: evaluation("gate", "passed", "gate exited 0", [a1GateStdout]),
         review: evaluation("review", "failed", "advisory only", [], "advisory"),
       }),
@@ -135,17 +143,18 @@ async function render(contest: Contest, width: number, plain = true): Promise<st
 }
 
 describe("ContestStatusView held-out evaluations", () => {
-  it("shows one readable verdict and summary row per held-out evaluator and attempt", async () => {
+  it("shows every evaluation generation with its verdict and summary", async () => {
     const output = await render(contestFixture(), 160)
     const rows = output.split("\n").filter((line) => /\b(?:verify|gate)\b/u.test(line))
 
-    expect(rows).toHaveLength(4)
+    expect(rows).toHaveLength(5)
     expect(rows).toEqual(
       expect.arrayContaining([
-        expect.stringMatching(/A1\s+passing\s+verify\s+passed\s+verify exited 0/u),
-        expect.stringMatching(/A1\s+passing\s+gate\s+passed\s+gate exited 0/u),
-        expect.stringMatching(/A2\s+waiting\s+verify\s+failed\s+two private failures/u),
-        expect.stringMatching(/A2\s+waiting\s+gate\s+waiting\s+awaiting external evaluator/u),
+        expect.stringMatching(/A1\s+passing\s+verify\s+1\s+failed\s+old private failure/u),
+        expect.stringMatching(/A1\s+passing\s+verify\s+2\s+passed\s+verify exited 0/u),
+        expect.stringMatching(/A1\s+passing\s+gate\s+1\s+passed\s+gate exited 0/u),
+        expect.stringMatching(/A2\s+waiting\s+verify\s+1\s+failed\s+two private failures/u),
+        expect.stringMatching(/A2\s+waiting\s+gate\s+1\s+waiting\s+awaiting external evaluator/u),
       ]),
     )
     expect(output).not.toContain("advisory only")
@@ -154,6 +163,7 @@ describe("ContestStatusView held-out evaluations", () => {
   it("links only the primary evidence artifact in each evaluator row", async () => {
     const output = await render(contestFixture(), 160, false)
 
+    expect(output).toContain("file:///evidence/A1/old/manifest.json")
     expect(output).toContain("file:///evidence/A1/manifest.json")
     expect(output).not.toContain("file:///evidence/A1/stdout.log")
     expect(output).toContain("file:///evidence/A1/gate/stdout.log")
@@ -166,7 +176,7 @@ describe("ContestStatusView held-out evaluations", () => {
     const output = await render(contestFixture(), 26)
     const lines = output.split("\n")
 
-    expect(lines.filter((line) => /A1\s+passing\s+passed/u.test(line))).toHaveLength(2)
-    expect(lines.filter((line) => /A2\s+waiting\s+(?:failed|waiting)/u.test(line))).toHaveLength(2)
+    expect(lines.filter((line) => /A1\s+passing/u.test(line))).toHaveLength(3)
+    expect(lines.filter((line) => /A2\s+waiting/u.test(line))).toHaveLength(2)
   })
 })

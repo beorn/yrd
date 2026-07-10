@@ -1,12 +1,13 @@
 import { pathToFileURL } from "node:url"
 import type { Bay, PR } from "@yrd/bay"
-import type { Contest, ContestEvaluation, ContestEvaluationRun } from "@yrd/contest"
+import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import { Box, Link, Table, Text } from "silvery"
 
 type EvaluationRow = Readonly<{
   attempt: string
   state: string
   evaluator: string
+  generation: string
   verdict: string
   summary: string
   evidenceLabel: string
@@ -54,41 +55,34 @@ export function StatusValue({ value, href }: { value: string; href?: string }) {
   )
 }
 
-function latestEvaluation(evaluation: ContestEvaluation | undefined): ContestEvaluationRun | undefined {
-  return evaluation?.runs.at(-1)
-}
-
-function evaluatorVerdict(evaluation: ContestEvaluation | undefined): string {
-  const current = latestEvaluation(evaluation)
-  if (current?.result !== undefined) return current.result.verdict
-  const status = current?.job.status
+function evaluatorVerdict(run: ContestEvaluationRun | undefined): string {
+  if (run?.result !== undefined) return run.result.verdict
+  const status = run?.job.status
   return status === undefined || status === "requested" ? "queued" : status
 }
 
-function evaluatorSummary(evaluation: ContestEvaluation | undefined): string {
-  const current = latestEvaluation(evaluation)
-  if (current?.result?.summary !== undefined) return current.result.summary
-  const job = current?.job
+function evaluatorSummary(run: ContestEvaluationRun | undefined): string {
+  if (run?.result?.summary !== undefined) return run.result.summary
+  const job = run?.job
   if (job?.status === "failed") return job.error.message
   if (job?.status === "lost") return job.lostReason
   if (job !== undefined && "detail" in job && job.detail !== undefined) return job.detail
   return "-"
 }
 
-function primaryEvidence(evaluation: ContestEvaluation | undefined):
+function primaryEvidence(run: ContestEvaluationRun | undefined):
   | Readonly<{
       label: string
       href: string
     }>
   | undefined {
-  const current = latestEvaluation(evaluation)
-  const artifacts = current?.result?.artifacts ?? []
+  const artifacts = run?.result?.artifacts ?? []
   const artifact = artifacts.find(({ kind }) => kind === "evaluator-manifest") ?? artifacts[0]
   if (artifact !== undefined) {
     const additional = artifacts.length - 1
     return { label: additional === 0 ? artifact.kind : `${artifact.kind} +${additional}`, href: artifact.uri }
   }
-  const job = current?.job
+  const job = run?.job
   return job !== undefined && "url" in job && job.url !== undefined ? { label: "job", href: job.url } : undefined
 }
 
@@ -98,18 +92,22 @@ function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
     if (attempt === undefined) throw new Error(`yrd: contest '${contest.id}' lost attempt '${id}'`)
     return contest.evaluators
       .filter(({ authority }) => authority === "held-out")
-      .map(({ id: evaluator }) => {
+      .flatMap(({ id: evaluator }) => {
         const evaluation = attempt.evaluations[evaluator]
-        const evidence = primaryEvidence(evaluation)
-        return {
-          attempt: id,
-          state: attempt.status,
-          evaluator,
-          verdict: evaluatorVerdict(evaluation),
-          summary: evaluatorSummary(evaluation),
-          evidenceLabel: evidence?.label ?? "-",
-          ...(evidence === undefined ? {} : { evidenceHref: evidence.href }),
-        }
+        const runs = evaluation?.runs.length ? evaluation.runs : [undefined]
+        return runs.map((run) => {
+          const evidence = primaryEvidence(run)
+          return {
+            attempt: id,
+            state: attempt.status,
+            evaluator,
+            generation: run === undefined ? "-" : String(run.generation),
+            verdict: evaluatorVerdict(run),
+            summary: evaluatorSummary(run),
+            evidenceLabel: evidence?.label ?? "-",
+            ...(evidence === undefined ? {} : { evidenceHref: evidence.href }),
+          }
+        })
       })
   })
 }
@@ -263,6 +261,7 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
                 render: (row) => <StatusValue value={row.state} />,
               },
               { header: "EVALUATOR", key: "evaluator" },
+              { header: "GEN", key: "generation", align: "right" },
               {
                 header: "VERDICT",
                 key: "verdict",

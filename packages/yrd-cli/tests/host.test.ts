@@ -9,7 +9,7 @@ import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal } from "@yrd/core"
 import { createProcess } from "@yrd/process"
-import { createDefaultYrdApp, createYrdHost } from "../src/host.ts"
+import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
 
@@ -103,6 +103,28 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("prints help outside Git without initializing a repository host", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-help-"))
+    roots.push(root)
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--help"], {
+        cwd: root,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(0)
+    expect(stdout).toContain("Usage: yrd")
+    expect(stderr).toBe("")
+    expect(await Bun.file(join(root, ".git", "yrd", "events.jsonl")).exists()).toBe(false)
+  })
+
   it("initializes one filesystem authority and reopens its durable PR state", async () => {
     const { repo } = await repository()
     const first = await createYrdHost({ cwd: repo })

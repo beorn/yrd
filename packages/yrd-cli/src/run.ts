@@ -523,6 +523,46 @@ async function evaluateContest(
   return contest.status === "failed" ? 1 : 0
 }
 
+async function finishContest(
+  app: YrdCliApp,
+  id: string,
+  options: {
+    attempt?: string
+    evaluator?: string
+    ok?: boolean
+    fail?: boolean
+    token?: string
+    detail?: string
+    artifact?: unknown
+    json?: boolean
+  },
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.ok === options.fail) usage("contest finish requires exactly one of --ok or --fail")
+  if (options.token === undefined || options.token === "") usage("contest finish requires --token <token>")
+  const recordedArtifacts = artifacts(options.artifact)?.map(({ name, uri }) => ({ kind: name, uri })) ?? []
+  const contest = await app.contests.finish({
+    contest: id,
+    ...(options.attempt === undefined ? {} : { attempt: options.attempt }),
+    ...(options.evaluator === undefined ? {} : { evaluator: options.evaluator }),
+    token: options.token,
+    result: {
+      status: "passed",
+      output: {
+        verdict: options.ok === true ? "passed" : "failed",
+        ...(options.detail === undefined ? {} : { summary: options.detail }),
+        artifacts: recordedArtifacts,
+      },
+    },
+  })
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "contest.finish", contest },
+    createElement(ContestStatusView, { contest }),
+  )
+}
+
 async function selectContest(
   app: YrdCliApp,
   id: string,
@@ -591,7 +631,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
 }
 
 function buildProgram(
-  app: YrdCliApp,
+  app: YrdCliApp | undefined,
   services: YrdCliServices,
   name: string,
   projection: "root" | "bay",
@@ -599,6 +639,7 @@ function buildProgram(
   setExit: (code: YrdCliExitCode) => void,
   commanderOutput: { wroteError: boolean },
 ): CliCommand {
+  const installed = (): YrdCliApp => app ?? configuration("command runtime is not initialized")
   const program = new CliCommand(name)
     .description(
       projection === "bay"
@@ -620,12 +661,12 @@ function buildProgram(
     .option("--base <branch>", "select the base branch")
     .option("--line <branch>", "alias for --base")
     .option("--json", "emit stable JSON")
-    .action(async (workName, options) => openBay(app, workName, options, io))
+    .action(async (workName, options) => openBay(installed(), workName, options, io))
   bay
     .command("refresh [selector...]")
     .description("refresh zero or more live bay leases")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => refreshBays(app, selectors, options, io))
+    .action(async (selectors, options) => refreshBays(installed(), selectors, options, io))
   bay
     .command("submit [selector...]")
     .description("submit zero or more bays or pushed revisions")
@@ -633,13 +674,13 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--line <branch>", "alias for --base")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(app, selectors, options, io)))
+    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io)))
   bay
     .command("close [selector...]")
     .description("close zero or more bays")
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => closeBays(app, selectors, options, io))
+    .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
 
   if (projection === "bay") {
     addExamples(program, name, projection)
@@ -653,12 +694,12 @@ function buildProgram(
     .command("status [selector...]")
     .description("show line or PR status")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => lineStatus(app, selectors, options, io))
+    .action(async (selectors, options) => lineStatus(installed(), selectors, options, io))
   line
     .command("audit")
     .description("audit folded line state")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await lineAudit(app, services, options, io)))
+    .action(async (options) => setExit(await lineAudit(installed(), services, options, io)))
   line
     .command("provision [base]")
     .description("run the installed line-environment provision preflight")
@@ -679,10 +720,10 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
       if (options.watch === true) {
-        setExit(await watchLine(app, selectors, options, io))
+        setExit(await watchLine(installed(), selectors, options, io))
         return
       }
-      const runs = await integrateLines(app, selectors, options, io)
+      const runs = await integrateLines(installed(), selectors, options, io)
       await printResult(
         io,
         jsonEnabled(options),
@@ -704,7 +745,7 @@ function buildProgram(
     .option("--exit-code <code>", "external process exit code", int)
     .option("--duration-ms <milliseconds>", "external duration", int)
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => finishLine(app, selector, options, io))
+    .action(async (selector, options) => finishLine(installed(), selector, options, io))
 
   const task = program.command("task").description("orchestrate work from tracker-neutral tasks")
   task.helpCommand(false)
@@ -717,21 +758,33 @@ function buildProgram(
     .option("--base <branch>", "base branch")
     .option("--line <branch>", "alias for --base")
     .option("--json", "emit stable JSON")
-    .action(async (taskId, options) => setExit(await competeTask(app, taskId, options, io)))
+    .action(async (taskId, options) => setExit(await competeTask(installed(), taskId, options, io)))
 
   const contest = program.command("contest").description("inspect and choose immutable contest attempts")
   contest.helpCommand(false)
   contest
     .command("evaluate <contest>")
-    .description("run missing evaluations for pinned attempts")
+    .description("resume missing contest work and evaluate pinned attempts")
     .option("--retry", "retry failed work or re-evaluate failed verdicts")
     .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => setExit(await evaluateContest(app, contestId, options, io)))
+    .action(async (contestId, options) => setExit(await evaluateContest(installed(), contestId, options, io)))
+  contest
+    .command("finish <contest>")
+    .description("finish one waiting remote evaluator")
+    .option("--attempt <attempt>", "contest attempt id")
+    .option("--evaluator <evaluator>", "evaluator id")
+    .option("--ok", "record a passing evaluator verdict")
+    .option("--fail", "record a failing evaluator verdict")
+    .option("--token <token>", "waiting-job correlation token")
+    .option("--detail <text>", "human-readable result summary")
+    .option("--artifact [artifact...]", "artifact name=path-or-url")
+    .option("--json", "emit stable JSON")
+    .action(async (contestId, options) => finishContest(installed(), contestId, options, io))
   contest
     .command("show <contest>")
     .description("show recorded attempts, metrics, evidence, and selection")
     .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => showContest(app, contestId, options, io))
+    .action(async (contestId, options) => showContest(installed(), contestId, options, io))
   contest
     .command("select <contest>")
     .description("record a manual winner")
@@ -739,12 +792,12 @@ function buildProgram(
     .option("--by <actor>", "selector identity")
     .option("--reason <text>", "selection rationale")
     .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => selectContest(app, contestId, options, io))
+    .action(async (contestId, options) => selectContest(installed(), contestId, options, io))
   contest
     .command("promote <contest>")
     .description("verify and submit the exact selected Git pin")
     .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => setExit(await promoteContest(app, contestId, options, io)))
+    .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
   addExamples(program, name, projection)
   configureOutput(program, io, commanderOutput)
@@ -753,8 +806,8 @@ function buildProgram(
 
 /** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
  * every mutation still resolves through the composed app's command registry. */
-export async function runYrd(
-  app: YrdCliApp,
+async function executeYrd(
+  app: YrdCliApp | undefined,
   argv: readonly string[],
   io: YrdCliIO,
   services: YrdCliServices = {},
@@ -780,4 +833,20 @@ export async function runYrd(
     await diagnostic(io, invocation.name, error)
     return code
   }
+}
+
+/** Render command metadata without creating a repository-backed runtime. */
+export function runYrdHelp(argv: readonly string[], io: YrdCliIO): Promise<YrdCliExitCode> {
+  return executeYrd(undefined, argv, io, {})
+}
+
+/** Run the one Yrd command surface. git-bay projects its canonical bay subtree;
+ * every mutation still resolves through the composed app's command registry. */
+export function runYrd(
+  app: YrdCliApp,
+  argv: readonly string[],
+  io: YrdCliIO,
+  services: YrdCliServices = {},
+): Promise<YrdCliExitCode> {
+  return executeYrd(app, argv, io, services)
 }

@@ -58,7 +58,14 @@ function outputFor(attempt: string, model: string, bay: string, branch: string):
   }
 }
 
-function fixtures(options: { waitingRunner?: string; waitingEvaluator?: boolean; waitingAdvisory?: boolean } = {}) {
+function fixtures(
+  options: {
+    waitingRunner?: string
+    failedRunner?: string
+    waitingEvaluator?: boolean
+    waitingAdvisory?: boolean
+  } = {},
+) {
   const pins = new Map<string, string>([["main", BASE_SHA]])
   const control = {
     waitingEvaluator: options.waitingEvaluator ?? false,
@@ -78,6 +85,9 @@ function fixtures(options: { waitingRunner?: string; waitingEvaluator?: boolean;
       try {
         if (input.competitor.model === options.waitingRunner) {
           return { status: "waiting", token: `remote-${input.attempt}`, detail: "capacity pending" }
+        }
+        if (input.competitor.model === options.failedRunner) {
+          return { status: "failed", error: { code: "runner-failed", message: "agent process failed" } }
         }
         const output = outputFor(input.attempt, input.competitor.model, input.bay.id, input.bay.branch)
         pins.set(output.pin.ref, output.pin.commit)
@@ -250,9 +260,10 @@ describe("Contests", () => {
     const evaluation = app.contests.get("C1")?.attempts.A2?.evaluations["held-out"]?.runs.at(-1)?.job
     if (evaluation?.status !== "waiting") throw new Error("evaluation did not remain waiting")
     expect(await app.jobs.recover({ now: "1970-01-01T00:01:01.000Z" })).toEqual([])
-    await app.jobs.finish(evaluation.id, {
-      attempt: evaluation.attempt,
-      executor: evaluation.executor,
+    await app.contests.finish({
+      contest: "C1",
+      attempt: "A2",
+      evaluator: "held-out",
       token: evaluation.token,
       result: { status: "failed", error: { code: "remote-timeout", message: "remote evaluator timed out" } },
     })
@@ -281,6 +292,25 @@ describe("Contests", () => {
       attempts: { A1: { status: "passing" }, A2: { status: "passing" } },
     })
     await expect(app.contests.select({ contest: "C1", attempt: "A1" })).rejects.toThrow("not ready")
+  })
+
+  it("terminalizes a failed runner without inventing evaluator jobs", async () => {
+    const setup = fixtures({ failedRunner: "claude" })
+    await using app = await createApp(createMemoryJournal(), setup)
+    await startContest(app)
+
+    const ready = await app.contests.evaluate("C1", runtime)
+    expect(ready).toMatchObject({
+      status: "ready",
+      attempts: {
+        A1: { status: "passing" },
+        A2: { status: "failed", runner: { status: "failed", error: { code: "runner-failed" } } },
+      },
+    })
+    expect(ready.attempts.A2?.evaluations["held-out"]?.runs).toEqual([])
+    await expect(app.contests.select({ contest: "C1", attempt: "A1" })).resolves.toMatchObject({
+      status: "selected",
+    })
   })
 
   it("re-evaluates failed verdicts with new Jobs while preserving prior evidence and runner pins", async () => {

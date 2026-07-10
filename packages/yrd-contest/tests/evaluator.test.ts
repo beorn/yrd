@@ -252,6 +252,29 @@ describe("held-out command evaluator", () => {
     expect(await readFile(stderr[0]!, "utf8")).toBe("durable stderr\n")
   })
 
+  it("preserves a launched waiting evaluator when local checkout cleanup fails", async () => {
+    const checkoutParent = await temporaryRoot("yrd-evaluator-waiting-cleanup-")
+    const launch = {
+      token: "remote-evaluation-9",
+      url: "https://ci.example.test/evaluations/9",
+      detail: "queued on secure runner",
+    }
+    const { evaluator } = await fixture(
+      {
+        command: processResult(0, `${JSON.stringify(launch)}\n`, "", 40),
+        cleanup: processResult(1, "", "cleanup denied"),
+      },
+      { runner: "waiting", checkoutParent },
+    )
+
+    await expect(evaluator.evaluate(input(), context)).resolves.toMatchObject({
+      status: "waiting",
+      token: launch.token,
+      url: launch.url,
+      detail: expect.stringContaining("cleanup denied"),
+    })
+  })
+
   it.each([
     ["moved attempt ref", { refSha: MOVED_SHA }, "pin-ref-mismatch"],
     ["wrong detached checkout", { checkoutSha: MOVED_SHA }, "pin-checkout-mismatch"],

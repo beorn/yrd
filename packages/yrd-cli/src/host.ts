@@ -46,7 +46,7 @@ import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
-import { runYrd } from "./run.ts"
+import { runYrd, runYrdHelp } from "./run.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliLineAdministration, YrdCliServices } from "./types.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
@@ -399,7 +399,7 @@ async function closeRuntime(app: YrdCliApp | undefined, process: Process, scope:
 
 export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
   const scope = createScope("yrd-host")
-  const log = createLogger("yrd:host")
+  const log = createLogger("yrd")
   const process = createProcess({ cwd: options.cwd, env: options.env, inject: { scope, log } })
   let app: YrdCliApp | undefined
   try {
@@ -423,7 +423,9 @@ export async function createYrdHost(options: { cwd?: string; env?: NodeJS.Proces
     })
     const runtimeApp = app
     const resolveTarget = receiverTarget(runtimeApp)
+    const receiverLog = log.child("receiver")
     const drain = async (): Promise<void> => {
+      using _span = receiverLog.span?.("drain")
       const result = await receiver.drain({
         resolveTarget,
         intake: (receipt) => intakeReceipt(runtimeApp, receipt),
@@ -459,7 +461,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
   const gitDir = env.GIT_DIR
   if (gitDir === undefined || gitDir === "") throw new Error("yrd: receiver hook requires GIT_DIR")
   const scope = createScope("yrd-receiver-hook")
-  const log = createLogger("yrd:receiver-hook")
+  const log = createLogger("yrd").child({ host: "receiver-hook", mode })
   const runtimeProcess = createProcess({ cwd: globalThis.process.cwd(), env, inject: { scope, log } })
   let app: YrdCliApp | undefined
   try {
@@ -519,6 +521,10 @@ export async function runYrdProcess(
       await diagnostic(io, invocation.name, error)
       return classifyFailure(error)
     }
+  }
+
+  if (invocation.args.length === 0 || invocation.args.some((argument) => argument === "--help" || argument === "-h")) {
+    return runYrdHelp(argv, io)
   }
 
   let host: YrdHost | undefined
