@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { createProcess } from "@yrd/process"
+import { createProcess, type Spawn } from "@yrd/process"
+
+function bytes(value: string): ReadableStream<Uint8Array> {
+  return new Blob([value]).stream()
+}
 
 describe("Process", () => {
   it("runs argv without a shell and returns one stable result shape", async () => {
@@ -34,6 +38,42 @@ describe("Process", () => {
     const result = await running
     expect(result).toMatchObject({ timedOut: false })
     expect(result.signal).not.toBeNull()
+  })
+
+  it("bounds captured stdout and terminates a process that exceeds it", async () => {
+    const killed: NodeJS.Signals[] = []
+    const spawn: Spawn = () => ({
+      stdout: bytes("too much output"),
+      stderr: bytes(""),
+      exited: Promise.resolve(0),
+      signalCode: null,
+      kill(signal = "SIGTERM") {
+        killed.push(signal as NodeJS.Signals)
+      },
+    })
+    await using process = createProcess({ maxOutputBytes: 4, inject: { spawn } })
+
+    await expect(process.run({ argv: ["noisy"] })).rejects.toThrow("stdout exceeded 4 bytes")
+    expect(killed).toContain("SIGTERM")
+  })
+
+  it("escalates timed-out children from SIGTERM to SIGKILL after the grace period", async () => {
+    const killed: NodeJS.Signals[] = []
+    const spawn: Spawn = () => ({
+      stdout: bytes(""),
+      stderr: bytes(""),
+      exited: new Promise((resolve) => setTimeout(() => resolve(137), 25)),
+      signalCode: "SIGKILL",
+      kill(signal = "SIGTERM") {
+        killed.push(signal as NodeJS.Signals)
+      },
+    })
+    await using process = createProcess({ killGraceMs: 1, inject: { spawn } })
+
+    const result = await process.run({ argv: ["stubborn"], timeoutMs: 1 })
+
+    expect(result.timedOut).toBe(true)
+    expect(killed).toEqual(["SIGTERM", "SIGKILL"])
   })
 
   it("refuses work after close", async () => {
