@@ -1,5 +1,5 @@
 steps:
-  verify: bun --bun x vitest run
+  verify: bun install --frozen-lockfile --ignore-scripts && bun --bun x vitest run
 
 contest:
   concurrency: 2
