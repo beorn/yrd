@@ -259,6 +259,27 @@ describe("runYrd", () => {
     expect(yrdHelp.stdout()).not.toMatch(/^\s+help /mu)
   })
 
+  it("uses concise layered help with examples on the root and line surfaces", async () => {
+    const app = await createApp()
+    const root = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
+    expect(root.stdout()).toContain("software delivery orchestration")
+    expect(root.stdout()).toContain("Help:")
+    expect(root.stdout()).toContain("Yrd coordinates software work from task to delivery.")
+    expect(root.stdout()).toContain("Examples:")
+    expect(root.stdout()).toContain("$ yrd bay open fix --from topic")
+
+    const line = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("line", "--help"), line.io)).toBe(0)
+    expect(line.stdout()).toContain("manage integration lines")
+    expect(line.stdout()).toMatch(/^\s+init \[options\] \[base\]\s+prepare line resources$/mu)
+    expect(line.stdout()).toMatch(/^\s+deinit \[options\] \[base\]\s+release line resources$/mu)
+    expect(line.stdout()).not.toMatch(/^\s+(?:provision|deprovision)\b/mu)
+    expect(line.stdout()).toContain("Examples:")
+    expect(line.stdout()).toContain("$ yrd line status release/2.0")
+    expect(line.stdout()).toContain("$ yrd line integrate PR7 --steps check,merge")
+  })
+
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
     const app = await createApp()
     const open = outputIO({ color: true, columns: 64 })
@@ -541,6 +562,23 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("keeps the line summary columns content-sized on wide terminals", async () => {
+    const app = await createApp()
+    const status = outputIO({
+      columns: 120,
+      resolveRevision: async () => "3".repeat(40),
+    })
+
+    expect(await runYrd(app, yrd("line", "status"), status.io), status.stderr()).toBe(0)
+    const header = status
+      .stdout()
+      .split("\n")
+      .find((line) => line.startsWith("LINE"))
+
+    expect(header).toBeDefined()
+    expect(header?.indexOf("REJECTED") ?? Number.POSITIVE_INFINITY).toBeLessThan(60)
+  })
+
   it("runs a real task contest to durable evidence, then selects and promotes the exact winner", async () => {
     const baseResolutions: string[] = []
     const app = await createApp({ baseResolutions })
@@ -710,8 +748,8 @@ describe("runYrd", () => {
     expect(missingWaitingRun.stderr()).toContain("no line run or PR 'PR404'")
 
     const unsupported = outputIO()
-    expect(await runYrd(app, yrd("line", "provision"), unsupported.io)).toBe(2)
-    expect(unsupported.stderr()).toContain("line.provision capability is not installed")
+    expect(await runYrd(app, yrd("line", "init"), unsupported.io)).toBe(2)
+    expect(unsupported.stderr()).toContain("line.init capability is not installed")
 
     const missingTaskSource = outputIO()
     expect(
@@ -746,12 +784,20 @@ describe("runYrd", () => {
       },
     }
 
-    const provision = outputIO()
-    expect(await runYrd(app, yrd("line", "provision", "release/2.0", "--json"), provision.io, services)).toBe(0)
-    expect(JSON.parse(provision.stdout())).toEqual({
+    const init = outputIO()
+    expect(await runYrd(app, yrd("line", "init", "release/2.0", "--json"), init.io, services)).toBe(0)
+    expect(JSON.parse(init.stdout())).toEqual({
       base: "release/2.0",
-      command: "line.provision",
+      command: "line.init",
       result: { base: "release/2.0", ready: true },
+    })
+
+    const deinit = outputIO()
+    expect(await runYrd(app, yrd("line", "deinit", "release/2.0", "--json"), deinit.io, services)).toBe(0)
+    expect(JSON.parse(deinit.stdout())).toEqual({
+      base: "release/2.0",
+      command: "line.deinit",
+      result: { base: "release/2.0", released: true },
     })
 
     const audit = outputIO()

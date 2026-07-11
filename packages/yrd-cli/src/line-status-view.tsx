@@ -265,7 +265,7 @@ export function LineStatusView({
             <Table
               data={summary}
               columns={[
-                { header: "LINE", key: "line", grow: true },
+                { header: "LINE", key: "line" },
                 { header: "OPEN", key: "open", align: "right" },
                 { header: "ACTIVE", key: "active", align: "right" },
                 { header: "INTEGRATED", key: "integrated", align: "right" },
