@@ -325,3 +325,32 @@ describe("Line command adapters", () => {
     expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
   })
 })
+
+describe("configuredCommandStep — a timed-out command is a NAMED timeout failure (21012 S1)", () => {
+  it("fails with <purpose>-timeout naming the bound, not a generic exit red", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-cmd-timeout-"))
+    roots.push(cwd)
+    await using process = createProcess({ cwd, killGraceMs: 500 })
+    const runner = configuredCommandStep<PRShape>({
+      inject: { process },
+      command: "sleep 30",
+      cwd,
+      purpose: "check",
+      artifactRoot: join(cwd, "artifacts"),
+      timeoutMs: 500,
+    })
+    const outcome = await runner(
+      {
+        run: "run-1",
+        step: "check",
+        prs: [{ id: "pr-1", base: "main", headSha: "a".repeat(40) }],
+        targetSha: "a".repeat(40),
+      } as unknown as StepExecution<PRShape>,
+      { attempt: 1 } as never,
+    )
+    expect(outcome.status).toBe("failed")
+    if (outcome.status !== "failed") return
+    expect(outcome.error.code).toBe("check-timeout")
+    expect(outcome.error.message).toContain("500ms wall-clock bound")
+  }, 15_000)
+})

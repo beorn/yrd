@@ -58,3 +58,26 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
     expect(() => parseYrdConfig(value)).toThrow(message)
   })
 })
+
+describe("Yrd config — step timeoutMs (21012 S1: local steps cannot be silently unbounded)", () => {
+  it("accepts a declarative per-step timeoutMs and threads it through parsing", () => {
+    const parsed = parseYrdConfig(
+      Bun.YAML.parse(`
+steps:
+  check: { run: bun run check, timeoutMs: 60000 }
+`),
+    )
+    expect(parsed.steps["check"]).toEqual({ run: "bun run check", runner: "local", timeoutMs: 60_000 })
+  })
+
+  it("rejects a nonsense bound instead of silently accepting it", () => {
+    expect(() =>
+      parseYrdConfig(
+        Bun.YAML.parse(`
+steps:
+  check: { run: bun run check, timeoutMs: 0 }
+`),
+      ),
+    ).toThrow()
+  })
+})

@@ -17,6 +17,11 @@ export type ProcessResult = Readonly<{
   stderr: string
   durationMs: number
   timedOut: boolean
+  /**
+   * Set when a settlement signal could not reach the process GROUP (non-ESRCH
+   * kill failure) — descendants may survive; loud, never swallowed (21012 S1).
+   */
+  sweepFailure?: string
 }>
 
 export type Process = Readonly<{
@@ -35,6 +40,8 @@ type SpawnOptions = Readonly<{
 }>
 
 type Spawned = Readonly<{
+  /** Child pid — the process-GROUP id when the spawn established leadership. */
+  pid: number
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
   exited: Promise<number>
@@ -62,6 +69,11 @@ export function createProcess(
   const log = options.inject?.log?.child("process") ?? createLogger("yrd:process")
   const now = options.inject?.now ?? performance.now.bind(performance)
   const spawn = options.inject?.spawn ?? spawnProcess
+  // Group settlement is the DEFAULT spawn's contract (it establishes group
+  // leadership via detached:true). An INJECTED spawn (test seam) gets the
+  // direct-child kill contract only — signalling a real OS group at a fake
+  // pid would strafe unrelated processes.
+  const groupSettlement = options.inject?.spawn === undefined
   const cwd = options.cwd ?? process.cwd()
   const env = definedEnv(options.env ?? process.env)
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? 16 * 1024 * 1024, "maxOutputBytes")
@@ -95,11 +107,48 @@ export function createProcess(
           signal,
         })
         let terminating = false
+        let sweepFailure: string | undefined
+        // 21012 S1 — settlement owns the FULL process tree. The default spawn
+        // makes the child a process-group LEADER (Bun.spawn detached:true —
+        // bun's NATIVE spawn honors it; the node:child_process shim does NOT,
+        // probed 2026-07-10/11), so signalling -pid reaches every descendant,
+        // including a fork worker holding our stdout pipe open (without this,
+        // run() hangs PAST its own timeout awaiting a pipe only SIGKILL can
+        // free). If leadership is absent (custom injected spawn), -pid names a
+        // nonexistent group — the child pid is fresh, never OUR pgid — so the
+        // signal degrades to ESRCH and we fall back to the direct child.
+        // Self-daemonized (setsid) descendants escape any group signal: the
+        // documented residual lifecycle class, owned by supervision, not here.
+        const signalTree = (sig: "SIGTERM" | "SIGKILL"): void => {
+          let groupReached = false
+          if (groupSettlement) {
+            try {
+              process.kill(-child.pid, sig)
+              groupReached = true
+            } catch (error) {
+              const code = (error as { code?: string }).code
+              // ESRCH: group already fully exited or no leadership — fall back.
+              if (code !== "ESRCH") {
+                sweepFailure ??= `process-group ${sig} failed (${code ?? String(error)}) — descendants may survive pgid ${child.pid}; inspect and kill manually`
+              }
+            }
+          }
+          if (!groupReached) {
+            try {
+              child.kill(sig)
+            } catch (error) {
+              const code = (error as { code?: string }).code
+              if (code !== "ESRCH") {
+                sweepFailure ??= `direct-child ${sig} failed (${code ?? String(error)})`
+              }
+            }
+          }
+        }
         const terminate = (): void => {
           if (terminating) return
           terminating = true
-          child.kill("SIGTERM")
-          cancelKill = runScope.timeout(() => child.kill("SIGKILL"), killGraceMs)
+          signalTree("SIGTERM")
+          cancelKill = runScope.timeout(() => signalTree("SIGKILL"), killGraceMs)
         }
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
@@ -134,6 +183,7 @@ export function createProcess(
           stderr,
           durationMs: Math.max(0, now() - started),
           timedOut,
+          ...(sweepFailure === undefined ? {} : { sweepFailure }),
         }
         log.debug?.("process exited", {
           argv: request.argv,
@@ -179,7 +229,11 @@ async function readBounded(
 }
 
 function spawnProcess(argv: readonly string[], options: SpawnOptions): Spawned {
-  return Bun.spawn([...argv], options)
+  // detached:true = the child becomes its own process-GROUP leader, which is
+  // what lets settlement signal the whole tree via -pid. Bun's NATIVE spawn
+  // honors this (probed + pinned by the bun-canary test); the node:child_process
+  // compat shim ignores it — do not port this file to node:child_process.
+  return Bun.spawn([...argv], { ...options, detached: true })
 }
 
 function definedEnv(input: NodeJS.ProcessEnv | undefined): Record<string, string> {
