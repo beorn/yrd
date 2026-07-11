@@ -206,7 +206,24 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   }
   const commit = async (repo: string, ref: string): Promise<string> =>
     (await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).stdout
-  return Object.freeze({ run, commit })
+  const optionalCommit = async (repo: string, ref: string): Promise<string | undefined> => {
+    const result = await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], true)
+    return result.code === 0 ? result.stdout : undefined
+  }
+  return Object.freeze({ run, commit, optionalCommit })
+}
+
+type LineBase = Readonly<{ branchRef: string; sha: string; local: boolean }>
+
+async function resolveLineBase(git: Git, repo: string, branch: string): Promise<LineBase> {
+  await git.run(repo, ["check-ref-format", "--branch", branch])
+  const branchRef = `refs/heads/${branch}`
+  const local = await git.optionalCommit(repo, branchRef)
+  if (local !== undefined) return { branchRef, sha: local, local: true }
+  const sourceRef = `refs/remotes/origin/${branch}`
+  const remote = await git.optionalCommit(repo, sourceRef)
+  if (remote !== undefined) return { branchRef, sha: remote, local: false }
+  throw new Error(`yrd: line base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
 }
 
 async function withScratch(
@@ -292,8 +309,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     try {
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
-      await git.run(repo, ["check-ref-format", "--branch", branch])
-      const baseSha = await git.commit(repo, `refs/heads/${branch}`)
+      const baseSha = (await resolveLineBase(git, repo, branch)).sha
       return await withScratch(
         git,
         repo,
@@ -366,9 +382,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   return async (input): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      await git.run(repo, ["check-ref-format", "--branch", branch])
-      const baseRef = `refs/heads/${branch}`
-      const baseSha = await git.commit(repo, baseRef)
+      const base = await resolveLineBase(git, repo, branch)
+      const baseSha = base.sha
       const checked = checkedCandidate(input.shape)
       if (checked === undefined) return failed("check-missing", "merge requires a pinned check")
       if (checked.baseSha !== baseSha) {
@@ -382,7 +397,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           return failed("invalid-candidate", `checked candidate does not contain '${sha}'`)
         }
       }
-      const checkedOut = await checkedOutWorktree(git, repo, baseRef)
+      const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
       if (checkedOut !== undefined) {
         const status = await git.run(checkedOut, ["status", "--porcelain"])
         if (status.stdout !== "") return failed("dirty-base", status.stdout)
@@ -390,7 +405,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
       } else {
-        const moved = await git.run(repo, ["update-ref", baseRef, checked.candidateSha, baseSha], true)
+        const expected = base.local ? baseSha : "0".repeat(baseSha.length)
+        const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
       }
       return {

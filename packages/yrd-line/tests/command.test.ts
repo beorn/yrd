@@ -130,6 +130,26 @@ describe("Line command adapters", () => {
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("checked\n")
   })
 
+  it("lands from origin when the base has no local branch without moving detached HEAD", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["update-ref", "refs/remotes/origin/main", baseSha])
+    await git(repo, ["switch", "-q", "--detach", featureSha])
+    await git(repo, ["branch", "-D", "main"])
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, "test -f feature.txt")
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status).toBe("passed")
+    expect(await git(repo, ["rev-parse", "HEAD"])).toBe(featureSha)
+    expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(baseSha)
+    const job = run.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("check did not pass")
+    await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
+  })
+
   it("materializes candidate checks under the injected trusted parent", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const parentRoot = await mkdtemp(join(tmpdir(), "yrd-line-checkouts-"))

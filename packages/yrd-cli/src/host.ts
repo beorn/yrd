@@ -234,12 +234,16 @@ function cleanEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: string): Promise<string | undefined> {
-  const result = await process.run({
-    argv: ["git", "-C", repo, "rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`],
-    cwd: repo,
-    env: cleanEnvironment(globalThis.process.env),
-  })
-  return result.exitCode === 0 ? result.stdout.trim().toLowerCase() : undefined
+  const candidates = ref.startsWith("refs/") ? [ref] : [ref, `refs/remotes/origin/${ref}`]
+  for (const candidate of candidates) {
+    const result = await process.run({
+      argv: ["git", "-C", repo, "rev-parse", "--verify", "--end-of-options", `${candidate}^{commit}`],
+      cwd: repo,
+      env: cleanEnvironment(globalThis.process.env),
+    })
+    if (result.exitCode === 0) return result.stdout.trim().toLowerCase()
+  }
+  return undefined
 }
 
 function localContestGit(process: Pick<Process, "run">, repo: string): ContestGit {
@@ -383,7 +387,7 @@ function lineAdministration(
   config: ResolvedYrdProjectConfig,
 ): YrdCliLineAdministration {
   const inspect = async (base = config.line.base) => {
-    const baseSha = await resolveCommit(process, repository.repo, `refs/heads/${base}`)
+    const baseSha = await resolveCommit(process, repository.repo, base)
     if (baseSha === undefined) throw new Error(`yrd: line base '${base}' does not resolve`)
     return { base, baseSha }
   }
