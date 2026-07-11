@@ -44,6 +44,11 @@ import {
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
 const MERGED_SHA = "b".repeat(40)
+const JOB_PREPARE_PASS_ID = "00000000-0000-7000-8000-000000000101"
+const JOB_CHECK_FAILED_ID = "00000000-0000-7000-8000-000000000102"
+const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
+const JOB_CHECK_PASS_ID = "00000000-0000-7000-8000-000000000104"
+const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
 
 type CheckedShape = AddStepResult<PRShape, "check", JsonValue>
 type ProbeKind = "bay" | "runner" | "evaluator"
@@ -859,12 +864,12 @@ describe("runYrd", () => {
       finishedAt: "2026-07-10T10:00:02.000Z",
       pr: { id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA },
       steps: [
-        fakeStep("prepare", "passed", fakeJob({ id: "job-prepare-pass", status: "passed", attempt: 1 })),
+        fakeStep("prepare", "passed", fakeJob({ id: JOB_PREPARE_PASS_ID, status: "passed", attempt: 1 })),
         fakeStep(
           "check",
           "failed",
           fakeJob({
-            id: "job-check-failed",
+            id: JOB_CHECK_FAILED_ID,
             status: "failed",
             attempt: 1,
             error: { code: "check-failed", message: "policy mismatch" },
@@ -874,7 +879,7 @@ describe("runYrd", () => {
         fakeStep(
           "deploy",
           "lost",
-          fakeJob({ id: "job-deploy-lost", status: "lost", attempt: 1, lostReason: "worker died" }),
+          fakeJob({ id: JOB_DEPLOY_LOST_ID, status: "lost", attempt: 1, lostReason: "worker died" }),
         ),
       ],
     })
@@ -893,7 +898,7 @@ describe("runYrd", () => {
           "check",
           "passed",
           fakeJob({
-            id: "job-check-pass",
+            id: JOB_CHECK_PASS_ID,
             status: "passed",
             attempt: 2,
             requestedAt: "2026-07-10T12:00:00.000Z",
@@ -922,7 +927,7 @@ describe("runYrd", () => {
         fakeStep(
           "check",
           "passed",
-          fakeJob({ id: "job-check-missing", status: "passed", artifacts: [{ path: missingArtifact }] }),
+          fakeJob({ id: JOB_CHECK_MISSING_ID, status: "passed", artifacts: [{ path: missingArtifact }] }),
         ),
       ],
     })
@@ -1007,7 +1012,7 @@ describe("runYrd", () => {
       step: "check",
       attempt: "2",
       status: "passed",
-      uuid: "job-check-pass",
+      uuid: JOB_CHECK_PASS_ID,
       evidence: {
         url: "https://ci.invalid/check",
         artifacts: [{ uri: attemptTwo }],
@@ -1080,7 +1085,7 @@ describe("runYrd", () => {
 
     const renderedShow = await renderString(createElement(LineShowView, { data: show }), { width: 140, height: 40 })
     expect(renderedShow).toContain("check")
-    expect(renderedShow).not.toContain("job-check-pass")
+    expect(renderedShow).not.toContain(JOB_CHECK_PASS_ID)
     const ttyShow = await renderString(createElement(LineShowView, { data: show }), {
       width: 140,
       height: 40,
@@ -1094,7 +1099,7 @@ describe("runYrd", () => {
     expect(ttyShow).toContain("\u001b]8;;")
     expect(plainShow).not.toContain("\u001b]8;;")
     const lineShowJson = JSON.parse(JSON.stringify(show))
-    expect(lineShowJson.steps[0].uuid).toBe("job-check-pass")
+    expect(lineShowJson.steps[0].uuid).toBe(JOB_CHECK_PASS_ID)
     expect(lineShowJson.steps[0].attempt).toBe("2")
     expect(lineShowJson.steps[0].duration).toBe("2.0s")
 
