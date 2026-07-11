@@ -16,10 +16,6 @@ task -> work bay -> PR -> line -> integrated base branch
 `yrd` is the complete command. `git bay` is available as a convenient alias in Git,
 and is the same as `yrd bay`.
 
-```text
-git bay <verb> == yrd bay <verb>
-```
-
 The project is `beorn/yrd`, the CLI distribution is `git-yrd`, the package
 scope is `@yrd`, and its owned public domain is `yrd.dev`.
 
