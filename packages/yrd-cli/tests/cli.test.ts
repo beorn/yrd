@@ -10,7 +10,16 @@ import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { type LineRun, type LineSummary, withLine, withMerge, withStep, type AddStepResult, type PRShape, type StepExecution } from "@yrd/line"
+import {
+  type LineRun,
+  type LineSummary,
+  withLine,
+  withMerge,
+  withStep,
+  type AddStepResult,
+  type PRShape,
+  type StepExecution,
+} from "@yrd/line"
 import { withTasks } from "@yrd/task"
 import { createElement } from "react"
 import { renderString } from "silvery"
@@ -36,7 +45,7 @@ type OverlapProbe = {
 
 function ids(): () => string {
   let value = 0
-  return () => `id-${++value}`
+  return () => `00000000-0000-7000-8000-${String(++value).padStart(12, "0")}`
 }
 
 function overlapProbe(): OverlapProbe {
@@ -263,7 +272,11 @@ function fakeJob(input: {
           leaseExpiresAt: "2026-07-09T12:00:10.000Z",
         }),
     ...(status === "waiting"
-      ? { token: "run-job", detail: input.detail ?? "waiting for downstream", ...(input.url === undefined ? {} : { url: input.url }) }
+      ? {
+          token: "run-job",
+          detail: input.detail ?? "waiting for downstream",
+          ...(input.url === undefined ? {} : { url: input.url }),
+        }
       : {}),
     ...(status === "passed"
       ? {
@@ -307,9 +320,7 @@ function fakeJob(input: {
     ...(input.checkpoint === undefined || status === "requested" || status === "running"
       ? {}
       : { checkpoint: input.checkpoint }),
-    ...(input.detail === undefined || status !== "passed"
-      ? {}
-      : { detail: input.detail }),
+    ...(input.detail === undefined || status !== "passed" ? {} : { detail: input.detail }),
   } as LineRun["steps"][number]["job"]
 }
 
@@ -676,7 +687,7 @@ describe("runYrd", () => {
     await openAndSubmit(app)
     await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000, now: () => 0 })
     const base = await app.contests.resolveBase()
-    await app.command(app.commands.task.compete, {
+    await app.dispatch(app.commands.task.compete, {
       task: { ref: { source: "km", id: "T1" }, title: "Task one" },
       competitors: [
         { model: "codex", harness: "ag", config: { prompt: "Implement it" } },
@@ -814,7 +825,6 @@ describe("runYrd", () => {
     expect(parsed.run.steps[0]).toHaveProperty("output")
     expect(parsed.run.steps[0]).toHaveProperty("landing")
   })
-
 
   it("maps the 10-row line log/show contract matrix directly from canonical fields", async () => {
     const temp = mkdtempSync(join(tmpdir(), "yrd-legacy-log-"))

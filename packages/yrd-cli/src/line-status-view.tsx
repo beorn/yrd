@@ -427,7 +427,12 @@ export function PRResultView({ prs, runs }: { prs: readonly PR[]; runs: readonly
   )
 }
 
-export function lineStatusRows(state: BaysState, result: LineStatusResult, selected: ReadonlySet<string>, now: number): Row[] {
+export function lineStatusRows(
+  state: BaysState,
+  result: LineStatusResult,
+  selected: ReadonlySet<string>,
+  now: number,
+): Row[] {
   return result.prs
     .filter((pr) => selected.has(pr.id) || (pr.status !== "integrated" && pr.status !== "withdrawn"))
     .map((pr) => {
@@ -629,8 +634,7 @@ export function lineLogRows(
           duration: duration(run.startedAt, run.finishedAt),
           retries: String(Math.max(0, runOutputLineageIndex(finished, run, pr.revision, pr.id))),
           landing: lineLanding(run),
-          integration:
-            outcome === "integrated" && run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
+          integration: outcome === "integrated" && run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
           parent: run.parent ?? "-",
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
@@ -715,7 +719,7 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
       attempt: step.job === undefined ? "-" : String(step.job.attempt),
       uuid: step.job?.id ?? "-",
       requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
-      started: step.job === undefined ? "-" : (step.job.status === "requested" ? "-" : toIso(step.job.startedAt)),
+      started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
       finished:
         step.job === undefined || step.job.status === "running" || step.job.status === "requested"
           ? "-"
