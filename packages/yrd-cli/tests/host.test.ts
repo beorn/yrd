@@ -212,6 +212,42 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     })
     await reopened.close()
   })
+
+  it("reports a failed line against origin when the operator HEAD is detached", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(join(repo, ".yrd.yml"), "steps:\n  check: exit 7\n")
+    const baseSha = await git(repo, "rev-parse", "main")
+    const first = await createYrdHost({ cwd: repo })
+    await first.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    const run = (await first.app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
+    expect(run.status).toBe("failed")
+    await first.close()
+
+    await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
+    await git(repo, "switch", "-q", "--detach", featureSha)
+    await git(repo, "branch", "-D", "main")
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+        columns: 120,
+        color: false,
+        now: () => Date.now(),
+      }),
+    ).toBe(0)
+    expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
+    expect(stdout).toMatch(/PR1\s+rejected/u)
+    expect(stdout).not.toContain(featureSha.slice(0, 12))
+    expect(stderr).toBe("")
+  })
 })
 
 describe("discoverYrdRepository", { timeout: 20_000 }, () => {
