@@ -129,6 +129,7 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
 async function createApp(
   options: {
     waitingCheck?: boolean
+    check?: (input: StepExecution<PRShape>) => JobResult<JsonValue>
     dirtyBay?: boolean
     refreshedHead?: string
     probe?: OverlapProbe
@@ -143,15 +144,16 @@ async function createApp(
   )
   const check = withStep(
     "check",
-    (_input: StepExecution<PRShape>): JobResult<JsonValue> =>
-      options.waitingCheck
+    (input: StepExecution<PRShape>): JobResult<JsonValue> =>
+      options.check?.(input) ??
+      (options.waitingCheck
         ? {
             status: "waiting",
             token: "remote-check",
             url: "https://ci.invalid/run/1",
             checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
           }
-        : { status: "passed", output: { checked: true } },
+        : { status: "passed", output: { checked: true, artifacts: [] } }),
     { revision: "check-v1", output: JsonSchema },
   )
   const merge = withMerge(
@@ -491,6 +493,125 @@ describe("runYrd", () => {
     const drained = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "--json"), drained.io)).toBe(0)
     expect(JSON.parse(drained.stdout())).toEqual({ command: "line.integrate", results: [] })
+  })
+
+  it("renders empty line log state as stable json and plain text", async () => {
+    const app = await createApp()
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("line", "log", "--json"), json.io)).toBe(0)
+    expect(JSON.parse(json.stdout())).toEqual({ command: "line.log", runs: [] })
+
+    const empty = outputIO({ color: true })
+    expect(await runYrd(app, yrd("line", "log"), empty.io)).toBe(0)
+    expect(empty.stdout()).toContain("No finished runs.")
+  })
+
+  it("shows rejected/retried attempts in line log with archive links and json stability", async () => {
+    const app = await createApp({
+      check: (input) =>
+        input.run === "R1"
+        ? {
+              status: "failed",
+              error: { code: "check", message: "failed test gate" },
+              output: { checked: false, artifacts: [{ uri: "file:///repo/.artifacts/R1" }] },
+            }
+          : { status: "passed", output: { checked: true, artifacts: [] } },
+    })
+    await openAndSubmit(app)
+
+    const first = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--json"), first.io), first.stderr()).toBe(1)
+    expect(JSON.parse(first.stdout())).toMatchObject({
+      command: "line.integrate",
+      results: [{ id: "R1", status: "failed", steps: [{ name: "check" }, { name: "merge" }] }],
+    })
+
+    const retried = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--retry", "--json"), retried.io), retried.stderr()).toBe(0)
+    expect(JSON.parse(retried.stdout())).toMatchObject({
+      command: "line.integrate",
+      results: [{ id: "R2", status: "passed", steps: [{ name: "check" }, { name: "merge" }] }],
+    })
+
+    const logJson = outputIO()
+    expect(await runYrd(app, yrd("line", "log", "--json"), logJson.io)).toBe(0)
+    expect(JSON.parse(logJson.stdout())).toMatchObject({
+      command: "line.log",
+      runs: [
+        expect.objectContaining({ run: "R1", status: "failed", archive: "file:///repo/.artifacts/R1" }),
+        expect.objectContaining({ run: "R2", status: "passed", archive: "-" }),
+      ],
+    })
+
+    const logText = outputIO({ color: true })
+    expect(await runYrd(app, yrd("line", "log"), logText.io)).toBe(0)
+    expect(logText.stdout()).toContain("\u001b]8;;")
+    expect(logText.stdout()).toContain("R1")
+    expect(logText.stdout()).toContain("R2")
+
+    const plainLog = outputIO()
+    expect(await runYrd(app, yrd("line", "log"), plainLog.io)).toBe(0)
+    expect(plainLog.stdout()).not.toContain("\u001b]8;;")
+  })
+
+  it("shows bisection lineage in line show output", async () => {
+    const app = await createApp({
+      batch: 2,
+      check: (input) =>
+        input.run === "R1"
+          ? {
+              status: "failed",
+              error: { code: "check", message: "combined batch failure" },
+              output: { checked: false, artifacts: [{ uri: "file:///repo/.artifacts/R1" }] },
+            }
+          : {
+              status: "passed",
+              output: { checked: true, artifacts: [{ uri: `file:///repo/.artifacts/${input.run}` }] },
+            },
+    })
+
+    expect(await runYrd(app, yrd("bay", "open", "batch-a"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B1" }).io)).toBe(0)
+    expect(await runYrd(app, yrd("bay", "open", "batch-b"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
+
+    const batch = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "PR2", "--json"), batch.io), batch.stderr()).toBe(1)
+    const batchResult = JSON.parse(batch.stdout())
+    expect(batchResult).toMatchObject({ command: "line.integrate" })
+    expect(batchResult.results).toContainEqual(expect.objectContaining({ id: "R1", status: "failed" }))
+
+    expect(
+      await (app.command as (command: unknown, params: { run: string; part: number }) => Promise<unknown>)(
+        app.commands.line.isolate,
+        { run: "R1", part: 0 },
+      ),
+    ).toBeDefined()
+    expect(
+      await (app.command as (command: unknown, params: { run: string; part: number }) => Promise<unknown>)(
+        app.commands.line.isolate,
+        { run: "R1", part: 1 },
+      ),
+    ).toBeDefined()
+    await app.line.run("R2", { executor: "cli-test", leaseMs: 60_000 })
+    await app.line.run("R3", { executor: "cli-test", leaseMs: 60_000 })
+
+    const child = outputIO()
+    expect(await runYrd(app, yrd("line", "show", "R2"), child.io)).toBe(0)
+    expect(child.stdout()).toContain("parent R1#-")
+
+    const parent = outputIO()
+    expect(await runYrd(app, yrd("line", "show", "R1"), parent.io)).toBe(0)
+    expect(parent.stdout()).toContain("child R2#0")
+    expect(parent.stdout()).toContain("child R3#1")
+
+    const showJson = outputIO()
+    expect(await runYrd(app, yrd("line", "show", "R2", "--json"), showJson.io)).toBe(0)
+    expect(JSON.parse(showJson.stdout())).toMatchObject({
+      command: "line.show",
+      run: { id: "R2", parent: "R1", isolationPart: 0 },
+    })
   })
 
   it("passes zero-or-more selectors to the line as one batch-capable candidate set", async () => {

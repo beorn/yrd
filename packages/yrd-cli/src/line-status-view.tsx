@@ -1,12 +1,27 @@
-import { resolve } from "node:path"
-import { pathToFileURL } from "node:url"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath, pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
-import type { Job } from "@yrd/job"
 import type { LineRun, LineStep, LineSummary } from "@yrd/line"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
 export type LineStatusResult = LineSummary & { headSha?: string; prs: PR[] }
+
+type JobLike = Readonly<{
+  status?: string
+  executor?: string
+  url?: string
+  requestedAt?: string
+  changedAt?: string
+  startedAt?: string
+  finishedAt?: string
+  attempt?: number
+  output?: unknown
+  artifacts?: readonly unknown[]
+  error?: { code?: string }
+  lostReason?: string
+  detail?: string
+}>
 
 type Row = Readonly<{
   pr: string
@@ -44,7 +59,7 @@ function latestRun(pr: PR, summary: LineSummary): LineRun | undefined {
     .at(-1)
 }
 
-function jobStatus(step: LineStep): Job["status"] | "queued" {
+function jobStatus(step: LineStep): string {
   return step.job?.status ?? "queued"
 }
 
@@ -59,9 +74,10 @@ function relevantStep(run: LineRun | undefined): LineStep | undefined {
 }
 
 function stepArtifacts(step: LineStep | undefined): readonly unknown[] {
-  if (step?.job === undefined) return []
-  if ("artifacts" in step.job && step.job.artifacts !== undefined) return step.job.artifacts
-  const output = "output" in step.job ? step.job.output : undefined
+  const job = step?.job as JobLike | undefined
+  if (job === undefined) return []
+  if (job.artifacts !== undefined) return job.artifacts
+  const output = job.output
   if (typeof output !== "object" || output === null || !("artifacts" in output)) return []
   return Array.isArray(output.artifacts) ? output.artifacts : []
 }
@@ -113,6 +129,215 @@ export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
   )
 }
 
+function runArchive(run: LineRun): string | undefined {
+  const artifact = run.steps
+    .flatMap((step) => {
+      const job = step.job as JobLike | undefined
+      return job?.artifacts ?? stepArtifacts(step)
+    })
+    .find((item): item is { path?: string; uri?: string } => {
+      if (typeof item !== "object" || item === null) return false
+      if ("path" in item && typeof item.path === "string") return true
+      const uri = "uri" in item && typeof item.uri === "string" ? item.uri : undefined
+      return uri !== undefined && (uri.startsWith("file://") || uri.startsWith("/"))
+    })
+  if (artifact === undefined) return undefined
+  if (artifact.path !== undefined) return pathToFileURL(resolve(dirname(artifact.path), "..", "..")).href
+  const artifactPath = artifact.uri
+  if (artifactPath === undefined) return undefined
+  if (artifactPath.startsWith("file://")) return pathToFileURL(fileURLToPath(artifactPath)).href
+  if (artifactPath.startsWith("/")) return pathToFileURL(artifactPath).href
+  return undefined
+}
+
+function logLineLink(value?: string): string {
+  return value === undefined ? "-" : value
+}
+
+export type LineLogRow = Readonly<{
+  base: string
+  run: string
+  status: string
+  prs: string
+  startedAt: string
+  finishedAt: string
+  parent: string
+  part: string
+  log: string
+  archive: string
+}>
+
+export function lineLogRows(results: readonly LineSummary[]): LineLogRow[] {
+  const finished = results
+    .flatMap((summary) => summary.finished)
+    .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+  return finished.map((run) => {
+    const latest = run.steps.at(-1)?.job as JobLike | undefined
+    const started = run.steps.find((step) => step.job !== undefined)?.job
+    const log = run.steps.find((step) => (step.job as JobLike | undefined)?.url !== undefined)?.job
+    const logValue = (log as JobLike | undefined)?.url
+    const finishedAt =
+      latest?.status === "passed" || latest?.status === "failed"
+        ? ((latest as JobLike).finishedAt ?? "")
+        : undefined
+    const archive = runArchive(run)
+    return {
+      base: run.base,
+      run: run.id,
+      status: run.status,
+      prs: run.prs.map((pr) => pr.id).join(","),
+      startedAt:
+        started === undefined
+          ? "-"
+          : new Date((started as JobLike).requestedAt ?? "").toISOString().replace(/\.\d{3}Z$/u, "Z"),
+      finishedAt:
+        finishedAt === undefined ? "-" : new Date(finishedAt).toISOString().replace(/\.\d{3}Z$/u, "Z"),
+      parent: logLineLink(run.parent),
+      part: run.isolationPart === undefined ? "-" : String(run.isolationPart),
+      log: logValue === undefined ? "-" : logValue,
+      archive: archive === undefined ? "-" : archive,
+    }
+  })
+}
+
+export function LineLogView({ results }: { results: readonly LineSummary[] }) {
+  const rows = lineLogRows(results)
+  if (rows.length === 0) return <Text color="$fg-muted">No finished runs.</Text>
+
+  return (
+    <Table
+      data={rows}
+      columns={[
+        { header: "BASE", key: "base" },
+        { header: "RUN", key: "run", minWidth: 5 },
+        {
+          header: "STATUS",
+          key: "status",
+          render: (row) => <StatusValue value={row.status} />,
+        },
+        { header: "PRS", key: "prs", grow: true },
+        { header: "STARTED", key: "startedAt" },
+        { header: "FINISHED", key: "finishedAt" },
+        { header: "PARENT", key: "parent" },
+        { header: "PART", key: "part" },
+        {
+          header: "LOG",
+          key: "log",
+          render: (row) => (row.log === "-" ? "-" : <Link href={row.log}>{"open"}</Link>),
+        },
+        {
+          header: "ARCHIVE",
+          key: "archive",
+          render: (row) => (row.archive === "-" ? "-" : <Link href={row.archive}>open</Link>),
+        },
+      ]}
+    />
+  )
+}
+
+type LineShowRelation = Readonly<{
+  role: string
+  run: string
+  part: string
+}>
+
+function showRelations(base: readonly LineSummary[], run: LineRun): LineShowRelation[] {
+  const byId = new Map<string, LineRun>(base.flatMap((summary) => summary.finished).map((candidate) => [candidate.id, candidate]))
+  const ancestors: LineShowRelation[] = []
+  let parent = run.parent
+  while (parent !== undefined) {
+    const current = byId.get(parent)
+    if (current === undefined) break
+    ancestors.push({ role: "parent", run: current.id, part: current.isolationPart === undefined ? "-" : String(current.isolationPart) })
+    parent = current.parent
+  }
+  const children = base
+    .flatMap((summary) => summary.finished)
+    .filter((candidate) => candidate.parent === run.id)
+    .map((candidate) => ({
+      role: `child`,
+      run: candidate.id,
+      part: candidate.isolationPart === undefined ? "-" : String(candidate.isolationPart),
+    }))
+  return [...ancestors.toReversed(), ...children]
+}
+
+export function LineShowView({ run, base }: { run: LineRun; base: readonly LineSummary[] }) {
+  const archive = runArchive(run)
+  const relations = showRelations(base, run)
+  const jobRows = run.steps.map((step, index) => {
+    const job = step.job as JobLike | undefined
+    return {
+      step: `${index + 1}:${step.name}`,
+      status: job?.status ?? "queued",
+      attempt: job?.attempt ?? "-",
+      executor: job?.executor ?? "-",
+      url: job?.url,
+      started: job?.startedAt,
+      finished: job?.finishedAt,
+      output: job?.output,
+    }
+  })
+  return (
+    <Box flexDirection="column">
+      <Table
+        data={[
+          {
+            run: run.id,
+            base: run.base,
+            status: run.status,
+            prs: run.prs.map((pr) => pr.id).join(","),
+            started: run.steps.find((step) => step.job !== undefined)?.job?.requestedAt ?? "-",
+            finished: run.finishedAt ?? "-",
+            parent: run.parent ?? "-",
+            part: run.isolationPart === undefined ? "-" : String(run.isolationPart),
+          },
+        ]}
+        columns={[
+          { header: "RUN", key: "run" },
+          { header: "BASE", key: "base" },
+          {
+            header: "STATUS",
+            key: "status",
+            render: (row) => <StatusValue value={row.status} />,
+          },
+          { header: "PRS", key: "prs", grow: true },
+          { header: "STARTED", key: "started" },
+          { header: "FINISHED", key: "finished" },
+          { header: "PARENT", key: "parent" },
+          { header: "PART", key: "part" },
+        ]}
+      />
+      <Box marginTop={1}>
+        <Table
+          data={jobRows}
+          columns={[
+            { header: "STEP", key: "step" },
+            { header: "STATUS", key: "status" },
+            { header: "ATTEMPT", key: "attempt", align: "right" },
+            { header: "EXECUTOR", key: "executor" },
+            { header: "STARTED", key: "started" },
+            { header: "FINISHED", key: "finished" },
+            {
+              header: "LOG",
+              key: "url",
+              render: (row) => (row.url === undefined ? "-" : <Link href={row.url}>open</Link>),
+            },
+          ]}
+        />
+      </Box>
+      {relations.length > 0 && (
+        <Box marginTop={1}>
+          <Text>
+            {relations.map((relation) => `${relation.role} ${relation.run}#${relation.part}`).join(" ")}
+          </Text>
+        </Box>
+      )}
+      {archive !== undefined ? <Box marginTop={1}>ARCHIVE <Link href={archive}>open</Link></Box> : null}
+    </Box>
+  )
+}
+
 export function PRResultView({ prs, runs }: { prs: readonly PR[]; runs: readonly LineRun[] }) {
   return (
     <Box flexDirection="column">
@@ -144,7 +369,7 @@ function lineRows(state: BaysState, result: LineStatusResult, selected: Readonly
         run?.startedAt,
         run?.finishedAt,
         ...(run?.steps ?? []).flatMap((item) => {
-          const itemJob = item.job
+          const itemJob = item.job as JobLike | undefined
           return itemJob === undefined
             ? []
             : [

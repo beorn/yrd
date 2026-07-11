@@ -6,7 +6,15 @@ import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { LineRun } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
-import { LineRunsView, LineStatusView, PRResultView, type LineStatusResult } from "./line-status-view.tsx"
+import {
+  LineLogView,
+  lineLogRows,
+  LineRunsView,
+  LineShowView,
+  LineStatusView,
+  PRResultView,
+  type LineStatusResult,
+} from "./line-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
@@ -300,6 +308,44 @@ async function lineStatus(
       now: io.now?.() ?? Date.now(),
     }),
   )
+}
+
+function lineBases(state: YrdCliState, selectors: readonly string[]): Set<string> {
+  const bases = new Set<string>()
+  for (const selector of selectors) {
+    const pr = resolvePR(state.bays, selector)
+    if (pr === undefined) bases.add(selector)
+    else bases.add(pr.base)
+  }
+  return bases
+}
+
+async function lineLog(app: YrdCliApp, selectors: readonly string[], options: JsonOption, io: YrdCliIO): Promise<void> {
+  const state = stateOf(app)
+  const bases = lineBases(state, selectors)
+  if (bases.size === 0) {
+    for (const run of Object.values(state.lines.records)) bases.add(run.base)
+    if (bases.size === 0) for (const pr of Object.values(state.bays.prs)) bases.add(pr.base)
+    if (bases.size === 0) bases.add("main")
+  }
+  const results: LineStatusResult[] = []
+
+  for (const base of [...bases].toSorted()) {
+    results.push({ ...app.line.status(base), prs: [] })
+  }
+  await printResult(io, jsonEnabled(options), { command: "line.log", runs: lineLogRows(results) }, createElement(LineLogView, { results }))
+}
+
+async function lineShow(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  const run = app.line.get(selector)
+  if (run === undefined) usage(`no line run '${selector}'`)
+  const summary = app.line.status(run.base)
+  await printResult(io, jsonEnabled(options), { command: "line.show", run }, createElement(LineShowView, { run, base: [summary] }))
 }
 
 async function lineAudit(
@@ -663,6 +709,8 @@ function addLineExamples(line: CliCommand, name: string): void {
     [`$ ${name} line status`, "show the default line"],
     [`$ ${name} line status release/2.0`, "show another base branch"],
     [`$ ${name} line integrate PR7 --steps check,merge`, "run selected steps for one PR"],
+    [`$ ${name} line log`, "show recently finished runs"],
+    [`$ ${name} line show R7`, "show completed run details"],
     [`$ ${name} line integrate --watch`, "keep the default line moving"],
   ])
 }
@@ -737,6 +785,16 @@ function buildProgram(
     .description("show line and PR status")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => lineStatus(installed(), selectors, options, io))
+  line
+    .command("log [selector...]")
+    .description("show recent historical runs")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => lineLog(installed(), selectors, options, io))
+  line
+    .command("show <run>")
+    .description("show a completed run")
+    .option("--json", "emit stable JSON")
+    .action(async (run, options) => lineShow(installed(), run, options, io))
   line
     .command("audit")
     .description("check line state")
