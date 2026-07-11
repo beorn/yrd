@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto"
 import { open, stat, type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
-import { CauseSchema, EventSchema, Frame, type Journal } from "@yrd/core"
+import { CauseSchema, Command, CommandSchema, EventSchema, JsonSchema, type Journal } from "@yrd/core"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
 
-const VERSION = 1
+const VERSION = 2
 const SCAN_BYTES = 64 * 1024
 const WARN_BYTES = 10 * 1024 * 1024
 const WARN_FRAMES = 10_000
@@ -32,10 +32,15 @@ const StoredFrameSchema = z
   .object({
     v: z.literal(VERSION),
     cause: CauseSchema,
+    command: CommandSchema,
     events: z.array(EventSchema),
+    value: JsonSchema.optional(),
     checksum: z.string().regex(/^[0-9a-f]{64}$/),
   })
   .strict()
+
+const JournalFrameSchema = StoredFrameSchema.omit({ v: true, checksum: true })
+type JournalFrame = z.infer<typeof JournalFrameSchema>
 
 export function createJournal(
   options: Readonly<{
@@ -91,7 +96,7 @@ export function createJournal(
 
     append(value, expectedCursor) {
       assertCursor(expectedCursor)
-      const frame = Frame.parse(value)
+      const frame = parseFrame(value)
       return exclusive.run(async () => {
         const { file, created } = await openJournal(path)
         let committed = 0
@@ -149,8 +154,14 @@ async function* decode(
   }
 }
 
-function encode(value: ReturnType<typeof Frame.parse>): Buffer {
-  const data = { v: VERSION, cause: value.cause, events: value.events }
+function encode(value: JournalFrame): Buffer {
+  const data = {
+    v: VERSION,
+    cause: value.cause,
+    command: value.command,
+    events: value.events,
+    ...(value.value === undefined ? {} : { value: value.value }),
+  }
   return Buffer.from(`${JSON.stringify({ ...data, checksum: digest(data) })}\n`)
 }
 
@@ -158,7 +169,18 @@ function decodeFrame(value: unknown) {
   const stored = StoredFrameSchema.parse(value)
   const { checksum, ...data } = stored
   if (checksum !== digest(data)) throw new Error("yrd: journal frame checksum mismatch")
-  return Frame.parse({ cause: stored.cause, events: stored.events })
+  return parseFrame({
+    cause: stored.cause,
+    command: stored.command,
+    events: stored.events,
+    ...(stored.value === undefined ? {} : { value: stored.value }),
+  })
+}
+
+function parseFrame(value: unknown): JournalFrame {
+  const frame = JournalFrameSchema.parse(value)
+  Command.assertCause(frame.command, frame.cause)
+  return frame
 }
 
 function digest(value: unknown): string {

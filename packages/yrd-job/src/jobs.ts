@@ -1,11 +1,11 @@
 import {
   command,
   event,
-  type Command,
+  type CommandHandler,
+  type CommandResult,
   type CommandTree,
   type DeepReadonly,
   type Event,
-  type Frame,
   type JsonValue,
   type YrdDef,
   JsonSchema,
@@ -254,7 +254,7 @@ export type Jobs = Readonly<{
   finish(id: string, completion: JobCompletion): Promise<Job>
   retry(id: string): Promise<Job>
   recover(options: Readonly<{ now: string; reason?: string }>): Promise<readonly string[]>
-  requested(source: Frame | readonly Event[]): readonly string[]
+  requested(source: CommandResult | readonly Event[]): readonly string[]
 }>
 
 type JobScope = Scope
@@ -262,7 +262,7 @@ type JobScope = Scope
 export type CreateJobsOptions = Readonly<{
   definitions: JobDefs
   state: ReadSignal<DeepReadonly<JobsState>>
-  transition(change: JobTransition): Promise<Frame>
+  transition(change: JobTransition): Promise<CommandResult>
   scope: JobScope
   log: ConditionalLogger
 }>
@@ -415,7 +415,8 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const worker = async (): Promise<void> => {
         while (next < ids.length) {
           const index = next++
-          const id = ids[index]!
+          const id = ids[index]
+          if (id === undefined) break
           const job = current(id)
           results[index] = job.status === "requested" ? await run(id, runOptions) : job
         }
@@ -477,7 +478,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
 
 export type JobCommands = Readonly<{
   job: Readonly<{
-    transition: Command<JobTransition, object>
+    transition: CommandHandler<JobTransition, object>
   }>
 }>
 
@@ -513,7 +514,7 @@ export function withJobs(options: JobsOptions = {}) {
           jobs: createJobs({
             definitions,
             state: computed(() => yrd.state().jobs),
-            transition: (change) => yrd.command(transition, change),
+            transition: (change) => yrd.dispatch(transition, change),
             scope: yrd.scope,
             log: yrd.log.child("jobs"),
           }),

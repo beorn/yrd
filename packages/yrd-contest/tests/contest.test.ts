@@ -23,7 +23,7 @@ const runtime = { executor: "test", leaseMs: 60_000, concurrency: 1 }
 
 function ids(): () => string {
   let value = 0
-  return () => `id-${++value}`
+  return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
 function workspace(): BayWorkspace {

@@ -37,7 +37,7 @@ type ProcessDependency = Readonly<{ inject: Readonly<{ process: Pick<Process, "r
 
 export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency &
   Readonly<{
-    command: string
+    command: readonly string[]
     cwd: string | ((input: StepExecution<Shape>) => string | Promise<string>)
     purpose: string
     artifactRoot?: string
@@ -73,11 +73,11 @@ function configuredCommand<Shape extends PRShape>(
   options: ConfiguredCommandOptions<Shape>,
   waiting: boolean,
 ): StepRunner<Shape, CommandEvidence> {
-  validateCommand(options.command, options.purpose)
+  const argv = validateCommand(options.command, options.purpose)
   const configHash = createHash("sha256")
     .update(options.purpose)
     .update("\0")
-    .update(options.command.trim())
+    .update(JSON.stringify(argv))
     .digest("hex")
   return async (input, context): Promise<JobResult<CommandEvidence>> => {
     const { process } = options.inject
@@ -99,7 +99,7 @@ function configuredCommand<Shape extends PRShape>(
       ...options.variables?.(input),
     }
     const result = await process.run({
-      argv: ["sh", "-c", options.command],
+      argv,
       cwd,
       env: commandEnvironment(options.env ?? globalThis.process.env, variables),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -172,13 +172,24 @@ function commandEnvironment(
   return env
 }
 
-function validateCommand(command: string, purpose: string): void {
-  if (command.trim() === "") throw new Error(`yrd: ${purpose} command must not be empty`)
+function validateCommand(command: unknown, purpose: string): readonly string[] {
+  if (!Array.isArray(command)) {
+    throw new TypeError(`yrd: ${purpose} command must be an argv array; wrap shell text with shellCommand()`)
+  }
+  const argv: string[] = []
+  for (const arg of command as readonly unknown[]) {
+    if (typeof arg !== "string" || arg.length === 0) {
+      throw new TypeError(`yrd: ${purpose} command argv must contain non-empty strings`)
+    }
+    argv.push(arg)
+  }
+  if (argv.length === 0) throw new TypeError(`yrd: ${purpose} command argv must contain non-empty strings`)
   for (const [placeholder, replacement] of RETIRED_PLACEHOLDERS) {
-    if (command.includes(placeholder)) {
+    if (argv.some((arg) => arg.includes(placeholder))) {
       throw new Error(`yrd: ${purpose} command placeholder ${placeholder} is retired; use ${replacement}`)
     }
   }
+  return Object.freeze(argv)
 }
 
 async function writeArtifacts(
@@ -300,7 +311,7 @@ async function prepareCandidate(git: Git, path: string, input: StepExecution): P
 export type GitCheckOptions = ProcessDependency &
   Readonly<{
     repo: string
-    command: string
+    command: readonly string[]
     checkoutParent?: string
     artifactRoot?: string
     purpose?: string

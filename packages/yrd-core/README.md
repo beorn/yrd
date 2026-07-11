@@ -36,7 +36,7 @@ function withMessages() {
       create: (yrd) => ({
         messages: Object.freeze({
           list: () => yrd.state().messages,
-          send: (text: string) => yrd.command(send, { text }),
+          send: (text: string) => yrd.dispatch(send, { text }),
         }),
       }),
     })
@@ -52,21 +52,28 @@ Journal and returns one frozen runtime. Plugins never mutate a running app.
 
 ## Command Contract
 
-An Operation is serializable JSON:
+A Command is serializable JSON. Callers may provide an id, or let Core create a
+process-unique UUIDv7 id:
 
 ```json
 { "op": "message.send", "args": { "text": "hello" } }
 ```
 
 Commands synchronously decide event drafts from one immutable state snapshot.
-Core validates arguments and event payloads with Zod, adds a command id and
-canonical operation hash, projects the candidate state, and appends one atomic
-Frame. External work must be requested as data and executed after commit.
+Core validates arguments and event payloads with Zod, adds UUIDv7 command,
+cause, and event ids, projects the candidate state, and appends one atomic
+private journal transaction. External work must be requested as data and
+executed after commit.
 
-`command()` accepts a command object reference for trusted in-process calls.
-`invoke()` accepts a public serialized Operation. Supplying a stable
-`commandId` makes retries exact: the same operation returns its committed Frame;
-different arguments under that id are refused.
+`dispatch()` is the only execution surface. It accepts either a trusted handler
+reference plus arguments or a public serialized Command. It returns
+`{ command, events, value? }`; handlers may use `value` for JSON-safe decision
+results without exposing the Journal envelope.
+
+Supplying the same Command id makes public retries exact. Trusted adapters can
+use `dispatch(handler, args, { key })` when their idempotency identity is not a
+UUID. The same id or key plus the same intent returns the committed result;
+different arguments are refused.
 
 ## Failure Contract
 
@@ -85,7 +92,7 @@ silently inferred from their wording by downstream callers.
 ## Reactive State
 
 `yrd.state` is a synchronous `ReadSignal<DeepReadonly<State>>`. Domain objects
-derive narrower signals with `computed()`. `await yrd.refresh()` replays Frames
+derive narrower signals with `computed()`. `await yrd.refresh()` replays journal records
 written by another process and publishes the newest snapshot. Commands refresh
 before deciding and publish after a successful append.
 

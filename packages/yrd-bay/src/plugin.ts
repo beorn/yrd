@@ -2,11 +2,11 @@ import {
   command,
   event,
   raiseFailure,
-  type Command,
+  type CommandHandler,
+  type CommandResult,
   type CommandTree,
   type DeepReadonly,
   type Event,
-  type Frame,
   type YrdDef,
 } from "@yrd/core"
 import {
@@ -203,11 +203,11 @@ type BayState = Readonly<{ bays: BaysState }>
 
 export type BayCommands = Readonly<{
   bay: Readonly<{
-    open: Command<OpenBayArgs, BayState>
-    refresh: Command<RefreshBayArgs, BayState>
-    intake: Command<IntakePRArgs, BayState>
-    submit: Command<SubmitArgs, BayState>
-    close: Command<CloseBayArgs, BayState>
+    open: CommandHandler<OpenBayArgs, BayState>
+    refresh: CommandHandler<RefreshBayArgs, BayState>
+    intake: CommandHandler<IntakePRArgs, BayState>
+    submit: CommandHandler<SubmitArgs, BayState>
+    close: CommandHandler<CloseBayArgs, BayState>
   }>
 }>
 
@@ -217,12 +217,12 @@ export type Bays = Readonly<{
   list(): readonly DeepReadonly<Bay>[]
   pr(selector: string): DeepReadonly<PR> | undefined
   prs(): readonly DeepReadonly<PR>[]
-  open(args: OpenBayArgs): Promise<Frame>
-  refresh(args: RefreshBayArgs): Promise<Frame>
-  intake(args: IntakePRArgs): Promise<Frame>
-  submit(args: SubmitArgs): Promise<Frame>
+  open(args: OpenBayArgs): Promise<CommandResult>
+  refresh(args: RefreshBayArgs): Promise<CommandResult>
+  intake(args: IntakePRArgs): Promise<CommandResult>
+  submit(args: SubmitArgs): Promise<CommandResult>
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
-  close(args: CloseBayArgs): Promise<Frame>
+  close(args: CloseBayArgs): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
@@ -230,8 +230,8 @@ export type HasBays = Readonly<{ bays: Bays }>
 type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close">
 
 export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Jobs, actions: BayActions): Bays {
-  const execute = async (frame: Frame, options: RunJobOptions, action: string): Promise<void> => {
-    const results = await jobs.runMany(jobs.requested(frame), options)
+  const execute = async (result: CommandResult, options: RunJobOptions, action: string): Promise<void> => {
+    const results = await jobs.runMany(jobs.requested(result), options)
     const failed = results.find((job) => job.status !== "passed")
     if (failed !== undefined) {
       raiseFailure("infrastructure", "bay-job-failed", `yrd: ${action} ${failed.status}: ${jobDetail(failed)}`)
@@ -354,11 +354,11 @@ export function withBays(options: WithBaysOptions) {
         const state = computed(() => yrd.state().bays)
         return {
           bays: createBays(state, yrd.jobs, {
-            open: (args) => yrd.command(commands.bay.open, args),
-            refresh: (args) => yrd.command(commands.bay.refresh, args),
-            intake: (args) => yrd.command(commands.bay.intake, args),
-            submit: (args) => yrd.command(commands.bay.submit, args),
-            close: (args) => yrd.command(commands.bay.close, args),
+            open: (args) => yrd.dispatch(commands.bay.open, args),
+            refresh: (args) => yrd.dispatch(commands.bay.refresh, args),
+            intake: (args) => yrd.dispatch(commands.bay.intake, args),
+            submit: (args) => yrd.dispatch(commands.bay.submit, args),
+            close: (args) => yrd.dispatch(commands.bay.close, args),
           }),
         }
       },

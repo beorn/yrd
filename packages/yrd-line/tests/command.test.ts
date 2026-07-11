@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createProcess, type Process, type ProcessResult } from "@yrd/process"
+import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import {
   GitCheckEvidenceSchema,
@@ -80,7 +80,7 @@ const unusedWorkspace: BayWorkspace = {
 async function checkedLine(
   process: Pick<Process, "run">,
   repo: string,
-  command: string,
+  command: readonly string[],
   options: Readonly<{ batch?: number; waiting?: boolean; checkoutParent?: string }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -93,7 +93,7 @@ async function checkedLine(
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
     }),
-    { revision: `check:${command}:${options.waiting === true}`, output: GitCheckEvidenceSchema },
+    { revision: `check:${JSON.stringify(command)}:${options.waiting === true}`, output: GitCheckEvidenceSchema },
   )
   const merge = withMerge(gitMergeStep<Checked>({ inject: { process }, repo }), { revision: "git-merge-v1" })
   const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? 1 })
@@ -107,13 +107,69 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
 }
 
 describe("Line command adapters", () => {
+  it("executes argv directly and requires an explicit gate for shell text", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-argv-"))
+    roots.push(cwd)
+    const requests: ProcessRequest[] = []
+    const process: Pick<Process, "run"> = {
+      run(request) {
+        requests.push(request)
+        return Promise.resolve({
+          exitCode: 0,
+          signal: null,
+          stdout: "ok",
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        })
+      },
+    }
+    const input = {
+      run: "R1",
+      step: "check",
+      index: 0,
+      prs: [{ id: "PR1", branch: "task/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+      shape: { results: {} },
+    } as StepExecution<PRShape>
+    const context = { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal }
+
+    expect(() =>
+      configuredCommandStep<PRShape>({
+        inject: { process },
+        command: "printf unsafe" as never,
+        cwd,
+        purpose: "check",
+      }),
+    ).toThrow("shellCommand")
+
+    const direct = configuredCommandStep<PRShape>({
+      inject: { process },
+      command: ["printf", "%s", "literal;$(not-expanded)"],
+      cwd,
+      purpose: "check",
+    })
+    const explicitShell = configuredCommandStep<PRShape>({
+      inject: { process },
+      command: shellCommand("printf shell"),
+      cwd,
+      purpose: "check",
+    })
+
+    await direct(input, context)
+    await explicitShell(input, context)
+    expect(requests.map((request) => request.argv)).toEqual([
+      ["printf", "%s", "literal;$(not-expanded)"],
+      ["sh", "-c", "printf shell"],
+    ])
+  })
+
   it("lands the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     await using app = await checkedLine(
       process,
       repo,
-      'git config user.name "Changed After Check" && test -f feature.txt && echo checked',
+      shellCommand('git config user.name "Changed After Check" && test -f feature.txt && echo checked'),
     )
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
 
@@ -137,7 +193,7 @@ describe("Line command adapters", () => {
     await git(repo, ["switch", "-q", "--detach", featureSha])
     await git(repo, ["branch", "-D", "main"])
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, "test -f feature.txt")
+    await using app = await checkedLine(process, repo, ["test", "-f", "feature.txt"])
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
@@ -156,7 +212,7 @@ describe("Line command adapters", () => {
     const checkoutParent = join(parentRoot, "nested")
     roots.push(parentRoot)
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, "pwd", { checkoutParent })
+    await using app = await checkedLine(process, repo, ["pwd"], { checkoutParent })
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
@@ -186,7 +242,7 @@ describe("Line command adapters", () => {
           : process.run(request)
       },
     }
-    await using app = await checkedLine(guarded, repo, "test -f feature.txt")
+    await using app = await checkedLine(guarded, repo, ["test", "-f", "feature.txt"])
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
@@ -201,7 +257,7 @@ describe("Line command adapters", () => {
     expect(() =>
       configuredCommandStep<PRShape>({
         inject: { process },
-        command: "echo {target}",
+        command: ["echo", "{target}"],
         cwd: ".",
         purpose: "check",
       }),
@@ -213,7 +269,7 @@ describe("Line command adapters", () => {
     const pr = { id: "PR1", branch: "task/feature", base: "main", revision: 1, headSha, baseSha }
     const step = configuredCommandStep<PRShape>({
       inject: { process },
-      command: "env | grep -E '^(YRD_|GIT_)' | sort",
+      command: shellCommand("env | grep -E '^(YRD_|GIT_)' | sort"),
       cwd: repo,
       purpose: "check",
       env: { ...globalThis.process.env, YRD_LEAK: "must-not-leak", GIT_DIR: "/must/not/leak" },
@@ -244,9 +300,12 @@ describe("Line command adapters", () => {
   it("checks and lands one combined candidate for a passing batch", async () => {
     const { repo, one: firstSha, two: secondSha } = await repository("one", "two")
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, "test -f one.txt && test -f two.txt && echo checked-batch", {
-      batch: 2,
-    })
+    await using app = await checkedLine(
+      process,
+      repo,
+      shellCommand("test -f one.txt && test -f two.txt && echo checked-batch"),
+      { batch: 2 },
+    )
     await app.bays.submit({ branch: "task/one", headSha: firstSha, base: "main" })
     await app.bays.submit({ branch: "task/two", headSha: secondSha, base: "main" })
     await git(repo, ["switch", "-q", "--detach", "main"])
@@ -267,8 +326,10 @@ describe("Line command adapters", () => {
     await using app = await checkedLine(
       process,
       repo,
-      `printf '%s\\n' '{"token":"ci-1","url":"https://ci.invalid/1","detail":"queued",` +
-        `"artifacts":[{"name":"remote","uri":"artifact://ci-1"}]}'`,
+      shellCommand(
+        `printf '%s\\n' '{"token":"ci-1","url":"https://ci.invalid/1","detail":"queued",` +
+          `"artifacts":[{"name":"remote","uri":"artifact://ci-1"}]}'`,
+      ),
       { waiting: true },
     )
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
@@ -296,10 +357,14 @@ describe("Line command adapters", () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     const bayJobs = createBayJobDefs(unusedWorkspace)
-    const check = withStep("check", gitCheckStep({ inject: { process }, repo, command: "test -f feature.txt" }), {
-      revision: "check-v1",
-      output: GitCheckEvidenceSchema,
-    })
+    const check = withStep(
+      "check",
+      gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
+      {
+        revision: "check-v1",
+        output: GitCheckEvidenceSchema,
+      },
+    )
     const MovedSchema = z.object({ moved: z.literal(true) }).strict()
     type Moved = AddStepResult<Checked, "move-base", z.infer<typeof MovedSchema>>
     const move = withStep(
@@ -333,7 +398,7 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
     await using process = createProcess({ cwd, killGraceMs: 500 })
     const runner = configuredCommandStep<PRShape>({
       inject: { process },
-      command: "sleep 30",
+      command: ["sleep", "30"],
       cwd,
       purpose: "check",
       artifactRoot: join(cwd, "artifacts"),

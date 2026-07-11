@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest"
 import * as z from "zod"
 import { createScope } from "@silvery/scope"
 import { createLogger, type Event as LogEvent } from "loggily"
+import * as Core from "@yrd/core"
 import {
   command,
   createMemoryJournal,
@@ -20,9 +21,9 @@ import {
 
 type CounterState = { counter: { value: number } }
 
-function ids(...values: string[]) {
-  let index = 0
-  return () => values[index++] ?? `id-${index}`
+let idSequence = 0
+function ids(..._labels: string[]) {
+  return () => `00000000-0000-7000-8000-${(++idSequence).toString(16).padStart(12, "0")}`
 }
 
 function withCounter() {
@@ -32,6 +33,7 @@ function withCounter() {
     params: z.object({ by: z.number().int() }),
     apply: (state: CounterState, args: { by: number }) => ({
       events: [event("counter/changed", { from: state.counter.value, by: args.by })],
+      value: { value: state.counter.value + args.by },
     }),
   })
 
@@ -62,6 +64,41 @@ function withCounter() {
 }
 
 describe("Yrd domain objects", () => {
+  it("exposes one dispatch surface and returns commands instead of storage frames", async () => {
+    const app = await createYrd(withCounter()(createYrdDef()), {
+      inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z" },
+    })
+
+    expect(Core).not.toHaveProperty("Operation")
+    expect(Core).not.toHaveProperty("Frame")
+    expect(app).toHaveProperty("dispatch")
+    expect(app).not.toHaveProperty("operation")
+    expect(app).not.toHaveProperty("command")
+    expect(app).not.toHaveProperty("invoke")
+
+    const publicResult = await app.dispatch({ op: "counter.add", args: { by: 2 } })
+    expect(publicResult).toMatchObject({
+      command: { op: "counter.add", args: { by: 2 } },
+      events: [{ name: "counter/changed", data: { from: 0, by: 2 } }],
+      value: { value: 2 },
+    })
+    expect(publicResult.command.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u)
+    expect(publicResult.events[0]?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u)
+    expect(publicResult).not.toHaveProperty("cause")
+
+    const trustedResult = await app.dispatch(app.commands.counter.add, { by: 1 })
+    expect(trustedResult.command).toMatchObject({ op: "counter.add", args: { by: 1 } })
+    expect(app.state().counter.value).toBe(3)
+
+    // @ts-expect-error The three legacy runtime surfaces are intentionally absent.
+    void app.command
+    // @ts-expect-error The three legacy runtime surfaces are intentionally absent.
+    void app.operation
+    // @ts-expect-error The three legacy runtime surfaces are intentionally absent.
+    void app.invoke
+    await app.close()
+  })
+
   it("composes immutable definitions into methodful plain objects", async () => {
     const base = createYrdDef()
     const definition = withCounter()(base)
@@ -81,7 +118,7 @@ describe("Yrd domain objects", () => {
     expect(Object.getPrototypeOf(app.counter)).toBe(Object.prototype)
     expect(app.counter.value()).toBe(0)
 
-    await app.command(app.commands.counter.add, { by: 3 })
+    await app.dispatch(app.commands.counter.add, { by: 3 })
 
     expect(app.counter.value()).toBe(3)
     expect(app.state().counter.value).toBe(3)
@@ -104,7 +141,7 @@ describe("Yrd domain objects", () => {
       },
     })
 
-    await writer.command(writer.commands.counter.add, { by: 4 })
+    await writer.dispatch(writer.commands.counter.add, { by: 4 })
 
     const reader = await createYrd(definition, {
       inject: {
@@ -119,7 +156,7 @@ describe("Yrd domain objects", () => {
       props: { frames: 1, events: 1, fromCursor: 0, toCursor: 1 },
     })
 
-    await writer.command(writer.commands.counter.add, { by: 2 })
+    await writer.dispatch(writer.commands.counter.add, { by: 2 })
     expect(reader.state().counter.value).toBe(4)
     expect((await reader.refresh()).counter.value).toBe(6)
     expect(reader.state().counter.value).toBe(6)
@@ -146,8 +183,8 @@ describe("Yrd domain objects", () => {
     })
 
     await Promise.all([
-      appA.command(appA.commands.counter.add, { by: 1 }),
-      appB.command(appB.commands.counter.add, { by: 1 }),
+      appA.dispatch(appA.commands.counter.add, { by: 1 }),
+      appB.dispatch(appB.commands.counter.add, { by: 1 }),
     ])
 
     await Promise.all([appA.refresh(), appB.refresh()])
@@ -166,16 +203,31 @@ describe("Yrd domain objects", () => {
       },
     })
 
-    const first = await app.invoke({ op: "counter.add", args: { by: 2 } }, { commandId: "stable-command" })
-    const retried = await app.invoke({ op: "counter.add", args: { by: 2 } }, { commandId: "stable-command" })
+    const first = await app.dispatch({ op: "counter.add", args: { by: 2 } }, { key: "stable-command" })
+    const retried = await app.dispatch({ op: "counter.add", args: { by: 2 } }, { key: "stable-command" })
 
     expect(retried).toEqual(first)
     expect(app.state().counter.value).toBe(2)
-    await expect(app.invoke({ op: "counter.add", args: { by: 3 } }, { commandId: "stable-command" })).rejects.toThrow(
-      "different operation",
+    await expect(app.dispatch({ op: "counter.add", args: { by: 3 } }, { key: "stable-command" })).rejects.toThrow(
+      "different command",
     )
-    await expect(app.invoke({ op: "counter.add", args: { by: 1.5 } })).rejects.toThrow()
-    await expect(app.invoke({ op: "missing.command" })).rejects.toThrow("unknown command")
+    await expect(app.dispatch({ op: "counter.add", args: { by: 1.5 } })).rejects.toThrow()
+    await expect(app.dispatch({ op: "missing.command" })).rejects.toThrow("unknown command")
+
+    await app.close()
+  })
+
+  it("uses caller-supplied UUIDv7 command ids as public retry identities", async () => {
+    const app = await createYrd(withCounter()(createYrdDef()), {
+      inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z" },
+    })
+    const id = "00000000-0000-7000-8000-000000000001"
+
+    const first = await app.dispatch({ id, op: "counter.add", args: { by: 2 } })
+    await expect(app.dispatch({ id, op: "counter.add", args: { by: 2 } })).resolves.toEqual(first)
+    await expect(app.dispatch({ id, op: "counter.add", args: { by: 3 } })).rejects.toThrow("different command")
+    await expect(app.dispatch({ id: "not-a-uuid", op: "counter.add", args: { by: 1 } })).rejects.toThrow()
+    expect(app.state().counter.value).toBe(2)
 
     await app.close()
   })
@@ -198,7 +250,7 @@ describe("Yrd domain objects", () => {
       },
     })
 
-    await expect(app.command(app.commands.counter.add, { by: 1 })).rejects.toThrow("projection refused")
+    await expect(app.dispatch(app.commands.counter.add, { by: 1 })).rejects.toThrow("projection refused")
     expect(await Array.fromAsync(journal.read())).toEqual([])
     await app.close()
   })
@@ -220,7 +272,7 @@ describe("Yrd domain objects", () => {
       },
     })
 
-    await app.command(app.commands.counter.add, { by: 2 })
+    await app.dispatch(app.commands.counter.add, { by: 2 })
 
     const state = app.state()
     expect(state).toEqual({ counter: { value: 2 }, flag: { seen: true } })
@@ -251,10 +303,10 @@ describe("Yrd domain objects", () => {
       inject: { journal: createMemoryJournal(), id: ids("generated-command", "event") },
     })
 
-    const first = await app.invoke({ op: "gate.close" }, { commandId: "same-command" })
+    const first = await app.dispatch({ op: "gate.close" }, { key: "same-command" })
     expect(app.state().gate.open).toBe(false)
-    await expect(app.invoke({ op: "gate.close" }, { commandId: "same-command" })).resolves.toEqual(first)
-    await expect(app.invoke({ op: "gate.close" }, { commandId: "new-command" })).rejects.toThrow("unavailable")
+    await expect(app.dispatch({ op: "gate.close" }, { key: "same-command" })).resolves.toEqual(first)
+    await expect(app.dispatch({ op: "gate.close" }, { key: "new-command" })).rejects.toThrow("unavailable")
     await app.close()
   })
 
@@ -315,9 +367,9 @@ describe("Yrd domain objects", () => {
       inject: { journal, id: ids("eventless-command") },
     })
 
-    await expect(app.invoke({ op: "internal.noop" })).rejects.toThrow("not publicly available")
-    const first = await app.command(app.commands.internal.noop, undefined, { commandId: "eventless" })
-    const retry = await app.command(app.commands.internal.noop, undefined, { commandId: "eventless" })
+    await expect(app.dispatch({ op: "internal.noop" })).rejects.toThrow("not publicly available")
+    const first = await app.dispatch(app.commands.internal.noop, undefined, { key: "eventless" })
+    const retry = await app.dispatch(app.commands.internal.noop, undefined, { key: "eventless" })
     expect(first.events).toEqual([])
     expect(retry).toEqual(first)
     expect((await Array.fromAsync(journal.read()))[0]?.values).toHaveLength(1)
@@ -339,15 +391,33 @@ describe("Yrd domain objects", () => {
       }),
     ).toThrow("duplicate command 'duplicate.noop'")
 
+    const corruptCommandId = ids()()
+    const corrupt = {
+      cause: {
+        id: ids()(),
+        commandId: corruptCommandId,
+        op: "corrupt",
+        commandHash: "0".repeat(64),
+      },
+      command: { id: corruptCommandId, op: "corrupt" },
+      events: [],
+    }
+    await expect(createYrd(createYrdDef(), { inject: { journal: createMemoryJournal([corrupt]) } })).rejects.toThrow(
+      "command hash",
+    )
+
+    const unknownCommandId = ids()()
     const unknown = {
       cause: {
-        commandId: "unknown",
+        id: ids()(),
+        commandId: unknownCommandId,
         op: "unknown",
-        operationHash: "0".repeat(64),
+        commandHash: Core.Command.hash({ op: "unknown" }),
       },
+      command: { id: unknownCommandId, op: "unknown" },
       events: [
         {
-          id: "unknown-event",
+          id: ids()(),
           name: "unknown/event",
           ts: "2026-07-09T12:00:00.000Z",
           data: {},

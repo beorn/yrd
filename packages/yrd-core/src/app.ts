@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto"
 import {
   commandNode as createCommandNode,
   createCommandRegistry as createCommandTreeRegistry,
@@ -11,34 +10,38 @@ import {
 import { createScope, type Scope } from "@silvery/scope"
 import { signal, type ReadSignal } from "@silvery/signals"
 import { createLogger, type ConditionalLogger } from "loggily"
+import { v7 as uuidv7 } from "uuid"
 import * as z from "zod"
 import {
   CauseSchema,
+  Command as CommandDomain,
+  CommandInputSchema,
   EventSchema,
-  Frame as FrameDomain,
-  Operation as OperationDomain,
+  JsonSchema,
   type Cause,
+  type Command,
+  type CommandInput,
+  type CommandResult,
   type Event,
   type EventDraft,
-  type Frame,
   type JsonValue,
-  type Operation,
 } from "./domain.ts"
 import { asFailure, raiseFailure } from "./failure.ts"
+import { parseJournalFrame, type JournalFrame } from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
 import type { Cursor, Journal } from "./journal.ts"
 
 export type { DeepReadonly } from "./immutable.ts"
 
-export type ApplyResult = Readonly<{ events: readonly EventDraft[] }>
+export type ApplyResult = Readonly<{ events: readonly EventDraft[]; value?: JsonValue }>
 
 export type CommandContext<State extends object> = Readonly<{
   state: DeepReadonly<State>
   cause: Cause
-  operation: Operation
+  command: Command
 }>
 
-export type Command<Args extends JsonValue | undefined = undefined, State extends object = object> = CommandNode<
+export type CommandHandler<Args extends JsonValue | undefined = undefined, State extends object = object> = CommandNode<
   CommandContext<State>,
   Args,
   ApplyResult
@@ -50,8 +53,8 @@ export type CommandTree = {
   readonly [segment: string]: AnyCommand | CommandTree
 }
 
-export type CommandOptions = Readonly<{
-  commandId?: string
+export type DispatchOptions = Readonly<{
+  key?: string
   traceId?: string
   spanId?: string
 }>
@@ -69,22 +72,22 @@ type EventSchemas = Readonly<Record<string, z.ZodType<JsonValue>>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
 
+export type Dispatch = {
+  <Args extends JsonValue | undefined, CommandState extends object>(
+    command: CommandHandler<Args, CommandState>,
+    args: Args,
+    options?: DispatchOptions,
+  ): Promise<CommandResult>
+  (command: CommandInput, options?: DispatchOptions): Promise<CommandResult>
+}
+
 export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   commands: Commands
   state: ReadSignal<DeepReadonly<State>>
   scope: Scope
   log: ConditionalLogger
   refresh(): Promise<DeepReadonly<State>>
-  operation<Args extends JsonValue | undefined, CommandState extends object>(
-    command: Command<Args, CommandState>,
-    args: Args,
-  ): Operation<Args>
-  command<Args extends JsonValue | undefined, CommandState extends object>(
-    command: Command<Args, CommandState>,
-    args: Args,
-    options?: CommandOptions,
-  ): Promise<Frame>
-  invoke(operation: Operation, options?: CommandOptions): Promise<Frame>
+  dispatch: Dispatch
   events(): AsyncIterable<Event>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
@@ -132,13 +135,13 @@ export type YrdOf<Def> =
 
 export function command<State extends object>(
   definition: CommandDef<State, undefined> & Readonly<{ params?: never }>,
-): Command<undefined, State>
+): CommandHandler<undefined, State>
 export function command<State extends object, Args extends JsonValue>(
   definition: CommandDef<State, Args> & Readonly<{ params: ParamSchema<Args> }>,
-): Command<Args, State>
+): CommandHandler<Args, State>
 export function command<State extends object, Args extends JsonValue | undefined>(
   definition: CommandDef<State, Args>,
-): Command<Args, State> {
+): CommandHandler<Args, State> {
   const node = createCommandNode({
     title: definition.title,
     ...(definition.description === undefined ? {} : { description: definition.description }),
@@ -149,7 +152,7 @@ export function command<State extends object, Args extends JsonValue | undefined
       try {
         return definition.apply(context.state, args, {
           cause: context.cause,
-          operation: context.operation,
+          command: context.command,
         })
       } catch (error) {
         throw asFailure(error, { kind: "refusal", code: "command-refused" })
@@ -183,7 +186,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 ): Promise<Yrd<State, Commands> & Features> {
   const journal = options.inject.journal
   const clock = options.inject.clock ?? (() => new Date().toISOString())
-  const id = options.inject.id ?? randomUUID
+  const id = options.inject.id ?? uuidv7
   const log = options.inject.log ?? createLogger("yrd")
   const coreLog = log.child("core")
   const scope = options.inject.scope?.child("yrd") ?? createScope("yrd")
@@ -196,14 +199,18 @@ export async function createYrd<State extends object, Commands extends CommandTr
   type Projection = Readonly<{
     cursor: Cursor
     state: DeepReadonly<State>
-    receipts: ReadonlyMap<string, Frame>
+    receiptsById: ReadonlyMap<string, JournalFrame>
+    receiptsByKey: ReadonlyMap<string, JournalFrame>
+    causeIds: ReadonlySet<string>
     eventIds: ReadonlySet<string>
   }>
 
   let projection: Projection = {
     cursor: 0,
     state: state(),
-    receipts: new Map(),
+    receiptsById: new Map(),
+    receiptsByKey: new Map(),
+    causeIds: new Set(),
     eventIds: new Set(),
   }
   let closing = false
@@ -218,7 +225,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     for await (const batch of journal.read(base.cursor)) {
       if (batch.cursor <= next.cursor) throw new Error("yrd: journal cursor did not advance")
       for (const value of batch.values) {
-        const frame = FrameDomain.parse(value)
+        const frame = parseJournalFrame(value)
         frames += 1
         events += frame.events.length
         next = projectFrame(next, frame)
@@ -229,10 +236,16 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return next
   }
 
-  const projectFrame = (base: Projection, frame: Frame): Projection => {
-    if (base.receipts.has(frame.cause.commandId)) {
+  const projectFrame = (base: Projection, frame: JournalFrame): Projection => {
+    if (base.receiptsById.has(frame.command.id)) {
       throw new Error(`yrd: journal contains duplicate command id '${frame.cause.commandId}'`)
     }
+    if (frame.cause.key !== undefined && base.receiptsByKey.has(frame.cause.key)) {
+      throw new Error(`yrd: journal contains duplicate command key '${frame.cause.key}'`)
+    }
+    const causeIds = new Set(base.causeIds)
+    if (causeIds.has(frame.cause.id)) throw new Error(`yrd: journal contains duplicate cause id '${frame.cause.id}'`)
+    causeIds.add(frame.cause.id)
     const eventIds = new Set(base.eventIds)
     let nextState = base.state
     for (const applied of frame.events) {
@@ -243,9 +256,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
       const validated = freeze(EventSchema.parse({ ...applied, data: schema.parse(applied.data) })) as Event
       nextState = freeze(definition.project(nextState, validated, frame.cause)) as DeepReadonly<State>
     }
-    const receipts = new Map(base.receipts)
-    receipts.set(frame.cause.commandId, frame)
-    return { ...base, state: nextState, receipts, eventIds }
+    const receiptsById = new Map(base.receiptsById)
+    receiptsById.set(frame.command.id, frame)
+    const receiptsByKey = new Map(base.receiptsByKey)
+    if (frame.cause.key !== undefined) receiptsByKey.set(frame.cause.key, frame)
+    return { ...base, state: nextState, receiptsById, receiptsByKey, causeIds, eventIds }
   }
 
   const publish = (next: Projection): void => {
@@ -265,17 +280,17 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return state()
   }
 
-  const dispatch = async (
-    input: Operation,
-    trace: CommandOptions | undefined,
+  const dispatchCommand = async (
+    input: CommandInput,
+    trace: DispatchOptions | undefined,
     visibility: "public" | "trusted",
-  ): Promise<Frame> => {
+  ): Promise<CommandResult> => {
     assertOpen()
-    let parsed: Operation
+    let parsed: CommandInput
     try {
-      parsed = OperationDomain.parse(input)
+      parsed = freeze(CommandInputSchema.parse(input)) as CommandInput
     } catch (error) {
-      throw asFailure(error, { kind: "usage", code: "invalid-operation" })
+      throw asFailure(error, { kind: "usage", code: "invalid-command" })
     }
     const registered = registry.commandAt(parsed.op)
     if (registered === undefined) {
@@ -286,35 +301,42 @@ export async function createYrd<State extends object, Commands extends CommandTr
       raiseFailure("usage", "internal-command", `yrd: internal command '${parsed.op}' is not publicly available`)
     }
 
-    const canonical = canonicalOperation(selected, parsed.op, parsed.args)
-    const commandId = trace?.commandId ?? id()
-    if (commandId.length === 0) {
-      raiseFailure("usage", "invalid-command-id", "yrd: command id must not be empty")
-    }
+    const canonical = canonicalCommand(selected, parsed.op, parsed.args, parsed.id ?? id())
     const cause = CauseSchema.parse({
-      commandId,
+      id: id(),
+      commandId: canonical.id,
       op: canonical.op,
-      operationHash: OperationDomain.hash(canonical),
+      commandHash: CommandDomain.hash(canonical),
+      ...(trace?.key === undefined ? {} : { key: trace.key }),
       ...(trace?.traceId === undefined ? {} : { traceId: trace.traceId }),
       ...(trace?.spanId === undefined ? {} : { spanId: trace.spanId }),
     })
 
     while (!closing && !scope.signal.aborted) {
       const current = await fold(projection)
-      const receipt = current.receipts.get(commandId)
+      const byId = current.receiptsById.get(canonical.id)
+      const byKey = trace?.key === undefined ? undefined : current.receiptsByKey.get(trace.key)
+      if (byId !== undefined && byKey !== undefined && byId !== byKey) {
+        raiseFailure(
+          "refusal",
+          "command-key-conflict",
+          `yrd: command id '${canonical.id}' and key '${trace?.key}' disagree`,
+        )
+      }
+      const receipt = byKey ?? byId
       if (receipt !== undefined) {
-        if (receipt.cause.operationHash !== cause.operationHash) {
+        if (receipt.cause.commandHash !== cause.commandHash) {
           raiseFailure(
             "refusal",
             "command-id-conflict",
-            `yrd: command id '${commandId}' was already used for a different operation`,
+            `yrd: command ${trace?.key === undefined ? `id '${canonical.id}'` : `key '${trace.key}'`} was already used for a different command`,
           )
         }
         publish(current)
-        return receipt
+        return commandResult(receipt)
       }
 
-      const context = { state: current.state, cause, operation: canonical }
+      const context = { state: current.state, cause, command: canonical }
       const unavailable = unavailableReason(selected.isAvailable?.(context))
       if (unavailable !== null) {
         raiseFailure(
@@ -334,12 +356,13 @@ export async function createYrd<State extends object, Commands extends CommandTr
         }
         return EventSchema.parse({ id: id(), name: draft.name, ts: clock(), data: schema.parse(draft.data) })
       })
-      const frame = FrameDomain.parse({ cause, events })
+      const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
+      const frame = parseJournalFrame({ cause, command: canonical, events, ...(value === undefined ? {} : { value }) })
       const candidate = projectFrame(current, frame)
       const appended = await journal.append(frame, current.cursor)
       if (!appended.appended) continue
       publish({ ...candidate, cursor: appended.cursor })
-      return frame
+      return commandResult(frame)
     }
     throw new Error("yrd: runtime is closed")
   }
@@ -363,26 +386,31 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return closePromise
   }
 
+  const dispatch: Dispatch = ((
+    input: CommandInput | AnyCommand,
+    argsOrOptions?: JsonValue | DispatchOptions,
+    commandOptions?: DispatchOptions,
+  ) => {
+    if (isCommand(input)) {
+      return track(() =>
+        dispatchCommand(serialize(registry, input, argsOrOptions as JsonValue | undefined), commandOptions, "trusted"),
+      )
+    }
+    return track(() => dispatchCommand(input, argsOrOptions as DispatchOptions | undefined, "public"))
+  }) as Dispatch
+
   const core: Yrd<State, Commands> = Object.freeze({
     commands,
     state,
     scope,
     log,
     refresh: () => track(refresh),
-    operation(selected, args) {
-      return serialize(registry, selected, args)
-    },
-    command(selected, args, commandOptions) {
-      return track(() => dispatch(serialize(registry, selected, args), commandOptions, "trusted"))
-    },
-    invoke(operation, commandOptions) {
-      return track(() => dispatch(operation, commandOptions, "public"))
-    },
+    dispatch,
     async *events() {
       await refresh()
       const before = projection.cursor
       for await (const batch of journal.read(0, before)) {
-        for (const value of batch.values) yield* FrameDomain.parse(value).events
+        for (const value of batch.values) yield* parseJournalFrame(value).events
       }
     },
     close,
@@ -521,15 +549,15 @@ type RuntimeCommand = Omit<AnyCommand, "isAvailable" | "run"> &
     run(context: CommandContext<object>, args: JsonValue | undefined): ApplyResult | Promise<ApplyResult>
   }>
 
-function canonicalOperation(command: RuntimeCommand, op: string, args: JsonValue | undefined): Operation {
-  if (command.params === undefined) return OperationDomain.parse({ op })
+function canonicalCommand(command: RuntimeCommand, op: string, args: JsonValue | undefined, id: string): Command {
+  if (command.params === undefined) return CommandDomain.parse({ id, op })
   const input = args ?? {}
   const missing = command.params.missing?.(input)
   if (missing !== undefined && missing.length > 0) {
     raiseFailure("usage", "missing-arguments", `yrd: command '${op}' requires ${missing.join(", ")}`)
   }
   try {
-    return OperationDomain.parse({ op, args: parseParams(command.params, input) })
+    return CommandDomain.parse({ id, op, args: parseParams(command.params, input) })
   } catch (error) {
     throw asFailure(error, { kind: "usage", code: "invalid-arguments" })
   }
@@ -550,12 +578,21 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 
 function serialize<Args extends JsonValue | undefined, State extends object>(
   registry: SerializableCommandRegistry<AnyCommand>,
-  selected: Command<Args, State>,
+  selected: CommandHandler<Args, State> | AnyCommand,
   args: Args,
-): Operation<Args> {
+): CommandInput<Args> {
   const path = registry.pathOf(selected as unknown as AnyCommand)
   if (path === undefined) {
     raiseFailure("configuration", "command-not-installed", "yrd: command is not installed")
   }
-  return canonicalOperation(selected as unknown as RuntimeCommand, path.join("."), args) as Operation<Args>
+  const op = path.join(".")
+  return (args === undefined ? { op } : { op, args }) as CommandInput<Args>
+}
+
+function commandResult(frame: JournalFrame): CommandResult {
+  return freeze({
+    command: frame.command,
+    events: frame.events,
+    ...(frame.value === undefined ? {} : { value: frame.value }),
+  }) as CommandResult
 }

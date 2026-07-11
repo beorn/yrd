@@ -38,9 +38,9 @@ The objects above operate on plain records:
 
 | Record                 | Meaning                                                                   |
 | ---------------------- | ------------------------------------------------------------------------- |
-| `Operation`            | Serializable request naming one registered command and its arguments      |
+| `Command`              | Serializable request naming one registered handler and its arguments      |
 | `Event`                | Validated fact emitted by a command                                       |
-| `Frame`                | One command cause and all events committed for it atomically              |
+| `CommandResult`        | Dispatched command, committed events, and optional JSON result value      |
 | `Task`                 | Versioned unit of intent from a configured task source                    |
 | `Bay`                  | Isolated worktree and its current Git facts                               |
 | `PR`                   | Immutable submitted revision offered to a base branch                     |
@@ -95,18 +95,19 @@ symbols, or discover dependencies through a registry after startup.
 ## Command Flow
 
 ```text
-Operation
+Command
   -> Zod command params
   -> command against a state snapshot
   -> Event drafts
   -> Zod event schemas
   -> project candidate state
-  -> Journal.append(frame, expectedCursor)
+  -> Journal.append(private transaction, expectedCursor)
   -> publish snapshot signal
+  -> CommandResult
 ```
 
 Commands are synchronous state decisions. External work is requested as a Job
-event and executed after the frame commits. This keeps cursor-conflict retries
+event and executed after the transaction commits. This keeps cursor-conflict retries
 safe: Yrd can refresh state and run the decision again without repeating an
 external side effect.
 

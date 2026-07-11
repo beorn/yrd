@@ -30,7 +30,7 @@ const definition = pipe(createYrdDef(), withJobs({ definitions: { [deliver.name]
 
 `deliver.request(input, {key})` is a serializable `job/requested` event draft.
 A domain command returns it beside its own events, so the request and domain
-decision commit in one Frame. The request pins the definition revision;
+decision commit in one journal transaction. The request pins the definition revision;
 execution refuses installed definition drift.
 
 Definitions are immutable after composition. `Jobs` exposes:
@@ -44,7 +44,7 @@ yrd.jobs.runMany(ids, { ...options, concurrency })
 yrd.jobs.finish(id, completion)
 yrd.jobs.retry(id)
 yrd.jobs.recover(options)
-yrd.jobs.requested(frame)
+yrd.jobs.requested(commandResult)
 ```
 
 `requireDefinitions()` verifies that a composing domain sees the exact Job

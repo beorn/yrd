@@ -2,7 +2,7 @@ import { defaultBayBranch, prForBay, resolveBay, type Bay, type HasBays, type PR
 import {
   command,
   event,
-  Operation,
+  Command,
   raiseFailure,
   type CommandTree,
   type DeepReadonly,
@@ -138,12 +138,12 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
             signal: yrd.scope.signal,
             log: yrd.log.child("contests"),
             actions: {
-              compete: (args) => yrd.command(commands.task.compete, args),
+              compete: (args) => yrd.dispatch(commands.task.compete, args),
               request: (contest, retry) =>
-                yrd.command(commands.contest.request, { contest, ...(retry === undefined ? {} : { retry }) }),
-              select: (args) => yrd.command(commands.contest.select, args),
-              promote: (args) => yrd.command(commands.contest.promote, args),
-              finalize: (contest, pr) => yrd.command(commands.contest.finalize, { contest, pr }),
+                yrd.dispatch(commands.contest.request, { contest, ...(retry === undefined ? {} : { retry }) }),
+              select: (args) => yrd.dispatch(commands.contest.select, args),
+              promote: (args) => yrd.dispatch(commands.contest.promote, args),
+              finalize: (contest, pr) => yrd.dispatch(commands.contest.finalize, { contest, pr }),
             },
           }),
         }
@@ -455,9 +455,9 @@ function createContests(
       }
       if (await finalizePromotion(contestId, options)) continue
       if (required(contestId).selection !== undefined) return required(contestId)
-      const frame = await options.actions.request(contestId, retry)
+      const result = await options.actions.request(contestId, retry)
       retry = false
-      if (options.jobs.requested(frame).length === 0) return required(contestId)
+      if (options.jobs.requested(result).length === 0) return required(contestId)
     }
   }
 
@@ -479,8 +479,8 @@ function createContests(
     },
     async compete(args) {
       using _span = options.log.span?.("compete", { task: args.task.ref, competitors: args.competitors.length })
-      const frame = await options.actions.compete(args)
-      const opened = frame.events.find(({ name }) => name === "contest/opened")
+      const result = await options.actions.compete(args)
+      const opened = result.events.find(({ name }) => name === "contest/opened")
       if (opened === undefined) throw new Error("yrd: task.compete did not open a contest")
       return required(OpenedSchema.parse(opened.data).contest.id)
     },
@@ -517,7 +517,7 @@ function createContests(
     async promote(args, runOptions) {
       using _span = options.log.span?.("promote", { contest: args.contest })
       await options.actions.promote(args)
-      return advance(args.contest, { ...runOptions, retry: false })
+      return await advance(args.contest, { ...runOptions, retry: false })
     },
   })
 }
@@ -869,7 +869,7 @@ function exactPR(pr: DeepReadonly<PR>, pin: DeepReadonly<z.infer<typeof GitRevis
 
 function competitorOf(definition: CompetitorDef): Competitor {
   const parsed = CompetitorDefSchema.parse(definition)
-  const id = `cmp-${Operation.hash({ op: "contest.competitor", args: parsed })}`
+  const id = `cmp-${Command.hash({ op: "contest.competitor", args: parsed })}`
   return { ...parsed, id }
 }
 

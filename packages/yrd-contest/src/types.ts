@@ -1,5 +1,5 @@
 import { BayIdSchema, GitRefSchema, GitShaSchema, PRIdSchema, type Bay, type BaysState, type PR } from "@yrd/bay"
-import { JsonSchema, type Command, type DeepReadonly, type Frame, type JsonValue } from "@yrd/core"
+import { JsonSchema, type CommandHandler, type CommandResult, type DeepReadonly, type JsonValue } from "@yrd/core"
 import type { Job, JobContext, JobResult, JobsState, RunJobOptions } from "@yrd/job"
 import { TaskSchema } from "@yrd/task"
 import type { ReadSignal } from "@silvery/signals"
@@ -278,12 +278,12 @@ export type ContestHostState = Readonly<{ jobs: JobsState; bays: BaysState }>
 export type ContestRuntimeState = ContestState & ContestHostState
 
 export type ContestCommands = Readonly<{
-  task: Readonly<{ compete: Command<CompeteArgs, ContestRuntimeState> }>
+  task: Readonly<{ compete: CommandHandler<CompeteArgs, ContestRuntimeState> }>
   contest: Readonly<{
-    request: Command<Readonly<{ contest: string; retry?: boolean }>, ContestRuntimeState>
-    select: Command<ContestSelectArgs, ContestRuntimeState>
-    promote: Command<ContestPromoteArgs, ContestRuntimeState>
-    finalize: Command<Readonly<{ contest: string; pr: string }>, ContestRuntimeState>
+    request: CommandHandler<Readonly<{ contest: string; retry?: boolean }>, ContestRuntimeState>
+    select: CommandHandler<ContestSelectArgs, ContestRuntimeState>
+    promote: CommandHandler<ContestPromoteArgs, ContestRuntimeState>
+    finalize: CommandHandler<Readonly<{ contest: string; pr: string }>, ContestRuntimeState>
   }>
 }>
 
@@ -321,11 +321,11 @@ export type Contests = Readonly<{
 export type HasContests = Readonly<{ contests: Contests }>
 
 export type ContestActions = Readonly<{
-  compete(args: CompeteArgs): Promise<Frame>
-  request(contest: string, retry?: boolean): Promise<Frame>
-  select(args: ContestSelectArgs): Promise<Frame>
-  promote(args: ContestPromoteArgs): Promise<Frame>
-  finalize(contest: string, pr: string): Promise<Frame>
+  compete(args: CompeteArgs): Promise<CommandResult>
+  request(contest: string, retry?: boolean): Promise<CommandResult>
+  select(args: ContestSelectArgs): Promise<CommandResult>
+  promote(args: ContestPromoteArgs): Promise<CommandResult>
+  finalize(contest: string, pr: string): Promise<CommandResult>
 }>
 
 export type WithContestsOptions = Readonly<{

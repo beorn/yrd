@@ -14,16 +14,21 @@ The returned value is a plain object with two methods:
 
 ```ts
 journal.read(afterCursor)
-journal.append(frame, expectedCursor)
+journal.append(transaction, expectedCursor)
 ```
 
 ## Format
 
-`events.jsonl` contains one checksummed versioned Frame per line. A Frame is
-one command cause plus every event accepted with that command.
+`events.jsonl` contains one checksummed versioned transaction per line. The
+private storage record contains one Command, its cause, every accepted Event,
+and the optional Command result value.
+
+This Command-bearing format is journal version 2. Pre-1 repositories start a
+fresh v2 journal at cutover and retain v1 read-only; persistence does not
+silently dual-decode incompatible schemas.
 
 Reads stream bytes through `Bun.JSONL.parseChunk()` and validate each decoded
-Frame with Core's Zod schema. The cursor is the exclusive byte offset after a
+record against the storage schema and Core's public domain schemas. The cursor is the exclusive byte offset after a
 fully newline-committed batch.
 
 An unterminated final record is uncommitted. Readers ignore it. The next
@@ -36,7 +41,7 @@ Append takes the OS lock only while it:
 
 1. repairs an uncommitted tail;
 2. compares the committed byte cursor;
-3. writes one complete Frame;
+3. writes one complete transaction;
 4. calls `datasync()`;
 5. syncs the directory when creating the file.
 
@@ -56,7 +61,7 @@ const journal = await createJournal({
 ## Growth Guardrail
 
 Replay logs a warning when the file reaches 10 MiB or an initial replay reaches
-10,000 Frames. The warning explicitly directs operators to implement
+10,000 transactions. The warning explicitly directs operators to implement
 compaction and GC before raising either limit. These thresholds are reminders
 to solve measured growth, not configuration knobs to raise when replay becomes
 slow.

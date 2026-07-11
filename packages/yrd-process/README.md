@@ -17,6 +17,17 @@ const result = await process.run({
 `run()` always returns `exitCode`, `signal`, `stdout`, `stderr`, `durationMs`,
 and `timedOut`. It executes argv directly without a shell.
 
+Trusted configuration that intentionally needs shell syntax must opt in at the
+call site:
+
+```ts
+await process.run({ argv: shellCommand("test -f dist/app.js && deploy dist") })
+```
+
+`shellCommand()` validates non-empty text and returns the explicit
+`["sh", "-c", script]` argv. Process adapters and Git-facing code never build
+shell strings from refs, branches, task names, or other untrusted values.
+
 The factory passes either its configured environment or the request's explicit
 replacement environment. Domain adapters own policy such as stripping ambient
 `GIT_*` and `YRD_*` variables. Every run gets a child Scope; parent disposal,

@@ -4,7 +4,7 @@
  * @consumer @yrd/bay
  */
 import { describe, expect, it } from "vitest"
-import { createMemoryJournal, createYrd, createYrdDef, pipe, type Frame } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
@@ -16,7 +16,7 @@ const runtime = { executor: "local", leaseMs: 60_000 }
 
 function ids(): () => string {
   let value = 0
-  return () => `id-${++value}`
+  return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
 async function createApp(workspace: BayWorkspace) {
@@ -63,8 +63,8 @@ async function createHarness() {
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
 
-async function finishJob(app: TestApp, frame: Frame): Promise<void> {
-  const id = app.jobs.requested(frame)[0]
+async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
+  const id = app.jobs.requested(result)[0]
   if (id === undefined) throw new Error("expected one Bay workspace job")
   await app.jobs.run(id, { executor: "local", leaseMs: 60_000 })
 }

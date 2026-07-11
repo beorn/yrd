@@ -23,9 +23,19 @@ type SendArgs = Delivery & { key?: string }
 
 const SendArgsSchema = z.object({ message: z.string().min(1), key: z.string().min(1).optional() })
 
+function testId(value: number): string {
+  return `00000000-0000-7000-8000-${value.toString(16).padStart(12, "0")}`
+}
+
+const JOB_ID = testId(1)
+let idSequence = 1
+
 function ids(...values: string[]) {
   let index = 0
-  return () => values[index++] ?? `id-${index}`
+  return () => {
+    const value = values[index++]
+    return value === JOB_ID ? value : testId(++idSequence)
+  }
 }
 
 function delivery(
@@ -152,13 +162,13 @@ describe("Jobs", () => {
         return { status: "passed", output: { receipt: `ok:${message}` } }
       }),
     )
-    const firstFrame = await app.command(app.commands.sender.send, { message: "first" })
-    const slowFrame = await app.command(app.commands.sender.send, { message: "slow" })
-    const thirdFrame = await app.command(app.commands.sender.send, { message: "third" })
+    const firstResult = await app.dispatch(app.commands.sender.send, { message: "first" })
+    const slowResult = await app.dispatch(app.commands.sender.send, { message: "slow" })
+    const thirdResult = await app.dispatch(app.commands.sender.send, { message: "third" })
     const jobIds = [
-      ...app.jobs.requested(firstFrame),
-      ...app.jobs.requested(slowFrame),
-      ...app.jobs.requested(thirdFrame),
+      ...app.jobs.requested(firstResult),
+      ...app.jobs.requested(slowResult),
+      ...app.jobs.requested(thirdResult),
     ]
 
     const running = app.jobs.runMany(jobIds, { executor: "worker", leaseMs: 60_000, concurrency: 2 })
@@ -188,8 +198,8 @@ describe("Jobs", () => {
       },
     }
     const app = await jobsApp(delivery(), { journal })
-    const frame = await app.command(app.commands.sender.send, { message: "hello" })
-    const [id] = app.jobs.requested(frame)
+    const result = await app.dispatch(app.commands.sender.send, { message: "hello" })
+    const [id] = app.jobs.requested(result)
 
     await expect(app.jobs.runMany([id!], { executor: "worker", leaseMs: 60_000 })).rejects.toThrow(
       "settlement append failed",
@@ -206,19 +216,19 @@ describe("Jobs", () => {
     const app = await jobsApp(job, {
       journal,
       clock,
-      id: ids("send", "J1", "start", "E-start", "finish", "E-finish"),
+      id: ids("send", "C-send", JOB_ID, "start", "C-start", "E-start", "finish", "C-finish", "E-finish"),
     })
 
-    const result = await app.command(app.commands.sender.send, { message: "hello", key: "delivery:1" })
-    expect(app.jobs.requested(result)).toEqual(["J1"])
+    const result = await app.dispatch(app.commands.sender.send, { message: "hello", key: "delivery:1" })
+    expect(app.jobs.requested(result)).toEqual([JOB_ID])
     expect(app.jobs.state()).toMatchObject({
-      byId: { J1: { id: "J1", status: "requested", attempt: 0, input: { message: "hello" } } },
-      byKey: { "delivery:1": "J1" },
+      byId: { [JOB_ID]: { id: JOB_ID, status: "requested", attempt: 0, input: { message: "hello" } } },
+      byKey: { "delivery:1": JOB_ID },
     })
-    expect(app.jobs.get("J1")).toMatchObject({ id: "J1", status: "requested" })
+    expect(app.jobs.get(JOB_ID)).toMatchObject({ id: JOB_ID, status: "requested" })
 
-    await expect(app.jobs.run("J1", { executor: "worker-1", leaseMs: 60_000 })).resolves.toMatchObject({
-      id: "J1",
+    await expect(app.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })).resolves.toMatchObject({
+      id: JOB_ID,
       status: "passed",
       attempt: 1,
       output: { receipt: "ok:hello" },
@@ -237,18 +247,18 @@ describe("Jobs", () => {
 
   it("pins revisions and keeps keyed requests unique", async () => {
     const journal = createMemoryJournal()
-    const original = await jobsApp(delivery(), { journal, id: ids("send", "J1") })
-    await original.command(original.commands.sender.send, { message: "hello", key: "delivery:1" })
+    const original = await jobsApp(delivery(), { journal, id: ids("send", "C-send", JOB_ID) })
+    await original.dispatch(original.commands.sender.send, { message: "hello", key: "delivery:1" })
     await expect(
-      original.command(original.commands.sender.send, { message: "again", key: "delivery:1" }),
+      original.dispatch(original.commands.sender.send, { message: "again", key: "delivery:1" }),
     ).rejects.toThrow("job key")
     await original.close()
 
     const changed = await jobsApp(delivery(undefined, "transport-v2"), { journal })
-    await expect(changed.jobs.run("J1", { executor: "worker-1", leaseMs: 60_000 })).rejects.toThrow(
+    await expect(changed.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })).rejects.toThrow(
       "definition revision",
     )
-    expect(changed.jobs.state().byId.J1?.status).toBe("requested")
+    expect(changed.jobs.state().byId[JOB_ID]?.status).toBe("requested")
     await changed.close()
   })
 
@@ -259,20 +269,22 @@ describe("Jobs", () => {
       url: "https://runner.invalid/jobs/1",
       checkpoint: { sha: "abc" },
     }))
-    const app = await jobsApp(job, { id: ids("send", "J1", "start", "E-start", "wait", "E-wait") })
-    await app.command(app.commands.sender.send, { message: "remote" })
-    await app.jobs.run("J1", { executor: "launcher", leaseMs: 60_000 })
+    const app = await jobsApp(job, {
+      id: ids("send", "C-send", JOB_ID, "start", "C-start", "E-start", "wait", "C-wait", "E-wait"),
+    })
+    await app.dispatch(app.commands.sender.send, { message: "remote" })
+    await app.jobs.run(JOB_ID, { executor: "launcher", leaseMs: 60_000 })
 
-    expect(app.jobs.state().byId.J1).toMatchObject({
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
       status: "waiting",
       attempt: 1,
       executor: "launcher",
       token: "remote-1",
       checkpoint: { sha: "abc" },
     })
-    expect(app.jobs.state().byId.J1).not.toHaveProperty("leaseExpiresAt")
+    expect(app.jobs.state().byId[JOB_ID]).not.toHaveProperty("leaseExpiresAt")
     await expect(
-      app.jobs.finish("J1", {
+      app.jobs.finish(JOB_ID, {
         attempt: 1,
         executor: "other",
         token: "remote-1",
@@ -280,7 +292,7 @@ describe("Jobs", () => {
       }),
     ).rejects.toThrow("executor mismatch")
     await expect(
-      app.jobs.finish("J1", {
+      app.jobs.finish(JOB_ID, {
         attempt: 1,
         executor: "launcher",
         token: "remote-1",
@@ -288,13 +300,13 @@ describe("Jobs", () => {
       }),
     ).rejects.toThrow()
 
-    await app.jobs.finish("J1", {
+    await app.jobs.finish(JOB_ID, {
       attempt: 1,
       executor: "launcher",
       token: "remote-1",
       result: { status: "passed", output: { receipt: "remote-ok" } },
     })
-    expect(app.jobs.state().byId.J1).toMatchObject({
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
       status: "passed",
       output: { receipt: "remote-ok" },
       checkpoint: { sha: "abc" },
@@ -308,14 +320,14 @@ describe("Jobs", () => {
       async () => ({ status: "waiting", token: "remote-1", url: "https://runner.invalid/jobs/1" }),
       "transport-v1",
     )
-    const original = await jobsApp(waiting, { journal, id: ids("send", "J1") })
-    await original.command(original.commands.sender.send, { message: "remote" })
-    await original.jobs.run("J1", { executor: "launcher", leaseMs: 60_000 })
+    const original = await jobsApp(waiting, { journal, id: ids("send", "C-send", JOB_ID) })
+    await original.dispatch(original.commands.sender.send, { message: "remote" })
+    await original.jobs.run(JOB_ID, { executor: "launcher", leaseMs: 60_000 })
     await original.close()
 
     const resumed = await jobsApp(delivery(undefined, "transport-v2"), { journal })
     await expect(
-      resumed.jobs.finish("J1", {
+      resumed.jobs.finish(JOB_ID, {
         attempt: 1,
         executor: "launcher",
         token: "remote-1",
@@ -326,34 +338,34 @@ describe("Jobs", () => {
   })
 
   it("recovers only the observed expired lease, then retries as a new attempt", async () => {
-    const app = await jobsApp(delivery(), { id: ids("send", "J1") })
-    await app.command(app.commands.sender.send, { message: "recover" })
-    await app.command(app.commands.job.transition, {
+    const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID) })
+    await app.dispatch(app.commands.sender.send, { message: "recover" })
+    await app.dispatch(app.commands.job.transition, {
       type: "start",
-      id: "J1",
+      id: JOB_ID,
       attempt: 1,
       executor: "lost-worker",
       leaseExpiresAt: "2026-01-01T00:00:01.000Z",
     })
-    await app.command(app.commands.job.transition, {
+    await app.dispatch(app.commands.job.transition, {
       type: "heartbeat",
-      id: "J1",
+      id: JOB_ID,
       attempt: 1,
       executor: "lost-worker",
       leaseExpiresAt: "2026-01-01T00:00:03.000Z",
     })
 
     expect(await app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).toEqual([])
-    expect(await app.jobs.recover({ now: "2026-01-01T00:00:04.000Z" })).toEqual(["J1"])
-    expect(app.jobs.state().byId.J1).toMatchObject({ status: "lost", attempt: 1 })
+    expect(await app.jobs.recover({ now: "2026-01-01T00:00:04.000Z" })).toEqual([JOB_ID])
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "lost", attempt: 1 })
 
-    await app.jobs.retry("J1")
-    await app.jobs.run("J1", { executor: "replacement", leaseMs: 60_000 })
-    expect(app.jobs.state().byId.J1).toMatchObject({ status: "passed", attempt: 2 })
+    await app.jobs.retry(JOB_ID)
+    await app.jobs.run(JOB_ID, { executor: "replacement", leaseMs: 60_000 })
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "passed", attempt: 2 })
     await expect(
-      app.command(app.commands.job.transition, {
+      app.dispatch(app.commands.job.transition, {
         type: "finish",
-        id: "J1",
+        id: JOB_ID,
         attempt: 1,
         executor: "lost-worker",
         result: { status: "passed", output: { receipt: "stale" } },
@@ -371,14 +383,14 @@ describe("Jobs", () => {
         await gate.promise
         return { status: "passed", output: { receipt: "slow-ok" } }
       }),
-      { id: ids("send", "J1") },
+      { id: ids("send", "C-send", JOB_ID) },
     )
-    await app.command(app.commands.sender.send, { message: "slow" })
+    await app.dispatch(app.commands.sender.send, { message: "slow" })
     let now = 0
 
     vi.useFakeTimers()
     try {
-      const running = app.jobs.run("J1", {
+      const running = app.jobs.run(JOB_ID, {
         executor: "worker-1",
         leaseMs: 20,
         heartbeatMs: 5,
@@ -418,22 +430,22 @@ describe("Jobs", () => {
         })
         return { status: "passed", output: { receipt: "too-late" } }
       }),
-      { id: ids("send", "J1") },
+      { id: ids("send", "C-send", JOB_ID) },
     )
-    await app.command(app.commands.sender.send, { message: "slow" })
+    await app.dispatch(app.commands.sender.send, { message: "slow" })
 
     vi.useFakeTimers()
     try {
-      const running = app.jobs.run("J1", {
+      const running = app.jobs.run(JOB_ID, {
         executor: "worker-1",
         leaseMs: 20,
         heartbeatMs: 5,
         now: () => 0,
       })
       await started.promise
-      const job = app.jobs.get("J1")
+      const job = app.jobs.get(JOB_ID)
       if (job?.status !== "running") throw new Error("job did not start")
-      await app.command(app.commands.job.transition, {
+      await app.dispatch(app.commands.job.transition, {
         type: "lose",
         id: job.id,
         attempt: job.attempt,

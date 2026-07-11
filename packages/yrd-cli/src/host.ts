@@ -39,7 +39,7 @@ import {
   type StepRunner,
 } from "@yrd/line"
 import { createJournal } from "@yrd/persistence"
-import { createProcess, type Process } from "@yrd/process"
+import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmTaskSource, withTasks, type TaskSource } from "@yrd/task"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
@@ -186,7 +186,7 @@ function candidateStep(
       gitCheckStep({
         inject: { process },
         repo,
-        command: stepCommand(name, config),
+        command: shellCommand(stepCommand(name, config)),
         checkoutParent,
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
@@ -208,7 +208,7 @@ function integratedRunner(
 ): StepRunner<IntegratedShape, CommandEvidence> {
   const options = {
     inject: { process },
-    command: stepCommand(name, config),
+    command: shellCommand(stepCommand(name, config)),
     cwd: repo,
     purpose: name,
     timeoutMs: stepTimeoutMs(config),
@@ -300,7 +300,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
           step,
           options.config.contest.timeoutMs,
         ),
-        command: ["sh", "-c", stepCommand(id, step)],
+        command: shellCommand(stepCommand(id, step)),
         timeoutMs: options.config.contest.timeoutMs,
         runner: step.runner,
         ...(step.environment === undefined ? {} : { targetEnvironment: step.environment }),
@@ -392,10 +392,10 @@ function receiverTarget(app: YrdCliApp) {
 }
 
 async function intakeReceipt(app: YrdCliApp, receipt: Readonly<ReceiverReceipt>): Promise<void> {
-  await app.command(
+  await app.dispatch(
     app.commands.bay.intake,
     { ...receipt.intake, receipt: receipt.id },
-    { commandId: `receiver:${receipt.id}` },
+    { key: `receiver:${receipt.id}` },
   )
 }
 

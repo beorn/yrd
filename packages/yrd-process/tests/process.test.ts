@@ -4,31 +4,34 @@
  * @consumer @yrd/process
  */
 import { describe, expect, it } from "vitest"
-import { createProcess, type Spawn } from "@yrd/process"
+import { createProcess, shellCommand, type Spawn } from "@yrd/process"
 
 function bytes(value: string): ReadableStream<Uint8Array> {
   return new Blob([value]).stream()
 }
 
 describe("Process", () => {
-  it("runs argv without a shell and returns one stable result shape", async () => {
+  it("runs argv directly and makes shell parsing explicit", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH, GIT_DIR: "leak", YRD_JOB: "leak" } })
+    const direct = await process.run({ argv: ["printf", "%s", "$GIT_DIR;$(not-expanded)"] })
     const result = await process.run({
-      argv: ["sh", "-c", 'printf "%s:%s" "$GIT_DIR" "$YRD_JOB"; printf error >&2'],
+      argv: shellCommand('printf "%s:%s" "$GIT_DIR" "$YRD_JOB"; printf error >&2'),
     })
     const isolated = await process.run({
-      argv: ["sh", "-c", 'printf "%s:%s" "$GIT_DIR" "$YRD_JOB"'],
+      argv: shellCommand('printf "%s:%s" "$GIT_DIR" "$YRD_JOB"'),
       env: { PATH: Bun.env.PATH, YRD_JOB: "job-1" },
     })
 
+    expect(direct.stdout).toBe("$GIT_DIR;$(not-expanded)")
     expect(result).toMatchObject({ exitCode: 0, stdout: "leak:leak", stderr: "error", timedOut: false })
     expect(isolated.stdout).toBe(":job-1")
     expect(result.durationMs).toBeGreaterThanOrEqual(0)
+    await expect(process.run({ argv: "printf unsafe" as never })).rejects.toThrow("argv")
   })
 
   it("owns timeout and cancellation through its Scope", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
-    const result = await process.run({ argv: ["sh", "-c", "sleep 10"], timeoutMs: 10 })
+    const result = await process.run({ argv: shellCommand("sleep 10"), timeoutMs: 10 })
 
     expect(result.timedOut).toBe(true)
     expect(result.signal).not.toBeNull()
@@ -37,7 +40,7 @@ describe("Process", () => {
   it("links an external cancellation signal to the child process", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH } })
     const controller = new AbortController()
-    const running = process.run({ argv: ["sh", "-c", "sleep 10"], signal: controller.signal })
+    const running = process.run({ argv: shellCommand("sleep 10"), signal: controller.signal })
     controller.abort()
 
     const result = await running

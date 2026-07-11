@@ -5,7 +5,7 @@
  */
 import { describe, expect, expectTypeOf, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
+import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -38,7 +38,7 @@ type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 
 function ids(): () => string {
   let value = 0
-  return () => `id-${++value}`
+  return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
 function workspace(): BayWorkspace {
@@ -141,8 +141,8 @@ describe("Line", () => {
     await using app = await createLineApp()
     const pr = await submitBranch(app, "task/no-steps")
 
-    const frame = await app.command(app.commands.line.integrate, { prs: [pr.id], steps: [] })
-    expect(frame.events).toEqual([])
+    const result = await app.dispatch(app.commands.line.integrate, { prs: [pr.id], steps: [] })
+    expect(result.events).toEqual([])
     await expect(app.line.integrate({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
     expect(app.state().lines.records).toEqual({})
     expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
@@ -170,13 +170,15 @@ describe("Line", () => {
     const journal = createMemoryJournal([
       {
         cause: {
-          commandId: "corrupt-line-failure",
+          id: "00000000-0000-7000-8000-000000000002",
+          commandId: "00000000-0000-7000-8000-000000000001",
           op: "line.advance",
-          operationHash: "0".repeat(64),
+          commandHash: Command.hash({ op: "line.advance" }),
         },
+        command: { id: "00000000-0000-7000-8000-000000000001", op: "line.advance" },
         events: [
           {
-            id: "corrupt-line-failure-event",
+            id: "00000000-0000-7000-8000-000000000003",
             name: "line/run/failed",
             ts: "2026-07-10T00:00:00.000Z",
             data: { run: "R404", error: { code: "missing-run", message: "missing" } },
@@ -241,7 +243,7 @@ describe("Line", () => {
     await first.bays.submit({ branch: "task/completed", headSha: HEAD, base: "main" })
     const completed = await first.line.integrate({ prs: ["PR1"], steps: ["check"] }, runtime)
     await first.bays.submit({ branch: "task/queued", headSha: UPDATED, base: "main" })
-    const queued = await first.command(first.commands.line.integrate, { prs: ["PR2"], steps: ["check"] })
+    const queued = await first.dispatch(first.commands.line.integrate, { prs: ["PR2"], steps: ["check"] })
     const queuedJob = first.jobs.requested(queued)[0]
     if (queuedJob === undefined) throw new Error("line did not request a Job")
     await first.close()

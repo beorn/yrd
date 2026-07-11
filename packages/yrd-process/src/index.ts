@@ -30,6 +30,14 @@ export type Process = Readonly<{
   [Symbol.asyncDispose](): Promise<void>
 }>
 
+/** Explicitly opts one process invocation into shell parsing. */
+export function shellCommand(script: string): readonly ["sh", "-c", string] {
+  if (typeof script !== "string" || script.trim() === "") {
+    throw new TypeError("yrd: shell command must be a non-empty string")
+  }
+  return Object.freeze(["sh", "-c", script])
+}
+
 type SpawnOptions = Readonly<{
   cwd: string
   env: Record<string, string>
@@ -83,22 +91,20 @@ export function createProcess(
   return {
     async run(request) {
       if (scope.disposed) throw new Error("yrd: Process is closed")
-      if (request.argv.length === 0 || request.argv.some((value) => value.length === 0)) {
-        throw new TypeError("yrd: Process argv must contain non-empty strings")
-      }
+      const argv = validateArgv(request.argv)
       if (request.timeoutMs !== undefined && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1)) {
         throw new RangeError("yrd: Process timeoutMs must be a positive integer")
       }
 
-      const runScope = scope.child(request.argv[0])
+      const runScope = scope.child(argv[0])
       const signal = request.signal === undefined ? runScope.signal : AbortSignal.any([runScope.signal, request.signal])
       const started = now()
       let timedOut = false
       let cancelTimeout: (() => void) | undefined
       let cancelKill: (() => void) | undefined
-      using _span = log.span?.("run", { argv: request.argv, cwd: request.cwd ?? cwd })
+      using _span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
-        const child = spawn(request.argv, {
+        const child = spawn(argv, {
           cwd: request.cwd ?? cwd,
           env: request.env === undefined ? env : definedEnv(request.env),
           stdin: request.stdin === undefined ? "ignore" : inputBlob(request.stdin),
@@ -186,7 +192,7 @@ export function createProcess(
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
         }
         log.debug?.("process exited", {
-          argv: request.argv,
+          argv,
           exitCode: result.exitCode,
           signal: result.signal,
           durationMs: result.durationMs,
@@ -247,9 +253,23 @@ function positiveInteger(value: number, name: string): number {
   return value
 }
 
-function inputBlob(input: string | Uint8Array): Blob {
-  if (typeof input === "string") return new Blob([input])
+function validateArgv(value: unknown): readonly [string, ...string[]] {
+  if (!Array.isArray(value)) throw new TypeError("yrd: Process argv must contain non-empty strings")
+  const input = value as readonly unknown[]
+  const argv: string[] = []
+  for (const arg of input) {
+    if (typeof arg !== "string" || arg.length === 0) {
+      throw new TypeError("yrd: Process argv must contain non-empty strings")
+    }
+    argv.push(arg)
+  }
+  if (argv.length === 0) throw new TypeError("yrd: Process argv must contain non-empty strings")
+  return Object.freeze(argv) as readonly [string, ...string[]]
+}
+
+function inputBlob(input: string | Uint8Array): globalThis.Blob {
+  if (typeof input === "string") return new globalThis.Blob([input])
   const copy = new Uint8Array(input.byteLength)
   copy.set(input)
-  return new Blob([copy.buffer])
+  return new globalThis.Blob([copy.buffer])
 }

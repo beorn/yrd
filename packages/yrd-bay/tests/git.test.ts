@@ -8,7 +8,7 @@ import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createMemoryJournal, createYrd, createYrdDef, pipe, type Frame } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
@@ -56,8 +56,8 @@ async function createApp(adapter: BayWorkspace) {
   return createYrd(definition, { inject: { journal: createMemoryJournal() } })
 }
 
-async function runRequested(app: Awaited<ReturnType<typeof createApp>>, frame: Frame): Promise<void> {
-  const id = app.jobs.requested(frame)[0]
+async function runRequested(app: Awaited<ReturnType<typeof createApp>>, result: CommandResult): Promise<void> {
+  const id = app.jobs.requested(result)[0]
   if (id === undefined) throw new Error("expected a Bay job")
   await app.jobs.run(id, { executor: "local", leaseMs: 60_000 })
 }
@@ -231,7 +231,7 @@ describe("createGitWorkspace", () => {
       app.bays.open({ name: "parallel-one" }),
       app.bays.open({ name: "parallel-two" }),
     ])
-    await Promise.all([first, second].map((frame) => runRequested(app, frame)))
+    await Promise.all([first, second].map((result) => runRequested(app, result)))
 
     expect(app.bays.list().map((bay) => ({ status: bay.status, failure: bay.failure }))).toEqual([
       { status: "active" },

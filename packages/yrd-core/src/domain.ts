@@ -6,22 +6,31 @@ import { freeze } from "./immutable.ts"
 export type JsonValue = string | number | boolean | null | readonly JsonValue[] | Readonly<{ [key: string]: JsonValue }>
 
 export const JsonSchema: z.ZodType<JsonValue> = z.json()
+const UUIDv7Schema = z.uuidv7()
 
-export const OperationSchema = z
+export const CommandInputSchema = z
   .object({
+    id: UUIDv7Schema.optional(),
     op: z.string().min(1),
     args: JsonSchema.optional(),
   })
   .strict()
-export type Operation<Args extends JsonValue | undefined = JsonValue | undefined> = Readonly<
-  [Args] extends [undefined] ? { op: string } : { op: string; args?: Args }
+export type CommandInput<Args extends JsonValue | undefined = JsonValue | undefined> = Readonly<
+  [Args] extends [undefined] ? { id?: string; op: string } : { id?: string; op: string; args?: Args }
+>
+
+export const CommandSchema = CommandInputSchema.extend({ id: UUIDv7Schema }).strict()
+export type Command<Args extends JsonValue | undefined = JsonValue | undefined> = Readonly<
+  [Args] extends [undefined] ? { id: string; op: string } : { id: string; op: string; args?: Args }
 >
 
 export const CauseSchema = z
   .object({
-    commandId: z.string().min(1),
+    id: UUIDv7Schema,
+    commandId: UUIDv7Schema,
     op: z.string().min(1),
-    operationHash: z.string().regex(/^[0-9a-f]{64}$/),
+    commandHash: z.string().regex(/^[0-9a-f]{64}$/),
+    key: z.string().min(1).optional(),
     traceId: z.string().min(1).optional(),
     spanId: z.string().min(1).optional(),
   })
@@ -30,7 +39,7 @@ export type Cause = z.infer<typeof CauseSchema>
 
 export const EventSchema = z
   .object({
-    id: z.string().min(1),
+    id: UUIDv7Schema,
     name: z.string().min(1),
     ts: z.iso.datetime({ offset: true }),
     data: JsonSchema,
@@ -43,28 +52,30 @@ export type EventDraft<Name extends string = string, Data extends JsonValue = Js
   data: Data
 }>
 
-export const FrameSchema = z
-  .object({
-    cause: CauseSchema,
-    events: z.array(EventSchema),
-  })
-  .strict()
-export type Frame = z.infer<typeof FrameSchema>
+export type CommandResult = Readonly<{
+  command: Command
+  events: readonly Event[]
+  value?: JsonValue
+}>
 
-export const Operation = Object.freeze({
+export const Command = Object.freeze({
   parse(value: unknown) {
-    return freeze(OperationSchema.parse(value)) as Operation
+    return freeze(CommandSchema.parse(value)) as Command
   },
-  hash(value: Operation) {
-    const encoded = canonicalize(value)
-    if (encoded === undefined) throw new TypeError("yrd: operation must be canonical JSON data")
+  hash(value: CommandInput) {
+    const command = CommandInputSchema.parse(value)
+    const intent = command.args === undefined ? { op: command.op } : { op: command.op, args: command.args }
+    const encoded = canonicalize(intent)
+    if (encoded === undefined) throw new TypeError("yrd: command must be canonical JSON data")
     return createHash("sha256").update(encoded).digest("hex")
   },
-})
-
-export const Frame = Object.freeze({
-  parse(value: unknown) {
-    return freeze(FrameSchema.parse(value)) as Frame
+  assertCause(command: Command, cause: Cause): void {
+    if (cause.commandId !== command.id || cause.op !== command.op) {
+      throw new Error("yrd: command cause does not match its command")
+    }
+    if (cause.commandHash !== Command.hash(command)) {
+      throw new Error("yrd: command hash does not match its command")
+    }
   },
 })
 

@@ -9,35 +9,118 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { describe, expect, it } from "vitest"
 import * as z from "zod"
-import { Frame, command, createYrd, createYrdDef, event, type Cause, type Event } from "@yrd/core"
+import {
+  CauseSchema,
+  Command,
+  EventSchema,
+  command,
+  createYrd,
+  createYrdDef,
+  event,
+  type Cause,
+  type Event,
+} from "@yrd/core"
 import { createJournal } from "@yrd/persistence"
 
-const cause = (commandId: string): Cause => ({
-  commandId,
-  op: "test.record",
-  operationHash: createHash("sha256").update(commandId).digest("hex"),
-})
+function uuid(label: string): string {
+  const hex = createHash("sha256").update(label).digest("hex")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-7${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
 
-function frame(commandId: string, text = "hello") {
-  const applied: Event = {
-    id: `event-${commandId}`,
+function frame(key: string, text = "hello") {
+  const commandValue = Command.parse({ id: uuid(`command:${key}`), op: "test.record" })
+  const cause: Cause = CauseSchema.parse({
+    id: uuid(`cause:${key}`),
+    commandId: commandValue.id,
+    op: commandValue.op,
+    commandHash: Command.hash(commandValue),
+  })
+  const applied: Event = EventSchema.parse({
+    id: uuid(`event:${key}`),
     name: "test/recorded",
     ts: "2026-07-09T12:00:00.000Z",
     data: { text },
-  }
-  return Frame.parse({ cause: cause(commandId), events: [applied] })
+  })
+  return { cause, command: commandValue, events: [applied] }
 }
 
 async function directory() {
   return mkdtemp(join(tmpdir(), "yrd-journal-"))
 }
 
+async function dispatchInFreshProcess(dir: string): Promise<unknown> {
+  const source = `
+    import * as z from "zod"
+    import { command, createYrd, createYrdDef, event } from "@yrd/core"
+    import { createJournal } from "@yrd/persistence"
+
+    const add = command({
+      title: "Add",
+      visibility: "public",
+      apply: (state) => ({ events: [event("counter/added", { value: state.counter + 1 })] }),
+    })
+    const definition = createYrdDef().extend({
+      initialState: { counter: 0 },
+      commands: { counter: { add } },
+      events: { "counter/added": z.object({ value: z.number().int() }) },
+      project: (state, applied) => applied.name === "counter/added"
+        ? { counter: applied.data.value }
+        : { counter: state.counter },
+    })
+    await using app = await createYrd(definition, { inject: { journal: createJournal({ dir: ${JSON.stringify(dir)} }) } })
+    const result = await app.dispatch({ op: "counter.add" })
+    console.log(JSON.stringify(result))
+  `
+  const child = Bun.spawn([process.execPath, "--eval", source], {
+    cwd: process.cwd(),
+    env: { ...process.env, NODE_ENV: "test" },
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (code !== 0) throw new Error(stderr || `child exited ${code}`)
+  return JSON.parse(stdout)
+}
+
 function ids(prefix: string) {
   let next = 0
-  return () => `${prefix}-${++next}`
+  return () => uuid(`${prefix}:${++next}`)
 }
 
 describe("filesystem Journal", () => {
+  it("generates UUIDv7 command, cause, and event ids uniquely across fresh processes", async () => {
+    const dir = await directory()
+    const results = await Promise.all([dispatchInFreshProcess(dir), dispatchInFreshProcess(dir)])
+    const stored = (await readFile(join(dir, "events.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            v: number
+            cause: { id: string }
+            command: { id: string }
+            events: { id: string }[]
+          },
+      )
+    const resultIds = results.flatMap((value) => {
+      const result = value as { command: { id: string }; events: { id: string }[] }
+      return [result.command.id, ...result.events.map((event) => event.id)]
+    })
+    const ids = stored.flatMap((frame) => [frame.cause.id, frame.command.id, ...frame.events.map((event) => event.id)])
+
+    expect(stored).toHaveLength(2)
+    expect(stored.every(({ v }) => v === 2)).toBe(true)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(new Set(resultIds).size).toBe(resultIds.length)
+    expect(ids.every((id) => z.uuidv7().safeParse(id).success)).toBe(true)
+    expect(resultIds.every((id) => ids.includes(id))).toBe(true)
+  })
+
   it("round-trips frames as cursor-addressed JSONL batches", async () => {
     const dir = await directory()
     const journal = await createJournal({ dir })
@@ -95,7 +178,7 @@ describe("filesystem Journal", () => {
     await Promise.all(
       Array.from({ length: 20 }, (_, index) => {
         const app = index % 2 === 0 ? appA : appB
-        return app.command(app.commands.counter.add, undefined)
+        return app.dispatch(app.commands.counter.add, undefined)
       }),
     )
 

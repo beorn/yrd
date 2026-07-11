@@ -123,7 +123,7 @@ Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 | **Evaluation run** | One evaluator Job against an immutable attempt pin                  |
 | **Base branch**    | Branch a line integrates into, such as `main` or `release/2.0`      |
 
-Task is intent. An Operation is a serializable command. A Step configures work
+Task is intent. A Command is serializable intent. A Step configures work
 on a Line; a Job durably executes that work. Issue is adapter vocabulary. PR is
 the Git-facing work package; Yrd does not add a second public synonym for it.
 
@@ -444,18 +444,20 @@ Yrd stores local authority under the primary worktree's common Git directory:
 ```
 
 `events.jsonl` is the source of truth. Each command appends one versioned,
-checksummed transaction frame as one JSONL record, containing both its domain
-events and Job requests. Startup folds committed frames into Bay, PR, Line,
-Job, and Contest state. An unterminated final frame is uncommitted and is
-truncated under the writer lock; malformed newline-committed frames are
+checksummed transaction as one JSONL record, containing the Command, its cause,
+its domain events, optional result value, and Job requests. Startup folds
+committed records into Bay, PR, Line, Job, and Contest state. An unterminated
+final record is uncommitted and is truncated under the writer lock; malformed
+newline-committed records are
 reported as corruption. There is no second mutable database or read-model
 cache to reconcile.
 
-Callers may supply a stable command id. Yrd records that id plus a hash of the
-serialized operation in each transaction Frame's cause. Repeating the same id
-and operation returns the already committed result; reusing the id for
-different arguments is refused. The Git receiver uses its receipt id this way,
-so replay after a lost response cannot create a second PR revision.
+Serialized callers may retry a stable UUIDv7 Command id; trusted adapters may
+instead supply a stable dispatch key. Yrd records the Command and a canonical
+intent hash in the private journal transaction. Repeating the same id or key
+with the same intent returns its committed `CommandResult`; reusing it for
+different arguments is refused. The Git receiver uses its receipt as a dispatch
+key, so replay after a lost response cannot create a second PR revision.
 
 Jobs are the single durable executable lifecycle: requested, running, waiting,
 passed, failed, or lost. `withJobs()` installs that authority when the

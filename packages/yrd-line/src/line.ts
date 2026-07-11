@@ -4,12 +4,12 @@ import {
   event,
   JsonSchema,
   raiseFailure,
-  type Command,
+  type CommandHandler,
+  type CommandResult,
   type CommandTree,
   type DeepReadonly,
   type Event,
   type EventDraft,
-  type Frame,
   type JsonValue,
   type YrdDef,
 } from "@yrd/core"
@@ -193,9 +193,9 @@ type LineStart = Omit<LineRecord, "startedAt" | "failure">
 
 export type LineCommands = Readonly<{
   line: Readonly<{
-    integrate: Command<IntegrateArgs, RuntimeState>
-    advance: Command<Readonly<{ run: LineRunId }>, RuntimeState>
-    isolate: Command<Readonly<{ run: LineRunId; part: 0 | 1 }>, RuntimeState>
+    integrate: CommandHandler<IntegrateArgs, RuntimeState>
+    advance: CommandHandler<Readonly<{ run: LineRunId }>, RuntimeState>
+    isolate: CommandHandler<Readonly<{ run: LineRunId; part: 0 | 1 }>, RuntimeState>
   }>
 }>
 
@@ -277,9 +277,9 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
             () => yrd.state() as unknown as DeepReadonly<RuntimeState>,
             yrd.jobs,
             {
-              integrate: (args) => yrd.command(commands.line.integrate, args),
-              advance: (run) => yrd.command(commands.line.advance, { run }),
-              isolate: (run, part) => yrd.command(commands.line.isolate, { run, part }),
+              integrate: (args) => yrd.dispatch(commands.line.integrate, args),
+              advance: (run) => yrd.dispatch(commands.line.advance, { run }),
+              isolate: (run, part) => yrd.dispatch(commands.line.isolate, { run, part }),
             },
             steps,
             yrd.log.child("line"),
@@ -294,9 +294,9 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
 
 type RuntimeStep = AnyStepDef
 type LineActions = Readonly<{
-  integrate(args: IntegrateArgs): Promise<Frame>
-  advance(run: LineRunId): Promise<Frame>
-  isolate(run: LineRunId, part: 0 | 1): Promise<Frame>
+  integrate(args: IntegrateArgs): Promise<CommandResult>
+  advance(run: LineRunId): Promise<CommandResult>
+  isolate(run: LineRunId, part: 0 | 1): Promise<CommandResult>
 }>
 
 function createLine<Shape extends PRShape>(
@@ -433,7 +433,7 @@ function createLine<Shape extends PRShape>(
         ...(completion.token === undefined ? {} : { token: completion.token }),
         result: completion.result,
       })
-      return run(selected.run.id, runOptions)
+      return await run(selected.run.id, runOptions)
     },
     async recover(recoverOptions) {
       using _span = log.span?.("recover", { at: recoverOptions.recoveryTime })
