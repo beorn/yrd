@@ -288,6 +288,16 @@ describe("Line", () => {
     })
     expect(merged).toBe(false)
     expect(rejectedApp.state().bays.prs[rejected.id]).toMatchObject({ status: "rejected" })
+    await rejectedApp.bays.submit({ branch: "task/rejected", headSha: UPDATED, base: "main" })
+    expect(rejectedApp.state().bays.prs[rejected.id]).toMatchObject({
+      status: "submitted",
+      revision: 2,
+      headSha: UPDATED,
+      revisions: [
+        { revision: 1, headSha: HEAD },
+        { revision: 2, headSha: UPDATED },
+      ],
+    })
 
     await using deployApp = await createLineApp({
       batch: 2,

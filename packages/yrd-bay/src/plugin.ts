@@ -514,20 +514,22 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   }
 
   const existing = resolvePR(current, args.branch)
-  if (existing !== undefined && isLivePR(existing.status)) {
+  if (existing?.status === "pushed" || existing?.status === "submitted") {
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
-  const id = nextId("PR", current.prs)
+  const resubmitted = existing?.status === "rejected" ? existing : undefined
+  const id = resubmitted?.id ?? nextId("PR", current.prs)
+  const revision = (resubmitted?.revision ?? 0) + 1
   const pushed = {
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
     branch: args.branch,
     base: args.base ?? defaultBase,
     headSha: args.headSha,
-    revision: 1,
+    revision,
   }
   return {
-    events: [event("pr/pushed", pushed), event("pr/submitted", { pr: id, revision: 1, headSha: args.headSha })],
+    events: [event("pr/pushed", pushed), event("pr/submitted", { pr: id, revision, headSha: args.headSha })],
   }
 }
 
