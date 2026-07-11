@@ -8,11 +8,12 @@ import type { LineRun } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
 import {
   LineLogView,
-  lineLogRows,
   LineRunsView,
   LineShowView,
   LineStatusView,
   PRResultView,
+  lineLogRows,
+  lineShowData,
   type LineStatusResult,
 } from "./line-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
@@ -310,42 +311,96 @@ async function lineStatus(
   )
 }
 
-function lineBases(state: YrdCliState, selectors: readonly string[]): Set<string> {
+function resolveLineTargets(
+  state: YrdCliState,
+  selectors: readonly string[],
+  base: string | undefined,
+  filterPr: string | undefined,
+): { bases: Set<string>; selected: Set<string>; prFilter: string | undefined } {
   const bases = new Set<string>()
+  const selected = new Set<string>()
+  if (base !== undefined) bases.add(base)
+  if (filterPr !== undefined) selected.add(filterPr)
   for (const selector of selectors) {
     const pr = resolvePR(state.bays, selector)
     if (pr === undefined) bases.add(selector)
-    else bases.add(pr.base)
+    else {
+      bases.add(pr.base)
+      selected.add(pr.id)
+    }
   }
-  return bases
+  if (filterPr !== undefined) {
+    const found = state.bays.prs[filterPr]
+    if (found !== undefined) selected.add(found.id)
+    if (found !== undefined) bases.add(found.base)
+  }
+  return { bases, selected, prFilter: filterPr }
 }
 
-async function lineLog(app: YrdCliApp, selectors: readonly string[], options: JsonOption, io: YrdCliIO): Promise<void> {
-  const state = stateOf(app)
-  const bases = lineBases(state, selectors)
-  if (bases.size === 0) {
-    for (const run of Object.values(state.lines.records)) bases.add(run.base)
-    if (bases.size === 0) for (const pr of Object.values(state.bays.prs)) bases.add(pr.base)
-    if (bases.size === 0) bases.add("main")
+function lineLogTargets(
+  state: YrdCliState,
+  selectors: readonly string[],
+  base: string | undefined,
+  pr: string | undefined,
+): { bases: Set<string>; selected: Set<string>; prFilter: string | undefined } {
+  const target = resolveLineTargets(state, selectors, base, pr)
+  if (selectors.length === 0 && base === undefined && pr === undefined) {
+    for (const item of Object.values(state.bays.prs)) target.bases.add(item.base)
+    for (const run of Object.values(state.lines.records)) target.bases.add(run.base)
+    if (target.bases.size === 0) target.bases.add("main")
   }
-  const results: LineStatusResult[] = []
-
-  for (const base of [...bases].toSorted()) {
-    results.push({ ...app.line.status(base), prs: [] })
-  }
-  await printResult(io, jsonEnabled(options), { command: "line.log", runs: lineLogRows(results) }, createElement(LineLogView, { results }))
+  return target
 }
 
-async function lineShow(
+async function lineLog(
   app: YrdCliApp,
-  selector: string,
-  options: JsonOption,
+  selectors: readonly string[],
+  options: { base?: string; pr?: string; json?: boolean },
   io: YrdCliIO,
 ): Promise<void> {
+  const state = stateOf(app)
+  const target = lineLogTargets(state, selectors, options.base, options.pr)
+  const summaries: LineStatusResult[] = []
+  const pathByPr = new Map<string, string>()
+  for (const pr of Object.values(state.bays.prs)) {
+    if (pr.bay !== undefined) {
+      const path = state.bays.byId[pr.bay]?.path
+      if (path !== undefined) pathByPr.set(pr.id, path)
+    }
+  }
+  for (const base of [...target.bases].toSorted()) {
+    const summary = app.line.status(base)
+    const headSha = await optionalRevision(base, io)
+    summaries.push({
+      ...summary,
+      ...(headSha === undefined ? {} : { headSha }),
+      prs: Object.values(state.bays.prs).filter(
+        (pr) => pr.base === base && (target.selected.size === 0 || target.selected.has(pr.id)),
+      ),
+    })
+  }
+  const prStatusById = new Map<string, PR["status"]>(
+    summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
+  )
+  const rows = lineLogRows(summaries, target.selected, target.prFilter, pathByPr, prStatusById)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.log", rows },
+    createElement(LineLogView, { rows }),
+  )
+}
+
+async function lineShow(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
   const run = app.line.get(selector)
-  if (run === undefined) usage(`no line run '${selector}'`)
-  const summary = app.line.status(run.base)
-  await printResult(io, jsonEnabled(options), { command: "line.show", run }, createElement(LineShowView, { run, base: [summary] }))
+  if (run === undefined) refusal(`no line run '${selector}'`)
+  const data = lineShowData(run)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.show", run: data },
+    createElement(LineShowView, { data }),
+  )
 }
 
 async function lineAudit(
@@ -709,8 +764,8 @@ function addLineExamples(line: CliCommand, name: string): void {
     [`$ ${name} line status`, "show the default line"],
     [`$ ${name} line status release/2.0`, "show another base branch"],
     [`$ ${name} line integrate PR7 --steps check,merge`, "run selected steps for one PR"],
-    [`$ ${name} line log`, "show recently finished runs"],
-    [`$ ${name} line show R7`, "show completed run details"],
+    [`$ ${name} line log --base release/2.0`, "show terminal completed log for a base"],
+    [`$ ${name} line show R1`, "show step-level run evidence and proofs"],
     [`$ ${name} line integrate --watch`, "keep the default line moving"],
   ])
 }
@@ -787,12 +842,14 @@ function buildProgram(
     .action(async (selectors, options) => lineStatus(installed(), selectors, options, io))
   line
     .command("log [selector...]")
-    .description("show recent historical runs")
+    .description("show terminal log of finished PR runs")
+    .option("--base <branch>", "scope log to one base branch")
+    .option("--pr <pr>", "scope log to one PR")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => lineLog(installed(), selectors, options, io))
   line
     .command("show <run>")
-    .description("show a completed run")
+    .description("show run steps and evidence")
     .option("--json", "emit stable JSON")
     .action(async (run, options) => lineShow(installed(), run, options, io))
   line
