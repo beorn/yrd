@@ -1,4 +1,6 @@
-import { isAbsolute, relative, resolve } from "node:path"
+import { execFileSync } from "node:child_process"
+import { readFile } from "node:fs/promises"
+import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
 import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
@@ -6,11 +8,55 @@ import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { LineRun } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
-import { LineRunsView, LineStatusView, PRResultView, type LineStatusResult } from "./line-status-view.tsx"
+import {
+  LineLogView,
+  LineRunsView,
+  LineShowView,
+  LineStatusView,
+  type LineLogCoverage,
+  PRResultView,
+  lineLogRows,
+  lineShowData,
+  type LineStatusResult,
+} from "./line-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { YRD_VERSION } from "./version.ts"
+
+function lineGitDir(cwd: string): string | undefined {
+  try {
+    const output = execFileSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    const gitDir = output.trim()
+    if (gitDir === "") return undefined
+    return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
+  } catch {
+    return undefined
+  }
+}
+
+async function lineLegacyCoverage(cwd: string): Promise<LineLogCoverage | undefined> {
+  const gitDir = lineGitDir(cwd)
+  if (gitDir === undefined) return undefined
+  const journal = join(gitDir, "bay", "journal.jsonl")
+  try {
+    const content = await readFile(journal, "utf8")
+    const lines = content.split(/\r?\n/u).filter((value) => value.trim() !== "")
+    let since = "-"
+    try {
+      const frame = JSON.parse(lines[0] as string)
+      if (typeof frame?.ts === "string") since = frame.ts
+    } catch {
+      // Keep the fallback placeholder when JSON is malformed.
+    }
+    return { since, completeness: "queue-only", legacy: { path: journal, frames: lines.length } }
+  } catch {
+    return undefined
+  }
+}
 
 type RuntimeOptions = {
   executor: string
@@ -299,6 +345,98 @@ async function lineStatus(
       selected,
       now: io.now?.() ?? Date.now(),
     }),
+  )
+}
+
+function resolveLineTargets(
+  state: YrdCliState,
+  selectors: readonly string[],
+  base: string | undefined,
+  filterPr: string | undefined,
+): { bases: Set<string>; selected: Set<string>; prFilter: string | undefined } {
+  const bases = new Set<string>()
+  const selected = new Set<string>()
+  if (base !== undefined) bases.add(base)
+  if (filterPr !== undefined) selected.add(filterPr)
+  for (const selector of selectors) {
+    const pr = resolvePR(state.bays, selector)
+    if (pr === undefined) bases.add(selector)
+    else {
+      bases.add(pr.base)
+      selected.add(pr.id)
+    }
+  }
+  if (filterPr !== undefined) {
+    const found = state.bays.prs[filterPr]
+    if (found !== undefined) selected.add(found.id)
+    if (found !== undefined) bases.add(found.base)
+  }
+  return { bases, selected, prFilter: filterPr }
+}
+
+function lineLogTargets(
+  state: YrdCliState,
+  selectors: readonly string[],
+  base: string | undefined,
+  pr: string | undefined,
+): { bases: Set<string>; selected: Set<string>; prFilter: string | undefined } {
+  const target = resolveLineTargets(state, selectors, base, pr)
+  if (selectors.length === 0 && base === undefined && pr === undefined) {
+    for (const item of Object.values(state.bays.prs)) target.bases.add(item.base)
+    for (const run of Object.values(state.lines.records)) target.bases.add(run.base)
+    if (target.bases.size === 0) target.bases.add("main")
+  }
+  return target
+}
+
+async function lineLog(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: { base?: string; pr?: string; json?: boolean },
+  io: YrdCliIO,
+): Promise<void> {
+  const state = stateOf(app)
+  const target = lineLogTargets(state, selectors, options.base, options.pr)
+  const summaries: LineStatusResult[] = []
+  for (const base of [...target.bases].toSorted()) {
+    const summary = app.line.status(base)
+    const headSha = await optionalRevision(base, io)
+    summaries.push({
+      ...summary,
+      ...(headSha === undefined ? {} : { headSha }),
+      prs: Object.values(state.bays.prs).filter(
+        (pr) => pr.base === base && (target.selected.size === 0 || target.selected.has(pr.id)),
+      ),
+    })
+  }
+  const prStatusById = new Map<string, PR["status"]>(
+    summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
+  )
+  const rows = lineLogRows(summaries, target.selected, target.prFilter, prStatusById)
+  const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd())
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.log", rows, ...(coverage === undefined ? {} : { coverage }) },
+    createElement(LineLogView, { rows, coverage }),
+  )
+}
+
+async function lineShow(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const run = app.line.get(selector)
+  if (run === undefined) refusal(`no line run '${selector}'`)
+  const finished = Object.values(stateOf(app).lines.records)
+    .map((record) => app.line.get(record.id))
+    .filter(
+      (candidate): candidate is LineRun =>
+        candidate !== undefined && (candidate.status === "passed" || candidate.status === "failed"),
+    )
+  const data = lineShowData(run, finished)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.show", run: data },
+    createElement(LineShowView, { data }),
   )
 }
 
@@ -663,6 +801,8 @@ function addLineExamples(line: CliCommand, name: string): void {
     [`$ ${name} line status`, "show the default line"],
     [`$ ${name} line status release/2.0`, "show another base branch"],
     [`$ ${name} line integrate PR7 --steps check,merge`, "run selected steps for one PR"],
+    [`$ ${name} line log --base release/2.0`, "show terminal completed log for a base"],
+    [`$ ${name} line show R1`, "show step-level run evidence and proofs"],
     [`$ ${name} line integrate --watch`, "keep the default line moving"],
   ])
 }
@@ -737,6 +877,18 @@ function buildProgram(
     .description("show line and PR status")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => lineStatus(installed(), selectors, options, io))
+  line
+    .command("log [selector...]")
+    .description("show terminal log of finished PR runs")
+    .option("--base <branch>", "scope log to one base branch")
+    .option("--pr <pr>", "scope log to one PR")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => lineLog(installed(), selectors, options, io))
+  line
+    .command("show <run>")
+    .description("show run steps and evidence")
+    .option("--json", "emit stable JSON")
+    .action(async (run, options) => lineShow(installed(), run, options, io))
   line
     .command("audit")
     .description("check line state")

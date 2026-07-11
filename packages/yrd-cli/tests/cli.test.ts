@@ -2,13 +2,18 @@
 // @level l2
 // @consumer @yrd/cli
 
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { withLine, withMerge, withStep, type AddStepResult, type PRShape, type StepExecution } from "@yrd/line"
+import { type LineRun, type LineSummary, withLine, withMerge, withStep, type AddStepResult, type PRShape, type StepExecution } from "@yrd/line"
 import { withTasks } from "@yrd/task"
+import { createElement } from "react"
+import { renderString } from "silvery"
 import {
   withContests,
   type AttemptRunOutput,
@@ -16,6 +21,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
+import { LineShowView, LineLogView, lineLogRows, lineShowData, type LineLogCoverage } from "../src/line-status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -223,6 +229,159 @@ async function openAndSubmit(app: TestApp): Promise<void> {
   expect(await runYrd(app, yrd("bay", "open", "one"), open.io)).toBe(0)
   const submit = outputIO({ cwd: "/repo/.bays/B1" })
   expect(await runYrd(app, yrd("bay", "submit"), submit.io)).toBe(0)
+}
+
+function fakeJob(input: {
+  id: string
+  status: "requested" | "running" | "waiting" | "passed" | "failed" | "lost"
+  attempt?: number
+  requestedAt?: string
+  startedAt?: string
+  finishedAt?: string
+  url?: string
+  detail?: string
+  checkpoint?: unknown
+  error?: { code: string; message: string }
+  output?: unknown
+  artifacts?: readonly unknown[]
+  lostReason?: string
+}): LineRun["steps"][number]["job"] {
+  const status = input.status
+  return {
+    id: input.id,
+    definition: "line.step",
+    revision: "test-v1",
+    input: {},
+    attempt: input.attempt ?? 1,
+    requestedAt: input.requestedAt ?? "2026-07-09T12:00:00.000Z",
+    changedAt: input.requestedAt ?? "2026-07-09T12:00:00.000Z",
+    ...(status === "requested"
+      ? {}
+      : {
+          startedAt: input.startedAt ?? "2026-07-09T12:00:00.000Z",
+          executor: "line-test",
+          leaseExpiresAt: "2026-07-09T12:00:10.000Z",
+        }),
+    ...(status === "waiting"
+      ? { token: "run-job", detail: input.detail ?? "waiting for downstream", ...(input.url === undefined ? {} : { url: input.url }) }
+      : {}),
+    ...(status === "passed"
+      ? {
+          status,
+          finishedAt: input.finishedAt ?? "2026-07-09T12:00:02.000Z",
+          output: input.output ?? {},
+          ...(input.url === undefined ? {} : { url: input.url }),
+          ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
+        }
+      : {}),
+    ...(status === "failed"
+      ? {
+          status,
+          finishedAt: input.finishedAt ?? "2026-07-09T12:00:03.000Z",
+          output: input.output ?? {},
+          error: input.error ?? { code: "check-failed", message: "failed" },
+          ...(input.url === undefined ? {} : { url: input.url }),
+          ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
+        }
+      : {}),
+    ...(status === "lost"
+      ? {
+          status,
+          finishedAt: input.finishedAt ?? "2026-07-09T12:00:04.000Z",
+          lostReason: input.lostReason ?? "lost while running",
+          ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
+        }
+      : {}),
+    ...(status === "running"
+      ? {
+          status,
+          startedAt: input.startedAt ?? "2026-07-09T12:00:01.000Z",
+          executor: "line-test",
+          leaseExpiresAt: "2026-07-09T12:00:10.000Z",
+          ...(input.url === undefined ? {} : { url: input.url }),
+        }
+      : {}),
+    ...(status !== "passed" && status !== "failed" && status !== "lost" && status !== "running" && status !== "waiting"
+      ? { status }
+      : {}),
+    ...(input.checkpoint === undefined || status === "requested" || status === "running"
+      ? {}
+      : { checkpoint: input.checkpoint }),
+    ...(input.detail === undefined || status !== "passed"
+      ? {}
+      : { detail: input.detail }),
+  } as LineRun["steps"][number]["job"]
+}
+
+function fakeStep(name: string, status: Parameters<typeof fakeJob>[0]["status"], job: LineRun["steps"][number]["job"]) {
+  return {
+    name,
+    title: `${name} test step`,
+    revision: "step-v1",
+    integrates: false,
+    needsIntegration: false,
+    job,
+  }
+}
+
+function fakeRun(input: {
+  id: string
+  base?: string
+  pr?: { id: string; revision: number; headSha: string; baseSha?: string }
+  status: "running" | "waiting" | "passed" | "failed"
+  steps: readonly ReturnType<typeof fakeStep>[]
+  startedAt: string
+  finishedAt?: string
+  parent?: string
+  isolationPart?: 0 | 1
+  integration?: { commit: string; baseSha: string }
+  error?: { code: string; message: string }
+}): LineRun {
+  const startedAt = input.startedAt
+  return {
+    id: input.id,
+    prs: [
+      {
+        id: input.pr?.id ?? "PR1",
+        branch: `topic/${input.id}`,
+        base: input.base ?? "main",
+        revision: input.pr?.revision ?? 1,
+        headSha: input.pr?.headSha ?? HEAD_SHA,
+        ...(input.pr?.baseSha === undefined ? {} : { baseSha: input.pr?.baseSha }),
+      },
+    ],
+    base: input.base ?? "main",
+    steps: input.steps,
+    startedAt,
+    cursor: 0,
+    integration: input.integration,
+    shape: {
+      results: {},
+      ...(input.integration === undefined ? {} : { integration: input.integration }),
+    },
+    status: input.status,
+    ...(input.parent === undefined ? {} : { parent: input.parent }),
+    ...(input.isolationPart === undefined ? {} : { isolationPart: input.isolationPart }),
+    ...(input.finishedAt === undefined ? {} : { finishedAt: input.finishedAt }),
+    ...(input.error === undefined ? {} : { error: input.error }),
+  }
+}
+
+function fakeSummary(runs: readonly LineRun[]): LineSummary {
+  return {
+    base: runs[0]?.base ?? "main",
+    running: [],
+    waiting: [],
+    finished: runs,
+  }
+}
+
+function coverageFixture(path: string, frames = 185): LineLogCoverage {
+  return {
+    since: "2026-07-09T12:00:00.000Z",
+    completeness: "queue-only",
+    legacy: { path, frames },
+  }
 }
 
 describe("runYrd", () => {
@@ -593,6 +752,263 @@ describe("runYrd", () => {
     expect(wideSummary).toBe("main@333333333333          0      0          0         0")
     expect(wideHeader?.trimEnd().length).toBeLessThan(64)
     expect(wideSummary?.trimEnd().length).toBe(wideHeader?.trimEnd().length)
+  })
+
+  it("streams terminal log rows with stable revision/SHA proof and scope options", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
+
+    const scoped = outputIO()
+    expect(await runYrd(app, yrd("line", "log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)
+    const parsed = JSON.parse(scoped.stdout())
+    expect(parsed.command).toBe("line.log")
+    expect(parsed.rows).toHaveLength(1)
+    expect(parsed.rows[0]).toMatchObject({
+      run: "R1",
+      pr: "PR1",
+      base: "main",
+      revision: "1",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      outcome: "integrated",
+    })
+    expect(parsed.rows[0]).not.toHaveProperty("location")
+
+    const human = outputIO({ color: true, columns: 120 })
+    expect(await runYrd(app, yrd("line", "log", "--base", "main"), human.io)).toBe(0)
+    expect(human.stdout()).toContain("RUN")
+    expect(human.stdout()).toContain("OUTCOME")
+    expect(human.stdout()).toContain("PR1")
+    expect(human.stdout()).toContain("integrated")
+  })
+
+  it("shows run proof slices, revisions, timings, evidence, checkpoint, and landing proof", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
+
+    const human = outputIO({ color: true, columns: 200 })
+    expect(await runYrd(app, yrd("line", "show", "R1"), human.io)).toBe(0)
+    expect(human.stdout()).toContain("RUN")
+    expect(human.stdout()).toContain("STEP")
+    expect(human.stdout()).toContain("REV")
+    expect(human.stdout()).toContain("OUTPUT")
+    expect(human.stdout()).toContain("CHECKPOINT")
+    expect(human.stdout()).toContain("EVIDENCE")
+    expect(human.stdout()).toContain("LANDING")
+    expect(human.stdout()).toContain("check")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("line", "show", "R1", "--json"), json.io)).toBe(0)
+    const parsed = JSON.parse(json.stdout())
+    expect(parsed.command).toBe("line.show")
+    expect(parsed.run.run).toBe("R1")
+    expect(parsed.run.steps).toHaveLength(2)
+    expect(parsed.run.steps[0]).toMatchObject({
+      step: "check",
+      revision: "check-v1",
+      status: "passed",
+    })
+    expect(parsed.run.steps[0]).toHaveProperty("detail")
+    expect(parsed.run.steps[0]).toHaveProperty("output")
+    expect(parsed.run.steps[0]).toHaveProperty("landing")
+  })
+
+
+  it("maps the 10-row line log/show contract matrix directly from canonical fields", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "yrd-legacy-log-"))
+    const artifacts = join(temp, "artifacts")
+    const attemptOne = join(artifacts, "attempt-1", "output.log")
+    const attemptTwo = join(artifacts, "attempt-2", "output.log")
+    const missingArtifact = join(artifacts, "attempt-missing", "output.log")
+    mkdirSync(artifacts, { recursive: true })
+    mkdirSync(join(artifacts, "attempt-1"), { recursive: true })
+    mkdirSync(join(artifacts, "attempt-2"), { recursive: true })
+    mkdirSync(join(artifacts, "attempt-missing"), { recursive: true })
+    writeFileSync(attemptOne, "attempt one\n")
+    writeFileSync(attemptTwo, "attempt two\n")
+
+    const runChronologyFailure = fakeRun({
+      id: "R10",
+      status: "failed",
+      startedAt: "2026-07-10T10:00:00.000Z",
+      finishedAt: "2026-07-10T10:00:02.000Z",
+      pr: { id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA },
+      steps: [
+        fakeStep(
+          "check",
+          "failed",
+          fakeJob({
+            id: "job-check-failed",
+            status: "failed",
+            attempt: 1,
+            error: { code: "check-failed", message: "policy mismatch" },
+            artifacts: [{ path: attemptOne }],
+          }),
+        ),
+        fakeStep(
+          "deploy",
+          "lost",
+          fakeJob({ id: "job-deploy-lost", status: "lost", attempt: 1, lostReason: "worker died" }),
+        ),
+      ],
+    })
+
+    const runRetryAttemptTwo = fakeRun({
+      id: "R2",
+      status: "passed",
+      parent: "R10",
+      isolationPart: 1,
+      startedAt: "2026-07-10T12:00:00.000Z",
+      finishedAt: "2026-07-10T12:00:03.000Z",
+      pr: { id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA },
+      integration: { commit: "d".repeat(40), baseSha: "e".repeat(40) },
+      steps: [
+        fakeStep(
+          "check",
+          "passed",
+          fakeJob({
+            id: "job-check-pass",
+            status: "passed",
+            attempt: 2,
+            requestedAt: "2026-07-10T12:00:00.000Z",
+            startedAt: "2026-07-10T12:00:01.000Z",
+            finishedAt: "2026-07-10T12:00:03.000Z",
+            url: "https://ci.invalid/check",
+            output: {
+              artifacts: [{ uri: attemptTwo }],
+            },
+            checkpoint: { baseSha: BASE_SHA, candidateSha: "c".repeat(40) },
+            detail: "recheck",
+            artifacts: [{ uri: attemptTwo }],
+          }),
+        ),
+      ],
+    })
+
+    const runMissingLocation = fakeRun({
+      id: "R3",
+      status: "passed",
+      pr: { id: "PR1", revision: 3, headSha: "f".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-10T11:00:00.000Z",
+      finishedAt: "2026-07-10T11:00:01.000Z",
+      integration: { commit: "g".repeat(40), baseSha: "h".repeat(40) },
+      steps: [
+        fakeStep(
+          "check",
+          "passed",
+          fakeJob({ id: "job-check-missing", status: "passed", artifacts: [{ path: missingArtifact }] }),
+        ),
+      ],
+    })
+
+    const summary = fakeSummary([runChronologyFailure, runRetryAttemptTwo, runMissingLocation])
+    const statusByPr = new Map<string, PR["status"]>([
+      ["PR1", "integrated"],
+      ["PR-retired", "withdrawn"],
+    ])
+    const rows = lineLogRows([summary], new Set<string>(), undefined, statusByPr)
+    const prRows = rows.filter((row) => row.pr === "PR1")
+    const revision2Rows = prRows.filter((row) => row.revision === "2")
+
+    expect(revision2Rows.map((row) => row.run)).toEqual(["R10", "R2"])
+    expect(revision2Rows[0]).toMatchObject({ outcome: "rejected", error: "policy mismatch", retries: "1", parent: "-" })
+    expect(revision2Rows[0]?.location).toMatchObject({ path: attemptOne })
+    expect(revision2Rows[1]).toMatchObject({
+      outcome: "integrated",
+      retries: "2",
+      parent: "R10",
+      isolationPart: "1",
+      integration: { commit: "d".repeat(40), baseSha: "e".repeat(40) },
+      location: { path: attemptTwo },
+    })
+    expect(prRows.find((row) => row.run === "R3")?.location).toBeUndefined()
+
+    const failureShow = lineShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
+    expect(failureShow.steps).toHaveLength(2)
+    expect(failureShow.steps[0]).toMatchObject({ status: "failed", attempt: "1", error: "policy mismatch" })
+    expect(failureShow.steps[1]).toMatchObject({ status: "lost", lost: "worker died" })
+
+    const retiredRows = lineLogRows([summary], new Set(["PR-retired"]), "PR-retired", statusByPr)
+    expect(retiredRows).toHaveLength(1)
+    expect(retiredRows[0]).toMatchObject({ outcome: "retired", run: "-", pr: "PR-retired" })
+    expect(prRows.some((row) => row.outcome === "retired")).toBe(false)
+
+    const show = lineShowData(runRetryAttemptTwo, [runChronologyFailure, runRetryAttemptTwo, runMissingLocation])
+    expect(show).toMatchObject({
+      run: "R2",
+      retries: 2,
+      integration: { commit: "d".repeat(40), baseSha: "e".repeat(40) },
+      parent: "R10",
+      isolationPart: "1",
+    })
+    expect(show.steps[0]).toMatchObject({
+      step: "check",
+      attempt: "2",
+      status: "passed",
+      uuid: "job-check-pass",
+      evidence: {
+        url: "https://ci.invalid/check",
+        artifacts: [{ uri: attemptTwo }],
+      },
+      checkpoint: `base:${BASE_SHA.slice(0, 12)} candidate:${"c".repeat(40).slice(0, 12)}`,
+    })
+
+    const journal = join(temp, ".git", "bay", "journal.jsonl")
+    mkdirSync(join(temp, ".git", "bay"), { recursive: true })
+    writeFileSync(
+      journal,
+      Array.from({ length: 185 }, (_value, index) =>
+        JSON.stringify({ ts: `2026-07-09T12:00:${String(index).padStart(2, "0")}.000Z` }),
+      ).join("\n"),
+    )
+
+    const withCoverage = coverageFixture(journal, 185)
+    const renderedLogWithCoverage = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
+      width: 140,
+      height: 24,
+    })
+    expect(renderedLogWithCoverage).toContain("Legacy queue coverage")
+    expect(renderedLogWithCoverage).toContain("185")
+    expect(renderedLogWithCoverage).toContain("R10")
+    expect(renderedLogWithCoverage).toContain("c".repeat(12))
+    expect(renderedLogWithCoverage).not.toContain("c".repeat(40))
+
+    const renderedLogNoCoverage = await renderString(createElement(LineLogView, { rows }), {
+      width: 140,
+      height: 24,
+    })
+    expect(renderedLogNoCoverage).not.toContain("Legacy queue coverage")
+    expect(renderedLogNoCoverage).not.toContain(missingArtifact)
+
+    const ttyLog = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
+      width: 140,
+      height: 24,
+      plain: false,
+    })
+    const plainLog = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
+      width: 140,
+      height: 24,
+      plain: true,
+    })
+    expect(ttyLog).toContain("\u001b]8;;")
+    expect(plainLog).not.toContain("\u001b]8;;")
+    expect(JSON.parse(JSON.stringify({ command: "line.log", rows, coverage: withCoverage }))).toEqual({
+      command: "line.log",
+      rows,
+      coverage: withCoverage,
+    })
+
+    const renderedShow = await renderString(createElement(LineShowView, { data: show }), { width: 140, height: 40 })
+    expect(renderedShow).toContain("check")
+    expect(renderedShow).not.toContain("job-check-pass")
+    const lineShowJson = JSON.parse(JSON.stringify(show))
+    expect(lineShowJson.steps[0].uuid).toBe("job-check-pass")
+    expect(lineShowJson.steps[0].attempt).toBe("2")
+    expect(lineShowJson.steps[0].duration).toBe("2.0s")
+
+    rmSync(temp, { recursive: true, force: true })
   })
 
   it("runs a real task contest to durable evidence, then selects and promotes the exact winner", async () => {
