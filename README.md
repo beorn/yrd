@@ -13,14 +13,12 @@ task -> work bay -> PR -> line -> integrated base branch
           \-> competing bays -> evaluation -> selected PR -> line
 ```
 
-`yrd` is the complete command. `git bay` is its Git-native bay projection:
+`yrd` is the complete command. `git bay` is available as a convenient alias in Git,
+and is the same as `yrd bay`.
 
 ```text
 git bay <verb> == yrd bay <verb>
 ```
-
-There is one implementation and one state model. `git bay` does not have a
-separate skin or a hidden line namespace.
 
 The project is `beorn/yrd`, the CLI distribution is `git-yrd`, the package
 scope is `@yrd`, and its owned public domain is `yrd.dev`.
