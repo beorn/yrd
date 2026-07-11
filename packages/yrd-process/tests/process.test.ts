@@ -48,6 +48,7 @@ describe("Process", () => {
   it("bounds captured stdout and terminates a process that exceeds it", async () => {
     const killed: NodeJS.Signals[] = []
     const spawn: Spawn = () => ({
+      pid: 4242,
       stdout: bytes("too much output"),
       stderr: bytes(""),
       exited: Promise.resolve(0),
@@ -65,6 +66,7 @@ describe("Process", () => {
   it("escalates timed-out children from SIGTERM to SIGKILL after the grace period", async () => {
     const killed: NodeJS.Signals[] = []
     const spawn: Spawn = () => ({
+      pid: 4242,
       stdout: bytes(""),
       stderr: bytes(""),
       exited: new Promise((resolve) => setTimeout(() => resolve(137), 25)),

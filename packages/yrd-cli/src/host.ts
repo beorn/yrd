@@ -151,6 +151,22 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
   return step as unknown as RuntimeStep
 }
 
+/**
+ * The ONE default wall-clock bound for a line step's local command (21012 S1).
+ * Generous by design — a legitimate broad local gate takes minutes; only a
+ * wedged process tree exceeds it. Declarative override: `timeoutMs` on the
+ * step config. Applies to the local command execution of BOTH runners (a
+ * waiting step's LAUNCHER is still a local command); the remote work behind a
+ * waiting step is governed by the remote system's own timeout. Policy lives
+ * HERE (host), mechanism lives in @yrd/process — never bound inside the lib.
+ */
+export const DEFAULT_STEP_TIMEOUT_MS = 15 * 60_000
+
+/** Effective wall-clock bound for a step: declared, else the host default. */
+export function stepTimeoutMs(config: YrdStepConfig): number {
+  return config.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS
+}
+
 function stepCommand(name: string, config: YrdStepConfig): string {
   if (config.run === undefined) throw new Error(`yrd: line step '${name}' has no command`)
   return config.run
@@ -175,6 +191,7 @@ function candidateStep(
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
         runner: config.runner,
+        timeoutMs: stepTimeoutMs(config),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
       { revision: lineStepRevision(repo, stateDir, name, config, checkoutParent) },
@@ -194,6 +211,7 @@ function integratedRunner(
     command: stepCommand(name, config),
     cwd: repo,
     purpose: name,
+    timeoutMs: stepTimeoutMs(config),
     artifactRoot: join(stateDir, "artifacts"),
     variables: (input: StepExecution<IntegratedShape>) => ({
       YRD_INTEGRATED_SHA: input.shape.integration.commit,

@@ -20,6 +20,8 @@ export const CommandEvidenceSchema = z
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
     artifacts: z.array(StepArtifactSchema),
     detail: z.string().optional(),
+    /** True when the command was settled by its wall-clock bound (21012 S1). */
+    timedOut: z.boolean().optional(),
   })
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
@@ -117,7 +119,19 @@ function configuredCommand<Shape extends PRShape>(
       configHash,
       artifacts,
       ...(detail === "" ? {} : { detail }),
+      ...(result.timedOut ? { timedOut: true } : {}),
     })
+    // 21012 S1: a wall-clock settlement is a NAMED failure class, never a
+    // generic exit red — the journal evidence must say the bound fired (and
+    // whether the tree sweep itself failed), so a wedged step self-diagnoses.
+    if (result.timedOut) {
+      const action = waiting ? "launcher" : "command"
+      return failed(
+        `${options.purpose}-timeout`,
+        `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound — process tree settled` +
+          (result.sweepFailure === undefined ? "" : ` (${result.sweepFailure})`),
+      )
+    }
     if (result.exitCode !== 0) {
       const action = waiting ? "launcher" : "command"
       return failed(

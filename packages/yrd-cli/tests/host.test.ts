@@ -287,3 +287,12 @@ describe("discoverYrdRepository", { timeout: 20_000 }, () => {
     await expect(discoverYrdRepository({ cwd: root })).rejects.toThrow("not inside a Git worktree")
   })
 })
+
+describe("stepTimeoutMs — the ONE default wall-clock bound for local step commands (21012 S1)", () => {
+  it("applies the default when a step declares no bound, and the declared bound when it does", async () => {
+    const { DEFAULT_STEP_TIMEOUT_MS, stepTimeoutMs } = await import("../src/host.ts")
+    expect(stepTimeoutMs({ run: "x", runner: "local" })).toBe(DEFAULT_STEP_TIMEOUT_MS)
+    expect(stepTimeoutMs({ run: "x", runner: "waiting" })).toBe(DEFAULT_STEP_TIMEOUT_MS)
+    expect(stepTimeoutMs({ run: "x", runner: "local", timeoutMs: 1_234 })).toBe(1_234)
+  })
+})

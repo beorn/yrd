@@ -10,7 +10,13 @@ const StepNamesSchema = z.array(StepNameSchema).superRefine((names, context) => 
 })
 const RunnerSchema = z.enum(["local", "waiting"])
 const StepObjectSchema = z
-  .object({ run: TextSchema.optional(), runner: RunnerSchema.default("local"), environment: TextSchema.optional() })
+  .object({
+    run: TextSchema.optional(),
+    runner: RunnerSchema.default("local"),
+    environment: TextSchema.optional(),
+    /** Declarative per-step wall-clock bound; absent = the host default applies (21012 S1 — never silently unbounded). */
+    timeoutMs: z.number().int().min(1).optional(),
+  })
   .strict()
 const StepSchema = z.preprocess((value) => (typeof value === "string" ? { run: value } : value), StepObjectSchema)
 
