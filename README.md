@@ -149,6 +149,14 @@ All read and mutation commands support stable, machine-readable JSON where
 documented. Human status uses Silvery tables, semantic status color, and OSC 8
 links for bay paths, logs, and artifacts.
 
+`line integrate --json` and `line status --json` include `runStatus`, one
+derived row per PR tip. Each row names the durable `runId`, PR, `tip`, base SHA,
+state, failed step, exact replay argv and display text, primary log path or URL,
+and the ordered full-gate steps still required. Batch execution still projects
+one row per tip. The same fields appear in the human Line table, so an
+integrator can resume from one command result without reconstructing job
+identity from terminal or messaging history. Raw Line runs remain in `results`.
+
 ### Bay Operations
 
 ```text

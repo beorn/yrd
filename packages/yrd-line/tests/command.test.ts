@@ -221,6 +221,29 @@ describe("Line command adapters", () => {
     ])
   })
 
+  it("retains exact replay and log artifacts when a configured command fails", async () => {
+    await using process = createProcess()
+    const { repo, feature: featureSha } = await repository("feature")
+    const command = "printf 'targeted failure\\n' >&2; exit 7"
+    await using app = await checkedLine(process, repo, command)
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "check-failed" },
+    })
+    const job = run.steps[0]?.job
+    if (job?.status !== "failed" || job.output === undefined) throw new Error("failure lost command evidence")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      exitCode: 7,
+      replay: { argv: ["sh", "-c", command], display: command },
+      artifacts: [{ name: "stderr" }],
+    })
+    expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("targeted failure\n")
+  })
+
   it("checks and lands one combined candidate for a passing batch", async () => {
     const { repo, one: firstSha, two: secondSha } = await repository("one", "two")
     await using process = createProcess()

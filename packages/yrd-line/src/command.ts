@@ -7,7 +7,7 @@ import { parseJobLaunch, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
-import { IntegrationProofSchema } from "./model.ts"
+import { IntegrationProofSchema, LineReplaySchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./line.ts"
 
 export const StepArtifactSchema = z.object({ name: z.string().min(1), path: z.string().min(1) }).strict()
@@ -19,6 +19,7 @@ export const CommandEvidenceSchema = z
     durationMs: z.number().nonnegative(),
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
     artifacts: z.array(StepArtifactSchema),
+    replay: LineReplaySchema.optional(),
     detail: z.string().optional(),
   })
   .strict()
@@ -116,6 +117,7 @@ function configuredCommand<Shape extends PRShape>(
       durationMs: result.durationMs,
       configHash,
       artifacts,
+      replay: { argv: ["sh", "-c", options.command], display: options.command },
       ...(detail === "" ? {} : { detail }),
     })
     if (result.exitCode !== 0) {
@@ -123,6 +125,7 @@ function configuredCommand<Shape extends PRShape>(
       return failed(
         `${options.purpose}${waiting ? "-launcher" : ""}-failed`,
         `${options.purpose} ${action} exited ${result.exitCode}${evidence.detail ? `: ${evidence.detail}` : ""}`,
+        evidence,
       )
     }
     if (!waiting) return { status: "passed", output: evidence }
@@ -332,7 +335,13 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               checkpoint: GitCheckEvidenceSchema.parse({ ...(outcome.checkpoint as CommandEvidence), ...evidence }),
             }
           }
-          return { status: "failed", error: outcome.error }
+          return {
+            status: "failed",
+            error: outcome.error,
+            ...(outcome.output === undefined
+              ? {}
+              : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }),
+          }
         },
       )
     } catch (cause) {
@@ -424,8 +433,12 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   return primary
 }
 
-function failed<Output extends JsonValue = JsonValue>(code: string, message: string): JobResult<Output> {
-  return { status: "failed", error: { code, message } }
+function failed<Output extends JsonValue = JsonValue>(
+  code: string,
+  message: string,
+  output?: Output,
+): JobResult<Output> {
+  return { status: "failed", error: { code, message }, ...(output === undefined ? {} : { output }) }
 }
 
 function messageOf(cause: unknown): string {

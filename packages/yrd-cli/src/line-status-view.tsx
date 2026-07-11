@@ -2,7 +2,7 @@ import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
 import type { Job } from "@yrd/job"
-import type { LineRun, LineStep, LineSummary } from "@yrd/line"
+import { lineRunStatus, type LineRun, type LineStep, type LineSummary } from "@yrd/line"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
@@ -89,25 +89,39 @@ function CellLink({ href, children }: { href: string; children: string }) {
 
 export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Line idle.</Text>
-  const data = runs.map((run) => ({
-    run: run.id,
-    prs: run.prs.map((pr) => pr.id).join(","),
-    state: run.status,
-    steps: run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" "),
+  const data = lineRunStatus(runs).map((run) => ({
+    ...run,
+    tip: run.tip.slice(0, 12),
+    base: run.baseSha?.slice(0, 12) ?? "-",
+    failed: run.failedStep ?? "-",
+    replay: run.replay?.display ?? "-",
+    gate: run.remainingGate.steps.join(",") || "done",
   }))
   return (
     <Table
       data={data}
       columns={[
-        { header: "RUN", key: "run" },
-        { header: "PRS", key: "prs" },
+        { header: "RUN", key: "runId" },
+        { header: "PR", key: "pr" },
+        { header: "TIP", key: "tip" },
+        { header: "BASE", key: "base" },
         {
           header: "STATE",
           key: "state",
           minWidth: 8,
           render: (row) => <StatusValue value={row.state} />,
         },
-        { header: "STEPS", key: "steps", grow: true },
+        { header: "FAILED", key: "failed" },
+        { header: "REPLAY", key: "replay", grow: true },
+        {
+          header: "LOG",
+          render: (row) => {
+            const href =
+              row.log?.url ?? (row.log?.path === undefined ? undefined : pathToFileURL(resolve(row.log.path)).href)
+            return href === undefined ? "-" : <CellLink href={href}>open</CellLink>
+          },
+        },
+        { header: "FULL GATE", key: "gate", grow: true },
       ]}
     />
   )
@@ -251,6 +265,10 @@ export function LineStatusView({
       {results.map((result, index) => {
         const all = Object.values(state.prs).filter((pr) => pr.base === result.base)
         const rows = lineRows(state, result, selected, now)
+        const visible = new Set(result.prs.map((pr) => pr.id))
+        const runs = [...result.running, ...result.waiting, ...result.finished].filter((run) =>
+          run.prs.some((pr) => visible.has(pr.id)),
+        )
         const summary = [
           {
             line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
@@ -279,6 +297,11 @@ export function LineStatusView({
             ) : (
               <Box marginTop={1}>
                 <Table data={rows} columns={detailColumns()} padding={1} />
+              </Box>
+            )}
+            {runs.length > 0 && (
+              <Box marginTop={1}>
+                <LineRunsView runs={runs} />
               </Box>
             )}
           </Box>

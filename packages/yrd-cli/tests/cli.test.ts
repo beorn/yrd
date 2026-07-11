@@ -129,6 +129,7 @@ function contestAdapters(probe?: OverlapProbe, baseResolutions?: string[], waiti
 async function createApp(
   options: {
     waitingCheck?: boolean
+    failingCheck?: boolean
     dirtyBay?: boolean
     refreshedHead?: string
     probe?: OverlapProbe
@@ -151,7 +152,22 @@ async function createApp(
             url: "https://ci.invalid/run/1",
             checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
           }
-        : { status: "passed", output: { checked: true } },
+        : options.failingCheck
+          ? {
+              status: "failed",
+              error: { code: "check-failed", message: "targeted guard failed" },
+              output: {
+                exitCode: 1,
+                durationMs: 1_234,
+                configHash: "c".repeat(64),
+                replay: {
+                  argv: ["bun", "vitest", "run", "--changed", BASE_SHA],
+                  display: `bun vitest run --changed ${BASE_SHA}`,
+                },
+                artifacts: [{ name: "stderr", path: "/tmp/yrd/R1/check/stderr.log" }],
+              },
+            }
+          : { status: "passed", output: { checked: true } },
     { revision: "check-v1", output: JsonSchema },
   )
   const merge = withMerge(
@@ -344,6 +360,39 @@ describe("runYrd", () => {
     })
   })
 
+  it("projects one complete CI run status per PR tip from integrate and status", async () => {
+    const app = await createApp({ failingCheck: true })
+    await openAndSubmit(app)
+
+    const integrated = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--json"), integrated.io)).toBe(1)
+    const expected = {
+      runId: "R1",
+      pr: "PR1",
+      tip: HEAD_SHA,
+      baseSha: BASE_SHA,
+      failedStep: "check",
+      replay: {
+        argv: ["bun", "vitest", "run", "--changed", BASE_SHA],
+        display: `bun vitest run --changed ${BASE_SHA}`,
+      },
+      log: { path: "/tmp/yrd/R1/check/stderr.log" },
+      remainingGate: { required: true, steps: ["check", "merge"] },
+    }
+    expect(JSON.parse(integrated.stdout())).toMatchObject({ command: "line.integrate", runStatus: [expected] })
+
+    const status = outputIO()
+    expect(await runYrd(app, yrd("line", "status", "PR1", "--json"), status.io)).toBe(0)
+    expect(JSON.parse(status.stdout())).toMatchObject({ command: "line.status", runStatus: [expected] })
+
+    const human = outputIO({ color: true, columns: 180 })
+    expect(await runYrd(app, yrd("line", "status", "PR1"), human.io)).toBe(0)
+    expect(human.stdout()).toContain("R1")
+    expect(human.stdout()).toContain("check")
+    expect(human.stdout()).toContain(`bun vitest run --changed ${BASE_SHA}`)
+    expect(human.stdout()).toContain("file:///tmp/yrd/R1/check/stderr.log")
+  })
+
   it("refreshes an active bay before submit and refuses uncommitted work", async () => {
     const refreshedHead = "2".repeat(40)
     const clean = await createApp({ refreshedHead })
@@ -457,7 +506,7 @@ describe("runYrd", () => {
 
     const integrated = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "--steps", "--json"), integrated.io)).toBe(0)
-    expect(JSON.parse(integrated.stdout())).toEqual({ command: "line.integrate", results: [] })
+    expect(JSON.parse(integrated.stdout())).toEqual({ command: "line.integrate", results: [], runStatus: [] })
     expect(app.state().bays.prs.PR1?.status).toBe("submitted")
 
     const idle = outputIO()
@@ -469,7 +518,7 @@ describe("runYrd", () => {
 
     const drained = outputIO()
     expect(await runYrd(app, yrd("line", "integrate", "--json"), drained.io)).toBe(0)
-    expect(JSON.parse(drained.stdout())).toEqual({ command: "line.integrate", results: [] })
+    expect(JSON.parse(drained.stdout())).toEqual({ command: "line.integrate", results: [], runStatus: [] })
   })
 
   it("passes zero-or-more selectors to the line as one batch-capable candidate set", async () => {
@@ -487,6 +536,10 @@ describe("runYrd", () => {
           status: "passed",
           prs: [{ id: "PR1" }, { id: "PR2" }],
         },
+      ],
+      runStatus: [
+        { runId: "R1", pr: "PR1", tip: HEAD_SHA, remainingGate: { required: false, steps: [] } },
+        { runId: "R1", pr: "PR2", tip: HEAD_SHA, remainingGate: { required: false, steps: [] } },
       ],
     })
   })

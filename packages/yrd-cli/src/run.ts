@@ -4,7 +4,7 @@ import { createElement } from "react"
 import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
-import type { LineRun } from "@yrd/line"
+import { lineRunStatus, type LineRun } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
 import { LineRunsView, LineStatusView, PRResultView, type LineStatusResult } from "./line-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
@@ -289,10 +289,14 @@ async function lineStatus(
       ),
     })
   }
+  const revisions = new Set(results.flatMap((result) => result.prs.map((pr) => `${pr.id}\0${pr.headSha}`)))
+  const runStatus = lineRunStatus(
+    results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished]),
+  ).filter((run) => revisions.has(`${run.pr}\0${run.tip}`))
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "line.status", results },
+    { command: "line.status", results, runStatus },
     createElement(LineStatusView, {
       state: state.bays,
       results,
@@ -441,7 +445,9 @@ async function watchLine(
   while (true) {
     const runs = await integrateLines(app, selectors, options, io)
     if (jsonEnabled(options)) {
-      for (const run of runs) io.stdout(stableJson({ command: "line.integrate", mode: "watch", run }))
+      for (const run of runs) {
+        io.stdout(stableJson({ command: "line.integrate", mode: "watch", run, runStatus: lineRunStatus([run]) }))
+      }
     } else if (runs.length > 0) {
       await printHuman(io, createElement(LineRunsView, { runs }))
     }
@@ -757,7 +763,7 @@ function buildProgram(
       await printResult(
         io,
         jsonEnabled(options),
-        { command: "line.integrate", results: runs },
+        { command: "line.integrate", results: runs, runStatus: lineRunStatus(runs) },
         createElement(LineRunsView, { runs }),
       )
       setExit(runs.some((run) => run.status === "failed") ? 1 : 0)

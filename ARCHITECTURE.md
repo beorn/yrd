@@ -46,6 +46,7 @@ The objects above operate on plain records:
 | `PR`                   | Immutable submitted revision offered to a base branch                     |
 | `Job`                  | Durable executable lifecycle and evidence                                 |
 | `LineRun`              | Pinned PR set, base, step plan, and integration facts                     |
+| `LineRunStatus`        | Per-tip operational projection with replay, log, and remaining gate       |
 | `Step`                 | Configured typed transition in a Line                                     |
 | `Contest`              | Task, competitors, attempts, selection, and promotion facts               |
 | `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |

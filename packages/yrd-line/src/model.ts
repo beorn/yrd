@@ -81,6 +81,28 @@ export type LineRun = Omit<LineRecord, "initialIntegration" | "steps" | "failure
     error?: JobError
   }>
 
+export const LineReplaySchema = z
+  .object({
+    argv: z.array(z.string().min(1)).min(1),
+    display: z.string().min(1),
+  })
+  .strict()
+export type LineReplay = Readonly<z.infer<typeof LineReplaySchema>>
+
+export type LineLog = Readonly<{ path: string; url?: string } | { path?: string; url: string }>
+
+export type LineRunStatus = Readonly<{
+  runId: LineRunId
+  pr: string
+  tip: string
+  baseSha?: string
+  state: LineRun["status"]
+  failedStep?: StepName
+  replay?: LineReplay
+  log?: LineLog
+  remainingGate: Readonly<{ required: boolean; steps: readonly StepName[] }>
+}>
+
 export type LinesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
@@ -172,3 +194,72 @@ export const Lines = Object.freeze({
     return run.status === "passed" || run.status === "failed"
   },
 })
+
+const LineEvidenceSchema = z
+  .object({
+    replay: LineReplaySchema.optional(),
+    artifacts: z
+      .array(
+        z
+          .object({
+            name: z.string().optional(),
+            path: z.string().min(1).optional(),
+            uri: z.string().min(1).optional(),
+            url: z.string().min(1).optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+  })
+  .passthrough()
+
+function lineEvidence(job: Job | undefined): z.infer<typeof LineEvidenceSchema> | undefined {
+  if (job === undefined) return undefined
+  const value = "output" in job ? job.output : "checkpoint" in job ? job.checkpoint : undefined
+  const parsed = LineEvidenceSchema.safeParse(value)
+  return parsed.success ? parsed.data : undefined
+}
+
+function lineLog(job: Job | undefined, evidence: z.infer<typeof LineEvidenceSchema> | undefined): LineLog | undefined {
+  const url = job !== undefined && "url" in job ? job.url : undefined
+  const artifacts = evidence?.artifacts ?? []
+  const artifact =
+    artifacts.find((item) => item.name === "stderr") ?? artifacts.find((item) => item.name === "stdout") ?? artifacts[0]
+  const path = artifact?.path
+  const artifactUrl = artifact?.url ?? artifact?.uri
+  const resolvedUrl = url ?? artifactUrl
+  if (path !== undefined) return resolvedUrl === undefined ? { path } : { path, url: resolvedUrl }
+  return resolvedUrl === undefined ? undefined : { url: resolvedUrl }
+}
+
+export function lineRunStatus(runs: readonly LineRun[]): LineRunStatus[] {
+  const byRevision = new Map<string, LineRunStatus>()
+  const ordered = runs.toSorted(
+    (left, right) =>
+      left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id, undefined, { numeric: true }),
+  )
+  for (const run of ordered) {
+    const failed = run.steps.find((step) => step.job?.status === "failed" || step.job?.status === "lost")
+    const active = run.steps.find((step) =>
+      step.job === undefined ? false : ["requested", "running", "waiting"].includes(step.job.status),
+    )
+    const focused = failed ?? active
+    const evidence = lineEvidence(focused?.job)
+    const log = lineLog(focused?.job, evidence)
+    const remaining = run.steps.filter((step) => step.job?.status !== "passed").map((step) => step.name)
+    for (const pr of run.prs) {
+      byRevision.set(`${pr.id}\0${pr.headSha}`, {
+        runId: run.id,
+        pr: pr.id,
+        tip: pr.headSha,
+        ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
+        state: run.status,
+        ...(failed === undefined ? {} : { failedStep: failed.name }),
+        ...(evidence?.replay === undefined ? {} : { replay: evidence.replay }),
+        ...(log === undefined ? {} : { log }),
+        remainingGate: { required: remaining.length > 0, steps: remaining },
+      })
+    }
+  }
+  return [...byRevision.values()]
+}
