@@ -124,7 +124,7 @@ describe("filesystem Journal", () => {
   it("round-trips frames as cursor-addressed JSONL batches", async () => {
     const dir = await directory()
     const journal = await createJournal({ dir })
-    const first = frame("c1", "héllo")
+    const first = { ...frame("c1", "héllo"), value: { receipt: "saved" } }
     const second = frame("c2")
 
     const appendedFirst = await journal.append(first, 0)
