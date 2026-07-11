@@ -523,7 +523,8 @@ export function withJobs(options: JobsOptions = {}) {
 }
 
 function mergeJobDefs(input: JobsOptions["definitions"]): JobDefs {
-  const groups: readonly JobDefs[] = input === undefined ? [] : Array.isArray(input) ? input : [input as JobDefs]
+  const groups: readonly JobDefs[] =
+    input === undefined ? [] : Array.isArray(input) ? (input as readonly JobDefs[]) : [input as JobDefs]
   const definitions: Record<string, JobDef> = {}
   for (const group of groups) {
     for (const [name, definition] of Object.entries(group)) {
