@@ -59,7 +59,7 @@ repository-independent and never creates Yrd state.
 
 ```console
 $ cd my-repository
-$ git bay open fix-release
+$ yrd bay open fix-release
 BAY    STATUS    BRANCH                    BASE    PATH
 B1     active    task/fix-release          main    /work/my-repository/.bays/B1
 
@@ -67,7 +67,7 @@ $ cd /work/my-repository/.bays/B1
 $ ...edit and test...
 $ git commit -am "fix: release ordering"
 
-$ git bay submit --wait
+$ yrd bay submit --wait
 PR     STATUS       BRANCH                 BASE    REV    HEAD
 PR1    submitted    task/fix-release       main      1    a13f09b1c821
 
@@ -75,10 +75,10 @@ RUN    PRS    STATE     STEPS
 R1     PR1    passed    check=passed merge=passed
 
 $ yrd line status
-LINE                            OPEN    ACTIVE    INTEGRATED    REJECTED
-main@91803b2137d8                 0         0             1         0
+LINE               OPEN  ACTIVE  INTEGRATED    REJECTED
+main@91803b2137d8     0       0           1           0
 
-$ git bay close
+$ yrd bay close
 BAY    STATUS    BRANCH                    BASE    PATH
 B1     closed    task/fix-release          main    /work/my-repository/.bays/B1
 ```
@@ -86,7 +86,7 @@ B1     closed    task/fix-release          main    /work/my-repository/.bays/B1
 Without `--wait`, submit is a handoff and an integrator runs the line:
 
 ```console
-$ git bay submit
+$ yrd bay submit
 PR     STATUS       BRANCH                 BASE    REV    HEAD
 PR2    submitted    task/another-fix       main      1    b7144cc7d201
 
@@ -100,7 +100,9 @@ During development in this repository:
 ```bash
 bun yrd --help
 bun yrd line status
-bun git-bay open example
+
+# Installed alias for `yrd bay open example`:
+git bay open example
 ```
 
 Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
@@ -146,14 +148,14 @@ links for bay paths, logs, and artifacts.
 ### Bay Operations
 
 ```text
-git bay open <name> [--from <branch>] [--base <branch>]
+yrd bay open <name> [--from <branch>] [--base <branch>]
   [--task <ref>] [--actor <id>] [--json]
-git bay refresh [selector...] [--json]
-git bay submit [selector...] [--wait] [--base <branch>] [--json]
-git bay close [selector...] [--withdraw] [--json]
+yrd bay refresh [selector...] [--json]
+yrd bay submit [selector...] [--wait] [--base <branch>] [--json]
+yrd bay close [selector...] [--withdraw] [--json]
 ```
 
-The same commands are available under `yrd bay`.
+The same commands are available through the `git bay` alias.
 
 | Command   | Input                                                | Output and state                                                            |
 | --------- | ---------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -175,8 +177,8 @@ runner, such as Contest's `ag` runner, mans the Bay.
 branch submission does not provision a worktree:
 
 ```bash
-git bay open release-fix --from fix/release --base release/2.0
-git bay submit fix/release --base release/2.0
+yrd bay open release-fix --from fix/release --base release/2.0
+yrd bay submit fix/release --base release/2.0
 ```
 
 #### Manning an Ordinary Bay
@@ -423,8 +425,8 @@ Different base branches have independent line state but share the repository's
 event journal, receiver, artifacts, and configured plugins:
 
 ```bash
-git bay open release-fix --base release/2.0
-git bay submit --base release/2.0
+yrd bay open release-fix --base release/2.0
+yrd bay submit --base release/2.0
 yrd line status release/2.0
 ```
 
