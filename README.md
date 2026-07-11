@@ -1,6 +1,6 @@
 # Yrd
 
-**Yrd** orchestrates software development: tasks become isolated work bays,
+**Yrd** (Yard, like in ship yard) orchestrates software development: tasks become isolated work bays,
 completed work becomes local PRs, integration lines verify and land those PRs,
 and contests compare multiple implementations of the same real task.
 
