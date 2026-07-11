@@ -38,20 +38,18 @@ function lineGitDir(cwd: string): string | undefined {
   }
 }
 
-async function lineLegacyCoverage(cwd: string): Promise<LineLogCoverage | undefined> {
+async function firstEventTimestamp(app: YrdCliApp): Promise<string> {
+  for await (const event of app.events()) return event.ts
+  return "-"
+}
+
+async function lineLegacyCoverage(cwd: string, since: string): Promise<LineLogCoverage | undefined> {
   const gitDir = lineGitDir(cwd)
   if (gitDir === undefined) return undefined
   const journal = join(gitDir, "bay", "journal.jsonl")
   try {
     const content = await readFile(journal, "utf8")
     const lines = content.split(/\r?\n/u).filter((value) => value.trim() !== "")
-    let since = "-"
-    try {
-      const frame = JSON.parse(lines[0] as string)
-      if (typeof frame?.ts === "string") since = frame.ts
-    } catch {
-      // Keep the fallback placeholder when JSON is malformed.
-    }
     return { since, completeness: "queue-only", legacy: { path: journal, frames: lines.length } }
   } catch {
     return undefined
@@ -175,14 +173,14 @@ async function openBay(
 ): Promise<void> {
   const from = oneOfAliases(options.from, options.head, "from", "head")
   const base = oneOfAliases(options.base, options.line, "base", "line")
-  const frame = await app.bays.open({
+  const result = await app.bays.open({
     name,
     ...(options.task === undefined ? {} : { task: options.task }),
     ...(options.actor === undefined ? {} : { actor: options.actor }),
     ...(from === undefined ? {} : { from }),
     ...(base === undefined ? {} : { base }),
   })
-  assertJobsPassed(await runJobs(app, app.jobs.requested(frame), io), `bay '${name}' provision`)
+  assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${name}' provision`)
   const bay = app.bays.get(name)
   if (bay?.path === undefined || bay.status !== "active") refusal(`bay '${name}' did not become active`)
   await printResult(
@@ -214,8 +212,8 @@ async function refreshBays(
 }
 
 async function refreshBay(app: YrdCliApp, bay: Bay, io: YrdCliIO): Promise<Bay> {
-  const frame = await app.bays.refresh({ bay: bay.id })
-  assertJobsPassed(await runJobs(app, app.jobs.requested(frame), io), `bay '${bay.id}' refresh`)
+  const result = await app.bays.refresh({ bay: bay.id })
+  assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' refresh`)
   const refreshed = app.bays.get(bay.id)
   if (refreshed === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after refresh`)
   return refreshed
@@ -230,11 +228,11 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
   const closed: Bay[] = []
   for (const bay of bays) {
-    const frame = await app.bays.close({
+    const result = await app.bays.close({
       bay: bay.id,
       ...(options.withdraw === true ? { withdraw: true } : {}),
     })
-    assertJobsPassed(await runJobs(app, app.jobs.requested(frame), io), `bay '${bay.id}' close`)
+    assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' close`)
     const current = app.bays.get(bay.id)
     if (current === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after close`)
     closed.push(current)
@@ -413,7 +411,7 @@ async function lineLog(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
   const rows = lineLogRows(summaries, target.selected, target.prFilter, prStatusById)
-  const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd())
+  const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
     jsonEnabled(options),

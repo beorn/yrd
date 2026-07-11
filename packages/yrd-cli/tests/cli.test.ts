@@ -2,9 +2,11 @@
 // @level l2
 // @consumer @yrd/cli
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
@@ -30,7 +32,14 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { LineShowView, LineLogView, lineLogRows, lineShowData, type LineLogCoverage } from "../src/line-status-view.tsx"
+import {
+  LineShowView,
+  LineLogView,
+  lineLogRows,
+  lineShowData,
+  lineStatusRows,
+  type LineLogCoverage,
+} from "../src/line-status-view.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -606,6 +615,9 @@ describe("runYrd", () => {
   })
 
   it("records an external failing verdict successfully while the line run becomes failed", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "yrd-external-verdict-"))
+    const artifact = join(temp, "private-tests.log")
+    writeFileSync(artifact, "private tests failed\n")
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
     expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
@@ -626,7 +638,7 @@ describe("runYrd", () => {
           "--detail",
           "private tests failed",
           "--artifact",
-          "report=/tmp/private-tests.log",
+          `report=${artifact}`,
           "--json",
         ),
         finish.io,
@@ -639,7 +651,8 @@ describe("runYrd", () => {
     })
     const status = outputIO({ color: true })
     expect(await runYrd(app, yrd("line", "status", "PR1"), status.io)).toBe(0)
-    expect(status.stdout()).toContain("file:///tmp/private-tests.log")
+    expect(status.stdout()).toContain(pathToFileURL(artifact).href)
+    rmSync(temp, { recursive: true, force: true })
   })
 
   it("preserves zero-selector and explicitly empty step selection semantics", async () => {
@@ -846,6 +859,7 @@ describe("runYrd", () => {
       finishedAt: "2026-07-10T10:00:02.000Z",
       pr: { id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA },
       steps: [
+        fakeStep("prepare", "passed", fakeJob({ id: "job-prepare-pass", status: "passed", attempt: 1 })),
         fakeStep(
           "check",
           "failed",
@@ -935,10 +949,46 @@ describe("runYrd", () => {
     })
     expect(prRows.find((row) => row.run === "R3")?.location).toBeUndefined()
 
+    const statusPr: PR = {
+      id: "PR1",
+      branch: "topic/R3",
+      base: "main",
+      status: "submitted",
+      revision: 3,
+      headSha: "f".repeat(40),
+      baseSha: BASE_SHA,
+      revisions: [
+        {
+          revision: 3,
+          headSha: "f".repeat(40),
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-10T10:59:00.000Z",
+        },
+      ],
+      submittedAt: "2026-07-10T10:59:00.000Z",
+    }
+    const statusRows = lineStatusRows(
+      { byId: {}, prs: { PR1: statusPr }, receipts: {} },
+      { ...fakeSummary([runMissingLocation]), prs: [statusPr] },
+      new Set(),
+      Date.parse("2026-07-10T12:01:00.000Z"),
+    )
+    expect(statusRows[0]).toMatchObject({ artifactCount: 1 })
+    expect(statusRows[0]).not.toHaveProperty("artifact")
+
     const failureShow = lineShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
-    expect(failureShow.steps).toHaveLength(2)
-    expect(failureShow.steps[0]).toMatchObject({ status: "failed", attempt: "1", error: "policy mismatch" })
-    expect(failureShow.steps[1]).toMatchObject({ status: "lost", lost: "worker died" })
+    expect(failureShow.steps).toHaveLength(3)
+    expect(failureShow.steps[1]).toMatchObject({
+      status: "failed",
+      attempt: "1",
+      error: "policy mismatch",
+      location: { path: attemptOne },
+    })
+    expect(failureShow.steps[2]).toMatchObject({ status: "lost", lost: "worker died" })
+
+    const missingShow = lineShowData(runMissingLocation, [runMissingLocation])
+    expect(missingShow.steps[0]).not.toHaveProperty("location")
 
     const retiredRows = lineLogRows([summary], new Set(["PR-retired"]), "PR-retired", statusByPr)
     expect(retiredRows).toHaveLength(1)
@@ -962,6 +1012,7 @@ describe("runYrd", () => {
         url: "https://ci.invalid/check",
         artifacts: [{ uri: attemptTwo }],
       },
+      location: { path: attemptTwo },
       checkpoint: `base:${BASE_SHA.slice(0, 12)} candidate:${"c".repeat(40).slice(0, 12)}`,
     })
 
@@ -970,9 +1021,20 @@ describe("runYrd", () => {
     writeFileSync(
       journal,
       Array.from({ length: 185 }, (_value, index) =>
-        JSON.stringify({ ts: `2026-07-09T12:00:${String(index).padStart(2, "0")}.000Z` }),
+        JSON.stringify({ ts: `2026-07-01T12:00:${String(index).padStart(2, "0")}.000Z` }),
       ).join("\n"),
     )
+
+    execFileSync("git", ["init", "-q", temp])
+    const coverageApp = await createApp()
+    await openAndSubmit(coverageApp)
+    const liveLog = outputIO({ cwd: temp })
+    expect(await runYrd(coverageApp, yrd("line", "log", "--json"), liveLog.io), liveLog.stderr()).toBe(0)
+    expect(JSON.parse(liveLog.stdout()).coverage).toMatchObject({
+      since: "2026-07-09T12:00:00.000Z",
+      completeness: "queue-only",
+      legacy: { path: join(realpathSync(temp), ".git", "bay", "journal.jsonl"), frames: 185 },
+    })
 
     const withCoverage = coverageFixture(journal, 185)
     const renderedLogWithCoverage = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
@@ -1004,6 +1066,12 @@ describe("runYrd", () => {
     })
     expect(ttyLog).toContain("\u001b]8;;")
     expect(plainLog).not.toContain("\u001b]8;;")
+    const coverageOnlyTty = await renderString(createElement(LineLogView, { rows: [], coverage: withCoverage }), {
+      width: 140,
+      height: 4,
+      plain: false,
+    })
+    expect(coverageOnlyTty).toContain("\u001b]8;;")
     expect(JSON.parse(JSON.stringify({ command: "line.log", rows, coverage: withCoverage }))).toEqual({
       command: "line.log",
       rows,
@@ -1013,6 +1081,18 @@ describe("runYrd", () => {
     const renderedShow = await renderString(createElement(LineShowView, { data: show }), { width: 140, height: 40 })
     expect(renderedShow).toContain("check")
     expect(renderedShow).not.toContain("job-check-pass")
+    const ttyShow = await renderString(createElement(LineShowView, { data: show }), {
+      width: 140,
+      height: 40,
+      plain: false,
+    })
+    const plainShow = await renderString(createElement(LineShowView, { data: show }), {
+      width: 140,
+      height: 40,
+      plain: true,
+    })
+    expect(ttyShow).toContain("\u001b]8;;")
+    expect(plainShow).not.toContain("\u001b]8;;")
     const lineShowJson = JSON.parse(JSON.stringify(show))
     expect(lineShowJson.steps[0].uuid).toBe("job-check-pass")
     expect(lineShowJson.steps[0].attempt).toBe("2")

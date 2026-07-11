@@ -67,6 +67,7 @@ type LineShowRow = Readonly<{
   evidence: string | Record<string, unknown>
   checkpoint: string
   landing: string
+  location?: LineLogLocation
 }>
 
 type LineShowData = Readonly<{
@@ -223,6 +224,13 @@ function artifactLocation(step: LineStep | undefined): LineLogLocation | undefin
   return undefined
 }
 
+function runLocation(run: LineRun): LineLogLocation | undefined {
+  return run.steps
+    .toReversed()
+    .map((step) => artifactLocation(step))
+    .find((location) => location !== undefined)
+}
+
 function jobCheckpoint(job: Job | undefined): unknown | undefined {
   if (job === undefined) return undefined
   if (job.status === "waiting" || job.status === "passed" || job.status === "failed") return job.checkpoint
@@ -256,10 +264,9 @@ function stepArtifacts(step: LineStep | undefined): readonly unknown[] {
 }
 
 function artifactHref(artifact: unknown): string | undefined {
-  if (!isObjectValue(artifact)) return undefined
-  const value = "uri" in artifact ? artifact.uri : "path" in artifact ? artifact.path : undefined
-  if (typeof value !== "string" || value === "") return undefined
-  return /^[a-z][a-z0-9+.-]*:/iu.test(value) ? value : pathToFileURL(resolve(value)).href
+  const location = artifactPath(artifact)
+  if (location === undefined) return undefined
+  return "path" in location ? pathToFileURL(location.path).href : location.url
 }
 
 function stepOutput(step: LineStep): string {
@@ -619,7 +626,7 @@ export function lineLogRows(
             .map((step) => step.job)
             .find((job) => job !== undefined && job.status === "failed")?.error?.message ??
           "-"
-        const location = artifactLocation(run.steps.find((step) => step.job !== undefined) as LineStep | undefined)
+        const location = runLocation(run)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
           run: run.id,
@@ -712,28 +719,32 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
     integration: run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
-    steps: run.steps.map((step) => ({
-      step: step.name,
-      revision: step.revision,
-      status: jobStatus(step),
-      attempt: step.job === undefined ? "-" : String(step.job.attempt),
-      uuid: step.job?.id ?? "-",
-      requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
-      started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
-      finished:
-        step.job === undefined || step.job.status === "running" || step.job.status === "requested"
-          ? "-"
-          : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
-      duration: step.job === undefined ? "-" : stepDuration(step),
-      error: stepError(step),
-      lost: stepLost(step),
-      detail: stepDetail(step),
-      output: stepOutput(step),
-      artifacts: stepArtifactsText(step),
-      evidence: stepEvidence(step),
-      checkpoint: stepCheckpointText(step),
-      landing: lineLanding(run),
-    })),
+    steps: run.steps.map((step) => {
+      const location = artifactLocation(step)
+      return {
+        step: step.name,
+        revision: step.revision,
+        status: jobStatus(step),
+        attempt: step.job === undefined ? "-" : String(step.job.attempt),
+        uuid: step.job?.id ?? "-",
+        requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
+        started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
+        finished:
+          step.job === undefined || step.job.status === "running" || step.job.status === "requested"
+            ? "-"
+            : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
+        duration: step.job === undefined ? "-" : stepDuration(step),
+        error: stepError(step),
+        lost: stepLost(step),
+        detail: stepDetail(step),
+        output: stepOutput(step),
+        artifacts: stepArtifactsText(step),
+        evidence: stepEvidence(step),
+        checkpoint: stepCheckpointText(step),
+        landing: lineLanding(run),
+        ...(location === undefined ? {} : { location }),
+      }
+    }),
   }
 }
 
@@ -742,7 +753,8 @@ export function LineLogView({ rows, coverage }: { rows: readonly LineLogRow[]; c
     <Box flexDirection="column">
       {coverage !== undefined ? (
         <Text color="$fg-muted">
-          Legacy queue coverage: {coverage.legacy.path} (since {coverage.since}; {coverage.legacy.frames} frames)
+          Legacy queue coverage: <Link href={pathToFileURL(coverage.legacy.path).href}>{coverage.legacy.path}</Link>{" "}
+          (since {coverage.since}; {coverage.legacy.frames} frames)
         </Text>
       ) : null}
       {rows.length === 0 ? (
@@ -850,6 +862,18 @@ export function LineShowView({ data }: { data: LineShowData }) {
             { header: "DETAIL", key: "detail", grow: true },
             { header: "OUTPUT", key: "output", grow: true, minWidth: 10 },
             { header: "ART", key: "artifacts", grow: true },
+            {
+              header: "PATH",
+              key: "location",
+              render: (row) =>
+                row.location === undefined ? (
+                  "-"
+                ) : "path" in row.location ? (
+                  <CellLink href={pathToFileURL(row.location.path).href}>{row.location.path}</CellLink>
+                ) : (
+                  <CellLink href={row.location.url}>{row.location.url}</CellLink>
+                ),
+            },
             {
               header: "EVIDENCE",
               key: "evidence",
