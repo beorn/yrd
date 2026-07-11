@@ -324,20 +324,21 @@ async function lineAudit(
 
 async function lineAdministration(
   services: YrdCliServices,
-  action: "provision" | "deprovision",
+  command: "init" | "deinit",
   base: string | undefined,
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<void> {
+  const action = command === "init" ? "provision" : "deprovision"
   const administration = services.line
   const capability = administration?.[action]
-  if (capability === undefined) configuration(`line.${action} capability is not installed`)
+  if (capability === undefined) configuration(`line.${command} capability is not installed`)
   const result = await capability(base)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: `line.${action}`, base: base ?? "main", result },
-    `${base ?? "main"} ${action}ed`,
+    { command: `line.${command}`, base: base ?? "main", result },
+    `${base ?? "main"} ${command === "init" ? "initialized" : "deinitialized"}`,
   )
 }
 
@@ -644,17 +645,26 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: { wroteError
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
   const bay = projection === "bay" ? name : `${name} bay`
   const examples: [string, string][] = [
-    [`$ ${bay} open fix --from topic`, "open from an existing source branch"],
-    [`$ ${bay} submit --wait`, "submit the current bay and run its line"],
+    [`$ ${bay} open fix --from topic`, "open an existing branch"],
+    [`$ ${bay} submit --wait`, "submit and run the line"],
   ]
   if (projection === "root") {
     examples.push(
-      [`$ ${name} line status`, "inspect active PRs and evidence"],
-      [`$ ${name} line integrate --steps check,merge`, "run selected integration steps"],
-      [`$ ${name} task compete km:T1 -a codex/claude`, "run a real-task contest"],
+      [`$ ${name} line status`, "inspect active PRs"],
+      [`$ ${name} line integrate --steps check,merge`, "run selected steps"],
+      [`$ ${name} task compete km:T1 -a codex/claude`, "compare implementations"],
     )
   }
   program.addHelpSection("Examples:", examples)
+}
+
+function addLineExamples(line: CliCommand, name: string): void {
+  line.addHelpSection("Examples:", [
+    [`$ ${name} line status`, "show the default line"],
+    [`$ ${name} line status release/2.0`, "show another base branch"],
+    [`$ ${name} line integrate PR7 --steps check,merge`, "run selected steps for one PR"],
+    [`$ ${name} line integrate --watch`, "keep the default line moving"],
+  ])
 }
 
 function buildProgram(
@@ -668,22 +678,24 @@ function buildProgram(
 ): CliCommand {
   const installed = (): YrdCliApp => app ?? configuration("command runtime is not initialized")
   const program = new CliCommand(name)
-    .description(
-      projection === "bay"
-        ? "operate isolated Git work bays"
-        : "software-development orchestration for tasks, bays, integration lines, and contests",
-    )
+    .description(projection === "bay" ? "manage isolated Git work bays" : "software delivery orchestration")
     .showHelpAfterError()
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
   if (projection === "root") program.version(YRD_VERSION, "-V, --version")
+  if (projection === "root") {
+    program.addHelpSection(
+      "Help:",
+      "Yrd coordinates software work from task to delivery.\nBays isolate implementations. Lines verify and integrate them.\nContests compare alternatives before promotion.",
+    )
+  }
 
-  const bay = projection === "bay" ? program : program.command("bay").description("operate isolated Git work bays")
+  const bay = projection === "bay" ? program : program.command("bay").description("manage isolated Git work bays")
   bay.helpCommand(false)
   bay
     .command("open <name>")
-    .description("open a bay and print its worktree path")
+    .description("open a work bay")
     .option("--from <branch>", "use an existing source branch")
     .option("--head <branch>", "alias for --from")
     .option("--base <branch>", "select the base branch")
@@ -694,12 +706,12 @@ function buildProgram(
     .action(async (workName, options) => openBay(installed(), workName, options, io))
   bay
     .command("refresh [selector...]")
-    .description("refresh zero or more live bay leases")
+    .description("refresh work bays")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => refreshBays(installed(), selectors, options, io))
   bay
     .command("submit [selector...]")
-    .description("submit zero or more bays or pushed revisions")
+    .description("submit bays or branches")
     .option("--wait", "run the line before returning")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--line <branch>", "alias for --base")
@@ -707,7 +719,7 @@ function buildProgram(
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io)))
   bay
     .command("close [selector...]")
-    .description("close zero or more bays")
+    .description("close work bays")
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
@@ -718,31 +730,31 @@ function buildProgram(
     return program
   }
 
-  const line = program.command("line").description("inspect and run integration lines")
+  const line = program.command("line").description("manage integration lines")
   line.helpCommand(false)
   line
     .command("status [selector...]")
-    .description("show line or PR status")
+    .description("show line and PR status")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => lineStatus(installed(), selectors, options, io))
   line
     .command("audit")
-    .description("audit folded line state")
+    .description("check line state")
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await lineAudit(installed(), services, options, io)))
   line
-    .command("provision [base]")
-    .description("run the installed line-environment provision preflight")
+    .command("init [base]")
+    .description("prepare line resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => lineAdministration(services, "provision", base, options, io))
+    .action(async (base, options) => lineAdministration(services, "init", base, options, io))
   line
-    .command("deprovision [base]")
-    .description("release installed line-environment resources")
+    .command("deinit [base]")
+    .description("release line resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => lineAdministration(services, "deprovision", base, options, io))
+    .action(async (base, options) => lineAdministration(services, "deinit", base, options, io))
   line
     .command("integrate [selector...]")
-    .description("run selected line steps for zero or more PRs")
+    .description("run line steps for PRs")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
     .option("--retry", "retry rejected PRs")
     .option("--watch", "keep draining the default line")
@@ -764,7 +776,7 @@ function buildProgram(
     })
   line
     .command("finish <selector>")
-    .description("finish one waiting external line step and resume its run")
+    .description("resume a waiting step")
     .option("--step <name>", "waiting step name")
     .option("--ok", "record a passing result")
     .option("--fail", "record a failing result")
@@ -776,12 +788,13 @@ function buildProgram(
     .option("--duration-ms <milliseconds>", "external duration", int)
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => finishLine(installed(), selector, options, io))
+  addLineExamples(line, name)
 
-  const task = program.command("task").description("orchestrate work from tracker-neutral tasks")
+  const task = program.command("task").description("orchestrate tracker-neutral tasks")
   task.helpCommand(false)
   task
     .command("compete <task>")
-    .description("run multiple model and harness competitors on one real task")
+    .description("compare implementations of one real task")
     .option("-a, --agents <agents>", "ag-style competitor list")
     .option("--prompt <text>", "additional implementation instructions")
     .option("--evaluators [evaluator...]", "evaluator ids, comma-separated or repeated")
@@ -790,17 +803,17 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (taskId, options) => setExit(await competeTask(installed(), taskId, options, io)))
 
-  const contest = program.command("contest").description("inspect and choose immutable contest attempts")
+  const contest = program.command("contest").description("inspect and select contest attempts")
   contest.helpCommand(false)
   contest
     .command("evaluate <contest>")
-    .description("resume missing contest work and evaluate pinned attempts")
+    .description("run pending work and evaluators")
     .option("--retry", "retry failed work or re-evaluate failed verdicts")
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await evaluateContest(installed(), contestId, options, io)))
   contest
     .command("finish <contest>")
-    .description("finish one waiting remote evaluator")
+    .description("finish a waiting evaluator")
     .option("--attempt <attempt>", "contest attempt id")
     .option("--evaluator <evaluator>", "evaluator id")
     .option("--ok", "record a passing evaluator verdict")
@@ -813,12 +826,12 @@ function buildProgram(
     .action(async (contestId, options) => finishContest(installed(), contestId, options, io))
   contest
     .command("show <contest>")
-    .description("show recorded attempts, metrics, evidence, and selection")
+    .description("show attempts, metrics, and evidence")
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => showContest(installed(), contestId, options, io))
   contest
     .command("select <contest>")
-    .description("record a manual winner")
+    .description("select a winner")
     .option("--winner <attempt>", "winning attempt id")
     .option("--by <actor>", "selector identity")
     .option("--reason <text>", "selection rationale")
@@ -826,7 +839,7 @@ function buildProgram(
     .action(async (contestId, options) => selectContest(installed(), contestId, options, io))
   contest
     .command("promote <contest>")
-    .description("verify and submit the exact selected Git pin")
+    .description("submit the selected Git pin")
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 

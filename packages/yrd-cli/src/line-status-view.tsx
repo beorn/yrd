@@ -264,8 +264,9 @@ export function LineStatusView({
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
             <Table
               data={summary}
+              padding={1}
               columns={[
-                { header: "LINE", key: "line", grow: true },
+                { header: "LINE", key: "line", grow: true, minWidth: 6, maxWidth: 24 },
                 { header: "OPEN", key: "open", align: "right" },
                 { header: "ACTIVE", key: "active", align: "right" },
                 { header: "INTEGRATED", key: "integrated", align: "right" },

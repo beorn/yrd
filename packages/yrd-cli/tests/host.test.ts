@@ -171,6 +171,28 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(await Bun.file(join(root, ".git", "yrd", "events.jsonl")).exists()).toBe(false)
   })
 
+  it("treats a bare command namespace as help without initializing a repository host", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-line-help-"))
+    roots.push(root)
+    let stdout = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line"], {
+        cwd: root,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(0)
+    expect(stdout).toContain("Usage: yrd line")
+    expect(stderr).toBe("")
+    expect(await Bun.file(join(root, ".git", "yrd", "events.jsonl")).exists()).toBe(false)
+  })
+
   it("initializes one filesystem authority and reopens its durable PR state", async () => {
     const { repo } = await repository()
     const first = await createYrdHost({ cwd: repo })

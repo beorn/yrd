@@ -7,7 +7,7 @@ export type HumanOutput = ReactNode
 
 async function rendered(io: YrdCliIO, output: HumanOutput): Promise<string> {
   const text = await renderString(typeof output === "string" ? <Text>{output}</Text> : <>{output}</>, {
-    width: io.columns ?? 120,
+    width: Math.min(io.columns ?? 120, 120),
     height: 10_000,
     plain: io.color !== true,
   })

@@ -75,8 +75,8 @@ RUN    PRS    STATE     STEPS
 R1     PR1    passed    check=passed merge=passed
 
 $ yrd line status
-LINE               OPEN  ACTIVE  INTEGRATED    REJECTED
-main@91803b2137d8     0       0           1           0
+LINE                    OPEN ACTIVE INTEGRATED  REJECTED
+main@91803b2137d8          0      0          1         0
 
 $ yrd bay close
 BAY    STATUS    BRANCH                    BASE    PATH
@@ -210,20 +210,20 @@ turning actor attribution into a hidden side effect of `bay open`.
 ```text
 yrd line status [selector...] [--json]
 yrd line audit [--json]
-yrd line provision [base] [--json]
-yrd line deprovision [base] [--json]
+yrd line init [base] [--json]
+yrd line deinit [base] [--json]
 yrd line integrate [selector...] [--steps [step...]] [--retry] [--watch]
 yrd line finish <selector> [--step <name>] (--ok | --fail) [evidence options]
 ```
 
-| Command       | Input                                  | Output and state                                                                                             |
-| ------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `status`      | PRs or base branches                   | Summary counts plus PR state, target, age, touched age, run time, step result, logs, artifacts, and bay path |
-| `audit`       | Repository                             | Journal, projection, pinned-plan, and installed-step findings; no state change                               |
-| `provision`   | Optional base                          | Resolves and validates line environment resources                                                            |
-| `deprovision` | Optional base                          | Releases resources owned by the installed line adapter                                                       |
-| `integrate`   | Zero or more eligible PRs              | Runs configured steps; `--watch` keeps draining until cancelled                                              |
-| `finish`      | One waiting PR/step plus token/verdict | Records external evidence and resumes that exact durable run                                                 |
+| Command     | Input                                  | Output and state                                                                                             |
+| ----------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `status`    | PRs or base branches                   | Summary counts plus PR state, target, age, touched age, run time, step result, logs, artifacts, and bay path |
+| `audit`     | Repository                             | Journal, projection, pinned-plan, and installed-step findings; no state change                               |
+| `init`      | Optional base                          | Resolves and validates line environment resources                                                            |
+| `deinit`    | Optional base                          | Releases resources owned by the installed line adapter                                                       |
+| `integrate` | Zero or more eligible PRs              | Runs configured steps; `--watch` keeps draining until cancelled                                              |
+| `finish`    | One waiting PR/step plus token/verdict | Records external evidence and resumes that exact durable run                                                 |
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. `--retry` re-enters rejected work; it is
