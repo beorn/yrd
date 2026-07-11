@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import * as z from "zod"
 import {
@@ -49,10 +50,21 @@ async function directory() {
 }
 
 async function dispatchInFreshProcess(dir: string): Promise<unknown> {
+  const packageDir = fileURLToPath(new URL("../", import.meta.url))
+  const coreEntry = new URL("../../yrd-core/src/index.ts", import.meta.url).href
+  const persistenceEntry = new URL("../src/index.ts", import.meta.url).href
   const source = `
     import * as z from "zod"
     import { command, createYrd, createYrdDef, event } from "@yrd/core"
     import { createJournal } from "@yrd/persistence"
+
+    const coreEntry = import.meta.resolve("@yrd/core")
+    const persistenceEntry = import.meta.resolve("@yrd/persistence")
+    if (coreEntry !== ${JSON.stringify(coreEntry)} || persistenceEntry !== ${JSON.stringify(persistenceEntry)}) {
+      throw new Error(
+        "yrd: fresh process resolved a foreign workspace (core=" + coreEntry + ", persistence=" + persistenceEntry + ")",
+      )
+    }
 
     const add = command({
       title: "Add",
@@ -72,7 +84,7 @@ async function dispatchInFreshProcess(dir: string): Promise<unknown> {
     console.log(JSON.stringify(result))
   `
   const child = Bun.spawn([process.execPath, "--eval", source], {
-    cwd: process.cwd(),
+    cwd: packageDir,
     env: { ...process.env, NODE_ENV: "test" },
     stdout: "pipe",
     stderr: "pipe",
