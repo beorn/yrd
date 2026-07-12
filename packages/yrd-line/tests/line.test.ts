@@ -242,6 +242,59 @@ describe("Line", () => {
     expect(app.line.status("release/2.0").finished).toHaveLength(1)
   })
 
+  it("reconciles historical same-payload PRs from one integration proof", async () => {
+    const journal = createMemoryJournal<unknown>()
+    await using app = await createLineApp({}, journal)
+    const canonical = await submitBranch(app, "task/one")
+    const run = (await app.line.integrate({ prs: [canonical.id], steps: ["check", "review", "merge"] }, runtime))[0]
+    let cursor = 0
+    for await (const batch of journal.read()) cursor = batch.cursor
+    const command = { id: "00000000-0000-7000-8000-000000000101", op: "fixture.duplicate" }
+    expect(
+      await journal.append(
+        {
+          command,
+          cause: {
+            id: "00000000-0000-7000-8000-000000000102",
+            commandId: command.id,
+            op: command.op,
+            commandHash: Command.hash(command),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-8000-000000000103",
+              name: "pr/pushed",
+              ts: "2026-01-01T00:00:01.000Z",
+              data: {
+                pr: "PR2",
+                branch: "origin/task/one",
+                base: "main",
+                headSha: canonical.headSha,
+                revision: 1,
+              },
+            },
+            {
+              id: "00000000-0000-7000-8000-000000000104",
+              name: "pr/submitted",
+              ts: "2026-01-01T00:00:01.001Z",
+              data: { pr: "PR2", revision: 1, headSha: canonical.headSha },
+            },
+          ],
+        },
+        cursor,
+      ),
+    ).toMatchObject({ appended: true })
+
+    const reconciled = await app.dispatch(app.commands.line.advance, { run: run?.id ?? "missing" })
+
+    expect(run).toMatchObject({ status: "passed", integration: { commit: MERGED } })
+    expect(reconciled.events).toEqual([
+      expect.objectContaining({ name: "pr/integrated", data: expect.objectContaining({ pr: "PR2" }) }),
+    ])
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", integration: run?.integration })
+    expect(app.state().bays.prs.PR2).toMatchObject({ status: "integrated", integration: run?.integration })
+  })
+
   it("integrates the implicit queue in PR revision submission order", async () => {
     let tick = 0
     await using app = await createLineApp({ batch: 1 }, createMemoryJournal(), () =>

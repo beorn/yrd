@@ -122,7 +122,7 @@ function lineStepRevision(
       JSON.stringify({
         implementation:
           name === "merge" && resolvedCommand === undefined
-            ? "yrd-native-merge-v2"
+            ? "yrd-native-merge-v3"
             : checkoutParent === undefined
               ? "yrd-line-command-v2"
               : "yrd-line-command-v3",

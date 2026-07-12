@@ -666,10 +666,9 @@ function advanceLine(
   const events: EventDraft[] = []
   if (planned.integrates) {
     if (!isIntegrated(shape)) throw new Error(`yrd: merge step '${planned.name}' produced no integration proof`)
-    for (const pr of record.prs) {
-      const current = state.bays.prs[pr.id]
+    for (const current of samePayloadPRs(state.bays, record.prs)) {
       if (
-        current?.status === "integrated" &&
+        current.status === "integrated" &&
         current.integration?.commit === shape.integration.commit &&
         current.integration?.baseSha === shape.integration.baseSha
       ) {
@@ -677,9 +676,9 @@ function advanceLine(
       }
       events.push(
         event("pr/integrated", {
-          pr: pr.id,
-          revision: pr.revision,
-          headSha: pr.headSha,
+          pr: current.id,
+          revision: current.revision,
+          headSha: current.headSha,
           commit: shape.integration.commit,
           baseSha: shape.integration.baseSha,
         }),
@@ -690,6 +689,14 @@ function advanceLine(
   const next = record.steps[index + 1]
   if (next !== undefined) events.push(requestStep(requirePlannedStep(steps, next), record, index + 1, shape))
   return { events }
+}
+
+function samePayloadPRs(
+  state: DeepReadonly<BaysState>,
+  snapshots: readonly DeepReadonly<PRSnapshot>[],
+): readonly DeepReadonly<PR>[] {
+  const payloads = new Set(snapshots.map((pr) => `${pr.base}\0${pr.headSha}`))
+  return Object.values(state.prs).filter((pr) => pr.status !== "withdrawn" && payloads.has(`${pr.base}\0${pr.headSha}`))
 }
 
 function materializeRun(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState>): LineRun {
