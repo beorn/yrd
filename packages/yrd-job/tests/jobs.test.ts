@@ -262,6 +262,30 @@ describe("Jobs", () => {
     await changed.close()
   })
 
+  it("omits an absent completion token from durable command data", async () => {
+    const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID) })
+    await app.dispatch(app.commands.sender.send, { message: "manual" })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: JOB_ID,
+      attempt: 1,
+      executor: "manual-runner",
+      leaseExpiresAt: "2026-01-01T00:01:00.000Z",
+    })
+
+    await app.jobs.finish(JOB_ID, {
+      attempt: 1,
+      executor: "manual-runner",
+      result: { status: "passed", output: { receipt: "manual-ok" } },
+    })
+
+    const completion = (await recorded(app)).findLast(
+      ({ name, data }) => name === "job/transitioned" && (data as { type?: string }).type === "finish",
+    )
+    expect(completion?.data).not.toHaveProperty("token")
+    await app.close()
+  })
+
   it("parks remote work and fences its terminal completion", async () => {
     const job = delivery(async () => ({
       status: "waiting",
@@ -311,6 +335,10 @@ describe("Jobs", () => {
       output: { receipt: "remote-ok" },
       checkpoint: { sha: "abc" },
     })
+    const completion = (await recorded(app)).findLast(
+      ({ name, data }) => name === "job/transitioned" && (data as { type?: string }).type === "finish",
+    )
+    expect(completion?.data).toMatchObject({ token: "remote-1" })
     await app.close()
   })
 

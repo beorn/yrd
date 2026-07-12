@@ -432,7 +432,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const metadata = CompletionSchema.parse({
         attempt: completion.attempt,
         executor: completion.executor,
-        token: completion.token,
+        ...(completion.token === undefined ? {} : { token: completion.token }),
       })
       const result = jobTerminalResultSchema(installedDef.output).parse(completion.result)
       await commit({ type: "finish", id, ...metadata, result })
