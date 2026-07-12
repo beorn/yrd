@@ -935,7 +935,16 @@ describe("runYrd", () => {
             status: "failed",
             attempt: 1,
             error: { code: "check-failed", message: "policy mismatch" },
-            artifacts: [{ path: attemptOne }],
+            output: {
+              exitCode: 1,
+              durationMs: 2_500,
+              configHash: "0".repeat(64),
+              detail: "full command diagnostic",
+              artifacts: [
+                { name: "stdout", path: attemptOne },
+                { name: "stderr", path: attemptTwo },
+              ],
+            },
           }),
         ),
         fakeStep(
@@ -1004,7 +1013,17 @@ describe("runYrd", () => {
     const revision2Rows = prRows.filter((row) => row.revision === "2")
 
     expect(revision2Rows.map((row) => row.run)).toEqual(["R10", "R2"])
-    expect(revision2Rows[0]).toMatchObject({ outcome: "rejected", error: "policy mismatch", retries: "1", parent: "-" })
+    expect(revision2Rows[0]).toMatchObject({
+      outcome: "rejected",
+      error: "policy mismatch",
+      retries: "1",
+      parent: "-",
+      durationMs: 2_000,
+      locations: [
+        { label: "stdout", location: { path: attemptOne } },
+        { label: "stderr", location: { path: attemptTwo } },
+      ],
+    })
     expect(revision2Rows[0]?.location).toMatchObject({ path: attemptOne })
     expect(revision2Rows[1]).toMatchObject({
       outcome: "integrated",
@@ -1045,12 +1064,22 @@ describe("runYrd", () => {
     expect(statusRows[0]).not.toHaveProperty("artifact")
 
     const failureShow = lineShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
+    expect(failureShow).toMatchObject({
+      durationMs: 2_000,
+      prs: [{ id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA }],
+    })
     expect(failureShow.steps).toHaveLength(3)
     expect(failureShow.steps[1]).toMatchObject({
       status: "failed",
       attempt: "1",
       error: "policy mismatch",
+      detail: "full command diagnostic",
+      durationMs: 3_000,
       location: { path: attemptOne },
+      locations: [
+        { label: "stdout", location: { path: attemptOne } },
+        { label: "stderr", location: { path: attemptTwo } },
+      ],
     })
     expect(failureShow.steps[2]).toMatchObject({ status: "lost", lost: "worker died" })
 
@@ -1132,6 +1161,9 @@ describe("runYrd", () => {
       plain: true,
     })
     expect(ttyLog).toContain("\u001b]8;;")
+    expect(ttyLog).toContain(pathToFileURL(attemptOne).href)
+    expect(ttyLog).toContain(pathToFileURL(attemptTwo).href)
+    expect(ttyLog).toContain("https://ci.invalid/check")
     expect(plainLog).not.toContain("\u001b]8;;")
     const coverageOnlyTty = await renderString(createElement(LineLogView, { rows: [], coverage: withCoverage }), {
       width: 140,
@@ -1159,6 +1191,8 @@ describe("runYrd", () => {
       plain: true,
     })
     expect(ttyShow).toContain("\u001b]8;;")
+    expect(ttyShow).toContain(pathToFileURL(attemptTwo).href)
+    expect(ttyShow).toContain("https://ci.invalid/check")
     expect(plainShow).not.toContain("\u001b]8;;")
     const lineShowJson = JSON.parse(JSON.stringify(show)) as typeof show
     expect(lineShowJson.steps[0]).toMatchObject({

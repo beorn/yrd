@@ -25,6 +25,7 @@ export const CommandEvidenceSchema = z
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
     lastProgressAtMs: z.number().nonnegative().optional(),
     lastProgressBytes: z.number().int().nonnegative().optional(),
+    sweepFailure: z.string().min(1).optional(),
   })
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
@@ -135,18 +136,16 @@ function configuredCommand<Shape extends PRShape>(
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
+      ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
     })
     if (progress.stalled === true) {
       if (options.noProgressTimeoutMs === undefined) {
         throw new Error(`${options.purpose} reported an unconfigured output-progress stall`)
       }
-      const artifactPaths = evidence.artifacts.map(({ path }) => path).join(", ")
       return failed(
         `${options.purpose}-stalled`,
-        `${options.purpose} made no test/log progress for ${options.noProgressTimeoutMs}ms; ` +
-          `last progress ${progress.lastProgressBytes} bytes at ${progress.lastProgressAtMs}ms; process tree settled` +
-          (artifactPaths === "" ? "" : `; partial artifacts: ${artifactPaths}`) +
-          (result.sweepFailure === undefined ? "" : ` (${result.sweepFailure})`),
+        `${options.purpose} stalled after ${options.noProgressTimeoutMs}ms without progress`,
+        evidence,
       )
     }
     // 21012 S1: a wall-clock settlement is a NAMED failure class, never a
@@ -156,15 +155,16 @@ function configuredCommand<Shape extends PRShape>(
       const action = waiting ? "launcher" : "command"
       return failed(
         `${options.purpose}-timeout`,
-        `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound — process tree settled` +
-          (result.sweepFailure === undefined ? "" : ` (${result.sweepFailure})`),
+        `${options.purpose} ${action} exceeded its ${options.timeoutMs ?? result.durationMs}ms wall-clock bound`,
+        evidence,
       )
     }
     if (result.exitCode !== 0) {
       const action = waiting ? "launcher" : "command"
       return failed(
         `${options.purpose}${waiting ? "-launcher" : ""}-failed`,
-        `${options.purpose} ${action} exited ${result.exitCode}${evidence.detail ? `: ${evidence.detail}` : ""}`,
+        `${options.purpose} ${action} exited ${result.exitCode}`,
+        evidence,
       )
     }
     if (!waiting) return { status: "passed", output: evidence }
@@ -179,7 +179,7 @@ function configuredCommand<Shape extends PRShape>(
         checkpoint: evidence,
       }
     } catch (cause) {
-      return failed(`${options.purpose}-launcher-invalid`, messageOf(cause))
+      return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
     }
   }
 }
@@ -731,8 +731,12 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   return primary
 }
 
-function failed<Output extends JsonValue = JsonValue>(code: string, message: string): JobResult<Output> {
-  return { status: "failed", error: { code, message } }
+function failed<Output extends JsonValue = JsonValue>(
+  code: string,
+  message: string,
+  output?: Output,
+): JobResult<Output> {
+  return { status: "failed", error: { code, message }, ...(output === undefined ? {} : { output }) }
 }
 
 function messageOf(cause: unknown): string {

@@ -14,6 +14,7 @@ import { withJobs } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import {
+  CommandEvidenceSchema,
   GitCheckEvidenceSchema,
   configuredCommandStep,
   configuredMergeStep,
@@ -208,6 +209,75 @@ describe("Line command adapters", () => {
     ])
     expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([undefined, undefined])
   })
+
+  it.each([
+    {
+      name: "nonzero exit",
+      process: {
+        exitCode: 17,
+        signal: null,
+        stdout: `diagnostic header\n${"x".repeat(2_100)}`,
+        stderr: "stderr evidence\n",
+        durationMs: 321,
+        timedOut: false,
+      } satisfies ProcessResult,
+      error: { code: "check-failed", message: "check command exited 17" },
+      verdict: undefined,
+    },
+    {
+      name: "stalled process",
+      process: {
+        exitCode: 137,
+        signal: "SIGKILL" as const,
+        stdout: "partial output\n",
+        stderr: "stalled stderr\n",
+        durationMs: 120_123,
+        timedOut: false,
+        stalled: true,
+        verdict: "STALLED" as const,
+        lastProgressAtMs: 17_500,
+        lastProgressBytes: 42,
+      } satisfies ProcessResult,
+      error: { code: "check-stalled", message: "check stalled after 120000ms without progress" },
+      verdict: "STALLED",
+    },
+  ])(
+    "keeps $name errors concise while retaining durable command evidence",
+    async ({ process: result, error, verdict }) => {
+      const cwd = await mkdtemp(join(tmpdir(), "yrd-command-failure-"))
+      roots.push(cwd)
+      const step = configuredCommandStep<PRShape>({
+        inject: { process: { run: () => Promise.resolve(result) } },
+        command: ["false"],
+        cwd,
+        purpose: "check",
+        ...(verdict === undefined ? {} : { noProgressTimeoutMs: 120_000 }),
+      })
+      const outcome = await step(
+        {
+          run: "R1",
+          step: "check",
+          index: 0,
+          prs: [{ id: "PR1", branch: "task/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          shape: { results: {} },
+        },
+        { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal },
+      )
+
+      expect(outcome).toMatchObject({ status: "failed", error })
+      if (outcome.status !== "failed") throw new Error(`configured command was ${outcome.status}`)
+      const evidence = CommandEvidenceSchema.parse(outcome.output)
+      expect(evidence).toMatchObject({
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        artifacts: [{ name: "stdout" }, { name: "stderr" }],
+        ...(verdict === undefined ? {} : { stageVerdict: verdict }),
+      })
+      expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
+      expect(outcome.error.message).not.toContain(evidence.detail ?? "")
+      expect(outcome.error.message).not.toContain(cwd)
+    },
+  )
 
   it("lands the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
@@ -680,5 +750,8 @@ describe("configuredCommandStep — a timed-out command is a NAMED timeout failu
     if (outcome.status !== "failed") return
     expect(outcome.error.code).toBe("check-timeout")
     expect(outcome.error.message).toContain("500ms wall-clock bound")
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence).toMatchObject({ timedOut: true, stageVerdict: "TIMED_OUT", durationMs: expect.any(Number) })
+    expect(outcome.error.message).not.toContain(cwd)
   }, 15_000)
 })
