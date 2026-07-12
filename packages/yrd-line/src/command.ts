@@ -263,7 +263,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   return Object.freeze({ run, commit, optionalCommit })
 }
 
-type LineBase = Readonly<{ branchRef: string; sha: string; local: boolean }>
+type LineBase = Readonly<{ branchRef: string; sha: string; local: boolean; remote?: string }>
 
 async function resolveLineBase(git: Git, repo: string, branch: string): Promise<LineBase> {
   await git.run(repo, ["check-ref-format", "--branch", branch])
@@ -360,7 +360,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     try {
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
-      const baseSha = (await resolveLineBase(git, repo, branch)).sha
+      const baseSha = (await authoritativeLineBase(git, repo, branch)).sha
       return await withScratch(
         git,
         repo,
@@ -469,7 +469,7 @@ async function validateCheckedCandidate(
   return { checked }
 }
 
-async function authoritativeBaseAfterCommand(git: Git, repo: string, branch: string): Promise<LineBase> {
+async function authoritativeLineBase(git: Git, repo: string, branch: string): Promise<LineBase> {
   const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
   if (remote.code !== 0 || remote.stdout === "") return resolveLineBase(git, repo, branch)
   const source = `refs/heads/${branch}`
@@ -478,7 +478,7 @@ async function authoritativeBaseAfterCommand(git: Git, repo: string, branch: str
   if (fetched.code !== 0) {
     throw new Error(fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`)
   }
-  return { branchRef: `refs/heads/${branch}`, sha: await git.commit(repo, target), local: false }
+  return { branchRef: `refs/heads/${branch}`, sha: await git.commit(repo, target), local: false, remote: "origin" }
 }
 
 async function landingError(
@@ -500,11 +500,29 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   return async (input): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const base = await resolveLineBase(git, repo, branch)
+      const base = await authoritativeLineBase(git, repo, branch)
       const baseSha = base.sha
       const candidate = await validateCheckedCandidate(git, repo, input, baseSha)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
       const { checked } = candidate
+      if (base.remote !== undefined) {
+        const branchRef = `refs/heads/${branch}`
+        const pushed = await git.run(
+          repo,
+          ["push", "--porcelain", base.remote, `${checked.candidateSha}:${branchRef}`],
+          true,
+        )
+        if (pushed.code !== 0) return failed("stale-base", pushed.stderr || pushed.stdout || `${branch} moved`)
+        const landing = await authoritativeLineBase(git, repo, branch)
+        const missing = await landingError(git, repo, input, checked, landing.sha)
+        if (missing !== undefined) {
+          return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
+        }
+        return {
+          status: "passed",
+          output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
+        }
+      }
       const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
       if (checkedOut !== undefined) {
         const status = await git.run(checkedOut, ["status", "--porcelain"])
@@ -552,14 +570,14 @@ export function configuredMergeStep<Shape extends PRShape>(
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const base = await resolveLineBase(git, repo, branch)
+      const base = await authoritativeLineBase(git, repo, branch)
       const candidate = await validateCheckedCandidate(git, repo, input, base.sha)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
 
       const outcome = await command(input, context)
       let landing: LineBase
       try {
-        landing = await authoritativeBaseAfterCommand(git, repo, branch)
+        landing = await authoritativeLineBase(git, repo, branch)
       } catch (cause) {
         return outcome.status === "failed"
           ? failed(outcome.error.code, outcome.error.message)

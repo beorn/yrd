@@ -322,6 +322,66 @@ describe("Line command adapters", () => {
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
+  it("lands the checked candidate through origin without touching a dirty local base checkout", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "task/feature"])
+    const localMain = await git(repo, ["rev-parse", "main"])
+    await writeFile(join(repo, "operator-wip.txt"), "preserve me\n")
+
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const checkJob = run.steps[0]?.job
+    const mergeJob = run.steps[1]?.job
+    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+
+    expect(run).toMatchObject({
+      status: "passed",
+      integration: { commit: checked.candidateSha, baseSha: checked.candidateSha },
+    })
+    expect(mergeJob).toMatchObject({ status: "passed", attempt: 1, output: run.integration })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
+    expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
+  })
+
+  it("keeps one same-base run active before the remote compare-and-push", async () => {
+    const { repo, one: firstSha, two: secondSha } = await repository("one", "two")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "task/one", "task/two"])
+    const localMain = await git(repo, ["rev-parse", "main"])
+
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, ["true"])
+    await app.bays.submit({ branch: "task/one", headSha: firstSha, base: "main" })
+    await app.bays.submit({ branch: "task/two", headSha: secondSha, base: "main" })
+
+    const settled = await Promise.allSettled([
+      app.line.integrate({ prs: ["PR1"] }, { executor: "worker-1", leaseMs: 60_000 }),
+      app.line.integrate({ prs: ["PR2"] }, { executor: "worker-2", leaseMs: 60_000 }),
+    ])
+    const completed = settled.find((result) => result.status === "fulfilled")
+    const refused = settled.find((result) => result.status === "rejected")
+
+    expect(completed).toMatchObject({ status: "fulfilled", value: [expect.objectContaining({ status: "passed" })] })
+    expect(refused).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({ message: expect.stringContaining("line 'main' is running") }),
+    })
+    const landing = await git(remote, ["rev-parse", "main"])
+    const landedPaths = (await git(remote, ["ls-tree", "--name-only", landing])).split("\n")
+    expect(landedPaths.filter((path) => path === "one.txt" || path === "two.txt")).toHaveLength(1)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
+  })
+
   it("preserves remote evidence and lands its pinned candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

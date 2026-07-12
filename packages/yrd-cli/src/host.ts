@@ -104,7 +104,12 @@ function lineStepRevision(
   return createHash("sha256")
     .update(
       JSON.stringify({
-        implementation: checkoutParent === undefined ? "yrd-line-command-v2" : "yrd-line-command-v3",
+        implementation:
+          name === "merge" && resolvedCommand === undefined
+            ? "yrd-native-merge-v2"
+            : checkoutParent === undefined
+              ? "yrd-line-command-v2"
+              : "yrd-line-command-v3",
         repo,
         stateDir,
         ...(checkoutParent === undefined ? {} : { checkoutParent }),
