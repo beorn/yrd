@@ -62,6 +62,22 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${String(++value).padStart(12, "0")}`
 }
 
+function stripOsc8Targets(value: string): string {
+  const opener = "\u001b]8;;"
+  const terminator = "\u001b\\"
+  let cursor = 0
+  let visible = ""
+  while (cursor < value.length) {
+    const start = value.indexOf(opener, cursor)
+    if (start === -1) return visible + value.slice(cursor)
+    visible += value.slice(cursor, start)
+    const end = value.indexOf(terminator, start + opener.length)
+    if (end === -1) return visible + value.slice(start)
+    cursor = end + terminator.length
+  }
+  return visible
+}
+
 function overlapProbe(): OverlapProbe {
   const active: Record<ProbeKind, number> = { bay: 0, runner: 0, evaluator: 0 }
   const maximum: Record<ProbeKind, number> = { bay: 0, runner: 0, evaluator: 0 }
@@ -1200,6 +1216,111 @@ describe("runYrd", () => {
       attempt: "2",
       duration: "2.0s",
     })
+
+    rmSync(temp, { recursive: true, force: true })
+  })
+
+  it("renders each history run as one width-safe row with typed time decomposition and recoverable artifacts", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "yrd-history-row-"))
+    const artifactDir = join(temp, "R4", "0-check", "attempt-1")
+    const stdout = join(artifactDir, "stdout.log")
+    const stderr = join(artifactDir, "stderr.log")
+    mkdirSync(artifactDir, { recursive: true })
+    writeFileSync(stdout, "stdout\n")
+    writeFileSync(stderr, "stderr\n")
+
+    const run = fakeRun({
+      id: "R4",
+      status: "passed",
+      pr: { id: "PR23", revision: 4, headSha: "4".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-12T11:01:16.930Z",
+      finishedAt: "2026-07-12T11:49:24.335Z",
+      integration: { commit: "5".repeat(40), baseSha: "6".repeat(40) },
+      steps: [
+        fakeStep(
+          "check",
+          "passed",
+          fakeJob({
+            id: JOB_CHECK_PASS_ID,
+            status: "passed",
+            requestedAt: "2026-07-12T11:01:16.930Z",
+            startedAt: "2026-07-12T11:01:16.934Z",
+            finishedAt: "2026-07-12T11:08:36.215Z",
+            output: {
+              durationMs: 426_008.048_209,
+              artifacts: [
+                { name: "stdout", path: stdout },
+                { name: "stderr", path: stderr },
+              ],
+            },
+          }),
+        ),
+        fakeStep(
+          "merge",
+          "passed",
+          fakeJob({
+            id: JOB_PREPARE_PASS_ID,
+            status: "passed",
+            requestedAt: "2026-07-12T11:08:36.216Z",
+            startedAt: "2026-07-12T11:48:59.829Z",
+            finishedAt: "2026-07-12T11:49:24.335Z",
+          }),
+        ),
+      ],
+    })
+    const rows = lineLogRows(
+      [fakeSummary([run])],
+      new Set<string>(),
+      undefined,
+      new Map([["PR23", "integrated"]]),
+      Date.parse("2026-07-12T12:49:24.335Z"),
+    )
+
+    expect(rows[0]).toMatchObject({
+      run: "R4",
+      pr: "PR23",
+      revision: "4",
+      startedAt: "2026-07-12T11:01:16.930Z",
+      ageMs: 3_600_000,
+      totalDurationMs: 2_887_405,
+      activeDurationMs: 463_787,
+      waitDurationMs: 2_423_618,
+      locations: [
+        { label: "stdout", location: { path: stdout } },
+        { label: "stderr", location: { path: stderr } },
+      ],
+    })
+
+    for (const width of [80, 120]) {
+      const human = await renderString(createElement(LineLogView, { rows, columns: width }), {
+        width,
+        height: 8,
+        plain: true,
+      })
+      const physicalRows = human.split("\n").filter((line) => line.includes("R4"))
+      expect(physicalRows).toHaveLength(1)
+      expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
+      expect(physicalRows[0]).toContain("R4/PR23@4/integrated")
+      expect(physicalRows[0]).toContain(width === 80 ? "20260712T1101Z" : "2026-07-12T11:01Z")
+      expect(physicalRows[0]).toContain(width === 80 ? "1h" : "1h00m")
+      expect(physicalRows[0]).toContain(width === 80 ? "48m7s" : "48m07s")
+      expect(physicalRows[0]).toContain(width === 80 ? "c:7m19s+m:25s" : "check:7m19s+merge:25s")
+      expect(physicalRows[0]).toContain("40m24s")
+      expect(physicalRows[0]).toContain(width === 80 ? "art:12" : "art:stdout+stderr")
+      expect(human).not.toMatch(/\n\s*\n\s*\n/u)
+      expect(human).not.toContain("stdout=/")
+    }
+
+    const tty = await renderString(createElement(LineLogView, { rows, columns: 80 }), {
+      width: 80,
+      height: 8,
+      plain: false,
+    })
+    expect(tty).toContain(pathToFileURL(stdout).href)
+    expect(tty).toContain(pathToFileURL(stderr).href)
+    const visibleTty = stripOsc8Targets(tty)
+    expect(visibleTty).not.toContain(stdout)
+    expect(visibleTty).not.toContain(stderr)
 
     rmSync(temp, { recursive: true, force: true })
   })

@@ -471,13 +471,13 @@ async function lineLog(
   const prStatusById = new Map<string, PR["status"]>(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
-  const rows = lineLogRows(summaries, target.selected, target.prFilter, prStatusById)
+  const rows = lineLogRows(summaries, target.selected, target.prFilter, prStatusById, io.now?.() ?? Date.now())
   const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
     jsonEnabled(options),
     { command: "line.log", rows, ...(coverage === undefined ? {} : { coverage }) },
-    createElement(LineLogView, { rows, coverage }),
+    createElement(LineLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
   )
 }
 

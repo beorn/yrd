@@ -17,10 +17,21 @@ export type LineLogRow = Readonly<{
   headSha: string
   baseSha: string
   outcome: string
+  startedAt: string
+  finishedAt?: string
   started: string
   finished: string
+  age: string
+  ageMs?: number
   duration: string
   durationMs?: number
+  totalDuration: string
+  totalDurationMs?: number
+  activeDuration: string
+  activeDurationMs?: number
+  waitDuration: string
+  waitDurationMs?: number
+  activeSteps: readonly Readonly<{ step: string; duration: string; durationMs: number }>[]
   retries: string
   parent: string
   isolationPart: "0" | "1" | "-"
@@ -162,6 +173,53 @@ function elapsedMs(started: string | undefined, finished: string | undefined): n
   const start = Date.parse(started)
   const end = Date.parse(finished)
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined
+}
+
+function preciseDuration(milliseconds: number, compact = false): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const remainder = seconds % 60
+  if (hours > 0) {
+    if (compact) return minutes === 0 ? `${hours}h` : `${hours}h${minutes}m`
+    return `${hours}h${String(minutes).padStart(2, "0")}m${String(remainder).padStart(2, "0")}s`
+  }
+  if (minutes > 0) return `${minutes}m${compact ? remainder : String(remainder).padStart(2, "0")}s`
+  return `${remainder}s`
+}
+
+function compactTimestamp(timestamp: string, compact: boolean): string {
+  if (timestamp === "-") return timestamp
+  const iso = new Date(timestamp).toISOString()
+  return compact
+    ? `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}Z`
+    : `${iso.slice(0, 16)}Z`
+}
+
+function runDurations(run: LineRun): {
+  totalDurationMs?: number
+  activeDurationMs?: number
+  waitDurationMs?: number
+  activeSteps: { step: string; duration: string; durationMs: number }[]
+} {
+  const totalDurationMs = elapsedMs(run.startedAt, run.finishedAt)
+  const activeSteps = run.steps.flatMap((step) => {
+    const job = step.job
+    if (job === undefined || !("startedAt" in job) || !("finishedAt" in job)) return []
+    const durationMs = elapsedMs(job.startedAt, job.finishedAt)
+    return durationMs === undefined ? [] : [{ step: step.name, duration: preciseDuration(durationMs), durationMs }]
+  })
+  if (totalDurationMs === undefined) return { activeSteps }
+  const activeDurationMs = Math.min(
+    totalDurationMs,
+    activeSteps.reduce((sum, step) => sum + step.durationMs, 0),
+  )
+  return {
+    totalDurationMs,
+    activeDurationMs,
+    waitDurationMs: totalDurationMs - activeDurationMs,
+    activeSteps,
+  }
 }
 
 function parseRunIdSuffix(run: string): number {
@@ -430,6 +488,24 @@ function LocationLinks({ entries }: { entries: readonly LineLogLocationEntry[] }
   )
 }
 
+function LineLogLocationLinks({ entries, compact }: { entries: readonly LineLogLocationEntry[]; compact: boolean }) {
+  if (entries.length === 0) return <Text>-</Text>
+  return (
+    <Text>
+      art:
+      {entries.map((entry, index) => {
+        const href = "path" in entry.location ? pathToFileURL(entry.location.path).href : entry.location.url
+        return (
+          <Text key={`${entry.label}:${href}`}>
+            {compact || index === 0 ? null : "+"}
+            <Link href={href}>{compact ? String(index + 1) : entry.label}</Link>
+          </Text>
+        )
+      })}
+    </Text>
+  )
+}
+
 export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Line idle.</Text>
   const data = runs.map((run) => ({
@@ -653,6 +729,7 @@ export function lineLogRows(
   selectedPrs: ReadonlySet<string>,
   prFilter: string | undefined,
   prStatus?: ReadonlyMap<string, PR["status"]>,
+  now = Date.now(),
 ): LineLogRow[] {
   const rows: LineLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
@@ -674,7 +751,10 @@ export function lineLogRows(
           "-"
         const location = runLocation(run)
         const locations = runLocations(run)
-        const durationMs = elapsedMs(run.startedAt, run.finishedAt)
+        const durations = runDurations(run)
+        const durationMs = durations.totalDurationMs
+        const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
+        const ageMs = Math.max(0, now - Date.parse(finishedAt ?? run.startedAt))
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
           run: run.id,
@@ -684,10 +764,21 @@ export function lineLogRows(
           headSha: pr.headSha,
           baseSha: pr.baseSha ?? "-",
           outcome,
+          startedAt: toIso(run.startedAt),
+          ...(finishedAt === undefined ? {} : { finishedAt }),
           started: toIso(run.startedAt),
-          finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
+          finished: finishedAt ?? "-",
+          age: preciseDuration(ageMs),
+          ageMs,
           duration: duration(run.startedAt, run.finishedAt),
           ...(durationMs === undefined ? {} : { durationMs }),
+          totalDuration: durationMs === undefined ? "-" : preciseDuration(durationMs),
+          ...(durationMs === undefined ? {} : { totalDurationMs: durationMs }),
+          activeDuration: durations.activeDurationMs === undefined ? "-" : preciseDuration(durations.activeDurationMs),
+          ...(durations.activeDurationMs === undefined ? {} : { activeDurationMs: durations.activeDurationMs }),
+          waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
+          ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
+          activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputLineageIndex(finished, run, pr.revision, pr.id))),
           landing: lineLanding(run),
           integration: outcome === "integrated" && run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
@@ -725,9 +816,15 @@ export function lineLogRows(
         headSha,
         baseSha,
         outcome: "retired",
+        startedAt: "-",
         started: "-",
         finished: "-",
+        age: "-",
         duration: "-",
+        totalDuration: "-",
+        activeDuration: "-",
+        waitDuration: "-",
+        activeSteps: [],
         retries: "0",
         landing: "-",
         parent: "-",
@@ -809,7 +906,16 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
   }
 }
 
-export function LineLogView({ rows, coverage }: { rows: readonly LineLogRow[]; coverage?: LineLogCoverage }) {
+export function LineLogView({
+  rows,
+  coverage,
+  columns = 120,
+}: {
+  rows: readonly LineLogRow[]
+  coverage?: LineLogCoverage
+  columns?: number
+}) {
+  const compact = columns <= 80
   return (
     <Box flexDirection="column">
       {coverage !== undefined ? (
@@ -821,38 +927,41 @@ export function LineLogView({ rows, coverage }: { rows: readonly LineLogRow[]; c
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching terminal log rows.</Text>
       ) : (
-        <Table
-          data={rows}
-          columns={[
-            { header: "RUN", key: "run", minWidth: 5, maxWidth: 8 },
-            { header: "PR", key: "pr", minWidth: 4 },
-            { header: "OUTCOME", key: "outcome", minWidth: 9 },
-            { header: "REV", key: "revision", align: "right" },
-            { header: "BASE", key: "base", minWidth: 8 },
-            { header: "BASE SHA", key: "baseSha", minWidth: 12 },
-            { header: "HEAD", key: "headSha", minWidth: 12, maxWidth: 14 },
-            { header: "START", key: "started", grow: true },
-            { header: "END", key: "finished", grow: true },
-            { header: "DUR", key: "duration", align: "right" },
-            { header: "RETRY", key: "retries", align: "right" },
-            { header: "PARENT", key: "parent", minWidth: 6 },
-            {
-              header: "ISO",
-              key: "isolationPart",
-              minWidth: 4,
-              align: "right",
-              render: (row) => (row.isolationPart === "-" ? "-" : row.isolationPart),
-            },
-            { header: "RESULT", key: "error", grow: true },
-            {
-              header: "PATH",
-              key: "locations",
-              render: (row) => <LocationLinks entries={row.locations} />,
-            },
-            { header: "INTEGRATION", key: "landing", grow: true },
-          ]}
-          padding={1}
-        />
+        <Box flexDirection="column">
+          <Text color="$fg-muted">
+            {compact
+              ? "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE(c=check,m=merge) WAIT ART"
+              : "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE WAIT ARTIFACTS"}
+          </Text>
+          {rows.map((row) => {
+            const identity = `${row.run}/${row.pr}@${row.revision}/${row.outcome}`
+            const active = row.activeSteps
+              .map((step) => {
+                const label = compact
+                  ? step.step === "check"
+                    ? "c"
+                    : step.step === "merge"
+                      ? "m"
+                      : step.step[0]
+                  : step.step
+                return `${label}:${preciseDuration(step.durationMs, compact)}`
+              })
+              .join("+")
+            return (
+              <Box key={`${row.run}:${row.pr}:${row.revision}`} height={1}>
+                <Text wrap="truncate">
+                  {identity} {compact ? null : `head:${row.headSha.slice(0, 12)} `}
+                  {compactTimestamp(row.startedAt, compact)}{" "}
+                  {row.ageMs === undefined ? "-" : preciseDuration(row.ageMs, compact)}{" "}
+                  {row.totalDurationMs === undefined ? "-" : preciseDuration(row.totalDurationMs, compact)}{" "}
+                  {active === "" ? "-" : active}{" "}
+                  {row.waitDurationMs === undefined ? "-" : preciseDuration(row.waitDurationMs, compact)}{" "}
+                  <LineLogLocationLinks entries={row.locations} compact={compact} />
+                </Text>
+              </Box>
+            )
+          })}
+        </Box>
       )}
     </Box>
   )
