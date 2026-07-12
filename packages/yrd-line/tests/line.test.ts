@@ -310,6 +310,37 @@ describe("Line", () => {
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
   })
 
+  it("persists a line hold and refuses unlisted PRs before creating a run", async () => {
+    const journal = createMemoryJournal()
+    const first = await createLineApp({}, journal)
+    const allowed = await submitBranch(first, "task/allowed")
+    const blocked = await submitBranch(first, "task/blocked")
+
+    await first.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
+
+    expect(first.line.status("main").hold).toMatchObject({
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [allowed.id],
+    })
+    await expect(first.line.integrate({ prs: [blocked.id] }, runtime)).rejects.toThrow(
+      `line 'main' is held: operator freeze`,
+    )
+    await expect(first.dispatch(first.commands.line.integrate, { prs: [blocked.id] })).rejects.toThrow(
+      `line 'main' is held: operator freeze`,
+    )
+    expect(first.state().lines.records).toEqual({})
+    await expect(first.line.integrate({ prs: [allowed.id] }, runtime)).resolves.toHaveLength(1)
+    await first.line.release("main")
+    await expect(first.line.integrate({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
+    expect(first.line.status("main").hold).toBeUndefined()
+    await first.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
+    await first.close()
+
+    await using replay = await createLineApp({}, journal)
+    expect(replay.line.status("main").hold).toMatchObject({ allowedPRs: [allowed.id] })
+  })
+
   it("keeps completed history readable and refuses queued work after revision drift", async () => {
     const journal = createMemoryJournal()
     const first = await createLineApp({}, journal)

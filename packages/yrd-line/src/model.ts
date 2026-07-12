@@ -81,9 +81,25 @@ export type LineRun = Omit<LineRecord, "initialIntegration" | "steps" | "failure
     error?: JobError
   }>
 
+export type LineHold = Readonly<{
+  base: string
+  reason: string
+  allowedPRs: readonly string[]
+  heldAt: string
+}>
+export const LineHoldSchema = z
+  .object({
+    base: GitRefSchema,
+    reason: z.string().trim().min(1),
+    allowedPRs: z.array(PRIdSchema),
+    heldAt: z.iso.datetime({ offset: true }),
+  })
+  .strict() as z.ZodType<LineHold>
+
 export type LinesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
+  holds: Readonly<Record<string, LineHold>>
   records: Readonly<Record<LineRunId, LineRecord>>
 }>
 
@@ -92,6 +108,7 @@ export type LineSummary = Readonly<{
   running: readonly LineRun[]
   waiting: readonly LineRun[]
   finished: readonly LineRun[]
+  hold?: LineHold
 }>
 
 export type LineAuditFinding = Readonly<{
@@ -138,6 +155,7 @@ export const Lines = Object.freeze({
     return {
       batchSize: options.batchSize,
       ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
+      holds: {},
       records: {},
     }
   },

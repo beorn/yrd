@@ -1,4 +1,4 @@
-import { resolvePR, type BaysState, type HasBays, type PR } from "@yrd/bay"
+import { GitRefSchema, PRIdSchema, resolvePR, type BaysState, type HasBays, type PR } from "@yrd/bay"
 import {
   command,
   event,
@@ -31,6 +31,7 @@ import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   IntegrationProofSchema,
+  LineHoldSchema,
   LineRecordSchema,
   Lines,
   PRSnapshotSchema,
@@ -41,6 +42,7 @@ import {
   type IntegrationProof,
   type LineAuditFinding,
   type LineAuditResult,
+  type LineHold,
   type LineRecord,
   type LineRun,
   type LineRunId,
@@ -78,6 +80,20 @@ export type IntegrateArgs = Readonly<z.infer<typeof IntegrateArgsSchema>>
 
 const AdvanceArgsSchema = z.object({ run: LineRunIdSchema }).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
+export type HoldLineArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
+const HoldLineArgsSchema = z
+  .object({
+    base: GitRefSchema,
+    reason: z.string().trim().min(1),
+    allowedPRs: z.array(PRIdSchema),
+  })
+  .strict()
+  .superRefine((args, context) => {
+    if (new Set(args.allowedPRs).size !== args.allowedPRs.length) {
+      context.addIssue({ code: "custom", message: "duplicate allowed PR", path: ["allowedPRs"] })
+    }
+  }) as z.ZodType<HoldLineArgs>
+const ReleaseLineArgsSchema = z.object({ base: GitRefSchema }).strict()
 const LineStartSchema = LineRecordSchema.omit({ startedAt: true, failure: true })
 const LineFailedSchema = z
   .object({ run: LineRunIdSchema, error: z.object({ code: z.string(), message: z.string() }) })
@@ -194,6 +210,8 @@ type LineStart = Omit<LineRecord, "startedAt" | "failure">
 export type LineCommands = Readonly<{
   line: Readonly<{
     integrate: CommandHandler<IntegrateArgs, RuntimeState>
+    hold: CommandHandler<HoldLineArgs, RuntimeState>
+    release: CommandHandler<Readonly<{ base: string }>, RuntimeState>
     advance: CommandHandler<Readonly<{ run: LineRunId }>, RuntimeState>
     isolate: CommandHandler<Readonly<{ run: LineRunId; part: 0 | 1 }>, RuntimeState>
   }>
@@ -203,6 +221,8 @@ export type Line<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<LinesState>>
   steps(): readonly InstalledStep[]
+  hold(args: HoldLineArgs): Promise<LineHold>
+  release(base: string): Promise<void>
   integrate(args: IntegrateArgs, options: RunJobOptions): Promise<readonly LineRun[]>
   run(run: LineRunId, options: RunJobOptions): Promise<LineRun>
   waiting(selector: string, step?: string): WaitingLineStep
@@ -259,6 +279,8 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
       events: {
         "line/run/started": z.object({ run: LineStartSchema }).strict(),
         "line/run/failed": LineFailedSchema,
+        "line/held": HoldLineArgsSchema,
+        "line/released": ReleaseLineArgsSchema,
         "line/batch/isolated": z
           .object({
             parent: LineRunIdSchema,
@@ -279,6 +301,8 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
             {
               refresh: () => yrd.refresh(),
               integrate: (args) => yrd.dispatch(commands.line.integrate, args),
+              hold: (args) => yrd.dispatch(commands.line.hold, args),
+              release: (base) => yrd.dispatch(commands.line.release, { base }),
               advance: (run) => yrd.dispatch(commands.line.advance, { run }),
               isolate: (run, part) => yrd.dispatch(commands.line.isolate, { run, part }),
             },
@@ -297,6 +321,8 @@ type RuntimeStep = AnyStepDef
 type LineActions = Readonly<{
   refresh(): Promise<unknown>
   integrate(args: IntegrateArgs): Promise<CommandResult>
+  hold(args: HoldLineArgs): Promise<CommandResult>
+  release(base: string): Promise<CommandResult>
   advance(run: LineRunId): Promise<CommandResult>
   isolate(run: LineRunId, part: 0 | 1): Promise<CommandResult>
 }>
@@ -402,6 +428,15 @@ function createLine<Shape extends PRShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
+    async hold(args) {
+      await actions.hold(args)
+      const held = state().holds[args.base]
+      if (held === undefined) throw new Error(`yrd: line '${args.base}' did not retain its hold`)
+      return held
+    },
+    async release(base) {
+      await actions.release(base)
+    },
     async integrate(args, runOptions) {
       using _span = log.span?.("integrate", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
@@ -462,6 +497,38 @@ function createLine<Shape extends PRShape>(
 }
 
 function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): LineCommands {
+  const hold = command({
+    title: "Hold line",
+    visibility: "public",
+    params: HoldLineArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: HoldLineArgs) {
+      const held = {
+        ...args,
+        allowedPRs: [...args.allowedPRs].toSorted((left, right) =>
+          left.localeCompare(right, undefined, { numeric: true }),
+        ),
+      }
+      const current = state.lines.holds[args.base]
+      if (
+        current?.reason === held.reason &&
+        current.allowedPRs.length === held.allowedPRs.length &&
+        current.allowedPRs.every((pr, index) => pr === held.allowedPRs[index])
+      ) {
+        return { events: [] }
+      }
+      return { events: [event("line/held", held)] }
+    },
+  })
+
+  const release = command({
+    title: "Release line hold",
+    visibility: "public",
+    params: ReleaseLineArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ base: string }>) {
+      return { events: state.lines.holds[args.base] === undefined ? [] : [event("line/released", args)] }
+    },
+  })
+
   const integrate = command({
     title: "Integrate PR",
     visibility: "public",
@@ -531,10 +598,23 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
     },
   })
 
-  return { line: { integrate, advance, isolate } }
+  return { line: { integrate, hold, release, advance, isolate } }
 }
 
 function projectLines(state: DeepReadonly<LineState>, applied: Event): LineState {
+  if (applied.name === "line/held") {
+    const held = LineHoldSchema.parse({ ...HoldLineArgsSchema.parse(applied.data), heldAt: applied.ts })
+    return { lines: { ...state.lines, holds: { ...state.lines.holds, [held.base]: held } } }
+  }
+  if (applied.name === "line/released") {
+    const { base } = ReleaseLineArgsSchema.parse(applied.data)
+    return {
+      lines: {
+        ...state.lines,
+        holds: Object.fromEntries(Object.entries(state.lines.holds).filter(([candidate]) => candidate !== base)),
+      },
+    }
+  }
   if (applied.name === "line/run/started") {
     const started = LineStartSchema.parse((applied.data as { run?: unknown }).run)
     if (state.lines.records[started.id] !== undefined) throw new Error(`yrd: duplicate line run '${started.id}'`)
@@ -849,6 +929,7 @@ function lineSummary(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsSta
     running: runs.filter((run) => run.status === "running"),
     waiting: runs.filter((run) => run.status === "waiting"),
     finished: runs.filter(Lines.terminal),
+    ...(lines.holds[base] === undefined ? {} : { hold: lines.holds[base] }),
   }
 }
 
@@ -950,12 +1031,22 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
 }
 
 function runnablePRs(state: DeepReadonly<RuntimeState>, args: IntegrateArgs): PR[] {
+  const requested = requestedPRs(state.bays, args)
+  for (const pr of requested) {
+    const hold = state.lines.holds[pr.base]
+    if (hold === undefined || hold.allowedPRs.includes(pr.id)) continue
+    raiseFailure(
+      "refusal",
+      "line-held",
+      `yrd: line '${pr.base}' is held: ${hold.reason}; PR '${pr.id}' is not in the allowed set`,
+    )
+  }
   const claimed = new Set(
     orderedLines(state.lines, state.jobs)
       .filter((run) => !Lines.terminal(run))
       .flatMap((run) => run.prs.map((pr) => pr.id)),
   )
-  return requestedPRs(state.bays, args).filter((pr) => !claimed.has(pr.id))
+  return requested.filter((pr) => !claimed.has(pr.id))
 }
 
 function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {

@@ -681,6 +681,41 @@ describe("runYrd", () => {
     expect(JSON.parse(drained.stdout())).toEqual({ command: "line.integrate", results: [] })
   })
 
+  it("persists and releases line holds through the operator CLI", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "task/allowed", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "task/blocked", headSha: "2".repeat(40), base: "main" })
+    const hold = outputIO()
+
+    expect(
+      await runYrd(
+        app,
+        yrd("line", "hold", "main", "--reason", "operator freeze", "--allow", "PR1", "--json"),
+        hold.io,
+      ),
+    ).toBe(0)
+    expect(JSON.parse(hold.stdout())).toMatchObject({
+      command: "line.hold",
+      hold: { base: "main", reason: "operator freeze", allowedPRs: ["PR1"] },
+    })
+
+    const blocked = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR2", "--json"), blocked.io)).toBe(1)
+    expect(blocked.stderr()).toContain("line 'main' is held: operator freeze")
+    expect(app.state().lines.records).toEqual({})
+
+    const status = outputIO()
+    expect(await runYrd(app, yrd("line", "status", "--json"), status.io)).toBe(0)
+    expect(JSON.parse(status.stdout())).toMatchObject({
+      results: [{ base: "main", hold: { reason: "operator freeze", allowedPRs: ["PR1"] } }],
+    })
+
+    const release = outputIO()
+    expect(await runYrd(app, yrd("line", "release", "main", "--json"), release.io)).toBe(0)
+    expect(JSON.parse(release.stdout())).toEqual({ command: "line.release", base: "main" })
+    expect(app.line.status("main").hold).toBeUndefined()
+  })
+
   it("passes zero-or-more selectors to the line as one batch-capable candidate set", async () => {
     const app = await createApp({ batch: 2 })
     await openAndSubmit(app)
