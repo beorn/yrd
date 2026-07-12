@@ -112,7 +112,8 @@ async function createLineApp(
 }
 
 async function submitBranch(app: Awaited<ReturnType<typeof createLineApp>>, branch: string, base = "main") {
-  await app.bays.submit({ branch, headSha: HEAD, base })
+  const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
+  await app.bays.submit({ branch, headSha: digit.repeat(40), base })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
   return pr

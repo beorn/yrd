@@ -46,5 +46,6 @@ export type YrdCliIO = {
   concurrency?: number
   now?: () => number
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
+  resolveLineTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
   scope?: Pick<Scope, "signal" | "sleep">
 }

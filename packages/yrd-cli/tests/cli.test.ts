@@ -93,7 +93,7 @@ function workspace(options: { dirty?: boolean; refreshedHead?: string; probe?: O
         status: "passed",
         output: {
           path: input.path ?? `/repo/.bays/${input.bay}`,
-          headSha: options.refreshedHead ?? HEAD_SHA,
+          headSha: options.refreshedHead ?? (input.bay === "B2" ? "2".repeat(40) : HEAD_SHA),
           baseSha: BASE_SHA,
           dirty: options.dirty ?? false,
         },
@@ -781,6 +781,21 @@ describe("runYrd", () => {
     expect(wideSummary).toBe("main@333333333333          0      0          0         0")
     expect(wideHeader?.trimEnd().length).toBeLessThan(64)
     expect(wideSummary?.trimEnd().length).toBe(wideHeader?.trimEnd().length)
+  })
+
+  it("projects local and remote spellings of one target as a single logical line", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "task/one", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "task/two", headSha: "2".repeat(40), base: "origin/main" })
+    const status = outputIO({
+      resolveLineTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: "a".repeat(40) }),
+    })
+
+    expect(await runYrd(app, yrd("line", "status", "--json"), status.io), status.stderr()).toBe(0)
+
+    expect(JSON.parse(status.stdout())).toMatchObject({
+      results: [{ base: "main", headSha: "a".repeat(40), prs: [{ id: "PR1" }, { id: "PR2" }] }],
+    })
   })
 
   it("streams terminal log rows with stable revision/SHA proof and scope options", async () => {

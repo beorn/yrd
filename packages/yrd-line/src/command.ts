@@ -113,7 +113,7 @@ function configuredCommand<Shape extends PRShape>(
       cwd,
       env: commandEnvironment(options.env ?? globalThis.process.env, variables),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      noProgressTimeoutMs: options.noProgressTimeoutMs ?? 120_000,
+      ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
     })
     const artifacts = await writeArtifacts(
       resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts")),
@@ -137,10 +137,13 @@ function configuredCommand<Shape extends PRShape>(
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
     })
     if (progress.stalled === true) {
+      if (options.noProgressTimeoutMs === undefined) {
+        throw new Error(`${options.purpose} reported an unconfigured output-progress stall`)
+      }
       const artifactPaths = evidence.artifacts.map(({ path }) => path).join(", ")
       return failed(
         `${options.purpose}-stalled`,
-        `${options.purpose} made no test/log progress for ${options.noProgressTimeoutMs ?? 120_000}ms; ` +
+        `${options.purpose} made no test/log progress for ${options.noProgressTimeoutMs}ms; ` +
           `last progress ${progress.lastProgressBytes} bytes at ${progress.lastProgressAtMs}ms; process tree settled` +
           (artifactPaths === "" ? "" : `; partial artifacts: ${artifactPaths}`) +
           (result.sweepFailure === undefined ? "" : ` (${result.sweepFailure})`),
@@ -263,17 +266,69 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   return Object.freeze({ run, commit, optionalCommit })
 }
 
-type LineBase = Readonly<{ branchRef: string; sha: string; local: boolean; remote?: string }>
+export type GitLineTarget = Readonly<{
+  branch: string
+  branchRef: string
+  sha: string
+  local: boolean
+  localSha?: string
+  remote?: string
+  remoteSha?: string
+  diverged: boolean
+}>
 
-async function resolveLineBase(git: Git, repo: string, branch: string): Promise<LineBase> {
+async function inspectLineBase(git: Git, repo: string, branch: string): Promise<GitLineTarget> {
   await git.run(repo, ["check-ref-format", "--branch", branch])
   const branchRef = `refs/heads/${branch}`
   const local = await git.optionalCommit(repo, branchRef)
-  if (local !== undefined) return { branchRef, sha: local, local: true }
   const sourceRef = `refs/remotes/origin/${branch}`
   const remote = await git.optionalCommit(repo, sourceRef)
-  if (remote !== undefined) return { branchRef, sha: remote, local: false }
+  const configuredRemote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  const remoteIsAuthoritative = configuredRemote.code === 0 && configuredRemote.stdout !== "" && remote !== undefined
+  if (remoteIsAuthoritative) {
+    return {
+      branch,
+      branchRef,
+      sha: remote,
+      local: false,
+      ...(local === undefined ? {} : { localSha: local }),
+      remote: "origin",
+      remoteSha: remote,
+      diverged: local !== undefined && local !== remote,
+    }
+  }
+  if (local !== undefined) {
+    return {
+      branch,
+      branchRef,
+      sha: local,
+      local: true,
+      localSha: local,
+      ...(remote === undefined ? {} : { remoteSha: remote }),
+      diverged: false,
+    }
+  }
+  if (remote !== undefined) {
+    return {
+      branch,
+      branchRef,
+      sha: remote,
+      local: false,
+      remoteSha: remote,
+      diverged: false,
+    }
+  }
   throw new Error(`yrd: line base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
+}
+
+export async function inspectGitLineTarget(options: {
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  branch: string
+  env?: NodeJS.ProcessEnv
+}): Promise<GitLineTarget> {
+  const repo = resolve(options.repo)
+  return inspectLineBase(createGit(options.inject.process, options.env), repo, options.branch)
 }
 
 async function withScratch(
@@ -360,7 +415,15 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     try {
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
-      const baseSha = (await authoritativeLineBase(git, repo, branch)).sha
+      const target = await authoritativeLineBase(git, repo, branch)
+      if (target.diverged) {
+        return failed(
+          "line-target-diverged",
+          `line '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
+            `${target.remote}/${branch} ${target.remoteSha?.slice(0, 12)}; align the local branch before integration`,
+        )
+      }
+      const baseSha = target.sha
       return await withScratch(
         git,
         repo,
@@ -469,16 +532,16 @@ async function validateCheckedCandidate(
   return { checked }
 }
 
-async function authoritativeLineBase(git: Git, repo: string, branch: string): Promise<LineBase> {
+async function authoritativeLineBase(git: Git, repo: string, branch: string): Promise<GitLineTarget> {
   const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
-  if (remote.code !== 0 || remote.stdout === "") return resolveLineBase(git, repo, branch)
+  if (remote.code !== 0 || remote.stdout === "") return inspectLineBase(git, repo, branch)
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
   const fetched = await git.run(repo, ["fetch", "--quiet", "origin", `+${source}:${target}`], true)
   if (fetched.code !== 0) {
     throw new Error(fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`)
   }
-  return { branchRef: `refs/heads/${branch}`, sha: await git.commit(repo, target), local: false, remote: "origin" }
+  return inspectLineBase(git, repo, branch)
 }
 
 async function landingError(
@@ -575,7 +638,7 @@ export function configuredMergeStep<Shape extends PRShape>(
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
 
       const outcome = await command(input, context)
-      let landing: LineBase
+      let landing: GitLineTarget
       try {
         landing = await authoritativeLineBase(git, repo, branch)
       } catch (cause) {

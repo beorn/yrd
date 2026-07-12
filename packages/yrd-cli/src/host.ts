@@ -29,6 +29,7 @@ import {
   configuredWaitingCommandStep,
   gitCheckStep,
   gitMergeStep,
+  inspectGitLineTarget,
   withLine,
   withMerge,
   withStep,
@@ -294,6 +295,29 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
+function lineBranch(ref: string): string {
+  if (ref.startsWith("refs/heads/")) return ref.slice("refs/heads/".length)
+  if (ref.startsWith("refs/remotes/origin/")) return ref.slice("refs/remotes/origin/".length)
+  if (ref.startsWith("origin/")) return ref.slice("origin/".length)
+  return ref
+}
+
+async function resolveLineTarget(
+  process: Pick<Process, "run">,
+  repo: string,
+  configuredBase: string,
+  requestedBase: string,
+): Promise<Readonly<{ base: string; sha: string }>> {
+  const configured = lineBranch(configuredBase)
+  const requested = lineBranch(requestedBase)
+  const base = requested === configured ? configured : requested
+  if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
+    throw new Error(`yrd: line base '${requestedBase}' does not resolve`)
+  }
+  const target = await inspectGitLineTarget({ inject: { process }, repo, branch: base })
+  return { base, sha: target.sha }
+}
+
 function localContestGit(process: Pick<Process, "run">, repo: string): ContestGit {
   return {
     revision: createHash("sha256").update(`yrd-contest-git-v2\0${repo}`).digest("hex"),
@@ -391,7 +415,14 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     withTasks({
       sources: options.taskSources ?? [createKmTaskSource({ process: options.process, cwd: options.repo })],
     }),
-    withBays({ jobs: bayJobs, defaultBase: options.config.line.base }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: lineBranch(options.config.line.base),
+      resolveBase: async (base) => {
+        const target = await resolveLineTarget(options.process, options.repo, options.config.line.base, base)
+        return { base: target.base, baseSha: target.sha }
+      },
+    }),
   )
   return createYrd(contests(line(base)), {
     inject: {
@@ -616,6 +647,10 @@ export async function runYrdProcess(
         ...io,
         concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
         resolveRevision: io.resolveRevision ?? ((ref, cwd) => resolveCommit(activeHost.process, cwd, ref)),
+        resolveLineTarget:
+          io.resolveLineTarget ??
+          ((ref) =>
+            resolveLineTarget(activeHost.process, activeHost.repository.repo, activeHost.config.line.base, ref)),
       },
       activeHost.services,
     )

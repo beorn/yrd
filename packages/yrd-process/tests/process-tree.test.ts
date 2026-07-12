@@ -169,7 +169,7 @@ function fakeRunner(
   return { spawn, kills }
 }
 
-describe("createProcess — progress lease (21057)", () => {
+describe("createProcess — explicit output-progress lease (21057)", () => {
   test("advancing output renews the lease", async () => {
     const runner = fakeRunner(
       [

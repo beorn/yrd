@@ -250,6 +250,28 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
   return io.resolveRevision?.(ref, cwd)
 }
 
+async function resolvedLineTarget(ref: string, io: YrdCliIO): Promise<Readonly<{ base: string; sha?: string }>> {
+  const cwd = io.cwd ?? process.cwd()
+  if (io.resolveLineTarget !== undefined) return io.resolveLineTarget(ref, cwd)
+  const sha = await optionalRevision(ref, io)
+  return { base: ref, ...(sha === undefined ? {} : { sha }) }
+}
+
+type LineTargetGroup = Readonly<{ base: string; aliases: ReadonlySet<string>; headSha?: string }>
+
+async function lineTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Promise<LineTargetGroup[]> {
+  const groups = new Map<string, { aliases: Set<string>; headSha?: string }>()
+  for (const ref of [...bases].toSorted()) {
+    const target = await resolvedLineTarget(ref, io)
+    const group = groups.get(target.base) ?? { aliases: new Set<string>() }
+    group.aliases.add(ref)
+    group.aliases.add(target.base)
+    if (target.sha !== undefined) group.headSha = target.sha
+    groups.set(target.base, group)
+  }
+  return [...groups.entries()].map(([base, group]) => ({ base, ...group }))
+}
+
 async function submitBays(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -322,14 +344,16 @@ async function lineStatus(
     if (bases.size === 0) bases.add("main")
   }
   const results: LineStatusResult[] = []
-  for (const base of [...bases].toSorted()) {
-    const summary = app.line.status(base)
-    const headSha = await optionalRevision(base, io)
+  for (const target of await lineTargetGroups(bases, io)) {
+    const summaries = [...target.aliases].map((base) => app.line.status(base))
     results.push({
-      ...summary,
-      ...(headSha === undefined ? {} : { headSha }),
+      base: target.base,
+      running: summaries.flatMap((summary) => summary.running),
+      waiting: summaries.flatMap((summary) => summary.waiting),
+      finished: summaries.flatMap((summary) => summary.finished),
+      ...(target.headSha === undefined ? {} : { headSha: target.headSha }),
       prs: Object.values(state.bays.prs).filter(
-        (pr) => pr.base === base && (selected.size === 0 || selected.has(pr.id)),
+        (pr) => target.aliases.has(pr.base) && (selected.size === 0 || selected.has(pr.id)),
       ),
     })
   }
@@ -396,14 +420,16 @@ async function lineLog(
   const state = stateOf(app)
   const target = lineLogTargets(state, selectors, options.base, options.pr)
   const summaries: LineStatusResult[] = []
-  for (const base of [...target.bases].toSorted()) {
-    const summary = app.line.status(base)
-    const headSha = await optionalRevision(base, io)
+  for (const group of await lineTargetGroups(target.bases, io)) {
+    const records = [...group.aliases].map((base) => app.line.status(base))
     summaries.push({
-      ...summary,
-      ...(headSha === undefined ? {} : { headSha }),
+      base: group.base,
+      running: records.flatMap((record) => record.running),
+      waiting: records.flatMap((record) => record.waiting),
+      finished: records.flatMap((record) => record.finished),
+      ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs: Object.values(state.bays.prs).filter(
-        (pr) => pr.base === base && (target.selected.size === 0 || target.selected.has(pr.id)),
+        (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
       ),
     })
   }

@@ -8,6 +8,8 @@ export type ProcessRequest = Readonly<{
   stdin?: string | Uint8Array
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
   timeoutMs?: number
+  /** Explicit output-silence lease. Only set this when the command contract
+   * guarantees observable output more frequently than the bound. */
   noProgressTimeoutMs?: number
   signal?: AbortSignal
 }>

@@ -162,7 +162,7 @@ describe("Line command adapters", () => {
       ["printf", "%s", "literal;$(not-expanded)"],
       ["sh", "-c", "printf shell"],
     ])
-    expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([120_000, 120_000])
+    expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([undefined, undefined])
   })
 
   it("lands the exact audited candidate and its durable artifacts", async () => {
@@ -206,6 +206,23 @@ describe("Line command adapters", () => {
     const job = run.steps[0]?.job
     if (job?.status !== "passed") throw new Error("check did not pass")
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
+  })
+
+  it("refuses local and authoritative remote base divergence before creating a candidate", async () => {
+    const { repo, feature: featureSha, competing: remoteBaseSha } = await repository("feature", "competing")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "task/feature", "task/competing"])
+    await git(repo, ["push", "-q", "origin", `${remoteBaseSha}:refs/heads/main`])
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, ["false"])
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "line-target-diverged" } })
+    expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
   it("materializes candidate checks under the injected trusted parent", async () => {

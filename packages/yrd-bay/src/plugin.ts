@@ -95,6 +95,7 @@ const SubmitArgsSchema = z.union([
       branch: GitRefSchema,
       headSha: GitShaSchema,
       base: GitRefSchema.optional(),
+      baseSha: GitShaSchema.optional(),
       name: TextSchema.optional(),
     })
     .strict(),
@@ -229,13 +230,51 @@ export type HasBays = Readonly<{ bays: Bays }>
 
 type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close">
 
-export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Jobs, actions: BayActions): Bays {
+export type BayBaseTarget = Readonly<{ base: string; baseSha?: string }>
+export type ResolveBayBase = (base: string) => BayBaseTarget | Promise<BayBaseTarget>
+
+export function createBays(
+  state: ReadSignal<DeepReadonly<BaysState>>,
+  jobs: Jobs,
+  actions: BayActions,
+  options: Readonly<{ defaultBase: string; resolveBase?: ResolveBayBase }>,
+): Bays {
   const execute = async (result: CommandResult, options: RunJobOptions, action: string): Promise<void> => {
     const results = await jobs.runMany(jobs.requested(result), options)
     const failed = results.find((job) => job.status !== "passed")
     if (failed !== undefined) {
       raiseFailure("infrastructure", "bay-job-failed", `yrd: ${action} ${failed.status}: ${jobDetail(failed)}`)
     }
+  }
+
+  const target = async (base: string | undefined, baseSha: string | undefined): Promise<BayBaseTarget> => {
+    const resolved =
+      options.resolveBase === undefined
+        ? { base: base ?? options.defaultBase, ...(baseSha === undefined ? {} : { baseSha }) }
+        : await options.resolveBase(base ?? options.defaultBase)
+    if (baseSha !== undefined && resolved.baseSha !== undefined && baseSha !== resolved.baseSha) {
+      raiseFailure(
+        "refusal",
+        "line-base-moved",
+        `yrd: line '${resolved.base}' resolved to ${resolved.baseSha.slice(0, 12)}, not pinned ${baseSha.slice(0, 12)}`,
+      )
+    }
+    return { ...resolved, ...(baseSha === undefined ? {} : { baseSha }) }
+  }
+
+  const open = async (args: OpenBayArgs): Promise<CommandResult> => {
+    const resolved = await target(args.base, args.baseSha)
+    return actions.open({ ...args, ...resolved })
+  }
+  const intake = async (args: IntakePRArgs): Promise<CommandResult> => {
+    const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
+    const resolved = await target(args.base ?? bay?.base, args.baseSha ?? bay?.baseSha)
+    return actions.intake({ ...args, ...resolved })
+  }
+  const submit = async (args: SubmitArgs): Promise<CommandResult> => {
+    if ("pr" in args) return actions.submit(args)
+    const resolved = await target(args.base, args.baseSha)
+    return actions.submit({ ...args, ...resolved })
   }
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
@@ -264,7 +303,7 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
       }
       pr = prForBay(snapshot, bay.id)
       if (pr === undefined || pr.headSha !== bay.headSha) {
-        await actions.intake({
+        await intake({
           bay: bay.id,
           headSha: bay.headSha,
           ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
@@ -275,7 +314,7 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
 
     if (pr?.status === "submitted") return pr
     if (pr?.status === "pushed") {
-      await actions.submit({ pr: pr.id })
+      await submit({ pr: pr.id })
       const submitted = resolvePR(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
@@ -288,7 +327,7 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
       if (headSha === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
-      await actions.submit({
+      await submit({
         branch: selector,
         headSha,
         ...(options.base === undefined ? {} : { base: options.base }),
@@ -320,13 +359,18 @@ export function createBays(state: ReadSignal<DeepReadonly<BaysState>>, jobs: Job
     pr: (selector) => resolvePR(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
     submitSelection,
-    ...actions,
+    open,
+    refresh: actions.refresh,
+    intake,
+    submit,
+    close: actions.close,
   })
 }
 
 export type WithBaysOptions = Readonly<{
   jobs: BayJobDefs
   defaultBase?: string
+  resolveBase?: ResolveBayBase
 }>
 
 export function withBays(options: WithBaysOptions) {
@@ -353,13 +397,18 @@ export function withBays(options: WithBaysOptions) {
         yrd.jobs.requireDefinitions(options.jobs)
         const state = computed(() => yrd.state().bays)
         return {
-          bays: createBays(state, yrd.jobs, {
-            open: (args) => yrd.dispatch(commands.bay.open, args),
-            refresh: (args) => yrd.dispatch(commands.bay.refresh, args),
-            intake: (args) => yrd.dispatch(commands.bay.intake, args),
-            submit: (args) => yrd.dispatch(commands.bay.submit, args),
-            close: (args) => yrd.dispatch(commands.bay.close, args),
-          }),
+          bays: createBays(
+            state,
+            yrd.jobs,
+            {
+              open: (args) => yrd.dispatch(commands.bay.open, args),
+              refresh: (args) => yrd.dispatch(commands.bay.refresh, args),
+              intake: (args) => yrd.dispatch(commands.bay.intake, args),
+              submit: (args) => yrd.dispatch(commands.bay.submit, args),
+              close: (args) => yrd.dispatch(commands.bay.close, args),
+            },
+            { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
+          ),
         }
       },
     })
@@ -484,6 +533,7 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
     }
   }
   const existing = bay === undefined ? resolvePR(current, branch) : prForBay(current, bay.id)
+  refuseDuplicatePayload(current, args.headSha, base, existing?.id)
   if (existing?.status === "integrated" || existing?.status === "withdrawn") {
     throw new Error(`yrd: PR '${existing.id}' is ${existing.status}; start a new bay`)
   }
@@ -513,10 +563,12 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     return { events: [event("pr/submitted", { pr: pr.id, revision: pr.revision, headSha: pr.headSha })] }
   }
 
+  const base = args.base ?? defaultBase
   const existing = resolvePR(current, args.branch)
   if (existing?.status === "pushed" || existing?.status === "submitted") {
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
+  refuseDuplicatePayload(current, args.headSha, base, existing?.id)
   const resubmitted = existing?.status === "rejected" ? existing : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
@@ -524,12 +576,22 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
     branch: args.branch,
-    base: args.base ?? defaultBase,
+    base,
     headSha: args.headSha,
+    ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
     revision,
   }
   return {
     events: [event("pr/pushed", pushed), event("pr/submitted", { pr: id, revision, headSha: args.headSha })],
+  }
+}
+
+function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string, base: string, except?: string): void {
+  const duplicate = Object.values(state.prs).find(
+    (pr) => pr.id !== except && pr.headSha === headSha && pr.base === base,
+  )
+  if (duplicate !== undefined) {
+    throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on line '${base}'`)
   }
 }
 

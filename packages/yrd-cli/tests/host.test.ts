@@ -103,6 +103,34 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await changedTimeout.close()
   })
 
+  it("normalizes remote aliases of the configured line and refuses duplicate payload admission", async () => {
+    const { repo, featureSha } = await repository()
+    const baseSha = await git(repo, "rev-parse", "main")
+    await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
+    const config: ResolvedYrdProjectConfig = {
+      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      steps: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "origin/main" })
+
+    expect(app.state().bays.prs.PR1).toMatchObject({ base: "main", baseSha })
+    await expect(app.bays.submit({ branch: "origin/task/feature", headSha: featureSha, base: "main" })).rejects.toThrow(
+      "payload already recorded as PR 'PR1'",
+    )
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+  })
+
   it("refreshes a shared journal before the host selects queued PRs", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
@@ -335,6 +363,35 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
     expect(stdout).toMatch(/PR1\s+rejected/u)
     expect(stdout).not.toContain(featureSha.slice(0, 12))
+    expect(stderr).toBe("")
+  })
+
+  it("reports the authoritative remote line head when local main is stale", async () => {
+    const { repo, featureSha } = await repository()
+    const localSha = await git(repo, "rev-parse", "main")
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "task/feature")
+    await git(repo, "push", "-q", "origin", `${featureSha}:refs/heads/main`)
+    await git(repo, "fetch", "-q", "origin", "main:refs/remotes/origin/main")
+    expect(await git(repo, "rev-parse", "main")).toBe(localSha)
+
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(0)
+
+    expect(JSON.parse(stdout)).toMatchObject({ results: [{ base: "main", headSha: featureSha }] })
     expect(stderr).toBe("")
   })
 })
