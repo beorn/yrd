@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "vitest"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createProcess } from "../src/index.ts"
+import { createProcess, type Spawn } from "../src/index.ts"
 
 const scratch: string[] = []
 afterEach(() => {
@@ -118,4 +118,82 @@ describe("createProcess — full process-tree settlement (21012 S1)", () => {
       cleanup()
     }
   }, 30_000)
+})
+
+function fakeRunner(
+  chunks: readonly { afterMs: number; text: string }[],
+  finishAfterMs: number | null,
+): { spawn: Spawn; kills: NodeJS.Signals[] } {
+  const kills: NodeJS.Signals[] = []
+  const spawn: Spawn = () => {
+    let close = () => {}
+    const stdout = new ReadableStream<Uint8Array>({
+      start(controller) {
+        let closed = false
+        close = () => {
+          if (closed) return
+          closed = true
+          controller.close()
+        }
+        for (const chunk of chunks) {
+          setTimeout(() => {
+            if (!closed) controller.enqueue(new TextEncoder().encode(chunk.text))
+          }, chunk.afterMs)
+        }
+      },
+    })
+    const stderr = new ReadableStream<Uint8Array>({ start: (controller) => controller.close() })
+    let settle = (_code: number) => {}
+    const exited = new Promise<number>((resolve) => {
+      settle = resolve
+      if (finishAfterMs !== null)
+        {setTimeout(() => {
+          close()
+          resolve(0)
+        }, finishAfterMs)}
+    })
+    return {
+      pid: 424_242,
+      stdout,
+      stderr,
+      exited,
+      signalCode: null,
+      kill(signal = "SIGTERM") {
+        kills.push(signal as NodeJS.Signals)
+        close()
+        settle(143)
+      },
+    }
+  }
+  return { spawn, kills }
+}
+
+describe("createProcess — progress lease (21057)", () => {
+  test("advancing output renews the lease", async () => {
+    const runner = fakeRunner(
+      [
+        { afterMs: 0, text: "one\n" },
+        { afterMs: 10, text: "two\n" },
+        { afterMs: 20, text: "three\n" },
+      ],
+      25,
+    )
+    await using proc = createProcess({ inject: { spawn: runner.spawn }, killGraceMs: 10 })
+
+    const result = await proc.run({ argv: ["fake-test"], noProgressTimeoutMs: 15 })
+
+    expect(result).toMatchObject({ exitCode: 0, stalled: false, lastProgressBytes: 14 })
+    expect(runner.kills).toEqual([])
+  })
+
+  test("silent output gracefully stops only the owned runner and retains partial output", async () => {
+    const runner = fakeRunner([{ afterMs: 0, text: "started\n" }], null)
+    await using proc = createProcess({ inject: { spawn: runner.spawn }, killGraceMs: 10 })
+
+    const result = await proc.run({ argv: ["fake-test"], noProgressTimeoutMs: 15 })
+
+    expect(result).toMatchObject({ exitCode: 143, stalled: true, stdout: "started\n", lastProgressBytes: 8 })
+    expect(result.lastProgressAtMs).toBeGreaterThanOrEqual(0)
+    expect(runner.kills).toEqual(["SIGTERM"])
+  })
 })

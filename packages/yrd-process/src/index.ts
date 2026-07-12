@@ -7,22 +7,32 @@ export type ProcessRequest = Readonly<{
   env?: NodeJS.ProcessEnv
   stdin?: string | Uint8Array
   timeoutMs?: number
+  noProgressTimeoutMs?: number
   signal?: AbortSignal
 }>
 
-export type ProcessResult = Readonly<{
+type ProcessResultBase = Readonly<{
   exitCode: number
   signal: NodeJS.Signals | null
   stdout: string
   stderr: string
   durationMs: number
   timedOut: boolean
+  lastProgressAtMs: number
+  lastProgressBytes: number
   /**
    * Set when a settlement signal could not reach the process GROUP (non-ESRCH
    * kill failure) — descendants may survive; loud, never swallowed (21012 S1).
    */
   sweepFailure?: string
 }>
+
+export type ProcessResult = ProcessResultBase &
+  (
+    | Readonly<{ verdict: "EXITED"; stalled: false; timedOut: false }>
+    | Readonly<{ verdict: "TIMED_OUT"; stalled: false; timedOut: true }>
+    | Readonly<{ verdict: "STALLED"; stalled: true; timedOut: false }>
+  )
 
 export type Process = Readonly<{
   run(request: ProcessRequest): Promise<ProcessResult>
@@ -95,12 +105,22 @@ export function createProcess(
       if (request.timeoutMs !== undefined && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1)) {
         throw new RangeError("yrd: Process timeoutMs must be a positive integer")
       }
+      if (
+        request.noProgressTimeoutMs !== undefined &&
+        (!Number.isSafeInteger(request.noProgressTimeoutMs) || request.noProgressTimeoutMs < 1)
+      ) {
+        throw new RangeError("yrd: Process noProgressTimeoutMs must be a positive integer")
+      }
 
       const runScope = scope.child(argv[0])
       const signal = request.signal === undefined ? runScope.signal : AbortSignal.any([runScope.signal, request.signal])
       const started = now()
       let timedOut = false
+      let stalled = false
+      let lastProgressAtMs = started
+      let lastProgressBytes = 0
       let cancelTimeout: (() => void) | undefined
+      let cancelProgressLease: (() => void) | undefined
       let cancelKill: (() => void) | undefined
       using _span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
@@ -144,9 +164,7 @@ export function createProcess(
               child.kill(sig)
             } catch (error) {
               const code = (error as { code?: string }).code
-              if (code !== "ESRCH") {
-                sweepFailure ??= `direct-child ${sig} failed (${code ?? String(error)})`
-              }
+              if (code !== "ESRCH") sweepFailure ??= `direct-child ${sig} failed (${code ?? String(error)})`
             }
           }
         }
@@ -158,10 +176,22 @@ export function createProcess(
         }
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
+        const renewProgressLease = (bytes = 0): void => {
+          lastProgressAtMs = now()
+          lastProgressBytes += bytes
+          cancelProgressLease?.()
+          if (request.noProgressTimeoutMs !== undefined) {
+            cancelProgressLease = runScope.timeout(() => {
+              stalled = true
+              terminate()
+            }, request.noProgressTimeoutMs)
+          }
+        }
+        renewProgressLease()
         let outputError: unknown
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {
-            return await readBounded(stream, maxOutputBytes, name)
+            return await readBounded(stream, maxOutputBytes, name, renewProgressLease)
           } catch (error) {
             outputError ??= error
             terminate()
@@ -180,6 +210,7 @@ export function createProcess(
           child.exited,
         ])
         signal.removeEventListener("abort", onAbort)
+        cancelProgressLease?.()
         cancelKill?.()
         if (outputError !== undefined) throw outputError
         const result: ProcessResult = {
@@ -189,8 +220,12 @@ export function createProcess(
           stderr,
           durationMs: Math.max(0, now() - started),
           timedOut,
+          stalled,
+          verdict: stalled ? "STALLED" : timedOut ? "TIMED_OUT" : "EXITED",
+          lastProgressAtMs,
+          lastProgressBytes,
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
-        }
+        } as ProcessResult
         log.debug?.("process exited", {
           argv,
           exitCode: result.exitCode,
@@ -201,6 +236,7 @@ export function createProcess(
         return result
       } finally {
         cancelTimeout?.()
+        cancelProgressLease?.()
         cancelKill?.()
         await runScope.disposeAsync()
       }
@@ -214,6 +250,7 @@ async function readBounded(
   stream: ReadableStream<Uint8Array>,
   limit: number,
   name: "stdout" | "stderr",
+  onProgress: (bytes: number) => void = () => {},
 ): Promise<string> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
@@ -228,6 +265,7 @@ async function readBounded(
       }
       chunks.push(value)
       size += value.byteLength
+      onProgress(value.byteLength)
     }
   } finally {
     reader.releaseLock()
