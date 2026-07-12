@@ -111,6 +111,9 @@ export type SubmitSelectionOptions = Readonly<{
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
 export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 
+const PrCloseArgsSchema = z.object({ pr: TextSchema }).strict()
+export type PrCloseArgs = z.infer<typeof PrCloseArgsSchema>
+
 const BayOpenedSchema = z
   .object({
     id: BayIdSchema,
@@ -210,6 +213,9 @@ export type BayCommands = Readonly<{
     submit: CommandHandler<SubmitArgs, BayState>
     close: CommandHandler<CloseBayArgs, BayState>
   }>
+  pr: Readonly<{
+    close: CommandHandler<PrCloseArgs, BayState>
+  }>
 }>
 
 export type Bays = Readonly<{
@@ -224,11 +230,12 @@ export type Bays = Readonly<{
   submit(args: SubmitArgs): Promise<CommandResult>
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
   close(args: CloseBayArgs): Promise<CommandResult>
+  closePr(args: PrCloseArgs): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
 
-type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close">
+type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close" | "closePr">
 
 export type BayBaseTarget = Readonly<{ base: string; baseSha?: string }>
 export type ResolveBayBase = (base: string) => BayBaseTarget | Promise<BayBaseTarget>
@@ -395,6 +402,7 @@ export function createBays(
     intake,
     submit,
     close: actions.close,
+    closePr: actions.closePr,
   })
 }
 
@@ -437,6 +445,7 @@ export function withBays(options: WithBaysOptions) {
               intake: (args) => yrd.dispatch(commands.bay.intake, args),
               submit: (args) => yrd.dispatch(commands.bay.submit, args),
               close: (args) => yrd.dispatch(commands.bay.close, args),
+              closePr: (args) => yrd.dispatch(commands.pr.close, args),
             },
             { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
           ),
@@ -483,6 +492,14 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         visibility: "public",
         params: CloseBayArgsSchema,
         apply: (state: BayState, args: CloseBayArgs) => closeBay(state, args, jobs["bay.deprovision"]),
+      }),
+    },
+    pr: {
+      close: command({
+        title: "Close a PR",
+        visibility: "public",
+        params: PrCloseArgsSchema,
+        apply: (state: BayState, args: PrCloseArgs) => closePr(state, args),
       }),
     },
   }
@@ -649,6 +666,14 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
       }),
     ],
   }
+}
+
+function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  if (!isLivePR(pr.status)) {
+    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
+  }
+  return { events: [event("pr/withdrawn", { pr: pr.id })] }
 }
 
 function bayState(bays: BaysState): BayState {

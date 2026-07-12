@@ -636,6 +636,26 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("release/2.0")
   })
 
+  it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
+    const app = await createApp()
+    const resolveRevision = () => Promise.resolve(HEAD_SHA)
+
+    const submit = outputIO({ resolveRevision })
+    expect(await runYrd(app, yrd("bay", "submit", "topic/superseded", "--json"), submit.io), submit.stderr()).toBe(0)
+    expect(JSON.parse(submit.stdout())).toMatchObject({ prs: [{ id: "PR1", status: "submitted" }] })
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
+    expect(JSON.parse(close.stdout())).toMatchObject({
+      command: "pr.close",
+      prs: [{ id: "PR1", status: "withdrawn" }],
+    })
+
+    // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
+    const again = outputIO()
+    expect(await runYrd(app, yrd("pr", "close", "PR1"), again.io)).not.toBe(0)
+  })
+
   it("finishes a waiting line job and resumes the same durable run", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)

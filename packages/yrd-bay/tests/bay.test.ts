@@ -151,6 +151,48 @@ describe("withBays", () => {
     await app.close()
   })
 
+  it("closes a direct bayless PR so it leaves live selection while history remains", async () => {
+    const { app, workspace } = await createHarness()
+
+    // Direct (bayless) submission — the superseded-PR shape with no Bay to close.
+    await app.bays.submit({ branch: "task/chief-state-20979-r1", headSha: HEAD_1 })
+    const live = app.bays.pr("PR1")
+    expect(live).toMatchObject({ id: "PR1", status: "submitted" })
+    expect(live?.bay).toBeUndefined()
+
+    // PR-native close requires no Bay.
+    await app.bays.closePr({ pr: "PR1" })
+    const closed = app.bays.pr("PR1")
+    // "withdrawn" is exactly the status the Line and status view exclude from OPEN selection.
+    expect(closed).toMatchObject({ id: "PR1", status: "withdrawn" })
+    expect(closed?.withdrawnAt).toBe("2026-01-01T00:00:00.000Z")
+    // History remains: the PR still resolves and keeps its revision trail.
+    expect(closed?.revisions).toHaveLength(1)
+    // A pure state transition — no bay/workspace job runs.
+    expect(workspace.calls).toEqual([])
+
+    await app.close()
+  })
+
+  it("refuses to close a terminal or unknown PR, and closes a bay-backed PR", async () => {
+    const { app } = await createHarness()
+
+    // A rejected/submitted direct PR is still live (pollutes selection) and can be closed.
+    await app.bays.submit({ branch: "task/superseded", headSha: HEAD_1 })
+    await app.bays.closePr({ pr: "PR1" })
+    // Already withdrawn (terminal) — refuse loudly, never a silent no-op.
+    await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow("PR 'PR1' is withdrawn")
+    // Unknown selector — refuse.
+    await expect(app.bays.closePr({ pr: "PR404" })).rejects.toThrow("no PR 'PR404'")
+
+    // The same verb resolves a bay-backed PR by its branch spelling.
+    await app.bays.submit({ branch: "task/other", headSha: HEAD_2 })
+    await app.bays.closePr({ pr: "task/other" })
+    expect(app.bays.pr("PR2")).toMatchObject({ status: "withdrawn" })
+
+    await app.close()
+  })
+
   it("owns the complete bay and direct-branch submission flow", async () => {
     const { app, workspace } = await createHarness()
     await finishJob(app, await app.bays.open({ name: "domain-submit" }))

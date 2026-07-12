@@ -246,6 +246,28 @@ async function closeBays(
   )
 }
 
+async function closePrs(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  if (selectors.length === 0) usage("pr close requires at least one PR selector")
+  const prs: PR[] = []
+  for (const selector of selectors) {
+    await app.bays.closePr({ pr: selector })
+    const pr = app.bays.pr(selector)
+    if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after close`)
+    prs.push(pr)
+  }
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.close", prs },
+    createElement(PRResultView, { prs, runs: [] }),
+  )
+}
+
 async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | undefined> {
   const cwd = io.cwd ?? process.cwd()
   return io.resolveRevision?.(ref, cwd)
@@ -1023,6 +1045,13 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => finishLine(installed(), selector, options, io))
   addLineExamples(line, name)
+
+  const pr = program.command("pr").description("manage pull requests")
+  pr.helpCommand(false)
+  pr.command("close [selector...]")
+    .description("close a live PR without merging (leaves it out of the line)")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => closePrs(installed(), selectors, options, io))
 
   const task = program.command("task").description("orchestrate tracker-neutral tasks")
   task.helpCommand(false)

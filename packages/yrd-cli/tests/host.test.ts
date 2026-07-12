@@ -79,8 +79,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       defaultSteps: ["security", "merge", "publish"],
     })
     expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
+    expect(Object.keys(app.commands.pr)).toEqual(["close"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
+    expect(app.commands.pr.close.metadata?.visibility).toBe("public")
     expect(app.commands.line.integrate.metadata?.visibility).toBe("public")
 
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
