@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
@@ -20,6 +21,8 @@ export type LineLogRow = Readonly<{
   finished: string
   duration: string
   retries: string
+  parent: string
+  part: string
   landing: string
   result: string
   error: string
@@ -27,6 +30,15 @@ export type LineLogRow = Readonly<{
     path: string
     url: string
   }
+}>
+
+export type LineLogCoverage = Readonly<{
+  since: string
+  completeness: "queue-only"
+  legacy: Readonly<{
+    path: string
+    frames: number
+  }>
 }>
 
 type Row = Readonly<{
@@ -73,7 +85,10 @@ type LineShowData = Readonly<{
   finished: string
   duration: string
   retries: number
+  parent: string
+  part: string
   landing: string
+  result: string
   steps: readonly LineShowRow[]
 }>
 
