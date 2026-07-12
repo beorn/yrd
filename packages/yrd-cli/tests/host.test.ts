@@ -164,6 +164,33 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(run).toMatchObject({ status: "passed", integration: { commit: landing, baseSha: landing } })
     expect(await Bun.file(join(repo, "delegated-merge.marker")).exists()).toBe(true)
   })
+
+  it("refuses a post-merge raw push when native merge owns the base ref", async () => {
+    const { repo } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      line: { base: "main", batch: 1, steps: ["check", "merge", "deploy"] },
+      steps: {
+        check: { run: "true", runner: "local" },
+        merge: { runner: "local" },
+        deploy: { run: "git push origin main", runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+
+    await expect(
+      createDefaultYrdApp({
+        repo,
+        stateDir: join(repo, ".git", "yrd"),
+        baysRoot: join(repo, ".bays"),
+        journal: createMemoryJournal(),
+        process: runtimeProcess,
+        config,
+      }),
+    ).rejects.toMatchObject({
+      failure: { kind: "configuration", code: "native-merge-post-push" },
+    })
+  })
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {

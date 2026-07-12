@@ -382,6 +382,38 @@ describe("Line command adapters", () => {
     expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
   })
 
+  it("refuses an intervening remote move instead of retrying the stale Candidate", async () => {
+    const { repo, feature: featureSha, competing: competingSha } = await repository("feature", "competing")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "task/feature", "task/competing"])
+
+    await using process = createProcess()
+    let raced = false
+    const racingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (!raced && request.argv.includes("push")) {
+          raced = true
+          await git(repo, ["push", "-q", "origin", `${competingSha}:refs/heads/main`])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedLine(racingProcess, repo, ["true"])
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+
+    expect(raced).toBe(true)
+    expect(run).toMatchObject({ status: "failed", error: { code: "stale-base" } })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(competingSha)
+    expect(await git(repo, ["rev-parse", checked.candidateRef])).toBe(checked.candidateSha)
+  })
+
   it("preserves remote evidence and lands its pinned candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

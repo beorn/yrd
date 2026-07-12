@@ -370,6 +370,12 @@ or operator WIP is touched. Repositories without a remote retain the local-ref
 adapter for embedded/test use. The existing Line and Job records retain the
 attempt, timing, error, and landing proof for `line log` and `line show`.
 
+Native merge never amends the Candidate after checks or asks a later step to
+push the base again. Its durable audit proof is the Run's integration record in
+the Yrd journal, including the exact landing SHA. A direct `git push` in a
+post-merge step is therefore a configuration error; ordinary publish and deploy
+steps remain valid.
+
 A configured `merge.run` delegates the landing to a repository command while
 Yrd keeps queue and Run authority. The command receives `$YRD_SHA`/`$YRD_SHAS`
 for submitted heads and `$YRD_CANDIDATE_SHA`/`$YRD_CANDIDATE_REF` for the exact

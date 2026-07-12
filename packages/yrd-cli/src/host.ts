@@ -52,6 +52,8 @@ import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliLineAdministration, Yrd
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
+const RawGitPushPattern = /(?:^|[\n;&|])\s*git\s+push(?:\s|$)/u
+
 export type DefaultYrdAppOptions = Readonly<{
   repo: string
   stateDir: string
@@ -81,6 +83,18 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   }
   if (config.steps.merge?.runner === "waiting") {
     raiseFailure("configuration", "merge-runner-invalid", "yrd: merge cannot use a waiting runner")
+  }
+  const mergeIndex = config.line.steps.indexOf("merge")
+  if (mergeIndex >= 0 && config.steps.merge?.run === undefined) {
+    for (const name of config.line.steps.slice(mergeIndex + 1)) {
+      if (RawGitPushPattern.test(config.steps[name]?.run ?? "")) {
+        raiseFailure(
+          "configuration",
+          "native-merge-post-push",
+          `yrd: post-merge step '${name}' cannot push Git refs after the native merge step`,
+        )
+      }
+    }
   }
   for (const evaluator of config.contest.evaluators) {
     if (config.steps[evaluator]?.run === undefined) {
