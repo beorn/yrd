@@ -78,7 +78,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       batchSize: 1,
       defaultSteps: ["security", "merge", "publish"],
     })
-    expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
+    expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close", "withdraw"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
     expect(app.commands.line.integrate.metadata?.visibility).toBe("public")

@@ -246,6 +246,28 @@ async function closeBays(
   )
 }
 
+async function withdrawPRs(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  if (selectors.length === 0) usage("bay withdraw requires at least one PR selector")
+  const prs: PR[] = []
+  for (const selector of selectors) {
+    await app.bays.withdraw({ pr: selector })
+    const pr = app.bays.pr(selector)
+    if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after withdraw`)
+    prs.push(pr)
+  }
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.withdraw", prs },
+    createElement(PRResultView, { prs, runs: [] }),
+  )
+}
+
 async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | undefined> {
   const cwd = io.cwd ?? process.cwd()
   return io.resolveRevision?.(ref, cwd)
@@ -933,6 +955,11 @@ function buildProgram(
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
+  bay
+    .command("withdraw [selector...]")
+    .description("withdraw a live PR (no bay required)")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => withdrawPRs(installed(), selectors, options, io))
 
   if (projection === "bay") {
     addExamples(program, name, projection)
