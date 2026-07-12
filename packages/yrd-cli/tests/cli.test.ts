@@ -587,15 +587,15 @@ describe("runYrd", () => {
     expect(Object.keys(dirty.state().bays.prs)).toEqual([])
   })
 
-  it("submits an existing source branch through the injected Git revision boundary", async () => {
+  it("submits and revises an existing source branch through the injected Git revision boundary", async () => {
     const app = await createApp()
     const resolved: string[] = []
-    const submit = outputIO({
-      resolveRevision: async (ref) => {
-        resolved.push(ref)
-        return HEAD_SHA
-      },
-    })
+    let resolvedHead = HEAD_SHA
+    const resolveRevision = (ref: string) => {
+      resolved.push(ref)
+      return Promise.resolve(resolvedHead)
+    }
+    const submit = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), submit.io)).toBe(
       0,
     )
@@ -604,7 +604,29 @@ describe("runYrd", () => {
       prs: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA, status: "submitted" }],
     })
 
-    const human = outputIO({ columns: 64 })
+    resolvedHead = MERGED_SHA
+    const revision = outputIO({ resolveRevision })
+    expect(
+      await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0", "--json"), revision.io),
+    ).toBe(0)
+    expect(resolved).toEqual(["topic/direct", "topic/direct"])
+    expect(JSON.parse(revision.stdout())).toMatchObject({
+      prs: [
+        {
+          id: "PR1",
+          branch: "topic/direct",
+          revision: 2,
+          headSha: MERGED_SHA,
+          status: "submitted",
+          revisions: [
+            { revision: 1, headSha: HEAD_SHA },
+            { revision: 2, headSha: MERGED_SHA },
+          ],
+        },
+      ],
+    })
+
+    const human = outputIO({ columns: 64, resolveRevision })
     expect(await runYrd(app, yrd("bay", "submit", "topic/direct", "--base", "release/2.0"), human.io)).toBe(0)
     expect(human.stdout()).toContain("PR")
     expect(human.stdout()).toContain("STATUS")

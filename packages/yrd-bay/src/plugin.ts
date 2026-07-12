@@ -312,6 +312,21 @@ export function createBays(
       }
     }
 
+    if (pr?.status === "submitted" && bay === undefined) {
+      const headSha = await options.resolveRevision(pr.branch)
+      if (headSha === undefined) {
+        raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${pr.branch}'`)
+      }
+      const resolved = await target(options.base ?? pr.base, undefined)
+      if (headSha !== pr.headSha || resolved.base !== pr.base || resolved.baseSha !== pr.baseSha) {
+        await intake({ branch: pr.branch, headSha, ...resolved })
+        pr = resolvePR(state(), pr.id)
+        if (pr === undefined) {
+          raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${selector}' disappeared after revision intake`)
+        }
+      }
+    }
+
     if (pr?.status === "submitted") return pr
     if (pr?.status === "pushed") {
       await submit({ pr: pr.id })
