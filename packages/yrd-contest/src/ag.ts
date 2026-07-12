@@ -537,7 +537,7 @@ export function createAgContestRunner(options: AgContestRunnerOptions): ContestR
         },
         "ag-spawn-failed",
       )
-      const agResult = processResult.ok
+      const agResult: ProcessResult = processResult.ok
         ? processResult.value
         : {
             exitCode: -1,

@@ -100,13 +100,21 @@ function result(
   stderr = "",
   options: Readonly<{ durationMs?: number; timedOut?: boolean }> = {},
 ): ProcessResult {
-  return {
+  const common = {
     exitCode,
     signal: null,
     stdout,
     stderr,
     durationMs: options.durationMs ?? 0,
-    timedOut: options.timedOut ?? false,
+  } as const
+  if (options.timedOut === true) {
+    return { ...common, timedOut: true, stalled: false, verdict: "TIMED_OUT" }
+  }
+  return {
+    ...common,
+    timedOut: false,
+    stalled: false,
+    verdict: "EXITED",
   }
 }
 
