@@ -6,6 +6,7 @@ export type ProcessRequest = Readonly<{
   cwd?: string
   env?: NodeJS.ProcessEnv
   stdin?: string | Uint8Array
+  onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
   timeoutMs?: number
   noProgressTimeoutMs?: number
   signal?: AbortSignal
@@ -197,7 +198,7 @@ export function createProcess(
         let outputError: unknown
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {
-            return await readBounded(stream, maxOutputBytes, name, renewProgressLease)
+            return await readBounded(stream, maxOutputBytes, name, renewProgressLease, request.onOutput)
           } catch (error) {
             outputError ??= error
             terminate()
@@ -257,6 +258,7 @@ async function readBounded(
   limit: number,
   name: "stdout" | "stderr",
   onProgress: (bytes: number) => void = () => {},
+  onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void = () => {},
 ): Promise<string> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
@@ -272,6 +274,7 @@ async function readBounded(
       chunks.push(value)
       size += value.byteLength
       onProgress(value.byteLength)
+      onOutput({ stream: name, chunk: value })
     }
   } finally {
     reader.releaseLock()
