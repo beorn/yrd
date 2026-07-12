@@ -97,13 +97,17 @@ function linePlugin(
   })
 }
 
-async function createLineApp(options: Parameters<typeof linePlugin>[0] = {}, journal = createMemoryJournal()) {
+async function createLineApp(
+  options: Parameters<typeof linePlugin>[0] = {},
+  journal = createMemoryJournal(),
+  clock: () => string = () => "2026-01-01T00:00:00.000Z",
+) {
   const bayJobs = createBayJobDefs(workspace())
   const line = linePlugin(options)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
   const definition = line(base)
   return createYrd(definition, {
-    inject: { journal, id: ids(), clock: () => "2026-01-01T00:00:00.000Z" },
+    inject: { journal, id: ids(), clock },
   })
 }
 
@@ -235,6 +239,21 @@ describe("Line", () => {
     ])
     expect(app.line.status("main").finished).toHaveLength(1)
     expect(app.line.status("release/2.0").finished).toHaveLength(1)
+  })
+
+  it("integrates the implicit queue in PR revision submission order", async () => {
+    let tick = 0
+    await using app = await createLineApp({ batch: 1 }, createMemoryJournal(), () =>
+      new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
+    )
+    await app.bays.intake({ branch: "task/created-first", headSha: HEAD, base: "main" })
+    await app.bays.intake({ branch: "task/submitted-first", headSha: UPDATED, base: "main" })
+    await app.bays.submit({ pr: "PR2" })
+    await app.bays.submit({ pr: "PR1" })
+
+    const runs = await app.line.integrate({}, runtime)
+
+    expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
   })
 
   it("keeps completed history readable and refuses queued work after revision drift", async () => {

@@ -32,6 +32,8 @@ public repository.
 - [x] Verify arbitrary configured names before and after `withMerge()`.
 - [x] Verify exact candidate landing, stale-base refusal, waiting/finish,
       multiple base branches, deploy evidence, and recursive batch bisection.
+- [x] Order the implicit serial queue by PR revision submission time and support
+      a delegated merge command with authoritative landing reconciliation.
 - [ ] Dogfood `yrd line status` against the live hh queue and verify links,
       `AGE`, `TOUCHED`, `RUN`, narrow-terminal layout, and `--json` parity.
 
@@ -51,7 +53,9 @@ public repository.
       clean clone with only declared dependencies.
 - [ ] Run focused tests, typecheck, scoped formatting/lint, pack/install smoke,
       and the complete acceptance flows.
-- [ ] Cut `@ci` over to Yrd once the non-contest bay and line flow is green.
+- [ ] Complete the hh sole-path pilot: at least ten consecutive real landings
+      or 48 hours, whichever is longer; zero unexplained movers against Gate-E
+      audit; and one preserved-root failure/resume.
 
 After these boxes are complete, this file should contain only observed bugs,
 small usability adjustments, and release chores - no deferred second design.

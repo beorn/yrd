@@ -102,6 +102,68 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(changedTimeout.jobs.definition("contest.evaluator.security").revision).not.toBe(evaluatorRevision)
     await changedTimeout.close()
   })
+
+  it("refreshes a shared journal before the host selects queued PRs", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      steps: {
+        check: { run: "test -f feature.txt", runner: "local" },
+        merge: { runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const journal = createMemoryJournal()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+    }
+    await using lineHost = await createDefaultYrdApp(options)
+    await using submitter = await createDefaultYrdApp(options)
+    await submitter.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    expect(lineHost.state().bays.prs.PR1).toBeUndefined()
+
+    const runs = await lineHost.line.integrate({}, { executor: "test", leaseMs: 60_000 })
+
+    expect(runs).toEqual([expect.objectContaining({ status: "passed", prs: [expect.objectContaining({ id: "PR1" })] })])
+    expect(lineHost.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
+  })
+
+  it("uses steps.merge.run as the configured merge step", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      steps: {
+        check: { run: "test -f feature.txt", runner: "local" },
+        merge: {
+          run: 'touch delegated-merge.marker && git merge --no-ff --no-edit "$YRD_SHA"',
+          runner: "local",
+        },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({}, { executor: "test", leaseMs: 60_000 }))[0]!
+    const landing = await git(repo, "rev-parse", "main")
+
+    expect(run).toMatchObject({ status: "passed", integration: { commit: landing, baseSha: landing } })
+    expect(await Bun.file(join(repo, "delegated-merge.marker")).exists()).toBe(true)
+  })
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {

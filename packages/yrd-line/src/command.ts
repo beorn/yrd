@@ -411,6 +411,16 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
 
 export type GitMergeOptions = ProcessDependency & Readonly<{ repo: string; env?: NodeJS.ProcessEnv }>
 
+export type ConfiguredMergeOptions = ProcessDependency &
+  Readonly<{
+    repo: string
+    command: readonly string[]
+    artifactRoot?: string
+    environment?: string
+    env?: NodeJS.ProcessEnv
+    timeoutMs?: number
+  }>
+
 function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
   for (const value of Object.values(shape.results).reverse()) {
     const parsed = GitCheckEvidenceSchema.safeParse(value)
@@ -428,6 +438,62 @@ async function checkedOutWorktree(git: Git, repo: string, branchRef: string): Pr
   return undefined
 }
 
+type CheckedCandidateResult =
+  | Readonly<{ checked: GitCheckEvidence }>
+  | Readonly<{ error: Readonly<{ code: string; message: string }> }>
+
+async function validateCheckedCandidate(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  baseSha: string,
+): Promise<CheckedCandidateResult> {
+  const checked = checkedCandidate(input.shape)
+  if (checked === undefined) return { error: { code: "check-missing", message: "merge requires a pinned check" } }
+  if (checked.baseSha !== baseSha) {
+    return {
+      error: {
+        code: "stale-check",
+        message: `line '${primaryPR(input).base}' moved from checked base '${checked.baseSha}' to '${baseSha}'`,
+      },
+    }
+  }
+  if ((await git.commit(repo, checked.candidateRef)) !== checked.candidateSha) {
+    return { error: { code: "stale-check", message: "checked candidate ref moved" } }
+  }
+  for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
+    if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, checked.candidateSha], true)).code !== 0) {
+      return { error: { code: "invalid-candidate", message: `checked candidate does not contain '${sha}'` } }
+    }
+  }
+  return { checked }
+}
+
+async function authoritativeBaseAfterCommand(git: Git, repo: string, branch: string): Promise<LineBase> {
+  const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  if (remote.code !== 0 || remote.stdout === "") return resolveLineBase(git, repo, branch)
+  const source = `refs/heads/${branch}`
+  const target = `refs/remotes/origin/${branch}`
+  const fetched = await git.run(repo, ["fetch", "--quiet", "origin", `+${source}:${target}`], true)
+  if (fetched.code !== 0) {
+    throw new Error(fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`)
+  }
+  return { branchRef: `refs/heads/${branch}`, sha: await git.commit(repo, target), local: false }
+}
+
+async function landingError(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  checked: GitCheckEvidence,
+  landingSha: string,
+): Promise<string | undefined> {
+  for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
+    if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, landingSha], true)).code !== 0) return sha
+  }
+  return undefined
+}
+
 export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
@@ -436,19 +502,9 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const branch = primaryPR(input).base
       const base = await resolveLineBase(git, repo, branch)
       const baseSha = base.sha
-      const checked = checkedCandidate(input.shape)
-      if (checked === undefined) return failed("check-missing", "merge requires a pinned check")
-      if (checked.baseSha !== baseSha) {
-        return failed("stale-check", `line '${branch}' moved from checked base '${checked.baseSha}' to '${baseSha}'`)
-      }
-      if ((await git.commit(repo, checked.candidateRef)) !== checked.candidateSha) {
-        return failed("stale-check", "checked candidate ref moved")
-      }
-      for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
-        if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, checked.candidateSha], true)).code !== 0) {
-          return failed("invalid-candidate", `checked candidate does not contain '${sha}'`)
-        }
-      }
+      const candidate = await validateCheckedCandidate(git, repo, input, baseSha)
+      if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
+      const { checked } = candidate
       const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
       if (checkedOut !== undefined) {
         const status = await git.run(checkedOut, ["status", "--porcelain"])
@@ -465,6 +521,65 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         status: "passed",
         output: IntegrationProofSchema.parse({ commit: checked.candidateSha, baseSha: checked.candidateSha }),
       }
+    } catch (cause) {
+      return failed("merge-failed", messageOf(cause))
+    }
+  }
+}
+
+export function configuredMergeStep<Shape extends PRShape>(
+  options: ConfiguredMergeOptions,
+): StepRunner<Shape, IntegrationProof> {
+  const repo = resolve(options.repo)
+  const git = createGit(options.inject.process, options.env)
+  const command = configuredCommandStep<Shape>({
+    inject: options.inject,
+    command: options.command,
+    cwd: repo,
+    purpose: "merge",
+    artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+    ...(options.env === undefined ? {} : { env: options.env }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    variables: (input) => {
+      const checked = checkedCandidate(input.shape)
+      return {
+        YRD_CANDIDATE_SHA: checked?.candidateSha,
+        YRD_CANDIDATE_REF: checked?.candidateRef,
+        ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
+      }
+    },
+  })
+  return async (input, context): Promise<JobResult<IntegrationProof>> => {
+    try {
+      const branch = primaryPR(input).base
+      const base = await resolveLineBase(git, repo, branch)
+      const candidate = await validateCheckedCandidate(git, repo, input, base.sha)
+      if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
+
+      const outcome = await command(input, context)
+      let landing: LineBase
+      try {
+        landing = await authoritativeBaseAfterCommand(git, repo, branch)
+      } catch (cause) {
+        return outcome.status === "failed"
+          ? failed(outcome.error.code, outcome.error.message)
+          : failed("merge-verification-failed", messageOf(cause))
+      }
+      const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
+      if (missing === undefined) {
+        return {
+          status: "passed",
+          output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
+        }
+      }
+      if (outcome.status === "failed") return failed(outcome.error.code, outcome.error.message)
+      if (outcome.status === "waiting") {
+        return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
+      }
+      return failed(
+        "merge-command-did-not-land",
+        `merge command exited successfully but '${branch}' does not contain '${missing}'`,
+      )
     } catch (cause) {
       return failed("merge-failed", messageOf(cause))
     }
