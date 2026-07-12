@@ -331,18 +331,18 @@ export async function inspectGitLineTarget(options: {
   return inspectLineBase(createGit(options.inject.process, options.env), repo, options.branch)
 }
 
-async function withScratch(
+async function withScratch<Output extends JsonValue>(
   git: Git,
   repo: string,
   ref: string,
   parent: string,
-  run: (path: string) => Promise<JobResult<GitCheckEvidence>>,
-): Promise<JobResult<GitCheckEvidence>> {
+  run: (path: string) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
   await mkdir(parent, { recursive: true })
   const root = await mkdtemp(join(await realpath(parent), "yrd-line-"))
   const path = join(root, "worktree")
   let added = false
-  let outcome: JobResult<GitCheckEvidence> | undefined
+  let outcome: JobResult<Output> | undefined
   let operationFailure: unknown
   try {
     await git.run(repo, ["worktree", "add", "--detach", path, ref])
@@ -544,6 +544,16 @@ async function authoritativeLineBase(git: Git, repo: string, branch: string): Pr
   return inspectLineBase(git, repo, branch)
 }
 
+export async function resolveGitLineTarget(options: {
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  branch: string
+  env?: NodeJS.ProcessEnv
+}): Promise<GitLineTarget> {
+  const repo = resolve(options.repo)
+  return authoritativeLineBase(createGit(options.inject.process, options.env), repo, options.branch)
+}
+
 async function landingError(
   git: Git,
   repo: string,
@@ -568,23 +578,56 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const candidate = await validateCheckedCandidate(git, repo, input, baseSha)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
       const { checked } = candidate
-      if (base.remote !== undefined) {
+      const remote = base.remote
+      if (remote !== undefined) {
         const branchRef = `refs/heads/${branch}`
-        const pushed = await git.run(
+        const attempted = await withScratch(
+          git,
           repo,
-          ["push", "--porcelain", base.remote, `${checked.candidateSha}:${branchRef}`],
-          true,
+          checked.candidateSha,
+          tmpdir(),
+          async (path): Promise<JobResult<IntegrationProof>> => {
+            const submodules = await git.run(path, ["submodule", "update", "--init", "--recursive"], true)
+            if (submodules.code !== 0) {
+              return failed(
+                "candidate-submodules-failed",
+                submodules.stderr || submodules.stdout || "could not materialize candidate submodules",
+              )
+            }
+            if ((await git.commit(path, "HEAD")) !== checked.candidateSha) {
+              return failed("invalid-candidate", "candidate checkout does not match its pinned commit")
+            }
+            const pushed = await git.run(
+              path,
+              ["push", "--porcelain", remote, `${checked.candidateSha}:${branchRef}`],
+              true,
+            )
+            if (pushed.code !== 0) {
+              return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
+            }
+            return {
+              status: "passed",
+              output: IntegrationProofSchema.parse({ commit: checked.candidateSha, baseSha: checked.candidateSha }),
+            }
+          },
         )
-        if (pushed.code !== 0) return failed("stale-base", pushed.stderr || pushed.stdout || `${branch} moved`)
         const landing = await authoritativeLineBase(git, repo, branch)
         const missing = await landingError(git, repo, input, checked, landing.sha)
-        if (missing !== undefined) {
-          return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
+        if (missing === undefined) {
+          return {
+            status: "passed",
+            output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
+          }
         }
-        return {
-          status: "passed",
-          output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
+        if (landing.sha !== baseSha) {
+          return failed(
+            "stale-base",
+            `line '${branch}' moved from '${baseSha}' to '${landing.sha}' before the candidate could land`,
+          )
         }
+        if (attempted.status === "failed") return attempted
+        if (attempted.status === "waiting") throw new Error("native merge cannot wait")
+        return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
       }
       const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
       if (checkedOut !== undefined) {

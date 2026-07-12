@@ -131,6 +131,43 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
+  it("refuses stale local line authority before recording a PR", async () => {
+    const { repo, featureSha } = await repository()
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "task/feature")
+    await git(repo, "switch", "-qc", "task/remote-main")
+    await writeFile(join(repo, "remote.txt"), "remote\n")
+    await git(repo, "add", "remote.txt")
+    await git(repo, "commit", "-qm", "remote main")
+    await git(repo, "push", "-q", "origin", "HEAD:main")
+    await git(repo, "switch", "-q", "main")
+
+    const config: ResolvedYrdProjectConfig = {
+      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      steps: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+
+    await expect(
+      app.bays.submitSelection("task/feature", {
+        resolveRevision: async () => featureSha,
+        run: { executor: "test", leaseMs: 60_000 },
+      }),
+    ).rejects.toThrow("differs from authoritative")
+    expect(app.state().bays.prs).toEqual({})
+  })
+
   it("refreshes a shared journal before the host selects queued PRs", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

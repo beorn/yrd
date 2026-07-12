@@ -327,10 +327,26 @@ export function createBays(
       if (headSha === undefined) {
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${selector}'`)
       }
-      await submit({
+      const resolved = await target(options.base, undefined)
+      const live = Object.values(snapshot.prs).find(
+        (candidate) =>
+          (candidate.status === "pushed" || candidate.status === "submitted") &&
+          candidate.headSha === headSha &&
+          candidate.base === resolved.base,
+      )
+      if (live !== undefined) {
+        if (live.status === "submitted") return live
+        await actions.submit({ pr: live.id })
+        const submitted = resolvePR(state(), live.id)
+        if (submitted === undefined) {
+          raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${live.id}' disappeared after submit`)
+        }
+        return submitted
+      }
+      await actions.submit({
         branch: selector,
         headSha,
-        ...(options.base === undefined ? {} : { base: options.base }),
+        ...resolved,
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {

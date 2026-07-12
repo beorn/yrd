@@ -178,6 +178,25 @@ describe("withBays", () => {
     await app.close()
   })
 
+  it("reuses one live PR when another branch spelling resolves to the same payload", async () => {
+    const { app } = await createHarness()
+    await app.bays.intake({ branch: "task/feature", base: "main", headSha: HEAD_1, baseSha: BASE })
+    expect(app.bays.pr("PR1")).toMatchObject({ branch: "task/feature", status: "pushed" })
+
+    const options = {
+      base: "main",
+      resolveRevision: async (ref: string) => (ref === "origin/task/feature" ? HEAD_1 : undefined),
+      run: runtime,
+    }
+    const submitted = await app.bays.submitSelection("origin/task/feature", options)
+    const repeated = await app.bays.submitSelection("origin/task/feature", options)
+
+    expect(submitted).toMatchObject({ id: "PR1", branch: "task/feature", status: "submitted" })
+    expect(repeated).toMatchObject({ id: "PR1", status: "submitted" })
+    expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    await app.close()
+  })
+
   it("requires durable Jobs before Bay composition in TypeScript", () => {
     const { adapter } = createWorkspaceHarness()
     const jobs = createBayJobDefs(adapter)

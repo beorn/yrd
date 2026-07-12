@@ -30,6 +30,7 @@ import {
   gitCheckStep,
   gitMergeStep,
   inspectGitLineTarget,
+  resolveGitLineTarget,
   withLine,
   withMerge,
   withStep,
@@ -307,6 +308,7 @@ async function resolveLineTarget(
   repo: string,
   configuredBase: string,
   requestedBase: string,
+  options: Readonly<{ requireAligned?: boolean }> = {},
 ): Promise<Readonly<{ base: string; sha: string }>> {
   const configured = lineBranch(configuredBase)
   const requested = lineBranch(requestedBase)
@@ -314,7 +316,16 @@ async function resolveLineTarget(
   if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
     throw new Error(`yrd: line base '${requestedBase}' does not resolve`)
   }
-  const target = await inspectGitLineTarget({ inject: { process }, repo, branch: base })
+  const inspect = options.requireAligned === true ? resolveGitLineTarget : inspectGitLineTarget
+  const target = await inspect({ inject: { process }, repo, branch: base })
+  if (target.diverged && options.requireAligned === true) {
+    raiseFailure(
+      "refusal",
+      "line-target-diverged",
+      `yrd: line '${base}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
+        `${target.remote}/${base} ${target.remoteSha?.slice(0, 12)}; align the local branch before admission`,
+    )
+  }
   return { base, sha: target.sha }
 }
 
@@ -419,7 +430,9 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       jobs: bayJobs,
       defaultBase: lineBranch(options.config.line.base),
       resolveBase: async (base) => {
-        const target = await resolveLineTarget(options.process, options.repo, options.config.line.base, base)
+        const target = await resolveLineTarget(options.process, options.repo, options.config.line.base, base, {
+          requireAligned: true,
+        })
         return { base: target.base, baseSha: target.sha }
       },
     }),
