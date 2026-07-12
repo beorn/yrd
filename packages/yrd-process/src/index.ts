@@ -18,8 +18,8 @@ type ProcessResultBase = Readonly<{
   stderr: string
   durationMs: number
   timedOut: boolean
-  lastProgressAtMs: number
-  lastProgressBytes: number
+  lastProgressAtMs?: number
+  lastProgressBytes?: number
   /**
    * Set when a settlement signal could not reach the process GROUP (non-ESRCH
    * kill failure) — descendants may survive; loud, never swallowed (21012 S1).
@@ -29,9 +29,15 @@ type ProcessResultBase = Readonly<{
 
 export type ProcessResult = ProcessResultBase &
   (
-    | Readonly<{ verdict: "EXITED"; stalled: false; timedOut: false }>
-    | Readonly<{ verdict: "TIMED_OUT"; stalled: false; timedOut: true }>
-    | Readonly<{ verdict: "STALLED"; stalled: true; timedOut: false }>
+    | Readonly<{ verdict?: "EXITED"; stalled?: false; timedOut: false }>
+    | Readonly<{ verdict?: "TIMED_OUT"; stalled?: false; timedOut: true }>
+    | Readonly<{
+        verdict: "STALLED"
+        stalled: true
+        timedOut: false
+        lastProgressAtMs: number
+        lastProgressBytes: number
+      }>
   )
 
 export type Process = Readonly<{

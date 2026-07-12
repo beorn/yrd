@@ -161,6 +161,7 @@ describe("Line command adapters", () => {
       ["printf", "%s", "literal;$(not-expanded)"],
       ["sh", "-c", "printf shell"],
     ])
+    expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([120_000, 120_000])
   })
 
   it("lands the exact audited candidate and its durable artifacts", async () => {

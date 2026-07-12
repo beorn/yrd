@@ -22,6 +22,9 @@ export const CommandEvidenceSchema = z
     detail: z.string().optional(),
     /** True when the command was settled by its wall-clock bound (21012 S1). */
     timedOut: z.boolean().optional(),
+    stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
+    lastProgressAtMs: z.number().nonnegative().optional(),
+    lastProgressBytes: z.number().int().nonnegative().optional(),
   })
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
@@ -34,6 +37,12 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
 type ProcessDependency = Readonly<{ inject: Readonly<{ process: Pick<Process, "run"> }> }>
+type ProgressResult = Readonly<{
+  verdict?: "EXITED" | "TIMED_OUT" | "STALLED"
+  stalled?: boolean
+  lastProgressAtMs?: number
+  lastProgressBytes?: number
+}>
 
 export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency &
   Readonly<{
@@ -43,6 +52,7 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     artifactRoot?: string
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
+    noProgressTimeoutMs?: number
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
   }>
 
@@ -103,6 +113,7 @@ function configuredCommand<Shape extends PRShape>(
       cwd,
       env: commandEnvironment(options.env ?? globalThis.process.env, variables),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      noProgressTimeoutMs: options.noProgressTimeoutMs ?? 120_000,
     })
     const artifacts = await writeArtifacts(
       resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts")),
@@ -113,6 +124,7 @@ function configuredCommand<Shape extends PRShape>(
     )
     const message = (result.stdout || result.stderr).trimEnd()
     const detail = message.length <= 2_000 ? message : message.slice(-2_000)
+    const progress = result as typeof result & ProgressResult
     const evidence = CommandEvidenceSchema.parse({
       exitCode: result.exitCode,
       durationMs: result.durationMs,
@@ -120,7 +132,20 @@ function configuredCommand<Shape extends PRShape>(
       artifacts,
       ...(detail === "" ? {} : { detail }),
       ...(result.timedOut ? { timedOut: true } : {}),
+      ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
+      ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
+      ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
     })
+    if (progress.stalled === true) {
+      const artifactPaths = evidence.artifacts.map(({ path }) => path).join(", ")
+      return failed(
+        `${options.purpose}-stalled`,
+        `${options.purpose} made no test/log progress for ${options.noProgressTimeoutMs ?? 120_000}ms; ` +
+          `last progress ${progress.lastProgressBytes} bytes at ${progress.lastProgressAtMs}ms; process tree settled` +
+          (artifactPaths === "" ? "" : `; partial artifacts: ${artifactPaths}`) +
+          (result.sweepFailure === undefined ? "" : ` (${result.sweepFailure})`),
+      )
+    }
     // 21012 S1: a wall-clock settlement is a NAMED failure class, never a
     // generic exit red — the journal evidence must say the bound fired (and
     // whether the tree sweep itself failed), so a wedged step self-diagnoses.
@@ -319,6 +344,7 @@ export type GitCheckOptions = ProcessDependency &
     environment?: string
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
+    noProgressTimeoutMs?: number
   }>
 
 async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<void> {
@@ -354,6 +380,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
             ...(options.env === undefined ? {} : { env: options.env }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+            ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
             variables: () => ({
               YRD_BASE_SHA: baseSha,
               YRD_CANDIDATE_SHA: candidate.output,

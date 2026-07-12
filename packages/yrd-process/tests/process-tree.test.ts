@@ -146,11 +146,12 @@ function fakeRunner(
     let settle = (_code: number) => {}
     const exited = new Promise<number>((resolve) => {
       settle = resolve
-      if (finishAfterMs !== null)
-        {setTimeout(() => {
+      if (finishAfterMs !== null) {
+        setTimeout(() => {
           close()
           resolve(0)
-        }, finishAfterMs)}
+        }, finishAfterMs)
+      }
     })
     return {
       pid: 424_242,
