@@ -341,6 +341,45 @@ describe("Line", () => {
     expect(replay.line.status("main").hold).toMatchObject({ allowedPRs: [allowed.id] })
   })
 
+  it("selects the first queue-ordered eligible submitted PR under a hold", async () => {
+    let tick = 0
+    await using app = await createLineApp({ batch: 23 }, createMemoryJournal(), () =>
+      new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
+    )
+    const prs = []
+    for (let index = 1; index <= 23; index++) {
+      await app.bays.submit({
+        branch: `task/pr-${index}`,
+        headSha: index.toString(16).padStart(40, "0"),
+        base: "main",
+      })
+      const pr = app.state().bays.prs[`PR${index}`]
+      if (pr === undefined) throw new Error(`PR${index} was not recorded`)
+      prs.push(pr)
+    }
+    const oldExcluded = prs[10]
+    const allowed = prs[22]
+    if (oldExcluded === undefined || allowed === undefined) throw new Error("PR fixture is incomplete")
+    expect([oldExcluded.id, allowed.id]).toEqual(["PR11", "PR23"])
+
+    await app.line.integrate(
+      {
+        prs: prs.filter((pr) => pr.id !== oldExcluded.id && pr.id !== allowed.id).map((pr) => pr.id),
+        steps: ["check", "review", "merge"],
+      },
+      runtime,
+    )
+    expect(app.state().bays.prs.PR11?.status).toBe("submitted")
+    expect(app.state().bays.prs.PR23?.status).toBe("submitted")
+    await app.line.hold({ base: "main", reason: "operator freeze", allowedPRs: ["PR23"] })
+
+    const runs = await app.line.integrate({}, runtime)
+
+    expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR23"]])
+    expect(app.state().bays.prs.PR11?.status).toBe("submitted")
+    expect(app.state().bays.prs.PR23?.status).toBe("integrated")
+  })
+
   it("keeps completed history readable and refuses queued work after revision drift", async () => {
     const journal = createMemoryJournal()
     const first = await createLineApp({}, journal)

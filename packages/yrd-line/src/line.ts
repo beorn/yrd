@@ -1032,21 +1032,23 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
 
 function runnablePRs(state: DeepReadonly<RuntimeState>, args: IntegrateArgs): PR[] {
   const requested = requestedPRs(state.bays, args)
-  for (const pr of requested) {
+  const implicitQueue = args.prs === undefined || args.prs.length === 0
+  const eligible = requested.filter((pr) => {
     const hold = state.lines.holds[pr.base]
-    if (hold === undefined || hold.allowedPRs.includes(pr.id)) continue
+    if (hold === undefined || hold.allowedPRs.includes(pr.id)) return true
+    if (implicitQueue) return false
     raiseFailure(
       "refusal",
       "line-held",
       `yrd: line '${pr.base}' is held: ${hold.reason}; PR '${pr.id}' is not in the allowed set`,
     )
-  }
+  })
   const claimed = new Set(
     orderedLines(state.lines, state.jobs)
       .filter((run) => !Lines.terminal(run))
       .flatMap((run) => run.prs.map((pr) => pr.id)),
   )
-  return requested.filter((pr) => !claimed.has(pr.id))
+  return eligible.filter((pr) => !claimed.has(pr.id))
 }
 
 function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {

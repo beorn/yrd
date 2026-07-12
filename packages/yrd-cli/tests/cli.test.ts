@@ -722,38 +722,44 @@ describe("runYrd", () => {
 
   it("persists and releases line holds through the operator CLI", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "task/allowed", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "task/blocked", headSha: "2".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "task/blocked", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "task/allowed", headSha: "2".repeat(40), base: "main" })
     const hold = outputIO()
 
     expect(
       await runYrd(
         app,
-        yrd("line", "hold", "main", "--reason", "operator freeze", "--allow", "PR1", "--json"),
+        yrd("line", "hold", "main", "--reason", "operator freeze", "--allow", "PR2", "--json"),
         hold.io,
       ),
     ).toBe(0)
     expect(JSON.parse(hold.stdout())).toMatchObject({
       command: "line.hold",
-      hold: { base: "main", reason: "operator freeze", allowedPRs: ["PR1"] },
+      hold: { base: "main", reason: "operator freeze", allowedPRs: ["PR2"] },
     })
 
     const blocked = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "PR2", "--json"), blocked.io)).toBe(1)
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--json"), blocked.io)).toBe(1)
     expect(blocked.stderr()).toContain("line 'main' is held: operator freeze")
     expect(app.state().lines.records).toEqual({})
+
+    const eligible = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "--json"), eligible.io), eligible.stderr()).toBe(0)
+    expect(JSON.parse(eligible.stdout())).toMatchObject({ results: [{ prs: [{ id: "PR2" }], status: "passed" }] })
+    expect(app.state().bays.prs.PR1?.status).toBe("submitted")
+    expect(app.state().bays.prs.PR2?.status).toBe("integrated")
 
     const status = outputIO()
     expect(await runYrd(app, yrd("line", "status", "--json"), status.io)).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({
-      results: [{ base: "main", hold: { reason: "operator freeze", allowedPRs: ["PR1"] } }],
+      results: [{ base: "main", hold: { reason: "operator freeze", allowedPRs: ["PR2"] } }],
     })
 
     const humanStatus = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("line", "status"), humanStatus.io)).toBe(0)
     expect(humanStatus.stdout()).toContain("HOLD")
     expect(humanStatus.stdout()).toContain("operator freeze")
-    expect(humanStatus.stdout()).toContain("PR1")
+    expect(humanStatus.stdout()).toContain("PR2")
 
     const release = outputIO()
     expect(await runYrd(app, yrd("line", "release", "main", "--json"), release.io)).toBe(0)
