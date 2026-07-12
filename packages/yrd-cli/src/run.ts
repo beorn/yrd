@@ -321,6 +321,39 @@ async function integrateLines(
   )
 }
 
+async function holdLine(
+  app: YrdCliApp,
+  base: string | undefined,
+  options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const target = await resolvedLineTarget(base ?? "main", io)
+  if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
+  const hold = await app.line.hold({
+    base: target.base,
+    reason: options.reason,
+    allowedPRs: csv(options.allow) ?? [],
+  })
+  const allowed = hold.allowedPRs.length === 0 ? "none" : hold.allowedPRs.join(", ")
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.hold", hold },
+    `Line ${hold.base} held: ${hold.reason} (allowed: ${allowed})`,
+  )
+}
+
+async function releaseLine(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const target = await resolvedLineTarget(base ?? "main", io)
+  await app.line.release(target.base)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.release", base: target.base },
+    `Line ${target.base} released`,
+  )
+}
+
 async function lineStatus(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -346,11 +379,13 @@ async function lineStatus(
   const results: LineStatusResult[] = []
   for (const target of await lineTargetGroups(bases, io)) {
     const summaries = [...target.aliases].map((base) => app.line.status(base))
+    const hold = summaries.find((summary) => summary.hold !== undefined)?.hold
     results.push({
       base: target.base,
       running: summaries.flatMap((summary) => summary.running),
       waiting: summaries.flatMap((summary) => summary.waiting),
       finished: summaries.flatMap((summary) => summary.finished),
+      ...(hold === undefined ? {} : { hold }),
       ...(target.headSha === undefined ? {} : { headSha: target.headSha }),
       prs: Object.values(state.bays.prs).filter(
         (pr) => target.aliases.has(pr.base) && (selected.size === 0 || selected.has(pr.id)),
@@ -827,6 +862,7 @@ function addLineExamples(line: CliCommand, name: string): void {
     [`$ ${name} line integrate PR7 --steps check,merge`, "run selected steps for one PR"],
     [`$ ${name} line log --base release/2.0`, "show terminal completed log for a base"],
     [`$ ${name} line show R1`, "show step-level run evidence and proofs"],
+    [`$ ${name} line hold --reason maintenance --allow PR7`, "hold all but selected PRs"],
     [`$ ${name} line integrate --watch`, "keep the default line moving"],
   ])
 }
@@ -928,6 +964,18 @@ function buildProgram(
     .description("release line resources")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => lineAdministration(services, "deinit", base, options, io))
+  line
+    .command("hold [base]")
+    .description("hold new line runs")
+    .requiredOption("--reason <text>", "record the hold reason")
+    .option("--allow [pr...]", "PR ids allowed through the hold")
+    .option("--json", "emit stable JSON")
+    .action(async (base, options) => holdLine(installed(), base, options, io))
+  line
+    .command("release [base]")
+    .description("release a line hold")
+    .option("--json", "emit stable JSON")
+    .action(async (base, options) => releaseLine(installed(), base, options, io))
   line
     .command("integrate [selector...]")
     .description("run line steps for PRs")
