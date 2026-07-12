@@ -1277,6 +1277,7 @@ describe("runYrd", () => {
             finishedAt: "2026-07-12T11:08:36.215Z",
             output: {
               durationMs: 426_008.048_209,
+              detail: [1_309, 0, 53, 73, 21, 102, 0, 108, 326].map((length) => "x".repeat(length)).join("\n"),
               artifacts: [
                 { name: "stdout", path: stdout },
                 { name: "stderr", path: stderr },
@@ -1290,6 +1291,7 @@ describe("runYrd", () => {
           fakeJob({
             id: JOB_PREPARE_PASS_ID,
             status: "passed",
+            attempt: 2,
             requestedAt: "2026-07-12T11:08:36.216Z",
             startedAt: "2026-07-12T11:48:59.829Z",
             finishedAt: "2026-07-12T11:49:24.335Z",
@@ -1405,38 +1407,112 @@ describe("runYrd", () => {
         run: "R4",
         step: "check",
         index: 0,
+        requestedAt: "2026-07-12T11:01:16.930Z",
+        revision: "check-v1",
         attempt: 1,
         executor: "yrd-cli",
         outcome: "passed",
         startedAt: "2026-07-12T11:01:16.934Z",
         finishedAt: "2026-07-12T11:08:36.215Z",
         durationMs: 439_281,
+        result: { status: "passed", output: {} },
       },
       {
         job: JOB_PREPARE_PASS_ID,
         run: "R4",
         step: "merge",
         index: 1,
+        requestedAt: "2026-07-12T11:08:36.216Z",
+        revision: "merge-v1",
         attempt: 1,
         executor: "yrd-cli",
         outcome: "failed",
         startedAt: "2026-07-12T11:08:36.218Z",
         finishedAt: "2026-07-12T11:12:18.300Z",
         durationMs: 222_082,
+        result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
       },
       {
         job: JOB_PREPARE_PASS_ID,
         run: "R4",
         step: "merge",
         index: 1,
+        requestedAt: "2026-07-12T11:08:36.216Z",
+        revision: "merge-v1",
         attempt: 2,
         executor: "yrd-native-bootstrap",
         outcome: "passed",
         startedAt: "2026-07-12T11:48:59.829Z",
         finishedAt: "2026-07-12T11:49:24.335Z",
         durationMs: 24_506,
+        result: { status: "passed", output: {} },
       },
     ])
+    const show = lineShowData(run, [run], attempts)
+    expect(show).toMatchObject({
+      run: "R4",
+      totalDuration: "48m07s",
+      totalDurationMs: 2_887_405,
+      activeDuration: "11m26s",
+      activeDurationMs: 685_869,
+      waitDuration: "36m42s",
+      waitDurationMs: 2_201_536,
+    })
+    expect(show.attempts).toHaveLength(3)
+    expect(show.attempts[1]).toMatchObject({
+      step: "merge",
+      attempt: 1,
+      outcome: "failed",
+      startedAt: "2026-07-12T11:08:36.218Z",
+      finishedAt: "2026-07-12T11:12:18.300Z",
+      durationMs: 222_082,
+      result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
+    })
+    expect(show.steps).toHaveLength(3)
+    expect(show.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ step: "check", attempt: "1", status: "passed", duration: "7m19s" }),
+        expect.objectContaining({
+          step: "merge",
+          attempt: "1",
+          status: "failed",
+          duration: "3m42s",
+          error: "merge stalled",
+        }),
+        expect.objectContaining({ step: "merge", attempt: "2", status: "passed", duration: "25s" }),
+      ]),
+    )
+
+    const showHuman = await renderString(createElement(LineShowView, { data: show }), {
+      width: 120,
+      height: 20,
+      plain: true,
+    })
+    expect(showHuman).toContain("TOTAL")
+    expect(showHuman).toContain("ACTIVE")
+    expect(showHuman).toContain("WAIT")
+    expect(showHuman).toContain("48m07s")
+    expect(showHuman).toContain("11m26s")
+    expect(showHuman).toContain("36m42s")
+    expect(showHuman).toContain("merge-stalled")
+    expect(showHuman.split("\n").filter((line) => line.trimStart().startsWith("merge"))).toHaveLength(2)
+
+    const showTty = await renderString(createElement(LineShowView, { data: show }), {
+      width: 200,
+      height: 20,
+      plain: false,
+    })
+    expect(showTty).toContain(pathToFileURL(stdout).href)
+    expect(showTty).toContain(pathToFileURL(stderr).href)
+    expect(JSON.parse(JSON.stringify({ command: "line.show", run: show }))).toMatchObject({
+      command: "line.show",
+      run: {
+        totalDurationMs: 2_887_405,
+        activeDurationMs: 685_869,
+        waitDurationMs: 2_201_536,
+        attempts: [{ attempt: 1 }, { attempt: 1 }, { attempt: 2 }],
+      },
+    })
     const rows = lineLogRows(
       [fakeSummary([run])],
       new Set<string>(),
@@ -1455,7 +1531,20 @@ describe("runYrd", () => {
       totalDurationMs: 2_887_405,
       activeDurationMs: 685_869,
       waitDurationMs: 2_201_536,
-      attempts,
+      attempts: attempts.map(
+        ({ job, run: attemptRun, step, index, attempt, executor, outcome, startedAt, finishedAt, durationMs }) => ({
+          job,
+          run: attemptRun,
+          step,
+          index,
+          attempt,
+          executor,
+          outcome,
+          startedAt,
+          finishedAt,
+          durationMs,
+        }),
+      ),
       locations: [
         { label: "stdout", location: { path: stdout } },
         { label: "stderr", location: { path: stderr } },

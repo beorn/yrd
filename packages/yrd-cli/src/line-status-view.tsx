@@ -2,7 +2,7 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
-import type { Event } from "@yrd/core"
+import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
 import type { LineRun, LineStep, LineSummary } from "@yrd/line"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
@@ -61,13 +61,25 @@ export type LineLogAttempt = Readonly<{
   durationMs: number
 }>
 
-type RequestedJob = Readonly<{ run: string; step: string; index: number }>
+type LineAttemptResult =
+  | Readonly<{ status: "passed"; output: JsonValue }>
+  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output?: JsonValue }>
+  | Readonly<{ status: "lost"; reason: string }>
+
+export type LineAttempt = LineLogAttempt &
+  Readonly<{
+    requestedAt: string
+    revision: string
+    result: LineAttemptResult
+  }>
+
+type RequestedJob = Readonly<{ run: string; step: string; index: number; requestedAt: string; revision: string }>
 type StartedAttempt = Readonly<{ attempt: number; executor: string; startedAt: string }>
 
-export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<LineLogAttempt[]> {
+export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<LineAttempt[]> {
   const requested = new Map<string, RequestedJob>()
   const started = new Map<string, StartedAttempt>()
-  const attempts: LineLogAttempt[] = []
+  const attempts: LineAttempt[] = []
 
   for await (const event of events) {
     if (event.name === "job/requested") {
@@ -83,7 +95,13 @@ export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Ev
         "index" in input &&
         typeof input.index === "number"
       ) {
-        requested.set(event.id, { run: input.run, step: input.step, index: input.index })
+        requested.set(event.id, {
+          run: input.run,
+          step: input.step,
+          index: input.index,
+          requestedAt: event.ts,
+          revision: request.revision,
+        })
       }
       continue
     }
@@ -112,6 +130,7 @@ export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Ev
       startedAt: start.startedAt,
       finishedAt: event.ts,
       durationMs: Date.parse(event.ts) - Date.parse(start.startedAt),
+      result: transition.type === "lose" ? { status: "lost", reason: transition.reason } : transition.result,
     })
   }
 
@@ -145,6 +164,7 @@ type LineShowRow = Readonly<{
   finished: string
   duration: string
   durationMs?: number
+  errorCode: string
   error: string
   lost: string
   detail: string
@@ -166,6 +186,12 @@ type LineShowData = Readonly<{
   finished: string
   duration: string
   durationMs?: number
+  totalDuration: string
+  totalDurationMs?: number
+  activeDuration: string
+  activeDurationMs?: number
+  waitDuration: string
+  waitDurationMs?: number
   retries: number
   landing: string
   integration?: {
@@ -175,6 +201,7 @@ type LineShowData = Readonly<{
   parent: string
   isolationPart: "0" | "1" | "-"
   prs: LineRun["prs"]
+  attempts: readonly LineAttempt[]
   steps: readonly LineShowRow[]
 }>
 
@@ -227,6 +254,11 @@ function safeText(value: unknown): string {
   if (value === "") return "-"
   if (typeof value === "string") return value
   return JSON.stringify(value)
+}
+
+function singleLine(value: string): string {
+  const normalized = value.replace(/\s+/gu, " ").trim()
+  return normalized === "" ? "-" : normalized
 }
 
 function toIso(timestamp: string | undefined): string {
@@ -369,6 +401,18 @@ function stepLocations(step: LineStep | undefined): LineLogLocationEntry[] {
   return locations
 }
 
+function attemptArtifacts(attempt: LineAttempt): readonly unknown[] {
+  if (attempt.result.status === "lost" || !isObjectValue(attempt.result.output)) return []
+  return Array.isArray(attempt.result.output.artifacts) ? attempt.result.output.artifacts : []
+}
+
+function attemptLocations(attempt: LineAttempt): LineLogLocationEntry[] {
+  return attemptArtifacts(attempt).flatMap((artifact) => {
+    const location = artifactPath(artifact)
+    return location === undefined ? [] : [{ label: artifactLabel(artifact), location }]
+  })
+}
+
 function runLocations(run: LineRun): LineLogLocationEntry[] {
   const locations = run.steps.flatMap((step) => stepLocations(step))
   return [...new Map(locations.map((entry) => [JSON.stringify(entry.location), entry])).values()]
@@ -475,6 +519,11 @@ function stepError(step: LineStep): string {
   if (job === undefined) return "-"
   if (job.status === "failed") return (job as JobByStatus<"failed">).error.message
   return "-"
+}
+
+function stepErrorCode(step: LineStep): string {
+  const job = step.job
+  return job?.status === "failed" ? (job as JobByStatus<"failed">).error.code : "-"
 }
 
 function stepLost(step: LineStep): string {
@@ -830,6 +879,31 @@ export function lineLogRows(
         const location = runLocation(run)
         const locations = runLocations(run)
         const runAttempts = attempts.filter((attempt) => attempt.run === run.id)
+        const attemptSummaries = runAttempts.map(
+          ({
+            job,
+            run: attemptRun,
+            step,
+            index,
+            attempt,
+            executor,
+            outcome: attemptOutcome,
+            startedAt,
+            finishedAt,
+            durationMs,
+          }) => ({
+            job,
+            run: attemptRun,
+            step,
+            index,
+            attempt,
+            executor,
+            outcome: attemptOutcome,
+            startedAt,
+            finishedAt,
+            durationMs,
+          }),
+        )
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
@@ -857,7 +931,7 @@ export function lineLogRows(
           ...(durations.activeDurationMs === undefined ? {} : { activeDurationMs: durations.activeDurationMs }),
           waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
           ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
-          attempts: runAttempts,
+          attempts: attemptSummaries,
           activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputLineageIndex(finished, run, pr.revision, pr.id))),
           landing: lineLanding(run),
@@ -933,9 +1007,98 @@ export function lineLogRows(
   })
 }
 
-export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): LineShowData {
+function lineShowStepRow(run: LineRun, step: LineStep): LineShowRow {
+  const location = artifactLocation(step)
+  const locations = stepLocations(step)
+  const stepDurationMs =
+    step.job === undefined || !("finishedAt" in step.job)
+      ? undefined
+      : elapsedMs(step.job.startedAt, step.job.finishedAt)
+  return {
+    step: step.name,
+    revision: step.revision,
+    status: jobStatus(step),
+    attempt: step.job === undefined ? "-" : String(step.job.attempt),
+    uuid: step.job?.id ?? "-",
+    requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
+    started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
+    finished:
+      step.job === undefined || step.job.status === "running" || step.job.status === "requested"
+        ? "-"
+        : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
+    duration: step.job === undefined ? "-" : stepDuration(step),
+    ...(stepDurationMs === undefined ? {} : { durationMs: stepDurationMs }),
+    errorCode: stepErrorCode(step),
+    error: stepError(step),
+    lost: stepLost(step),
+    detail: stepDetail(step),
+    output: stepOutput(step),
+    artifacts: stepArtifactsText(step),
+    evidence: stepEvidence(step),
+    checkpoint: stepCheckpointText(step),
+    landing: lineLanding(run),
+    locations,
+    ...(location === undefined ? {} : { location }),
+  }
+}
+
+function lineShowAttemptRow(run: LineRun, attempt: LineAttempt): LineShowRow {
+  const step = run.steps[attempt.index] ?? run.steps.find((candidate) => candidate.name === attempt.step)
+  if (step?.job?.id === attempt.job && step.job.attempt === attempt.attempt) {
+    return {
+      ...lineShowStepRow(run, step),
+      requested: toIso(attempt.requestedAt),
+      started: toIso(attempt.startedAt),
+      finished: toIso(attempt.finishedAt),
+      duration: preciseDuration(attempt.durationMs),
+      durationMs: attempt.durationMs,
+    }
+  }
+
+  const output = attempt.result.status === "lost" ? undefined : attempt.result.output
+  const locations = attemptLocations(attempt)
+  const firstLocation = locations[0]?.location
+  const artifacts = attemptArtifacts(attempt)
+  const detail = isObjectValue(output) && typeof output.detail === "string" ? output.detail : undefined
+  return {
+    step: attempt.step,
+    revision: attempt.revision,
+    status: attempt.outcome,
+    attempt: String(attempt.attempt),
+    uuid: attempt.job,
+    requested: toIso(attempt.requestedAt),
+    started: toIso(attempt.startedAt),
+    finished: toIso(attempt.finishedAt),
+    duration: preciseDuration(attempt.durationMs),
+    durationMs: attempt.durationMs,
+    errorCode: attempt.result.status === "failed" ? attempt.result.error.code : "-",
+    error: attempt.result.status === "failed" ? attempt.result.error.message : "-",
+    lost: attempt.result.status === "lost" ? attempt.result.reason : "-",
+    detail: detail ?? (attempt.result.status === "failed" ? attempt.result.error.message : "-"),
+    output:
+      attempt.result.status === "lost"
+        ? "-"
+        : safeText(attempt.result.output ?? (attempt.result.status === "failed" ? attempt.result.error : undefined)),
+    artifacts: artifacts.length === 0 ? "-" : artifactLabel(artifacts[0]),
+    evidence: isObjectValue(output) ? output : "-",
+    checkpoint: "-",
+    landing: lineLanding(run),
+    locations,
+    ...(firstLocation === undefined ? {} : { location: firstLocation }),
+  }
+}
+
+export function lineShowData(
+  run: LineRun,
+  allRuns: readonly LineRun[] = [],
+  attempts: readonly LineAttempt[] = [],
+): LineShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "passed" || candidate.status === "failed")
-  const runDurationMs = elapsedMs(run.startedAt, run.finishedAt)
+  const runAttempts = attempts
+    .filter((attempt) => attempt.run === run.id)
+    .toSorted((left, right) => left.index - right.index || left.attempt - right.attempt)
+  const durations = runDurations(run, runAttempts)
+  const runDurationMs = durations.totalDurationMs
   return {
     run: run.id,
     base: run.base,
@@ -943,47 +1106,25 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
     outcome: lineOutcome(run),
     started: toIso(run.startedAt),
     finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
-    duration: run.finishedAt === undefined ? "-" : duration(run.startedAt, run.finishedAt),
+    duration: runDurationMs === undefined ? "-" : preciseDuration(runDurationMs),
     ...(runDurationMs === undefined ? {} : { durationMs: runDurationMs }),
+    totalDuration: runDurationMs === undefined ? "-" : preciseDuration(runDurationMs),
+    ...(runDurationMs === undefined ? {} : { totalDurationMs: runDurationMs }),
+    activeDuration: durations.activeDurationMs === undefined ? "-" : preciseDuration(durations.activeDurationMs),
+    ...(durations.activeDurationMs === undefined ? {} : { activeDurationMs: durations.activeDurationMs }),
+    waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
+    ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
     retries: lineShowRetries(finished, run),
     landing: lineLanding(run),
     integration: run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     prs: run.prs,
-    steps: run.steps.map((step) => {
-      const location = artifactLocation(step)
-      const locations = stepLocations(step)
-      const stepDurationMs =
-        step.job === undefined || !("finishedAt" in step.job)
-          ? undefined
-          : elapsedMs(step.job.startedAt, step.job.finishedAt)
-      return {
-        step: step.name,
-        revision: step.revision,
-        status: jobStatus(step),
-        attempt: step.job === undefined ? "-" : String(step.job.attempt),
-        uuid: step.job?.id ?? "-",
-        requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
-        started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
-        finished:
-          step.job === undefined || step.job.status === "running" || step.job.status === "requested"
-            ? "-"
-            : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
-        duration: step.job === undefined ? "-" : stepDuration(step),
-        ...(stepDurationMs === undefined ? {} : { durationMs: stepDurationMs }),
-        error: stepError(step),
-        lost: stepLost(step),
-        detail: stepDetail(step),
-        output: stepOutput(step),
-        artifacts: stepArtifactsText(step),
-        evidence: stepEvidence(step),
-        checkpoint: stepCheckpointText(step),
-        landing: lineLanding(run),
-        locations,
-        ...(location === undefined ? {} : { location }),
-      }
-    }),
+    attempts: runAttempts,
+    steps:
+      runAttempts.length === 0
+        ? run.steps.map((step) => lineShowStepRow(run, step))
+        : runAttempts.map((attempt) => lineShowAttemptRow(run, attempt)),
   }
 }
 
@@ -1054,7 +1195,9 @@ export function LineShowView({ data }: { data: LineShowData }) {
           { header: "OUTCOME", key: "outcome" },
           { header: "START", key: "started", grow: true },
           { header: "END", key: "finished", grow: true },
-          { header: "DUR", key: "duration", align: "right" },
+          { header: "TOTAL", key: "totalDuration", align: "right" },
+          { header: "ACTIVE", key: "activeDuration", align: "right" },
+          { header: "WAIT", key: "waitDuration", align: "right" },
           { header: "RETRY", key: "retries", align: "right" },
           {
             header: "PARENT",
@@ -1078,7 +1221,13 @@ export function LineShowView({ data }: { data: LineShowData }) {
           data={data.steps}
           columns={[
             { header: "STEP", key: "step", minWidth: 8 },
-            { header: "REV", key: "revision", minWidth: 8 },
+            {
+              header: "REV",
+              key: "revision",
+              minWidth: 8,
+              maxWidth: 12,
+              render: (row) => <Text wrap="truncate">{row.revision.slice(0, 12)}</Text>,
+            },
             {
               header: "STATUS",
               key: "status",
@@ -1086,14 +1235,42 @@ export function LineShowView({ data }: { data: LineShowData }) {
               render: (row) => <StatusValue value={row.status} />,
             },
             { header: "ATT", key: "attempt", align: "right" },
-            { header: "REQ", key: "requested" },
+            { header: "DUR", key: "duration", align: "right", minWidth: 8 },
+            {
+              header: "ERROR",
+              key: "errorCode",
+              minWidth: 15,
+              grow: true,
+              render: (row) => <Text wrap="truncate">{row.errorCode}</Text>,
+            },
             { header: "START", key: "started", grow: true },
             { header: "END", key: "finished", grow: true },
-            { header: "DUR", key: "duration", align: "right", minWidth: 8 },
-            { header: "ERROR", key: "error", grow: true },
-            { header: "LOST", key: "lost", grow: true },
-            { header: "DETAIL", key: "detail", grow: true },
-            { header: "OUTPUT", key: "output", grow: true, minWidth: 10 },
+            { header: "REQ", key: "requested" },
+            {
+              header: "LOST",
+              key: "lost",
+              grow: true,
+              render: (row) => <Text wrap="truncate">{singleLine(row.lost)}</Text>,
+            },
+            {
+              header: "MESSAGE",
+              key: "error",
+              grow: true,
+              render: (row) => <Text wrap="truncate">{singleLine(row.error)}</Text>,
+            },
+            {
+              header: "DETAIL",
+              key: "detail",
+              grow: true,
+              render: (row) => <Text wrap="truncate">{singleLine(row.detail)}</Text>,
+            },
+            {
+              header: "OUTPUT",
+              key: "output",
+              grow: true,
+              minWidth: 10,
+              render: (row) => <Text wrap="truncate">{singleLine(row.output)}</Text>,
+            },
             { header: "ART", key: "artifacts", grow: true },
             {
               header: "PATH",
@@ -1105,13 +1282,34 @@ export function LineShowView({ data }: { data: LineShowData }) {
               key: "evidence",
               minWidth: 10,
               grow: false,
-              render: (row) => (typeof row.evidence === "string" ? row.evidence : safeText(row.evidence)),
+              render: (row) => (
+                <Text wrap="truncate">
+                  {singleLine(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))}
+                </Text>
+              ),
             },
             { header: "CHECKPOINT", key: "checkpoint", minWidth: 10, grow: false },
-            { header: "LANDING", key: "landing", minWidth: 10, grow: false },
           ]}
           padding={1}
         />
+      </Box>
+      <Box marginTop={1}>
+        <Box flexDirection="column">
+          {data.steps.map((row) => (
+            <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
+              <Text wrap="truncate">
+                {`PROOF ${row.step}#${row.attempt} EVIDENCE ${singleLine(
+                  typeof row.evidence === "string" ? row.evidence : safeText(row.evidence),
+                )} CHECKPOINT ${singleLine(row.checkpoint)}`}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      </Box>
+      <Box marginTop={1}>
+        <Text>
+          LANDING <Text color="$fg-muted">{data.landing}</Text>
+        </Text>
       </Box>
     </Box>
   )

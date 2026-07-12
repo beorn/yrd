@@ -499,7 +499,8 @@ async function lineShow(app: YrdCliApp, selector: string, options: JsonOption, i
       (candidate): candidate is LineRun =>
         candidate !== undefined && (candidate.status === "passed" || candidate.status === "failed"),
     )
-  const data = lineShowData(run, finished)
+  const attempts = await lineLogAttempts(app.events())
+  const data = lineShowData(run, finished, attempts)
   await printResult(
     io,
     jsonEnabled(options),
