@@ -2,7 +2,8 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
-import type { Job } from "@yrd/job"
+import type { Event } from "@yrd/core"
+import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
 import type { LineRun, LineStep, LineSummary } from "@yrd/line"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
@@ -31,6 +32,7 @@ export type LineLogRow = Readonly<{
   activeDurationMs?: number
   waitDuration: string
   waitDurationMs?: number
+  attempts: readonly LineLogAttempt[]
   activeSteps: readonly Readonly<{ step: string; duration: string; durationMs: number }>[]
   retries: string
   parent: string
@@ -45,6 +47,76 @@ export type LineLogRow = Readonly<{
   }
   landing: string
 }>
+
+export type LineLogAttempt = Readonly<{
+  job: string
+  run: string
+  step: string
+  index: number
+  attempt: number
+  executor: string
+  outcome: "passed" | "failed" | "lost"
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+}>
+
+type RequestedJob = Readonly<{ run: string; step: string; index: number }>
+type StartedAttempt = Readonly<{ attempt: number; executor: string; startedAt: string }>
+
+export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<LineLogAttempt[]> {
+  const requested = new Map<string, RequestedJob>()
+  const started = new Map<string, StartedAttempt>()
+  const attempts: LineLogAttempt[] = []
+
+  for await (const event of events) {
+    if (event.name === "job/requested") {
+      const request = JobRequestSchema.parse(event.data)
+      const input = request.input
+      if (
+        typeof input === "object" &&
+        input !== null &&
+        "run" in input &&
+        typeof input.run === "string" &&
+        "step" in input &&
+        typeof input.step === "string" &&
+        "index" in input &&
+        typeof input.index === "number"
+      ) {
+        requested.set(event.id, { run: input.run, step: input.step, index: input.index })
+      }
+      continue
+    }
+
+    if (event.name !== "job/transitioned") continue
+    const transition = JobTransitionSchema.parse(event.data)
+    if (transition.type === "start") {
+      started.set(`${transition.id}:${transition.attempt}`, {
+        attempt: transition.attempt,
+        executor: transition.executor,
+        startedAt: event.ts,
+      })
+      continue
+    }
+    if (transition.type !== "finish" && transition.type !== "lose") continue
+
+    const request = requested.get(transition.id)
+    const start = started.get(`${transition.id}:${transition.attempt}`)
+    if (request === undefined || start === undefined) continue
+    attempts.push({
+      job: transition.id,
+      ...request,
+      attempt: transition.attempt,
+      executor: start.executor,
+      outcome: transition.type === "lose" ? "lost" : transition.result.status === "passed" ? "passed" : "failed",
+      startedAt: start.startedAt,
+      finishedAt: event.ts,
+      durationMs: Date.parse(event.ts) - Date.parse(start.startedAt),
+    })
+  }
+
+  return attempts
+}
 
 type Row = Readonly<{
   pr: string
@@ -196,7 +268,10 @@ function compactTimestamp(timestamp: string, compact: boolean): string {
     : `${iso.slice(0, 16)}Z`
 }
 
-function runDurations(run: LineRun): {
+function runDurations(
+  run: LineRun,
+  attempts: readonly LineLogAttempt[],
+): {
   totalDurationMs?: number
   activeDurationMs?: number
   waitDurationMs?: number
@@ -212,7 +287,9 @@ function runDurations(run: LineRun): {
   if (totalDurationMs === undefined) return { activeSteps }
   const activeDurationMs = Math.min(
     totalDurationMs,
-    activeSteps.reduce((sum, step) => sum + step.durationMs, 0),
+    attempts.length > 0
+      ? attempts.reduce((sum, attempt) => sum + attempt.durationMs, 0)
+      : activeSteps.reduce((sum, step) => sum + step.durationMs, 0),
   )
   return {
     totalDurationMs,
@@ -730,6 +807,7 @@ export function lineLogRows(
   prFilter: string | undefined,
   prStatus?: ReadonlyMap<string, PR["status"]>,
   now = Date.now(),
+  attempts: readonly LineLogAttempt[] = [],
 ): LineLogRow[] {
   const rows: LineLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
@@ -751,7 +829,8 @@ export function lineLogRows(
           "-"
         const location = runLocation(run)
         const locations = runLocations(run)
-        const durations = runDurations(run)
+        const runAttempts = attempts.filter((attempt) => attempt.run === run.id)
+        const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
         const ageMs = Math.max(0, now - Date.parse(finishedAt ?? run.startedAt))
@@ -778,6 +857,7 @@ export function lineLogRows(
           ...(durations.activeDurationMs === undefined ? {} : { activeDurationMs: durations.activeDurationMs }),
           waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
           ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
+          attempts: runAttempts,
           activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputLineageIndex(finished, run, pr.revision, pr.id))),
           landing: lineLanding(run),
@@ -824,6 +904,7 @@ export function lineLogRows(
         totalDuration: "-",
         activeDuration: "-",
         waitDuration: "-",
+        attempts: [],
         activeSteps: [],
         retries: "0",
         landing: "-",
@@ -930,23 +1011,12 @@ export function LineLogView({
         <Box flexDirection="column">
           <Text color="$fg-muted">
             {compact
-              ? "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE(c=check,m=merge) WAIT ART"
+              ? "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE WAIT ART"
               : "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE WAIT ARTIFACTS"}
           </Text>
           {rows.map((row) => {
             const identity = `${row.run}/${row.pr}@${row.revision}/${row.outcome}`
-            const active = row.activeSteps
-              .map((step) => {
-                const label = compact
-                  ? step.step === "check"
-                    ? "c"
-                    : step.step === "merge"
-                      ? "m"
-                      : step.step[0]
-                  : step.step
-                return `${label}:${preciseDuration(step.durationMs, compact)}`
-              })
-              .join("+")
+            const active = row.activeDurationMs === undefined ? "-" : preciseDuration(row.activeDurationMs, compact)
             return (
               <Box key={`${row.run}:${row.pr}:${row.revision}`} height={1}>
                 <Text wrap="truncate">

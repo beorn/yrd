@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
-import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, EventSchema, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import {
   type LineRun,
@@ -35,6 +35,7 @@ import {
 import {
   LineShowView,
   LineLogView,
+  lineLogAttempts,
   lineLogRows,
   lineShowData,
   lineStatusRows,
@@ -1290,12 +1291,153 @@ describe("runYrd", () => {
         ),
       ],
     })
+    const attempts = await lineLogAttempts([
+      EventSchema.parse({
+        id: JOB_CHECK_PASS_ID,
+        name: "job/requested",
+        ts: "2026-07-12T11:01:16.930Z",
+        data: {
+          definition: "line.step.check",
+          revision: "check-v1",
+          input: { run: "R4", step: "check", index: 0 },
+          key: "line:R4:0",
+        },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000201",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:01:16.934Z",
+        data: {
+          type: "start",
+          id: JOB_CHECK_PASS_ID,
+          attempt: 1,
+          executor: "yrd-cli",
+          leaseExpiresAt: "2026-07-12T11:03:16.934Z",
+        },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000202",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:08:36.215Z",
+        data: {
+          type: "finish",
+          id: JOB_CHECK_PASS_ID,
+          attempt: 1,
+          executor: "yrd-cli",
+          result: { status: "passed", output: {} },
+        },
+      }),
+      EventSchema.parse({
+        id: JOB_PREPARE_PASS_ID,
+        name: "job/requested",
+        ts: "2026-07-12T11:08:36.216Z",
+        data: {
+          definition: "line.step.merge",
+          revision: "merge-v1",
+          input: { run: "R4", step: "merge", index: 1 },
+          key: "line:R4:1",
+        },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000203",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:08:36.218Z",
+        data: {
+          type: "start",
+          id: JOB_PREPARE_PASS_ID,
+          attempt: 1,
+          executor: "yrd-cli",
+          leaseExpiresAt: "2026-07-12T11:10:36.218Z",
+        },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000204",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:12:18.300Z",
+        data: {
+          type: "finish",
+          id: JOB_PREPARE_PASS_ID,
+          attempt: 1,
+          executor: "yrd-cli",
+          result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
+        },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000205",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:48:59.827Z",
+        data: { type: "retry", id: JOB_PREPARE_PASS_ID },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000206",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:48:59.829Z",
+        data: {
+          type: "start",
+          id: JOB_PREPARE_PASS_ID,
+          attempt: 2,
+          executor: "yrd-native-bootstrap",
+          leaseExpiresAt: "2026-07-12T11:50:59.829Z",
+        },
+      }),
+      EventSchema.parse({
+        id: "00000000-0000-7000-8000-000000000207",
+        name: "job/transitioned",
+        ts: "2026-07-12T11:49:24.335Z",
+        data: {
+          type: "finish",
+          id: JOB_PREPARE_PASS_ID,
+          attempt: 2,
+          executor: "yrd-native-bootstrap",
+          result: { status: "passed", output: {} },
+        },
+      }),
+    ])
+    expect(attempts).toEqual([
+      {
+        job: JOB_CHECK_PASS_ID,
+        run: "R4",
+        step: "check",
+        index: 0,
+        attempt: 1,
+        executor: "yrd-cli",
+        outcome: "passed",
+        startedAt: "2026-07-12T11:01:16.934Z",
+        finishedAt: "2026-07-12T11:08:36.215Z",
+        durationMs: 439_281,
+      },
+      {
+        job: JOB_PREPARE_PASS_ID,
+        run: "R4",
+        step: "merge",
+        index: 1,
+        attempt: 1,
+        executor: "yrd-cli",
+        outcome: "failed",
+        startedAt: "2026-07-12T11:08:36.218Z",
+        finishedAt: "2026-07-12T11:12:18.300Z",
+        durationMs: 222_082,
+      },
+      {
+        job: JOB_PREPARE_PASS_ID,
+        run: "R4",
+        step: "merge",
+        index: 1,
+        attempt: 2,
+        executor: "yrd-native-bootstrap",
+        outcome: "passed",
+        startedAt: "2026-07-12T11:48:59.829Z",
+        finishedAt: "2026-07-12T11:49:24.335Z",
+        durationMs: 24_506,
+      },
+    ])
     const rows = lineLogRows(
       [fakeSummary([run])],
       new Set<string>(),
       undefined,
       new Map([["PR23", "integrated"]]),
       Date.parse("2026-07-12T12:49:24.335Z"),
+      attempts,
     )
 
     expect(rows[0]).toMatchObject({
@@ -1305,8 +1447,9 @@ describe("runYrd", () => {
       startedAt: "2026-07-12T11:01:16.930Z",
       ageMs: 3_600_000,
       totalDurationMs: 2_887_405,
-      activeDurationMs: 463_787,
-      waitDurationMs: 2_423_618,
+      activeDurationMs: 685_869,
+      waitDurationMs: 2_201_536,
+      attempts,
       locations: [
         { label: "stdout", location: { path: stdout } },
         { label: "stderr", location: { path: stderr } },
@@ -1326,8 +1469,8 @@ describe("runYrd", () => {
       expect(physicalRows[0]).toContain(width === 80 ? "20260712T1101Z" : "2026-07-12T11:01Z")
       expect(physicalRows[0]).toContain(width === 80 ? "1h" : "1h00m")
       expect(physicalRows[0]).toContain(width === 80 ? "48m7s" : "48m07s")
-      expect(physicalRows[0]).toContain(width === 80 ? "c:7m19s+m:25s" : "check:7m19s+merge:25s")
-      expect(physicalRows[0]).toContain("40m24s")
+      expect(physicalRows[0]).toContain(width === 80 ? "11m26s" : "11m26s")
+      expect(physicalRows[0]).toContain("36m42s")
       expect(physicalRows[0]).toContain(width === 80 ? "art:12" : "art:stdout+stderr")
       expect(human).not.toMatch(/\n\s*\n\s*\n/u)
       expect(human).not.toContain("stdout=/")

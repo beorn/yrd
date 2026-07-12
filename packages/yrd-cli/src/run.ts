@@ -15,6 +15,7 @@ import {
   LineStatusView,
   type LineLogCoverage,
   PRResultView,
+  lineLogAttempts,
   lineLogRows,
   lineShowData,
   type LineStatusResult,
@@ -471,7 +472,15 @@ async function lineLog(
   const prStatusById = new Map<string, PR["status"]>(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
-  const rows = lineLogRows(summaries, target.selected, target.prFilter, prStatusById, io.now?.() ?? Date.now())
+  const attempts = await lineLogAttempts(app.events())
+  const rows = lineLogRows(
+    summaries,
+    target.selected,
+    target.prFilter,
+    prStatusById,
+    io.now?.() ?? Date.now(),
+    attempts,
+  )
   const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
