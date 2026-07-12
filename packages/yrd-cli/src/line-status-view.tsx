@@ -231,7 +231,7 @@ function runLocation(run: LineRun): LineLogLocation | undefined {
     .find((location) => location !== undefined)
 }
 
-function jobCheckpoint(job: Job | undefined): unknown | undefined {
+function jobCheckpoint(job: Job | undefined): unknown {
   if (job === undefined) return undefined
   if (job.status === "waiting" || job.status === "passed" || job.status === "failed") return job.checkpoint
   return undefined
@@ -573,8 +573,19 @@ export function LineStatusView({
             rejected: all.filter((pr) => pr.status === "rejected").length,
           },
         ]
+        const allowed = result.hold?.allowedPRs.length === 0 ? "none" : result.hold?.allowedPRs.join(", ")
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
+            {result.hold !== undefined && (
+              <Box marginBottom={1}>
+                <Text>
+                  <Text color="$fg-warning" bold>
+                    HOLD
+                  </Text>
+                  {`: ${result.hold.reason} (allowed: ${allowed})`}
+                </Text>
+              </Box>
+            )}
             <Table
               data={summary}
               padding={1}

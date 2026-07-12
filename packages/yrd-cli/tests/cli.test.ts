@@ -710,6 +710,12 @@ describe("runYrd", () => {
       results: [{ base: "main", hold: { reason: "operator freeze", allowedPRs: ["PR1"] } }],
     })
 
+    const humanStatus = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("line", "status"), humanStatus.io)).toBe(0)
+    expect(humanStatus.stdout()).toContain("HOLD")
+    expect(humanStatus.stdout()).toContain("operator freeze")
+    expect(humanStatus.stdout()).toContain("PR1")
+
     const release = outputIO()
     expect(await runYrd(app, yrd("line", "release", "main", "--json"), release.io)).toBe(0)
     expect(JSON.parse(release.stdout())).toEqual({ command: "line.release", base: "main" })
