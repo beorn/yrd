@@ -20,12 +20,14 @@ export type LineLogRow = Readonly<{
   started: string
   finished: string
   duration: string
+  durationMs?: number
   retries: string
   parent: string
   isolationPart: "0" | "1" | "-"
   result: string
   error: string
   location?: LineLogLocation
+  locations: readonly LineLogLocationEntry[]
   integration?: {
     commit: string
     baseSha: string
@@ -59,6 +61,7 @@ type LineShowRow = Readonly<{
   started: string
   finished: string
   duration: string
+  durationMs?: number
   error: string
   lost: string
   detail: string
@@ -68,6 +71,7 @@ type LineShowRow = Readonly<{
   checkpoint: string
   landing: string
   location?: LineLogLocation
+  locations: readonly LineLogLocationEntry[]
 }>
 
 type LineShowData = Readonly<{
@@ -78,6 +82,7 @@ type LineShowData = Readonly<{
   started: string
   finished: string
   duration: string
+  durationMs?: number
   retries: number
   landing: string
   integration?: {
@@ -86,6 +91,7 @@ type LineShowData = Readonly<{
   }
   parent: string
   isolationPart: "0" | "1" | "-"
+  prs: LineRun["prs"]
   steps: readonly LineShowRow[]
 }>
 
@@ -101,6 +107,7 @@ export type LineLogCoverage = Readonly<{
 }>
 
 type LineLogLocation = Readonly<{ path: string }> | Readonly<{ url: string }>
+type LineLogLocationEntry = Readonly<{ label: string; location: LineLogLocation }>
 
 function age(timestamp: string | undefined, now: number): string {
   if (timestamp === undefined) return "-"
@@ -146,10 +153,15 @@ function toIso(timestamp: string | undefined): string {
 }
 
 function duration(started: string | undefined, finished: string | undefined): string {
-  if (started === undefined || finished === undefined) return "-"
+  const value = elapsedMs(started, finished)
+  return value === undefined ? "-" : formatDuration(value)
+}
+
+function elapsedMs(started: string | undefined, finished: string | undefined): number | undefined {
+  if (started === undefined || finished === undefined) return undefined
   const start = Date.parse(started)
   const end = Date.parse(finished)
-  return Number.isFinite(start) && Number.isFinite(end) ? formatDuration(end - start) : "-"
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined
 }
 
 function parseRunIdSuffix(run: string): number {
@@ -189,49 +201,49 @@ function artifactPath(artifact: unknown): LineLogLocation | undefined {
 }
 
 function artifactLocation(step: LineStep | undefined): LineLogLocation | undefined {
-  if (step?.job === undefined) return undefined
+  return stepLocations(step)[0]?.location
+}
 
-  if ("artifacts" in step.job && step.job.artifacts !== undefined) {
-    for (const item of step.job.artifacts) {
-      const location = artifactPath(item)
-      if (location !== undefined) return location
-    }
+function artifactLabel(artifact: unknown): string {
+  if (!isObjectValue(artifact)) return "artifact"
+  for (const key of ["name", "kind", "file"] as const) {
+    const value = artifact[key]
+    if (typeof value === "string" && value !== "") return value
   }
+  return "artifact"
+}
 
-  if (step.job.status === "passed" || step.job.status === "failed") {
-    const output = step.job.output
-    if (isObjectValue(output) && Array.isArray(output.artifacts)) {
-      for (const item of output.artifacts) {
-        const location = artifactPath(item)
-        if (location !== undefined) return location
-      }
-    }
+function stepLocations(step: LineStep | undefined): LineLogLocationEntry[] {
+  if (step?.job === undefined) return []
+  const locations: LineLogLocationEntry[] = []
+  const seen = new Set<string>()
+  const add = (label: string, location: LineLogLocation): void => {
+    const key = "path" in location ? `path:${location.path}` : `url:${location.url}`
+    if (seen.has(key)) return
+    seen.add(key)
+    locations.push({ label, location })
   }
-
-  const checkpoint = jobCheckpoint(step.job)
-  if (isObjectValue(checkpoint) && isObjectValue(checkpoint.artifacts) && Array.isArray(checkpoint.artifacts)) {
-    for (const item of checkpoint.artifacts) {
-      const location = artifactPath(item)
-      if (location !== undefined) return location
-    }
+  for (const artifact of stepArtifacts(step)) {
+    const location = artifactPath(artifact)
+    if (location !== undefined) add(artifactLabel(artifact), location)
   }
-
   if (typeof (step.job as { url?: unknown }).url === "string") {
-    const evidenceUrl = (step.job as { url: string }).url
-    if (evidenceUrl !== "") return { url: evidenceUrl }
+    const url = (step.job as { url: string }).url
+    if (url !== "") add("job", { url })
   }
+  return locations
+}
 
-  return undefined
+function runLocations(run: LineRun): LineLogLocationEntry[] {
+  const locations = run.steps.flatMap((step) => stepLocations(step))
+  return [...new Map(locations.map((entry) => [JSON.stringify(entry.location), entry])).values()]
 }
 
 function runLocation(run: LineRun): LineLogLocation | undefined {
-  return run.steps
-    .toReversed()
-    .map((step) => artifactLocation(step))
-    .find((location) => location !== undefined)
+  return run.steps.toReversed().flatMap(stepLocations).at(0)?.location
 }
 
-function jobCheckpoint(job: Job | undefined): unknown | undefined {
+function jobCheckpoint(job: Job | undefined): unknown {
   if (job === undefined) return undefined
   if (job.status === "waiting" || job.status === "passed" || job.status === "failed") return job.checkpoint
   return undefined
@@ -256,11 +268,14 @@ function runOutputLineageIndex(finished: readonly LineRun[], run: LineRun, revis
 
 function stepArtifacts(step: LineStep | undefined): readonly unknown[] {
   if (step?.job === undefined) return []
-  if ("artifacts" in step.job && step.job.artifacts !== undefined) return step.job.artifacts
-  if ((step.job.status !== "passed" && step.job.status !== "failed") || !isObjectValue(step.job.output)) return []
-  const output = step.job.output
-  if (!isObjectValue(output) || !("artifacts" in output)) return []
-  return Array.isArray(output.artifacts) ? output.artifacts : []
+  const artifacts: unknown[] = []
+  if ("artifacts" in step.job && Array.isArray(step.job.artifacts)) artifacts.push(...step.job.artifacts)
+  if ((step.job.status === "passed" || step.job.status === "failed") && isObjectValue(step.job.output)) {
+    if (Array.isArray(step.job.output.artifacts)) artifacts.push(...step.job.output.artifacts)
+  }
+  const checkpoint = jobCheckpoint(step.job)
+  if (isObjectValue(checkpoint) && Array.isArray(checkpoint.artifacts)) artifacts.push(...checkpoint.artifacts)
+  return [...new Map(artifacts.map((artifact) => [JSON.stringify(artifact), artifact])).values()]
 }
 
 function artifactHref(artifact: unknown): string | undefined {
@@ -272,7 +287,7 @@ function artifactHref(artifact: unknown): string | undefined {
 function stepOutput(step: LineStep): string {
   const job = step.job
   if (job === undefined) return "-"
-  if (job.status === "failed") return safeText((job as JobByStatus<"failed">).error)
+  if (job.status === "failed") return safeText((job as JobByStatus<"failed">).output ?? job.error)
   if (job.status === "passed") return safeText((job as JobByStatus<"passed">).output)
   if (job.status === "waiting" || job.status === "running") {
     const detail = job.status === "waiting" && typeof job.detail === "string" ? job.detail : undefined
@@ -336,6 +351,9 @@ function stepLost(step: LineStep): string {
 function stepDetail(step: LineStep): string {
   const job = step.job
   if (job === undefined) return "-"
+  const outputDetail =
+    (job.status === "passed" || job.status === "failed") && isObjectValue(job.output) ? job.output.detail : undefined
+  if (typeof outputDetail === "string" && outputDetail !== "") return outputDetail
   const detail =
     job.status === "waiting" || job.status === "passed" || job.status === "failed"
       ? "detail" in job
@@ -392,6 +410,23 @@ function CellLink({ href, children }: { href: string; children: string }) {
     <Link href={href} minWidth={0} maxWidth="100%" wrap="truncate">
       {children}
     </Link>
+  )
+}
+
+function LocationLinks({ entries }: { entries: readonly LineLogLocationEntry[] }) {
+  if (entries.length === 0) return "-"
+  return (
+    <Box flexDirection="row" gap={1}>
+      {entries.map((entry) => {
+        const target = "path" in entry.location ? entry.location.path : entry.location.url
+        const href = "path" in entry.location ? pathToFileURL(entry.location.path).href : entry.location.url
+        return (
+          <CellLink key={`${entry.label}:${target}`} href={href}>
+            {`${entry.label}=${target}`}
+          </CellLink>
+        )
+      })}
+    </Box>
   )
 }
 
@@ -627,6 +662,8 @@ export function lineLogRows(
             .find((job) => job !== undefined && job.status === "failed")?.error?.message ??
           "-"
         const location = runLocation(run)
+        const locations = runLocations(run)
+        const durationMs = elapsedMs(run.startedAt, run.finishedAt)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
           run: run.id,
@@ -639,6 +676,7 @@ export function lineLogRows(
           started: toIso(run.startedAt),
           finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
           duration: duration(run.startedAt, run.finishedAt),
+          ...(durationMs === undefined ? {} : { durationMs }),
           retries: String(Math.max(0, runOutputLineageIndex(finished, run, pr.revision, pr.id))),
           landing: lineLanding(run),
           integration: outcome === "integrated" && run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
@@ -646,6 +684,7 @@ export function lineLogRows(
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
           error: safeText(runError),
+          locations,
           ...(showLocation === undefined
             ? {}
             : "path" in showLocation
@@ -684,6 +723,7 @@ export function lineLogRows(
         isolationPart: "-",
         result: "-",
         error: "-",
+        locations: [],
       })
     }
   }
@@ -706,6 +746,7 @@ export function lineLogRows(
 
 export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): LineShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "passed" || candidate.status === "failed")
+  const runDurationMs = elapsedMs(run.startedAt, run.finishedAt)
   return {
     run: run.id,
     base: run.base,
@@ -714,13 +755,20 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
     started: toIso(run.startedAt),
     finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
     duration: run.finishedAt === undefined ? "-" : duration(run.startedAt, run.finishedAt),
+    ...(runDurationMs === undefined ? {} : { durationMs: runDurationMs }),
     retries: lineShowRetries(finished, run),
     landing: lineLanding(run),
     integration: run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
+    prs: run.prs,
     steps: run.steps.map((step) => {
       const location = artifactLocation(step)
+      const locations = stepLocations(step)
+      const stepDurationMs =
+        step.job === undefined || !("finishedAt" in step.job)
+          ? undefined
+          : elapsedMs(step.job.startedAt, step.job.finishedAt)
       return {
         step: step.name,
         revision: step.revision,
@@ -734,6 +782,7 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
             ? "-"
             : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
         duration: step.job === undefined ? "-" : stepDuration(step),
+        ...(stepDurationMs === undefined ? {} : { durationMs: stepDurationMs }),
         error: stepError(step),
         lost: stepLost(step),
         detail: stepDetail(step),
@@ -742,6 +791,7 @@ export function lineShowData(run: LineRun, allRuns: readonly LineRun[] = []): Li
         evidence: stepEvidence(step),
         checkpoint: stepCheckpointText(step),
         landing: lineLanding(run),
+        locations,
         ...(location === undefined ? {} : { location }),
       }
     }),
@@ -785,15 +835,8 @@ export function LineLogView({ rows, coverage }: { rows: readonly LineLogRow[]; c
             { header: "RESULT", key: "error", grow: true },
             {
               header: "PATH",
-              key: "location",
-              render: (row) =>
-                row.location === undefined ? (
-                  "-"
-                ) : "path" in row.location ? (
-                  <CellLink href={pathToFileURL(row.location.path).href}>{row.location.path}</CellLink>
-                ) : (
-                  <CellLink href={row.location.url}>{row.location.url}</CellLink>
-                ),
+              key: "locations",
+              render: (row) => <LocationLinks entries={row.locations} />,
             },
             { header: "INTEGRATION", key: "landing", grow: true },
           ]}
@@ -864,15 +907,8 @@ export function LineShowView({ data }: { data: LineShowData }) {
             { header: "ART", key: "artifacts", grow: true },
             {
               header: "PATH",
-              key: "location",
-              render: (row) =>
-                row.location === undefined ? (
-                  "-"
-                ) : "path" in row.location ? (
-                  <CellLink href={pathToFileURL(row.location.path).href}>{row.location.path}</CellLink>
-                ) : (
-                  <CellLink href={row.location.url}>{row.location.url}</CellLink>
-                ),
+              key: "locations",
+              render: (row) => <LocationLinks entries={row.locations} />,
             },
             {
               header: "EVIDENCE",
