@@ -71,6 +71,50 @@ async function repository<const Names extends readonly string[]>(
   return { repo, ...shas } as { repo: string } & Record<Names[number], string>
 }
 
+async function hookedSubmoduleRepository(options: {
+  baseVersion: string
+  candidateVersion: string
+  requiredVersion: string
+}): Promise<{ repo: string; remote: string; baseSha: string; featureSha: string; moduleSha: string }> {
+  const { repo } = await repository()
+  const module = join(repo, "..", "module")
+  await Bun.$`git init -q -b main ${module}`
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(module, "version.txt"), `${options.baseVersion}\n`)
+  await git(module, ["add", "version.txt"])
+  await git(module, ["commit", "-qm", "base"])
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["commit", "-qam", "add dependency"])
+  const baseSha = await git(repo, ["rev-parse", "HEAD"])
+
+  await writeFile(join(module, "version.txt"), `${options.candidateVersion}\n`)
+  await git(module, ["commit", "-qam", "candidate"])
+  const moduleSha = await git(module, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-qc", "task/feature"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+  await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
+  await writeFile(join(repo, "feature.txt"), "feature\n")
+  await git(repo, ["add", "dep", "feature.txt"])
+  await git(repo, ["commit", "-qm", "feature"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["submodule", "update", "--init", "--recursive"])
+
+  const remote = join(repo, "..", "origin.git")
+  await Bun.$`git init -q --bare ${remote}`
+  await git(repo, ["remote", "add", "origin", remote])
+  await git(repo, ["push", "-q", "origin", "main", "task/feature"])
+  const hook = join(repo, ".git", "hooks", "pre-push")
+  await writeFile(
+    hook,
+    `#!/bin/sh\nroot=$(git rev-parse --show-toplevel)\ntest "$(cat "$root/dep/version.txt")" = ${options.requiredVersion}\n`,
+  )
+  await chmod(hook, 0o755)
+  return { repo, remote, baseSha, featureSha, moduleSha }
+}
+
 const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
   provision: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
@@ -369,41 +413,11 @@ describe("Line command adapters", () => {
   })
 
   it("runs remote push hooks from the checked candidate tree and submodule pins", async () => {
-    const { repo } = await repository()
-    const module = join(repo, "..", "module")
-    await Bun.$`git init -q -b main ${module}`
-    await git(module, ["config", "user.name", "Yrd Test"])
-    await git(module, ["config", "user.email", "yrd@example.invalid"])
-    await writeFile(join(module, "version.txt"), "base\n")
-    await git(module, ["add", "version.txt"])
-    await git(module, ["commit", "-qm", "base"])
-    await git(repo, ["config", "protocol.file.allow", "always"])
-    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
-    await git(repo, ["commit", "-qam", "add dependency"])
-
-    await writeFile(join(module, "version.txt"), "candidate\n")
-    await git(module, ["commit", "-qam", "candidate"])
-    const moduleSha = await git(module, ["rev-parse", "HEAD"])
-    await git(repo, ["switch", "-qc", "task/feature"])
-    await git(join(repo, "dep"), ["fetch", "-q", "origin"])
-    await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
-    await writeFile(join(repo, "feature.txt"), "feature\n")
-    await git(repo, ["add", "dep", "feature.txt"])
-    await git(repo, ["commit", "-qm", "feature"])
-    const featureSha = await git(repo, ["rev-parse", "HEAD"])
-    await git(repo, ["switch", "-q", "main"])
-    await git(repo, ["submodule", "update", "--init", "--recursive"])
-
-    const remote = join(repo, "..", "origin.git")
-    await Bun.$`git init -q --bare ${remote}`
-    await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "task/feature"])
-    const hook = join(repo, ".git", "hooks", "pre-push")
-    await writeFile(
-      hook,
-      '#!/bin/sh\nroot=$(git rev-parse --show-toplevel)\ntest "$(cat "$root/feature.txt")" = feature\ntest "$(cat "$root/dep/version.txt")" = candidate\n',
-    )
-    await chmod(hook, 0o755)
+    const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
 
     await using process = createProcess()
     await using app = await checkedLine(
@@ -417,6 +431,22 @@ describe("Line command adapters", () => {
 
     expect(run).toMatchObject({ status: "passed", prs: [{ headSha: featureSha }] })
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
+  })
+
+  it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
+    const { repo, remote, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "accepted",
+      candidateVersion: "invalid",
+      requiredVersion: "accepted",
+    })
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, shellCommand("git submodule update --init --recursive"))
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "merge-push-failed" } })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
   })
 
   it("keeps one same-base run active before the remote compare-and-push", async () => {
