@@ -790,7 +790,10 @@ describe("runYrd", () => {
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("line", "log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)
-    const parsed = JSON.parse(scoped.stdout())
+    const parsed = JSON.parse(scoped.stdout()) as {
+      command: string
+      rows: ReturnType<typeof lineLogRows>
+    }
     expect(parsed.command).toBe("line.log")
     expect(parsed.rows).toHaveLength(1)
     expect(parsed.rows[0]).toMatchObject({
@@ -830,7 +833,10 @@ describe("runYrd", () => {
 
     const json = outputIO()
     expect(await runYrd(app, yrd("line", "show", "R1", "--json"), json.io)).toBe(0)
-    const parsed = JSON.parse(json.stdout())
+    const parsed = JSON.parse(json.stdout()) as {
+      command: string
+      run: ReturnType<typeof lineShowData>
+    }
     expect(parsed.command).toBe("line.show")
     expect(parsed.run.run).toBe("R1")
     expect(parsed.run.steps).toHaveLength(2)
@@ -1035,7 +1041,7 @@ describe("runYrd", () => {
     await openAndSubmit(coverageApp)
     const liveLog = outputIO({ cwd: temp })
     expect(await runYrd(coverageApp, yrd("line", "log", "--json"), liveLog.io), liveLog.stderr()).toBe(0)
-    expect(JSON.parse(liveLog.stdout()).coverage).toMatchObject({
+    expect((JSON.parse(liveLog.stdout()) as { coverage: LineLogCoverage }).coverage).toMatchObject({
       since: "2026-07-09T12:00:00.000Z",
       completeness: "queue-only",
       legacy: { path: join(realpathSync(temp), ".git", "bay", "journal.jsonl"), frames: 185 },
@@ -1098,10 +1104,12 @@ describe("runYrd", () => {
     })
     expect(ttyShow).toContain("\u001b]8;;")
     expect(plainShow).not.toContain("\u001b]8;;")
-    const lineShowJson = JSON.parse(JSON.stringify(show))
-    expect(lineShowJson.steps[0].uuid).toBe(JOB_CHECK_PASS_ID)
-    expect(lineShowJson.steps[0].attempt).toBe("2")
-    expect(lineShowJson.steps[0].duration).toBe("2.0s")
+    const lineShowJson = JSON.parse(JSON.stringify(show)) as typeof show
+    expect(lineShowJson.steps[0]).toMatchObject({
+      uuid: JOB_CHECK_PASS_ID,
+      attempt: "2",
+      duration: "2.0s",
+    })
 
     rmSync(temp, { recursive: true, force: true })
   })
