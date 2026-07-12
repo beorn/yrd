@@ -10,7 +10,7 @@ import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs } from "@yrd/job"
-import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -50,6 +50,18 @@ async function repository(): Promise<{ root: string; repo: string; intake: strin
   return { root, repo, intake }
 }
 
+async function addSubmodule(root: string, repo: string): Promise<void> {
+  const dependency = join(root, "dependency")
+  await Bun.$`git init -q -b main ${dependency}`
+  await git(dependency, ["config", "user.name", "Yrd Test"])
+  await git(dependency, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(dependency, "dependency.txt"), "dependency\n")
+  await git(dependency, ["add", "dependency.txt"])
+  await git(dependency, ["commit", "-qm", "initial dependency"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", dependency, "vendor/dependency"])
+  await git(repo, ["commit", "-qm", "add dependency"])
+}
+
 async function createApp(adapter: BayWorkspace) {
   const jobs = createBayJobDefs(adapter)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs }))
@@ -62,7 +74,7 @@ async function runRequested(app: Awaited<ReturnType<typeof createApp>>, result: 
   await app.jobs.run(id, { executor: "local", leaseMs: 60_000 })
 }
 
-async function workspace(process: ReturnType<typeof createProcess>, options: Omit<GitWorkspaceOptions, "process">) {
+async function workspace(process: Pick<Process, "run">, options: Omit<GitWorkspaceOptions, "process">) {
   return createGitWorkspace({ ...options, process })
 }
 
@@ -125,6 +137,107 @@ describe("createGitWorkspace", () => {
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(existsSync(bay.path)).toBe(false)
     expect(await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"])).toMatchObject({ code: 0 })
+  })
+
+  it("closes a clean worktree whose repository contains submodules", async () => {
+    const { root, repo } = await repository()
+    await addSubmodule(root, repo)
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "submodule-close" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    await git(bay.path, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+
+    expect(app.bays.get("B1")?.status).toBe("closed")
+    expect(existsSync(bay.path)).toBe(false)
+  })
+
+  it("preserves a Bay when an initialized submodule has uncommitted work", async () => {
+    const { root, repo } = await repository()
+    await addSubmodule(root, repo)
+    await using process = createProcess()
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "dirty-submodule" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    await git(bay.path, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+    const dirtyPath = join(bay.path, "vendor", "dependency", "dependency.txt")
+    await writeFile(dirtyPath, "dirty dependency\n")
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "dirty-worktree" } })
+    expect(existsSync(dirtyPath)).toBe(true)
+  })
+
+  it("resumes close after interruption leaves the preservation ref behind", async () => {
+    const { root, repo } = await repository()
+    await using actual = createProcess()
+    let interruptRemoval = true
+    const process: Pick<Process, "run"> = {
+      run(request) {
+        const args = request.argv.slice(3)
+        if (interruptRemoval && args[0] === "worktree" && args[1] === "remove") {
+          interruptRemoval = false
+          return Promise.resolve(processResult(1, "simulated removal interruption"))
+        }
+        return actual.run(request)
+      },
+    }
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "resume-close" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "deprovision-failed" } })
+    expect(existsSync(bay.path)).toBe(true)
+    expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(bay.headSha)
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+
+    expect(app.bays.get("B1")?.status).toBe("closed")
+    expect(existsSync(bay.path)).toBe(false)
+    expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(bay.headSha)
+  })
+
+  it("resumes close after removal succeeds but Job completion is interrupted", async () => {
+    const { root, repo } = await repository()
+    await using actual = createProcess()
+    let interruptCompletion = true
+    const process: Pick<Process, "run"> = {
+      async run(request) {
+        const args = request.argv.slice(3)
+        if (interruptCompletion && args[0] === "worktree" && args[1] === "remove") {
+          interruptCompletion = false
+          const removed = await actual.run(request)
+          if (removed.exitCode !== 0) return removed
+          return processResult(1, "simulated completion interruption")
+        }
+        return actual.run(request)
+      },
+    }
+    await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
+
+    await runRequested(app, await app.bays.open({ name: "resume-removed-close" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+    expect(app.bays.get("B1")).toMatchObject({ status: "active", failure: { code: "deprovision-failed" } })
+    expect(existsSync(bay.path)).toBe(false)
+    expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(bay.headSha)
+
+    await runRequested(app, await app.bays.close({ bay: bay.id }))
+
+    expect(app.bays.get("B1")?.status).toBe("closed")
+    expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(bay.headSha)
   })
 
   it("removes a legacy shared bay push default while keeping the Bay-local receiver", async () => {

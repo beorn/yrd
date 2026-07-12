@@ -136,6 +136,23 @@ async function ignoreInRepositoryBays(git: Git, repo: string, baysRoot: string):
   await appendFile(exclude, `\n/${escaped}/\n`, { encoding: "utf8", mode: 0o600 })
 }
 
+async function preserveClosedBay(git: Git, repo: string, bay: string, headSha: string): Promise<string> {
+  const preservedRef = `refs/yrd/closed/${bay}`
+  const created = await git.run(repo, ["update-ref", preservedRef, headSha, "0".repeat(headSha.length)], true)
+  if (created.code === 0) return preservedRef
+
+  const existing = await git.run(repo, ["rev-parse", "--verify", `${preservedRef}^{commit}`], true)
+  if (existing.code === 0 && existing.stdout.trim() === headSha) return preservedRef
+  throw new Error(created.stderr.trim() || created.stdout.trim() || `could not preserve '${preservedRef}'`)
+}
+
+async function requirePreservedBay(git: Git, repo: string, bay: string, headSha: string): Promise<string> {
+  const preservedRef = `refs/yrd/closed/${bay}`
+  const existing = await git.run(repo, ["rev-parse", "--verify", `${preservedRef}^{commit}`], true)
+  if (existing.code === 0 && existing.stdout.trim() === headSha) return preservedRef
+  throw new Error(`workspace is absent but '${preservedRef}' does not preserve '${headSha}'`)
+}
+
 export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<BayWorkspace> {
   const repo = resolve(options.repo)
   const baysRoot = resolve(options.baysRoot ?? `${repo}/.bays`)
@@ -198,7 +215,14 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
       if (input.path === undefined) return { status: "passed", output: {} }
       try {
-        const status = await git.run(input.path, ["status", "--porcelain"])
+        if (!existsSync(input.path)) {
+          if (input.headSha === undefined) throw new Error("workspace is absent and the Bay has no recorded head")
+          return {
+            status: "passed",
+            output: { preservedRef: await requirePreservedBay(git, repo, input.bay, input.headSha) },
+          }
+        }
+        const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
         if (status.stdout.trim() !== "") {
           return {
             status: "failed",
@@ -209,9 +233,8 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           }
         }
         const headSha = await git.commit(input.path, "HEAD")
-        const preservedRef = `refs/yrd/closed/${input.bay}`
-        await git.run(repo, ["update-ref", preservedRef, headSha, "0".repeat(headSha.length)])
-        await git.run(repo, ["worktree", "remove", input.path])
+        const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
+        await git.run(repo, ["worktree", "remove", "--force", input.path])
         return { status: "passed", output: { preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)
