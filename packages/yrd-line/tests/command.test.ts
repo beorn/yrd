@@ -16,6 +16,7 @@ import * as z from "zod"
 import {
   GitCheckEvidenceSchema,
   configuredCommandStep,
+  configuredMergeStep,
   gitCheckStep,
   gitMergeStep,
   withLine,
@@ -388,6 +389,77 @@ describe("Line command adapters", () => {
     expect(run).toMatchObject({ status: "failed", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)
     expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
+  })
+
+  it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "task/feature"])
+    await using process = createProcess()
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const check = withStep(
+      "check",
+      gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
+      { revision: "check-v1", output: GitCheckEvidenceSchema },
+    )
+    const merge = withMerge(
+      configuredMergeStep<Checked>({
+        inject: { process },
+        repo,
+        command: shellCommand(
+          'git merge --no-ff --no-edit "$YRD_SHA" && git commit --amend --no-edit && ' +
+            "git push origin HEAD:refs/heads/main; exit 19",
+        ),
+      }),
+      { revision: "delegated-merge-v1" },
+    )
+    const line = withLine({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(line(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const landing = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+
+    expect(run).toMatchObject({
+      status: "passed",
+      integration: { commit: landing, baseSha: landing },
+    })
+    expect(await git(repo, ["merge-base", "--is-ancestor", run.integration!.commit, "refs/remotes/origin/main"])).toBe(
+      "",
+    )
+    expect(landing).not.toBe(GitCheckEvidenceSchema.parse(checkJob.output).candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      status: "integrated",
+      integration: { commit: landing, baseSha: landing },
+    })
+  })
+
+  it("fails a delegated merge command that exits zero without landing the PR", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const check = withStep(
+      "check",
+      gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
+      { revision: "check-v1", output: GitCheckEvidenceSchema },
+    )
+    const merge = withMerge(configuredMergeStep<Checked>({ inject: { process }, repo, command: ["true"] }), {
+      revision: "delegated-merge-v1",
+    })
+    const line = withLine({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(line(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    expect((await app.line.integrate({ prs: ["PR1"] }, runtime))[0]).toMatchObject({
+      status: "failed",
+      error: { code: "merge-command-did-not-land" },
+    })
   })
 })
 

@@ -25,6 +25,7 @@ import { createYrd, createYrdDef, pipe, raiseFailure, type Journal } from "@yrd/
 import { withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
+  configuredMergeStep,
   configuredWaitingCommandStep,
   gitCheckStep,
   gitMergeStep,
@@ -81,13 +82,6 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   if (config.steps.merge?.runner === "waiting") {
     raiseFailure("configuration", "merge-runner-invalid", "yrd: merge cannot use a waiting runner")
   }
-  if (config.steps.merge?.run !== undefined) {
-    raiseFailure(
-      "configuration",
-      "merge-command-unsupported",
-      "yrd: steps.merge.run is not supported by the default Git line; compose withMerge() for a custom merge",
-    )
-  }
   for (const evaluator of config.contest.evaluators) {
     if (config.steps[evaluator]?.run === undefined) {
       raiseFailure(
@@ -105,6 +99,7 @@ function lineStepRevision(
   name: string,
   config: YrdStepConfig,
   checkoutParent?: string,
+  resolvedCommand?: readonly string[],
 ): string {
   return createHash("sha256")
     .update(
@@ -115,6 +110,7 @@ function lineStepRevision(
         ...(checkoutParent === undefined ? {} : { checkoutParent }),
         name,
         run: config.run,
+        resolvedCommand,
         runner: config.runner,
         environment: config.environment,
       }),
@@ -221,16 +217,31 @@ function integratedRunner(
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
 
-function configuredLineSteps(options: DefaultYrdAppOptions): readonly RuntimeStep[] {
+function configuredLineSteps(
+  options: DefaultYrdAppOptions,
+  mergeCommand: readonly string[] | undefined,
+): readonly RuntimeStep[] {
   let integrated = false
   return options.config.line.steps.map((name) => {
     const config = options.config.steps[name] ?? { runner: "local" as const }
     if (name === "merge") {
       integrated = true
       return eraseStep(
-        withMerge(gitMergeStep({ inject: { process: options.process }, repo: options.repo }), {
-          revision: lineStepRevision(options.repo, options.stateDir, name, config),
-        }),
+        withMerge(
+          mergeCommand === undefined
+            ? gitMergeStep({ inject: { process: options.process }, repo: options.repo })
+            : configuredMergeStep({
+                inject: { process: options.process },
+                repo: options.repo,
+                command: mergeCommand,
+                artifactRoot: join(options.stateDir, "artifacts"),
+                timeoutMs: stepTimeoutMs(config),
+                ...(config.environment === undefined ? {} : { environment: config.environment }),
+              }),
+          {
+            revision: lineStepRevision(options.repo, options.stateDir, name, config, undefined, mergeCommand),
+          },
+        ),
       )
     }
     if (!integrated) {
@@ -334,6 +345,8 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
 /** Compose the built-in workflow from immutable plugins and injected resources. */
 export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
   validateConfig(options.config)
+  const mergeCommand =
+    options.config.steps.merge?.run === undefined ? undefined : shellCommand(options.config.steps.merge.run)
   const workspace =
     options.workspace ??
     (await createGitWorkspace({
@@ -344,7 +357,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     }))
   const bayJobs = createBayJobDefs(workspace)
   const line = withLine({
-    steps: configuredLineSteps(options),
+    steps: configuredLineSteps(options, mergeCommand),
     batch: options.config.line.batch,
     defaultSteps: options.config.line.steps,
   })

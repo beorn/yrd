@@ -277,6 +277,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
             () => yrd.state() as unknown as DeepReadonly<RuntimeState>,
             yrd.jobs,
             {
+              refresh: () => yrd.refresh(),
               integrate: (args) => yrd.dispatch(commands.line.integrate, args),
               advance: (run) => yrd.dispatch(commands.line.advance, { run }),
               isolate: (run, part) => yrd.dispatch(commands.line.isolate, { run, part }),
@@ -294,6 +295,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
 
 type RuntimeStep = AnyStepDef
 type LineActions = Readonly<{
+  refresh(): Promise<unknown>
   integrate(args: IntegrateArgs): Promise<CommandResult>
   advance(run: LineRunId): Promise<CommandResult>
   isolate(run: LineRunId, part: 0 | 1): Promise<CommandResult>
@@ -403,6 +405,7 @@ function createLine<Shape extends PRShape>(
     async integrate(args, runOptions) {
       using _span = log.span?.("integrate", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
+      await actions.refresh()
       const snapshot = runtime()
       const prs = runnablePRs(snapshot, args)
       if (prs.length === 0) return []
@@ -910,7 +913,14 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
     selectors === undefined
       ? Object.values(state.prs)
           .filter((pr) => pr.status === "submitted" || (args.retry === true && pr.status === "rejected"))
-          .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+          .toSorted((left, right) => {
+            if (left.submittedAt === undefined) throw new Error(`yrd: queued PR '${left.id}' has no submission time`)
+            if (right.submittedAt === undefined) throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
+            return (
+              left.submittedAt.localeCompare(right.submittedAt) ||
+              left.id.localeCompare(right.id, undefined, { numeric: true })
+            )
+          })
       : selectors.map((selector) => {
           const pr = resolvePR(state, selector)
           if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)

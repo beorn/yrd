@@ -349,7 +349,8 @@ steps:
     run: launch-coderabbit
     runner: waiting
   sec-check: bun run security
-  merge: {}
+  merge:
+    run: land-candidate "$YRD_CANDIDATE_SHA"
   deploy: bun run deploy
 
 contest:
@@ -361,6 +362,14 @@ contest:
 Names before `merge` run against the checked candidate. Names after `merge` run
 against the integrated commit. The TypeScript API enforces this statically; the
 YAML adapter validates the same ordering while composing plugins.
+
+An empty `merge: {}` uses Yrd's native Git merge. A configured `merge.run`
+delegates the landing to a repository command while Yrd keeps queue and Run
+authority. The command receives `$YRD_SHA`/`$YRD_SHAS` for submitted heads and
+`$YRD_CANDIDATE_SHA`/`$YRD_CANDIDATE_REF` for the exact checked candidate.
+After it returns, Yrd refreshes the base branch and records the actual landing
+SHA; success without a landing fails closed. The base branch's tracked config is
+the single command authority; submitted revisions cannot replace it.
 
 Local pre-merge checks and held-out evaluators use detached scratch worktrees
 under the configured bays root. The configured command owns dependency
