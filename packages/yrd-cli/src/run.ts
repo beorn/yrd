@@ -547,7 +547,6 @@ async function lineLog(
     target.selected,
     target.prFilter,
     prStatusById,
-    io.now?.() ?? Date.now(),
     attempts,
     revisionSubjects,
     submissionTimes,

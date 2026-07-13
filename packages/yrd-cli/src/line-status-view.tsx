@@ -82,7 +82,7 @@ type StartedAttempt = Readonly<{ attempt: number; executor: string; startedAt: s
 type PinnedPRRevision = Readonly<{ id: string; revision: number; headSha: string }>
 
 export function lineRevisionKey(revision: PinnedPRRevision): string {
-  return `${revision.id}:${revision.revision}:${revision.headSha}`
+  return JSON.stringify([revision.id, revision.revision, revision.headSha])
 }
 
 export async function lineSubmissionTimes(
@@ -1167,12 +1167,10 @@ export function lineLogRows(
   selectedPrs: ReadonlySet<string>,
   prFilter: string | undefined,
   prStatus?: ReadonlyMap<string, PR["status"]>,
-  now = Date.now(),
   attempts: readonly LineLogAttempt[] = [],
   revisionSubjects: ReadonlyMap<string, string> = new Map(),
   submissionTimes: ReadonlyMap<string, string> = new Map(),
 ): LineLogRow[] {
-  void now
   const rows: LineLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
 

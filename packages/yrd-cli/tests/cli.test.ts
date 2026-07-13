@@ -41,6 +41,7 @@ import {
   humanLineProjection,
   lineLogAttempts,
   lineLogRows,
+  lineRevisionKey,
   lineShowData,
   lineStatusRows,
   watchQueueRows,
@@ -2255,10 +2256,9 @@ describe("runYrd", () => {
       new Set<string>(),
       undefined,
       new Map([["PR23", "integrated"]]),
-      Date.parse("2026-07-12T12:49:24.335Z"),
       attempts,
       new Map(),
-      new Map([[`PR23:4:${"4".repeat(40)}`, "2026-07-12T10:49:24.335Z"]]),
+      new Map([[lineRevisionKey(run.prs[0]!), "2026-07-12T10:49:24.335Z"]]),
     )
 
     expect(rows[0]).toMatchObject({
@@ -2360,23 +2360,22 @@ describe("runYrd", () => {
         ),
       ],
     })
-    const key = `PR42:7:${headSha}`
+    const key = lineRevisionKey(run.prs[0]!)
     const subjects = new Map([[key, subject]])
     const submissions = new Map([[key, "2026-07-12T11:00:00.000Z"]])
-    const project = (now: string) =>
+    const project = () =>
       lineLogRows(
         [fakeSummary([run])],
         new Set<string>(),
         undefined,
         new Map([["PR42", "rejected"]]),
-        Date.parse(now),
         [],
         subjects,
         submissions,
       )[0]
 
-    const first = project("2026-07-12T12:00:00.000Z")
-    const later = project("2026-07-13T12:00:00.000Z")
+    const first = project()
+    const later = project()
     expect(first).toMatchObject({ subject, ageMs: 20 * 60_000, age: "20m00s" })
     expect(later).toMatchObject({ subject, ageMs: 20 * 60_000, age: "20m00s" })
     expect(first?.subject.length).toBeGreaterThan(80)
@@ -2404,14 +2403,7 @@ describe("runYrd", () => {
         ],
       })
     })
-    const rows = lineLogRows(
-      [fakeSummary(runs)],
-      new Set<string>(),
-      undefined,
-      new Map([["PR1", "rejected"]]),
-      Date.parse("2026-07-09T13:00:00.000Z"),
-      [],
-    )
+    const rows = lineLogRows([fakeSummary(runs)], new Set<string>(), undefined, new Map([["PR1", "rejected"]]), [])
     expect(rows).toHaveLength(22)
     expect(rows[0]).toMatchObject({
       branch: "fix(cli): bounded operator history",
