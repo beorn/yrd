@@ -754,6 +754,53 @@ describe("runYrd", () => {
     })
   })
 
+  it("exports one cursor-stamped tracker bridge snapshot from typed PR facts", async () => {
+    const app = await createApp()
+    const issueRef = "@km/all/21063-steering-laser"
+    await app.bays.submit({
+      branch: "topic/partial-2106-token",
+      headSha: HEAD_SHA,
+      base: "main",
+      issue: issueRef,
+    })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    await app.bays.submit({
+      branch: "topic/retired",
+      headSha: "2".repeat(40),
+      base: "main",
+      issue: issueRef,
+    })
+    await app.bays.closePr({ pr: "PR2" })
+    await app.bays.submit({ branch: "topic/unlinked", headSha: "7".repeat(40), base: "main" })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("log", "--all", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "log",
+      trackerBridge: {
+        version: 1,
+        asOf: { cursor: expect.any(Number), at: "2026-07-09T12:00:00.000Z" },
+        deliveries: [
+          {
+            pr: "PR1",
+            issueRef,
+            revision: 1,
+            status: "integrated",
+            landingSha: MERGED_SHA,
+            at: "2026-07-09T12:00:00.000Z",
+          },
+          {
+            pr: "PR2",
+            issueRef,
+            revision: 1,
+            status: "withdrawn",
+            at: "2026-07-09T12:00:00.000Z",
+          },
+        ],
+      },
+    })
+  })
+
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })
