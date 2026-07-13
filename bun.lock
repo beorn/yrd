@@ -42,11 +42,11 @@
         "@yrd/bay": "workspace:*",
         "@yrd/contest": "workspace:*",
         "@yrd/core": "workspace:*",
+        "@yrd/issue": "workspace:*",
         "@yrd/job": "workspace:*",
-        "@yrd/queue": "workspace:*",
         "@yrd/persistence": "workspace:*",
         "@yrd/process": "workspace:*",
-        "@yrd/issue": "workspace:*",
+        "@yrd/queue": "workspace:*",
         "loggily": "^0.10.2",
         "react": "^19.2.0",
         "silvery": "^0.21.1",
@@ -60,9 +60,9 @@
         "@silvery/signals": "^0.21.0",
         "@yrd/bay": "workspace:*",
         "@yrd/core": "workspace:*",
+        "@yrd/issue": "workspace:*",
         "@yrd/job": "workspace:*",
         "@yrd/process": "workspace:*",
-        "@yrd/issue": "workspace:*",
         "zod": "^4.4.3",
       },
     },
@@ -79,6 +79,15 @@
         "zod": "^4.4.3",
       },
     },
+    "packages/yrd-issue": {
+      "name": "@yrd/issue",
+      "version": "0.0.1",
+      "dependencies": {
+        "@yrd/core": "workspace:*",
+        "@yrd/process": "workspace:*",
+        "zod": "^4.4.3",
+      },
+    },
     "packages/yrd-job": {
       "name": "@yrd/job",
       "version": "0.0.1",
@@ -86,18 +95,6 @@
         "@silvery/scope": "^0.21.0",
         "@silvery/signals": "^0.21.0",
         "@yrd/core": "workspace:*",
-        "zod": "^4.4.3",
-      },
-    },
-    "packages/yrd-queue": {
-      "name": "@yrd/queue",
-      "version": "0.0.1",
-      "dependencies": {
-        "@silvery/signals": "^0.21.0",
-        "@yrd/bay": "workspace:*",
-        "@yrd/core": "workspace:*",
-        "@yrd/job": "workspace:*",
-        "@yrd/process": "workspace:*",
         "zod": "^4.4.3",
       },
     },
@@ -119,11 +116,14 @@
         "loggily": "^0.10.2",
       },
     },
-    "packages/yrd-issue": {
-      "name": "@yrd/issue",
+    "packages/yrd-queue": {
+      "name": "@yrd/queue",
       "version": "0.0.1",
       "dependencies": {
+        "@silvery/signals": "^0.21.0",
+        "@yrd/bay": "workspace:*",
         "@yrd/core": "workspace:*",
+        "@yrd/job": "workspace:*",
         "@yrd/process": "workspace:*",
         "zod": "^4.4.3",
       },
@@ -280,15 +280,15 @@
 
     "@yrd/core": ["@yrd/core@workspace:packages/yrd-core"],
 
-    "@yrd/job": ["@yrd/job@workspace:packages/yrd-job"],
+    "@yrd/issue": ["@yrd/issue@workspace:packages/yrd-issue"],
 
-    "@yrd/queue": ["@yrd/queue@workspace:packages/yrd-queue"],
+    "@yrd/job": ["@yrd/job@workspace:packages/yrd-job"],
 
     "@yrd/persistence": ["@yrd/persistence@workspace:packages/yrd-persistence"],
 
     "@yrd/process": ["@yrd/process@workspace:packages/yrd-process"],
 
-    "@yrd/issue": ["@yrd/issue@workspace:packages/yrd-issue"],
+    "@yrd/queue": ["@yrd/queue@workspace:packages/yrd-queue"],
 
     "alien-signals": ["alien-signals@3.1.2", "", {}, "sha512-d9dYqZTS90WLiU0I5c6DHj/HcKkF8ZyGN3G5x8wSbslulz70KOxaqCT0hQCo9KOyhVqzqGojvNdJXoTumZOtcw=="],
 
