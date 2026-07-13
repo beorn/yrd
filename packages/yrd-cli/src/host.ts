@@ -45,8 +45,10 @@ import { createJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmTaskSource, withTasks, type TaskSource } from "@yrd/task"
 import { createLogger, type ConditionalLogger } from "loggily"
+import { run } from "silvery/runtime"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { withLiveRenderer } from "./live-renderer.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrd, runYrdHelp } from "./run.ts"
@@ -603,13 +605,19 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
 
 function defaultIO(): YrdCliIO {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
-  return {
+  const interactive = process.stdin.isTTY && process.stdout.isTTY
+  const io: YrdCliIO = {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
     color,
     columns: process.stdout.columns,
     cwd: process.cwd(),
   }
+  if (!interactive) return io
+  return withLiveRenderer(io, async (element, options) => {
+    using handle = await run(element, { signal: options.signal, mode: "fullscreen", mouse: false })
+    await handle.waitUntilExit()
+  })
 }
 
 /** Process entrypoint shared by yrd, git-yrd, and git-bay. */

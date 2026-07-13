@@ -8,6 +8,7 @@ import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { LineRun } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
+import { getLiveRenderer } from "./live-renderer.ts"
 import {
   LineLogView,
   LineRunsView,
@@ -25,6 +26,7 @@ import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { YRD_VERSION } from "./version.ts"
+import { LineWatchPane, type LineWatchSnapshot } from "./watch-pane.tsx"
 
 function lineGitDir(cwd: string): string | undefined {
   try {
@@ -706,21 +708,30 @@ async function watchLine(
 }
 
 async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const interval = 15_000
+  const interval = 1_000
   const scope = io.scope ?? app.scope
-  while (true) {
+  const load = async (): Promise<LineWatchSnapshot> => {
     const state = stateOf(app)
     const target = resolveLineTargets(state, [], options.base, options.pr)
     const { results } = await lineStatusSnapshots(app, state, target, io)
-    await printResult(
-      io,
-      jsonEnabled(options),
-      { command: "watch", results },
-      createElement(LineWatchView, {
-        results,
-        now: io.now?.() ?? Date.now(),
-      }),
-    )
+    return { results, now: io.now?.() ?? Date.now() }
+  }
+
+  if (!jsonEnabled(options)) {
+    const renderLive = getLiveRenderer(io)
+    if (renderLive === undefined) {
+      refusal("watch requires an interactive terminal; use --json for streaming output")
+    }
+    const initial = await load()
+    await renderLive(createElement(LineWatchPane, { initial, load, intervalMs: interval }), {
+      signal: scope.signal,
+    })
+    return 0
+  }
+
+  while (true) {
+    const snapshot = await load()
+    await printResult(io, true, { command: "watch", results: snapshot.results }, createElement(LineWatchView, snapshot))
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
     if (scope.signal.aborted) return 0

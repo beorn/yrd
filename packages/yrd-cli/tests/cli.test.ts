@@ -23,8 +23,9 @@ import {
   type StepExecution,
 } from "@yrd/line"
 import { withTasks } from "@yrd/task"
-import { createElement } from "react"
+import { createElement, type ReactElement } from "react"
 import { renderString } from "silvery"
+import { run } from "silvery/runtime"
 import {
   withContests,
   type AttemptRunOutput,
@@ -35,12 +36,18 @@ import {
 import {
   LineShowView,
   LineLogView,
+  LineWatchView,
+  activeWatchRow,
   lineLogAttempts,
   lineLogRows,
   lineShowData,
   lineStatusRows,
+  watchQueueRows,
   type LineLogCoverage,
+  type LineStatusResult,
 } from "../src/line-status-view.tsx"
+import { withLiveRenderer } from "../src/live-renderer.ts"
+import { LineWatchFrame, LineWatchPane, reduceWatchControl, type LineWatchPaneProps } from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -899,23 +906,26 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("renders watch as a queue-focused pane", async () => {
+  it("mounts watch as one read-only queue-focused live pane", async () => {
     const app = await createApp()
     await openAndSubmit(app)
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
 
-    const controller = new AbortController()
-    const sleeps: number[] = []
+    let mounted: ReactElement | undefined
     const watch = outputIO({
-      scope: {
-        signal: controller.signal,
-        sleep: async (milliseconds) => {
-          sleeps.push(milliseconds)
-          controller.abort()
-        },
-      },
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
     })
-    expect(await runYrd(app, yrd("watch"), watch.io)).toBe(0)
-    const frame = stripOsc8Targets(watch.stdout())
+    const io = withLiveRenderer(watch.io, async (element) => {
+      mounted = element
+    })
+    expect(await runYrd(app, yrd("watch"), io)).toBe(0)
+    expect(watch.stdout()).toBe("")
+    expect(mounted?.type).toBe(LineWatchPane)
+    const props = mounted?.props as LineWatchPaneProps
+    expect(props.intervalMs).toBe(1_000)
+    const frame = stripOsc8Targets(
+      await renderString(createElement(LineWatchFrame, { snapshot: props.initial, paused: false })),
+    )
     expect(frame).toContain("LINE")
     expect(frame).toContain("OPEN")
     expect(frame).toContain("ACTIVE")
@@ -923,9 +933,12 @@ describe("runYrd", () => {
     expect(frame).toContain("REJECTED")
     expect(frame).toContain("POS")
     expect(frame).toContain("PR1")
+    expect(frame).toContain("LIVE")
+    expect(frame).toContain("p pause")
+    expect(frame).toContain("q quit")
     expect(frame).not.toContain("PATH")
     expect(frame).not.toContain("file:///repo/.bays/B1")
-    expect(sleeps).toEqual([15_000])
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
   it("renders hold and drain health in watch output", async () => {
@@ -933,23 +946,100 @@ describe("runYrd", () => {
     await openAndSubmit(app)
     await app.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [] })
 
-    const controller = new AbortController()
-    const sleeps: number[] = []
+    let mounted: ReactElement | undefined
     const watch = outputIO({
-      scope: {
-        signal: controller.signal,
-        sleep: async (milliseconds) => {
-          sleeps.push(milliseconds)
-          controller.abort()
-        },
-      },
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
     })
-    expect(await runYrd(app, yrd("watch"), watch.io)).toBe(0)
-    const frame = stripOsc8Targets(watch.stdout())
+    const io = withLiveRenderer(watch.io, async (element) => {
+      mounted = element
+    })
+    expect(await runYrd(app, yrd("watch"), io)).toBe(0)
+    const props = mounted?.props as LineWatchPaneProps
+    const frame = stripOsc8Targets(await renderString(createElement(LineWatchView, props.initial)))
     expect(frame).toContain("HOLD")
     expect(frame).toContain("operator freeze")
     expect(frame).toContain("DRAIN")
-    expect(sleeps).toEqual([15_000])
+  })
+
+  it("projects watch controls, oldest-open drain age, and the active spotlight", () => {
+    expect(reduceWatchControl({ paused: false }, "p")).toEqual({ paused: true })
+    expect(reduceWatchControl({ paused: true }, "p")).toEqual({ paused: false })
+    expect(reduceWatchControl({ paused: false }, "q")).toBe("exit")
+
+    const result = {
+      base: "main",
+      prs: [
+        {
+          id: "PR1",
+          name: "Watch the queue",
+          branch: "task/watch",
+          base: "main",
+          status: "submitted",
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+      ],
+      running: [
+        {
+          id: "R1",
+          status: "running",
+          startedAt: "2026-07-09T12:09:00.000Z",
+          prs: [{ id: "PR1" }],
+          steps: [{ name: "review" }],
+        },
+      ],
+      waiting: [],
+      finished: [],
+    } as unknown as LineStatusResult
+    const now = Date.parse("2026-07-09T12:10:00.000Z")
+
+    expect(watchQueueRows(result, now)[0]).toMatchObject({ age: "10m", touched: "1m" })
+    expect(activeWatchRow(result, now)).toMatchObject({
+      run: "R1",
+      pr: "PR1",
+      subject: "Watch the queue",
+      step: "review",
+      elapsed: "1m",
+    })
+  })
+
+  it("handles pause and quit inside the live Silvery runtime", async () => {
+    const initial = {
+      results: [
+        {
+          base: "main",
+          headSha: "a".repeat(40),
+          prs: [],
+          running: [],
+          waiting: [],
+          finished: [],
+        } as unknown as LineStatusResult,
+      ],
+      now: 0,
+    }
+    const handle = await run(
+      createElement(LineWatchPane, {
+        initial,
+        load: async () => initial,
+        intervalMs: 60_000,
+      }),
+      { writable: { write: () => {} }, cols: 40, rows: 8 },
+    )
+    try {
+      expect(handle.text).toContain("LINE")
+      expect(handle.text).toContain("main")
+      expect(handle.text).toContain("HOLD")
+      expect(handle.text).toContain("DRAIN")
+      expect(handle.text).toContain("LIVE")
+      await handle.press("p")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("PAUSED")
+
+      const exited = handle.waitUntilExit()
+      await handle.press("q")
+      await exited
+    } finally {
+      handle.unmount()
+    }
   })
 
   it("monitors line status continuously from root watch", async () => {
@@ -971,7 +1061,7 @@ describe("runYrd", () => {
     expect(watch.stdout()).toContain('"command":"watch"')
     expect(watch.stdout()).toContain('"base":"main"')
     expect(watch.stdout()).toContain('"id":"PR1"')
-    expect(sleeps).toEqual([15_000])
+    expect(sleeps).toEqual([1_000])
   })
 
   it("keeps the line summary readable at 40 columns and bounded at 120 and 240 columns", async () => {

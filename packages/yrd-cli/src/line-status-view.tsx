@@ -850,7 +850,7 @@ export function LineStatusView({
   )
 }
 
-type WatchQueueRow = Readonly<{
+export type WatchQueueRow = Readonly<{
   pos: number
   pr: string
   state: string
@@ -861,7 +861,7 @@ type WatchQueueRow = Readonly<{
   result: string
 }>
 
-function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] {
+export function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] {
   return result.prs
     .filter((pr) => !["integrated", "withdrawn"].includes(pr.status))
     .toSorted((left, right) => {
@@ -902,9 +902,11 @@ function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] 
         run:
           run === undefined || run.startedAt === undefined
             ? "-"
-            : formatDuration((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt)),
+            : formatDuration(
+                (run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt),
+              ),
         result:
-          (job !== undefined && "error" in job
+          job !== undefined && "error" in job
             ? job.error.message
             : job !== undefined && "lostReason" in job
               ? job.lostReason
@@ -912,9 +914,48 @@ function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] 
                 ? job.detail
                 : step === undefined
                   ? "-"
-                  : jobStatus(step)),
+                  : jobStatus(step),
       }
     })
+}
+
+export type WatchActiveRow = Readonly<{
+  run: string
+  pr: string
+  subject: string
+  step: string
+  glyph: string
+  elapsed: string
+}>
+
+export function activeWatchRow(result: LineStatusResult, now: number): WatchActiveRow | undefined {
+  const run = [...result.running, ...result.waiting].toSorted(byRunStarted).at(0)
+  if (run === undefined) return undefined
+  const member = run.prs.at(0)
+  if (member === undefined) return undefined
+  const pr = result.prs.find((candidate) => candidate.id === member.id)
+  const step = relevantStep(run) ?? run.steps.at(0)
+  return {
+    run: run.id,
+    pr: member.id,
+    subject: pr?.name ?? member.id,
+    step: step?.name ?? "-",
+    glyph: run.status === "waiting" ? "o" : ">",
+    elapsed: age(run.startedAt, now),
+  }
+}
+
+function watchFailureReason(run: LineRun): string {
+  if (run.error !== undefined) return run.error.message
+  const job = run.steps
+    .toReversed()
+    .map((step) => step.job)
+    .find((candidate) => candidate?.status === "failed" || candidate?.status === "lost")
+  if (job === undefined) return "failed"
+  if ("error" in job) return job.error.message
+  if ("lostReason" in job) return job.lostReason
+  if ("detail" in job) return singleLine(String(job.detail))
+  return job.status
 }
 
 function retryHint(run: LineRun): string {
@@ -930,35 +971,41 @@ export function LineWatchView({ results, now }: { results: readonly LineStatusRe
         const all = result.prs.filter((pr) => pr.base === result.base)
         const hold = result.hold
         const rows = watchQueueRows(result, now)
-        const failed = [...result.finished].filter((run) => run.status === "failed").toSorted(byRunStarted).toReversed().slice(0, 3)
+        const failed = [...result.finished]
+          .filter((run) => run.status === "failed")
+          .toSorted(byRunStarted)
+          .toReversed()
+          .slice(0, 3)
+        const active = activeWatchRow(result, now)
         const holdState = hold === undefined ? "active" : `held: ${hold.reason}`
-        const oldestOpen = rows[0] === undefined ? "-" : rows[0].touched
-        const summary = [
-          {
-            line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
-            open: all.filter((pr) => !["integrated", "withdrawn"].includes(pr.status)).length,
-            active: all.filter((pr) => ["checking", "waiting"].includes(lineState(pr, latestRun(pr, result)))).length,
-            hold: holdState,
-            drain: oldestOpen,
-            integrated: all.filter((pr) => pr.status === "integrated").length,
-            rejected: all.filter((pr) => pr.status === "rejected").length,
-          },
-        ]
+        const oldestOpen = rows[0] === undefined ? "-" : rows[0].age
+        const summary = {
+          line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
+          open: all.filter((pr) => !["integrated", "withdrawn"].includes(pr.status)).length,
+          active: all.filter((pr) => ["checking", "waiting"].includes(lineState(pr, latestRun(pr, result)))).length,
+          integrated: all.filter((pr) => pr.status === "integrated").length,
+          rejected: all.filter((pr) => pr.status === "rejected").length,
+        }
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-            <Table
-              data={summary}
-              padding={1}
-              columns={[
-                { header: "LINE", key: "line", grow: true, minWidth: 6, maxWidth: 24 },
-                { header: "HOLD", key: "hold", grow: true, maxWidth: 24 },
-                { header: "DRAIN", key: "drain", align: "right", maxWidth: 12 },
-                { header: "OPEN", key: "open", align: "right" },
-                { header: "ACTIVE", key: "active", align: "right" },
-                { header: "INTEGRATED", key: "integrated", align: "right" },
-                { header: "REJECTED", key: "rejected", align: "right" },
-              ]}
-            />
+            <Text>
+              <Text bold>LINE</Text> {summary.line} <Text bold>OPEN</Text> {summary.open} <Text bold>ACTIVE</Text>{" "}
+              {summary.active} <Text bold>INTEGRATED</Text> {summary.integrated} <Text bold>REJECTED</Text>{" "}
+              {summary.rejected}
+            </Text>
+            <Box marginTop={1}>
+              <Text>
+                <Text bold>HOLD</Text> {holdState} <Text bold>DRAIN</Text> {oldestOpen}
+              </Text>
+            </Box>
+            {active !== undefined && (
+              <Box marginTop={1}>
+                <Text>
+                  <Text bold>ACTIVE</Text> {active.run} {active.pr} {active.subject} {active.glyph} {active.step}{" "}
+                  {active.elapsed}
+                </Text>
+              </Box>
+            )}
             {rows.length === 0 ? (
               <Box marginTop={1}>
                 <Text color="$fg-muted">No matching PRs.</Text>
@@ -991,8 +1038,8 @@ export function LineWatchView({ results, now }: { results: readonly LineStatusRe
                 <Text>Recent failures</Text>
                 {failed.map((run) => (
                   <Text key={run.id}>
-                    <Text color="$fg-error">{run.id}</Text>{" "}
-                    {run.prs.map((pr) => pr.id).join(",")} {duration(run.startedAt, run.finishedAt)} {retryHint(run)}
+                    <Text color="$fg-error">{run.id}</Text> {run.prs.map((pr) => pr.id).join(",")}{" "}
+                    {duration(run.startedAt, run.finishedAt)} {watchFailureReason(run)} {retryHint(run)}
                   </Text>
                 ))}
               </Box>
