@@ -536,9 +536,151 @@ async function checkedOutWorktree(git: Git, repo: string, branchRef: string): Pr
   return undefined
 }
 
-type CheckedCandidateResult =
-  | Readonly<{ checked: GitCheckEvidence }>
-  | Readonly<{ error: Readonly<{ code: string; message: string }> }>
+type CheckedCandidateFailure = Readonly<{ error: Readonly<{ code: string; message: string }> }>
+type CheckedCandidateResult = Readonly<{ checked: GitCheckEvidence }> | CheckedCandidateFailure
+
+type Gitlink = Readonly<{ path: string; sha: string }>
+type GitlinkAuthority = Readonly<{ url: string; branch: string }>
+type GitlinkFailureCode = "gitlink-not-on-remote-branch" | "gitlink-reachability-unavailable"
+
+function gitlinkFailure(code: GitlinkFailureCode, message: string): CheckedCandidateFailure {
+  return { error: { code, message } }
+}
+
+function unpublishedGitlink(link: Gitlink, authority: GitlinkAuthority): CheckedCandidateFailure {
+  return gitlinkFailure(
+    "gitlink-not-on-remote-branch",
+    `changed gitlink '${link.path}' commit '${link.sha}' is not reachable from canonical ` +
+      `branch '${authority.branch}' at '${authority.url}'; publish that commit to the canonical branch before retrying`,
+  )
+}
+
+function nullTerminatedValue(output: string): string {
+  return output.endsWith("\0") ? output.slice(0, -1) : output
+}
+
+async function gitlinkReachabilityError(
+  git: Git,
+  repo: string,
+  link: Gitlink,
+  authority: GitlinkAuthority,
+): Promise<CheckedCandidateFailure | undefined> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-gitlink-reachability-"))
+  try {
+    const cloned = await git.run(
+      repo,
+      [
+        "clone",
+        "--quiet",
+        "--bare",
+        "--single-branch",
+        "--no-tags",
+        "--branch",
+        authority.branch,
+        "--",
+        authority.url,
+        root,
+      ],
+      true,
+    )
+    if (cloned.code !== 0) {
+      return gitlinkFailure(
+        "gitlink-reachability-unavailable",
+        `changed gitlink '${link.path}' could not verify canonical branch '${authority.branch}' ` +
+          `at '${authority.url}': ${cloned.stderr || cloned.stdout || "clone failed"}; ` +
+          "restore canonical remote access before retrying",
+      )
+    }
+    const present = await git.run(root, ["cat-file", "-e", `${link.sha}^{commit}`], true)
+    if (present.code !== 0) return unpublishedGitlink(link, authority)
+    const reachable = await git.run(root, ["merge-base", "--is-ancestor", link.sha, "HEAD"], true)
+    if (reachable.code === 0) return undefined
+    if (reachable.code === 1) return unpublishedGitlink(link, authority)
+    return gitlinkFailure(
+      "gitlink-reachability-unavailable",
+      `changed gitlink '${link.path}' could not prove reachability from canonical branch ` +
+        `'${authority.branch}' at '${authority.url}': ${reachable.stderr || reachable.stdout || "git failed"}; ` +
+        "verify the canonical remote before retrying",
+    )
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+function configEntries(output: string): ReadonlyArray<Readonly<{ key: string; value: string }>> {
+  return output
+    .split("\0")
+    .filter((entry) => entry !== "")
+    .map((entry) => {
+      const separator = entry.indexOf("\n")
+      if (separator < 0) throw new Error(`git returned invalid config entry '${entry}'`)
+      return { key: entry.slice(0, separator), value: entry.slice(separator + 1) }
+    })
+}
+
+async function configValue(git: Git, repo: string, blob: string, key: string): Promise<string | undefined> {
+  const result = await git.run(repo, ["config", "-z", "--blob", blob, "--get", key], true)
+  return result.code === 0 ? nullTerminatedValue(result.stdout) : undefined
+}
+
+function selectedGitlink(output: string, path: string): Gitlink | undefined {
+  if (output === "") return undefined
+  if (!output.endsWith("\0") || output.slice(0, -1).includes("\0")) {
+    throw new Error(`git returned invalid tree evidence for '${path}'`)
+  }
+  const record = output.slice(0, -1)
+  const separator = record.indexOf("\t")
+  if (separator < 0 || record.slice(separator + 1) !== path) {
+    throw new Error(`git returned invalid tree evidence for '${path}'`)
+  }
+  const [mode, type, sha] = record.slice(0, separator).split(" ")
+  if (mode !== "160000") return undefined
+  if (type !== "commit" || sha === undefined || !/^[0-9a-f]{40,64}$/iu.test(sha)) {
+    throw new Error(`git returned invalid gitlink evidence for '${path}'`)
+  }
+  return { path, sha }
+}
+
+async function validateChangedBranchGitlinks(
+  git: Git,
+  repo: string,
+  baseSha: string,
+  candidateSha: string,
+  lineBranch: string,
+): Promise<CheckedCandidateFailure | undefined> {
+  const blob = `${baseSha}:.gitmodules`
+  if ((await git.run(repo, ["ls-tree", "-z", baseSha, "--", ".gitmodules"])).stdout === "") return undefined
+  const branches = await git.run(
+    repo,
+    ["config", "-z", "--blob", blob, "--get-regexp", "^submodule\\..*\\.branch$"],
+    true,
+  )
+  if (branches.code === 1) return undefined
+  if (branches.code !== 0) throw new Error(branches.stderr || branches.stdout || `could not read '${blob}'`)
+  for (const entry of configEntries(branches.stdout)) {
+    const name = entry.key.slice("submodule.".length, -".branch".length)
+    const path = await configValue(git, repo, blob, `submodule.${name}.path`)
+    const url = await configValue(git, repo, blob, `submodule.${name}.url`)
+    if (path === undefined || url === undefined || path === "" || url === "") {
+      return gitlinkFailure(
+        "gitlink-reachability-unavailable",
+        `branch-tracked submodule '${name}' has incomplete canonical remote evidence in '${blob}'; ` +
+          "define its path and URL before retrying",
+      )
+    }
+    const changed = await git.run(repo, ["diff", "--quiet", baseSha, candidateSha, "--", path], true)
+    if (changed.code === 0) continue
+    if (changed.code !== 1) throw new Error(changed.stderr || changed.stdout || `could not compare gitlink '${path}'`)
+    const selected = await git.run(repo, ["ls-tree", "-z", candidateSha, "--", path])
+    const link = selectedGitlink(selected.stdout, path)
+    if (link === undefined) continue
+    const branch = entry.value === "." ? lineBranch : entry.value
+    const authority = { url, branch }
+    const error = await gitlinkReachabilityError(git, repo, link, authority)
+    if (error !== undefined) return error
+  }
+  return undefined
+}
 
 async function validateCheckedCandidate(
   git: Git,
@@ -564,6 +706,14 @@ async function validateCheckedCandidate(
       return { error: { code: "invalid-candidate", message: `checked candidate does not contain '${sha}'` } }
     }
   }
+  const gitlinkError = await validateChangedBranchGitlinks(
+    git,
+    repo,
+    checked.baseSha,
+    checked.candidateSha,
+    primaryPR(input).base,
+  )
+  if (gitlinkError !== undefined) return gitlinkError
   return { checked }
 }
 

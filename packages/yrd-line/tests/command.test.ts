@@ -33,6 +33,7 @@ import {
 
 const roots: string[] = []
 const runtime = { executor: "local", leaseMs: 60_000 }
+const trackedGitlinkPath = "vendor/yrd"
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
 afterEach(async () => {
@@ -116,6 +117,56 @@ async function hookedSubmoduleRepository(options: {
   )
   await chmod(hook, 0o755)
   return { repo, remote, baseSha, featureSha, moduleSha }
+}
+
+async function branchTrackedGitlinkRepository(options: {
+  reachableFromMain: boolean
+  remoteAvailable?: boolean
+}): Promise<{ repo: string; baseSha: string; featureSha: string; moduleSha: string }> {
+  const { repo } = await repository()
+  const module = join(repo, "..", "yrd-source")
+  const remote = join(repo, "..", "yrd.git")
+  await Bun.$`git init -q -b main ${module}`
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(module, "version.txt"), "base\n")
+  await git(module, ["add", "version.txt"])
+  await git(module, ["commit", "-qm", "base"])
+  await Bun.$`git init -q --bare ${remote}`
+  await git(module, ["remote", "add", "origin", remote])
+  await git(module, ["push", "-q", "origin", "main"])
+
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", remote, trackedGitlinkPath])
+  await git(repo, ["config", "-f", ".gitmodules", `submodule.${trackedGitlinkPath}.branch`, "main"])
+  if (options.remoteAvailable === false) {
+    await git(repo, [
+      "config",
+      "-f",
+      ".gitmodules",
+      `submodule.${trackedGitlinkPath}.url`,
+      join(repo, "..", "missing.git"),
+    ])
+  }
+  await git(repo, ["add", ".gitmodules", trackedGitlinkPath])
+  await git(repo, ["commit", "-qm", "add branch-tracked dependency"])
+  const baseSha = await git(repo, ["rev-parse", "HEAD"])
+
+  if (!options.reachableFromMain) await git(module, ["switch", "-qc", "task/candidate"])
+  await writeFile(join(module, "version.txt"), "candidate\n")
+  await git(module, ["commit", "-qam", "candidate"])
+  const moduleSha = await git(module, ["rev-parse", "HEAD"])
+  await git(module, ["push", "-q", "origin", options.reachableFromMain ? "main" : "task/candidate"])
+
+  await git(join(repo, trackedGitlinkPath), ["fetch", "-q", "origin"])
+  await git(join(repo, trackedGitlinkPath), ["checkout", "-q", moduleSha])
+  await git(repo, ["switch", "-qc", "task/feature"])
+  await git(repo, ["add", trackedGitlinkPath])
+  await git(repo, ["commit", "-qm", "select candidate dependency"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["submodule", "update", "--init", "--recursive"])
+  return { repo, baseSha, featureSha, moduleSha }
 }
 
 const unusedWorkspace: BayWorkspace = {
@@ -580,6 +631,69 @@ describe("Line command adapters", () => {
 
     expect(run).toMatchObject({ status: "passed", prs: [{ headSha: featureSha }] })
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
+  })
+
+  it("refuses to promote a changed gitlink that is only reachable from a task branch", async () => {
+    const { repo, baseSha, featureSha, moduleSha } = await branchTrackedGitlinkRepository({
+      reachableFromMain: false,
+    })
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, ["true"])
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "gitlink-not-on-remote-branch",
+        message: expect.stringMatching(new RegExp(`${trackedGitlinkPath}.*${moduleSha}.*main`, "u")),
+      },
+    })
+    expect(run.steps[0]?.job).toMatchObject({ status: "passed" })
+    expect(run.steps[1]?.job).toMatchObject({
+      status: "failed",
+      error: { code: "gitlink-not-on-remote-branch" },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
+  })
+
+  it("promotes a changed gitlink that is reachable from its canonical remote main", async () => {
+    const { repo, featureSha, moduleSha } = await branchTrackedGitlinkRepository({ reachableFromMain: true })
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, ["true"])
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "passed" })
+    expect(await git(repo, ["ls-tree", "main", trackedGitlinkPath])).toContain(moduleSha)
+  })
+
+  it("fails loud when canonical gitlink reachability evidence cannot be fetched", async () => {
+    const { repo, baseSha, featureSha } = await branchTrackedGitlinkRepository({
+      reachableFromMain: true,
+      remoteAvailable: false,
+    })
+    await using process = createProcess()
+    await using app = await checkedLine(process, repo, ["true"])
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "gitlink-reachability-unavailable",
+        message: expect.stringMatching(/vendor\/yrd.*main.*missing\.git/u),
+      },
+    })
+    expect(run.steps[0]?.job).toMatchObject({ status: "passed" })
+    expect(run.steps[1]?.job).toMatchObject({
+      status: "failed",
+      error: { code: "gitlink-reachability-unavailable" },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
   })
 
   it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
