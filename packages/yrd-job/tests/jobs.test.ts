@@ -15,7 +15,14 @@ import {
   type Event,
   type YrdDef,
 } from "@yrd/core"
-import { createJobDef, withJobs, type JobContext, type JobDef, type JobHandler } from "@yrd/job"
+import {
+  createJobDef,
+  withJobs,
+  type JobAttemptResources,
+  type JobContext,
+  type JobDef,
+  type JobHandler,
+} from "@yrd/job"
 
 type Delivery = { message: string }
 type Receipt = { receipt: string }
@@ -81,9 +88,17 @@ async function jobsApp(
     journal?: ReturnType<typeof createMemoryJournal>
     clock?: () => string
     id?: () => string
+    attemptResources?: JobAttemptResources
   } = {},
 ) {
-  const definition = pipe(createYrdDef(), withJobs({ definitions: { [job.name]: job } }), withSender(job))
+  const definition = pipe(
+    createYrdDef(),
+    withJobs({
+      definitions: { [job.name]: job },
+      ...(options.attemptResources === undefined ? {} : { attemptResources: options.attemptResources }),
+    }),
+    withSender(job),
+  )
   const app = await createYrd(definition, {
     inject: {
       journal: options.journal ?? createMemoryJournal(),
@@ -242,6 +257,76 @@ describe("Jobs", () => {
     const replayed = await jobsApp(job, { journal })
     expect(replayed.jobs.state()).toEqual(app.jobs.state())
     await replayed.close()
+    await app.close()
+  })
+
+  it.each([
+    {
+      outcome: "success",
+      execute: async () => ({ status: "passed", output: { receipt: "ok" } }) as const,
+      status: "passed",
+    },
+    {
+      outcome: "failure",
+      execute: async () => ({ status: "failed", error: { code: "delivery-failed", message: "no route" } }) as const,
+      status: "failed",
+    },
+  ])("releases job-owned attempt resources before $outcome settlement", async ({ execute, status }) => {
+    const lifecycle: string[] = []
+    const app = await jobsApp(
+      delivery(async () => {
+        lifecycle.push("execute")
+        return execute()
+      }),
+      {
+        id: ids("send", "C-send", JOB_ID),
+        attemptResources: {
+          prepare: async ({ id, attempt, executor }) => {
+            lifecycle.push(`prepare:${id}:${attempt}:${executor}`)
+          },
+          release: async ({ id, attempt, executor }) => {
+            lifecycle.push(`release:${id}:${attempt}:${executor}`)
+          },
+        },
+      },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "hello" })
+
+    await expect(app.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })).resolves.toMatchObject({ status })
+    expect(lifecycle).toEqual([`prepare:${JOB_ID}:1:worker-1`, "execute", `release:${JOB_ID}:1:worker-1`])
+    await app.close()
+  })
+
+  it("fences an expired owner before release and retries interrupted recovery cleanup", async () => {
+    let app: Awaited<ReturnType<typeof jobsApp>>
+    let releaseFailure = true
+    const releasedStatuses: string[] = []
+    app = await jobsApp(delivery(), {
+      id: ids("send", "C-send", JOB_ID),
+      attemptResources: {
+        prepare: () => Promise.resolve(),
+        release: () => {
+          releasedStatuses.push(app.jobs.get(JOB_ID)?.status ?? "missing")
+          return releaseFailure ? Promise.reject(new Error("resident still alive")) : Promise.resolve()
+        },
+      },
+    })
+    await app.dispatch(app.commands.sender.send, { message: "recover" })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: JOB_ID,
+      attempt: 1,
+      executor: "lost-worker",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).rejects.toThrow("resident still alive")
+    expect(app.jobs.get(JOB_ID)).toMatchObject({ status: "lost", attempt: 1 })
+    expect(releasedStatuses).toEqual(["lost"])
+
+    releaseFailure = false
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:03.000Z" })).resolves.toEqual([])
+    expect(releasedStatuses).toEqual(["lost", "lost"])
     await app.close()
   })
 
@@ -473,6 +558,7 @@ describe("Jobs", () => {
   it("aborts an executor after heartbeat observes lost ownership", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()
+    const released = Promise.withResolvers<void>()
     const app = await jobsApp(
       delivery(async (_input, context) => {
         started.resolve()
@@ -488,7 +574,16 @@ describe("Jobs", () => {
         })
         return { status: "passed", output: { receipt: "too-late" } }
       }),
-      { id: ids("send", "C-send", JOB_ID) },
+      {
+        id: ids("send", "C-send", JOB_ID),
+        attemptResources: {
+          prepare: () => Promise.resolve(),
+          release: () => {
+            released.resolve()
+            return Promise.resolve()
+          },
+        },
+      },
     )
     await app.dispatch(app.commands.sender.send, { message: "slow" })
 
@@ -514,6 +609,7 @@ describe("Jobs", () => {
       await vi.advanceTimersByTimeAsync(5)
       await aborted.promise
       await expect(running).resolves.toMatchObject({ status: "lost", lostReason: "lease transferred" })
+      await released.promise
     } finally {
       vi.useRealTimers()
     }

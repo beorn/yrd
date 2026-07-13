@@ -15,6 +15,7 @@ import { createProcess } from "@yrd/process"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
+import { createJobAttemptResources } from "../src/job-attempt-resources.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
 
 const roots: string[] = []
@@ -55,6 +56,54 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
+  it("isolates configured commands under their durable Job attempt and releases the root before settlement", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const ambientHab = join(repo, "..", "ambient-hab")
+    await mkdir(ambientHab)
+    await writeFile(join(ambientHab, "operator-owned"), "keep\n")
+    const config: ResolvedYrdProjectConfig = {
+      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      steps: {
+        check: {
+          run: 'test "$TMPDIR" = "$YRD_JOB_ROOT/tmp" && touch "$YRD_JOB_ROOT/job-owned"',
+          runner: "local",
+        },
+        merge: { runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({
+      cwd: repo,
+      env: {
+        ...process.env,
+        HAB_STATE_ROOT: ambientHab,
+        SILVERCODE_HAB_STATE_ROOT: ambientHab,
+      },
+    })
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir,
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({}, { executor: "test", leaseMs: 60_000 }))[0]!
+    const check = run.steps[0]?.job
+    expect(run.status, JSON.stringify(run, null, 2)).toBe("passed")
+    if (check === undefined || !("executor" in check)) throw new Error("check Job did not execute")
+    const attemptRoot = createJobAttemptResources({ stateDir }).path({
+      id: check.id,
+      attempt: check.attempt,
+      executor: check.executor,
+    })
+    expect(existsSync(attemptRoot)).toBe(false)
+    expect(await readFile(join(ambientHab, "operator-owned"), "utf8")).toBe("keep\n")
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

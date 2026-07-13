@@ -235,6 +235,22 @@ export type RunJobOptions = Readonly<{
 
 export type RunManyJobOptions = RunJobOptions & Readonly<{ concurrency?: number }>
 
+export type JobAttempt = Readonly<{
+  id: string
+  attempt: number
+  executor: string
+}>
+
+/**
+ * Host-owned resources whose lifetime is exactly one durable Job attempt.
+ * `release` must be idempotent: recovery repeats it for already-lost attempts
+ * so a crash between the durable ownership fence and cleanup is repairable.
+ */
+export type JobAttemptResources = Readonly<{
+  prepare(attempt: JobAttempt): Promise<void>
+  release(attempt: JobAttempt): Promise<void>
+}>
+
 export type JobCompletion<Output extends JsonValue = JsonValue> = Readonly<{
   attempt: number
   executor: string
@@ -265,6 +281,7 @@ export type CreateJobsOptions = Readonly<{
   transition(change: JobTransition): Promise<CommandResult>
   scope: JobScope
   log: ConditionalLogger
+  attemptResources?: JobAttemptResources
 }>
 
 const RunOptionsSchema = z
@@ -294,10 +311,16 @@ const RecoverOptionsSchema = z
   })
   .strict()
 
+const NO_JOB_ATTEMPT_RESOURCES: JobAttemptResources = Object.freeze({
+  prepare: () => Promise.resolve(),
+  release: () => Promise.resolve(),
+})
+
 export function createJobs(options: CreateJobsOptions): Jobs {
   const definitions = new Map(Object.entries(options.definitions))
   const state = options.state
   const commit = options.transition
+  const attemptResources = options.attemptResources ?? NO_JOB_ATTEMPT_RESOURCES
 
   const definition = (name: string): JobDef => {
     const found = definitions.get(name)
@@ -350,24 +373,36 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     if (!Job.owns(started, attempt, parsed.executor, "running")) return started
 
     const scope = options.scope.child(`job:${id}:${attempt}`)
-    const outcome = await executeWithHeartbeat(
-      scope,
-      (signal) => installed.execute(requested.input, { id, attempt, executor: parsed.executor, signal }),
-      heartbeatMs,
-      async () => {
-        const active = current(id)
-        if (!Job.owns(active, attempt, parsed.executor, "running")) {
-          throw new Error(`yrd: job '${id}' lost execution ownership`)
-        }
-        await commit({
-          type: "heartbeat",
-          id,
-          attempt,
-          executor: parsed.executor,
-          leaseExpiresAt: lease(now, parsed.leaseMs),
-        })
-      },
-    )
+    const ownedAttempt = { id, attempt, executor: parsed.executor }
+    let outcome: Awaited<ReturnType<typeof executeWithHeartbeat>>
+    try {
+      await attemptResources.prepare(ownedAttempt)
+      outcome = await executeWithHeartbeat(
+        scope,
+        (signal) => installed.execute(requested.input, { ...ownedAttempt, signal }),
+        heartbeatMs,
+        async () => {
+          const active = current(id)
+          if (!Job.owns(active, attempt, parsed.executor, "running")) {
+            throw new Error(`yrd: job '${id}' lost execution ownership`)
+          }
+          await commit({
+            type: "heartbeat",
+            id,
+            attempt,
+            executor: parsed.executor,
+            leaseExpiresAt: lease(now, parsed.leaseMs),
+          })
+        },
+      )
+    } catch (error) {
+      await scope[Symbol.asyncDispose]()
+      outcome = { result: failed("executor-error", error) }
+    } finally {
+      // Release before terminal settlement: a passed/failed/waiting Job is a
+      // durable claim that no resources remain owned by this attempt.
+      await attemptResources.release(ownedAttempt)
+    }
 
     const active = current(id)
     if (!Job.owns(active, attempt, parsed.executor, "running")) return active
@@ -440,6 +475,10 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     },
 
     async retry(id) {
+      const job = current(id)
+      if (job.status === "lost" || job.status === "failed") {
+        await attemptResources.release(jobAttempt(job))
+      }
       await commit({ type: "retry", id })
       return current(id)
     },
@@ -448,6 +487,12 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const parsed = RecoverOptionsSchema.parse(recoverOptions)
       const cutoff = Date.parse(parsed.now)
       const recovered: string[] = []
+      // A prior recoverer may have crashed after the durable `lose` fence but
+      // before resource release. Repeating the idempotent release closes that
+      // window without ever touching a currently-owned running attempt.
+      for (const job of Object.values(state().byId)) {
+        if (job.status === "lost") await attemptResources.release(jobAttempt(job))
+      }
       for (const job of Object.values(state().byId)) {
         if (job.status !== "running" || Date.parse(job.leaseExpiresAt) > cutoff) continue
         try {
@@ -464,6 +509,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           if (!sameLease(latest, job)) continue
           throw error
         }
+        await attemptResources.release(jobAttempt(job))
         recovered.push(job.id)
       }
       return recovered
@@ -486,6 +532,7 @@ export type HasJobs = Readonly<{ jobs: Jobs }>
 
 export type JobsOptions = Readonly<{
   definitions?: JobDefs | readonly JobDefs[]
+  attemptResources?: JobAttemptResources
 }>
 
 export function withJobs(options: JobsOptions = {}) {
@@ -517,6 +564,7 @@ export function withJobs(options: JobsOptions = {}) {
             transition: (change) => yrd.dispatch(transition, change),
             scope: yrd.scope,
             log: yrd.log.child("jobs"),
+            ...(options.attemptResources === undefined ? {} : { attemptResources: options.attemptResources }),
           }),
         }
       },
@@ -674,4 +722,8 @@ function sameLease(left: Job, right: Extract<Job, { status: "running" }>): boole
     left.executor === right.executor &&
     left.leaseExpiresAt === right.leaseExpiresAt
   )
+}
+
+function jobAttempt(job: Exclude<Job, { status: "requested" }>): JobAttempt {
+  return { id: job.id, attempt: job.attempt, executor: job.executor }
 }

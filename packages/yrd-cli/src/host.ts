@@ -22,7 +22,7 @@ import {
   type ContestRunnerDef,
 } from "@yrd/contest"
 import { createYrd, createYrdDef, pipe, raiseFailure, type Journal } from "@yrd/core"
-import { withJobs } from "@yrd/job"
+import { withJobs, type JobContext } from "@yrd/job"
 import {
   configuredCommandStep,
   configuredMergeStep,
@@ -49,6 +49,7 @@ import { run } from "silvery/runtime"
 import { resolveBaySubmitArgv } from "./bay-selection.ts"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { createJobAttemptResources, type JobAttemptResourceHost } from "./job-attempt-resources.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
@@ -125,10 +126,10 @@ function lineStepRevision(
       JSON.stringify({
         implementation:
           name === "merge" && resolvedCommand === undefined
-            ? "yrd-native-merge-v3"
+            ? "yrd-native-merge-v4"
             : checkoutParent === undefined
-              ? "yrd-line-command-v2"
-              : "yrd-line-command-v3",
+              ? "yrd-line-command-v3"
+              : "yrd-line-command-v4",
         repo,
         stateDir,
         ...(checkoutParent === undefined ? {} : { checkoutParent }),
@@ -153,7 +154,7 @@ function contestEvaluatorRevision(
   return createHash("sha256")
     .update(
       JSON.stringify({
-        implementation: "yrd-contest-command-v3",
+        implementation: "yrd-contest-command-v4",
         repo,
         stateDir,
         checkoutParent,
@@ -199,6 +200,7 @@ function candidateStep(
   checkoutParent: string,
   name: string,
   config: YrdStepConfig,
+  attemptResources: JobAttemptResourceHost,
 ): RuntimeStep {
   return eraseStep(
     withStep(
@@ -212,6 +214,7 @@ function candidateStep(
         purpose: name,
         runner: config.runner,
         timeoutMs: stepTimeoutMs(config),
+        attemptEnvironment: (_input, context) => attemptResources.environment(context),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
       { revision: lineStepRevision(repo, stateDir, name, config, checkoutParent) },
@@ -225,6 +228,7 @@ function integratedRunner(
   stateDir: string,
   name: string,
   config: YrdStepConfig,
+  attemptResources: JobAttemptResourceHost,
 ): StepRunner<IntegratedShape, CommandEvidence> {
   const options = {
     inject: { process },
@@ -233,6 +237,8 @@ function integratedRunner(
     purpose: name,
     timeoutMs: stepTimeoutMs(config),
     artifactRoot: join(stateDir, "artifacts"),
+    attemptEnvironment: (_input: StepExecution<IntegratedShape>, context: JobContext) =>
+      attemptResources.environment(context),
     variables: (input: StepExecution<IntegratedShape>) => ({
       YRD_INTEGRATED_SHA: input.shape.integration.commit,
       ...(config.environment === undefined ? {} : { YRD_ENVIRONMENT: config.environment }),
@@ -244,6 +250,7 @@ function integratedRunner(
 function configuredLineSteps(
   options: DefaultYrdAppOptions,
   mergeCommand: readonly string[] | undefined,
+  attemptResources: JobAttemptResourceHost,
 ): readonly RuntimeStep[] {
   let integrated = false
   return options.config.line.steps.map((name) => {
@@ -260,6 +267,7 @@ function configuredLineSteps(
                 command: mergeCommand,
                 artifactRoot: join(options.stateDir, "artifacts"),
                 timeoutMs: stepTimeoutMs(config),
+                attemptEnvironment: (_input, context) => attemptResources.environment(context),
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
               }),
           {
@@ -269,13 +277,25 @@ function configuredLineSteps(
       )
     }
     if (!integrated) {
-      return candidateStep(options.process, options.repo, options.stateDir, options.baysRoot, name, config)
+      return candidateStep(
+        options.process,
+        options.repo,
+        options.stateDir,
+        options.baysRoot,
+        name,
+        config,
+        attemptResources,
+      )
     }
     return eraseStep(
-      withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
-        revision: lineStepRevision(options.repo, options.stateDir, name, config),
-        needsIntegration: true,
-      }),
+      withStep(
+        name,
+        integratedRunner(options.process, options.repo, options.stateDir, name, config, attemptResources),
+        {
+          revision: lineStepRevision(options.repo, options.stateDir, name, config),
+          needsIntegration: true,
+        },
+      ),
     )
   })
 }
@@ -348,7 +368,10 @@ function bayPath(root: string, bay: string): string {
   return path
 }
 
-function defaultContestAdapters(options: DefaultYrdAppOptions): {
+function defaultContestAdapters(
+  options: DefaultYrdAppOptions,
+  attemptResources: JobAttemptResourceHost,
+): {
   runners: readonly ContestRunnerDef[]
   evaluators: readonly ContestEvaluatorDef[]
   git: ContestGit
@@ -375,6 +398,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
         checkoutParent: options.baysRoot,
         artifactRoot: join(options.stateDir, "artifacts"),
         resolveBayPath: (bay) => bayPath(options.baysRoot, bay),
+        environment: (_input, context) => attemptResources.environment(context),
         inject: { process: options.process },
       })
     })
@@ -383,7 +407,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
       revision: createHash("sha256")
         .update(
           JSON.stringify({
-            implementation: "yrd-ag-runner-v2",
+            implementation: "yrd-ag-runner-v3",
             repo: options.repo,
             stateDir: options.stateDir,
             timeoutMs: options.config.contest.timeoutMs,
@@ -393,6 +417,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
       command: ["ag"],
       timeoutMs: options.config.contest.timeoutMs,
       artifactRoot: join(options.stateDir, "artifacts"),
+      environment: (_input, context) => attemptResources.environment(context),
       inject: { process: options.process },
     }),
   ]
@@ -413,19 +438,20 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     }))
   const bayJobs = createBayJobDefs(workspace)
+  const attemptResources = createJobAttemptResources({ stateDir: options.stateDir })
   const line = withLine({
-    steps: configuredLineSteps(options, mergeCommand),
+    steps: configuredLineSteps(options, mergeCommand, attemptResources),
     batch: options.config.line.batch,
     defaultSteps: options.config.line.steps,
   })
-  const contestAdapters = defaultContestAdapters(options)
+  const contestAdapters = defaultContestAdapters(options, attemptResources)
   const contests = withContests({
     ...contestAdapters,
     defaultBase: options.config.line.base,
   })
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs], attemptResources }),
     withTasks({
       sources: options.taskSources ?? [createKmTaskSource({ process: options.process, cwd: options.repo })],
     }),
