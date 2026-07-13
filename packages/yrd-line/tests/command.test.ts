@@ -16,6 +16,7 @@ import * as z from "zod"
 import {
   CommandEvidenceSchema,
   GitCheckEvidenceSchema,
+  GitCheckResultEvidenceSchema,
   configuredCommandStep,
   configuredMergeStep,
   gitCheckStep,
@@ -25,13 +26,14 @@ import {
   withStep,
   type AddStepResult,
   type GitCheckEvidence,
+  type GitCheckResultEvidence,
   type PRShape,
   type StepExecution,
 } from "@yrd/line"
 
 const roots: string[] = []
 const runtime = { executor: "local", leaseMs: 60_000 }
-type Checked = AddStepResult<PRShape, "check", GitCheckEvidence>
+type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -139,7 +141,7 @@ async function checkedLine(
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
     }),
-    { revision: `check:${JSON.stringify(command)}:${options.waiting === true}`, output: GitCheckEvidenceSchema },
+    { revision: `check:${JSON.stringify(command)}:${options.waiting === true}`, output: GitCheckResultEvidenceSchema },
   )
   const merge = withMerge(gitMergeStep<Checked>({ inject: { process }, repo }), { revision: "git-merge-v1" })
   const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? 1 })
@@ -669,7 +671,7 @@ describe("Line command adapters", () => {
       gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
       {
         revision: "check-v1",
-        output: GitCheckEvidenceSchema,
+        output: GitCheckResultEvidenceSchema,
       },
     )
     const MovedSchema = z.object({ moved: z.literal(true) }).strict()
@@ -708,7 +710,7 @@ describe("Line command adapters", () => {
     const check = withStep(
       "check",
       gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
-      { revision: "check-v1", output: GitCheckEvidenceSchema },
+      { revision: "check-v1", output: GitCheckResultEvidenceSchema },
     )
     const merge = withMerge(
       configuredMergeStep<Checked>({
@@ -752,7 +754,7 @@ describe("Line command adapters", () => {
     const check = withStep(
       "check",
       gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
-      { revision: "check-v1", output: GitCheckEvidenceSchema },
+      { revision: "check-v1", output: GitCheckResultEvidenceSchema },
     )
     const merge = withMerge(configuredMergeStep<Checked>({ inject: { process }, repo, command: ["true"] }), {
       revision: "delegated-merge-v1",

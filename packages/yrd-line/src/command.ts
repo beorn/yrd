@@ -37,6 +37,12 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
+export const GitCheckFailureEvidenceSchema = z.object({ artifacts: z.array(StepArtifactSchema) }).strict()
+export type GitCheckFailureEvidence = Readonly<z.infer<typeof GitCheckFailureEvidenceSchema>>
+
+export const GitCheckResultEvidenceSchema = z.union([GitCheckEvidenceSchema, GitCheckFailureEvidenceSchema])
+export type GitCheckResultEvidence = Readonly<z.infer<typeof GitCheckResultEvidenceSchema>>
+
 type ProcessDependency = Readonly<{ inject: Readonly<{ process: Pick<Process, "run"> }> }>
 type ProgressResult = Readonly<{
   verdict?: "EXITED" | "TIMED_OUT" | "STALLED"
@@ -377,12 +383,29 @@ async function withScratch<Output extends JsonValue>(
   return failed("scratch-cleanup-failed", cleanupFailure)
 }
 
-async function prepareCandidate(git: Git, path: string, input: StepExecution): Promise<JobResult<string>> {
+async function prepareCandidate(
+  git: Git,
+  path: string,
+  input: StepExecution,
+  attempt: number,
+  artifactRoot: string,
+): Promise<
+  | Readonly<{ status: "passed"; output: string }>
+  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: GitCheckFailureEvidence }>
+> {
   for (const pr of input.prs) {
     const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
     if (merged.code !== 0) {
+      const artifacts = await writeArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
       await git.run(path, ["merge", "--abort"], true)
-      return failed("candidate-conflict", `PR '${pr.id}' could not be applied: ${merged.stderr || merged.stdout}`)
+      return {
+        status: "failed",
+        error: {
+          code: "candidate-conflict",
+          message: `PR '${pr.id}' could not be applied: ${merged.stderr || merged.stdout}`,
+        },
+        output: GitCheckFailureEvidenceSchema.parse({ artifacts }),
+      }
     }
   }
   return { status: "passed", output: await git.commit(path, "HEAD") }
@@ -408,10 +431,10 @@ async function pinCandidate(git: Git, repo: string, ref: string, sha: string): P
   throw new Error(created.stderr || created.stdout || `candidate ref '${ref}' has a different commit`)
 }
 
-export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckEvidence> {
+export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return async (input, context): Promise<JobResult<GitCheckEvidence>> => {
+  return async (input, context): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
@@ -429,10 +452,15 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         repo,
         baseSha,
         options.checkoutParent ?? tmpdir(),
-        async (path): Promise<JobResult<GitCheckEvidence>> => {
-          const candidate = await prepareCandidate(git, path, input)
-          if (candidate.status === "failed") return { status: "failed", error: candidate.error }
-          if (candidate.status === "waiting") throw new Error("candidate preparation cannot wait")
+        async (path): Promise<JobResult<GitCheckResultEvidence>> => {
+          const candidate = await prepareCandidate(
+            git,
+            path,
+            input,
+            context.attempt,
+            resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
+          )
+          if (candidate.status === "failed") return candidate
           const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
           await pinCandidate(git, repo, candidateRef, candidate.output)
           const configured: ConfiguredCommandOptions<PRShape> = {

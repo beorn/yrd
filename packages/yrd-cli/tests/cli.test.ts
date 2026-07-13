@@ -1563,7 +1563,7 @@ describe("runYrd", () => {
         plain: true,
       })
       const lines = frame.trimEnd().split("\n")
-      expect(lines).toHaveLength(22)
+      expect(lines).toHaveLength(16)
       expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(width)
       expect(frame).toContain("... 2 more runnable")
       expect(frame).not.toContain("hint:")
@@ -2257,6 +2257,8 @@ describe("runYrd", () => {
       new Map([["PR23", "integrated"]]),
       Date.parse("2026-07-12T12:49:24.335Z"),
       attempts,
+      new Map(),
+      new Map([[`PR23:4:${"4".repeat(40)}`, "2026-07-12T10:49:24.335Z"]]),
     )
 
     expect(rows[0]).toMatchObject({
@@ -2366,7 +2368,7 @@ describe("runYrd", () => {
         [fakeSummary([run])],
         new Set<string>(),
         undefined,
-        new Map([['PR42', 'rejected']]),
+        new Map([["PR42", "rejected"]]),
         Date.parse(now),
         [],
         subjects,

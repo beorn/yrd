@@ -79,6 +79,25 @@ export type LineAttempt = LineLogAttempt &
 type RequestedJob = Readonly<{ run: string; step: string; index: number; requestedAt: string; revision: string }>
 type StartedAttempt = Readonly<{ attempt: number; executor: string; startedAt: string }>
 
+type PinnedPRRevision = Readonly<{ id: string; revision: number; headSha: string }>
+
+export function lineRevisionKey(revision: PinnedPRRevision): string {
+  return `${revision.id}:${revision.revision}:${revision.headSha}`
+}
+
+export async function lineSubmissionTimes(
+  events: AsyncIterable<Event> | Iterable<Event>,
+): Promise<Map<string, string>> {
+  const submissions = new Map<string, string>()
+  for await (const event of events) {
+    if (event.name !== "pr/submitted" || !isObjectValue(event.data)) continue
+    const { pr, revision, headSha } = event.data
+    if (typeof pr !== "string" || typeof revision !== "number" || typeof headSha !== "string") continue
+    submissions.set(lineRevisionKey({ id: pr, revision, headSha }), event.ts)
+  }
+  return submissions
+}
+
 export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<LineAttempt[]> {
   const requested = new Map<string, RequestedJob>()
   const started = new Map<string, StartedAttempt>()
@@ -159,8 +178,7 @@ type Row = Readonly<{
 export type HumanFailureProjection = Readonly<{
   code: string
   summary: string
-  evidence: Readonly<{ text: string; href?: string }>
-  next?: string
+  evidence?: Readonly<{ text: string; href?: string }>
 }>
 
 export type HumanPRProjection = Row &
@@ -500,12 +518,18 @@ function runOutputLineageIndex(finished: readonly LineRun[], run: LineRun, revis
 function stepArtifacts(step: LineStep | undefined): readonly unknown[] {
   if (step?.job === undefined) return []
   const artifacts: unknown[] = []
-  if ("artifacts" in step.job && Array.isArray(step.job.artifacts)) artifacts.push(...step.job.artifacts)
+  if ("artifacts" in step.job && Array.isArray(step.job.artifacts)) {
+    artifacts.push(...(step.job.artifacts as readonly unknown[]))
+  }
   if ((step.job.status === "passed" || step.job.status === "failed") && isObjectValue(step.job.output)) {
-    if (Array.isArray(step.job.output.artifacts)) artifacts.push(...step.job.output.artifacts)
+    if (Array.isArray(step.job.output.artifacts)) {
+      artifacts.push(...(step.job.output.artifacts as readonly unknown[]))
+    }
   }
   const checkpoint = jobCheckpoint(step.job)
-  if (isObjectValue(checkpoint) && Array.isArray(checkpoint.artifacts)) artifacts.push(...checkpoint.artifacts)
+  if (isObjectValue(checkpoint) && Array.isArray(checkpoint.artifacts)) {
+    artifacts.push(...(checkpoint.artifacts as readonly unknown[]))
+  }
   return [...new Map(artifacts.map((artifact) => [JSON.stringify(artifact), artifact])).values()]
 }
 
@@ -686,16 +710,6 @@ function LineLogLocationLinks({ entries, compact }: { entries: readonly LineLogL
 
 const QUEUE_ROW_LIMIT = 5
 const RECENT_ROW_LIMIT = 3
-const RETRYABLE_FAILURE_CODES = new Set([
-  "check-stalled",
-  "infrastructure-failure",
-  "job-lost",
-  "lease-expired",
-  "merge-stalled",
-  "process-stalled",
-  "runner-interrupted",
-  "runner-lost",
-])
 
 function statusGlyph(status: string): string {
   if (["checking", "running", "waiting"].includes(status)) return "[/]"
@@ -728,24 +742,12 @@ function causalSummary(message: string): string {
   return boundedLine(`${cause.replace(/[:\s]+$/u, "")}${usefulHint === undefined ? "" : `: ${usefulHint}`}`, 104)
 }
 
-function failureEvidence(run: LineRun): HumanFailureProjection["evidence"] {
-  const location = runLocations(run)[0]?.location
-  if (location === undefined) return { text: `yrd line show ${run.id}` }
+function failureEvidence(step: LineStep | undefined): HumanFailureProjection["evidence"] {
+  const location = stepLocations(step)[0]?.location
+  if (location === undefined) return undefined
   return "path" in location
     ? { text: location.path, href: pathToFileURL(location.path).href }
     : { text: location.url, href: location.url }
-}
-
-function correctiveAction(pr: PR, run: LineRun, result: LineStatusResult, code: string): string | undefined {
-  if (pr.status !== "rejected" || run.status !== "failed") return undefined
-  if (latestRun(pr, result)?.id !== run.id) return undefined
-  const snapshot = run.prs.find((candidate) => candidate.id === pr.id)
-  if (snapshot === undefined || snapshot.revision !== pr.revision || snapshot.headSha !== pr.headSha) return undefined
-  if (result.headSha !== undefined && pr.baseSha !== undefined && result.headSha !== pr.baseSha) {
-    return `next: yrd bay submit ${pr.branch} --base ${result.base}`
-  }
-  if (RETRYABLE_FAILURE_CODES.has(code)) return `next: yrd line integrate ${pr.id} --retry`
-  return `next: fix ${pr.branch}; yrd bay submit ${pr.branch} --base ${result.base}`
 }
 
 function projectPR(
@@ -786,15 +788,14 @@ function projectPR(
   const artifact = artifactHref(artifacts[0])
   const stateLabel = lineState(pr, run)
   const fact = failureFact(run, step)
-  const next = fact === undefined || run === undefined ? undefined : correctiveAction(pr, run, result, fact.code)
+  const evidence = failureEvidence(step)
   const failure =
     fact === undefined || run === undefined
       ? undefined
       : {
           code: fact.code,
           summary: `${fact.code}: ${causalSummary(fact.message)}`,
-          evidence: failureEvidence(run),
-          ...(next === undefined ? {} : { next }),
+          ...(evidence === undefined ? {} : { evidence }),
         }
   return {
     pr: pr.id,
@@ -869,7 +870,7 @@ export function humanLineProjection(
     }),
   ]
   const queue = queueRows.slice(0, QUEUE_ROW_LIMIT).map((row, index) => ({ ...row, position: index + 1 }))
-  const active = activeWatchRow(result, now)
+  const active = activeWatchRow(result, now, selected)
   return {
     line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
     open: queueRows.length,
@@ -975,19 +976,16 @@ function FailureLines({ failure }: { failure: HumanFailureProjection }) {
       <Box height={1}>
         <Text wrap="truncate"> {failure.summary}</Text>
       </Box>
-      <Box height={1}>
-        <Text wrap="truncate">
-          {"    evidence: "}
-          {failure.evidence.href === undefined ? (
-            failure.evidence.text
-          ) : (
-            <CellLink href={failure.evidence.href}>{failure.evidence.text}</CellLink>
-          )}
-        </Text>
-      </Box>
-      {failure.next === undefined ? null : (
+      {failure.evidence === undefined ? null : (
         <Box height={1}>
-          <Text wrap="truncate"> {failure.next}</Text>
+          <Text wrap="truncate">
+            {"    evidence: "}
+            {failure.evidence.href === undefined ? (
+              failure.evidence.text
+            ) : (
+              <CellLink href={failure.evidence.href}>{failure.evidence.text}</CellLink>
+            )}
+          </Text>
         </Box>
       )}
     </Box>
@@ -1117,10 +1115,17 @@ export type WatchActiveRow = Readonly<{
   elapsed: string
 }>
 
-export function activeWatchRow(result: LineStatusResult, now: number): WatchActiveRow | undefined {
-  const run = [...result.running, ...result.waiting].toSorted(byRunStarted).at(0)
+export function activeWatchRow(
+  result: LineStatusResult,
+  now: number,
+  selected: ReadonlySet<string> = new Set<string>(),
+): WatchActiveRow | undefined {
+  const run = [...result.running, ...result.waiting]
+    .filter((candidate) => selected.size === 0 || candidate.prs.some((member) => selected.has(member.id)))
+    .toSorted(byRunStarted)
+    .at(0)
   if (run === undefined) return undefined
-  const member = run.prs.at(0)
+  const member = run.prs.find((candidate) => selected.size === 0 || selected.has(candidate.id))
   if (member === undefined) return undefined
   const pr = result.prs.find((candidate) => candidate.id === member.id)
   const step = relevantStep(run) ?? run.steps.at(0)
@@ -1164,8 +1169,10 @@ export function lineLogRows(
   prStatus?: ReadonlyMap<string, PR["status"]>,
   now = Date.now(),
   attempts: readonly LineLogAttempt[] = [],
-  prSubjects: ReadonlyMap<string, string> = new Map(),
+  revisionSubjects: ReadonlyMap<string, string> = new Map(),
+  submissionTimes: ReadonlyMap<string, string> = new Map(),
 ): LineLogRow[] {
+  void now
   const rows: LineLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
 
@@ -1182,7 +1189,7 @@ export function lineLogRows(
           run.steps
             .toReversed()
             .map((step) => step.job)
-            .find((job) => job !== undefined && job.status === "failed")?.error?.message ??
+            .find((job) => job?.status === "failed")?.error?.message ??
           "-"
         const location = runLocation(run)
         const locations = runLocations(run)
@@ -1215,14 +1222,18 @@ export function lineLogRows(
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
-        const ageMs = Math.max(0, now - Date.parse(finishedAt ?? run.startedAt))
+        const submittedAt = submissionTimes.get(lineRevisionKey(pr))
+        const ageMs =
+          submittedAt === undefined || finishedAt === undefined
+            ? undefined
+            : Math.max(0, Date.parse(finishedAt) - Date.parse(submittedAt))
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
           run: run.id,
           base: run.base,
           pr: pr.id,
           branch: pr.branch,
-          subject: boundedLine(prSubjects.get(pr.id) ?? pr.branch, 80),
+          subject: revisionSubjects.get(lineRevisionKey(pr)) ?? pr.branch,
           glyph: statusGlyph(outcome),
           revision: String(pr.revision),
           headSha: pr.headSha,
@@ -1232,8 +1243,8 @@ export function lineLogRows(
           ...(finishedAt === undefined ? {} : { finishedAt }),
           started: toIso(run.startedAt),
           finished: finishedAt ?? "-",
-          age: preciseDuration(ageMs),
-          ageMs,
+          age: ageMs === undefined ? "-" : preciseDuration(ageMs),
+          ...(ageMs === undefined ? {} : { ageMs }),
           duration: duration(run.startedAt, run.finishedAt),
           ...(durationMs === undefined ? {} : { durationMs }),
           totalDuration: durationMs === undefined ? "-" : preciseDuration(durationMs),
@@ -1278,7 +1289,10 @@ export function lineLogRows(
         base: exampleResult?.base ?? "-",
         pr: prFilter,
         branch: exampleResult?.branch ?? "-",
-        subject: boundedLine(prSubjects.get(prFilter) ?? exampleResult?.branch ?? prFilter, 80),
+        subject:
+          (exampleResult === undefined ? undefined : revisionSubjects.get(lineRevisionKey(exampleResult))) ??
+          exampleResult?.branch ??
+          prFilter,
         glyph: statusGlyph("retired"),
         revision: String(exampleResult?.revision ?? 0),
         headSha,

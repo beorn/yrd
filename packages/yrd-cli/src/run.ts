@@ -19,7 +19,9 @@ import {
   PRResultView,
   lineLogAttempts,
   lineLogRows,
+  lineRevisionKey,
   lineShowData,
+  lineSubmissionTimes,
   type LineStatusResult,
 } from "./line-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
@@ -37,6 +39,19 @@ function lineGitDir(cwd: string): string | undefined {
     const gitDir = output.trim()
     if (gitDir === "") return undefined
     return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
+  } catch {
+    return undefined
+  }
+}
+
+function commitSubject(cwd: string, headSha: string): string | undefined {
+  try {
+    const subject = execFileSync(
+      "git",
+      ["-C", cwd, "show", "-s", "--format=%s", "--no-show-signature", headSha, "--"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trimEnd()
+    return subject === "" ? undefined : subject
   } catch {
     return undefined
   }
@@ -118,7 +133,12 @@ function unique<Value extends { id: string }>(values: readonly Value[]): Value[]
   return [...new Map(values.map((value) => [value.id, value])).values()]
 }
 
-function mergedLineRuns(
+function byLineRunChronology(left: LineRun, right: LineRun): number {
+  const started = left.startedAt.localeCompare(right.startedAt)
+  return started === 0 ? left.id.localeCompare(right.id, undefined, { numeric: true }) : started
+}
+
+export function mergedLineRuns(
   canonical: LineSummary,
   aliases: readonly LineSummary[],
 ): Pick<LineSummary, "running" | "waiting" | "finished"> {
@@ -127,7 +147,7 @@ function mergedLineRuns(
     unique([
       ...aliases.flatMap((summary) => summary[key]).filter((run) => !canonicalIds.has(run.id)),
       ...canonical[key],
-    ])
+    ]).toSorted(byLineRunChronology)
   return { running: merge("running"), waiting: merge("waiting"), finished: merge("finished") }
 }
 
@@ -512,10 +532,16 @@ async function lineLog(
   const prStatusById = new Map<string, PR["status"]>(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
-  const prSubjectById = new Map<string, string>(
-    summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.name ?? pr.branch])),
-  )
+  const revisionSubjects = new Map<string, string>()
+  const cwd = io.cwd ?? process.cwd()
+  for (const pr of summaries.flatMap((result) => result.finished.flatMap((run) => run.prs))) {
+    const key = lineRevisionKey(pr)
+    if (revisionSubjects.has(key)) continue
+    const subject = commitSubject(cwd, pr.headSha)
+    if (subject !== undefined) revisionSubjects.set(key, subject)
+  }
   const attempts = await lineLogAttempts(app.events())
+  const submissionTimes = await lineSubmissionTimes(app.events())
   const rows = lineLogRows(
     summaries,
     target.selected,
@@ -523,7 +549,8 @@ async function lineLog(
     prStatusById,
     io.now?.() ?? Date.now(),
     attempts,
-    prSubjectById,
+    revisionSubjects,
+    submissionTimes,
   )
   const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
