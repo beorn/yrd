@@ -1,7 +1,7 @@
 import { BayIdSchema, GitRefSchema, GitShaSchema, PRIdSchema, type Bay, type BaysState, type PR } from "@yrd/bay"
 import { JsonSchema, type CommandHandler, type CommandResult, type DeepReadonly, type JsonValue } from "@yrd/core"
 import type { Job, JobContext, JobResult, JobsState, RunJobOptions } from "@yrd/job"
-import { TaskSchema } from "@yrd/task"
+import { IssueSchema } from "@yrd/issue"
 import type { ReadSignal } from "@silvery/signals"
 import * as z from "zod"
 
@@ -94,7 +94,7 @@ export const ContestRunnerInputSchema = z
   .object({
     contest: TextSchema,
     attempt: TextSchema,
-    task: TaskSchema,
+    issue: IssueSchema,
     competitor: CompetitorSchema,
     base: GitRefSchema,
     bay: ContestBaySchema,
@@ -106,7 +106,7 @@ export const ContestEvaluatorInputSchema = z
   .object({
     contest: TextSchema,
     attempt: TextSchema,
-    task: TaskSchema,
+    issue: IssueSchema,
     competitor: CompetitorSchema,
     pin: GitRevisionPinSchema,
     artifacts: z.array(ContestArtifactSchema),
@@ -183,7 +183,7 @@ export type ContestPromotionRecord = DeepReadonly<z.infer<typeof ContestPromotio
 export const ContestRecordSchema = z
   .object({
     id: TextSchema,
-    task: TaskSchema,
+    issue: IssueSchema,
     base: GitRefSchema,
     baseSha: GitShaSchema,
     createdAt: TimestampSchema,
@@ -251,7 +251,7 @@ export type Contest = Omit<ContestRecord, "attempts" | "promotion"> &
 
 export const CompeteArgsSchema = z
   .object({
-    task: TaskSchema,
+    issue: IssueSchema,
     competitors: z.array(CompetitorDefSchema).min(2),
     evaluators: z.array(DefIdSchema).optional(),
     base: GitRefSchema,
@@ -278,7 +278,7 @@ export type ContestHostState = Readonly<{ jobs: JobsState; bays: BaysState }>
 export type ContestRuntimeState = ContestState & ContestHostState
 
 export type ContestCommands = Readonly<{
-  task: Readonly<{ compete: CommandHandler<CompeteArgs, ContestRuntimeState> }>
+  issue: Readonly<{ compete: CommandHandler<CompeteArgs, ContestRuntimeState> }>
   contest: Readonly<{
     request: CommandHandler<Readonly<{ contest: string; retry?: boolean }>, ContestRuntimeState>
     select: CommandHandler<ContestSelectArgs, ContestRuntimeState>

@@ -1,7 +1,7 @@
 # `@yrd/core`
 
 `@yrd/core` supplies Yrd's immutable definition, command, event, projection,
-runtime, and Journal contracts. It knows nothing about Jobs, Git, bays, lines,
+runtime, and Journal contracts. It knows nothing about Jobs, Git, bays, queues,
 contests, files, or the CLI.
 
 ## Definition And Runtime

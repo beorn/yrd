@@ -1,17 +1,17 @@
 import { useState } from "react"
 import { Box, Text, useInput, useScopeEffect } from "silvery"
-import { LineWatchView, type LineStatusResult } from "./line-status-view.tsx"
+import { QueueWatchView, type QueueStatusResult } from "./queue-status-view.tsx"
 
-export type LineWatchSnapshot = Readonly<{
-  results: readonly LineStatusResult[]
+export type QueueWatchSnapshot = Readonly<{
+  results: readonly QueueStatusResult[]
   now: number
 }>
 
 export type WatchControl = Readonly<{ paused: boolean }>
 
-export type LineWatchPaneProps = Readonly<{
-  initial: LineWatchSnapshot
-  load(): Promise<LineWatchSnapshot>
+export type QueueWatchPaneProps = Readonly<{
+  initial: QueueWatchSnapshot
+  load(): Promise<QueueWatchSnapshot>
   intervalMs: number
 }>
 
@@ -21,10 +21,10 @@ export function reduceWatchControl(control: WatchControl, input: string): WatchC
   return control
 }
 
-export function LineWatchFrame({ snapshot, paused }: { snapshot: LineWatchSnapshot; paused: boolean }) {
+export function QueueWatchFrame({ snapshot, paused }: { snapshot: QueueWatchSnapshot; paused: boolean }) {
   return (
     <Box flexDirection="column">
-      <LineWatchView results={snapshot.results} now={snapshot.now} />
+      <QueueWatchView results={snapshot.results} now={snapshot.now} />
       <Box marginTop={1}>
         <Text bold>{paused ? "PAUSED" : "LIVE"}</Text>
         <Text color="$fg-muted"> {paused ? "p resume" : "p pause"} q quit</Text>
@@ -33,7 +33,7 @@ export function LineWatchFrame({ snapshot, paused }: { snapshot: LineWatchSnapsh
   )
 }
 
-export function LineWatchPane({ initial, load, intervalMs }: LineWatchPaneProps) {
+export function QueueWatchPane({ initial, load, intervalMs }: QueueWatchPaneProps) {
   const [snapshot, setSnapshot] = useState(initial)
   const [control, setControl] = useState<WatchControl>({ paused: false })
   const [failure, setFailure] = useState<Error | undefined>()
@@ -64,5 +64,5 @@ export function LineWatchPane({ initial, load, intervalMs }: LineWatchPaneProps)
   )
 
   if (failure !== undefined) throw failure
-  return <LineWatchFrame snapshot={snapshot} paused={control.paused} />
+  return <QueueWatchFrame snapshot={snapshot} paused={control.paused} />
 }

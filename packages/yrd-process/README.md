@@ -26,7 +26,7 @@ await process.run({ argv: shellCommand("test -f dist/app.js && deploy dist") })
 
 `shellCommand()` validates non-empty text and returns the explicit
 `["sh", "-c", script]` argv. Process adapters and Git-facing code never build
-shell strings from refs, branches, task names, or other untrusted values.
+shell strings from refs, branches, issue names, or other untrusted values.
 
 The factory passes either its configured environment or the request's explicit
 replacement environment. Domain adapters own policy such as stripping ambient

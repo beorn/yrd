@@ -18,7 +18,7 @@ export type BayStatus = "opening" | "active" | "closing" | "closed" | "failed"
 export type Bay = Readonly<{
   id: BayId
   name: string
-  task?: string
+  issue?: string
   actor?: string
   branch: string
   base: string
@@ -50,6 +50,8 @@ export type PR = Readonly<{
   id: PRId
   bay?: BayId
   name?: string
+  issue?: string
+  note?: string
   branch: string
   base: string
   status: PRStatus
@@ -128,7 +130,7 @@ export const DeprovisionedBaySchema = z.object({ preservedRef: GitRefSchema.opti
 export type DeprovisionedBay = z.infer<typeof DeprovisionedBaySchema>
 
 export function defaultBayBranch(name: string): string {
-  return `task/${name}`
+  return `issue/${name}`
 }
 
 export function emptyBaysState(): BaysState {

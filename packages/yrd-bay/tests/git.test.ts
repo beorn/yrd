@@ -71,7 +71,7 @@ async function createApp(adapter: BayWorkspace) {
 async function runRequested(app: Awaited<ReturnType<typeof createApp>>, result: CommandResult): Promise<void> {
   const id = app.jobs.requested(result)[0]
   if (id === undefined) throw new Error("expected a Bay job")
-  await app.jobs.run(id, { executor: "local", leaseMs: 60_000 })
+  await app.jobs.run(id, { runner: "local", leaseMs: 60_000 })
 }
 
 async function workspace(process: Pick<Process, "run">, options: Omit<GitWorkspaceOptions, "process">) {
@@ -252,13 +252,13 @@ describe("createGitWorkspace", () => {
       {
         bay: "B1",
         name: "migrate-push-default",
-        branch: "task/migrate-push-default",
+        branch: "issue/migrate-push-default",
         base: "main",
       },
       {
         id: "provision-B1",
         attempt: 1,
-        executor: "test",
+        runner: "test",
         signal: new AbortController().signal,
       },
     )
@@ -302,8 +302,8 @@ describe("createGitWorkspace", () => {
 
     await expect(
       adapter.provision(
-        { bay: "B1", name: "broken-config", branch: "task/broken-config", base: "main" },
-        { id: "provision-B1", attempt: 1, executor: "test", signal: new AbortController().signal },
+        { bay: "B1", name: "broken-config", branch: "issue/broken-config", base: "main" },
+        { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
       ),
     ).resolves.toMatchObject({
       status: "failed",

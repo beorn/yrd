@@ -369,11 +369,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
 
   const track = <Result>(operation: () => Promise<Result>): Promise<Result> => {
     assertOpen()
-    const task = operation().finally(() => {
-      active.delete(task)
+    const pending = operation().finally(() => {
+      active.delete(pending)
     })
-    active.add(task)
-    return task
+    active.add(pending)
+    return pending
   }
 
   const close = (): Promise<void> => {

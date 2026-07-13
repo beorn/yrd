@@ -10,7 +10,7 @@ import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
-import { GitCheckEvidenceSchema } from "@yrd/line"
+import { GitCheckEvidenceSchema } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
@@ -46,7 +46,7 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   await writeFile(join(repo, "README.md"), "main\n")
   await git(repo, "add", "README.md")
   await git(repo, "commit", "-qm", "main")
-  await git(repo, "switch", "-qc", "task/feature")
+  await git(repo, "switch", "-qc", "issue/feature")
   await writeFile(join(repo, "feature.txt"), "feature\n")
   await git(repo, "add", "feature.txt")
   await git(repo, "commit", "-qm", "feature")
@@ -59,8 +59,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["security", "merge", "publish"] },
-      steps: {
+      base: "main",
+      batch: 1,
+      steps: ["security", "merge", "publish"],
+      definitions: {
         security: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
         publish: { run: "test -f feature.txt", runner: "local" },
@@ -77,19 +79,19 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    expect(app.state().lines).toMatchObject({
+    expect(app.state().queues).toMatchObject({
       batchSize: 1,
       defaultSteps: ["security", "merge", "publish"],
     })
     expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
-    expect(Object.keys(app.commands.pr)).toEqual(["close"])
+    expect(Object.keys(app.commands.pr)).toEqual(["close", "edit"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
     expect(app.commands.pr.close.metadata?.visibility).toBe("public")
-    expect(app.commands.line.integrate.metadata?.visibility).toBe("public")
+    expect(app.commands.queue.run.metadata?.visibility).toBe("public")
 
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
-    const run = (await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
     expect(run.status).toBe("passed")
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
@@ -108,13 +110,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await changedTimeout.close()
   })
 
-  it("normalizes remote aliases of the configured line and refuses duplicate payload admission", async () => {
+  it("normalizes remote aliases of the configured queue and refuses duplicate payload admission", async () => {
     const { repo, featureSha } = await repository()
     const baseSha = await git(repo, "rev-parse", "main")
     await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
-      steps: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
     }
     await using runtimeProcess = createProcess({ cwd: repo })
@@ -127,22 +131,22 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "origin/main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "origin/main" })
 
     expect(app.state().bays.prs.PR1).toMatchObject({ base: "main", baseSha })
-    await expect(app.bays.submit({ branch: "origin/task/feature", headSha: featureSha, base: "main" })).rejects.toThrow(
-      "payload already recorded as PR 'PR1'",
-    )
+    await expect(
+      app.bays.submit({ branch: "origin/issue/feature", headSha: featureSha, base: "main" }),
+    ).rejects.toThrow("payload already recorded as PR 'PR1'")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
-  it("refuses stale local line authority before recording a PR", async () => {
+  it("refuses stale local queue authority before recording a PR", async () => {
     const { repo, featureSha } = await repository()
     const remote = join(repo, "..", "origin.git")
     await git(repo, "init", "-q", "--bare", remote)
     await git(repo, "remote", "add", "origin", remote)
-    await git(repo, "push", "-q", "origin", "main", "task/feature")
-    await git(repo, "switch", "-qc", "task/remote-main")
+    await git(repo, "push", "-q", "origin", "main", "issue/feature")
+    await git(repo, "switch", "-qc", "issue/remote-main")
     await writeFile(join(repo, "remote.txt"), "remote\n")
     await git(repo, "add", "remote.txt")
     await git(repo, "commit", "-qm", "remote main")
@@ -150,8 +154,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await git(repo, "switch", "-q", "main")
 
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
-      steps: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
     }
     await using runtimeProcess = createProcess({ cwd: repo })
@@ -165,9 +171,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
 
     await expect(
-      app.bays.submitSelection("task/feature", {
+      app.bays.submitSelection("issue/feature", {
         resolveRevision: async () => featureSha,
-        run: { executor: "test", leaseMs: 60_000 },
+        run: { runner: "test", leaseMs: 60_000 },
       }),
     ).rejects.toThrow("differs from authoritative")
     expect(app.state().bays.prs).toEqual({})
@@ -176,8 +182,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("refreshes a shared journal before the host selects queued PRs", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
-      steps: {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
       },
@@ -193,22 +201,24 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     }
-    await using lineHost = await createDefaultYrdApp(options)
+    await using queueHost = await createDefaultYrdApp(options)
     await using submitter = await createDefaultYrdApp(options)
-    await submitter.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
-    expect(lineHost.state().bays.prs.PR1).toBeUndefined()
+    await submitter.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    expect(queueHost.state().bays.prs.PR1).toBeUndefined()
 
-    const runs = await lineHost.line.integrate({}, { executor: "test", leaseMs: 60_000 })
+    const runs = await queueHost.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
     expect(runs).toEqual([expect.objectContaining({ status: "passed", prs: [expect.objectContaining({ id: "PR1" })] })])
-    expect(lineHost.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
+    expect(queueHost.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
   })
 
   it("uses steps.merge.run as the configured merge step", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
-      steps: {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: {
           run: 'touch delegated-merge.marker && git merge --no-ff --no-edit "$YRD_SHA"',
@@ -226,9 +236,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       process: runtimeProcess,
       config,
     })
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({}, { executor: "test", leaseMs: 60_000 }))[0]!
+    const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
     const landing = await git(repo, "rev-parse", "main")
 
     expect(run).toMatchObject({ status: "passed", integration: { commit: landing, baseSha: landing } })
@@ -238,8 +248,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("refuses a post-merge raw push when native merge owns the base ref", async () => {
     const { repo } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge", "deploy"] },
-      steps: {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge", "deploy"],
+      definitions: {
         check: { run: "true", runner: "local" },
         merge: { runner: "local" },
         deploy: { run: "git push origin main", runner: "local" },
@@ -326,18 +338,29 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }),
     ).toBe(0)
     expect(stdout).toContain("Usage: yrd")
+    expect(stdout).toContain("yrd (shipyard) — agentic software delivery")
+    expect(stdout).toContain("Model:")
+    expect(stdout).toContain("Objects:")
+    expect(stdout).toContain("Boundaries:")
+    const commandBlock = stdout.match(/Commands:\n(?<commands>[\s\S]*?)\n\nModel:/u)?.groups?.commands ?? ""
+    expect(
+      commandBlock
+        .split("\n")
+        .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[options\])?\s{2,}/u)?.groups?.command ?? []),
+    ).toEqual(["pr", "bay", "issue", "contest", "queue", "log", "watch", "prime"])
+    expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
-    expect(await Bun.file(join(root, ".git", "yrd", "events.jsonl")).exists()).toBe(false)
+    expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
-  it("treats a bare command namespace as help without initializing a repository host", async () => {
-    const root = await mkdtemp(join(tmpdir(), "yrd-line-help-"))
+  it("prints namespace help without initializing a repository host", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-queue-help-"))
     roots.push(root)
     let stdout = ""
     let stderr = ""
 
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "--help"], {
         cwd: root,
         stdout: (text) => {
           stdout += text
@@ -347,9 +370,77 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
         },
       }),
     ).toBe(0)
-    expect(stdout).toContain("Usage: yrd line")
+    expect(stdout).toContain("Usage: yrd queue")
     expect(stderr).toBe("")
-    expect(await Bun.file(join(root, ".git", "yrd", "events.jsonl")).exists()).toBe(false)
+    expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
+  })
+
+  it("runs the bare plain and JSON dashboards from the flat project config", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      ["base: main", "batch: 1", "steps: [check, merge]", "check: 'true'", "merge: {}", ""].join("\n"),
+    )
+
+    let plain = ""
+    let plainError = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
+        cwd: repo,
+        stdout: (text) => {
+          plain += text
+        },
+        stderr: (text) => {
+          plainError += text
+        },
+      }),
+      plainError,
+    ).toBe(0)
+    expect(plain).toContain("OPEN")
+    expect(plainError).toBe("")
+
+    let json = ""
+    let jsonError = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          json += text
+        },
+        stderr: (text) => {
+          jsonError += text
+        },
+      }),
+      jsonError,
+    ).toBe(0)
+    expect(JSON.parse(json)).toMatchObject({ command: "dashboard", results: [{ base: "main" }] })
+    expect(jsonError).toBe("")
+  })
+
+  it("refuses the retired config wrapper before plain or JSON startup mutates state", async () => {
+    const { repo } = await repository()
+    const retiredWrapper = ["li", "ne"].join("")
+    await writeFile(join(repo, ".yrd.yml"), `${retiredWrapper}:\n  base: main\n  steps: [check, merge]\n`)
+
+    for (const args of [[], ["--json"]]) {
+      let stdout = ""
+      let stderr = ""
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", ...args], {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        }),
+      ).toBe(2)
+      expect(stdout).toBe("")
+      expect(stderr).toContain(`remove '${retiredWrapper}:'`)
+      expect(stderr).toContain("configure base, batch, steps, and step definitions at the top level")
+      expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
+    }
   })
 
   it("initializes one filesystem authority and reopens its durable PR state", async () => {
@@ -359,17 +450,68 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(first.repository).toMatchObject({ repo, stateDir: join(repo, ".git", "yrd") })
     expect(first.receiver.receiverPath).toBe(join(repo, ".git", "yrd", "prs.git"))
     expect(await Bun.file(join(first.receiver.receiverPath, "hooks", "pre-receive")).exists()).toBe(true)
-    const headSha = await git(repo, "rev-parse", "task/feature")
-    await first.app.bays.submit({ branch: "task/feature", headSha, base: "main" })
+    const headSha = await git(repo, "rev-parse", "issue/feature")
+    await first.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
     await first.close()
 
     const reopened = await createYrdHost({ cwd: repo })
     expect(reopened.app.state().bays.prs.PR1).toMatchObject({
-      branch: "task/feature",
+      branch: "issue/feature",
       headSha,
       status: "submitted",
     })
     await reopened.close()
+  })
+
+  it("finds a direct-branch PR for status and refuses pr merge without appending", async () => {
+    const { repo } = await repository()
+    await git(repo, "switch", "-q", "issue/feature")
+    let submitJson = ""
+    let submitError = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          submitJson += text
+        },
+        stderr: (text) => {
+          submitError += text
+        },
+      }),
+      submitError,
+    ).toBe(0)
+    expect(JSON.parse(submitJson)).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1" }] })
+
+    let statusJson = ""
+    let statusError = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "status", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          statusJson += text
+        },
+        stderr: (text) => {
+          statusError += text
+        },
+      }),
+      statusError,
+    ).toBe(0)
+    expect(JSON.parse(statusJson)).toMatchObject({ command: "pr.status", pr: { id: "PR1" } })
+
+    const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
+    const before = await readFile(journal, "utf8")
+    let mergeJson = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "merge", "PR1", "--json"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: (text) => {
+          mergeJson += text
+        },
+      }),
+    ).toBe(1)
+    expect(JSON.parse(mergeJson)).toMatchObject({ command: "pr.merge", next: "yrd queue run PR1" })
+    expect(await readFile(journal, "utf8")).toBe(before)
   })
 
   it("starts a fresh v3 journal without reading or rewriting legacy journal files", async () => {
@@ -382,8 +524,8 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await writeFile(oldBayJournal, "old bay journal remains opaque\n")
 
     await using host = await createYrdHost({ cwd: repo })
-    const headSha = await git(repo, "rev-parse", "task/feature")
-    await host.app.bays.submit({ branch: "task/feature", headSha, base: "main" })
+    const headSha = await git(repo, "rev-parse", "issue/feature")
+    await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
 
     expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(true)
     expect(await readFile(oldYrdJournal, "utf8")).toBe("old yrd journal remains opaque\n")
@@ -409,7 +551,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(releases).toBe(1)
   })
 
-  it("reaps an active configured child before SIGINT releases its executor lease", async () => {
+  it("reaps an active configured child before SIGINT releases its runner lease", async () => {
     const { repo, featureSha } = await repository()
     const baseSha = await git(repo, "rev-parse", "main")
     const childPidPath = join(repo, "active-check.pid")
@@ -427,15 +569,15 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     ].join("; ")
     await writeFile(
       join(repo, ".yrd.yml"),
-      `steps:\n  check:\n    run: ${JSON.stringify(command)}\n    timeoutMs: 30000\n`,
+      `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
     )
 
     await using submitter = await createYrdHost({ cwd: repo })
-    await submitter.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     await submitter.close()
 
     const cli = Bun.spawn(
-      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "line", "integrate", "PR1", "--json"],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "PR1", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     const cliStdout = new Response(cli.stdout).text()
@@ -457,9 +599,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false))
 
       await using recovery = await createYrdHost({ cwd: repo })
-      const recovered = await recovery.app.line.recover({
+      const recovered = await recovery.app.queue.recover({
         recoveryTime: "2100-01-01T00:00:00.000Z",
-        executor: "recovery",
+        runner: "recovery",
         leaseMs: 100,
       })
       expect(recovered).toEqual([
@@ -514,7 +656,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }),
       setupStderr,
     ).toBe(0)
-    await git(repo, "worktree", "add", "-q", linked, "task/feature")
+    await git(repo, "worktree", "add", "-q", linked, "issue/feature")
 
     let stdout = ""
     let stderr = ""
@@ -531,7 +673,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       stderr,
     ).toBe(0)
     expect(JSON.parse(stdout)).toMatchObject({
-      prs: [{ branch: "task/feature", headSha: featureSha, base: "main", status: "submitted" }],
+      prs: [{ branch: "issue/feature", headSha: featureSha, base: "main", status: "submitted" }],
     })
 
     await git(linked, "switch", "-q", "--detach")
@@ -552,16 +694,16 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(stderr).toContain("no current Git branch; pass a bay or branch selector")
   })
 
-  it("reports a failed line against origin when the operator HEAD is detached", async () => {
+  it("reports a failed queue against origin when the operator HEAD is detached", async () => {
     const { repo, featureSha } = await repository()
     await writeFile(
       join(repo, ".yrd.yml"),
-      "steps:\n  check: printf 'real stdout\\n'; printf 'real stderr\\n' >&2; exit 7\n",
+      "steps: [check, merge]\ncheck: printf 'real stdout\\n'; printf 'real stderr\\n' >&2; exit 7\n",
     )
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
-    await first.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
-    const run = (await first.app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
+    await first.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const run = (await first.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
     expect(run.status).toBe("failed")
     const failedJob = run.steps.find((step) => step.job?.status === "failed")?.job
     if (failedJob?.status !== "failed") throw new Error("missing failed configured check")
@@ -590,7 +732,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stderr = ""
 
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -604,14 +746,14 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }),
     ).toBe(0)
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
-    expect(stdout).toMatch(/PR1\s+task\/feature\s+rejected/u)
+    expect(stdout).toMatch(/PR1\s+issue\/feature\s+rejected/u)
     expect(stdout).not.toContain(featureSha.slice(0, 12))
     expect(stderr).toBe("")
 
     stdout = ""
     stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -629,7 +771,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     stdout = ""
     stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "show", run.id], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "runs", "PR1"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -649,7 +791,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       let json = ""
       let error = ""
       expect(
-        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "log", "--json"], {
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "log", "--json"], {
           cwd: repo,
           stdout: (text) => {
             json += text
@@ -672,19 +814,19 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await writeFile(join(repo, "conflict.txt"), "main\n")
     await git(repo, "add", "conflict.txt")
     await git(repo, "commit", "-qm", "main conflict")
-    await git(repo, "switch", "-q", "task/feature")
+    await git(repo, "switch", "-q", "issue/feature")
     await writeFile(join(repo, "conflict.txt"), "feature\n")
     await git(repo, "add", "conflict.txt")
     await git(repo, "commit", "-qm", "feature conflict")
     const featureSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
-    await writeFile(join(repo, ".yrd.yml"), 'steps:\n  check:\n    run: "true"\n')
+    await writeFile(join(repo, ".yrd.yml"), 'steps: [check, merge]\ncheck:\n  run: "true"\n')
 
     const host = await createYrdHost({ cwd: repo })
     let artifact: string | undefined
     try {
-      await host.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
-      const run = (await host.app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
       expect(run).toMatchObject({ status: "failed", error: { code: "candidate-conflict" } })
       const failedStep = run.steps.find((step) => step.job?.status === "failed")
       const artifacts = (failedStep?.job as { output?: { artifacts?: readonly { path: string }[] } } | undefined)
@@ -699,7 +841,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stdout = ""
     let stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -713,19 +855,18 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       stderr,
     ).toBe(0)
     expect(stdout).toContain("candidate-conflict")
-    expect(stdout).not.toContain("yrd line show")
     expect(artifact === undefined ? stdout : stdout).toContain(
       artifact === undefined ? "candidate-conflict" : pathToFileURL(artifact).href,
     )
   })
 
-  it("reports the authoritative remote line head when local main is stale", async () => {
+  it("reports the authoritative remote queue head when local main is stale", async () => {
     const { repo, featureSha } = await repository()
     const localSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
     await git(repo, "init", "-q", "--bare", remote)
     await git(repo, "remote", "add", "origin", remote)
-    await git(repo, "push", "-q", "origin", "main", "task/feature")
+    await git(repo, "push", "-q", "origin", "main", "issue/feature")
     await git(repo, "push", "-q", "origin", `${featureSha}:refs/heads/main`)
     await git(repo, "fetch", "-q", "origin", "main:refs/remotes/origin/main")
     expect(await git(repo, "rev-parse", "main")).toBe(localSha)
@@ -733,7 +874,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stdout = ""
     let stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status", "--json"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--json"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -799,7 +940,7 @@ describe("discoverYrdRepository", { timeout: 20_000 }, () => {
     await git(repo, "config", "extensions.worktreeConfig", "true")
     await git(repo, "config", "--worktree", "core.worktree", worktree)
     await git(repo, "config", "--local", "--unset-all", "core.worktree")
-    await git(repo, "worktree", "add", "-qb", "task/bay", linked)
+    await git(repo, "worktree", "add", "-qb", "issue/bay", linked)
 
     expect(await discoverYrdRepository({ cwd: linked })).toMatchObject({
       repo: await realpath(repo),
@@ -812,7 +953,7 @@ describe("discoverYrdRepository", { timeout: 20_000 }, () => {
   it("finds the shared Git directory and primary worktree from a linked worktree", async () => {
     const { repo } = await repository()
     const linked = join(repo, "..", "linked")
-    await git(repo, "worktree", "add", "-qb", "task/linked", linked)
+    await git(repo, "worktree", "add", "-qb", "issue/linked", linked)
     const nested = join(linked, "nested")
     await mkdir(nested)
 

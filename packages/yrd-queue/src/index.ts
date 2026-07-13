@@ -1,3 +1,3 @@
 export * from "./model.ts"
-export * from "./line.ts"
+export * from "./queue.ts"
 export * from "./command.ts"

@@ -39,7 +39,7 @@ type JobBase = Readonly<{
 
 type JobExecution = Readonly<{
   startedAt: string
-  executor: string
+  runner: string
 }>
 
 type JobEvidence = Readonly<{
@@ -80,7 +80,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       type: z.literal("start"),
       id: IdSchema,
       attempt: AttemptSchema,
-      executor: IdSchema,
+      runner: IdSchema,
       leaseExpiresAt: TimestampSchema,
     })
     .strict(),
@@ -89,7 +89,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       type: z.literal("heartbeat"),
       id: IdSchema,
       attempt: AttemptSchema,
-      executor: IdSchema,
+      runner: IdSchema,
       leaseExpiresAt: TimestampSchema,
     })
     .strict(),
@@ -98,7 +98,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       type: z.literal("wait"),
       id: IdSchema,
       attempt: AttemptSchema,
-      executor: IdSchema,
+      runner: IdSchema,
     })
     .strict(),
   z
@@ -106,7 +106,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       type: z.literal("finish"),
       id: IdSchema,
       attempt: AttemptSchema,
-      executor: IdSchema,
+      runner: IdSchema,
       token: IdSchema.optional(),
       result: TerminalResultSchema,
     })
@@ -116,7 +116,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       type: z.literal("lose"),
       id: IdSchema,
       attempt: AttemptSchema,
-      executor: IdSchema,
+      runner: IdSchema,
       leaseExpiresAt: TimestampSchema,
       reason: z.string().min(1),
     })
@@ -155,7 +155,7 @@ export const Job = Object.freeze({
           attempt: change.attempt,
           changedAt: at,
           startedAt: at,
-          executor: change.executor,
+          runner: change.runner,
           leaseExpiresAt: change.leaseExpiresAt,
         }
 
@@ -217,8 +217,8 @@ export const Job = Object.freeze({
     }
   },
 
-  owns(job: Job, attempt: number, executor: string, status: Job["status"]): boolean {
-    return job.status === status && job.attempt === attempt && "executor" in job && job.executor === executor
+  owns(job: Job, attempt: number, runner: string, status: Job["status"]): boolean {
+    return job.status === status && job.attempt === attempt && "runner" in job && job.runner === runner
   },
 
   terminal(job: DeepReadonly<Job>): boolean {
@@ -227,7 +227,7 @@ export const Job = Object.freeze({
 })
 
 export type RunJobOptions = Readonly<{
-  executor: string
+  runner: string
   leaseMs: number
   heartbeatMs?: number
   now?: () => number
@@ -237,7 +237,7 @@ export type RunManyJobOptions = RunJobOptions & Readonly<{ concurrency?: number 
 
 export type JobCompletion<Output extends JsonValue = JsonValue> = Readonly<{
   attempt: number
-  executor: string
+  runner: string
   token?: string
   result: Exclude<JobResult<Output>, JobWaiting>
 }>
@@ -269,7 +269,7 @@ export type CreateJobsOptions = Readonly<{
 
 const RunOptionsSchema = z
   .object({
-    executor: IdSchema,
+    runner: IdSchema,
     leaseMs: z.number().int().min(2),
     heartbeatMs: z.number().int().positive().optional(),
   })
@@ -282,7 +282,7 @@ const RunOptionsSchema = z
 const CompletionSchema = z
   .object({
     attempt: AttemptSchema,
-    executor: IdSchema,
+    runner: IdSchema,
     token: IdSchema.optional(),
   })
   .strict()
@@ -323,7 +323,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
 
   const run = async (id: string, runOptions: RunJobOptions): Promise<Job> => {
     const parsed = RunOptionsSchema.parse({
-      executor: runOptions.executor,
+      runner: runOptions.runner,
       leaseMs: runOptions.leaseMs,
       heartbeatMs: runOptions.heartbeatMs,
     })
@@ -343,36 +343,36 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       type: "start",
       id,
       attempt,
-      executor: parsed.executor,
+      runner: parsed.runner,
       leaseExpiresAt: lease(now, parsed.leaseMs),
     })
     const started = current(id)
-    if (!Job.owns(started, attempt, parsed.executor, "running")) return started
+    if (!Job.owns(started, attempt, parsed.runner, "running")) return started
 
     const scope = options.scope.child(`job:${id}:${attempt}`)
     const outcome = await executeWithHeartbeat(
       scope,
-      (signal) => installed.execute(requested.input, { id, attempt, executor: parsed.executor, signal }),
+      (signal) => installed.execute(requested.input, { id, attempt, runner: parsed.runner, signal }),
       heartbeatMs,
       async () => {
         const active = current(id)
-        if (!Job.owns(active, attempt, parsed.executor, "running")) {
+        if (!Job.owns(active, attempt, parsed.runner, "running")) {
           throw new Error(`yrd: job '${id}' lost execution ownership`)
         }
         await commit({
           type: "heartbeat",
           id,
           attempt,
-          executor: parsed.executor,
+          runner: parsed.runner,
           leaseExpiresAt: lease(now, parsed.leaseMs),
         })
       },
     )
 
     const active = current(id)
-    if (!Job.owns(active, attempt, parsed.executor, "running")) return active
+    if (!Job.owns(active, attempt, parsed.runner, "running")) return active
     const result = outcome.heartbeatError ? failed("heartbeat-failed", outcome.heartbeatError) : outcome.result
-    await commit(settlement(id, attempt, parsed.executor, result))
+    await commit(settlement(id, attempt, parsed.runner, result))
     return current(id)
   }
 
@@ -405,7 +405,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         .positive()
         .parse(runManyOptions.concurrency ?? 1)
       const runOptions: RunJobOptions = {
-        executor: runManyOptions.executor,
+        runner: runManyOptions.runner,
         leaseMs: runManyOptions.leaseMs,
         ...(runManyOptions.heartbeatMs === undefined ? {} : { heartbeatMs: runManyOptions.heartbeatMs }),
         ...(runManyOptions.now === undefined ? {} : { now: runManyOptions.now }),
@@ -431,7 +431,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const installedDef = definition(job.definition)
       const metadata = CompletionSchema.parse({
         attempt: completion.attempt,
-        executor: completion.executor,
+        runner: completion.runner,
         ...(completion.token === undefined ? {} : { token: completion.token }),
       })
       const result = jobTerminalResultSchema(installedDef.output).parse(completion.result)
@@ -455,9 +455,9 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             type: "lose",
             id: job.id,
             attempt: job.attempt,
-            executor: job.executor,
+            runner: job.runner,
             leaseExpiresAt: job.leaseExpiresAt,
-            reason: parsed.reason ?? "executor lease expired",
+            reason: parsed.reason ?? "runner lease expired",
           })
         } catch (error) {
           const latest = current(job.id)
@@ -602,7 +602,7 @@ async function executeWithHeartbeat(
   try {
     result = await execution
   } catch (error) {
-    result = failed("executor-error", error)
+    result = failed("runner-error", error)
   } finally {
     await scope[Symbol.asyncDispose]()
     await heartbeats
@@ -610,12 +610,12 @@ async function executeWithHeartbeat(
   return { result, ...(heartbeatError === undefined ? {} : { heartbeatError }) }
 }
 
-function settlement(id: string, attempt: number, executor: string, result: JobResult): JobTransition {
+function settlement(id: string, attempt: number, runner: string, result: JobResult): JobTransition {
   if (result.status === "waiting") {
     const { status: _status, ...waiting } = result
-    return { type: "wait", id, attempt, executor, ...waiting }
+    return { type: "wait", id, attempt, runner, ...waiting }
   }
-  return { type: "finish", id, attempt, executor, result }
+  return { type: "finish", id, attempt, runner, result }
 }
 
 function failed(code: string, error: unknown): JobResult<never> {
@@ -635,7 +635,7 @@ function jobBase(job: Job): JobBase {
 }
 
 function execution(job: Exclude<Job, { status: "requested" }>): JobBase & JobExecution {
-  return { ...jobBase(job), startedAt: job.startedAt, executor: job.executor }
+  return { ...jobBase(job), startedAt: job.startedAt, runner: job.runner }
 }
 
 function evidence(source: JobEvidence): JobEvidence {
@@ -648,12 +648,12 @@ function evidence(source: JobEvidence): JobEvidence {
   }
 }
 
-function requireOwner(job: Job, change: { attempt: number; executor: string }): void {
+function requireOwner(job: Job, change: { attempt: number; runner: string }): void {
   if (job.attempt !== change.attempt) {
     throw new Error(`yrd: job '${job.id}' attempt ${change.attempt} is stale; current attempt is ${job.attempt}`)
   }
-  if (!("executor" in job) || job.executor !== change.executor) {
-    throw new Error(`yrd: job '${job.id}' executor mismatch`)
+  if (!("runner" in job) || job.runner !== change.runner) {
+    throw new Error(`yrd: job '${job.id}' runner mismatch`)
   }
 }
 
@@ -671,7 +671,7 @@ function sameLease(left: Job, right: Extract<Job, { status: "running" }>): boole
   return (
     left.status === "running" &&
     left.attempt === right.attempt &&
-    left.executor === right.executor &&
+    left.runner === right.runner &&
     left.leaseExpiresAt === right.leaseExpiresAt
   )
 }

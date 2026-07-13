@@ -14,7 +14,7 @@ public repository.
       waiting, lost, and retried work.
 - [x] Prove replay equivalence, command-atomic checksummed frames, exact command
       retry deduplication, and cross-process single-writer authority.
-- [x] Pin Job definition revisions and complete Line step descriptors so
+- [x] Pin Job definition revisions and complete Queue step descriptors so
       pending work refuses config drift while historical runs remain readable.
 
 ### Bay and PR Intake
@@ -25,29 +25,29 @@ public repository.
       intake without duplicating a PR revision.
 - [x] Keep `git bay` and `yrd bay` as argv projections of the same commands.
 
-### Line
+### Queue
 
-- [x] Derive step lifecycle and evidence from the shared Job authority; Line
+- [x] Derive step lifecycle and evidence from the shared Job authority; Queue
       records retain only immutable run facts.
 - [x] Verify arbitrary configured names before and after `withMerge()`.
 - [x] Verify exact candidate landing, stale-base refusal, waiting/finish,
       multiple base branches, deploy evidence, and recursive batch bisection.
 - [x] Order the implicit serial queue by PR revision submission time and support
       a delegated merge command with authoritative landing reconciliation.
-- [ ] Dogfood `yrd line status` against the live hh queue and verify links,
+- [ ] Dogfood the bare `yrd` dashboard against the live hh queues and verify links,
       `AGE`, `TOUCHED`, `RUN`, narrow-terminal layout, and `--json` parity.
 
 ### Contest
 
 - [x] Derive attempt, evaluation, and promotion lifecycle from shared Jobs;
-      Contest records retain only task, competitor, Bay, selection, and pin facts.
-- [ ] Run a real `ag` Codex versus Claude Opus contest on one task.
+      Contest records retain only issue, competitor, Bay, selection, and pin facts.
+- [ ] Run a real `ag` Codex versus Claude Opus contest on one issue.
 - [ ] Verify wall time, tokens, reported USD cost, artifacts, held-out results,
       manual selection, immutable ref verification, and exact winner promotion.
 
 ### CLI and Packaging
 
-- [ ] Finish Silvery output for bay, line, and contest result views; keep JSON
+- [ ] Finish Silvery output for bay, queue, and contest result views; keep JSON
       raw and deterministic.
 - [ ] Make standalone `bun yrd`, `yrd`, `git-yrd`, and `git-bay` work from a
       clean clone with only declared dependencies.

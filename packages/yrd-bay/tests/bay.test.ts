@@ -12,7 +12,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
 const BASE = "a".repeat(40)
-const runtime = { executor: "local", leaseMs: 60_000 }
+const runtime = { runner: "local", leaseMs: 60_000 }
 
 function ids(): () => string {
   let value = 0
@@ -66,7 +66,7 @@ type TestApp = Awaited<ReturnType<typeof createApp>>
 async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
   const id = app.jobs.requested(result)[0]
   if (id === undefined) throw new Error("expected one Bay workspace job")
-  await app.jobs.run(id, { executor: "local", leaseMs: 60_000 })
+  await app.jobs.run(id, { runner: "local", leaseMs: 60_000 })
 }
 
 describe("withBays", () => {
@@ -79,7 +79,7 @@ describe("withBays", () => {
     expect(app.bays.get("fix-release")).toMatchObject({
       id: "B1",
       name: "fix-release",
-      branch: "task/fix-release",
+      branch: "issue/fix-release",
       base: "main",
       status: "active",
       path: "/repo/.bays/B1",
@@ -103,7 +103,7 @@ describe("withBays", () => {
     expect(app.bays.pr("PR1")).toMatchObject({
       id: "PR1",
       bay: "B1",
-      branch: "task/fix-release",
+      branch: "issue/fix-release",
       base: "main",
       status: "pushed",
       revision: 2,
@@ -114,7 +114,9 @@ describe("withBays", () => {
       ],
     })
 
-    await expect(app.bays.close({ bay: "B1" })).rejects.toThrow("integrate it or close with withdraw=true")
+    await expect(app.bays.close({ bay: "B1" })).rejects.toThrow(
+      "run it through the queue or withdraw it before closing",
+    )
     workspace.dirty = true
     const refused = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, refused)
@@ -155,7 +157,7 @@ describe("withBays", () => {
     const { app, workspace } = await createHarness()
 
     // Direct (bayless) submission — the superseded-PR shape with no Bay to close.
-    await app.bays.submit({ branch: "task/chief-state-20979-r1", headSha: HEAD_1 })
+    await app.bays.submit({ branch: "issue/chief-state-20979-r1", headSha: HEAD_1 })
     const live = app.bays.pr("PR1")
     expect(live).toMatchObject({ id: "PR1", status: "submitted" })
     expect(live?.bay).toBeUndefined()
@@ -163,7 +165,7 @@ describe("withBays", () => {
     // PR-native close requires no Bay.
     await app.bays.closePr({ pr: "PR1" })
     const closed = app.bays.pr("PR1")
-    // "withdrawn" is exactly the status the Line and status view exclude from OPEN selection.
+    // "withdrawn" is exactly the status the Queue and status view exclude from OPEN selection.
     expect(closed).toMatchObject({ id: "PR1", status: "withdrawn" })
     expect(closed?.withdrawnAt).toBe("2026-01-01T00:00:00.000Z")
     // History remains: the PR still resolves and keeps its revision trail.
@@ -178,7 +180,7 @@ describe("withBays", () => {
     const { app } = await createHarness()
 
     // A rejected/submitted direct PR is still live (pollutes selection) and can be closed.
-    await app.bays.submit({ branch: "task/superseded", headSha: HEAD_1 })
+    await app.bays.submit({ branch: "issue/superseded", headSha: HEAD_1 })
     await app.bays.closePr({ pr: "PR1" })
     // Already withdrawn (terminal) — refuse loudly, never a silent no-op.
     await expect(app.bays.closePr({ pr: "PR1" })).rejects.toThrow("PR 'PR1' is withdrawn")
@@ -186,8 +188,8 @@ describe("withBays", () => {
     await expect(app.bays.closePr({ pr: "PR404" })).rejects.toThrow("no PR 'PR404'")
 
     // The same verb resolves a bay-backed PR by its branch spelling.
-    await app.bays.submit({ branch: "task/other", headSha: HEAD_2 })
-    await app.bays.closePr({ pr: "task/other" })
+    await app.bays.submit({ branch: "issue/other", headSha: HEAD_2 })
+    await app.bays.closePr({ pr: "issue/other" })
     expect(app.bays.pr("PR2")).toMatchObject({ status: "withdrawn" })
 
     await app.close()
@@ -222,18 +224,18 @@ describe("withBays", () => {
 
   it("reuses one live PR when another branch spelling resolves to the same payload", async () => {
     const { app } = await createHarness()
-    await app.bays.intake({ branch: "task/feature", base: "main", headSha: HEAD_1, baseSha: BASE })
-    expect(app.bays.pr("PR1")).toMatchObject({ branch: "task/feature", status: "pushed" })
+    await app.bays.intake({ branch: "issue/feature", base: "main", headSha: HEAD_1, baseSha: BASE })
+    expect(app.bays.pr("PR1")).toMatchObject({ branch: "issue/feature", status: "pushed" })
 
     const options = {
       base: "main",
-      resolveRevision: async (ref: string) => (ref === "origin/task/feature" ? HEAD_1 : undefined),
+      resolveRevision: async (ref: string) => (ref === "origin/issue/feature" ? HEAD_1 : undefined),
       run: runtime,
     }
-    const submitted = await app.bays.submitSelection("origin/task/feature", options)
-    const repeated = await app.bays.submitSelection("origin/task/feature", options)
+    const submitted = await app.bays.submitSelection("origin/issue/feature", options)
+    const repeated = await app.bays.submitSelection("origin/issue/feature", options)
 
-    expect(submitted).toMatchObject({ id: "PR1", branch: "task/feature", status: "submitted" })
+    expect(submitted).toMatchObject({ id: "PR1", branch: "issue/feature", status: "submitted" })
     expect(repeated).toMatchObject({ id: "PR1", status: "submitted" })
     expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
     await app.close()

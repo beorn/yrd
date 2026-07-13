@@ -1,5 +1,5 @@
 /**
- * @failure Durable Jobs accept invalid data, lose lifecycle state, or let stale executors settle work.
+ * @failure Durable Jobs accept invalid data, lose lifecycle state, or let stale runners settle work.
  * @level l1
  * @consumer @yrd/job
  */
@@ -104,7 +104,7 @@ describe("JobDef", () => {
     const context: JobContext = {
       id: "J1",
       attempt: 1,
-      executor: "worker-1",
+      runner: "worker-1",
       signal: new AbortController().signal,
     }
 
@@ -171,7 +171,7 @@ describe("Jobs", () => {
       ...app.jobs.requested(thirdResult),
     ]
 
-    const running = app.jobs.runMany(jobIds, { executor: "worker", leaseMs: 60_000, concurrency: 2 })
+    const running = app.jobs.runMany(jobIds, { runner: "worker", leaseMs: 60_000, concurrency: 2 })
     await vi.waitFor(() => expect(started).toEqual(["first", "slow"]))
     first.resolve()
     await vi.waitFor(() => expect(started).toEqual(["first", "slow", "third"]))
@@ -201,7 +201,7 @@ describe("Jobs", () => {
     const result = await app.dispatch(app.commands.sender.send, { message: "hello" })
     const [id] = app.jobs.requested(result)
 
-    await expect(app.jobs.runMany([id!], { executor: "worker", leaseMs: 60_000 })).rejects.toThrow(
+    await expect(app.jobs.runMany([id!], { runner: "worker", leaseMs: 60_000 })).rejects.toThrow(
       "settlement append failed",
     )
     expect(app.jobs.get(id!)).toMatchObject({ status: "running", attempt: 1 })
@@ -227,7 +227,7 @@ describe("Jobs", () => {
     })
     expect(app.jobs.get(JOB_ID)).toMatchObject({ id: JOB_ID, status: "requested" })
 
-    await expect(app.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })).resolves.toMatchObject({
+    await expect(app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 60_000 })).resolves.toMatchObject({
       id: JOB_ID,
       status: "passed",
       attempt: 1,
@@ -255,7 +255,7 @@ describe("Jobs", () => {
     await original.close()
 
     const changed = await jobsApp(delivery(undefined, "transport-v2"), { journal })
-    await expect(changed.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })).rejects.toThrow(
+    await expect(changed.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 60_000 })).rejects.toThrow(
       "definition revision",
     )
     expect(changed.jobs.state().byId[JOB_ID]?.status).toBe("requested")
@@ -269,13 +269,13 @@ describe("Jobs", () => {
       type: "start",
       id: JOB_ID,
       attempt: 1,
-      executor: "manual-runner",
+      runner: "manual-runner",
       leaseExpiresAt: "2026-01-01T00:01:00.000Z",
     })
 
     await app.jobs.finish(JOB_ID, {
       attempt: 1,
-      executor: "manual-runner",
+      runner: "manual-runner",
       result: { status: "passed", output: { receipt: "manual-ok" } },
     })
 
@@ -297,12 +297,12 @@ describe("Jobs", () => {
       id: ids("send", "C-send", JOB_ID, "start", "C-start", "E-start", "wait", "C-wait", "E-wait"),
     })
     await app.dispatch(app.commands.sender.send, { message: "remote" })
-    await app.jobs.run(JOB_ID, { executor: "launcher", leaseMs: 60_000 })
+    await app.jobs.run(JOB_ID, { runner: "launcher", leaseMs: 60_000 })
 
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
       status: "waiting",
       attempt: 1,
-      executor: "launcher",
+      runner: "launcher",
       token: "remote-1",
       checkpoint: { sha: "abc" },
     })
@@ -310,15 +310,15 @@ describe("Jobs", () => {
     await expect(
       app.jobs.finish(JOB_ID, {
         attempt: 1,
-        executor: "other",
+        runner: "other",
         token: "remote-1",
         result: { status: "passed", output: { receipt: "ok" } },
       }),
-    ).rejects.toThrow("executor mismatch")
+    ).rejects.toThrow("runner mismatch")
     await expect(
       app.jobs.finish(JOB_ID, {
         attempt: 1,
-        executor: "launcher",
+        runner: "launcher",
         token: "remote-1",
         result: { status: "passed", output: { receipt: "" } },
       }),
@@ -326,7 +326,7 @@ describe("Jobs", () => {
 
     await app.jobs.finish(JOB_ID, {
       attempt: 1,
-      executor: "launcher",
+      runner: "launcher",
       token: "remote-1",
       result: { status: "passed", output: { receipt: "remote-ok" } },
     })
@@ -350,14 +350,14 @@ describe("Jobs", () => {
     )
     const original = await jobsApp(waiting, { journal, id: ids("send", "C-send", JOB_ID) })
     await original.dispatch(original.commands.sender.send, { message: "remote" })
-    await original.jobs.run(JOB_ID, { executor: "launcher", leaseMs: 60_000 })
+    await original.jobs.run(JOB_ID, { runner: "launcher", leaseMs: 60_000 })
     await original.close()
 
     const resumed = await jobsApp(delivery(undefined, "transport-v2"), { journal })
     await expect(
       resumed.jobs.finish(JOB_ID, {
         attempt: 1,
-        executor: "launcher",
+        runner: "launcher",
         token: "remote-1",
         result: { status: "passed", output: { receipt: "remote-ok" } },
       }),
@@ -372,14 +372,14 @@ describe("Jobs", () => {
       type: "start",
       id: JOB_ID,
       attempt: 1,
-      executor: "lost-worker",
+      runner: "lost-worker",
       leaseExpiresAt: "2026-01-01T00:00:01.000Z",
     })
     await app.dispatch(app.commands.job.transition, {
       type: "heartbeat",
       id: JOB_ID,
       attempt: 1,
-      executor: "lost-worker",
+      runner: "lost-worker",
       leaseExpiresAt: "2026-01-01T00:00:03.000Z",
     })
 
@@ -388,14 +388,14 @@ describe("Jobs", () => {
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "lost", attempt: 1 })
 
     await app.jobs.retry(JOB_ID)
-    await app.jobs.run(JOB_ID, { executor: "replacement", leaseMs: 60_000 })
+    await app.jobs.run(JOB_ID, { runner: "replacement", leaseMs: 60_000 })
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "passed", attempt: 2 })
     await expect(
       app.dispatch(app.commands.job.transition, {
         type: "finish",
         id: JOB_ID,
         attempt: 1,
-        executor: "lost-worker",
+        runner: "lost-worker",
         result: { status: "passed", output: { receipt: "stale" } },
       }),
     ).rejects.toThrow("attempt 1 is stale")
@@ -419,7 +419,7 @@ describe("Jobs", () => {
     vi.useFakeTimers()
     try {
       const running = app.jobs.run(JOB_ID, {
-        executor: "worker-1",
+        runner: "worker-1",
         leaseMs: 20,
         heartbeatMs: 5,
         now: () => (now += 10),
@@ -440,7 +440,7 @@ describe("Jobs", () => {
     await app.close()
   })
 
-  it("aborts and awaits active executor cleanup when the runtime closes", async () => {
+  it("aborts and awaits active runner cleanup when the runtime closes", async () => {
     const started = Promise.withResolvers<void>()
     let cleaned = false
     const app = await jobsApp(
@@ -457,7 +457,7 @@ describe("Jobs", () => {
       { id: ids("send", "C-send", JOB_ID) },
     )
     await app.dispatch(app.commands.sender.send, { message: "slow" })
-    const running = app.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })
+    const running = app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 60_000 })
     const settled = running.then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),
@@ -470,7 +470,7 @@ describe("Jobs", () => {
     await expect(settled).resolves.toEqual({ error: expect.objectContaining({ message: "yrd: runtime is closed" }) })
   })
 
-  it("aborts an executor after heartbeat observes lost ownership", async () => {
+  it("aborts an runner after heartbeat observes lost ownership", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()
     const app = await jobsApp(
@@ -495,7 +495,7 @@ describe("Jobs", () => {
     vi.useFakeTimers()
     try {
       const running = app.jobs.run(JOB_ID, {
-        executor: "worker-1",
+        runner: "worker-1",
         leaseMs: 20,
         heartbeatMs: 5,
         now: () => 0,
@@ -507,7 +507,7 @@ describe("Jobs", () => {
         type: "lose",
         id: job.id,
         attempt: job.attempt,
-        executor: job.executor,
+        runner: job.runner,
         leaseExpiresAt: job.leaseExpiresAt,
         reason: "lease transferred",
       })

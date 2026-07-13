@@ -2,18 +2,18 @@ import type { BayCommands, BaysState, HasBays } from "@yrd/bay"
 import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
 import type { HasJobs, JobCommands, JobsState } from "@yrd/job"
-import type { HasLine, LineAuditResult, LineCommands, LinesState } from "@yrd/line"
-import type { HasTasks } from "@yrd/task"
+import type { HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
+import type { HasIssues } from "@yrd/issue"
 import type { Scope } from "@silvery/scope"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
-export type { LineAuditFinding, LineAuditResult } from "@yrd/line"
+export type { QueueAuditFinding, QueueAuditResult } from "@yrd/queue"
 
-/** Optional operator capabilities supplied by a line-environment plugin. The
+/** Optional operator capabilities supplied by a queue-environment plugin. The
  * CLI never simulates these lifecycle operations when no plugin owns them. */
-export type YrdCliLineAdministration = Readonly<{
-  auditEnvironment?(): Promise<LineAuditResult>
+export type YrdCliQueueAdministration = Readonly<{
+  auditEnvironment?(): Promise<QueueAuditResult>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
 }>
@@ -21,16 +21,16 @@ export type YrdCliLineAdministration = Readonly<{
 export type YrdCliState = Readonly<{
   jobs: JobsState
   bays: BaysState
-  lines: LinesState
+  queues: QueuesState
   contests: ContestsState
 }>
 
-export type YrdCliCommands = JobCommands & BayCommands & LineCommands & ContestCommands
+export type YrdCliCommands = JobCommands & BayCommands & QueueCommands & ContestCommands
 
-export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> & HasJobs & HasBays & HasLine & HasTasks & HasContests
+export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> & HasJobs & HasBays & HasQueue & HasIssues & HasContests
 
 export type YrdCliServices = Readonly<{
-  line?: YrdCliLineAdministration
+  queue?: YrdCliQueueAdministration
 }>
 
 export type YrdCliIO = {
@@ -41,11 +41,12 @@ export type YrdCliIO = {
   color?: boolean
   columns?: number
   cwd?: string
-  executor?: string
+  runner?: string
   leaseMs?: number
   concurrency?: number
   now?: () => number
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
-  resolveLineTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
+  resolveQueueTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
+  currentBranch?(cwd: string): string | undefined
   scope?: Pick<Scope, "signal" | "sleep">
 }

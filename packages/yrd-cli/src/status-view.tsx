@@ -121,8 +121,8 @@ export function BayStatusView({ bays }: { bays: readonly Bay[] }) {
       minWidth: 11,
       render: (bay) => <StatusValue value={bay.status} />,
     },
-    ...(bays.some((bay) => bay.task !== undefined)
-      ? ([{ header: "TASK", key: "task", grow: true }] satisfies TableColumn<Bay>[])
+    ...(bays.some((bay) => bay.issue !== undefined)
+      ? ([{ header: "ISSUE", key: "issue", grow: true }] satisfies TableColumn<Bay>[])
       : []),
     ...(bays.some((bay) => bay.actor !== undefined)
       ? ([{ header: "ACTOR", key: "actor" }] satisfies TableColumn<Bay>[])
@@ -171,6 +171,29 @@ export function PRStatusView({ prs }: { prs: readonly PR[] }) {
   )
 }
 
+export type IssueLensRow = Readonly<{
+  issue: string
+  bays: string
+  prs: string
+  contests: string
+  outcome: string
+}>
+
+export function IssueLensView({ rows }: { rows: readonly IssueLensRow[] }) {
+  return (
+    <Table
+      data={rows}
+      columns={[
+        { header: "ISSUE", key: "issue", grow: true },
+        { header: "BAYS", key: "bays" },
+        { header: "PRS", key: "prs" },
+        { header: "CONTESTS", key: "contests" },
+        { header: "OUTCOME", key: "outcome", grow: true },
+      ]}
+    />
+  )
+}
+
 export function ContestStatusView({ contest }: { contest: Contest }) {
   const attempts = contest.attemptOrder.map((id) => {
     const attempt = contest.attempts[id]
@@ -200,7 +223,7 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
           {
             id: contest.id,
             status: contest.status,
-            task: contest.task.title,
+            issue: contest.issue.title,
             base: contest.base,
             winner: contest.selection?.attempt ?? "-",
           },
@@ -213,7 +236,7 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
             minWidth: 10,
             render: (row) => <StatusValue value={row.status} />,
           },
-          { header: "TASK", key: "task", grow: true },
+          { header: "ISSUE", key: "issue", grow: true },
           { header: "BASE", key: "base" },
           { header: "WINNER", key: "winner" },
         ]}

@@ -1,36 +1,37 @@
 import { execFileSync } from "node:child_process"
 import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
-import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
+import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
 import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
-import type { LineRun, LineSummary } from "@yrd/line"
+import type { QueueRun, QueueSummary } from "@yrd/queue"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
-  LineLogView,
-  LineRunsView,
-  LineWatchView,
-  LineShowView,
-  LineStatusView,
-  type LineLogCoverage,
+  QueueLogView,
+  QueueListView,
+  PRRunsView,
+  QueueRunsView,
+  QueueWatchView,
+  QueueStatusView,
+  type QueueLogCoverage,
   PRResultView,
-  lineLogAttempts,
-  lineLogRows,
-  lineRevisionKey,
-  lineShowData,
-  lineSubmissionTimes,
-  type LineStatusResult,
-} from "./line-status-view.tsx"
+  queueLogAttempts,
+  queueLogRows,
+  queueRevisionKey,
+  queueShowData,
+  queueSubmissionTimes,
+  type QueueStatusResult,
+} from "./queue-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
-import { BayStatusView, ContestStatusView } from "./status-view.tsx"
+import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { YRD_VERSION } from "./version.ts"
-import { LineWatchPane, type LineWatchSnapshot } from "./watch-pane.tsx"
+import { QueueWatchPane, type QueueWatchSnapshot } from "./watch-pane.tsx"
 
-function lineGitDir(cwd: string): string | undefined {
+function queueGitDir(cwd: string): string | undefined {
   try {
     const output = execFileSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
       encoding: "utf8",
@@ -62,21 +63,30 @@ async function firstEventTimestamp(app: YrdCliApp): Promise<string> {
   return "-"
 }
 
-async function lineLegacyCoverage(cwd: string, since: string): Promise<LineLogCoverage | undefined> {
-  const gitDir = lineGitDir(cwd)
+async function queueLegacyCoverage(cwd: string, since: string): Promise<QueueLogCoverage | undefined> {
+  const gitDir = queueGitDir(cwd)
   if (gitDir === undefined) return undefined
-  const journal = join(gitDir, "bay", "journal.jsonl")
-  try {
-    const content = await readFile(journal, "utf8")
-    const lines = content.split(/\r?\n/u).filter((value) => value.trim() !== "")
-    return { since, completeness: "queue-only", legacy: { path: journal, frames: lines.length } }
-  } catch {
-    return undefined
-  }
+  const paths = [join(gitDir, "yrd", "events.jsonl"), join(gitDir, "bay", "journal.jsonl")]
+  const legacy = (
+    await Promise.all(
+      paths.map(async (path) => {
+        try {
+          const content = await readFile(path, "utf8")
+          return { path, frames: content.split(/\r?\n/u).filter((value) => value.trim() !== "").length }
+        } catch (error) {
+          if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+            return undefined
+          }
+          throw error
+        }
+      }),
+    )
+  ).filter((coverage): coverage is { path: string; frames: number } => coverage !== undefined)
+  return legacy.length === 0 ? undefined : { since, completeness: "queue-only", legacy }
 }
 
 type RuntimeOptions = {
-  executor: string
+  runner: string
   leaseMs: number
   now?: () => number
 }
@@ -87,7 +97,7 @@ type JsonOption = { json?: boolean }
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   return {
-    executor: io.executor ?? "yrd-cli",
+    runner: io.runner ?? "yrd-cli",
     leaseMs: io.leaseMs ?? 5 * 60_000,
     ...(io.now === undefined ? {} : { now: io.now }),
   }
@@ -133,21 +143,21 @@ function unique<Value extends { id: string }>(values: readonly Value[]): Value[]
   return [...new Map(values.map((value) => [value.id, value])).values()]
 }
 
-function byLineRunChronology(left: LineRun, right: LineRun): number {
+function byQueueRunChronology(left: QueueRun, right: QueueRun): number {
   const started = left.startedAt.localeCompare(right.startedAt)
   return started === 0 ? left.id.localeCompare(right.id, undefined, { numeric: true }) : started
 }
 
-export function mergedLineRuns(
-  canonical: LineSummary,
-  aliases: readonly LineSummary[],
-): Pick<LineSummary, "running" | "waiting" | "finished"> {
+export function mergedQueueRuns(
+  canonical: QueueSummary,
+  aliases: readonly QueueSummary[],
+): Pick<QueueSummary, "running" | "waiting" | "finished"> {
   const canonicalIds = new Set([...canonical.running, ...canonical.waiting, ...canonical.finished].map((run) => run.id))
-  const merge = (key: "running" | "waiting" | "finished"): LineRun[] =>
+  const merge = (key: "running" | "waiting" | "finished"): QueueRun[] =>
     unique([
       ...aliases.flatMap((summary) => summary[key]).filter((run) => !canonicalIds.has(run.id)),
       ...canonical[key],
-    ]).toSorted(byLineRunChronology)
+    ]).toSorted(byQueueRunChronology)
   return { running: merge("running"), waiting: merge("waiting"), finished: merge("finished") }
 }
 
@@ -203,18 +213,20 @@ async function openBay(
     from?: string
     head?: string
     base?: string
-    line?: string
-    task?: string
+    queue?: string
+    issue?: string
     actor?: string
     json?: boolean
   },
   io: YrdCliIO,
+  command = "bay.open",
+  pr?: string,
 ): Promise<void> {
   const from = oneOfAliases(options.from, options.head, "from", "head")
-  const base = oneOfAliases(options.base, options.line, "base", "line")
+  const base = oneOfAliases(options.base, options.queue, "base", "queue")
   const result = await app.bays.open({
     name,
-    ...(options.task === undefined ? {} : { task: options.task }),
+    ...(options.issue === undefined ? {} : { issue: options.issue }),
     ...(options.actor === undefined ? {} : { actor: options.actor }),
     ...(from === undefined ? {} : { from }),
     ...(base === undefined ? {} : { base }),
@@ -225,7 +237,7 @@ async function openBay(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "bay.open", bay },
+    { command, ...(pr === undefined ? {} : { pr }), bay },
     createElement(BayStatusView, { bays: [bay] }),
   )
 }
@@ -311,19 +323,19 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
   return io.resolveRevision?.(ref, cwd)
 }
 
-async function resolvedLineTarget(ref: string, io: YrdCliIO): Promise<Readonly<{ base: string; sha?: string }>> {
+async function resolvedQueueTarget(ref: string, io: YrdCliIO): Promise<Readonly<{ base: string; sha?: string }>> {
   const cwd = io.cwd ?? process.cwd()
-  if (io.resolveLineTarget !== undefined) return io.resolveLineTarget(ref, cwd)
+  if (io.resolveQueueTarget !== undefined) return io.resolveQueueTarget(ref, cwd)
   const sha = await optionalRevision(ref, io)
   return { base: ref, ...(sha === undefined ? {} : { sha }) }
 }
 
-type LineTargetGroup = Readonly<{ base: string; aliases: ReadonlySet<string>; headSha?: string }>
+type QueueTargetGroup = Readonly<{ base: string; aliases: ReadonlySet<string>; headSha?: string }>
 
-async function lineTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Promise<LineTargetGroup[]> {
+async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Promise<QueueTargetGroup[]> {
   const groups = new Map<string, { aliases: Set<string>; headSha?: string }>()
   for (const ref of [...bases].toSorted()) {
-    const target = await resolvedLineTarget(ref, io)
+    const target = await resolvedQueueTarget(ref, io)
     const group = groups.get(target.base) ?? { aliases: new Set<string>() }
     group.aliases.add(ref)
     group.aliases.add(target.base)
@@ -336,8 +348,9 @@ async function lineTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Promi
 async function submitBays(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { wait?: boolean; base?: string; line?: string; json?: boolean },
+  options: { base?: string; queue?: string; issue?: string; json?: boolean },
   io: YrdCliIO,
+  command: "bay.submit" | "pr.submit",
 ): Promise<YrdCliExitCode> {
   const state = stateOf(app)
   const inferred =
@@ -345,90 +358,78 @@ async function submitBays(
       ? [...selectors]
       : selectedBays(state.bays, [], io.cwd ?? process.cwd(), "submit").map((bay) => bay.id)
   const prs: PR[] = []
-  const base = oneOfAliases(options.base, options.line, "base", "line")
+  const base = oneOfAliases(options.base, options.queue, "base", "queue")
   for (const selector of inferred) {
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
+      ...(options.issue === undefined ? {} : { issue: options.issue }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
     prs.push(pr)
   }
-  const runs =
-    options.wait === true ? await app.line.integrate({ prs: prs.map((pr) => pr.id) }, runtimeOptions(io)) : []
+  await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
+  return 0
+}
+
+function requiredPr(app: YrdCliApp, selector: string): PR {
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) refusal(`no PR '${selector}'`)
+  return pr as PR
+}
+
+function allQueueRuns(app: YrdCliApp): QueueRun[] {
+  return Object.keys(stateOf(app).queues.records)
+    .map((id) => app.queue.get(id))
+    .filter((run): run is QueueRun => run !== undefined)
+    .toSorted(byQueueRunChronology)
+}
+
+function prQueueRuns(app: YrdCliApp, pr: PR): QueueRun[] {
+  return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
+}
+
+async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const bays = app.bays.list()
+  await printResult(io, jsonEnabled(options), { command: "bay.list", bays }, createElement(BayStatusView, { bays }))
+}
+
+async function listPrs(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ base?: string; state?: string; issue?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const prs = app.bays
+    .prs()
+    .filter((pr) => options.base === undefined || pr.base === options.base)
+    .filter((pr) => options.state === undefined || pr.status === options.state)
+    .filter((pr) => options.issue === undefined || pr.issue === options.issue)
+  const selected = new Set(prs.map((pr) => pr.id))
+  const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "bay.submit", prs, ...(runs.length === 0 ? {} : { runs }) },
+    { command: "pr.list", prs, runs },
     createElement(PRResultView, { prs, runs }),
   )
-  return runs.some((run) => run.status === "failed") ? 1 : 0
 }
 
-async function integrateLines(
+async function viewPr(
   app: YrdCliApp,
-  selectors: readonly string[],
-  options: { steps?: unknown; retry?: boolean },
-  io: YrdCliIO,
-): Promise<readonly LineRun[]> {
-  const steps = csv(options.steps)
-  return app.line.integrate(
-    {
-      prs: [...selectors],
-      ...(steps === undefined ? {} : { steps }),
-      ...(options.retry === true ? { retry: true } : {}),
-    },
-    runtimeOptions(io),
-  )
-}
-
-async function holdLine(
-  app: YrdCliApp,
-  base: string | undefined,
-  options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown }>,
-  io: YrdCliIO,
-): Promise<void> {
-  const target = await resolvedLineTarget(base ?? "main", io)
-  if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
-  const hold = await app.line.hold({
-    base: target.base,
-    reason: options.reason,
-    allowedPRs: csv(options.allow) ?? [],
-  })
-  const allowed = hold.allowedPRs.length === 0 ? "none" : hold.allowedPRs.join(", ")
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "line.hold", hold },
-    `Line ${hold.base} held: ${hold.reason} (allowed: ${allowed})`,
-  )
-}
-
-async function releaseLine(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const target = await resolvedLineTarget(base ?? "main", io)
-  await app.line.release(target.base)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "line.release", base: target.base },
-    `Line ${target.base} released`,
-  )
-}
-
-async function lineStatus(
-  app: YrdCliApp,
-  selectors: readonly string[],
+  selector: string,
   options: JsonOption,
   io: YrdCliIO,
+  command = "pr.view",
 ): Promise<void> {
+  const pr = requiredPr(app, selector)
   const state = stateOf(app)
-  const target = resolveLineTargets(state, selectors, undefined, undefined)
-  const { results } = await lineStatusSnapshots(app, state, target, io)
+  const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
+  const { results } = await queueStatusSnapshots(app, state, target, io)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "line.status", results },
-    createElement(LineStatusView, {
+    { command, pr, results },
+    createElement(QueueStatusView, {
       state: state.bays,
       results,
       selected: target.selected,
@@ -437,26 +438,257 @@ async function lineStatus(
   )
 }
 
-async function lineStatusSnapshots(
+async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const pr = requiredPr(app, selector)
+  const runs = prQueueRuns(app, pr)
+  const attempts = await queueLogAttempts(app.events())
+  const data = runs.map((run) => queueShowData(run, runs, attempts))
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.runs", pr, runs: data },
+    createElement(PRRunsView, { runs: data }),
+  )
+}
+
+async function diffPr(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ stat?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const pr = requiredPr(app, selector)
+  const cwd = io.cwd ?? process.cwd()
+  const base = pr.baseSha ?? pr.base
+  let diff: string
+  try {
+    diff = execFileSync(
+      "git",
+      ["-C", cwd, "diff", ...(options.stat === true ? ["--stat"] : []), `${base}...${pr.headSha}`, "--"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    )
+  } catch (error) {
+    refusal(`cannot diff PR '${pr.id}': ${error instanceof Error ? error.message : String(error)}`)
+  }
+  await printResult(io, jsonEnabled(options), { command: "pr.diff", pr: pr.id, base, head: pr.headSha, diff }, diff)
+}
+
+async function checkoutPr(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ bay?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const pr = requiredPr(app, selector)
+  const name = options.bay ?? `pr-${pr.id.toLowerCase()}`
+  await openBay(
+    app,
+    name,
+    { from: pr.branch, base: pr.base, ...(pr.issue === undefined ? {} : { issue: pr.issue }), ...options },
+    io,
+    "pr.checkout",
+    pr.id,
+  )
+}
+
+function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
+  const injected = io.currentBranch?.(cwd)
+  if (injected !== undefined) return injected
+  try {
+    const branch = execFileSync("git", ["-C", cwd, "branch", "--show-current"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim()
+    return branch === "" ? undefined : branch
+  } catch {
+    return undefined
+  }
+}
+
+function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
+  const state = stateOf(app)
+  const cwd = io.cwd ?? process.cwd()
+  const bay = currentBay(state.bays, cwd)
+  const branch = bay?.branch ?? currentGitBranch(cwd, io)
+  const pr =
+    (bay === undefined ? undefined : Object.values(state.bays.prs).find((candidate) => candidate.bay === bay.id)) ??
+    Object.values(state.bays.prs).find((candidate) => candidate.branch === branch)
+  if (pr === undefined) refusal("the current bay or branch has no PR; submit it with 'yrd pr submit'")
+  return pr as PR
+}
+
+async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const pr = currentPr(app, io)
+  await viewPr(app, pr.id, options, io, "pr.status")
+}
+
+async function editPr(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ issue?: string; note?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.issue === undefined && options.note === undefined) usage("pr edit requires --issue or --note")
+  const pr = requiredPr(app, selector)
+  await app.bays.editPr({
+    pr: pr.id,
+    ...(options.issue === undefined ? {} : { issue: options.issue }),
+    ...(options.note === undefined ? {} : { note: options.note }),
+  })
+  const edited = requiredPr(app, pr.id)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.edit", pr: edited },
+    createElement(PRResultView, { prs: [edited], runs: prQueueRuns(app, edited) }),
+  )
+}
+
+async function retryPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const selectedRun = app.queue.get(selector)
+  const prs = selectedRun?.prs.map((pr) => pr.id) ?? [requiredPr(app, selector).id]
+  const runs = await app.queue.run({ prs, retry: true }, runtimeOptions(io))
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.retry", prs, runs },
+    createElement(QueueRunsView, { runs }),
+  )
+  return runs.some((run) => run.status === "failed") ? 1 : 0
+}
+
+function issueRows(app: YrdCliApp, selected?: string): IssueLensRow[] {
+  const state = stateOf(app)
+  const contests = app.contests.list()
+  const refs = new Set<string>()
+  for (const bay of Object.values(state.bays.byId)) if (bay.issue !== undefined) refs.add(bay.issue)
+  for (const pr of Object.values(state.bays.prs)) if (pr.issue !== undefined) refs.add(pr.issue)
+  for (const contest of contests) refs.add(`${contest.issue.ref.source}:${contest.issue.ref.id}`)
+  if (selected !== undefined && !refs.has(selected)) refusal(`no issue '${selected}' is in flight`)
+  return [...refs]
+    .filter((issue) => selected === undefined || issue === selected)
+    .toSorted()
+    .map((issue) => {
+      const bays = Object.values(state.bays.byId).filter((bay) => bay.issue === issue)
+      const bayIds = new Set(bays.map((bay) => bay.id))
+      const prs = Object.values(state.bays.prs).filter(
+        (pr) => pr.issue === issue || (pr.bay !== undefined && bayIds.has(pr.bay)),
+      )
+      const joinedContests = contests.filter(
+        (contest) => `${contest.issue.ref.source}:${contest.issue.ref.id}` === issue,
+      )
+      return {
+        issue,
+        bays: bays.map((bay) => bay.id).join(",") || "-",
+        prs: prs.map((pr) => pr.id).join(",") || "-",
+        contests: joinedContests.map((contest) => contest.id).join(",") || "-",
+        outcome:
+          [...prs.map((pr) => pr.status), ...joinedContests.map((contest) => contest.status)].join(",") || "in-flight",
+      }
+    })
+}
+
+async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
+  const issues = issueRows(app, selected)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: selected === undefined ? "issue.list" : "issue.view", issues },
+    createElement(IssueLensView, { rows: issues }),
+  )
+}
+
+async function runQueues(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: { steps?: unknown },
+  io: YrdCliIO,
+): Promise<readonly QueueRun[]> {
+  const steps = csv(options.steps)
+  return app.queue.run(
+    {
+      prs: [...selectors],
+      ...(steps === undefined ? {} : { steps }),
+    },
+    runtimeOptions(io),
+  )
+}
+
+async function pauseQueue(
+  app: YrdCliApp,
+  base: string | undefined,
+  options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const target = await resolvedQueueTarget(base ?? "main", io)
+  if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
+  const pause = await app.queue.pause({
+    base: target.base,
+    reason: options.reason,
+    allowedPRs: csv(options.allow) ?? [],
+  })
+  const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(", ")
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "queue.pause", pause },
+    `Queue ${pause.base} paused: ${pause.reason} (allowed: ${allowed})`,
+  )
+}
+
+async function resumeQueue(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const target = await resolvedQueueTarget(base ?? "main", io)
+  await app.queue.resume(target.base)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "queue.resume", base: target.base },
+    `Queue ${target.base} resumed`,
+  )
+}
+
+async function renderDashboard(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  const state = stateOf(app)
+  const target = resolveQueueTargets(state, selectors, undefined, undefined)
+  const { results } = await queueStatusSnapshots(app, state, target, io)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "dashboard", results },
+    createElement(QueueStatusView, {
+      state: state.bays,
+      results,
+      selected: target.selected,
+      now: io.now?.() ?? Date.now(),
+    }),
+  )
+}
+
+async function queueStatusSnapshots(
   app: YrdCliApp,
   state: YrdCliState,
   target: { bases: Set<string>; selected: Set<string>; prFilter: string | undefined },
   io: YrdCliIO,
-): Promise<{ results: readonly LineStatusResult[] }> {
+): Promise<{ results: readonly QueueStatusResult[] }> {
   if (target.selected.size === 0 && target.bases.size === 0) {
     for (const pr of Object.values(state.bays.prs)) target.bases.add(pr.base)
-    for (const run of Object.values(state.lines.records)) target.bases.add(run.base)
+    for (const run of Object.values(state.queues.records)) target.bases.add(run.base)
     if (target.bases.size === 0) target.bases.add("main")
   }
-  const results: LineStatusResult[] = []
-  for (const group of await lineTargetGroups(target.bases, io)) {
-    const canonical = app.line.status(group.base)
-    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.line.status(base))
-    const runs = mergedLineRuns(canonical, aliases)
+  const results: QueueStatusResult[] = []
+  for (const group of await queueTargetGroups(target.bases, io)) {
+    const canonical = app.queue.status(group.base)
+    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
+    const runs = mergedQueueRuns(canonical, aliases)
     results.push({
       base: group.base,
       ...runs,
-      ...(canonical.hold === undefined ? {} : { hold: canonical.hold }),
+      ...(canonical.pause === undefined ? {} : { pause: canonical.pause }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs: Object.values(state.bays.prs).filter(
         (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
@@ -466,7 +698,85 @@ async function lineStatusSnapshots(
   return { results }
 }
 
-function resolveLineTargets(
+async function listQueues(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ base?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const state = stateOf(app)
+  const target = resolveQueueTargets(state, [], options.base, undefined)
+  const { results } = await queueStatusSnapshots(app, state, target, io)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "queue.list", results },
+    createElement(QueueListView, { results, now: io.now?.() ?? Date.now() }),
+  )
+}
+
+async function dashboard(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ base?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  await renderDashboard(app, options.base === undefined ? [] : [options.base], options, io)
+}
+
+async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const state = stateOf(app)
+  const cwd = io.cwd ?? process.cwd()
+  const bay = currentBay(state.bays, cwd)
+  const branch = bay?.branch ?? currentGitBranch(cwd, io)
+  const pr = Object.values(state.bays.prs).find(
+    (candidate) => (bay !== undefined && candidate.bay === bay.id) || candidate.branch === branch,
+  )
+  const queue = pr === undefined ? undefined : app.queue.status(pr.base)
+  const briefing = {
+    model: "issue -> bay -> pr -> queue -> integrated or rejected",
+    loop: [
+      "yrd pr submit",
+      "yrd pr status",
+      "yrd pr runs <PR>",
+      "yrd pr retry <PR|R>",
+      "fix the branch and run yrd pr submit again",
+    ],
+    live: {
+      bay: bay?.id,
+      pr: pr?.id,
+      base: pr?.base ?? bay?.base,
+      position:
+        pr === undefined
+          ? undefined
+          : Object.values(state.bays.prs)
+              .filter((candidate) => candidate.base === pr.base && candidate.status === "submitted")
+              .toSorted((left, right) => (left.submittedAt ?? "").localeCompare(right.submittedAt ?? ""))
+              .findIndex((candidate) => candidate.id === pr.id) + 1,
+      pause: queue?.pause,
+    },
+    boundaries: ["the queue is the only merger", "issues are read-only references; edit them in the tracker"],
+    json: "add --json to every read or mutation",
+  }
+  const live = [
+    `bay=${briefing.live.bay ?? "-"}`,
+    `pr=${briefing.live.pr ?? "-"}`,
+    `base=${briefing.live.base ?? "-"}`,
+    `position=${briefing.live.position && briefing.live.position > 0 ? briefing.live.position : "-"}`,
+    `pause=${briefing.live.pause?.reason ?? "active"}`,
+  ].join(" ")
+  const human = [
+    "Yrd agent briefing",
+    "Pick an issue -> work in a bay -> submit a PR -> the queue runs checks and merges it.",
+    "Loop:",
+    ...briefing.loop.map((step, index) => `${index + 1}. ${step}`),
+    `Live: ${live}`,
+    "The queue is the only merger; pr merge only teaches the correct next command.",
+    "The tracker holds the pen; yrd's issue surface is a read-only lens.",
+    "Use --json for lossless machine-readable output.",
+  ].join("\n")
+  await printResult(io, jsonEnabled(options), { command: "prime", ...briefing }, human)
+}
+
+function resolveQueueTargets(
   state: YrdCliState,
   selectors: readonly string[],
   base: string | undefined,
@@ -492,34 +802,34 @@ function resolveLineTargets(
   return { bases, selected, prFilter: filterPr }
 }
 
-function lineLogTargets(
+function queueLogTargets(
   state: YrdCliState,
   selectors: readonly string[],
   base: string | undefined,
   pr: string | undefined,
 ): { bases: Set<string>; selected: Set<string>; prFilter: string | undefined } {
-  const target = resolveLineTargets(state, selectors, base, pr)
+  const target = resolveQueueTargets(state, selectors, base, pr)
   if (selectors.length === 0 && base === undefined && pr === undefined) {
     for (const item of Object.values(state.bays.prs)) target.bases.add(item.base)
-    for (const run of Object.values(state.lines.records)) target.bases.add(run.base)
+    for (const run of Object.values(state.queues.records)) target.bases.add(run.base)
     if (target.bases.size === 0) target.bases.add("main")
   }
   return target
 }
 
-async function lineLog(
+async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { base?: string; pr?: string; json?: boolean },
   io: YrdCliIO,
 ): Promise<void> {
   const state = stateOf(app)
-  const target = lineLogTargets(state, selectors, options.base, options.pr)
-  const summaries: LineStatusResult[] = []
-  for (const group of await lineTargetGroups(target.bases, io)) {
-    const canonical = app.line.status(group.base)
-    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.line.status(base))
-    const runs = mergedLineRuns(canonical, aliases)
+  const target = queueLogTargets(state, selectors, options.base, options.pr)
+  const summaries: QueueStatusResult[] = []
+  for (const group of await queueTargetGroups(target.bases, io)) {
+    const canonical = app.queue.status(group.base)
+    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
+    const runs = mergedQueueRuns(canonical, aliases)
     summaries.push({
       base: group.base,
       ...runs,
@@ -535,14 +845,14 @@ async function lineLog(
   const revisionSubjects = new Map<string, string>()
   const cwd = io.cwd ?? process.cwd()
   for (const pr of summaries.flatMap((result) => result.finished.flatMap((run) => run.prs))) {
-    const key = lineRevisionKey(pr)
+    const key = queueRevisionKey(pr)
     if (revisionSubjects.has(key)) continue
     const subject = commitSubject(cwd, pr.headSha)
     if (subject !== undefined) revisionSubjects.set(key, subject)
   }
-  const attempts = await lineLogAttempts(app.events())
-  const submissionTimes = await lineSubmissionTimes(app.events())
-  const rows = lineLogRows(
+  const attempts = await queueLogAttempts(app.events())
+  const submissionTimes = await queueSubmissionTimes(app.events())
+  const rows = queueLogRows(
     summaries,
     target.selected,
     target.prFilter,
@@ -551,74 +861,36 @@ async function lineLog(
     revisionSubjects,
     submissionTimes,
   )
-  const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
+  const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "line.log", rows, ...(coverage === undefined ? {} : { coverage }) },
-    createElement(LineLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
+    { command: "log", rows, ...(coverage === undefined ? {} : { coverage }) },
+    createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
   )
 }
 
-async function lineShow(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const run = app.line.get(selector)
-  if (run === undefined) refusal(`no line run '${selector}'`)
-  const finished = Object.values(stateOf(app).lines.records)
-    .map((record) => app.line.get(record.id))
-    .filter(
-      (candidate): candidate is LineRun =>
-        candidate !== undefined && (candidate.status === "passed" || candidate.status === "failed"),
-    )
-  const attempts = await lineLogAttempts(app.events())
-  const data = lineShowData(run, finished, attempts)
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "line.show", run: data },
-    createElement(LineShowView, { data }),
-  )
-}
-
-async function lineAudit(
+async function queueAudit(
   app: YrdCliApp,
   services: YrdCliServices,
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  const core = app.line.audit()
-  const environment = await services.line?.auditEnvironment?.()
+  const core = app.queue.audit()
+  const environment = await services.queue?.auditEnvironment?.()
   const result = { findings: [...core.findings, ...(environment?.findings ?? [])] }
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "line.audit", ...result },
+    { command: "queue.audit", ...result },
     result.findings.length === 0
-      ? "line audit clean"
+      ? "queue audit clean"
       : result.findings.map((finding) => `${finding.code}: ${finding.message}`).join("\n"),
   )
   return result.findings.length === 0 ? 0 : 1
 }
 
-async function recoverLine(
-  app: YrdCliApp,
-  options: JsonOption & Readonly<{ reason?: string }>,
-  io: YrdCliIO,
-): Promise<void> {
-  if (options.reason?.trim() === "") usage("--reason requires text")
-  const runs = await app.line.recover({
-    ...runtimeOptions(io),
-    recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
-    ...(options.reason === undefined ? {} : { reason: options.reason }),
-  })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "line.recover", results: runs },
-    createElement(LineRunsView, { runs }),
-  )
-}
-
-async function lineAdministration(
+async function queueAdministration(
   services: YrdCliServices,
   command: "init" | "deinit",
   base: string | undefined,
@@ -626,14 +898,14 @@ async function lineAdministration(
   io: YrdCliIO,
 ): Promise<void> {
   const action = command === "init" ? "provision" : "deprovision"
-  const administration = services.line
+  const administration = services.queue
   const capability = administration?.[action]
-  if (capability === undefined) configuration(`line.${command} capability is not installed`)
+  if (capability === undefined) configuration(`queue.${command} capability is not installed`)
   const result = await capability(base)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: `line.${command}`, base: base ?? "main", result },
+    { command: `queue.${command}`, base: base ?? "main", result },
     `${base ?? "main"} ${command === "init" ? "initialized" : "deinitialized"}`,
   )
 }
@@ -662,7 +934,7 @@ function jsonRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-async function finishLine(
+async function finishQueue(
   app: YrdCliApp,
   selector: string,
   options: {
@@ -679,8 +951,8 @@ async function finishLine(
   },
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.ok === options.fail) usage("line finish requires exactly one of --ok or --fail")
-  const waiting = app.line.waiting(selector, options.step)
+  if (options.ok === options.fail) usage("queue finish requires exactly one of --ok or --fail")
+  const waiting = app.queue.waiting(selector, options.step)
   const job = waiting.step.job
   const recordedArtifacts = artifacts(options.artifact)
   const exitCode = positiveInteger(options.exitCode, "--exit-code")
@@ -695,7 +967,7 @@ async function finishLine(
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
   }
-  const resumed = await app.line.finish(
+  const resumed = await app.queue.finish(
     selector,
     {
       step: waiting.step.name,
@@ -717,15 +989,15 @@ async function finishLine(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "line.finish", run: resumed },
+    { command: "queue.finish", run: resumed },
     `${resumed.id} ${resumed.status}`,
   )
 }
 
-async function watchLine(
+async function watchQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { steps?: unknown; retry?: boolean; json?: boolean; interval?: number },
+  options: { steps?: unknown; json?: boolean; interval?: number },
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const intervalSeconds = options.interval ?? 15
@@ -736,11 +1008,11 @@ async function watchLine(
   const scope = io.scope ?? app.scope
   let exit: YrdCliExitCode = 0
   while (true) {
-    const runs = await integrateLines(app, selectors, options, io)
+    const runs = await runQueues(app, selectors, options, io)
     if (jsonEnabled(options)) {
-      for (const run of runs) io.stdout(stableJson({ command: "line.integrate", mode: "watch", run }))
+      for (const run of runs) io.stdout(stableJson({ command: "queue.run", mode: "watch", run }))
     } else if (runs.length > 0) {
-      await printHuman(io, createElement(LineRunsView, { runs }))
+      await printHuman(io, createElement(QueueRunsView, { runs }))
     }
     if (runs.some((run) => run.status === "failed")) exit = 1
     if (selectors.length > 0 || scope.signal.aborted) return exit
@@ -752,10 +1024,10 @@ async function watchLine(
 async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const load = async (): Promise<LineWatchSnapshot> => {
+  const load = async (): Promise<QueueWatchSnapshot> => {
     const state = stateOf(app)
-    const target = resolveLineTargets(state, [], options.base, options.pr)
-    const { results } = await lineStatusSnapshots(app, state, target, io)
+    const target = resolveQueueTargets(state, [], options.base, options.pr)
+    const { results } = await queueStatusSnapshots(app, state, target, io)
     return { results, now: io.now?.() ?? Date.now() }
   }
 
@@ -765,7 +1037,7 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
       refusal("watch requires an interactive terminal; use --json for streaming output")
     }
     const initial = await load()
-    await renderLive(createElement(LineWatchPane, { initial, load, intervalMs: interval }), {
+    await renderLive(createElement(QueueWatchPane, { initial, load, intervalMs: interval }), {
       signal: scope.signal,
     })
     return 0
@@ -773,7 +1045,12 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
 
   while (true) {
     const snapshot = await load()
-    await printResult(io, true, { command: "watch", results: snapshot.results }, createElement(LineWatchView, snapshot))
+    await printResult(
+      io,
+      true,
+      { command: "watch", results: snapshot.results },
+      createElement(QueueWatchView, snapshot),
+    )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
     if (scope.signal.aborted) return 0
@@ -807,19 +1084,19 @@ async function advanceContest(app: YrdCliApp, contest: string, io: YrdCliIO, ret
   return app.contests.evaluate(contest, { ...runtimeOptions(io), concurrency, retry })
 }
 
-async function competeTask(
+async function openContest(
   app: YrdCliApp,
-  taskInput: string,
-  options: { agents?: string; prompt?: string; evaluators?: unknown; base?: string; line?: string; json?: boolean },
+  issueInput: string,
+  options: { agents?: string; prompt?: string; evaluators?: unknown; base?: string; queue?: string; json?: boolean },
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  if (options.agents === undefined) usage("task compete requires --agents <list>")
+  if (options.agents === undefined) usage("contest open requires --agents <list>")
   if (options.prompt?.trim() === "") usage("--prompt requires non-empty text")
-  const task = await app.tasks.resolve(app.tasks.ref(taskInput))
-  const requestedBase = oneOfAliases(options.base, options.line, "base", "line")
+  const issue = await app.issues.resolve(app.issues.ref(issueInput))
+  const requestedBase = oneOfAliases(options.base, options.queue, "base", "queue")
   const base = await app.contests.resolveBase(requestedBase)
   const opened = await app.contests.compete({
-    task,
+    issue,
     competitors: competitors(options.agents, options.prompt),
     ...(csv(options.evaluators) === undefined ? {} : { evaluators: csv(options.evaluators) }),
     base: base.base,
@@ -829,24 +1106,24 @@ async function competeTask(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "task.compete", contest },
+    { command: "contest.open", contest },
     createElement(ContestStatusView, { contest }),
   )
   return contest.status === "failed" ? 1 : 0
 }
 
-async function showContest(app: YrdCliApp, id: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function viewContest(app: YrdCliApp, id: string, options: JsonOption, io: YrdCliIO): Promise<void> {
   const contest = app.contests.get(id)
   if (contest === undefined) refusal(`no contest '${id}'`)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "contest.show", contest },
+    { command: "contest.view", contest },
     createElement(ContestStatusView, { contest }),
   )
 }
 
-async function evaluateContest(
+async function evalContest(
   app: YrdCliApp,
   id: string,
   options: { retry?: boolean; json?: boolean },
@@ -856,7 +1133,7 @@ async function evaluateContest(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "contest.evaluate", contest },
+    { command: "contest.eval", contest },
     createElement(ContestStatusView, { contest }),
   )
   return contest.status === "failed" ? 1 : 0
@@ -952,6 +1229,45 @@ async function promoteContest(app: YrdCliApp, id: string, options: JsonOption, i
   return contest.status === "promotion-failed" ? 1 : 0
 }
 
+async function listContests(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const contests = app.contests.list()
+  const human =
+    contests.length === 0
+      ? "No contests."
+      : [
+          "CONTEST ISSUE STATUS",
+          ...contests.map(
+            (contest) => `${contest.id} ${contest.issue.ref.source}:${contest.issue.ref.id} ${contest.status}`,
+          ),
+        ].join("\n")
+  await printResult(io, jsonEnabled(options), { command: "contest.list", contests }, human)
+}
+
+function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): YrdCliExitCode {
+  const pr = requiredPr(app, selector)
+  const next =
+    pr.status === "submitted"
+      ? `yrd queue run ${pr.id}`
+      : pr.status === "rejected"
+        ? `yrd pr retry ${pr.id}`
+        : pr.status === "pushed"
+          ? `yrd pr submit ${pr.id}`
+          : `yrd pr view ${pr.id}`
+  const message = `the queue is the only merger; PR '${pr.id}' is ${pr.status}; run '${next}'`
+  const guidance = {
+    command: "pr.merge",
+    pr: pr.id,
+    status: pr.status,
+    next,
+    failure: { kind: "refusal", code: "queue-only-merger", message },
+  }
+  if (jsonEnabled(options)) {
+    io.stderr(stableJson(guidance))
+    return 1
+  }
+  refusal(message)
+}
+
 function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
@@ -969,32 +1285,43 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: { wroteError
   for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
 
+function configureCanonicalHelp(program: CliCommand): void {
+  const standard = new Help()
+  const withoutAlias = (value: string, command: CliCommand): string => {
+    const alias = command.alias()
+    return alias === "" ? value : value.replace(`|${alias}`, "")
+  }
+  program.configureHelp({
+    subcommandTerm: (command) => withoutAlias(standard.subcommandTerm(command), command as unknown as CliCommand),
+    commandUsage: (command) => withoutAlias(standard.commandUsage(command), command as unknown as CliCommand),
+  })
+}
+
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
   const bay = projection === "bay" ? name : `${name} bay`
   const examples: [string, string][] = [
     [`$ ${bay} open fix --from topic`, "open an existing branch"],
-    [`$ ${bay} submit --wait`, "submit and run the line"],
+    [`$ ${bay} submit`, "submit the current bay as a PR"],
   ]
   if (projection === "root") {
     examples.push(
-      [`$ ${name} line status`, "inspect active PRs"],
-      [`$ ${name} line integrate --steps check,merge`, "run selected steps"],
+      [`$ ${name} pr`, "inspect active PRs"],
+      [`$ ${name} queue run --steps check,merge`, "run selected steps"],
       [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
-      [`$ ${name} task compete km:T1 -a codex/claude`, "compare implementations"],
+      [`$ ${name} contest open km:T1 -a codex/claude`, "compare implementations"],
     )
   }
   program.addHelpSection("Examples:", examples)
 }
 
-function addLineExamples(line: CliCommand, name: string): void {
-  line.addHelpSection("Examples:", [
-    [`$ ${name} line status`, "show the default line"],
-    [`$ ${name} line status release/2.0`, "show another base branch"],
-    [`$ ${name} line integrate PR7 --steps check,merge`, "run selected steps for one PR"],
-    [`$ ${name} line log --base release/2.0`, "show terminal completed log for a base"],
-    [`$ ${name} line show R1`, "show step-level run evidence and proofs"],
-    [`$ ${name} line hold --reason maintenance --allow PR7`, "hold all but selected PRs"],
-    [`$ ${name} line integrate --watch`, "keep the default line moving"],
+function addQueueExamples(queue: CliCommand, name: string): void {
+  queue.addHelpSection("Examples:", [
+    [`$ ${name} queue`, "list active queues"],
+    [`$ ${name} queue run PR7 --steps check,merge`, "run selected steps for one PR"],
+    [`$ ${name} log --base release/2.0`, "show completed work for a base"],
+    [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
+    [`$ ${name} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
+    [`$ ${name} queue run --watch`, "keep the default queue moving"],
   ])
 }
 
@@ -1009,29 +1336,51 @@ function buildProgram(
 ): CliCommand {
   const installed = (): YrdCliApp => app ?? configuration("command runtime is not initialized")
   const program = new CliCommand(name)
-    .description(projection === "bay" ? "manage isolated Git work bays" : "software delivery orchestration")
+    .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — agentic software delivery")
     .showHelpAfterError()
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
+  configureCanonicalHelp(program)
   if (projection === "root") program.version(YRD_VERSION, "-V, --version")
   if (projection === "root") {
     program.addHelpSection(
-      "Help:",
-      "Yrd coordinates software work from task to delivery.\nBays isolate implementations. Lines verify and integrate them.\nContests compare alternatives before promotion.",
+      "Model:",
+      "Pick an issue -> work it in a bay -> submit as a PR -> PRs queue per base ->\na run verifies and merges each one -> integrated, or rejected with the log.",
     )
+    program.addHelpSection("Objects:", [
+      ["issue", "tracker-owned intent; yrd exposes a read-only delivery lens"],
+      ["bay", "isolated Git workspace; also standalone as git-bay"],
+      ["pr", "submitted branch@head revision; the queue's unit"],
+      ["contest", "competing implementations; winner promotes to a PR"],
+      ["queue", "one per base; verifies and merges PRs serially"],
+    ])
+    program.addHelpSection(
+      "Boundaries:",
+      "Runs, steps, jobs, attempts, and runners are records inside PRs and the log.\nThe queue is the only merger; pr merge is a teaching refusal.\nThe tracker holds the pen; yrd never creates or edits issues.",
+    )
+    program
+      .command("_dashboard", { isDefault: true, hidden: true })
+      .option("--base <branch>", "scope the dashboard to one base")
+      .option("--json", "emit stable JSON")
+      .action(async (options) => dashboard(installed(), options, io))
   }
 
   const bay = projection === "bay" ? program : program.command("bay").description("manage isolated Git work bays")
   bay.helpCommand(false)
+  if (projection === "root") bay.alias("bays")
+  bay
+    .command("_list", { isDefault: true, hidden: true })
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listBays(installed(), options, io))
   bay
     .command("open <name>")
     .description("open a work bay")
     .option("--from <branch>", "use an existing source branch")
     .option("--head <branch>", "alias for --from")
     .option("--base <branch>", "select the base branch")
-    .option("--line <branch>", "alias for --base")
-    .option("--task <ref>", "link a tracker-neutral task reference")
+    .option("--queue <branch>", "alias for --base")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--actor <id>", "record the worker or implementation identity")
     .option("--json", "emit stable JSON")
     .action(async (workName, options) => openBay(installed(), workName, options, io))
@@ -1043,11 +1392,11 @@ function buildProgram(
   bay
     .command("submit [selector...]")
     .description("submit bays or branches")
-    .option("--wait", "run the line before returning")
     .option("--base <branch>", "base branch for a direct branch submit")
-    .option("--line <branch>", "alias for --base")
+    .option("--queue <branch>", "alias for --base")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io)))
+    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
     .command("close [selector...]")
     .description("close work bays")
@@ -1062,8 +1411,16 @@ function buildProgram(
   }
 
   program
+    .command("log")
+    .description("show queue history, newest first")
+    .option("--base <branch>", "scope log to one base branch")
+    .option("--pr <pr>", "scope log to one PR")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => logRuns(installed(), [], options, io))
+
+  program
     .command("watch")
-    .description("monitor line progress")
+    .description("monitor queue progress")
     .option("--base <branch>", "scope watch to one base")
     .option("--pr <pr>", "scope watch to one PR")
     .option("--json", "emit stable JSON")
@@ -1071,81 +1428,69 @@ function buildProgram(
       setExit(await watchQueue(installed(), options, io))
     })
 
-  const line = program.command("line").description("manage integration lines")
-  line.helpCommand(false)
-  line
-    .command("status [selector...]")
-    .description("show line and PR status")
+  program
+    .command("prime")
+    .description("brief an agent on Yrd and current delivery state")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => lineStatus(installed(), selectors, options, io))
-  line
-    .command("log [selector...]")
-    .description("show terminal log of finished PR runs")
-    .option("--base <branch>", "scope log to one base branch")
-    .option("--pr <pr>", "scope log to one PR")
+    .action(async (options) => primeYrd(installed(), options, io))
+
+  const queue = program.command("queue").description("manage integration queues")
+  queue.helpCommand(false)
+  queue.alias("queues")
+  queue
+    .command("_list", { isDefault: true, hidden: true })
+    .option("--base <branch>", "scope queues to one base")
     .option("--json", "emit stable JSON")
-    .action(async (selectors, options) => lineLog(installed(), selectors, options, io))
-  line
-    .command("show <run>")
-    .description("show run steps and evidence")
-    .option("--json", "emit stable JSON")
-    .action(async (run, options) => lineShow(installed(), run, options, io))
-  line
+    .action(async (options) => listQueues(installed(), options, io))
+  queue
     .command("audit")
-    .description("check line state")
+    .description("check queue state")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await lineAudit(installed(), services, options, io)))
-  line
+    .action(async (options) => setExit(await queueAudit(installed(), services, options, io)))
+  queue
     .command("init [base]")
-    .description("prepare line resources")
+    .description("prepare queue resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => lineAdministration(services, "init", base, options, io))
-  line
+    .action(async (base, options) => queueAdministration(services, "init", base, options, io))
+  queue
     .command("deinit [base]")
-    .description("release line resources")
+    .description("release queue resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => lineAdministration(services, "deinit", base, options, io))
-  line
-    .command("hold [base]")
-    .description("hold new line runs")
-    .requiredOption("--reason <text>", "record the hold reason")
-    .option("--allow [pr...]", "PR ids allowed through the hold")
+    .action(async (base, options) => queueAdministration(services, "deinit", base, options, io))
+  queue
+    .command("pause [base]")
+    .description("pause new queue runs")
+    .requiredOption("--reason <text>", "record the pause reason")
+    .option("--allow [pr...]", "PR ids allowed through the pause")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => holdLine(installed(), base, options, io))
-  line
-    .command("release [base]")
-    .description("release a line hold")
+    .action(async (base, options) => pauseQueue(installed(), base, options, io))
+  queue
+    .command("resume [base]")
+    .description("resume a paused queue")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => releaseLine(installed(), base, options, io))
-  line
-    .command("recover")
-    .description("recover expired runner leases")
-    .option("--reason <text>", "record the recovery reason")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => recoverLine(installed(), options, io))
-  line
-    .command("integrate [selector...]")
-    .description("run line steps for PRs")
+    .action(async (base, options) => resumeQueue(installed(), base, options, io))
+  queue
+    .command("run [selector...]")
+    .description("run queue steps for PRs")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--retry", "retry rejected PRs")
-    .option("--watch", "keep draining the default line")
+    .option("--watch", "keep draining the default queue")
     .option("--interval <seconds>", "watch interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
       if (options.watch === true) {
-        setExit(await watchLine(installed(), selectors, options, io))
+        setExit(await watchQueueRuns(installed(), selectors, options, io))
         return
       }
-      const runs = await integrateLines(installed(), selectors, options, io)
+      const runs = await runQueues(installed(), selectors, options, io)
       await printResult(
         io,
         jsonEnabled(options),
-        { command: "line.integrate", results: runs },
-        createElement(LineRunsView, { runs }),
+        { command: "queue.run", results: runs },
+        createElement(QueueRunsView, { runs }),
       )
       setExit(runs.some((run) => run.status === "failed") ? 1 : 0)
     })
-  line
+  queue
     .command("finish <selector>")
     .description("resume a waiting step")
     .option("--step <name>", "waiting step name")
@@ -1158,37 +1503,102 @@ function buildProgram(
     .option("--exit-code <code>", "external process exit code", int)
     .option("--duration-ms <milliseconds>", "external duration", int)
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => finishLine(installed(), selector, options, io))
-  addLineExamples(line, name)
+    .action(async (selector, options) => finishQueue(installed(), selector, options, io))
+  addQueueExamples(queue, name)
 
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)
+  pr.alias("prs")
+  pr.command("_list", { isDefault: true, hidden: true })
+    .option("--base <branch>", "scope PRs to one base")
+    .option("--state <state>", "scope PRs to one native state")
+    .option("--issue <ref>", "scope PRs to one issue reference")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listPrs(installed(), options, io))
+  pr.command("submit [selector...]")
+    .description("submit bays or branches without running the queue")
+    .option("--base <branch>", "base branch for a direct branch submit")
+    .option("--queue <branch>", "alias for --base")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
+  pr.command("view <selector>")
+    .description("show a PR and its runs")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => viewPr(installed(), selector, options, io))
+  pr.command("runs <selector>")
+    .description("show run, step, attempt, proof, and artifact detail")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => viewPrRuns(installed(), selector, options, io))
+  pr.command("diff <selector>")
+    .description("show the candidate diff")
+    .option("--stat", "show diff statistics")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => diffPr(installed(), selector, options, io))
+  pr.command("checkout <selector>")
+    .description("materialize a bay from a PR branch")
+    .option("--bay <name>", "name the new bay")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => checkoutPr(installed(), selector, options, io))
+  pr.command("status")
+    .description("show the current bay or branch PR")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => statusPr(installed(), options, io))
+  pr.command("edit <selector>")
+    .description("edit the issue link or note")
+    .option("--issue <ref>", "set the tracker-neutral issue reference")
+    .option("--note <text>", "set the delivery note")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => editPr(installed(), selector, options, io))
+  pr.command("retry <selector>")
+    .description("retry a rejected PR or run")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => setExit(await retryPr(installed(), selector, options, io)))
   pr.command("close [selector...]")
-    .description("close a live PR without merging (leaves it out of the line)")
+    .description("close a live PR without merging (leaves it out of the queue)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closePrs(installed(), selectors, options, io))
+  pr.command("merge <selector>")
+    .description("teach that the queue is the only merger")
+    .option("--json", "emit stable JSON")
+    .action((selector, options) => setExit(refusePrMerge(installed(), selector, options, io)))
 
-  const task = program.command("task").description("orchestrate tracker-neutral tasks")
-  task.helpCommand(false)
-  task
-    .command("compete <task>")
-    .description("compare implementations of one real task")
+  const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
+  issue.helpCommand(false)
+  issue.alias("issues")
+  issue
+    .command("_list", { isDefault: true, hidden: true })
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listIssues(installed(), options, io))
+  issue
+    .command("view <issue>")
+    .description("show Yrd delivery records joined to an issue")
+    .option("--json", "emit stable JSON")
+    .action(async (issueId, options) => listIssues(installed(), options, io, issueId))
+
+  const contest = program.command("contest").description("inspect and select contest attempts")
+  contest.helpCommand(false)
+  contest.alias("contests")
+  contest
+    .command("_list", { isDefault: true, hidden: true })
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listContests(installed(), options, io))
+  contest
+    .command("open <issue>")
+    .description("compare implementations of one real issue")
     .option("-a, --agents <agents>", "ag-style competitor list")
     .option("--prompt <text>", "additional implementation instructions")
     .option("--evaluators [evaluator...]", "evaluator ids, comma-separated or repeated")
     .option("--base <branch>", "base branch")
-    .option("--line <branch>", "alias for --base")
+    .option("--queue <branch>", "alias for --base")
     .option("--json", "emit stable JSON")
-    .action(async (taskId, options) => setExit(await competeTask(installed(), taskId, options, io)))
-
-  const contest = program.command("contest").description("inspect and select contest attempts")
-  contest.helpCommand(false)
+    .action(async (issueId, options) => setExit(await openContest(installed(), issueId, options, io)))
   contest
-    .command("evaluate <contest>")
+    .command("eval <contest>")
     .description("run pending work and evaluators")
     .option("--retry", "retry failed work or re-evaluate failed verdicts")
     .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => setExit(await evaluateContest(installed(), contestId, options, io)))
+    .action(async (contestId, options) => setExit(await evalContest(installed(), contestId, options, io)))
   contest
     .command("finish <contest>")
     .description("finish a waiting evaluator")
@@ -1203,10 +1613,10 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => finishContest(installed(), contestId, options, io))
   contest
-    .command("show <contest>")
+    .command("view <contest>")
     .description("show attempts, metrics, and evidence")
     .option("--json", "emit stable JSON")
-    .action(async (contestId, options) => showContest(installed(), contestId, options, io))
+    .action(async (contestId, options) => viewContest(installed(), contestId, options, io))
   contest
     .command("select <contest>")
     .description("select a winner")
@@ -1221,6 +1631,11 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
+  const order = new Map(
+    ["pr", "bay", "issue", "contest", "queue", "log", "watch", "prime"].map((command, index) => [command, index]),
+  )
+  const orderedCommands = program.commands as unknown as CliCommand[]
+  orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
   addExamples(program, name, projection)
   configureOutput(program, io, commanderOutput)
   return program
@@ -1241,7 +1656,7 @@ async function executeYrd(
   }
   const commanderOutput = { wroteError: false }
   const program = buildProgram(app, services, invocation.name, invocation.projection, io, setExit, commanderOutput)
-  const args = invocation.args.length === 0 ? ["--help"] : invocation.args
+  const args = invocation.args
   try {
     await program.parseAsync(args, { from: "user" })
     return exit

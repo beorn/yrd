@@ -25,7 +25,7 @@ import {
 export type HeldOutCommandEvaluatorOptions = Readonly<{
   id: string
   revision: string
-  /** Executable and static arguments. Yrd never interpolates task or Git data into this array. */
+  /** Executable and static arguments. Yrd never interpolates issue or Git data into this array. */
   command: readonly string[]
   resolveBayPath(bay: string, input: ContestEvaluatorInput, context: JobContext): string | Promise<string>
   timeoutMs?: number
@@ -72,8 +72,8 @@ function evaluatorEnvironment(
     YRD_EVALUATOR: id,
     YRD_CONTEST: input.contest,
     YRD_ATTEMPT: input.attempt,
-    YRD_TASK_SOURCE: input.task.ref.source,
-    YRD_TASK_ID: input.task.ref.id,
+    YRD_ISSUE_SOURCE: input.issue.ref.source,
+    YRD_ISSUE_ID: input.issue.ref.id,
     YRD_COMPETITOR: input.competitor.id,
     YRD_BAY: input.pin.bay,
     YRD_BRANCH: input.pin.branch,
@@ -113,7 +113,7 @@ async function writeEvidence(
       contest: input.contest,
       attempt: input.attempt,
       job: context,
-      task: input.task.ref,
+      issue: input.issue.ref,
       competitor: input.competitor,
       pin: input.pin,
       checkout: { path: checkout, commit: input.pin.commit.toLowerCase(), detached: true },
@@ -152,7 +152,7 @@ async function writeWaitingEvidence(
       evaluator: { id: evaluator, authority: "held-out" },
       contest: input.contest,
       attempt: input.attempt,
-      task: input.task.ref,
+      issue: input.issue.ref,
       competitor: input.competitor,
       pin: input.pin,
       checkout: { path: checkout, commit: input.pin.commit.toLowerCase(), detached: true },
@@ -273,8 +273,9 @@ export function createHeldOutCommandEvaluator(options: HeldOutCommandEvaluatorOp
   const process = options.inject.process
   const baseEnv = options.inject.env ?? globalThis.process.env
   const runner = options.runner ?? "local"
-  if (runner !== "local" && runner !== "waiting")
+  if (runner !== "local" && runner !== "waiting") {
     throw new Error("yrd: held-out evaluator runner must be local or waiting")
+  }
   const targetEnvironment =
     options.targetEnvironment === undefined
       ? undefined

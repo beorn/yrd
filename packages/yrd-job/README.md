@@ -1,7 +1,7 @@
 # `@yrd/job`
 
 `@yrd/job` adds durable executable work to a Yrd definition. It owns fixed Job
-definitions, lifecycle projection, executor leases, heartbeats, waiting work,
+definitions, lifecycle projection, runner leases, heartbeats, waiting work,
 recovery, and retries. It uses Core's Journal rather than a second store.
 
 ## Composition
@@ -62,7 +62,7 @@ requested -> running -> passed
 ```
 
 `run()` starts the next attempt, heartbeats its lease, executes the pinned
-definition, and settles only while the same executor still owns that attempt.
+definition, and settles only while the same runner still owns that attempt.
 Losing ownership aborts the handler's `JobContext.signal` instead of allowing a
 stale external operation to keep running.
 `recover()` marks an expired running lease as lost only if a concurrent
@@ -81,11 +81,11 @@ return {
 ```
 
 Command-backed adapters use `parseJobLaunch(stdout)` for the shared launcher
-contract. It reads the final JSON line containing `token` and optional `url`,
-`detail`, and `artifacts`; Line and Contest therefore do not maintain separate
+contract. It reads the final JSON queue containing `token` and optional `url`,
+`detail`, and `artifacts`; Queue and Contest therefore do not maintain separate
 remote-job parsers.
 
-Finish it with the exact executor, attempt, and token. Stale attempts, wrong
+Finish it with the exact runner, attempt, and token. Stale attempts, wrong
 owners, and wrong tokens are refused without appending a transition. Revision
 drift still blocks a not-yet-started Job, but it does not strand already waiting
 work: completion is validated against the stable output contract registered

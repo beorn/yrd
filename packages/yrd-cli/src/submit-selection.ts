@@ -2,7 +2,7 @@ import { raiseFailure } from "@yrd/core"
 import type { Process } from "@yrd/process"
 import type { Invocation } from "./invocation.ts"
 
-type BaySelectionOptions = Readonly<{
+type SubmitSelectionOptions = Readonly<{
   worktree: string
   process: Pick<Process, "run">
   env: NodeJS.ProcessEnv
@@ -12,7 +12,9 @@ function submitArguments(invocation: Invocation): readonly string[] | undefined 
   if (invocation.projection === "bay") {
     return invocation.args[0] === "submit" ? invocation.args.slice(1) : undefined
   }
-  return invocation.args[0] === "bay" && invocation.args[1] === "submit" ? invocation.args.slice(2) : undefined
+  return (invocation.args[0] === "bay" || invocation.args[0] === "pr") && invocation.args[1] === "submit"
+    ? invocation.args.slice(2)
+    : undefined
 }
 
 function hasSelector(args: readonly string[]): boolean {
@@ -20,15 +22,14 @@ function hasSelector(args: readonly string[]): boolean {
     const argument = args[index]
     if (argument === undefined) continue
     if (argument === "--") return index + 1 < args.length
-    if (argument === "--base" || argument === "--line") {
+    if (argument === "--base" || argument === "--queue") {
       index += 1
       continue
     }
     if (
-      argument === "--wait" ||
       argument === "--json" ||
       argument.startsWith("--base=") ||
-      argument.startsWith("--line=") ||
+      argument.startsWith("--queue=") ||
       argument.startsWith("-")
     ) {
       continue
@@ -46,9 +47,9 @@ function withSelector(invocation: Invocation, selector: string): string[] {
   return ["yrd", ...args]
 }
 
-export async function resolveBaySubmitArgv(
+export async function resolveSubmitArgv(
   invocation: Invocation,
-  options: BaySelectionOptions,
+  options: SubmitSelectionOptions,
 ): Promise<readonly string[] | undefined> {
   const args = submitArguments(invocation)
   if (args === undefined || hasSelector(args)) return undefined

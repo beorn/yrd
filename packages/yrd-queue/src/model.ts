@@ -3,7 +3,7 @@ import type { JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 
-export type LineRunId = string
+export type QueueRunId = string
 export type StepName = string
 export type BatchConfig = false | number
 
@@ -51,77 +51,77 @@ export type InstalledStep = Readonly<{
   needsIntegration: boolean
 }>
 
-export type LineFailure = Readonly<{
+export type QueueFailure = Readonly<{
   at: string
   error: JobError
 }>
 
-export type LineRecord = Readonly<{
-  id: LineRunId
+export type QueueRecord = Readonly<{
+  id: QueueRunId
   prs: readonly PRSnapshot[]
   base: string
   steps: readonly InstalledStep[]
   initialIntegration?: IntegrationProof
   startedAt: string
-  parent?: LineRunId
+  parent?: QueueRunId
   isolationPart?: 0 | 1
-  failure?: LineFailure
+  failure?: QueueFailure
 }>
 
-export type LineStep = InstalledStep & Readonly<{ job?: Job }>
+export type QueueStep = InstalledStep & Readonly<{ job?: Job }>
 
-export type LineRun = Omit<LineRecord, "initialIntegration" | "steps" | "failure"> &
+export type QueueRun = Omit<QueueRecord, "initialIntegration" | "steps" | "failure"> &
   Readonly<{
     cursor: number
     integration?: IntegrationProof
     status: "running" | "waiting" | "passed" | "failed"
-    steps: readonly LineStep[]
+    steps: readonly QueueStep[]
     shape: PRShape | IntegratedShape
     finishedAt?: string
     error?: JobError
   }>
 
-export type LineHold = Readonly<{
+export type QueuePause = Readonly<{
   base: string
   reason: string
   allowedPRs: readonly string[]
-  heldAt: string
+  pausedAt: string
 }>
-export const LineHoldSchema = z
+export const QueuePauseSchema = z
   .object({
     base: GitRefSchema,
     reason: z.string().trim().min(1),
     allowedPRs: z.array(PRIdSchema),
-    heldAt: z.iso.datetime({ offset: true }),
+    pausedAt: z.iso.datetime({ offset: true }),
   })
-  .strict() as z.ZodType<LineHold>
+  .strict() as z.ZodType<QueuePause>
 
-export type LinesState = Readonly<{
+export type QueuesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
-  holds: Readonly<Record<string, LineHold>>
-  records: Readonly<Record<LineRunId, LineRecord>>
+  pauses: Readonly<Record<string, QueuePause>>
+  records: Readonly<Record<QueueRunId, QueueRecord>>
 }>
 
-export type LineSummary = Readonly<{
+export type QueueSummary = Readonly<{
   base: string
-  running: readonly LineRun[]
-  waiting: readonly LineRun[]
-  finished: readonly LineRun[]
-  hold?: LineHold
+  running: readonly QueueRun[]
+  waiting: readonly QueueRun[]
+  finished: readonly QueueRun[]
+  pause?: QueuePause
 }>
 
-export type LineAuditFinding = Readonly<{
+export type QueueAuditFinding = Readonly<{
   code: string
   message: string
-  run?: LineRunId
+  run?: QueueRunId
   pr?: string
   step?: StepName
 }>
 
-export type LineAuditResult = Readonly<{ findings: readonly LineAuditFinding[] }>
+export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 
-export const LineRecordSchema = z
+export const QueueRecordSchema = z
   .object({
     id: z.string().trim().min(1),
     prs: z.array(PRSnapshotSchema).min(1),
@@ -150,23 +150,23 @@ export const LineRecordSchema = z
   })
   .strict()
 
-export const Lines = Object.freeze({
-  empty(options: Readonly<{ batchSize: number; defaultSteps?: readonly StepName[] }>): LinesState {
+export const Queues = Object.freeze({
+  empty(options: Readonly<{ batchSize: number; defaultSteps?: readonly StepName[] }>): QueuesState {
     return {
       batchSize: options.batchSize,
       ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
-      holds: {},
+      pauses: {},
       records: {},
     }
   },
 
-  record(state: LinesState, id: LineRunId): LineRecord {
+  record(state: QueuesState, id: QueueRunId): QueueRecord {
     const record = state.records[id]
-    if (record === undefined) throw new Error(`yrd: no line run '${id}'`)
+    if (record === undefined) throw new Error(`yrd: no queue run '${id}'`)
     return record
   },
 
-  nextId(state: LinesState): LineRunId {
+  nextId(state: QueuesState): QueueRunId {
     const values = Object.keys(state.records)
       .filter((id) => /^R\d+$/u.test(id))
       .map((id) => Number(id.slice(1)))
@@ -186,7 +186,7 @@ export const Lines = Object.freeze({
     })
   },
 
-  terminal(run: LineRun): boolean {
+  terminal(run: QueueRun): boolean {
     return run.status === "passed" || run.status === "failed"
   },
 })

@@ -29,9 +29,9 @@ import {
   configuredWaitingCommandStep,
   gitCheckStep,
   gitMergeStep,
-  inspectGitLineTarget,
-  resolveGitLineTarget,
-  withLine,
+  inspectGitQueueTarget,
+  resolveGitQueueTarget,
+  withQueue,
   withMerge,
   withStep,
   type CommandEvidence,
@@ -40,20 +40,20 @@ import {
   type StepDef,
   type StepExecution,
   type StepRunner,
-} from "@yrd/line"
+} from "@yrd/queue"
 import { createJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
-import { createKmTaskSource, withTasks, type TaskSource } from "@yrd/task"
+import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
-import { resolveBaySubmitArgv } from "./bay-selection.ts"
+import { resolveSubmitArgv } from "./submit-selection.ts"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrd, runYrdHelp } from "./run.ts"
-import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliLineAdministration, YrdCliServices } from "./types.ts"
+import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
 
@@ -68,7 +68,7 @@ export type DefaultYrdAppOptions = Readonly<{
   config: ResolvedYrdProjectConfig
   receiverPath?: string
   workspace?: BayWorkspace
-  taskSources?: readonly TaskSource[]
+  issueSources?: readonly IssueSource[]
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
   contestGit?: ContestGit
@@ -77,22 +77,22 @@ export type DefaultYrdAppOptions = Readonly<{
 }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
-  for (const name of config.line.steps) {
-    if (name !== "merge" && config.steps[name]?.run === undefined) {
+  for (const name of config.steps) {
+    if (name !== "merge" && config.definitions[name]?.run === undefined) {
       raiseFailure(
         "configuration",
         "step-command-missing",
-        `yrd: default line step '${name}' requires steps.${name}.run`,
+        `yrd: default queue step '${name}' requires steps.${name}.run`,
       )
     }
   }
-  if (config.steps.merge?.runner === "waiting") {
+  if (config.definitions.merge?.runner === "waiting") {
     raiseFailure("configuration", "merge-runner-invalid", "yrd: merge cannot use a waiting runner")
   }
-  const mergeIndex = config.line.steps.indexOf("merge")
-  if (mergeIndex >= 0 && config.steps.merge?.run === undefined) {
-    for (const name of config.line.steps.slice(mergeIndex + 1)) {
-      if (RawGitPushPattern.test(config.steps[name]?.run ?? "")) {
+  const mergeIndex = config.steps.indexOf("merge")
+  if (mergeIndex >= 0 && config.definitions.merge?.run === undefined) {
+    for (const name of config.steps.slice(mergeIndex + 1)) {
+      if (RawGitPushPattern.test(config.definitions[name]?.run ?? "")) {
         raiseFailure(
           "configuration",
           "native-merge-post-push",
@@ -102,7 +102,7 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
     }
   }
   for (const evaluator of config.contest.evaluators) {
-    if (config.steps[evaluator]?.run === undefined) {
+    if (config.definitions[evaluator]?.run === undefined) {
       raiseFailure(
         "configuration",
         "evaluator-command-missing",
@@ -112,7 +112,7 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   }
 }
 
-function lineStepRevision(
+function queueStepRevision(
   repo: string,
   stateDir: string,
   name: string,
@@ -127,8 +127,8 @@ function lineStepRevision(
           name === "merge" && resolvedCommand === undefined
             ? "yrd-native-merge-v3"
             : checkoutParent === undefined
-              ? "yrd-line-command-v2"
-              : "yrd-line-command-v3",
+              ? "yrd-queue-command-v2"
+              : "yrd-queue-command-v3",
         repo,
         stateDir,
         ...(checkoutParent === undefined ? {} : { checkoutParent }),
@@ -172,7 +172,7 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
 }
 
 /**
- * The ONE default wall-clock bound for a line step's local command (21012 S1).
+ * The ONE default wall-clock bound for a queue step's local command (21012 S1).
  * Generous by design — a legitimate broad local gate takes minutes; only a
  * wedged process tree exceeds it. Declarative override: `timeoutMs` on the
  * step config. Applies to the local command execution of BOTH runners (a
@@ -188,7 +188,7 @@ export function stepTimeoutMs(config: YrdStepConfig): number {
 }
 
 function stepCommand(name: string, config: YrdStepConfig): string {
-  if (config.run === undefined) throw new Error(`yrd: line step '${name}' has no command`)
+  if (config.run === undefined) throw new Error(`yrd: queue step '${name}' has no command`)
   return config.run
 }
 
@@ -214,7 +214,7 @@ function candidateStep(
         timeoutMs: stepTimeoutMs(config),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
-      { revision: lineStepRevision(repo, stateDir, name, config, checkoutParent) },
+      { revision: queueStepRevision(repo, stateDir, name, config, checkoutParent) },
     ),
   )
 }
@@ -241,13 +241,13 @@ function integratedRunner(
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
 
-function configuredLineSteps(
+function configuredQueueSteps(
   options: DefaultYrdAppOptions,
   mergeCommand: readonly string[] | undefined,
 ): readonly RuntimeStep[] {
   let integrated = false
-  return options.config.line.steps.map((name) => {
-    const config = options.config.steps[name] ?? { runner: "local" as const }
+  return options.config.steps.map((name) => {
+    const config = options.config.definitions[name] ?? { runner: "local" as const }
     if (name === "merge") {
       integrated = true
       return eraseStep(
@@ -263,7 +263,7 @@ function configuredLineSteps(
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
               }),
           {
-            revision: lineStepRevision(options.repo, options.stateDir, name, config, undefined, mergeCommand),
+            revision: queueStepRevision(options.repo, options.stateDir, name, config, undefined, mergeCommand),
           },
         ),
       )
@@ -273,7 +273,7 @@ function configuredLineSteps(
     }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
-        revision: lineStepRevision(options.repo, options.stateDir, name, config),
+        revision: queueStepRevision(options.repo, options.stateDir, name, config),
         needsIntegration: true,
       }),
     )
@@ -299,33 +299,33 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
-function lineBranch(ref: string): string {
+function queueBranch(ref: string): string {
   if (ref.startsWith("refs/heads/")) return ref.slice("refs/heads/".length)
   if (ref.startsWith("refs/remotes/origin/")) return ref.slice("refs/remotes/origin/".length)
   if (ref.startsWith("origin/")) return ref.slice("origin/".length)
   return ref
 }
 
-async function resolveLineTarget(
+async function resolveQueueTarget(
   process: Pick<Process, "run">,
   repo: string,
   configuredBase: string,
   requestedBase: string,
   options: Readonly<{ requireAligned?: boolean }> = {},
 ): Promise<Readonly<{ base: string; sha: string }>> {
-  const configured = lineBranch(configuredBase)
-  const requested = lineBranch(requestedBase)
+  const configured = queueBranch(configuredBase)
+  const requested = queueBranch(requestedBase)
   const base = requested === configured ? configured : requested
   if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
-    throw new Error(`yrd: line base '${requestedBase}' does not resolve`)
+    throw new Error(`yrd: queue base '${requestedBase}' does not resolve`)
   }
-  const inspect = options.requireAligned === true ? resolveGitLineTarget : inspectGitLineTarget
+  const inspect = options.requireAligned === true ? resolveGitQueueTarget : inspectGitQueueTarget
   const target = await inspect({ inject: { process }, repo, branch: base })
   if (target.diverged && options.requireAligned === true) {
     raiseFailure(
       "refusal",
-      "line-target-diverged",
-      `yrd: line '${base}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
+      "queue-target-diverged",
+      `yrd: queue '${base}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
         `${target.remote}/${base} ${target.remoteSha?.slice(0, 12)}; align the local branch before admission`,
     )
   }
@@ -356,7 +356,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
   const evaluators =
     options.contestEvaluators ??
     options.config.contest.evaluators.map((id) => {
-      const step = options.config.steps[id]
+      const step = options.config.definitions[id]
       if (step === undefined) throw new Error(`yrd: contest evaluator '${id}' has no step configuration`)
       return createHeldOutCommandEvaluator({
         id,
@@ -403,7 +403,7 @@ function defaultContestAdapters(options: DefaultYrdAppOptions): {
 export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promise<YrdCliApp> {
   validateConfig(options.config)
   const mergeCommand =
-    options.config.steps.merge?.run === undefined ? undefined : shellCommand(options.config.steps.merge.run)
+    options.config.definitions.merge?.run === undefined ? undefined : shellCommand(options.config.definitions.merge.run)
   const workspace =
     options.workspace ??
     (await createGitWorkspace({
@@ -413,34 +413,34 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     }))
   const bayJobs = createBayJobDefs(workspace)
-  const line = withLine({
-    steps: configuredLineSteps(options, mergeCommand),
-    batch: options.config.line.batch,
-    defaultSteps: options.config.line.steps,
+  const queue = withQueue({
+    steps: configuredQueueSteps(options, mergeCommand),
+    batch: options.config.batch,
+    defaultSteps: options.config.steps,
   })
   const contestAdapters = defaultContestAdapters(options)
   const contests = withContests({
     ...contestAdapters,
-    defaultBase: options.config.line.base,
+    defaultBase: options.config.base,
   })
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
-    withTasks({
-      sources: options.taskSources ?? [createKmTaskSource({ process: options.process, cwd: options.repo })],
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withIssues({
+      sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
     }),
     withBays({
       jobs: bayJobs,
-      defaultBase: lineBranch(options.config.line.base),
+      defaultBase: queueBranch(options.config.base),
       resolveBase: async (base) => {
-        const target = await resolveLineTarget(options.process, options.repo, options.config.line.base, base, {
+        const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           requireAligned: true,
         })
         return { base: target.base, baseSha: target.sha }
       },
     }),
   )
-  return createYrd(contests(line(base)), {
+  return createYrd(contests(queue(base)), {
     inject: {
       journal: options.journal,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
@@ -481,19 +481,19 @@ async function intakeReceipt(app: YrdCliApp, receipt: Readonly<ReceiverReceipt>)
   )
 }
 
-function lineAdministration(
+function queueAdministration(
   process: Pick<Process, "run">,
   repository: YrdRepository,
   config: ResolvedYrdProjectConfig,
-): YrdCliLineAdministration {
-  const inspect = async (base = config.line.base) => {
+): YrdCliQueueAdministration {
+  const inspect = async (base = config.base) => {
     const baseSha = await resolveCommit(process, repository.repo, base)
-    if (baseSha === undefined) throw new Error(`yrd: line base '${base}' does not resolve`)
+    if (baseSha === undefined) throw new Error(`yrd: queue base '${base}' does not resolve`)
     return { base, baseSha }
   }
   return Object.freeze({
     async provision(base) {
-      return { ...(await inspect(base)), steps: config.line.steps, persistentResources: false }
+      return { ...(await inspect(base)), steps: config.steps, persistentResources: false }
     },
     async deprovision(base) {
       return { ...(await inspect(base)), released: [], persistentResources: false }
@@ -586,7 +586,7 @@ export async function createYrdHost(options: { cwd?: string; env?: NodeJS.Proces
       }
     }
     await drain()
-    const services = Object.freeze({ line: lineAdministration(process, repository, loaded.config) })
+    const services = Object.freeze({ queue: queueAdministration(process, repository, loaded.config) })
     let closePromise: Promise<void> | undefined
     const close = () => (closePromise ??= closeRuntime(app, process, scope))
     return Object.freeze({
@@ -663,12 +663,6 @@ export async function runYrdProcess(
   io: YrdCliIO = defaultIO(),
 ): Promise<YrdCliExitCode> {
   const invocation = resolveInvocation(argv)
-  const namespace = invocation.args[0]
-  const namespaceOnly =
-    invocation.projection === "root" &&
-    invocation.args.length === 1 &&
-    namespace !== undefined &&
-    ["bay", "line", "task", "contest"].includes(namespace)
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
     const mode = invocation.args[1]
     if (mode !== "pre-receive" && mode !== "post-receive") {
@@ -685,13 +679,11 @@ export async function runYrdProcess(
   }
 
   if (
-    invocation.args.length === 0 ||
-    namespaceOnly ||
     invocation.args.some(
       (argument) => argument === "--help" || argument === "-h" || argument === "--version" || argument === "-V",
     )
   ) {
-    return runYrdHelp(namespaceOnly ? [...argv, "--help"] : argv, io)
+    return runYrdHelp(argv, io)
   }
 
   let host: YrdHost | undefined
@@ -702,7 +694,7 @@ export async function runYrdProcess(
     const activeHost = await createYrdHost({ cwd: io.cwd })
     host = activeHost
     removeShutdownSignals = bindProcessShutdown(closeHost)
-    const selectedArgv = await resolveBaySubmitArgv(invocation, {
+    const selectedArgv = await resolveSubmitArgv(invocation, {
       worktree: activeHost.repository.worktree,
       process: activeHost.process,
       env: cleanEnvironment(globalThis.process.env),
@@ -714,10 +706,9 @@ export async function runYrdProcess(
         ...io,
         concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
         resolveRevision: io.resolveRevision ?? ((ref, cwd) => resolveCommit(activeHost.process, cwd, ref)),
-        resolveLineTarget:
-          io.resolveLineTarget ??
-          ((ref) =>
-            resolveLineTarget(activeHost.process, activeHost.repository.repo, activeHost.config.line.base, ref)),
+        resolveQueueTarget:
+          io.resolveQueueTarget ??
+          ((ref) => resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)),
       },
       activeHost.services,
     )

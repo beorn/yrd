@@ -1,7 +1,7 @@
 /**
- * @failure Git-backed Line steps can check one candidate and merge another or lose durable command evidence.
+ * @failure Git-backed Queue steps can check one candidate and merge another or lose durable command evidence.
  * @level l2
- * @consumer @yrd/line Git step adapters
+ * @consumer @yrd/queue Git step adapters
  */
 import { existsSync } from "node:fs"
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
@@ -21,7 +21,7 @@ import {
   configuredMergeStep,
   gitCheckStep,
   gitMergeStep,
-  withLine,
+  withQueue,
   withMerge,
   withStep,
   type AddStepResult,
@@ -29,10 +29,10 @@ import {
   type GitCheckResultEvidence,
   type PRShape,
   type StepExecution,
-} from "@yrd/line"
+} from "@yrd/queue"
 
 const roots: string[] = []
-const runtime = { executor: "local", leaseMs: 60_000 }
+const runtime = { runner: "local", leaseMs: 60_000 }
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
 afterEach(async () => {
@@ -53,7 +53,7 @@ async function git(repo: string, args: string[]): Promise<string> {
 async function repository<const Names extends readonly string[]>(
   ...names: Names
 ): Promise<{ repo: string } & Record<Names[number], string>> {
-  const root = await mkdtemp(join(tmpdir(), "yrd-line-git-"))
+  const root = await mkdtemp(join(tmpdir(), "yrd-queue-git-"))
   roots.push(root)
   const repo = join(root, "repo")
   await Bun.$`git init -q -b main ${repo}`
@@ -64,7 +64,7 @@ async function repository<const Names extends readonly string[]>(
   await git(repo, ["commit", "-qm", "main"])
   const shas: Record<string, string> = {}
   for (const name of names) {
-    await git(repo, ["switch", "-qc", `task/${name}`])
+    await git(repo, ["switch", "-qc", `issue/${name}`])
     await writeFile(join(repo, `${name}.txt`), `${name}\n`)
     await git(repo, ["add", `${name}.txt`])
     await git(repo, ["commit", "-qm", name])
@@ -95,7 +95,7 @@ async function hookedSubmoduleRepository(options: {
   await writeFile(join(module, "version.txt"), `${options.candidateVersion}\n`)
   await git(module, ["commit", "-qam", "candidate"])
   const moduleSha = await git(module, ["rev-parse", "HEAD"])
-  await git(repo, ["switch", "-qc", "task/feature"])
+  await git(repo, ["switch", "-qc", "issue/feature"])
   await git(join(repo, "dep"), ["fetch", "-q", "origin"])
   await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
   await writeFile(join(repo, "feature.txt"), "feature\n")
@@ -108,7 +108,7 @@ async function hookedSubmoduleRepository(options: {
   const remote = join(repo, "..", "origin.git")
   await Bun.$`git init -q --bare ${remote}`
   await git(repo, ["remote", "add", "origin", remote])
-  await git(repo, ["push", "-q", "origin", "main", "task/feature"])
+  await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
   const hook = join(repo, ".git", "hooks", "pre-push")
   await writeFile(
     hook,
@@ -125,7 +125,7 @@ const unusedWorkspace: BayWorkspace = {
   deprovision: () => ({ status: "passed", output: {} }),
 }
 
-async function checkedLine(
+async function checkedQueue(
   process: Pick<Process, "run">,
   repo: string,
   command: readonly string[],
@@ -144,9 +144,9 @@ async function checkedLine(
     { revision: `check:${JSON.stringify(command)}:${options.waiting === true}`, output: GitCheckResultEvidenceSchema },
   )
   const merge = withMerge(gitMergeStep<Checked>({ inject: { process }, repo }), { revision: "git-merge-v1" })
-  const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? 1 })
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
-  return createYrd(line(base), { inject: { journal: createMemoryJournal() } })
+  const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? 1 })
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  return createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
 }
 
 async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<void> {
@@ -154,13 +154,13 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
   expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
 }
 
-describe("Line command adapters", () => {
+describe("Queue command adapters", () => {
   it("persists candidate-conflict evidence on the causative check step before scratch cleanup", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "conflict.txt"), "base\n")
     await git(repo, ["add", "conflict.txt"])
     await git(repo, ["commit", "-qm", "conflict base"])
-    await git(repo, ["switch", "-qc", "task/conflict"])
+    await git(repo, ["switch", "-qc", "issue/conflict"])
     await writeFile(join(repo, "conflict.txt"), "feature\n")
     await git(repo, ["commit", "-qam", "conflicting feature"])
     const featureSha = await git(repo, ["rev-parse", "HEAD"])
@@ -180,10 +180,10 @@ describe("Line command adapters", () => {
         run: "R1",
         step: "check",
         index: 0,
-        prs: [{ id: "PR1", branch: "task/conflict", base: "main", revision: 1, headSha: featureSha }],
+        prs: [{ id: "PR1", branch: "issue/conflict", base: "main", revision: 1, headSha: featureSha }],
         shape: { results: {} },
       },
-      { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
     )
 
     expect(outcome).toMatchObject({ status: "failed", error: { code: "candidate-conflict" } })
@@ -221,10 +221,10 @@ describe("Line command adapters", () => {
       run: "R1",
       step: "check",
       index: 0,
-      prs: [{ id: "PR1", branch: "task/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
       shape: { results: {} },
     } as StepExecution<PRShape>
-    const context = { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal }
+    const context = { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal }
 
     expect(() =>
       configuredCommandStep<PRShape>({
@@ -305,10 +305,10 @@ describe("Line command adapters", () => {
           run: "R1",
           step: "check",
           index: 0,
-          prs: [{ id: "PR1", branch: "task/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
           shape: { results: {} },
         },
-        { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal },
+        { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
       )
 
       expect(outcome).toMatchObject({ status: "failed", error })
@@ -330,14 +330,14 @@ describe("Line command adapters", () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
-    await using app = await checkedLine(
+    await using app = await checkedQueue(
       process,
       repo,
       shellCommand("printf 'check stdout\\n'; printf 'check stderr\\n' >&2; exit 17"),
     )
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
     if (run === undefined) throw new Error("missing integration run")
     expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
     const job = run.steps[0]?.job
@@ -361,14 +361,14 @@ describe("Line command adapters", () => {
   it("lands the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
-    await using app = await checkedLine(
+    await using app = await checkedQueue(
       process,
       repo,
       shellCommand('git config user.name "Changed After Check" && test -f feature.txt && echo checked'),
     )
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     expect(run.status).toBe("passed")
     expect(await readFile(join(repo, "feature.txt"), "utf8")).toBe("feature\n")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
@@ -388,10 +388,10 @@ describe("Line command adapters", () => {
     await git(repo, ["switch", "-q", "--detach", featureSha])
     await git(repo, ["branch", "-D", "main"])
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status).toBe("passed")
     expect(await git(repo, ["rev-parse", "HEAD"])).toBe(featureSha)
@@ -406,33 +406,33 @@ describe("Line command adapters", () => {
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "task/feature", "task/competing"])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature", "issue/competing"])
     await git(repo, ["push", "-q", "origin", `${remoteBaseSha}:refs/heads/main`])
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, ["false"])
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(process, repo, ["false"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "line-target-diverged" } })
+    expect(run).toMatchObject({ status: "failed", error: { code: "queue-target-diverged" } })
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
   it("materializes candidate checks under the injected trusted parent", async () => {
     const { repo, feature: featureSha } = await repository("feature")
-    const parentRoot = await mkdtemp(join(tmpdir(), "yrd-line-checkouts-"))
+    const parentRoot = await mkdtemp(join(tmpdir(), "yrd-queue-checkouts-"))
     const checkoutParent = join(parentRoot, "nested")
     roots.push(parentRoot)
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, ["pwd"], { checkoutParent })
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(process, repo, ["pwd"], { checkoutParent })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const job = run.steps[0]?.job
     if (job?.status !== "passed") throw new Error("check did not pass")
     const evidence = GitCheckEvidenceSchema.parse(job.output)
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toMatch(
-      new RegExp(`^${await realpath(checkoutParent)}/yrd-line-`),
+      new RegExp(`^${await realpath(checkoutParent)}/yrd-queue-`),
     )
   })
 
@@ -454,10 +454,10 @@ describe("Line command adapters", () => {
           : process.run(request)
       },
     }
-    await using app = await checkedLine(guarded, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(guarded, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     expect(run).toMatchObject({
       status: "failed",
       error: { code: "scratch-cleanup-failed", message: "cleanup denied" },
@@ -478,7 +478,7 @@ describe("Line command adapters", () => {
     const { repo } = await repository()
     const headSha = "a".repeat(40)
     const baseSha = "b".repeat(40)
-    const pr = { id: "PR1", branch: "task/feature", base: "main", revision: 1, headSha, baseSha }
+    const pr = { id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha, baseSha }
     const step = configuredCommandStep<PRShape>({
       inject: { process },
       command: shellCommand("env | grep -E '^(YRD_|GIT_)' | sort"),
@@ -489,7 +489,7 @@ describe("Line command adapters", () => {
     })
     const result = await step(
       { run: "R1", step: "check", index: 0, prs: [pr], shape: { results: {} } },
-      { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
     )
     if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
     expect(result.output.detail?.split("\n")).toEqual([
@@ -497,33 +497,34 @@ describe("Line command adapters", () => {
       "YRD_BASE=main",
       `YRD_BASE_SHA=${baseSha}`,
       "YRD_CUSTOM=custom",
-      "YRD_RUNNER=test",
       "YRD_JOB=J1",
       "YRD_PR=PR1",
       'YRD_PRS=["PR1"]',
       "YRD_RUN=R1",
+      "YRD_RUNNER=test",
       `YRD_SHA=${headSha}`,
       `YRD_SHAS=["${headSha}"]`,
       "YRD_STEP=check",
       `YRD_TARGET=${headSha}`,
     ])
-    expect(result.output.detail).not.toContain("YRD_EXECUTOR")
+    expect(result.output.detail).not.toContain("YRD_LEAK")
+    expect(result.output.detail).not.toContain("GIT_DIR")
   })
 
   it("checks and lands one combined candidate for a passing batch", async () => {
     const { repo, one: firstSha, two: secondSha } = await repository("one", "two")
     await using process = createProcess()
-    await using app = await checkedLine(
+    await using app = await checkedQueue(
       process,
       repo,
       shellCommand("test -f one.txt && test -f two.txt && echo checked-batch"),
       { batch: 2 },
     )
-    await app.bays.submit({ branch: "task/one", headSha: firstSha, base: "main" })
-    await app.bays.submit({ branch: "task/two", headSha: secondSha, base: "main" })
+    await app.bays.submit({ branch: "issue/one", headSha: firstSha, base: "main" })
+    await app.bays.submit({ branch: "issue/two", headSha: secondSha, base: "main" })
     await git(repo, ["switch", "-q", "--detach", "main"])
 
-    const runs = await app.line.integrate({ prs: ["PR1", "PR2"] }, runtime)
+    const runs = await app.queue.run({ prs: ["PR1", "PR2"] }, runtime)
     await git(repo, ["switch", "-q", "main"])
 
     expect(runs).toHaveLength(1)
@@ -538,15 +539,15 @@ describe("Line command adapters", () => {
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "task/feature"])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
     const localMain = await git(repo, ["rev-parse", "main"])
     await writeFile(join(repo, "operator-wip.txt"), "preserve me\n")
 
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, ["test", "-f", "feature.txt"])
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     const mergeJob = run.steps[1]?.job
     if (checkJob?.status !== "passed") throw new Error("check did not pass")
@@ -570,14 +571,14 @@ describe("Line command adapters", () => {
     })
 
     await using process = createProcess()
-    await using app = await checkedLine(
+    await using app = await checkedQueue(
       process,
       repo,
       shellCommand('git submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate'),
     )
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "passed", prs: [{ headSha: featureSha }] })
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
@@ -590,10 +591,10 @@ describe("Line command adapters", () => {
       requiredVersion: "accepted",
     })
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, shellCommand("git submodule update --init --recursive"))
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"))
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "failed", error: { code: "merge-push-failed" } })
     expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
@@ -604,17 +605,17 @@ describe("Line command adapters", () => {
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "task/one", "task/two"])
+    await git(repo, ["push", "-q", "origin", "main", "issue/one", "issue/two"])
     const localMain = await git(repo, ["rev-parse", "main"])
 
     await using process = createProcess()
-    await using app = await checkedLine(process, repo, ["true"])
-    await app.bays.submit({ branch: "task/one", headSha: firstSha, base: "main" })
-    await app.bays.submit({ branch: "task/two", headSha: secondSha, base: "main" })
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({ branch: "issue/one", headSha: firstSha, base: "main" })
+    await app.bays.submit({ branch: "issue/two", headSha: secondSha, base: "main" })
 
     const settled = await Promise.allSettled([
-      app.line.integrate({ prs: ["PR1"] }, { executor: "worker-1", leaseMs: 60_000 }),
-      app.line.integrate({ prs: ["PR2"] }, { executor: "worker-2", leaseMs: 60_000 }),
+      app.queue.run({ prs: ["PR1"] }, { runner: "worker-1", leaseMs: 60_000 }),
+      app.queue.run({ prs: ["PR2"] }, { runner: "worker-2", leaseMs: 60_000 }),
     ])
     const completed = settled.find((result) => result.status === "fulfilled")
     const refused = settled.find((result) => result.status === "rejected")
@@ -622,7 +623,7 @@ describe("Line command adapters", () => {
     expect(completed).toMatchObject({ status: "fulfilled", value: [expect.objectContaining({ status: "passed" })] })
     expect(refused).toMatchObject({
       status: "rejected",
-      reason: expect.objectContaining({ message: expect.stringContaining("line 'main' is running") }),
+      reason: expect.objectContaining({ message: expect.stringContaining("queue 'main' is running") }),
     })
     const landing = await git(remote, ["rev-parse", "main"])
     const landedPaths = (await git(remote, ["ls-tree", "--name-only", landing])).split("\n")
@@ -635,7 +636,7 @@ describe("Line command adapters", () => {
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "task/feature", "task/competing"])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature", "issue/competing"])
 
     await using process = createProcess()
     let raced = false
@@ -648,10 +649,10 @@ describe("Line command adapters", () => {
         return process.run(request)
       },
     }
-    await using app = await checkedLine(racingProcess, repo, ["true"])
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await using app = await checkedQueue(racingProcess, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "passed") throw new Error("check did not pass")
     const checked = GitCheckEvidenceSchema.parse(checkJob.output)
@@ -665,7 +666,7 @@ describe("Line command adapters", () => {
   it("preserves remote evidence and lands its pinned candidate", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
-    await using app = await checkedLine(
+    await using app = await checkedQueue(
       process,
       repo,
       shellCommand(
@@ -674,9 +675,9 @@ describe("Line command adapters", () => {
       ),
       { waiting: true },
     )
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const waiting = run.steps[0]?.job
     if (waiting?.status !== "waiting") throw new Error("check did not wait")
     const checkpoint = GitCheckEvidenceSchema.parse(waiting.checkpoint)
@@ -684,13 +685,14 @@ describe("Line command adapters", () => {
     expect(waiting.artifacts).toEqual(expect.arrayContaining([expect.objectContaining({ uri: "artifact://ci-1" })]))
     expect(await git(repo, ["rev-parse", checkpoint.candidateRef])).toBe(checkpoint.candidateSha)
 
-    await app.jobs.finish(waiting.id, {
-      attempt: waiting.attempt,
-      executor: waiting.executor,
-      token: waiting.token,
-      result: { status: "passed", output: checkpoint },
-    })
-    const finished = await app.line.run(run.id, runtime)
+    const finished = await app.queue.finish(
+      run.id,
+      {
+        token: waiting.token,
+        result: { status: "passed", output: checkpoint },
+      },
+      runtime,
+    )
     expect(finished.status).toBe("passed")
     await expectLanded(repo, checkpoint)
   })
@@ -720,12 +722,12 @@ describe("Line command adapters", () => {
       { revision: "move-base-v1", output: MovedSchema },
     )
     const merge = withMerge(gitMergeStep<Moved>({ inject: { process }, repo }), { revision: "git-merge-v1" })
-    const line = withLine({ steps: [check, move, merge] as const })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(line(base), { inject: { journal: createMemoryJournal() } })
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    const queue = withQueue({ steps: [check, move, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "failed", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)
@@ -737,7 +739,7 @@ describe("Line command adapters", () => {
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
-    await git(repo, ["push", "-q", "origin", "main", "task/feature"])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
     await using process = createProcess()
     const bayJobs = createBayJobDefs(unusedWorkspace)
     const check = withStep(
@@ -756,12 +758,12 @@ describe("Line command adapters", () => {
       }),
       { revision: "delegated-merge-v1" },
     )
-    const line = withLine({ steps: [check, merge] as const })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(line(base), { inject: { journal: createMemoryJournal() } })
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    const queue = withQueue({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     const landing = await git(repo, ["rev-parse", "refs/remotes/origin/main"])
     const checkJob = run.steps[0]?.job
     if (checkJob?.status !== "passed") throw new Error("check did not pass")
@@ -792,12 +794,12 @@ describe("Line command adapters", () => {
     const merge = withMerge(configuredMergeStep<Checked>({ inject: { process }, repo, command: ["true"] }), {
       revision: "delegated-merge-v1",
     })
-    const line = withLine({ steps: [check, merge] as const })
-    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
-    await using app = await createYrd(line(base), { inject: { journal: createMemoryJournal() } })
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    const queue = withQueue({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
-    expect((await app.line.integrate({ prs: ["PR1"] }, runtime))[0]).toMatchObject({
+    expect((await app.queue.run({ prs: ["PR1"] }, runtime))[0]).toMatchObject({
       status: "failed",
       error: { code: "merge-command-did-not-land" },
     })

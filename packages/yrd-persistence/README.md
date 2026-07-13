@@ -19,13 +19,14 @@ journal.append(transaction, expectedCursor)
 
 ## Format
 
-`events.jsonl` contains one checksummed versioned transaction per line. The
+`events-v3.jsonl` contains one checksummed versioned transaction per command. The
 private storage record contains one Command, its cause, every accepted Event,
 and the optional Command result value.
 
-This Command-bearing format is journal version 2. Pre-1 repositories start a
-fresh v2 journal at cutover and retain v1 read-only; persistence does not
-silently dual-decode incompatible schemas.
+This runner-and-queue vocabulary is journal version 3. Pre-cutover repositories
+start a fresh v3 journal and retain `.git/yrd/events.jsonl` and
+`.git/bay/journal.jsonl` as opaque read-only data; persistence never silently
+dual-decodes or rewrites incompatible schemas.
 
 Reads stream bytes through `Bun.JSONL.parseChunk()` and validate each decoded
 record against the storage schema and Core's public domain schemas. The cursor is the exclusive byte offset after a

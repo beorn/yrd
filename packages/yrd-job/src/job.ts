@@ -27,9 +27,9 @@ export const JobLaunchSchema = JobWaitingSchema.omit({ status: true, checkpoint:
 export type JobLaunch = z.infer<typeof JobLaunchSchema>
 
 export function parseJobLaunch(stdout: string): JobLaunch {
-  for (const line of stdout.trim().split(/\r?\n/u).reverse()) {
+  for (const entry of stdout.trim().split(/\r?\n/u).reverse()) {
     try {
-      return JobLaunchSchema.parse(JSON.parse(line))
+      return JobLaunchSchema.parse(JSON.parse(entry))
     } catch (error) {
       if (error instanceof SyntaxError) continue
       throw error
@@ -46,7 +46,7 @@ export type JobResult<Output extends JsonValue = JsonValue> =
 export type JobContext = Readonly<{
   id: string
   attempt: number
-  executor: string
+  runner: string
   /** Aborts when this execution loses ownership or its runtime closes. */
   signal: AbortSignal
 }>

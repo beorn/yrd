@@ -1,7 +1,7 @@
 # `@yrd/contest`
 
-`@yrd/contest` compares multiple implementations of one real `@yrd/task`
-Task. Every competitor gets an isolated `@yrd/bay` Work Bay. Yrd records the
+`@yrd/contest` compares multiple implementations of one real `@yrd/issue`
+Issue. Every competitor gets an isolated `@yrd/bay` Work Bay. Yrd records the
 immutable result commit, runtime, token and cost evidence, artifacts, and
 held-out evaluations needed to choose work that can actually ship.
 
@@ -18,7 +18,7 @@ const contests = withContests({ runners, evaluators, git })
 const base = pipe(
   createYrdDef(),
   withJobs({ definitions: [bayJobs, contests.jobDefs] }),
-  withTasks({ sources }),
+  withIssues({ sources }),
   withBays({ jobs: bayJobs }),
 )
 
@@ -30,7 +30,7 @@ definition revision they were created with and refuse to run after revision
 drift.
 
 Runner definitions and their launch arguments are trusted organizer
-configuration. Task text and competitor output are untrusted inputs, but Yrd
+configuration. Issue text and competitor output are untrusted inputs, but Yrd
 does not sandbox flags deliberately installed by the operator. An adapter that
 accepts competitor definitions from another trust domain must validate or
 allowlist those flags before composition.
@@ -42,20 +42,20 @@ allowlist those flags before composition.
 ```ts
 const base = await yrd.contests.resolveBase()
 const contest = await yrd.contests.compete({
-  task,
+  issue,
   competitors,
   base: base.base,
   baseSha: base.sha,
 })
 
 const ready = await yrd.contests.evaluate(contest.id, {
-  executor: "local",
+  runner: "local",
   leaseMs: 60_000,
   concurrency: 2,
 })
 
 const reevaluated = await yrd.contests.evaluate(contest.id, {
-  executor: "local",
+  runner: "local",
   leaseMs: 60_000,
   concurrency: 2,
   retry: true,
@@ -71,10 +71,7 @@ await yrd.contests.finish({
 })
 
 await yrd.contests.select({ contest: ready.id, attempt: "A2" })
-const promoted = await yrd.contests.promote(
-  { contest: ready.id },
-  { executor: "local", leaseMs: 60_000, concurrency: 2 },
-)
+const promoted = await yrd.contests.promote({ contest: ready.id }, { runner: "local", leaseMs: 60_000, concurrency: 2 })
 ```
 
 `get()` and `list()` are synchronous signal-backed reads. Attempt runner,
@@ -85,9 +82,9 @@ whose candidate verdict failed creates a new evaluator Job generation instead.
 Earlier evidence remains immutable, appears as separate human-status rows, and
 a pinned competitor is never rerun.
 
-The public command tree exposes `task.compete`, `contest.select`, and
-`contest.promote`. The CLI also projects the methodful `evaluate()` operation
-as `yrd contest evaluate`; internal request and finalize commands keep
+The embedded command tree exposes `issue.compete`, `contest.select`, and
+`contest.promote`. The CLI projects the methodful `evaluate()` operation as
+`yrd contest eval`; internal request and finalize commands keep
 restart-safe reconciliation out of the public command tree.
 
 ## Evaluation And Promotion
@@ -109,7 +106,7 @@ timeouts, cancellation, timing, and cleanup. External adapters may return a
 `waiting` Job result and later finish that same durable Job.
 
 A configured evaluator with `runner: waiting` uses the same launcher JSON as a
-waiting Line step: the final stdout line contains `token` and optional `url`,
+waiting Queue step: the final stdout record contains `token` and optional `url`,
 `detail`, and `artifacts`. Yrd records that launch evidence, cleans the local
 detached checkout, and waits for token-fenced completion of the evaluator Job.
 Complete it through `yrd contest finish`; the generic Job transition command is
@@ -117,7 +114,7 @@ not exposed. A launched waiting Job remains finishable after configuration
 revision drift because its pinned identity and stable output contract still
 fence completion. `--fail` means the evaluator completed and rejected the
 candidate; `--error <code>` means the evaluator infrastructure failed and makes
-that durable Job eligible for `contest evaluate --retry`.
+that durable Job eligible for `contest eval --retry`.
 
 The local command evaluator materializes the immutable pin as a detached
 scratch worktree. Its checkout parent is injected by the host, and the

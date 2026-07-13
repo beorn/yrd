@@ -3,12 +3,12 @@ export * from "./host.ts"
 export * from "./repository.ts"
 export { runYrd } from "./run.ts"
 export type {
-  LineAuditFinding,
-  LineAuditResult,
+  QueueAuditFinding,
+  QueueAuditResult,
   YrdCliApp,
   YrdCliExitCode,
   YrdCliIO,
-  YrdCliLineAdministration,
+  YrdCliQueueAdministration,
   YrdCliServices,
   YrdCliState,
 } from "./types.ts"

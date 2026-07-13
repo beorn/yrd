@@ -11,16 +11,16 @@ tradeoffs.
 
 | #   | Ask                                                    | Ruling                                                                                                                                                                                                                                                                                                                                            |
 | --- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Core hierarchy                                         | **Validated** as proposed: Repository → Yrd → FlowDef[]/ExecutorDef[] + projected PR/PRRev/Line/Candidate/Run/Job. One amendment: Contest is a consumer of these primitives, not a core member (C1).                                                                                                                                              |
+| 1   | Core hierarchy                                         | **Validated** as proposed: Repository → Yrd → FlowDef[]/RunnerDef[] + projected PR/PRRev/Queue/Candidate/Run/Job. One amendment: Contest is a consumer of these primitives, not a core member (C1).                                                                                                                                               |
 | 2   | PR keeps GitHub semantics; Candidate owns merge groups | **Confirmed.** Strengthened: PR adopts GitHub's exact state shape — `state: "open" \| "closed"` + `merged: boolean` — replacing today's five-way `pushed/submitted/rejected/integrated/withdrawn` enum (B3).                                                                                                                                      |
 | 3   | Two config spellings                                   | **One plugin model, both spellings ship, one audience rule** (C7): config authors write `yrd.*` namespace aliases; extension/plugin authors write `with*`. Aliases are exact re-export bindings (`export const check = withCheckStep`) — zero drift surface. Docs show exactly one spelling per audience.                                         |
 | 4   | `@yrd/config` provider-neutral                         | **Confirmed.** `@yrd/github` is a separate adapter package and is explicitly deferred until after the local cutover milestone (E, "deferred"). No convenience entry point until the adapter exists.                                                                                                                                               |
-| 5   | Task resolver placement                                | **Confirmed** as optional shared YrdDef capability via `withTask(resolve)`. No `withSource` until a second source capability is real.                                                                                                                                                                                                             |
+| 5   | Issue resolver placement                               | **Confirmed** as optional shared YrdDef capability via `withIssue(resolve)`. No `withSource` until a second source capability is real.                                                                                                                                                                                                            |
 | 6   | Job status/conclusion spellings                        | **Settled, GitHub verbatim** (B6): `status: queued \| in_progress \| waiting \| completed`; `conclusion: success \| failure \| cancelled \| skipped \| timed_out` (`action_required`/`neutral` reserved for adapters that need them). `waiting` is a status, exactly as GitHub Actions uses it for deployment approvals. Run uses the same split. |
-| 7   | Readiness projection + concurrency boundaries          | **Confirmed** derived readiness (no `PRReadiness` aggregate). Merge serialization is a per-`(repository, base branch)` lock shared across all Lines on that base — the lock is keyed by base, not by Line (C4).                                                                                                                                   |
+| 7   | Readiness projection + concurrency boundaries          | **Confirmed** derived readiness (no `PRReadiness` aggregate). Merge serialization is a per-`(repository, base branch)` lock shared across all Queues on that base — the lock is keyed by base, not by Queue (C4).                                                                                                                                 |
 | 8   | `Command`/`Event` vs `Op`/`OpCall`                     | **Confirmed CQRS names.** The former `Operation {op, args}` is `Command`; `CommandResult {command, events, value?}` is the dispatch return; `Frame` is below the Journal interface and no longer exported from core. Runtime execution is one `dispatch()` surface rather than the former `command()`/`operation()`/`invoke()` triple.            |
-| 9   | `init/deinit` vs `provision/deprovision`               | **Neither — the question dissolves** (C6). Lines materialize lazily on first submit; the only lifecycle verb is repo-level `yrd init` (optional; first repository-backed command auto-inits, as today). If operational need arises later, `yrd line pause/resume` — but not in v1.                                                                |
-| 10  | `.yrd.ts` configures Executor/target, not Runner       | **Confirmed.** Runner and Context identities are runtime evidence on the Job. One security amendment: config authority is the base branch (C5).                                                                                                                                                                                                   |
+| 9   | `init/deinit` vs `provision/deprovision`               | **Neither — the question dissolves** (C6). Queues materialize lazily on first submit; the only lifecycle verb is repo-level `yrd init` (optional; first repository-backed command auto-inits, as today). If operational need arises later, `yrd queue pause/resume` — but not in v1.                                                              |
+| 10  | `.yrd.ts` configures Runner/target, not Runner         | **Confirmed.** Runner and Context identities are runtime evidence on the Job. One security amendment: config authority is the base branch (C5).                                                                                                                                                                                                   |
 
 ## B. The model
 
@@ -30,11 +30,11 @@ tradeoffs.
 Repository
 └── Yrd                       one configured orchestration system per repository
     ├── FlowDef[]             integration procedures (name, rev, on, steps)
-    ├── ExecutorDef[]         configured local/remote execution adapters
-    ├── capabilities          optional shared (TaskResolver, ...)
+    ├── RunnerDef[]         configured local/remote execution adapters
+    ├── capabilities          optional shared (IssueResolver, ...)
     └── YrdState              event-projected operational state
         ├── PR[] → PRRev[]    proposals and their immutable submitted revisions
-        ├── Line[]            landing lanes: one per (FlowDef, base branch), lazy
+        ├── Queue[]            landing lanes: one per (FlowDef, base branch), lazy
         ├── Candidate[]       immutable attempted integrations (merge groups)
         ├── Run[]             one Flow-rev execution against one Candidate
         └── Job[]             durable step executions with evidence
@@ -51,7 +51,7 @@ type Submission = Readonly<{
   branch: string // source ref
   head: string // submitted head SHA
   bay?: string // originating bay, when any
-  task?: TaskRef // resolved task reference, when any
+  issue?: IssueRef // resolved issue reference, when any
 }>
 
 type FlowDef = Readonly<{
@@ -71,7 +71,7 @@ type FlowDef = Readonly<{
 - The selected flow `name` + `rev` is pinned on the PR's enrollment and on
   every Run, so historical runs stay explainable after `.yrd.ts` edits.
 - **Drift guard**: the runtime also fingerprints the flow's structural content
-  (step names, kinds, order, executor bindings). If the fingerprint changes
+  (step names, kinds, order, runner bindings). If the fingerprint changes
   while `rev` does not, submit/doctor warn loudly. Pending/waiting work refuses
   to resume across a rev change, as today.
 
@@ -107,7 +107,7 @@ type PRRev = Readonly<{
 ```ts
 type Candidate = Readonly<{
   id: string // C1, C2, ... (counter for UX)
-  lineId: string
+  queueId: string
   baseSha: string
   revs: readonly { pr: string; n: number; head: string }[] // ordered
   sha?: string // synthetic merge commit, once constructed
@@ -125,7 +125,7 @@ type Candidate = Readonly<{
 - Mergeability is computed via `git merge-tree` — no checkout, no Context
   lease — before any expensive check is admitted.
 - The synthetic commit is published at `refs/yrd/candidates/<id>`. Local
-  executors read it in place; a future remote executor's adapter is
+  runners read it in place; a future remote runner's adapter is
   responsible for pushing that ref wherever its runners can fetch (the seam is
   named now; no remote push machinery ships in v1).
 - Bisection on a failing multi-rev Candidate creates **new child Candidates**
@@ -137,7 +137,7 @@ type Candidate = Readonly<{
 ```ts
 type Run = Readonly<{
   id: string // R1, R2, ...
-  lineId: string
+  queueId: string
   candidateId: string
   flow: { name: string; rev: string }
   status: "queued" | "in_progress" | "waiting" | "completed"
@@ -149,17 +149,17 @@ type Run = Readonly<{
 }>
 ```
 
-Run status/conclusion uses the same split as Job. Today's LineRun
+Run status/conclusion uses the same split as Job. Today's QueueRun
 `running/waiting/passed/failed` refits mechanically
 (`passed → completed+success`, `failed → completed+failure`).
 
-### B6. StepDef, Job, Executor, Context
+### B6. StepDef, Job, Runner, Context
 
 ```ts
 type StepDef = Readonly<{
   name: string
   kind: "check" | "action" | "merge"
-  job: JobDef // executor-bound executable description
+  job: JobDef // runner-bound executable description
   required?: boolean // gating; orthogonal to kind
   timeoutMs?: number
   env?: Env
@@ -175,7 +175,7 @@ type StepDef = Readonly<{
   `passed/failed/waiting` job results refit; the durable Job machine (leases,
   waiting, retry, recover) is kept as-is — only vocabulary and the
   status/conclusion split change at its boundary.
-- Executor is the configured control-plane adapter: `submit`, `observe`,
+- Runner is the configured control-plane adapter: `submit`, `observe`,
   `cancel`, plus `maxInFlight` as Yrd's admission limit. Runner and Context
   are runtime evidence recorded on the Job, never configured identities.
 - `ContextReq` stays minimal: `scope: job | run | session | shared`,
@@ -183,9 +183,9 @@ type StepDef = Readonly<{
   worktree materializes one Candidate at a time. Submodule-heavy repositories
   default to independently initialized contexts (per prior-art research);
   linked worktrees share objects but not mutable submodule working dirs.
-- v1 ships **exactly one executor**: `localExecutor({ contexts:
+- v1 ships **exactly one runner**: `localRunner({ contexts:
 worktreeContexts({ size, submodules: "isolated" }) })` — a refit of the
-  existing process/runner machinery behind the Executor seam. Remote executors
+  existing process/runner machinery behind the Runner seam. Remote runners
   (GitHub Actions, agent hosts) bind to the same seam later.
 
 ### B7. Readiness (derived)
@@ -206,23 +206,23 @@ concluded success`. Reviews participate as asynchronous required checks
 - Event/cause/command ids are process-unique (UUIDv7). Domain object ids stay
   human counters (PR1/C1/R1/B1) — safe because journal CAS forces replay and
   re-decision on cursor conflict, so colliding counters cannot commit.
-- `events.jsonl` authoritative; `index.sqlite` rebuildable; Git stores named
+- `events-v3.jsonl` authoritative; `index.sqlite` rebuildable; Git stores named
   by content (`prs.git`; candidate refs under `refs/yrd/candidates/`).
-- Event names are namespaced by owning plugin (`pr/…`, `line/…`, `job/…`).
+- Event names are namespaced by owning plugin (`pr/…`, `queue/…`, `job/…`).
 
 ## C. Decisions the packet left implicit (now explicit)
 
 **C1. Contest placement.** Contest is an orchestration _above_ the landing
 core: competitors produce Bays → PRs; evaluations are ordinary Jobs; promotion
-submits the winner's PRRev to a Line. Contest remains a first-class projected
+submits the winner's PRRev to a Queue. Contest remains a first-class projected
 collection in its own package, consuming PR/Job/Bay primitives — it is not in
 the core hierarchy and adds no core concepts.
 
-**C2. Line concurrency model (v1): serial-head with batching, no stacked
-speculation.** A Line processes its queue FIFO; the head batch (up to
+**C2. Queue concurrency model (v1): serial-head with batching, no stacked
+speculation.** A Queue processes its queue FIFO; the head batch (up to
 `batch: N`) forms one Candidate; its Run must reach the merge step before the
-next Candidate is constructed. Concurrent check Runs for _other Lines_ and
-other base branches proceed freely under Executor/Context admission.
+next Candidate is constructed. Concurrent check Runs for _other Queues_ and
+other base branches proceed freely under Runner/Context admission.
 GitHub-merge-queue-style stacked speculative candidates are explicitly out of
 v1 — but the model already carries the seam (content-keyed Candidates pinned
 to `baseSha` make speculative results reusable-iff-base-unchanged), so
@@ -232,7 +232,7 @@ speculation can arrive later as a scheduling plugin without model change.
 reordering is an operator action, not config.
 
 **C4. Merge lock scope.** The merge step acquires a per-`(repository, base
-branch)` lock. Two Lines (two Flows) landing on the same base share that lock;
+branch)` lock. Two Queues (two Flows) landing on the same base share that lock;
 checks never take it.
 
 **C5. Config authority is the base branch.** Flows and steps for evaluating a
@@ -242,7 +242,7 @@ edits `.yrd.ts` takes effect only after it lands. This is the same rule GitHub
 enforces for `pull_request_target` workflows, and it is what makes contests
 with agent-written (untrusted) candidate content safe to check.
 
-**C6. Line lifecycle verbs are deleted.** A Line exists because a FlowDef
+**C6. Queue lifecycle verbs are deleted.** A Queue exists because a FlowDef
 matched a submission on a base branch; it materializes lazily and needs no
 provision/deprovision/init/deinit. Repo-level `yrd init` stays optional
 (auto-init on first repository-backed command, exactly as today).
@@ -265,7 +265,7 @@ dual-decode paths for a single-digit number of live deployments is waste.
 
 **C10. Security invariants (absorbed from the standing P0).** Event/cause/
 command ids unique across fresh CLI processes; all subprocess execution is
-argv-array (no string interpolation into `sh -c`); Git ref/branch/task names
+argv-array (no string interpolation into `sh -c`); Git ref/branch/issue names
 are treated as hostile input at every boundary (they ride argv, never shell
 text, and are schema-validated on intake).
 
@@ -275,23 +275,23 @@ The implementation is close to the target; this is vocabulary + object
 extraction, keeping the proven machinery (journal CAS, Job transitions,
 receive-hook intake, bisection, waiting/finish/recover).
 
-| Pre-refit                                                     | Target                                                                                      | Nature                                                     |
-| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `Operation {op,args}`, `operation()`, `command()`, `invoke()` | `Command`, single `dispatch()`, `CommandResult`                                             | rename + surface collapse (yrd-core)                       |
-| `Frame` exported from core domain                             | storage-internal to Journal                                                                 | demotion (yrd-core/yrd-persistence)                        |
-| `PR` with 5-way `PRStatus` + embedded `revisions[]`           | `PR {state, merged}` + `PRRev` extracted; readiness derived                                 | shrink + extraction (yrd-bay → landing domain in yrd-line) |
-| `LineRecord.prs: PRSnapshot[]` + `baseSha`                    | `Candidate` first-class (id, content key, merge-tree mergeability, ref)                     | extraction (yrd-line)                                      |
-| `LineRun` status `running/waiting/passed/failed`              | `Run` with status+conclusion split                                                          | refit (yrd-line)                                           |
-| `InstalledStep {integrates, needsIntegration}`                | `StepDef {kind: check\|action\|merge}` + order                                              | refit (yrd-line)                                           |
-| Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                                 | vocabulary (yrd-job)                                       |
-| injected `checkRunner`/`mergeRunner` capabilities             | `Executor` seam + `localExecutor` + `worktreeContexts` leases                               | generalization (yrd-job/yrd-process)                       |
-| programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*` + `.yrd.ts` discovery + doctor            | new package                                                |
-| `git bay submit`                                              | `yrd pr submit` (bay keeps workspace verbs only; deprecation alias window for `bay submit`) | CLI move (yrd-cli)                                         |
-| `parent`/`isolationPart` bisection fields                     | child Candidates + `Run.parent` provenance                                                  | refit (yrd-line)                                           |
+| Pre-refit                                                     | Target                                                                                      | Nature                                                      |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `Operation {op,args}`, `operation()`, `command()`, `invoke()` | `Command`, single `dispatch()`, `CommandResult`                                             | rename + surface collapse (yrd-core)                        |
+| `Frame` exported from core domain                             | storage-internal to Journal                                                                 | demotion (yrd-core/yrd-persistence)                         |
+| `PR` with 5-way `PRStatus` + embedded `revisions[]`           | `PR {state, merged}` + `PRRev` extracted; readiness derived                                 | shrink + extraction (yrd-bay → landing domain in yrd-queue) |
+| `QueueRecord.prs: PRSnapshot[]` + `baseSha`                   | `Candidate` first-class (id, content key, merge-tree mergeability, ref)                     | extraction (yrd-queue)                                      |
+| `QueueRun` status `running/waiting/passed/failed`             | `Run` with status+conclusion split                                                          | refit (yrd-queue)                                           |
+| `InstalledStep {integrates, needsIntegration}`                | `StepDef {kind: check\|action\|merge}` + order                                              | refit (yrd-queue)                                           |
+| Job results `passed/failed/waiting`                           | GitHub status+conclusion at the boundary; machine unchanged                                 | vocabulary (yrd-job)                                        |
+| injected `checkRunner`/`mergeRunner` capabilities             | `Runner` seam + `localRunner` + `worktreeContexts` leases                                   | generalization (yrd-job/yrd-process)                        |
+| programmatic composition only                                 | `@yrd/config`: `defineConfig` + `with*` + `yrd.*` + `.yrd.ts` discovery + doctor            | new package                                                 |
+| `git bay submit`                                              | `yrd pr submit` (bay keeps workspace verbs only; deprecation alias window for `bay submit`) | CLI move (yrd-cli)                                          |
+| `parent`/`isolationPart` bisection fields                     | child Candidates + `Run.parent` provenance                                                  | refit (yrd-queue)                                           |
 
-Package set stays: core, bay, line (landing domain: PR/PRRev/Candidate/Run/
-Flow), job, task, contest, cli, persistence, process (absorbed into the local
-executor), plus new `@yrd/config`. `@yrd/github` deferred.
+Package set stays: core, bay, queue (landing domain: PR/PRRev/Candidate/Run/
+Flow), job, issue, contest, cli, persistence, process (absorbed into the local
+runner), plus new `@yrd/config`. `@yrd/github` deferred.
 
 ## E. What we lose / honest costs
 
@@ -302,14 +302,14 @@ executor), plus new `@yrd/config`. `@yrd/github` deferred.
 - **Fresh-journal migration (C9)** drops historical run evidence from live v2
   projections (archive stays readable); bought: zero dual-decode machinery.
 - **Four objects where today there is one** (PR/PRRev/Candidate/Run vs
-  LineRun) puts more ids in front of users; bought: each object answers
+  QueueRun) puts more ids in front of users; bought: each object answers
   exactly one question and the GitHub mapping becomes 1:1. CLI mitigates by
   showing the chain (`PR1 rev2 → C3 → R4`) in status output.
-- **Serial-head Lines (C2)** cap throughput vs stacked speculation; bought:
+- **Serial-head Queues (C2)** cap throughput vs stacked speculation; bought:
   v1 scheduling stays trivially explainable, and the seam for speculation is
   already in the model.
 - **Deferred `@yrd/github`** keeps Yrd local-only for now; bought: the first
-  consumer (local queue cutover) arrives sooner, and the Executor/Context/
+  consumer (local queue cutover) arrives sooner, and the Runner/Context/
   candidate-ref seams are named so the adapter lands without model change.
 - **Deleted lifecycle verbs (C6)** remove explicit pre-provisioning; bought:
   two fewer verbs and no state to desync. If a real operational need appears,

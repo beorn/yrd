@@ -107,12 +107,12 @@ describe("filesystem Journal", () => {
   it("generates UUIDv7 command, cause, and event ids uniquely across fresh processes", async () => {
     const dir = await directory()
     const results = await Promise.all([dispatchInFreshProcess(dir), dispatchInFreshProcess(dir)])
-    const stored = (await readFile(join(dir, "events.jsonl"), "utf8"))
+    const stored = (await readFile(join(dir, "events-v3.jsonl"), "utf8"))
       .trim()
       .split("\n")
       .map(
-        (line) =>
-          JSON.parse(line) as {
+        (queue) =>
+          JSON.parse(queue) as {
             v: number
             cause: { id: string }
             command: { id: string }
@@ -126,7 +126,7 @@ describe("filesystem Journal", () => {
     const ids = stored.flatMap((frame) => [frame.cause.id, frame.command.id, ...frame.events.map((event) => event.id)])
 
     expect(stored).toHaveLength(2)
-    expect(stored.every(({ v }) => v === 2)).toBe(true)
+    expect(stored.every(({ v }) => v === 3)).toBe(true)
     expect(new Set(ids).size).toBe(ids.length)
     expect(new Set(resultIds).size).toBe(resultIds.length)
     expect(ids.every((id) => z.uuidv7().safeParse(id).success)).toBe(true)
@@ -150,7 +150,7 @@ describe("filesystem Journal", () => {
     expect(await Array.fromAsync(journal.read(appendedFirst.cursor))).toEqual([
       { cursor: appendedSecond.cursor, values: [second] },
     ])
-    expect(Buffer.byteLength(await readFile(join(dir, "events.jsonl"), "utf8"))).toBe(appendedSecond.cursor)
+    expect(Buffer.byteLength(await readFile(join(dir, "events-v3.jsonl"), "utf8"))).toBe(appendedSecond.cursor)
   })
 
   it("uses compare-and-append instead of exposing writer leases", async () => {
@@ -332,7 +332,7 @@ describe("filesystem Journal", () => {
     const journal = await createJournal({ dir })
     const accepted = await journal.append(frame("c1"), 0)
     if (!accepted.appended) throw new Error("expected append")
-    const path = join(dir, "events.jsonl")
+    const path = join(dir, "events-v3.jsonl")
     await appendFile(path, "x".repeat(130 * 1024))
 
     expect(await Array.fromAsync(journal.read())).toEqual([{ cursor: accepted.cursor, values: [frame("c1")] }])
@@ -344,7 +344,7 @@ describe("filesystem Journal", () => {
 
   it("repairs a file with no committed newline from cursor zero", async () => {
     const dir = await directory()
-    const path = join(dir, "events.jsonl")
+    const path = join(dir, "events-v3.jsonl")
     await writeFile(path, "x".repeat(130 * 1024))
     const journal = await createJournal({ dir })
 
@@ -358,14 +358,14 @@ describe("filesystem Journal", () => {
 
   it("fails on newline-committed corruption and checksum drift", async () => {
     const corruptDir = await directory()
-    await writeFile(join(corruptDir, "events.jsonl"), "{bad}\n")
+    await writeFile(join(corruptDir, "events-v3.jsonl"), "{bad}\n")
     const corrupt = await createJournal({ dir: corruptDir })
     await expect(Array.fromAsync(corrupt.read())).rejects.toThrow("journal corrupt")
 
     const driftDir = await directory()
     const valid = await createJournal({ dir: driftDir })
     await valid.append(frame("c1"), 0)
-    const path = join(driftDir, "events.jsonl")
+    const path = join(driftDir, "events-v3.jsonl")
     const text = await readFile(path, "utf8")
     await writeFile(path, text.replace("hello", "jello"))
     await expect(Array.fromAsync(valid.read())).rejects.toThrow("checksum")

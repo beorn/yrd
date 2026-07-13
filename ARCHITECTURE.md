@@ -23,12 +23,12 @@ function per implementation detail.
 | `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                              |
 | `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                |
 | `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
-| `Tasks`    | `withTasks()`                                | Resolve task references through configured sources                                         | `sources`, `ref()`, `resolve()`                                                                                                   |
+| `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                   |
 | `Bays`     | `withBays()`                                 | Query and operate on isolated work bays and local PRs                                      | `state`, `get()`, `list()`, `pr()`, `prs()`, `open()`, `refresh()`, `intake()`, `submit()`, `submitSelection()`, `close()`        |
-| `Line`     | `withLine()`                                 | Integrate PRs through configured steps and expose evidence                                 | `state`, `steps()`, `integrate()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()`                  |
+| `Queue`    | `withQueue()`                                | Verify and merge PRs through configured steps and expose evidence                          | `state`, `steps()`, `pause()`, `resume()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()`          |
 | `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
 
-`Process`, `Git`, task sources, workspaces, runners, evaluators, clocks, ids,
+`Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
 function or a small plain object; it is not a global singleton.
 
@@ -41,13 +41,13 @@ The objects above operate on plain records:
 | `Command`              | Serializable request naming one registered handler and its arguments      |
 | `Event`                | Validated fact emitted by a command                                       |
 | `CommandResult`        | Dispatched command, committed events, and optional JSON result value      |
-| `Task`                 | Versioned unit of intent from a configured task source                    |
+| `Issue`                | Versioned unit of intent from a configured issue source                   |
 | `Bay`                  | Isolated worktree and its current Git facts                               |
 | `PR`                   | Immutable submitted revision offered to a base branch                     |
 | `Job`                  | Durable executable lifecycle and evidence                                 |
-| `LineRun`              | Pinned PR set, base, step plan, and integration facts                     |
-| `Step`                 | Configured typed transition in a Line                                     |
-| `Contest`              | Task, competitors, attempts, selection, and promotion facts               |
+| `QueueRun`             | Pinned PR set, base, step plan, and integration facts                     |
+| `Step`                 | Configured typed transition in a Queue                                    |
+| `Contest`              | Issue, competitors, attempts, selection, and promotion facts              |
 | `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |
 | `Artifact`             | Named evidence with a path or URL and media type                          |
 
@@ -69,18 +69,18 @@ const deploy = withStep("deploy", deployRunner, {
   revision: "deploy-v1",
   needsIntegration: true,
 })
-const line = withLine({ steps: [check, merge, deploy] as const })
+const queue = withQueue({ steps: [check, merge, deploy] as const })
 const contests = withContests({ runners, evaluators, git })
 
 const base = pipe(
   createYrdDef(),
-  withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
-  withTasks({ sources }),
+  withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+  withIssues({ sources }),
   withBays({ jobs: bayJobs }),
 )
 
 const journal = await createJournal({ dir: stateDir })
-await using yrd = await createYrd(contests(line(base)), {
+await using yrd = await createYrd(contests(queue(base)), {
   inject: { journal, scope, log, clock, id },
 })
 ```
@@ -147,14 +147,14 @@ before raising either guardrail.
 
 ```text
 CLI / Git command projection
-  -> Contest / Line / Bay / Task objects
+  -> Contest / Queue / Bay / Issue objects
   -> Jobs
   -> Yrd Core
   -> Journal interface
   -> Filesystem persistence adapter
 ```
 
-Dependencies point down. Core has no knowledge of Jobs, Git, bays, lines,
+Dependencies point down. Core has no knowledge of Jobs, Git, bays, queues,
 contests, the filesystem, or the CLI. Persistence implements Core's Journal
 interface. Domain packages depend on Core and on the lower domain objects they
 actually use.

@@ -31,33 +31,33 @@ import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   IntegrationProofSchema,
-  LineHoldSchema,
-  LineRecordSchema,
-  Lines,
+  QueuePauseSchema,
+  QueueRecordSchema,
+  Queues,
   PRSnapshotSchema,
   type AddStepResult,
   type BatchConfig,
   type InstalledStep,
   type IntegratedShape,
   type IntegrationProof,
-  type LineAuditFinding,
-  type LineAuditResult,
-  type LineHold,
-  type LineRecord,
-  type LineRun,
-  type LineRunId,
-  type LineSummary,
-  type LinesState,
-  type LineStep,
+  type QueueAuditFinding,
+  type QueueAuditResult,
+  type QueuePause,
+  type QueueRecord,
+  type QueueRun,
+  type QueueRunId,
+  type QueueSummary,
+  type QueuesState,
+  type QueueStep,
   type PRShape,
   type PRSnapshot,
 } from "./model.ts"
 
 const StepNameSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/iu)
-const LineRunIdSchema = z.string().trim().min(1)
+const QueueRunIdSchema = z.string().trim().min(1)
 const StepExecutionSchema = z
   .object({
-    run: LineRunIdSchema,
+    run: QueueRunIdSchema,
     step: StepNameSchema,
     index: z.number().int().nonnegative(),
     prs: z.array(PRSnapshotSchema).min(1),
@@ -69,19 +69,19 @@ const StepExecutionSchema = z
   })
   .strict() as unknown as z.ZodType<StepExecution>
 
-const IntegrateArgsSchema = z
+const QueueRunArgsSchema = z
   .object({
     prs: z.array(z.string().trim().min(1)).optional(),
     steps: z.array(StepNameSchema).optional(),
     retry: z.boolean().optional(),
   })
   .strict()
-export type IntegrateArgs = Readonly<z.infer<typeof IntegrateArgsSchema>>
+export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdvanceArgsSchema = z.object({ run: LineRunIdSchema }).strict()
+const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
-export type HoldLineArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
-const HoldLineArgsSchema = z
+export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
+const PauseQueueArgsSchema = z
   .object({
     base: GitRefSchema,
     reason: z.string().trim().min(1),
@@ -92,15 +92,15 @@ const HoldLineArgsSchema = z
     if (new Set(args.allowedPRs).size !== args.allowedPRs.length) {
       context.addIssue({ code: "custom", message: "duplicate allowed PR", path: ["allowedPRs"] })
     }
-  }) as z.ZodType<HoldLineArgs>
-const ReleaseLineArgsSchema = z.object({ base: GitRefSchema }).strict()
-const LineStartSchema = LineRecordSchema.omit({ startedAt: true, failure: true })
-const LineFailedSchema = z
-  .object({ run: LineRunIdSchema, error: z.object({ code: z.string(), message: z.string() }) })
+  }) as z.ZodType<PauseQueueArgs>
+const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
+const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
+const QueueFailedSchema = z
+  .object({ run: QueueRunIdSchema, error: z.object({ code: z.string(), message: z.string() }) })
   .strict()
 
 export type StepExecution<Shape extends PRShape = PRShape> = Readonly<{
-  run: LineRunId
+  run: QueueRunId
   step: string
   index: number
   prs: readonly PRSnapshot[]
@@ -133,7 +133,7 @@ type ValidateStepChain<Steps extends readonly AnyStepDef[], Shape extends PRShap
 ]
   ? Shape extends InputOf<First>
     ? ValidateStepChain<Rest, OutputOf<First>>
-    : Readonly<{ "yrd: incompatible line step input": never }>
+    : Readonly<{ "yrd: incompatible queue step input": never }>
   : object
 type FinalShape<Steps extends readonly AnyStepDef[], Shape extends PRShape = PRShape> = Steps extends readonly [
   infer First extends AnyStepDef,
@@ -157,7 +157,7 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
   const stepName = StepNameSchema.parse(name)
   const output = options.output ?? (JsonSchema as z.ZodType<Output>)
   const job = createJobDef({
-    name: `line.step.${stepName}`,
+    name: `queue.step.${stepName}`,
     title: options.title ?? stepName,
     revision: options.revision,
     input: StepExecutionSchema,
@@ -179,7 +179,7 @@ export function withMerge<Shape extends PRShape>(
   options: Readonly<{ revision: string; title?: string }>,
 ): StepDef<Shape, Shape & IntegratedShape> {
   const job = createJobDef({
-    name: "line.step.merge",
+    name: "queue.step.merge",
     title: options.title ?? "merge",
     revision: options.revision,
     input: StepExecutionSchema,
@@ -196,157 +196,156 @@ export function withMerge<Shape extends PRShape>(
   }) as StepDef<Shape, Shape & IntegratedShape>
 }
 
-export type LineOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
+export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   steps: Steps
   batch?: BatchConfig
   defaultSteps?: readonly string[]
 }>
 
-type LineState = Readonly<{ lines: LinesState }>
-type LineHostState = Readonly<{ bays: BaysState; jobs: JobsState }>
-type RuntimeState = LineHostState & LineState
-type LineStart = Omit<LineRecord, "startedAt" | "failure">
+type QueueState = Readonly<{ queues: QueuesState }>
+type QueueHostState = Readonly<{ bays: BaysState; jobs: JobsState }>
+type RuntimeState = QueueHostState & QueueState
+type QueueStart = Omit<QueueRecord, "startedAt" | "failure">
 
-export type LineCommands = Readonly<{
-  line: Readonly<{
-    integrate: CommandHandler<IntegrateArgs, RuntimeState>
-    hold: CommandHandler<HoldLineArgs, RuntimeState>
-    release: CommandHandler<Readonly<{ base: string }>, RuntimeState>
-    advance: CommandHandler<Readonly<{ run: LineRunId }>, RuntimeState>
-    isolate: CommandHandler<Readonly<{ run: LineRunId; part: 0 | 1 }>, RuntimeState>
+export type QueueCommands = Readonly<{
+  queue: Readonly<{
+    run: CommandHandler<QueueRunArgs, RuntimeState>
+    pause: CommandHandler<PauseQueueArgs, RuntimeState>
+    resume: CommandHandler<Readonly<{ base: string }>, RuntimeState>
+    advance: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
+    isolate: CommandHandler<Readonly<{ run: QueueRunId; part: 0 | 1 }>, RuntimeState>
   }>
 }>
 
-export type Line<Shape extends PRShape = PRShape> = Readonly<{
+export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
-  state: ReadSignal<DeepReadonly<LinesState>>
+  state: ReadSignal<DeepReadonly<QueuesState>>
   steps(): readonly InstalledStep[]
-  hold(args: HoldLineArgs): Promise<LineHold>
-  release(base: string): Promise<void>
-  integrate(args: IntegrateArgs, options: RunJobOptions): Promise<readonly LineRun[]>
-  run(run: LineRunId, options: RunJobOptions): Promise<LineRun>
-  waiting(selector: string, step?: string): WaitingLineStep
-  finish(selector: string, completion: FinishLineArgs, options: RunJobOptions): Promise<LineRun>
-  recover(options: RunJobOptions & Readonly<{ recoveryTime: string; reason?: string }>): Promise<readonly LineRun[]>
-  audit(): LineAuditResult
-  get(run: LineRunId): LineRun | undefined
-  status(base: string): LineSummary
+  pause(args: PauseQueueArgs): Promise<QueuePause>
+  resume(base: string): Promise<void>
+  run(args: QueueRunArgs, options: RunJobOptions): Promise<readonly QueueRun[]>
+  waiting(selector: string, step?: string): WaitingQueueStep
+  finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<QueueRun>
+  recover(options: RunJobOptions & Readonly<{ recoveryTime: string; reason?: string }>): Promise<readonly QueueRun[]>
+  audit(): QueueAuditResult
+  get(run: QueueRunId): QueueRun | undefined
+  status(base: string): QueueSummary
 }>
 
-export type WaitingLineStep = Readonly<{
-  run: LineRun
-  step: LineStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
+export type WaitingQueueStep = Readonly<{
+  run: QueueRun
+  step: QueueStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
 }>
 
-export type FinishLineArgs = Readonly<{
+export type FinishQueueArgs = Readonly<{
   step?: string
   token?: string
   result: Exclude<JobResult, JobWaiting>
 }>
 
-export type HasLine<Shape extends PRShape = PRShape> = Readonly<{ line: Line<Shape> }>
+export type HasQueue<Shape extends PRShape = PRShape> = Readonly<{ queue: Queue<Shape> }>
 
-export type LinePlugin<Shape extends PRShape> = (<
+export type QueuePlugin<Shape extends PRShape> = (<
   State extends object,
   Commands extends CommandTree,
   Features extends HasJobs & HasBays,
 >(
   definition: YrdDef<State, Commands, Features>,
-) => YrdDef<State & LineState, Commands & LineCommands, Features & HasLine<Shape>>) &
+) => YrdDef<State & QueueState, Commands & QueueCommands, Features & HasQueue<Shape>>) &
   Readonly<{ jobDefs: JobDefs }>
 
-export function withLine<const Steps extends readonly AnyStepDef[]>(
-  options: LineOptions<Steps> & ValidateStepChain<Steps>,
-): LinePlugin<FinalShape<Steps>> {
+export function withQueue<const Steps extends readonly AnyStepDef[]>(
+  options: QueueOptions<Steps> & ValidateStepChain<Steps>,
+): QueuePlugin<FinalShape<Steps>> {
   const steps = installSteps(options.steps)
   const byName = new Map(steps.map((step) => [step.name, step] as const))
   const batchSize = normalizeBatch(options.batch ?? 1)
   const defaults = options.defaultSteps === undefined ? undefined : selectSteps(steps, options.defaultSteps)
   validateSequence(defaults ?? steps, false)
-  const initial = Lines.empty({
+  const initial = Queues.empty({
     batchSize,
     ...(defaults === undefined ? {} : { defaultSteps: defaults.map((step) => step.name) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createLineCommands(steps, byName)
+  const commands = createQueueCommands(steps, byName)
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
   ) =>
     definition.extend({
-      initialState: { lines: initial },
+      initialState: { queues: initial },
       commands,
       events: {
-        "line/run/started": z.object({ run: LineStartSchema }).strict(),
-        "line/run/failed": LineFailedSchema,
-        "line/held": HoldLineArgsSchema,
-        "line/released": ReleaseLineArgsSchema,
-        "line/batch/isolated": z
+        "queue/run/started": z.object({ run: QueueStartSchema }).strict(),
+        "queue/run/failed": QueueFailedSchema,
+        "queue/paused": PauseQueueArgsSchema,
+        "queue/resumed": ResumeQueueArgsSchema,
+        "queue/batch/isolated": z
           .object({
-            parent: LineRunIdSchema,
-            run: LineRunIdSchema,
+            parent: QueueRunIdSchema,
+            run: QueueRunIdSchema,
             part: z.union([z.literal(0), z.literal(1)]),
             prs: z.array(z.string().trim().min(1)).min(1),
           })
           .strict(),
       },
-      project: projectLines,
+      project: projectQueues,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
         return {
-          line: createLine(
-            computed(() => yrd.state().lines),
+          queue: createQueue(
+            computed(() => yrd.state().queues),
             () => yrd.state() as unknown as DeepReadonly<RuntimeState>,
             yrd.jobs,
             {
               refresh: () => yrd.refresh(),
-              integrate: (args) => yrd.dispatch(commands.line.integrate, args),
-              hold: (args) => yrd.dispatch(commands.line.hold, args),
-              release: (base) => yrd.dispatch(commands.line.release, { base }),
-              advance: (run) => yrd.dispatch(commands.line.advance, { run }),
-              isolate: (run, part) => yrd.dispatch(commands.line.isolate, { run, part }),
+              run: (args) => yrd.dispatch(commands.queue.run, args),
+              pause: (args) => yrd.dispatch(commands.queue.pause, args),
+              resume: (base) => yrd.dispatch(commands.queue.resume, { base }),
+              advance: (run) => yrd.dispatch(commands.queue.advance, { run }),
+              isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
             },
             steps,
-            yrd.log.child("line"),
+            yrd.log.child("queue"),
           ),
         }
       },
     })
 
   Object.defineProperty(install, "jobDefs", { value: jobDefs, enumerable: true })
-  return Object.freeze(install) as unknown as LinePlugin<FinalShape<Steps>>
+  return Object.freeze(install) as unknown as QueuePlugin<FinalShape<Steps>>
 }
 
 type RuntimeStep = AnyStepDef
-type LineActions = Readonly<{
+type QueueActions = Readonly<{
   refresh(): Promise<unknown>
-  integrate(args: IntegrateArgs): Promise<CommandResult>
-  hold(args: HoldLineArgs): Promise<CommandResult>
-  release(base: string): Promise<CommandResult>
-  advance(run: LineRunId): Promise<CommandResult>
-  isolate(run: LineRunId, part: 0 | 1): Promise<CommandResult>
+  run(args: QueueRunArgs): Promise<CommandResult>
+  pause(args: PauseQueueArgs): Promise<CommandResult>
+  resume(base: string): Promise<CommandResult>
+  advance(run: QueueRunId): Promise<CommandResult>
+  isolate(run: QueueRunId, part: 0 | 1): Promise<CommandResult>
 }>
 
-function createLine<Shape extends PRShape>(
-  state: ReadSignal<DeepReadonly<LinesState>>,
+function createQueue<Shape extends PRShape>(
+  state: ReadSignal<DeepReadonly<QueuesState>>,
   runtime: () => DeepReadonly<RuntimeState>,
   jobs: HasJobs["jobs"],
-  actions: LineActions,
+  actions: QueueActions,
   steps: readonly RuntimeStep[],
   log: ConditionalLogger,
-): Line<Shape> {
-  const current = (id: LineRunId): LineRun => materializeRun(Lines.record(state(), id), runtime().jobs)
+): Queue<Shape> {
+  const current = (id: QueueRunId): QueueRun => materializeRun(Queues.record(state(), id), runtime().jobs)
 
-  const waiting = (selector: string, stepName?: string): WaitingLineStep => {
+  const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
     const snapshot = runtime()
-    const direct = snapshot.lines.records[selector]
+    const direct = snapshot.queues.records[selector]
     let selected = direct === undefined ? undefined : materializeRun(direct, snapshot.jobs)
     if (selected === undefined) {
       const pr = resolvePR(snapshot.bays, selector)
       if (pr === undefined) {
-        raiseFailure("refusal", "line-selection-missing", `yrd: no line run or PR '${selector}'`)
+        raiseFailure("refusal", "queue-selection-missing", `yrd: no queue run or PR '${selector}'`)
       }
-      const summary = lineSummary(snapshot.lines, snapshot.jobs, pr.base)
+      const summary = queueSummary(snapshot.queues, snapshot.jobs, pr.base)
       selected = [...summary.waiting, ...summary.running]
         .toReversed()
         .find(
@@ -359,7 +358,7 @@ function createLine<Shape extends PRShape>(
       if (selected === undefined) {
         raiseFailure(
           "refusal",
-          "line-step-not-waiting",
+          "queue-step-not-waiting",
           `yrd: PR '${pr.id}' has no waiting${stepName === undefined ? "" : ` '${stepName}'`} step`,
         )
       }
@@ -375,25 +374,25 @@ function createLine<Shape extends PRShape>(
     if (stepName === undefined && pending.length !== 1) {
       raiseFailure(
         "refusal",
-        pending.length === 0 ? "line-step-not-waiting" : "line-step-ambiguous",
-        `yrd: line run '${selected.id}' ${pending.length === 0 ? "has no waiting step" : "has multiple waiting steps; select one"}`,
+        pending.length === 0 ? "queue-step-not-waiting" : "queue-step-ambiguous",
+        `yrd: queue run '${selected.id}' ${pending.length === 0 ? "has no waiting step" : "has multiple waiting steps; select one"}`,
       )
     }
     if (step?.job?.status !== "waiting") {
       raiseFailure(
         "refusal",
-        "line-step-not-waiting",
-        `yrd: line run '${selected.id}' has no waiting '${stepName ?? "unknown"}' step`,
+        "queue-step-not-waiting",
+        `yrd: queue run '${selected.id}' has no waiting '${stepName ?? "unknown"}' step`,
       )
     }
-    return { run: selected, step: step as WaitingLineStep["step"] }
+    return { run: selected, step: step as WaitingQueueStep["step"] }
   }
 
-  const drive = async (id: LineRunId, options: RunJobOptions): Promise<LineRun> => {
+  const drive = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
     while (true) {
       const snapshot = runtime()
-      const run = materializeRun(Lines.record(snapshot.lines, id), snapshot.jobs)
-      if (Lines.terminal(run) && !needsAdvance(snapshot, run)) return run
+      const run = materializeRun(Queues.record(snapshot.queues, id), snapshot.jobs)
+      if (Queues.terminal(run) && !needsAdvance(snapshot, run)) return run
       const active = run.steps[run.cursor]
       if (active?.job?.status === "requested") {
         const guarded = await actions.advance(id)
@@ -407,20 +406,20 @@ function createLine<Shape extends PRShape>(
     }
   }
 
-  const run = async (id: LineRunId, options: RunJobOptions): Promise<LineRun> => {
+  const settle = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
     using _span = log.span?.("run", { id })
     const settled = await drive(id, options)
     if (!bisectable(settled)) return settled
     for (const part of [0, 1] as const) {
       let snapshot = runtime()
-      let child = childLine(snapshot.lines, snapshot.jobs, settled.id, part)
+      let child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
       if (child === undefined) {
         await actions.isolate(settled.id, part)
         snapshot = runtime()
-        child = childLine(snapshot.lines, snapshot.jobs, settled.id, part)
+        child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
       }
-      if (child === undefined) throw new Error(`yrd: line run '${settled.id}' did not create isolation part ${part}`)
-      await run(child.id, options)
+      if (child === undefined) throw new Error(`yrd: queue run '${settled.id}' did not create isolation part ${part}`)
+      await settle(child.id, options)
     }
     return current(id)
   }
@@ -428,50 +427,49 @@ function createLine<Shape extends PRShape>(
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
-    async hold(args) {
-      await actions.hold(args)
-      const held = state().holds[args.base]
-      if (held === undefined) throw new Error(`yrd: line '${args.base}' did not retain its hold`)
-      return held
+    async pause(args) {
+      await actions.pause(args)
+      const pause = state().pauses[args.base]
+      if (pause === undefined) throw new Error(`yrd: queue '${args.base}' did not retain its pause`)
+      return pause
     },
-    async release(base) {
-      await actions.release(base)
+    async resume(base) {
+      await actions.resume(base)
     },
-    async integrate(args, runOptions) {
-      using _span = log.span?.("integrate", { prs: args.prs, steps: args.steps, retry: args.retry === true })
+    async run(args, runOptions) {
+      using _span = log.span?.("run", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
       await actions.refresh()
       const snapshot = runtime()
       const prs = runnablePRs(snapshot, args)
       if (prs.length === 0) return []
-      const roots: LineRunId[] = []
-      for (const candidate of partitionCandidates(prs, snapshot.lines.batchSize)) {
-        const started = await actions.integrate({
+      const roots: QueueRunId[] = []
+      for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
+        const started = await actions.run({
           prs: candidate.map((pr) => pr.id),
           ...(args.steps === undefined ? {} : { steps: args.steps }),
           ...(args.retry === true ? { retry: true } : {}),
         })
-        const startedEvent = started.events.find((applied) => applied.name === "line/run/started")
-        if (startedEvent === undefined) throw new Error("yrd: line integrate did not start a run")
-        const id = LineStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
+        const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
+        if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
+        const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
         roots.push(id)
-        await run(id, runOptions)
+        await settle(id, runOptions)
       }
       const final = runtime()
-      return roots.flatMap((root) => lineTree(final.lines, final.jobs, root))
+      return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
     },
-    run,
     waiting,
     async finish(selector, completion, runOptions) {
       using _span = log.span?.("finish", { selector, step: completion.step })
       const selected = waiting(selector, completion.step)
       await jobs.finish(selected.step.job.id, {
         attempt: selected.step.job.attempt,
-        executor: selected.step.job.executor,
+        runner: selected.step.job.runner,
         ...(completion.token === undefined ? {} : { token: completion.token }),
         result: completion.result,
       })
-      return await run(selected.run.id, runOptions)
+      return await settle(selected.run.id, runOptions)
     },
     async recover(recoverOptions) {
       using _span = log.span?.("recover", { at: recoverOptions.recoveryTime })
@@ -481,84 +479,86 @@ function createLine<Shape extends PRShape>(
           ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
         }),
       )
-      const recovered: LineRun[] = []
+      const recovered: QueueRun[] = []
       const snapshot = runtime()
-      for (const candidate of orderedLines(snapshot.lines, snapshot.jobs)) {
-        if (Lines.terminal(candidate) && !needsAdvance(snapshot, candidate) && !bisectable(candidate)) {
+      for (const candidate of orderedQueues(snapshot.queues, snapshot.jobs)) {
+        if (Queues.terminal(candidate) && !needsAdvance(snapshot, candidate) && !bisectable(candidate)) {
           if (candidate.steps.some((step) => step.job !== undefined && recoveredJobs.has(step.job.id))) {
             recovered.push(candidate)
           }
           continue
         }
-        recovered.push(await run(candidate.id, recoverOptions))
+        recovered.push(await settle(candidate.id, recoverOptions))
       }
       return recovered
     },
-    audit: () => auditLines(runtime(), steps),
+    audit: () => auditQueues(runtime(), steps),
     get(id) {
       const record = state().records[id]
       return record === undefined ? undefined : materializeRun(record, runtime().jobs)
     },
-    status: (base) => lineSummary(state(), runtime().jobs, base),
-  }) as Line<Shape>
+    status: (base) => queueSummary(state(), runtime().jobs, base),
+  }) as Queue<Shape>
 }
 
-function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): LineCommands {
-  const hold = command({
-    title: "Hold line",
+function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): QueueCommands {
+  const pause = command({
+    title: "Pause queue",
     visibility: "public",
-    params: HoldLineArgsSchema,
-    apply(state: DeepReadonly<RuntimeState>, args: HoldLineArgs) {
-      const held = {
+    params: PauseQueueArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: PauseQueueArgs) {
+      const paused = {
         ...args,
         allowedPRs: [...args.allowedPRs].toSorted((left, right) =>
           left.localeCompare(right, undefined, { numeric: true }),
         ),
       }
-      const current = state.lines.holds[args.base]
+      const current = state.queues.pauses[args.base]
       if (
-        current?.reason === held.reason &&
-        current.allowedPRs.length === held.allowedPRs.length &&
-        current.allowedPRs.every((pr, index) => pr === held.allowedPRs[index])
+        current?.reason === paused.reason &&
+        current.allowedPRs.length === paused.allowedPRs.length &&
+        current.allowedPRs.every((pr, index) => pr === paused.allowedPRs[index])
       ) {
         return { events: [] }
       }
-      return { events: [event("line/held", held)] }
+      return { events: [event("queue/paused", paused)] }
     },
   })
 
-  const release = command({
-    title: "Release line hold",
+  const resume = command({
+    title: "Resume queue",
     visibility: "public",
-    params: ReleaseLineArgsSchema,
+    params: ResumeQueueArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ base: string }>) {
-      return { events: state.lines.holds[args.base] === undefined ? [] : [event("line/released", args)] }
+      return { events: state.queues.pauses[args.base] === undefined ? [] : [event("queue/resumed", args)] }
     },
   })
 
-  const integrate = command({
-    title: "Integrate PR",
+  const run = command({
+    title: "Run queue",
     visibility: "public",
-    params: IntegrateArgsSchema,
-    apply(state: DeepReadonly<RuntimeState>, args: IntegrateArgs) {
+    params: QueueRunArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
       const prs = runnablePRs(state, args)
       if (prs.length === 0) return { events: [] }
       const base = prs[0]?.base
-      if (base === undefined) throw new Error("yrd: a line run requires at least one PR")
-      if (prs.some((pr) => pr.base !== base)) throw new Error("yrd: one line candidate cannot span base branches")
-      if (prs.length > state.lines.batchSize) {
-        throw new Error(`yrd: line candidate has ${prs.length} PRs; configured batch size is ${state.lines.batchSize}`)
+      if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
+      if (prs.some((pr) => pr.base !== base)) throw new Error("yrd: one queue candidate cannot span base branches")
+      if (prs.length > state.queues.batchSize) {
+        throw new Error(
+          `yrd: queue candidate has ${prs.length} PRs; configured batch size is ${state.queues.batchSize}`,
+        )
       }
-      const active = runningLine(state.lines, state.jobs, base)
-      if (active !== undefined) throw new Error(`yrd: line '${base}' is running '${active.id}'`)
+      const active = runningQueue(state.queues, state.jobs, base)
+      if (active !== undefined) throw new Error(`yrd: queue '${base}' is running '${active.id}'`)
 
-      const selected = selectSteps(steps, args.steps ?? state.lines.defaultSteps)
+      const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
       const integrated = integratedPRShape(prs)
       validateSequence(selected, integrated !== undefined)
-      const snapshots = prs.map(Lines.snapshot)
+      const snapshots = prs.map(Queues.snapshot)
       return startRun(
-        Lines.nextId(state.lines),
+        Queues.nextId(state.queues),
         snapshots,
         selected,
         integrated ?? prShape(snapshots),
@@ -568,32 +568,33 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
   })
 
   const advance = command({
-    title: "Advance line run",
+    title: "Advance queue run",
     params: AdvanceArgsSchema,
-    apply: (state: DeepReadonly<RuntimeState>, args) => advanceLine(state, Lines.record(state.lines, args.run), byName),
+    apply: (state: DeepReadonly<RuntimeState>, args) =>
+      advanceQueue(state, Queues.record(state.queues, args.run), byName),
   })
 
   const isolate = command({
-    title: "Isolate failed line batch",
+    title: "Isolate failed queue batch",
     params: IsolateArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args) {
-      const parent = materializeRun(Lines.record(state.lines, args.run), state.jobs)
-      if (childLine(state.lines, state.jobs, parent.id, args.part) !== undefined) return { events: [] }
-      if (!bisectable(parent)) throw new Error(`yrd: line run '${parent.id}' is not a failed pre-merge batch`)
-      const active = runningLine(state.lines, state.jobs, parent.base)
-      if (active !== undefined) throw new Error(`yrd: line '${parent.base}' is running '${active.id}'`)
+      const parent = materializeRun(Queues.record(state.queues, args.run), state.jobs)
+      if (childQueue(state.queues, state.jobs, parent.id, args.part) !== undefined) return { events: [] }
+      if (!bisectable(parent)) throw new Error(`yrd: queue run '${parent.id}' is not a failed pre-merge batch`)
+      const active = runningQueue(state.queues, state.jobs, parent.base)
+      if (active !== undefined) throw new Error(`yrd: queue '${parent.base}' is running '${active.id}'`)
 
       const pivot = Math.ceil(parent.prs.length / 2)
       const prs = args.part === 0 ? parent.prs.slice(0, pivot) : parent.prs.slice(pivot)
-      if (prs.length === 0) throw new Error(`yrd: line run '${parent.id}' has no isolation part ${args.part}`)
+      if (prs.length === 0) throw new Error(`yrd: queue run '${parent.id}' has no isolation part ${args.part}`)
       const selected = parent.steps.map((planned) => requirePlannedStep(byName, planned))
-      const started = startRun(Lines.nextId(state.lines), prs, selected, prShape(prs), undefined, {
+      const started = startRun(Queues.nextId(state.queues), prs, selected, prShape(prs), undefined, {
         parent: parent.id,
         isolationPart: args.part,
       })
       return {
         events: [
-          event("line/batch/isolated", {
+          event("queue/batch/isolated", {
             parent: parent.id,
             run: started.run.id,
             part: args.part,
@@ -605,38 +606,38 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
     },
   })
 
-  return { line: { integrate, hold, release, advance, isolate } }
+  return { queue: { run, pause, resume, advance, isolate } }
 }
 
-function projectLines(state: DeepReadonly<LineState>, applied: Event): LineState {
-  if (applied.name === "line/held") {
-    const held = LineHoldSchema.parse({ ...HoldLineArgsSchema.parse(applied.data), heldAt: applied.ts })
-    return { lines: { ...state.lines, holds: { ...state.lines.holds, [held.base]: held } } }
+function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
+  if (applied.name === "queue/paused") {
+    const paused = QueuePauseSchema.parse({ ...PauseQueueArgsSchema.parse(applied.data), pausedAt: applied.ts })
+    return { queues: { ...state.queues, pauses: { ...state.queues.pauses, [paused.base]: paused } } }
   }
-  if (applied.name === "line/released") {
-    const { base } = ReleaseLineArgsSchema.parse(applied.data)
+  if (applied.name === "queue/resumed") {
+    const { base } = ResumeQueueArgsSchema.parse(applied.data)
     return {
-      lines: {
-        ...state.lines,
-        holds: Object.fromEntries(Object.entries(state.lines.holds).filter(([candidate]) => candidate !== base)),
+      queues: {
+        ...state.queues,
+        pauses: Object.fromEntries(Object.entries(state.queues.pauses).filter(([candidate]) => candidate !== base)),
       },
     }
   }
-  if (applied.name === "line/run/started") {
-    const started = LineStartSchema.parse((applied.data as { run?: unknown }).run)
-    if (state.lines.records[started.id] !== undefined) throw new Error(`yrd: duplicate line run '${started.id}'`)
-    const record = LineRecordSchema.parse({ ...started, startedAt: applied.ts })
-    return { lines: { ...state.lines, records: { ...state.lines.records, [record.id]: record } } }
+  if (applied.name === "queue/run/started") {
+    const started = QueueStartSchema.parse((applied.data as { run?: unknown }).run)
+    if (state.queues.records[started.id] !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
+    const record = QueueRecordSchema.parse({ ...started, startedAt: applied.ts })
+    return { queues: { ...state.queues, records: { ...state.queues.records, [record.id]: record } } }
   }
-  if (applied.name === "line/run/failed") {
-    const failed = LineFailedSchema.parse(applied.data)
-    const record = state.lines.records[failed.run]
-    if (record === undefined) throw new Error(`yrd: no line run '${failed.run}'`)
+  if (applied.name === "queue/run/failed") {
+    const failed = QueueFailedSchema.parse(applied.data)
+    const record = state.queues.records[failed.run]
+    if (record === undefined) throw new Error(`yrd: no queue run '${failed.run}'`)
     return {
-      lines: {
-        ...state.lines,
+      queues: {
+        ...state.queues,
         records: {
-          ...state.lines.records,
+          ...state.queues.records,
           [record.id]: { ...record, failure: { at: applied.ts, error: failed.error } },
         },
       },
@@ -648,13 +649,13 @@ function projectLines(state: DeepReadonly<LineState>, applied: Event): LineState
 function installSteps(definitions: readonly AnyStepDef[]): readonly RuntimeStep[] {
   const names = new Set<string>()
   for (const step of definitions) {
-    if (names.has(step.name)) throw new Error(`yrd: line step '${step.name}' is already installed`)
+    if (names.has(step.name)) throw new Error(`yrd: queue step '${step.name}' is already installed`)
     names.add(step.name)
   }
   return Object.freeze([...definitions])
 }
 
-function descriptor(step: RuntimeStep | LineStep): InstalledStep {
+function descriptor(step: RuntimeStep | QueueStep): InstalledStep {
   return {
     name: step.name,
     title: step.title,
@@ -667,9 +668,9 @@ function descriptor(step: RuntimeStep | LineStep): InstalledStep {
 function selectSteps(steps: readonly RuntimeStep[], names?: readonly string[]): RuntimeStep[] {
   if (names === undefined) return [...steps]
   const selected = new Set(names)
-  if (selected.size !== names.length) throw new Error("yrd: line.integrate: duplicate step name")
+  if (selected.size !== names.length) throw new Error("yrd: queue.run: duplicate step name")
   for (const name of selected) {
-    if (!steps.some((step) => step.name === name)) throw new Error(`yrd: line step '${name}' is not installed`)
+    if (!steps.some((step) => step.name === name)) throw new Error(`yrd: queue step '${name}' is not installed`)
   }
   return steps.filter((step) => selected.has(step.name))
 }
@@ -678,7 +679,7 @@ function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: bool
   let integrated = alreadyIntegrated
   for (const step of steps) {
     if (step.needsIntegration && !integrated) {
-      throw new Error(`yrd: line step '${step.name}' requires integration output before it can run`)
+      throw new Error(`yrd: queue step '${step.name}' requires integration output before it can run`)
     }
     if (!step.integrates) continue
     if (integrated) throw new Error("yrd: merge step cannot run after the PR is already integrated")
@@ -687,16 +688,16 @@ function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: bool
 }
 
 function startRun(
-  id: LineRunId,
+  id: QueueRunId,
   prs: readonly PRSnapshot[],
   selected: readonly RuntimeStep[],
   shape: PRShape,
   integration?: IntegrationProof,
-  lineage: Readonly<{ parent?: LineRunId; isolationPart?: 0 | 1 }> = {},
-): Readonly<{ run: LineStart; events: readonly EventDraft[] }> {
+  lineage: Readonly<{ parent?: QueueRunId; isolationPart?: 0 | 1 }> = {},
+): Readonly<{ run: QueueStart; events: readonly EventDraft[] }> {
   const pr = prs[0]
-  if (pr === undefined) throw new Error("yrd: a line run requires at least one PR")
-  const run: LineStart = {
+  if (pr === undefined) throw new Error("yrd: a queue run requires at least one PR")
+  const run: QueueStart = {
     id,
     prs,
     base: pr.base,
@@ -707,35 +708,35 @@ function startRun(
   return {
     run,
     events: [
-      event("line/run/started", { run }),
+      event("queue/run/started", { run }),
       ...(selected[0] === undefined ? [] : [requestStep(selected[0], run, 0, shape)]),
     ],
   }
 }
 
-function requestStep(step: RuntimeStep, run: Pick<LineStart, "id" | "prs">, index: number, shape: PRShape) {
+function requestStep(step: RuntimeStep, run: Pick<QueueStart, "id" | "prs">, index: number, shape: PRShape) {
   return step.job.request({ run: run.id, step: step.name, index, prs: run.prs, shape }, { key: jobKey(run.id, index) })
 }
 
-function advanceLine(
+function advanceQueue(
   state: DeepReadonly<RuntimeState>,
-  record: DeepReadonly<LineRecord>,
+  record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
 ): Readonly<{ events: readonly EventDraft[] }> {
   const stale = pinnedPRError(state.bays, record.prs)
   if (stale !== undefined && record.failure === undefined) {
-    return { events: [event("line/run/failed", { run: record.id, error: stale })] }
+    return { events: [event("queue/run/failed", { run: record.id, error: stale })] }
   }
 
-  const jobs = lineJobs(record, state.jobs)
+  const jobs = queueJobs(record, state.jobs)
   const index = jobs.length - 1
   const job = jobs[index]
   if (job === undefined || job.status === "requested" || job.status === "running" || job.status === "waiting") {
     return { events: [] }
   }
   const planned = record.steps[index]
-  if (planned === undefined) throw new Error(`yrd: line run '${record.id}' lost step ${index}`)
-  if (runningLine(state.lines, state.jobs, record.base, record.id) !== undefined) return { events: [] }
+  if (planned === undefined) throw new Error(`yrd: queue run '${record.id}' lost step ${index}`)
+  if (runningQueue(state.queues, state.jobs, record.base, record.id) !== undefined) return { events: [] }
 
   if (job.status !== "passed") {
     const before = shapeThrough(record, state.jobs, index)
@@ -786,10 +787,10 @@ function samePayloadPRs(
   return Object.values(state.prs).filter((pr) => pr.status !== "withdrawn" && payloads.has(`${pr.base}\0${pr.headSha}`))
 }
 
-function materializeRun(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState>): LineRun {
-  const jobList = lineJobs(record, jobs)
+function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): QueueRun {
+  const jobList = queueJobs(record, jobs)
   const steps = record.steps.map(
-    (step, index): LineStep => ({
+    (step, index): QueueStep => ({
       ...step,
       ...(jobList[index] === undefined ? {} : { job: jobList[index] }),
     }),
@@ -836,7 +837,7 @@ function materializeRun(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<Job
   }
 }
 
-function lineJobs(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState>): Job[] {
+function queueJobs(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): Job[] {
   const result: Job[] = []
   let missing = false
   for (const [index, step] of record.steps.entries()) {
@@ -845,30 +846,30 @@ function lineJobs(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<JobsState
       missing = true
       continue
     }
-    if (missing) throw new Error(`yrd: line run '${record.id}' requested steps out of order`)
+    if (missing) throw new Error(`yrd: queue run '${record.id}' requested steps out of order`)
     const job = jobs.byId[id]
-    if (job === undefined) throw new Error(`yrd: line run '${record.id}' lost job '${id}'`)
+    if (job === undefined) throw new Error(`yrd: queue run '${record.id}' lost job '${id}'`)
     const input = StepExecutionSchema.parse(job.input)
     if (
       input.run !== record.id ||
       input.index !== index ||
       input.step !== step.name ||
-      job.definition !== `line.step.${step.name}` ||
+      job.definition !== `queue.step.${step.name}` ||
       job.revision !== step.revision
     ) {
-      throw new Error(`yrd: line run '${record.id}' job '${job.id}' does not match step '${step.name}'`)
+      throw new Error(`yrd: queue run '${record.id}' job '${job.id}' does not match step '${step.name}'`)
     }
     result.push(job)
   }
   return result
 }
 
-function jobKey(run: LineRunId, index: number): string {
-  return `line:${run}:${index}`
+function jobKey(run: QueueRunId, index: number): string {
+  return `queue:${run}:${index}`
 }
 
 function shapeThrough(
-  record: DeepReadonly<LineRecord>,
+  record: DeepReadonly<QueueRecord>,
   jobs: DeepReadonly<JobsState>,
   limit = record.steps.length,
 ): PRShape {
@@ -877,7 +878,7 @@ function shapeThrough(
     ...prShape(record.prs),
     ...(record.initialIntegration === undefined || hasMerge ? {} : { integration: record.initialIntegration }),
   }
-  const jobList = lineJobs(record, jobs)
+  const jobList = queueJobs(record, jobs)
   for (let index = 0; index < Math.min(limit, record.steps.length); index += 1) {
     const planned = record.steps[index]
     const job = jobList[index]
@@ -889,37 +890,37 @@ function shapeThrough(
   return shape
 }
 
-function orderedLines(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsState>): LineRun[] {
-  return Object.values(lines.records)
+function orderedQueues(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): QueueRun[] {
+  return Object.values(queues.records)
     .map((record) => materializeRun(record, jobs))
     .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
 }
 
-function runningLine(
-  lines: DeepReadonly<LinesState>,
+function runningQueue(
+  queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
   base: string,
-  except?: LineRunId,
-): LineRun | undefined {
-  return orderedLines(lines, jobs).find((run) => run.id !== except && run.base === base && run.status === "running")
+  except?: QueueRunId,
+): QueueRun | undefined {
+  return orderedQueues(queues, jobs).find((run) => run.id !== except && run.base === base && run.status === "running")
 }
 
-function childLine(
-  lines: DeepReadonly<LinesState>,
+function childQueue(
+  queues: DeepReadonly<QueuesState>,
   jobs: DeepReadonly<JobsState>,
-  parent: LineRunId,
+  parent: QueueRunId,
   part: 0 | 1,
-): LineRun | undefined {
-  const record = Object.values(lines.records).find(
+): QueueRun | undefined {
+  const record = Object.values(queues.records).find(
     (candidate) => candidate.parent === parent && candidate.isolationPart === part,
   )
   return record === undefined ? undefined : materializeRun(record, jobs)
 }
 
-function lineTree(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsState>, root: LineRunId): LineRun[] {
-  const ordered = orderedLines(lines, jobs)
-  const result: LineRun[] = []
-  const visit = (id: LineRunId): void => {
+function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, root: QueueRunId): QueueRun[] {
+  const ordered = orderedQueues(queues, jobs)
+  const result: QueueRun[] = []
+  const visit = (id: QueueRunId): void => {
     const run = ordered.find((candidate) => candidate.id === id)
     if (run === undefined) return
     result.push(run)
@@ -929,31 +930,31 @@ function lineTree(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsState>
   return result
 }
 
-function lineSummary(lines: DeepReadonly<LinesState>, jobs: DeepReadonly<JobsState>, base: string): LineSummary {
-  const runs = orderedLines(lines, jobs).filter((run) => run.base === base)
+function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, base: string): QueueSummary {
+  const runs = orderedQueues(queues, jobs).filter((run) => run.base === base)
   return {
     base,
     running: runs.filter((run) => run.status === "running"),
     waiting: runs.filter((run) => run.status === "waiting"),
-    finished: runs.filter(Lines.terminal),
-    ...(lines.holds[base] === undefined ? {} : { hold: lines.holds[base] }),
+    finished: runs.filter(Queues.terminal),
+    ...(queues.pauses[base] === undefined ? {} : { pause: queues.pauses[base] }),
   }
 }
 
-function auditLines(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): LineAuditResult {
-  const findings: LineAuditFinding[] = []
+function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
+  const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
-  for (const record of Object.values(state.lines.records)) {
+  for (const record of Object.values(state.queues.records)) {
     for (const pr of record.prs) {
       if (state.bays.prs[pr.id] !== undefined) continue
       findings.push({
         code: "missing-pr",
-        message: `line run '${record.id}' references missing PR '${pr.id}'`,
+        message: `queue run '${record.id}' references missing PR '${pr.id}'`,
         run: record.id,
         pr: pr.id,
       })
     }
-    let run: LineRun
+    let run: QueueRun
     try {
       run = materializeRun(record, state.jobs)
     } catch (error) {
@@ -964,20 +965,20 @@ function auditLines(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeSt
       })
       continue
     }
-    if (Lines.terminal(run)) continue
+    if (Queues.terminal(run)) continue
     for (const planned of record.steps) {
       const current = installed.get(planned.name)
       if (current === undefined) {
         findings.push({
           code: "step-unavailable",
-          message: `line run '${record.id}' requires unavailable step '${planned.name}' revision '${planned.revision}'`,
+          message: `queue run '${record.id}' requires unavailable step '${planned.name}' revision '${planned.revision}'`,
           run: record.id,
           step: planned.name,
         })
       } else if (current.revision !== planned.revision) {
         findings.push({
           code: "step-revision-drift",
-          message: `line run '${record.id}' requires step '${planned.name}' revision '${planned.revision}', installed '${current.revision}'`,
+          message: `queue run '${record.id}' requires step '${planned.name}' revision '${planned.revision}', installed '${current.revision}'`,
           run: record.id,
           step: planned.name,
         })
@@ -989,20 +990,20 @@ function auditLines(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeSt
 
 function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: InstalledStep): RuntimeStep {
   const current = steps.get(planned.name)
-  if (current === undefined) throw new Error(`yrd: line step '${planned.name}' is not installed`)
+  if (current === undefined) throw new Error(`yrd: queue step '${planned.name}' is not installed`)
   if (
     current.revision !== planned.revision ||
     current.integrates !== planned.integrates ||
     current.needsIntegration !== planned.needsIntegration
   ) {
     throw new Error(
-      `yrd: line step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`,
+      `yrd: queue step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`,
     )
   }
   return current
 }
 
-function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[] {
+function requestedPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] {
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
   const prs =
     selectors === undefined
@@ -1024,35 +1025,35 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
   const ids = new Set<string>()
   for (const pr of prs) {
     if (ids.has(pr.id)) {
-      raiseFailure("usage", "duplicate-pr", `yrd: line.integrate: duplicate PR '${pr.id}'`)
+      raiseFailure("usage", "duplicate-pr", `yrd: queue.run: duplicate PR '${pr.id}'`)
     }
     ids.add(pr.id)
     if (pr.status === "rejected" && args.retry !== true) {
       raiseFailure("refusal", "retry-required", `yrd: PR '${pr.id}' is rejected; retry=true is required`)
     }
     if (pr.status !== "submitted" && pr.status !== "rejected" && pr.status !== "integrated") {
-      raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${pr.status}, not ready for the line`)
+      raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${pr.status}, not ready for the queue`)
     }
   }
   return prs
 }
 
-function runnablePRs(state: DeepReadonly<RuntimeState>, args: IntegrateArgs): PR[] {
+function runnablePRs(state: DeepReadonly<RuntimeState>, args: QueueRunArgs): PR[] {
   const requested = requestedPRs(state.bays, args)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const eligible = requested.filter((pr) => {
-    const hold = state.lines.holds[pr.base]
-    if (hold === undefined || hold.allowedPRs.includes(pr.id)) return true
+    const pause = state.queues.pauses[pr.base]
+    if (pause === undefined || pause.allowedPRs.includes(pr.id)) return true
     if (implicitQueue) return false
     raiseFailure(
       "refusal",
-      "line-held",
-      `yrd: line '${pr.base}' is held: ${hold.reason}; PR '${pr.id}' is not in the allowed set`,
+      "queue-paused",
+      `yrd: queue '${pr.base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
     )
   })
   const claimed = new Set(
-    orderedLines(state.lines, state.jobs)
-      .filter((run) => !Lines.terminal(run))
+    orderedQueues(state.queues, state.jobs)
+      .filter((run) => !Queues.terminal(run))
       .flatMap((run) => run.prs.map((pr) => pr.id)),
   )
   return eligible.filter((pr) => !claimed.has(pr.id))
@@ -1075,7 +1076,7 @@ function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
 }
 
 function prShape(prs: readonly PRSnapshot[]): PRShape {
-  if (prs.length === 0) throw new Error("yrd: a line run requires at least one PR")
+  if (prs.length === 0) throw new Error("yrd: a queue run requires at least one PR")
   return { results: {} }
 }
 
@@ -1091,9 +1092,9 @@ function integratedPRShape(prs: readonly PR[]): IntegratedShape | undefined {
         pr.integration?.baseSha !== proof.baseSha,
     )
   ) {
-    throw new Error("yrd: every PR in a line candidate must share one integration proof")
+    throw new Error("yrd: every PR in a queue candidate must share one integration proof")
   }
-  return { ...prShape(prs.map(Lines.snapshot)), integration: proof }
+  return { ...prShape(prs.map(Queues.snapshot)), integration: proof }
 }
 
 function pinnedPRError(state: DeepReadonly<BaysState>, snapshots: readonly PRSnapshot[]): JobError | undefined {
@@ -1108,7 +1109,7 @@ function pinnedPRError(state: DeepReadonly<BaysState>, snapshots: readonly PRSna
     ) {
       return {
         code: "stale-pr",
-        message: `PR '${snapshot.id}' changed after line run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
+        message: `PR '${snapshot.id}' changed after queue run pinned revision ${snapshot.revision} (${snapshot.headSha})`,
       }
     }
   }
@@ -1123,12 +1124,12 @@ function normalizeBatch(config: BatchConfig): number {
   return config <= 1 ? 1 : config
 }
 
-function bisectable(run: LineRun): boolean {
+function bisectable(run: QueueRun): boolean {
   const failed = run.steps.some((step) => step.job?.status === "failed" || step.job?.status === "lost")
   return run.status === "failed" && failed && !isIntegrated(run.shape) && run.prs.length > 1
 }
 
-function needsAdvance(state: DeepReadonly<RuntimeState>, run: LineRun): boolean {
+function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean {
   if (run.error?.code === "stale-pr") return false
   const index = run.steps.findLastIndex((step) => step.job !== undefined)
   const step = run.steps[index]

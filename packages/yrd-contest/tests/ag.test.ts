@@ -21,7 +21,7 @@ afterEach(async () => {
 
 const systemProcess = createProcess()
 afterAll(() => systemProcess.close())
-const job = (id = "E1", attempt = 1) => ({ id, attempt, executor: "test", signal: new AbortController().signal })
+const job = (id = "E1", attempt = 1) => ({ id, attempt, runner: "test", signal: new AbortController().signal })
 const argv = (value: string) => value.split(" ")
 
 function passed(run: Awaited<ReturnType<ContestRunnerDef["run"]>>) {
@@ -47,7 +47,7 @@ async function repository(): Promise<{ root: string; repo: string; bay: Bay; bas
   await git(repo, "add", "README.md")
   await git(repo, "commit", "-qm", "base")
   const baseSha = await git(repo, "rev-parse", "HEAD")
-  await git(repo, "switch", "-qc", "task/contest-c1-a1")
+  await git(repo, "switch", "-qc", "issue/contest-c1-a1")
   return {
     root,
     repo,
@@ -55,7 +55,7 @@ async function repository(): Promise<{ root: string; repo: string; bay: Bay; bas
     bay: {
       id: "B1",
       name: "contest-c1-a1",
-      branch: "task/contest-c1-a1",
+      branch: "issue/contest-c1-a1",
       base: "main",
       status: "active",
       openedAt: "2026-07-09T12:00:00.000Z",
@@ -72,11 +72,11 @@ function contestInput(bay: Bay, config: ContestRunnerInput["competitor"]["config
   return {
     contest: "C1",
     attempt: "A1",
-    task: {
+    issue: {
       ref: { source: "km", id: "@yrd/core/21012" },
       title: "Finish Yrd",
       description: "Implement the contest runner end to end.\nPreserve immutable evidence.",
-      url: "https://tasks.example.invalid/21012",
+      url: "https://issues.example.invalid/21012",
       labels: ["#P0", "#feature"],
       revision: "r7",
     },
@@ -90,7 +90,7 @@ async function commitSolution(request: ProcessRequest): Promise<string> {
   if (request.cwd === undefined) throw new Error("agent request has no cwd")
   await writeFile(join(request.cwd, "solution.ts"), "export const solution = true\n")
   await git(request.cwd, "add", "solution.ts")
-  await git(request.cwd, "commit", "-qm", "implement task")
+  await git(request.cwd, "commit", "-qm", "implement issue")
   return await git(request.cwd, "rev-parse", "HEAD")
 }
 
@@ -127,7 +127,7 @@ function artifactPath(uri: string): string {
 }
 
 describe("createAgContestRunner", () => {
-  it("runs Ag in the exact Bay, passes the real task as one argv value, and pins the committed result", async () => {
+  it("runs Ag in the exact Bay, passes the real issue as one argv value, and pins the committed result", async () => {
     const { root, repo, bay, baseSha } = await repository()
     const agentRequests: ProcessRequest[] = []
     let committed = ""
@@ -156,7 +156,7 @@ describe("createAgContestRunner", () => {
       command: ["bun", "/opt/ag/cli.ts"],
       inject: injected(process),
       artifactRoot: join(root, "artifacts"),
-      environment: () => ({ GIT_DIR: "/tmp/forged", YRD_TASK_ID: "forged", SAFE_VALUE: "kept" }),
+      environment: () => ({ GIT_DIR: "/tmp/forged", YRD_ISSUE_ID: "forged", SAFE_VALUE: "kept" }),
     })
 
     const output = passed(
@@ -181,18 +181,18 @@ describe("createAgContestRunner", () => {
       ),
     )
     const prompt = agentRequests[0]?.argv.at(-1) ?? ""
-    expect(prompt).toContain("Task id: @yrd/core/21012")
+    expect(prompt).toContain("Issue id: @yrd/core/21012")
     expect(prompt).toContain("Implement the contest runner end to end.\nPreserve immutable evidence.")
     expect(prompt).toContain("Additional instructions:\nPreserve the public command contract.")
     expect(prompt).toContain(`Base commit: ${baseSha}`)
-    expect(agentRequests[0]?.env?.YRD_TASK_ID).toBe("@yrd/core/21012")
+    expect(agentRequests[0]?.env?.YRD_ISSUE_ID).toBe("@yrd/core/21012")
     expect(agentRequests[0]?.env?.GIT_DIR).toBeUndefined()
     expect(agentRequests[0]?.env?.SAFE_VALUE).toBe("kept")
     expect(output).toMatchObject({
       pin: {
         commit: committed,
         ref: "refs/yrd/attempts/C1/A1",
-        branch: "task/contest-c1-a1",
+        branch: "issue/contest-c1-a1",
         bay: "B1",
         baseSha,
       },
@@ -209,7 +209,7 @@ describe("createAgContestRunner", () => {
     expect(await readFile(artifactPath(transcript!.uri), "utf8")).toContain('"type":"turn.completed"')
   })
 
-  it("does not evaluate task text as shell source and records Claude-reported cost without estimating missing metrics", async () => {
+  it("does not evaluate issue text as shell source and records Claude-reported cost without estimating missing metrics", async () => {
     const { root, bay } = await repository()
     const marker = join(root, "must-not-exist")
     let launch: ProcessRequest | undefined
@@ -240,7 +240,7 @@ describe("createAgContestRunner", () => {
     const baseInput = contestInput(bay, { provider: "claude", account: "bench", effort: "max" })
     const input: ContestRunnerInput = {
       ...baseInput,
-      task: { ...baseInput.task, description: `Do the work; $(touch ${marker}) is literal acceptance text.` },
+      issue: { ...baseInput.issue, description: `Do the work; $(touch ${marker}) is literal acceptance text.` },
     }
 
     const output = passed(await runner.run(input, job()))

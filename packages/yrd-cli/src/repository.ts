@@ -45,8 +45,8 @@ function primaryWorktree(output: string): Readonly<{ path: string; branch?: stri
   const fields = new Map(
     first
       .split("\n")
-      .filter((line) => line.includes(" "))
-      .map((line) => [line.slice(0, line.indexOf(" ")), line.slice(line.indexOf(" ") + 1)]),
+      .filter((entry) => entry.includes(" "))
+      .map((entry) => [entry.slice(0, entry.indexOf(" ")), entry.slice(entry.indexOf(" ") + 1)]),
   )
   const path = fields.get("worktree")
   if (path === undefined || path === "") return undefined

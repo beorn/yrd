@@ -8,7 +8,7 @@ import type { Process } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
 import { IntegrationProofSchema } from "./model.ts"
-import type { StepExecution, StepRunner } from "./line.ts"
+import type { StepExecution, StepRunner } from "./queue.ts"
 
 export const StepArtifactSchema = z.object({ name: z.string().min(1), path: z.string().min(1) }).strict()
 export type StepArtifact = Readonly<z.infer<typeof StepArtifactSchema>>
@@ -66,7 +66,7 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
 export type ConfiguredWaitingCommandOptions<Shape extends PRShape> = ConfiguredCommandOptions<Shape>
 
 const RETIRED_PLACEHOLDERS = new Map([
-  ["{name}", "$YRD_TASK"],
+  ["{name}", "$YRD_ISSUE"],
   ["{pr}", "$YRD_PR"],
   ["{changeset}", "$YRD_PR"],
   ["{sha}", "$YRD_SHA"],
@@ -105,7 +105,7 @@ function configuredCommand<Shape extends PRShape>(
       YRD_BASE_SHA: primary.baseSha,
       YRD_JOB: context.id,
       YRD_ATTEMPT: String(context.attempt),
-      YRD_EXECUTOR: context.executor,
+      YRD_RUNNER: context.runner,
       YRD_RUN: input.run,
       YRD_SHA: primary.headSha,
       YRD_SHAS: JSON.stringify(input.prs.map((pr) => pr.headSha)),
@@ -273,7 +273,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   return Object.freeze({ run, commit, optionalCommit })
 }
 
-export type GitLineTarget = Readonly<{
+export type GitQueueTarget = Readonly<{
   branch: string
   branchRef: string
   sha: string
@@ -284,7 +284,7 @@ export type GitLineTarget = Readonly<{
   diverged: boolean
 }>
 
-async function inspectLineBase(git: Git, repo: string, branch: string): Promise<GitLineTarget> {
+async function inspectQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
   await git.run(repo, ["check-ref-format", "--branch", branch])
   const branchRef = `refs/heads/${branch}`
   const local = await git.optionalCommit(repo, branchRef)
@@ -325,17 +325,17 @@ async function inspectLineBase(git: Git, repo: string, branch: string): Promise<
       diverged: false,
     }
   }
-  throw new Error(`yrd: line base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
+  throw new Error(`yrd: queue base '${branch}' does not resolve as '${branchRef}' or '${sourceRef}'`)
 }
 
-export async function inspectGitLineTarget(options: {
+export async function inspectGitQueueTarget(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
   repo: string
   branch: string
   env?: NodeJS.ProcessEnv
-}): Promise<GitLineTarget> {
+}): Promise<GitQueueTarget> {
   const repo = resolve(options.repo)
-  return inspectLineBase(createGit(options.inject.process, options.env), repo, options.branch)
+  return inspectQueueBase(createGit(options.inject.process, options.env), repo, options.branch)
 }
 
 async function withScratch<Output extends JsonValue>(
@@ -346,7 +346,7 @@ async function withScratch<Output extends JsonValue>(
   run: (path: string) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   await mkdir(parent, { recursive: true })
-  const root = await mkdtemp(join(await realpath(parent), "yrd-line-"))
+  const root = await mkdtemp(join(await realpath(parent), "yrd-queue-"))
   const path = join(root, "worktree")
   let added = false
   let outcome: JobResult<Output> | undefined
@@ -439,11 +439,11 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     try {
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
-      const target = await authoritativeLineBase(git, repo, branch)
+      const target = await authoritativeQueueBase(git, repo, branch)
       if (target.diverged) {
         return failed(
-          "line-target-diverged",
-          `line '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
+          "queue-target-diverged",
+          `queue '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
             `${target.remote}/${branch} ${target.remoteSha?.slice(0, 12)}; align the local branch before integration`,
         )
       }
@@ -530,8 +530,10 @@ function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
 async function checkedOutWorktree(git: Git, repo: string, branchRef: string): Promise<string | undefined> {
   const listing = await git.run(repo, ["worktree", "list", "--porcelain"])
   for (const record of listing.stdout.split(/\n\n+/u)) {
-    const lines = record.split("\n")
-    if (lines.includes(`branch ${branchRef}`)) return lines.find((line) => line.startsWith("worktree "))?.slice(9)
+    const entries = record.split("\n")
+    if (entries.includes(`branch ${branchRef}`)) {
+      return entries.find((entry) => entry.startsWith("worktree "))?.slice(9)
+    }
   }
   return undefined
 }
@@ -552,7 +554,7 @@ async function validateCheckedCandidate(
     return {
       error: {
         code: "stale-check",
-        message: `line '${primaryPR(input).base}' moved from checked base '${checked.baseSha}' to '${baseSha}'`,
+        message: `queue '${primaryPR(input).base}' moved from checked base '${checked.baseSha}' to '${baseSha}'`,
       },
     }
   }
@@ -567,26 +569,26 @@ async function validateCheckedCandidate(
   return { checked }
 }
 
-async function authoritativeLineBase(git: Git, repo: string, branch: string): Promise<GitLineTarget> {
+async function authoritativeQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
   const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
-  if (remote.code !== 0 || remote.stdout === "") return inspectLineBase(git, repo, branch)
+  if (remote.code !== 0 || remote.stdout === "") return inspectQueueBase(git, repo, branch)
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
   const fetched = await git.run(repo, ["fetch", "--quiet", "origin", `+${source}:${target}`], true)
   if (fetched.code !== 0) {
     throw new Error(fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`)
   }
-  return inspectLineBase(git, repo, branch)
+  return inspectQueueBase(git, repo, branch)
 }
 
-export async function resolveGitLineTarget(options: {
+export async function resolveGitQueueTarget(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
   repo: string
   branch: string
   env?: NodeJS.ProcessEnv
-}): Promise<GitLineTarget> {
+}): Promise<GitQueueTarget> {
   const repo = resolve(options.repo)
-  return authoritativeLineBase(createGit(options.inject.process, options.env), repo, options.branch)
+  return authoritativeQueueBase(createGit(options.inject.process, options.env), repo, options.branch)
 }
 
 async function landingError(
@@ -608,7 +610,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
   return async (input): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const base = await authoritativeLineBase(git, repo, branch)
+      const base = await authoritativeQueueBase(git, repo, branch)
       const baseSha = base.sha
       const candidate = await validateCheckedCandidate(git, repo, input, baseSha)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
@@ -646,7 +648,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             }
           },
         )
-        const landing = await authoritativeLineBase(git, repo, branch)
+        const landing = await authoritativeQueueBase(git, repo, branch)
         const missing = await landingError(git, repo, input, checked, landing.sha)
         if (missing === undefined) {
           return {
@@ -657,7 +659,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if (landing.sha !== baseSha) {
           return failed(
             "stale-base",
-            `line '${branch}' moved from '${baseSha}' to '${landing.sha}' before the candidate could land`,
+            `queue '${branch}' moved from '${baseSha}' to '${landing.sha}' before the candidate could land`,
           )
         }
         if (attempted.status === "failed") return attempted
@@ -711,14 +713,14 @@ export function configuredMergeStep<Shape extends PRShape>(
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const base = await authoritativeLineBase(git, repo, branch)
+      const base = await authoritativeQueueBase(git, repo, branch)
       const candidate = await validateCheckedCandidate(git, repo, input, base.sha)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
 
       const outcome = await command(input, context)
-      let landing: GitLineTarget
+      let landing: GitQueueTarget
       try {
-        landing = await authoritativeLineBase(git, repo, branch)
+        landing = await authoritativeQueueBase(git, repo, branch)
       } catch (cause) {
         return outcome.status === "failed"
           ? failed(outcome.error.code, outcome.error.message)
@@ -762,7 +764,7 @@ export function deployCommandStep(
 
 function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   const primary = input.prs[0]
-  if (primary === undefined) throw new Error(`yrd: line run '${input.run}' has no PR`)
+  if (primary === undefined) throw new Error(`yrd: queue run '${input.run}' has no PR`)
   return primary
 }
 

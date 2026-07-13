@@ -31,7 +31,7 @@ function input(): ContestEvaluatorInput {
   return {
     contest: "C1",
     attempt: "A1",
-    task: {
+    issue: {
       ref: { source: "km", id: "@yrd/core/21012; $(touch /tmp/yrd-evaluator-injection)" },
       title: "Finish Yrd; $(touch /tmp/yrd-evaluator-title)",
     },
@@ -50,7 +50,7 @@ function input(): ContestEvaluatorInput {
 const context: JobContext = {
   id: "job-C1-A1-tests",
   attempt: 2,
-  executor: "worker-1",
+  runner: "worker-1",
   signal: new AbortController().signal,
 }
 
@@ -159,7 +159,7 @@ describe("held-out command evaluator", () => {
       YRD_ATTEMPT: "A1",
       YRD_PIN_COMMIT: PINNED_SHA,
       YRD_PIN_REF: "refs/yrd/attempts/C1/A1",
-      YRD_TASK_ID: "@yrd/core/21012; $(touch /tmp/yrd-evaluator-injection)",
+      YRD_ISSUE_ID: "@yrd/core/21012; $(touch /tmp/yrd-evaluator-injection)",
     })
     expect(await artifactText(result, "stdout")).toBe("27 checks passed\n")
     expect(await artifactText(result, "stderr")).toBe("")

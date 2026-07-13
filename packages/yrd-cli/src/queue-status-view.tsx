@@ -4,13 +4,13 @@ import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
-import type { LineRun, LineStep, LineSummary } from "@yrd/line"
+import type { QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Link, Table, Text } from "silvery"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
-export type LineStatusResult = LineSummary & { headSha?: string; prs: PR[] }
+export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
 
-export type LineLogRow = Readonly<{
+export type QueueLogRow = Readonly<{
   run: string
   base: string
   pr: string
@@ -35,15 +35,15 @@ export type LineLogRow = Readonly<{
   activeDurationMs?: number
   waitDuration: string
   waitDurationMs?: number
-  attempts: readonly LineLogAttempt[]
+  attempts: readonly QueueLogAttempt[]
   activeSteps: readonly Readonly<{ step: string; duration: string; durationMs: number }>[]
   retries: string
   parent: string
   isolationPart: "0" | "1" | "-"
   result: string
   error: string
-  location?: LineLogLocation
-  locations: readonly LineLogLocationEntry[]
+  location?: QueueLogLocation
+  locations: readonly QueueLogLocationEntry[]
   integration?: {
     commit: string
     baseSha: string
@@ -51,41 +51,41 @@ export type LineLogRow = Readonly<{
   landing: string
 }>
 
-export type LineLogAttempt = Readonly<{
+export type QueueLogAttempt = Readonly<{
   job: string
   run: string
   step: string
   index: number
   attempt: number
-  executor: string
+  runner: string
   outcome: "passed" | "failed" | "lost"
   startedAt: string
   finishedAt: string
   durationMs: number
 }>
 
-type LineAttemptResult =
+type QueueAttemptResult =
   | Readonly<{ status: "passed"; output: JsonValue }>
   | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output?: JsonValue }>
   | Readonly<{ status: "lost"; reason: string }>
 
-export type LineAttempt = LineLogAttempt &
+export type QueueAttempt = QueueLogAttempt &
   Readonly<{
     requestedAt: string
     revision: string
-    result: LineAttemptResult
+    result: QueueAttemptResult
   }>
 
 type RequestedJob = Readonly<{ run: string; step: string; index: number; requestedAt: string; revision: string }>
-type StartedAttempt = Readonly<{ attempt: number; executor: string; startedAt: string }>
+type StartedAttempt = Readonly<{ attempt: number; runner: string; startedAt: string }>
 
 type PinnedPRRevision = Readonly<{ id: string; revision: number; headSha: string }>
 
-export function lineRevisionKey(revision: PinnedPRRevision): string {
+export function queueRevisionKey(revision: PinnedPRRevision): string {
   return JSON.stringify([revision.id, revision.revision, revision.headSha])
 }
 
-export async function lineSubmissionTimes(
+export async function queueSubmissionTimes(
   events: AsyncIterable<Event> | Iterable<Event>,
 ): Promise<Map<string, string>> {
   const submissions = new Map<string, string>()
@@ -93,15 +93,15 @@ export async function lineSubmissionTimes(
     if (event.name !== "pr/submitted" || !isObjectValue(event.data)) continue
     const { pr, revision, headSha } = event.data
     if (typeof pr !== "string" || typeof revision !== "number" || typeof headSha !== "string") continue
-    submissions.set(lineRevisionKey({ id: pr, revision, headSha }), event.ts)
+    submissions.set(queueRevisionKey({ id: pr, revision, headSha }), event.ts)
   }
   return submissions
 }
 
-export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<LineAttempt[]> {
+export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
   const requested = new Map<string, RequestedJob>()
   const started = new Map<string, StartedAttempt>()
-  const attempts: LineAttempt[] = []
+  const attempts: QueueAttempt[] = []
 
   for await (const event of events) {
     if (event.name === "job/requested") {
@@ -133,7 +133,7 @@ export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Ev
     if (transition.type === "start") {
       started.set(`${transition.id}:${transition.attempt}`, {
         attempt: transition.attempt,
-        executor: transition.executor,
+        runner: transition.runner,
         startedAt: event.ts,
       })
       continue
@@ -147,7 +147,7 @@ export async function lineLogAttempts(events: AsyncIterable<Event> | Iterable<Ev
       job: transition.id,
       ...request,
       attempt: transition.attempt,
-      executor: start.executor,
+      runner: start.runner,
       outcome: transition.type === "lose" ? "lost" : transition.result.status === "passed" ? "passed" : "failed",
       startedAt: start.startedAt,
       finishedAt: event.ts,
@@ -193,13 +193,13 @@ export type HumanPRProjection = Row &
     failure?: HumanFailureProjection
   }>
 
-export type HumanLineProjection = Readonly<{
-  line: string
+export type HumanQueueProjection = Readonly<{
+  target: string
   open: number
   activeCount: number
   integrated: number
   rejected: number
-  hold?: LineSummary["hold"]
+  pause?: QueueSummary["pause"]
   active?: WatchActiveRow
   oldestOpen: string
   queue: readonly (HumanPRProjection & Readonly<{ position: number }>)[]
@@ -207,7 +207,7 @@ export type HumanLineProjection = Readonly<{
   recent: readonly HumanPRProjection[]
 }>
 
-type LineShowRow = Readonly<{
+type QueueShowRow = Readonly<{
   step: string
   revision: string
   status: string
@@ -227,11 +227,11 @@ type LineShowRow = Readonly<{
   evidence: string | Record<string, unknown>
   checkpoint: string
   landing: string
-  location?: LineLogLocation
-  locations: readonly LineLogLocationEntry[]
+  location?: QueueLogLocation
+  locations: readonly QueueLogLocationEntry[]
 }>
 
-type LineShowData = Readonly<{
+export type QueueShowData = Readonly<{
   run: string
   base: string
   status: string
@@ -254,24 +254,24 @@ type LineShowData = Readonly<{
   }
   parent: string
   isolationPart: "0" | "1" | "-"
-  prs: LineRun["prs"]
-  attempts: readonly LineAttempt[]
-  steps: readonly LineShowRow[]
+  prs: QueueRun["prs"]
+  attempts: readonly QueueAttempt[]
+  steps: readonly QueueShowRow[]
 }>
 
-type LegacyLineCoverage = Readonly<{
+type LegacyQueueCoverage = Readonly<{
   path: string
   frames: number
 }>
 
-export type LineLogCoverage = Readonly<{
+export type QueueLogCoverage = Readonly<{
   since: string
   completeness: "queue-only"
-  legacy: LegacyLineCoverage
+  legacy: readonly LegacyQueueCoverage[]
 }>
 
-type LineLogLocation = Readonly<{ path: string }> | Readonly<{ url: string }>
-type LineLogLocationEntry = Readonly<{ label: string; location: LineLogLocation }>
+type QueueLogLocation = Readonly<{ path: string }> | Readonly<{ url: string }>
+type QueueLogLocationEntry = Readonly<{ label: string; location: QueueLogLocation }>
 
 function age(timestamp: string | undefined, now: number): string {
   if (timestamp === undefined) return "-"
@@ -286,7 +286,7 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
     .at(-1)
 }
 
-function latestRun(pr: PR, summary: LineSummary): LineRun | undefined {
+function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
   return [...summary.running, ...summary.waiting, ...summary.finished]
     .filter((run) => run.prs.some((member) => member.id === pr.id))
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
@@ -295,7 +295,7 @@ function latestRun(pr: PR, summary: LineSummary): LineRun | undefined {
 
 type JobByStatus<Status extends Job["status"]> = Extract<Job, { status: Status }>
 
-function jobStatus(step: LineStep): Job["status"] | "queued" {
+function jobStatus(step: QueueStep): Job["status"] | "queued" {
   return step.job?.status ?? "queued"
 }
 
@@ -310,13 +310,13 @@ function safeText(value: unknown): string {
   return JSON.stringify(value)
 }
 
-function singleLine(value: string): string {
+function singleQueue(value: string): string {
   const normalized = value.replace(/\s+/gu, " ").trim()
   return normalized === "" ? "-" : normalized
 }
 
-function boundedLine(value: string, limit = 120): string {
-  const normalized = singleLine(value)
+function boundedQueue(value: string, limit = 120): string {
+  const normalized = singleQueue(value)
   if (normalized.length <= limit) return normalized
   return `${normalized.slice(0, Math.max(1, limit - 1)).trimEnd()}…`
 }
@@ -365,14 +365,14 @@ function relativeAge(milliseconds: number): string {
   return preciseDuration(milliseconds, true)
 }
 
-function lineLogClock(timestamp: string, compact: boolean, includeDate: boolean): string {
+function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean): string {
   if (timestamp === "-") return timestamp
   const iso = new Date(timestamp).toISOString()
   if (includeDate) return `${iso.slice(0, 19)}Z`
   return compact ? iso.slice(11, 16) : iso.slice(11, 19)
 }
 
-function lineLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
+function queueLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
   if (["integrated", "submitted"].includes(outcome)) return "INFO"
   if (["rejected", "paused", "resumed"].includes(outcome)) return "WARN"
   if (["failed", "lost"].includes(outcome)) return "ERROR"
@@ -380,8 +380,8 @@ function lineLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
 }
 
 function runDurations(
-  run: LineRun,
-  attempts: readonly LineLogAttempt[],
+  run: QueueRun,
+  attempts: readonly QueueLogAttempt[],
 ): {
   totalDurationMs?: number
   activeDurationMs?: number
@@ -417,7 +417,7 @@ function parseRunIdSuffix(run: string): number {
   return suffix === undefined ? Number.MAX_SAFE_INTEGER : Number.parseInt(suffix, 10)
 }
 
-function byRunStarted(left: LineRun, right: LineRun): number {
+function byRunStarted(left: QueueRun, right: QueueRun): number {
   const leftAt = Date.parse(left.startedAt)
   const rightAt = Date.parse(right.startedAt)
   if (leftAt !== rightAt) return leftAt - rightAt
@@ -429,7 +429,7 @@ function isLocalArtifact(value: unknown): value is string {
   return !/^[a-z][a-z0-9+.-]*:/iu.test(value)
 }
 
-function artifactPath(artifact: unknown): LineLogLocation | undefined {
+function artifactPath(artifact: unknown): QueueLogLocation | undefined {
   if (!isObjectValue(artifact)) return undefined
   const candidate =
     typeof artifact.uri === "string" && artifact.uri !== ""
@@ -446,7 +446,7 @@ function artifactPath(artifact: unknown): LineLogLocation | undefined {
   return { path }
 }
 
-function artifactLocation(step: LineStep | undefined): LineLogLocation | undefined {
+function artifactLocation(step: QueueStep | undefined): QueueLogLocation | undefined {
   return stepLocations(step)[0]?.location
 }
 
@@ -459,11 +459,11 @@ function artifactLabel(artifact: unknown): string {
   return "artifact"
 }
 
-function stepLocations(step: LineStep | undefined): LineLogLocationEntry[] {
+function stepLocations(step: QueueStep | undefined): QueueLogLocationEntry[] {
   if (step?.job === undefined) return []
-  const locations: LineLogLocationEntry[] = []
+  const locations: QueueLogLocationEntry[] = []
   const seen = new Set<string>()
-  const add = (label: string, location: LineLogLocation): void => {
+  const add = (label: string, location: QueueLogLocation): void => {
     const key = "path" in location ? `path:${location.path}` : `url:${location.url}`
     if (seen.has(key)) return
     seen.add(key)
@@ -480,24 +480,24 @@ function stepLocations(step: LineStep | undefined): LineLogLocationEntry[] {
   return locations
 }
 
-function attemptArtifacts(attempt: LineAttempt): readonly unknown[] {
+function attemptArtifacts(attempt: QueueAttempt): readonly unknown[] {
   if (attempt.result.status === "lost" || !isObjectValue(attempt.result.output)) return []
   return Array.isArray(attempt.result.output.artifacts) ? attempt.result.output.artifacts : []
 }
 
-function attemptLocations(attempt: LineAttempt): LineLogLocationEntry[] {
+function attemptLocations(attempt: QueueAttempt): QueueLogLocationEntry[] {
   return attemptArtifacts(attempt).flatMap((artifact) => {
     const location = artifactPath(artifact)
     return location === undefined ? [] : [{ label: artifactLabel(artifact), location }]
   })
 }
 
-function runLocations(run: LineRun): LineLogLocationEntry[] {
+function runLocations(run: QueueRun): QueueLogLocationEntry[] {
   const locations = run.steps.flatMap((step) => stepLocations(step))
   return [...new Map(locations.map((entry) => [JSON.stringify(entry.location), entry])).values()]
 }
 
-function runLocation(run: LineRun): LineLogLocation | undefined {
+function runLocation(run: QueueRun): QueueLogLocation | undefined {
   return run.steps.toReversed().flatMap(stepLocations).at(0)?.location
 }
 
@@ -507,7 +507,7 @@ function jobCheckpoint(job: Job | undefined): unknown {
   return undefined
 }
 
-function relevantStep(run: LineRun | undefined): LineStep | undefined {
+function relevantStep(run: QueueRun | undefined): QueueStep | undefined {
   if (run === undefined) return undefined
   const latestFirst = run.steps.toReversed()
   return (
@@ -517,14 +517,14 @@ function relevantStep(run: LineRun | undefined): LineStep | undefined {
   )
 }
 
-function runOutputLineageIndex(finished: readonly LineRun[], run: LineRun, revision: number, prId: string): number {
+function runOutputQueueageIndex(finished: readonly QueueRun[], run: QueueRun, revision: number, prId: string): number {
   const related = finished
     .filter((candidate) => candidate.prs.some((pr) => pr.id === prId && pr.revision === revision))
     .toSorted(byRunStarted)
   return related.findIndex((candidate) => candidate.id === run.id) + 1
 }
 
-function stepArtifacts(step: LineStep | undefined): readonly unknown[] {
+function stepArtifacts(step: QueueStep | undefined): readonly unknown[] {
   if (step?.job === undefined) return []
   const artifacts: unknown[] = []
   if ("artifacts" in step.job && Array.isArray(step.job.artifacts)) {
@@ -548,7 +548,7 @@ function artifactHref(artifact: unknown): string | undefined {
   return "path" in location ? pathToFileURL(location.path).href : location.url
 }
 
-function stepOutput(step: LineStep): string {
+function stepOutput(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
   if (job.status === "failed") return safeText((job as JobByStatus<"failed">).output ?? job.error)
@@ -560,64 +560,64 @@ function stepOutput(step: LineStep): string {
   return "-"
 }
 
-function lineOutcome(run: LineRun): string {
+function queueOutcome(run: QueueRun): string {
   if (run.status === "passed") return "integrated"
   if (run.status === "failed") return "rejected"
   return run.status
 }
 
-function lineIntegration(run: LineRun): { commit: string; baseSha: string } | undefined {
+function queueIntegration(run: QueueRun): { commit: string; baseSha: string } | undefined {
   return run.integration ?? ("integration" in run.shape ? run.shape.integration : undefined)
 }
 
-function lineLanding(run: LineRun): string {
-  const proof = lineIntegration(run)
+function queueLanding(run: QueueRun): string {
+  const proof = queueIntegration(run)
   if (proof === undefined) return "-"
   return `${proof.commit.slice(0, 12)}@${proof.baseSha.slice(0, 12)}`
 }
 
-function lineOutcomeIntegration(run: LineRun): { commit: string; baseSha: string } {
-  const proof = lineIntegration(run)
+function queueOutcomeIntegration(run: QueueRun): { commit: string; baseSha: string } {
+  const proof = queueIntegration(run)
   if (proof === undefined) throw new Error(`yrd: passed run '${run.id}' is missing integration proof`)
   return proof
 }
 
-function isolationPartLabel(run: LineRun): "0" | "1" | "-" {
+function isolationPartLabel(run: QueueRun): "0" | "1" | "-" {
   return run.isolationPart === undefined ? "-" : run.isolationPart === 0 ? "0" : "1"
 }
 
-function lineShowRetries(finished: readonly LineRun[], run: LineRun): number {
+function queueShowRetries(finished: readonly QueueRun[], run: QueueRun): number {
   if (run.prs.length === 0) return 0
   const first = run.prs[0]
   if (first === undefined) return 0
-  return runOutputLineageIndex(finished, run, first.revision, first.id)
+  return runOutputQueueageIndex(finished, run, first.revision, first.id)
 }
 
-function lineState(pr: PR, run: LineRun | undefined): string {
+function queueState(pr: PR, run: QueueRun | undefined): string {
   if (run?.status === "running") return "checking"
   if (run?.status === "waiting") return "waiting"
   return pr.status
 }
 
-function stepError(step: LineStep): string {
+function stepError(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
   if (job.status === "failed") return (job as JobByStatus<"failed">).error.message
   return "-"
 }
 
-function stepErrorCode(step: LineStep): string {
+function stepErrorCode(step: QueueStep): string {
   const job = step.job
   return job?.status === "failed" ? (job as JobByStatus<"failed">).error.code : "-"
 }
 
-function stepLost(step: LineStep): string {
+function stepLost(step: QueueStep): string {
   const job = step.job
   if (job?.status !== "lost") return "-"
   return job.lostReason
 }
 
-function stepDetail(step: LineStep): string {
+function stepDetail(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
   const outputDetail =
@@ -634,7 +634,7 @@ function stepDetail(step: LineStep): string {
   return "-"
 }
 
-function stepDuration(step: LineStep): string {
+function stepDuration(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
   if (job.status === "requested" || job.status === "running" || job.status === "waiting") return "-"
@@ -644,7 +644,7 @@ function stepDuration(step: LineStep): string {
   return "-"
 }
 
-function stepArtifactsText(step: LineStep): string {
+function stepArtifactsText(step: QueueStep): string {
   const artifacts = stepArtifacts(step)
   if (artifacts.length === 0) return "-"
   const first = artifacts[0]
@@ -652,7 +652,7 @@ function stepArtifactsText(step: LineStep): string {
   return String(artifacts.length)
 }
 
-function stepCheckpointText(step: LineStep): string {
+function stepCheckpointText(step: QueueStep): string {
   const checkpoint = jobCheckpoint(step.job)
   if (!isObjectValue(checkpoint)) return "-"
   const value = [] as string[]
@@ -661,7 +661,7 @@ function stepCheckpointText(step: LineStep): string {
   return value.length === 0 ? safeText(checkpoint) : value.join(" ")
 }
 
-function stepEvidence(step: LineStep): string | Record<string, unknown> {
+function stepEvidence(step: QueueStep): string | Record<string, unknown> {
   const job = step.job
   if (job === undefined) return "-"
   const evidence: Record<string, unknown> = {}
@@ -682,7 +682,7 @@ function CellLink({ href, children }: { href: string; children: string }) {
   )
 }
 
-function LocationLinks({ entries }: { entries: readonly LineLogLocationEntry[] }) {
+function LocationLinks({ entries }: { entries: readonly QueueLogLocationEntry[] }) {
   if (entries.length === 0) return "-"
   return (
     <Box flexDirection="row" gap={1}>
@@ -699,7 +699,7 @@ function LocationLinks({ entries }: { entries: readonly LineLogLocationEntry[] }
   )
 }
 
-function LineLogLocationLinks({ entries, compact }: { entries: readonly LineLogLocationEntry[]; compact: boolean }) {
+function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLogLocationEntry[]; compact: boolean }) {
   if (entries.length === 0) return <Text>-</Text>
   return (
     <Text>
@@ -729,8 +729,8 @@ function statusGlyph(status: string): string {
 }
 
 function failureFact(
-  run: LineRun | undefined,
-  step: LineStep | undefined,
+  run: QueueRun | undefined,
+  step: QueueStep | undefined,
 ): { code: string; message: string } | undefined {
   const job = step?.job
   if (job?.status === "failed") return { code: job.error.code, message: job.error.message }
@@ -739,19 +739,19 @@ function failureFact(
 }
 
 function causalSummary(message: string): string {
-  const lines = message
+  const parts = message
     .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line !== "" && !/^at\s+/u.test(line))
-  const candidate = lines.find((line) => !/^hint:/iu.test(line)) ?? lines[0] ?? "failed"
+    .map((part) => part.trim())
+    .filter((part) => part !== "" && !/^at\s+/u.test(part))
+  const candidate = parts.find((part) => !/^hint:/iu.test(part)) ?? parts[0] ?? "failed"
   const first = candidate.replace(/^hint:\s*/iu, "")
   const [rawCause, hint] = first.split(/\s+hint:\s*/iu, 2)
   const cause = rawCause ?? first
   const usefulHint = hint === undefined || /^(?:please|this can|[-])/iu.test(hint) ? undefined : hint
-  return boundedLine(`${cause.replace(/[:\s]+$/u, "")}${usefulHint === undefined ? "" : `: ${usefulHint}`}`, 104)
+  return boundedQueue(`${cause.replace(/[:\s]+$/u, "")}${usefulHint === undefined ? "" : `: ${usefulHint}`}`, 104)
 }
 
-function failureEvidence(step: LineStep | undefined): HumanFailureProjection["evidence"] {
+function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["evidence"] {
   const location = stepLocations(step)[0]?.location
   if (location === undefined) return undefined
   return "path" in location
@@ -761,10 +761,10 @@ function failureEvidence(step: LineStep | undefined): HumanFailureProjection["ev
 
 function projectPR(
   state: BaysState | undefined,
-  result: LineStatusResult,
+  result: QueueStatusResult,
   pr: PR,
   now: number,
-  runOverride?: LineRun,
+  runOverride?: QueueRun,
 ): HumanPRProjection {
   const run = runOverride ?? latestRun(pr, result)
   const step = relevantStep(run)
@@ -795,7 +795,7 @@ function projectPR(
       : formatDuration((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt))
   const artifacts = stepArtifacts(step)
   const artifact = artifactHref(artifacts[0])
-  const stateLabel = lineState(pr, run)
+  const stateLabel = queueState(pr, run)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
   const terminalAt =
@@ -821,7 +821,7 @@ function projectPR(
     pr: pr.id,
     ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
     branch: pr.branch,
-    subject: boundedLine(pr.name ?? pr.branch, 80),
+    subject: boundedQueue(pr.name ?? pr.branch, 80),
     nativeStatus: pr.status,
     state: stateLabel,
     glyph: statusGlyph(stateLabel),
@@ -835,7 +835,7 @@ function projectPR(
     step: step?.name ?? "-",
     result:
       failure?.summary ??
-      (job !== undefined && "detail" in job && typeof job.detail === "string" ? boundedLine(job.detail) : undefined) ??
+      (job !== undefined && "detail" in job && typeof job.detail === "string" ? boundedQueue(job.detail) : undefined) ??
       (step === undefined ? "-" : jobStatus(step)),
     ...(job !== undefined && "url" in job && job.url !== undefined ? { log: job.url } : {}),
     artifactCount: artifacts.length,
@@ -844,7 +844,7 @@ function projectPR(
   }
 }
 
-function projectedPRRows(state: BaysState | undefined, result: LineStatusResult, now: number): HumanPRProjection[] {
+function projectedPRRows(state: BaysState | undefined, result: QueueStatusResult, now: number): HumanPRProjection[] {
   return result.prs.map((pr) => projectPR(state, result, pr, now))
 }
 
@@ -853,11 +853,11 @@ function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): num
   return order === 0 ? left.pr.localeCompare(right.pr, undefined, { numeric: true }) : order
 }
 
-export function humanLineProjection(
-  result: LineStatusResult,
+export function humanQueueProjection(
+  result: QueueStatusResult,
   now: number,
   options: Readonly<{ selected?: ReadonlySet<string>; state?: BaysState }> = {},
-): HumanLineProjection {
+): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const rows = projectedPRRows(options.state, result, now)
   const queueRows = rows
@@ -892,12 +892,12 @@ export function humanLineProjection(
   const queue = queueRows.slice(0, QUEUE_ROW_LIMIT).map((row, index) => ({ ...row, position: index + 1 }))
   const active = activeWatchRow(result, now, selected)
   return {
-    line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
+    target: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
     open: queueRows.length,
     activeCount: queueRows.filter((row) => ["checking", "waiting"].includes(row.state)).length,
     integrated: rows.filter((row) => row.nativeStatus === "integrated").length,
     rejected: rows.filter((row) => row.nativeStatus === "rejected").length,
-    ...(result.hold === undefined ? {} : { hold: result.hold }),
+    ...(result.pause === undefined ? {} : { pause: result.pause }),
     ...(active === undefined ? {} : { active }),
     oldestOpen: queueRows[0]?.age ?? "-",
     queue,
@@ -906,13 +906,13 @@ export function humanLineProjection(
   }
 }
 
-export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
-  if (runs.length === 0) return <Text color="$fg-muted">Line idle.</Text>
+export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
+  if (runs.length === 0) return <Text color="$fg-muted">Queue idle.</Text>
   const data = runs.map((run) => ({
     run: run.id,
     prs: run.prs.map((pr) => pr.id).join(","),
     state: run.status,
-    steps: boundedLine(run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")),
+    steps: boundedQueue(run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")),
   }))
   return (
     <Table
@@ -932,22 +932,22 @@ export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
   )
 }
 
-export function PRResultView({ prs, runs }: { prs: readonly PR[]; runs: readonly LineRun[] }) {
+export function PRResultView({ prs, runs }: { prs: readonly PR[]; runs: readonly QueueRun[] }) {
   return (
     <Box flexDirection="column">
       <PRStatusView prs={prs} />
       {runs.length > 0 && (
         <Box marginTop={1}>
-          <LineRunsView runs={runs} />
+          <QueueRunsView runs={runs} />
         </Box>
       )}
     </Box>
   )
 }
 
-export function lineStatusRows(
+export function queueStatusRows(
   state: BaysState,
-  result: LineStatusResult,
+  result: QueueStatusResult,
   selected: ReadonlySet<string>,
   now: number,
 ): Row[] {
@@ -956,11 +956,11 @@ export function lineStatusRows(
   )
 }
 
-function SummaryLine({ projection }: { projection: HumanLineProjection }) {
+function SummaryQueue({ projection }: { projection: HumanQueueProjection }) {
   return (
     <Box height={1}>
       <Text wrap="truncate">
-        <Text bold>LINE</Text> {projection.line} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
+        <Text bold>QUEUE</Text> {projection.target} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
         {projection.activeCount} <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text>{" "}
         {projection.rejected} <Text bold>DRAIN</Text> {projection.oldestOpen}
       </Text>
@@ -968,7 +968,17 @@ function SummaryLine({ projection }: { projection: HumanLineProjection }) {
   )
 }
 
-function ActiveLine({ active }: { active: WatchActiveRow }) {
+export function QueueListView({ results, now }: { results: readonly QueueStatusResult[]; now: number }) {
+  return (
+    <Box flexDirection="column">
+      {results.map((result) => (
+        <SummaryQueue key={result.base} projection={humanQueueProjection(result, now)} />
+      ))}
+    </Box>
+  )
+}
+
+function ActiveQueue({ active }: { active: WatchActiveRow }) {
   return (
     <Box height={1}>
       <Text wrap="truncate">
@@ -978,7 +988,7 @@ function ActiveLine({ active }: { active: WatchActiveRow }) {
   )
 }
 
-function ProjectedPRLine({ row, position }: { row: HumanPRProjection; position?: number }) {
+function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?: number }) {
   return (
     <Box height={1}>
       <Text wrap="truncate">
@@ -990,7 +1000,7 @@ function ProjectedPRLine({ row, position }: { row: HumanPRProjection; position?:
   )
 }
 
-function FailureLines({ failure }: { failure: HumanFailureProjection }) {
+function FailureQueues({ failure }: { failure: HumanFailureProjection }) {
   return (
     <Box flexDirection="column">
       <Box height={1}>
@@ -1016,7 +1026,7 @@ function ProjectionRows({
   projection,
   queueHeading = "QUEUE",
 }: {
-  projection: HumanLineProjection
+  projection: HumanQueueProjection
   queueHeading?: string
 }) {
   return (
@@ -1027,7 +1037,7 @@ function ProjectionRows({
             <Text bold>{queueHeading}</Text>
           </Box>
           {projection.queue.map((row) => (
-            <ProjectedPRLine key={row.pr} row={row} position={row.position} />
+            <ProjectedPRQueue key={row.pr} row={row} position={row.position} />
           ))}
           {projection.queueOverflow === 0 ? null : (
             <Box height={1}>
@@ -1045,8 +1055,8 @@ function ProjectionRows({
           </Box>
           {projection.recent.map((row, index) => (
             <Box key={`${row.pr}:${row.runId ?? index}`} flexDirection="column">
-              <ProjectedPRLine row={row} />
-              {row.failure === undefined ? null : <FailureLines failure={row.failure} />}
+              <ProjectedPRQueue row={row} />
+              {row.failure === undefined ? null : <FailureQueues failure={row.failure} />}
             </Box>
           ))}
         </>
@@ -1060,36 +1070,36 @@ function ProjectionRows({
   )
 }
 
-export function LineStatusView({
+export function QueueStatusView({
   state,
   results,
   selected,
   now,
 }: {
   state: BaysState
-  results: readonly LineStatusResult[]
+  results: readonly QueueStatusResult[]
   selected: ReadonlySet<string>
   now: number
 }) {
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const projection = humanLineProjection(result, now, { selected, state })
-        const allowed = projection.hold?.allowedPRs.length === 0 ? "none" : projection.hold?.allowedPRs.join(", ")
+        const projection = humanQueueProjection(result, now, { selected, state })
+        const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(", ")
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-            <SummaryLine projection={projection} />
-            {projection.hold !== undefined && (
+            <SummaryQueue projection={projection} />
+            {projection.pause !== undefined && (
               <Box height={1}>
                 <Text wrap="truncate">
                   <Text color="$fg-warning" bold>
-                    HOLD
+                    PAUSE
                   </Text>
-                  {`: ${projection.hold.reason} (allowed: ${allowed})`}
+                  {`: ${projection.pause.reason} (allowed: ${allowed})`}
                 </Text>
               </Box>
             )}
-            {projection.active === undefined ? null : <ActiveLine active={projection.active} />}
+            {projection.active === undefined ? null : <ActiveQueue active={projection.active} />}
             <ProjectionRows projection={projection} />
           </Box>
         )
@@ -1111,8 +1121,8 @@ export type WatchQueueRow = Readonly<{
   result: string
 }>
 
-export function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] {
-  return humanLineProjection(result, now).queue.map((row) => ({
+export function watchQueueRows(result: QueueStatusResult, now: number): WatchQueueRow[] {
+  return humanQueueProjection(result, now).queue.map((row) => ({
     pos: row.position,
     pr: row.pr,
     subject: row.subject,
@@ -1136,7 +1146,7 @@ export type WatchActiveRow = Readonly<{
 }>
 
 export function activeWatchRow(
-  result: LineStatusResult,
+  result: QueueStatusResult,
   now: number,
   selected: ReadonlySet<string> = new Set<string>(),
 ): WatchActiveRow | undefined {
@@ -1152,28 +1162,28 @@ export function activeWatchRow(
   return {
     run: run.id,
     pr: member.id,
-    subject: boundedLine(pr?.name ?? member.id, 80),
+    subject: boundedQueue(pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
     glyph: statusGlyph(run.status),
     elapsed: age(run.startedAt, now),
   }
 }
 
-export function LineWatchView({ results, now }: { results: readonly LineStatusResult[]; now: number }) {
+export function QueueWatchView({ results, now }: { results: readonly QueueStatusResult[]; now: number }) {
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const projection = humanLineProjection(result, now)
-        const holdState = projection.hold === undefined ? "active" : `held: ${projection.hold.reason}`
+        const projection = humanQueueProjection(result, now)
+        const pauseState = projection.pause === undefined ? "active" : `paused: ${projection.pause.reason}`
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-            <SummaryLine projection={projection} />
+            <SummaryQueue projection={projection} />
             <Box height={1}>
               <Text wrap="truncate">
-                <Text bold>HOLD</Text> {holdState} <Text bold>DRAIN</Text> {projection.oldestOpen}
+                <Text bold>PAUSE</Text> {pauseState} <Text bold>DRAIN</Text> {projection.oldestOpen}
               </Text>
             </Box>
-            {projection.active === undefined ? null : <ActiveLine active={projection.active} />}
+            {projection.active === undefined ? null : <ActiveQueue active={projection.active} />}
             <ProjectionRows projection={projection} queueHeading="QUEUE POS" />
           </Box>
         )
@@ -1182,16 +1192,16 @@ export function LineWatchView({ results, now }: { results: readonly LineStatusRe
   )
 }
 
-export function lineLogRows(
-  results: readonly LineSummary[],
+export function queueLogRows(
+  results: readonly QueueSummary[],
   selectedPrs: ReadonlySet<string>,
   prFilter: string | undefined,
   prStatus?: ReadonlyMap<string, PR["status"]>,
-  attempts: readonly LineLogAttempt[] = [],
+  attempts: readonly QueueLogAttempt[] = [],
   revisionSubjects: ReadonlyMap<string, string> = new Map(),
   submissionTimes: ReadonlyMap<string, string> = new Map(),
-): LineLogRow[] {
-  const rows: LineLogRow[] = []
+): QueueLogRow[] {
+  const rows: QueueLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
 
   for (const result of results) {
@@ -1199,7 +1209,7 @@ export function lineLogRows(
       for (const pr of run.prs) {
         if (selectedPrs.size > 0 && !selectedPrs.has(pr.id)) continue
         if (prFilter !== undefined && pr.id !== prFilter) continue
-        const outcome = lineOutcome(run)
+        const outcome = queueOutcome(run)
         if (outcome === "running" || outcome === "waiting") continue
 
         const runError =
@@ -1219,7 +1229,7 @@ export function lineLogRows(
             step,
             index,
             attempt,
-            executor,
+            runner,
             outcome: attemptOutcome,
             startedAt,
             finishedAt,
@@ -1230,7 +1240,7 @@ export function lineLogRows(
             step,
             index,
             attempt,
-            executor,
+            runner,
             outcome: attemptOutcome,
             startedAt,
             finishedAt,
@@ -1240,7 +1250,7 @@ export function lineLogRows(
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
-        const submittedAt = submissionTimes.get(lineRevisionKey(pr))
+        const submittedAt = submissionTimes.get(queueRevisionKey(pr))
         const ageMs =
           submittedAt === undefined || finishedAt === undefined
             ? undefined
@@ -1251,7 +1261,7 @@ export function lineLogRows(
           base: run.base,
           pr: pr.id,
           branch: pr.branch,
-          subject: revisionSubjects.get(lineRevisionKey(pr)) ?? pr.branch,
+          subject: revisionSubjects.get(queueRevisionKey(pr)) ?? pr.branch,
           glyph: statusGlyph(outcome),
           revision: String(pr.revision),
           headSha: pr.headSha,
@@ -1273,9 +1283,9 @@ export function lineLogRows(
           ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
           attempts: attemptSummaries,
           activeSteps: durations.activeSteps,
-          retries: String(Math.max(0, runOutputLineageIndex(finished, run, pr.revision, pr.id))),
-          landing: lineLanding(run),
-          integration: outcome === "integrated" && run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
+          retries: String(Math.max(0, runOutputQueueageIndex(finished, run, pr.revision, pr.id))),
+          landing: queueLanding(run),
+          integration: outcome === "integrated" && run.status === "passed" ? queueOutcomeIntegration(run) : undefined,
           parent: run.parent ?? "-",
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
@@ -1308,7 +1318,7 @@ export function lineLogRows(
         pr: prFilter,
         branch: exampleResult?.branch ?? "-",
         subject:
-          (exampleResult === undefined ? undefined : revisionSubjects.get(lineRevisionKey(exampleResult))) ??
+          (exampleResult === undefined ? undefined : revisionSubjects.get(queueRevisionKey(exampleResult))) ??
           exampleResult?.branch ??
           prFilter,
         glyph: statusGlyph("retired"),
@@ -1342,8 +1352,8 @@ export function lineLogRows(
     const rightAt = Date.parse(right.started)
     if (Number.isNaN(leftAt) && Number.isNaN(rightAt)) {
       return byRunStarted(
-        { id: left.run, startedAt: left.started, base: left.base } as LineRun,
-        { id: right.run, startedAt: right.started, base: right.base } as LineRun,
+        { id: left.run, startedAt: left.started, base: left.base } as QueueRun,
+        { id: right.run, startedAt: right.started, base: right.base } as QueueRun,
       )
     }
     if (Number.isNaN(leftAt)) return 1
@@ -1353,7 +1363,7 @@ export function lineLogRows(
   })
 }
 
-function lineShowStepRow(run: LineRun, step: LineStep): LineShowRow {
+function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const stepDurationMs =
@@ -1382,17 +1392,17 @@ function lineShowStepRow(run: LineRun, step: LineStep): LineShowRow {
     artifacts: stepArtifactsText(step),
     evidence: stepEvidence(step),
     checkpoint: stepCheckpointText(step),
-    landing: lineLanding(run),
+    landing: queueLanding(run),
     locations,
     ...(location === undefined ? {} : { location }),
   }
 }
 
-function lineShowAttemptRow(run: LineRun, attempt: LineAttempt): LineShowRow {
+function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow {
   const step = run.steps[attempt.index] ?? run.steps.find((candidate) => candidate.name === attempt.step)
   if (step?.job?.id === attempt.job && step.job.attempt === attempt.attempt) {
     return {
-      ...lineShowStepRow(run, step),
+      ...queueShowStepRow(run, step),
       requested: toIso(attempt.requestedAt),
       started: toIso(attempt.startedAt),
       finished: toIso(attempt.finishedAt),
@@ -1428,17 +1438,17 @@ function lineShowAttemptRow(run: LineRun, attempt: LineAttempt): LineShowRow {
     artifacts: artifacts.length === 0 ? "-" : artifactLabel(artifacts[0]),
     evidence: isObjectValue(output) ? output : "-",
     checkpoint: "-",
-    landing: lineLanding(run),
+    landing: queueLanding(run),
     locations,
     ...(firstLocation === undefined ? {} : { location: firstLocation }),
   }
 }
 
-export function lineShowData(
-  run: LineRun,
-  allRuns: readonly LineRun[] = [],
-  attempts: readonly LineAttempt[] = [],
-): LineShowData {
+export function queueShowData(
+  run: QueueRun,
+  allRuns: readonly QueueRun[] = [],
+  attempts: readonly QueueAttempt[] = [],
+): QueueShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "passed" || candidate.status === "failed")
   const runAttempts = attempts
     .filter((attempt) => attempt.run === run.id)
@@ -1449,7 +1459,7 @@ export function lineShowData(
     run: run.id,
     base: run.base,
     status: run.status,
-    outcome: lineOutcome(run),
+    outcome: queueOutcome(run),
     started: toIso(run.startedAt),
     finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
     duration: runDurationMs === undefined ? "-" : preciseDuration(runDurationMs),
@@ -1460,27 +1470,27 @@ export function lineShowData(
     ...(durations.activeDurationMs === undefined ? {} : { activeDurationMs: durations.activeDurationMs }),
     waitDuration: durations.waitDurationMs === undefined ? "-" : preciseDuration(durations.waitDurationMs),
     ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
-    retries: lineShowRetries(finished, run),
-    landing: lineLanding(run),
-    integration: run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
+    retries: queueShowRetries(finished, run),
+    landing: queueLanding(run),
+    integration: run.status === "passed" ? queueOutcomeIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     prs: run.prs,
     attempts: runAttempts,
     steps:
       runAttempts.length === 0
-        ? run.steps.map((step) => lineShowStepRow(run, step))
-        : runAttempts.map((attempt) => lineShowAttemptRow(run, attempt)),
+        ? run.steps.map((step) => queueShowStepRow(run, step))
+        : runAttempts.map((attempt) => queueShowAttemptRow(run, attempt)),
   }
 }
 
-export function LineLogView({
+export function QueueLogView({
   rows,
   coverage,
   columns = 120,
 }: {
-  rows: readonly LineLogRow[]
-  coverage?: LineLogCoverage
+  rows: readonly QueueLogRow[]
+  coverage?: QueueLogCoverage
   columns?: number
 }) {
   const compact = columns <= 80
@@ -1508,8 +1518,8 @@ export function LineLogView({
           </Box>
           {visibleRows.map((row) => {
             const identity = compact
-              ? `${row.glyph} ${lineLogClock(row.startedAt, true, includeDate)} ${row.pr} r${row.revision} ${row.run} ${row.outcome}`
-              : `${row.glyph} ${lineLogClock(row.startedAt, false, includeDate)} ${lineLogLevel(row.outcome)} [${row.base}] ${row.pr} (rev${row.revision}, run${row.run.replace(/^R/u, "")}) ${row.outcome}`
+              ? `${row.glyph} ${queueLogClock(row.startedAt, true, includeDate)} ${row.pr} r${row.revision} ${row.run} ${row.outcome}`
+              : `${row.glyph} ${queueLogClock(row.startedAt, false, includeDate)} ${queueLogLevel(row.outcome)} [${row.base}] ${row.pr} (rev${row.revision}, run${row.run.replace(/^R/u, "")}) ${row.outcome}`
             const hasWait = Math.round((row.waitDurationMs ?? 0) / 1_000) > 0
             return (
               <Box key={`${row.run}:${row.pr}:${row.revision}`} height={1}>
@@ -1518,7 +1528,7 @@ export function LineLogView({
                   {row.locations.length === 0 ? null : (
                     <>
                       {" "}
-                      <LineLogLocationLinks entries={row.locations} compact />
+                      <QueueLogLocationLinks entries={row.locations} compact />
                     </>
                   )}{" "}
                   {row.subject}
@@ -1538,7 +1548,7 @@ export function LineLogView({
   )
 }
 
-export function LineShowView({ data }: { data: LineShowData }) {
+export function QueueShowView({ data }: { data: QueueShowData }) {
   return (
     <Box flexDirection="column">
       <Table
@@ -1610,26 +1620,26 @@ export function LineShowView({ data }: { data: LineShowData }) {
               header: "LOST",
               key: "lost",
               grow: true,
-              render: (row) => <Text wrap="truncate">{singleLine(row.lost)}</Text>,
+              render: (row) => <Text wrap="truncate">{singleQueue(row.lost)}</Text>,
             },
             {
               header: "MESSAGE",
               key: "error",
               grow: true,
-              render: (row) => <Text wrap="truncate">{singleLine(row.error)}</Text>,
+              render: (row) => <Text wrap="truncate">{singleQueue(row.error)}</Text>,
             },
             {
               header: "DETAIL",
               key: "detail",
               grow: true,
-              render: (row) => <Text wrap="truncate">{singleLine(row.detail)}</Text>,
+              render: (row) => <Text wrap="truncate">{singleQueue(row.detail)}</Text>,
             },
             {
               header: "OUTPUT",
               key: "output",
               grow: true,
               minWidth: 10,
-              render: (row) => <Text wrap="truncate">{singleLine(row.output)}</Text>,
+              render: (row) => <Text wrap="truncate">{singleQueue(row.output)}</Text>,
             },
             { header: "ART", key: "artifacts", grow: true },
             {
@@ -1644,7 +1654,7 @@ export function LineShowView({ data }: { data: LineShowData }) {
               grow: false,
               render: (row) => (
                 <Text wrap="truncate">
-                  {singleLine(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))}
+                  {singleQueue(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))}
                 </Text>
               ),
             },
@@ -1658,9 +1668,9 @@ export function LineShowView({ data }: { data: LineShowData }) {
           {data.steps.map((row) => (
             <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
               <Text wrap="truncate">
-                {`PROOF ${row.step}#${row.attempt} EVIDENCE ${singleLine(
+                {`PROOF ${row.step}#${row.attempt} EVIDENCE ${singleQueue(
                   typeof row.evidence === "string" ? row.evidence : safeText(row.evidence),
-                )} CHECKPOINT ${singleLine(row.checkpoint)}`}
+                )} CHECKPOINT ${singleQueue(row.checkpoint)}`}
               </Text>
             </Box>
           ))}
@@ -1671,6 +1681,19 @@ export function LineShowView({ data }: { data: LineShowData }) {
           LANDING <Text color="$fg-muted">{data.landing}</Text>
         </Text>
       </Box>
+    </Box>
+  )
+}
+
+export function PRRunsView({ runs }: { runs: readonly QueueShowData[] }) {
+  if (runs.length === 0) return <Text color="$fg-muted">No runs recorded.</Text>
+  return (
+    <Box flexDirection="column">
+      {runs.map((run, index) => (
+        <Box key={run.run} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
+          <QueueShowView data={run} />
+        </Box>
+      ))}
     </Box>
   )
 }

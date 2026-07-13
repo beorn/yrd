@@ -10,9 +10,9 @@
     "@silvery/signals": "^0.21.0",
     "@yrd/bay": "workspace:*",
     "@yrd/core": "workspace:*",
+    "@yrd/issue": "workspace:*",
     "@yrd/job": "workspace:*",
     "@yrd/process": "workspace:*",
-    "@yrd/task": "workspace:*",
     "zod": "^4.4.3"
   }
 }

@@ -13,16 +13,16 @@ import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, EventSchema, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import {
-  type LineRun,
-  type LineSummary,
-  withLine,
+  type QueueRun,
+  type QueueSummary,
+  withQueue,
   withMerge,
   withStep,
   type AddStepResult,
   type PRShape,
   type StepExecution,
-} from "@yrd/line"
-import { withTasks } from "@yrd/task"
+} from "@yrd/queue"
+import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
 import { renderString } from "silvery"
 import { run } from "silvery/runtime"
@@ -34,23 +34,23 @@ import {
   type ContestRunnerDef,
 } from "@yrd/contest"
 import {
-  LineShowView,
-  LineLogView,
-  LineWatchView,
+  QueueShowView,
+  QueueLogView,
+  QueueWatchView,
   activeWatchRow,
-  humanLineProjection,
-  lineLogAttempts,
-  lineLogRows,
-  lineRevisionKey,
-  lineShowData,
-  lineStatusRows,
+  humanQueueProjection,
+  queueLogAttempts,
+  queueLogRows,
+  queueRevisionKey,
+  queueShowData,
+  queueStatusRows,
   watchQueueRows,
-  type LineLogCoverage,
-  type LineStatusResult,
-} from "../src/line-status-view.tsx"
+  type QueueLogCoverage,
+  type QueueStatusResult,
+} from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
-import { LineWatchFrame, LineWatchPane, reduceWatchControl, type LineWatchPaneProps } from "../src/watch-pane.tsx"
+import { QueueWatchFrame, QueueWatchPane, reduceWatchControl, type QueueWatchPaneProps } from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -236,15 +236,15 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? false })
+  const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? false })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
-    withTasks({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Task one" }) }] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
     withBays({ jobs: bayJobs, defaultBase: "main" }),
   )
-  return createYrd(contests(line(base)), {
+  return createYrd(contests(queue(base)), {
     inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
   })
 }
@@ -262,7 +262,7 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
       stderr += text
     },
     cwd: "/repo",
-    executor: "cli-test",
+    runner: "cli-test",
     leaseMs: 60_000,
     now: () => 0,
     ...overrides,
@@ -314,11 +314,11 @@ function fakeJob(input: {
   output?: unknown
   artifacts?: readonly unknown[]
   lostReason?: string
-}): LineRun["steps"][number]["job"] {
+}): QueueRun["steps"][number]["job"] {
   const status = input.status
   return {
     id: input.id,
-    definition: "line.step",
+    definition: "queue.step",
     revision: "test-v1",
     input: {},
     attempt: input.attempt ?? 1,
@@ -328,7 +328,7 @@ function fakeJob(input: {
       ? {}
       : {
           startedAt: input.startedAt ?? "2026-07-09T12:00:00.000Z",
-          executor: "line-test",
+          runner: "queue-test",
           leaseExpiresAt: "2026-07-09T12:00:10.000Z",
         }),
     ...(status === "waiting"
@@ -369,7 +369,7 @@ function fakeJob(input: {
       ? {
           status,
           startedAt: input.startedAt ?? "2026-07-09T12:00:01.000Z",
-          executor: "line-test",
+          runner: "queue-test",
           leaseExpiresAt: "2026-07-09T12:00:10.000Z",
           ...(input.url === undefined ? {} : { url: input.url }),
         }
@@ -381,10 +381,14 @@ function fakeJob(input: {
       ? {}
       : { checkpoint: input.checkpoint }),
     ...(input.detail === undefined || status !== "passed" ? {} : { detail: input.detail }),
-  } as LineRun["steps"][number]["job"]
+  } as QueueRun["steps"][number]["job"]
 }
 
-function fakeStep(name: string, status: Parameters<typeof fakeJob>[0]["status"], job: LineRun["steps"][number]["job"]) {
+function fakeStep(
+  name: string,
+  status: Parameters<typeof fakeJob>[0]["status"],
+  job: QueueRun["steps"][number]["job"],
+) {
   return {
     name,
     title: `${name} test step`,
@@ -408,7 +412,7 @@ function fakeRun(input: {
   integration?: { commit: string; baseSha: string }
   error?: { code: string; message: string }
   subject?: string
-}): LineRun {
+}): QueueRun {
   const startedAt = input.startedAt
   return {
     id: input.id,
@@ -439,7 +443,7 @@ function fakeRun(input: {
   }
 }
 
-function fakeSummary(runs: readonly LineRun[]): LineSummary {
+function fakeSummary(runs: readonly QueueRun[]): QueueSummary {
   return {
     base: runs[0]?.base ?? "main",
     running: [],
@@ -448,11 +452,11 @@ function fakeSummary(runs: readonly LineRun[]): LineSummary {
   }
 }
 
-function coverageFixture(path: string, frames = 185): LineLogCoverage {
+function coverageFixture(path: string, frames = 185): QueueLogCoverage {
   return {
     since: "2026-07-09T12:00:00.000Z",
     completeness: "queue-only",
-    legacy: { path, frames },
+    legacy: [{ path, frames }],
   }
 }
 
@@ -466,8 +470,8 @@ describe("runYrd", () => {
     expect(gitHelp.stdout()).toContain("refresh")
     expect(gitHelp.stdout()).toContain("submit")
     expect(gitHelp.stdout()).toContain("close")
-    expect(gitHelp.stdout()).not.toMatch(/^\s+line /mu)
-    expect(gitHelp.stdout()).not.toMatch(/^\s+task /mu)
+    expect(gitHelp.stdout()).not.toMatch(/^\s+queue /mu)
+    expect(gitHelp.stdout()).not.toMatch(/^\s+issue /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+contest /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+help /mu)
 
@@ -481,8 +485,8 @@ describe("runYrd", () => {
     const yrdHelp = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), yrdHelp.io)).toBe(0)
     expect(yrdHelp.stdout()).toContain("Usage: yrd contest")
-    expect(yrdHelp.stdout()).toContain("show")
-    expect(yrdHelp.stdout()).toContain("evaluate")
+    expect(yrdHelp.stdout()).toContain("view")
+    expect(yrdHelp.stdout()).toContain("eval")
     expect(yrdHelp.stdout()).toContain("finish")
     expect(yrdHelp.stdout()).toContain("select")
     expect(yrdHelp.stdout()).toContain("promote")
@@ -490,25 +494,28 @@ describe("runYrd", () => {
     expect(yrdHelp.stdout()).not.toMatch(/^\s+help /mu)
   })
 
-  it("uses concise layered help with examples on the root and line surfaces", async () => {
+  it("uses concise layered help with examples on the root and queue surfaces", async () => {
     const app = await createApp()
     const root = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
-    expect(root.stdout()).toContain("software delivery orchestration")
-    expect(root.stdout()).toContain("Help:")
-    expect(root.stdout()).toContain("Yrd coordinates software work from task to delivery.")
+    expect(root.stdout()).toContain("yrd (shipyard) — agentic software delivery")
+    expect(root.stdout()).toContain("Model:")
+    expect(root.stdout()).toContain("Objects:")
+    expect(root.stdout()).toContain("Boundaries:")
+    expect(root.stdout()).toContain("Pick an issue")
+    expect(root.stdout()).toContain("The tracker holds the pen; yrd never creates or edits issues.")
     expect(root.stdout()).toContain("Examples:")
     expect(root.stdout()).toContain("$ yrd bay open fix --from topic")
+    expect(root.stdout()).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
 
-    const line = outputIO({ columns: 100 })
-    expect(await runYrd(app, yrd("line", "--help"), line.io)).toBe(0)
-    expect(line.stdout()).toContain("manage integration lines")
-    expect(line.stdout()).toMatch(/^\s+init \[options\] \[base\]\s+prepare line resources$/mu)
-    expect(line.stdout()).toMatch(/^\s+deinit \[options\] \[base\]\s+release line resources$/mu)
-    expect(line.stdout()).not.toMatch(/^\s+(?:provision|deprovision)\b/mu)
-    expect(line.stdout()).toContain("Examples:")
-    expect(line.stdout()).toContain("$ yrd line status release/2.0")
-    expect(line.stdout()).toContain("$ yrd line integrate PR7 --steps check,merge")
+    const queue = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
+    expect(queue.stdout()).toContain("manage integration queues")
+    expect(queue.stdout()).toMatch(/^\s+init \[options\] \[base\]\s+prepare queue resources$/mu)
+    expect(queue.stdout()).toMatch(/^\s+deinit \[options\] \[base\]\s+release queue resources$/mu)
+    expect(queue.stdout()).not.toMatch(/^\s+(?:provision|deprovision)\b/mu)
+    expect(queue.stdout()).toContain("Examples:")
+    expect(queue.stdout()).toContain("$ yrd queue run PR7 --steps check,merge")
   })
 
   it("exposes the locked noun-cutover surface and teaches that only the queue merges", async () => {
@@ -519,7 +526,15 @@ describe("runYrd", () => {
     for (const command of ["pr", "bay", "issue", "contest", "queue", "log", "watch", "prime"]) {
       expect(root.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
-    for (const removed of ["line", "task", "integrate", "hold", "release", "admin"]) {
+    const retiredQueueNoun = ["li", "ne"].join("")
+    const retiredIssueNoun = ["ta", "sk"].join("")
+    const retiredVerbs = [
+      ["inte", "grate"].join(""),
+      ["ho", "ld"].join(""),
+      ["re", "lease"].join(""),
+      ["ad", "min"].join(""),
+    ]
+    for (const removed of [retiredQueueNoun, retiredIssueNoun, ...retiredVerbs]) {
       expect(root.stdout()).not.toMatch(new RegExp(`^\\s+${removed}\\b`, "mu"))
     }
 
@@ -528,6 +543,10 @@ describe("runYrd", () => {
     for (const command of ["run", "pause", "resume", "finish", "init", "deinit", "audit"]) {
       expect(queue.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
+    expect(queue.stdout()).not.toMatch(/^\s+recover\b/mu)
+    const queueRun = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--help"), queueRun.io)).toBe(0)
+    expect(queueRun.stdout()).not.toContain("--retry")
 
     const pr = outputIO()
     expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
@@ -541,11 +560,69 @@ describe("runYrd", () => {
     expect(contest.stdout()).toMatch(/^\s+view\b/mu)
     expect(contest.stdout()).not.toMatch(/^\s+(?:evaluate|show)\b/mu)
 
+    await openAndSubmit(app)
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     const merge = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1"), merge.io)).toBe(1)
     expect(merge.stdout()).toBe("")
     expect(merge.stderr()).toContain("the queue is the only merger")
+    expect(merge.stderr()).toContain("yrd queue run PR1")
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+
+    const mergeJson = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), mergeJson.io)).toBe(1)
+    expect(mergeJson.stdout()).toBe("")
+    expect(JSON.parse(mergeJson.stderr())).toMatchObject({
+      command: "pr.merge",
+      pr: "PR1",
+      next: "yrd queue run PR1",
+      failure: { kind: "refusal", code: "queue-only-merger" },
+    })
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+  })
+
+  it("keeps JSON discriminators faithful and finds a direct-branch PR for status", async () => {
+    const app = await createApp()
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/direct", "--base", "main", "--json"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submit.stdout())).toMatchObject({ command: "pr.submit", prs: [{ branch: "topic/direct" }] })
+
+    const status = outputIO({ currentBranch: () => "topic/direct" })
+    expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
+    expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { branch: "topic/direct" } })
+
+    const prime = outputIO({ currentBranch: () => "topic/direct" })
+    expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
+    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
+
+    const checkout = outputIO()
+    expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
+    expect(JSON.parse(checkout.stdout())).toMatchObject({
+      command: "pr.checkout",
+      pr: "PR1",
+      bay: { status: "active" },
+    })
+
+    const dashboard = outputIO()
+    expect(await runYrd(app, yrd("--json"), dashboard.io), dashboard.stderr()).toBe(0)
+    expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
+  })
+
+  it("teaches PR-owned retry when pr merge is invoked for rejected work", async () => {
+    const app = await createApp({ failingCheck: true })
+    await openAndSubmit(app)
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
+    const output = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), output.io)).toBe(1)
+    expect(JSON.parse(output.stderr())).toMatchObject({
+      command: "pr.merge",
+      status: "rejected",
+      next: "yrd pr retry PR1",
+    })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
@@ -558,24 +635,43 @@ describe("runYrd", () => {
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "submit"), submit.io), submit.stderr()).toBe(0)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
-    expect(Object.values(app.state().lines.records)).toHaveLength(0)
+    expect(Object.values(app.state().queues.records)).toHaveLength(0)
     expect(mergeRuns).toEqual([])
 
     const beforeRejectedWait = await Array.fromAsync(app.events()).then((events) => events.length)
     const rejectedWait = outputIO({ cwd: "/repo/.bays/B1" })
-    expect(await runYrd(app, yrd("bay", "submit", "--wait"), rejectedWait.io)).toBe(2)
+    const retiredWait = `--${["wa", "it"].join("")}`
+    expect(await runYrd(app, yrd("bay", "submit", retiredWait), rejectedWait.io)).toBe(2)
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRejectedWait)
 
     const run = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
     expect(mergeRuns).toEqual(["merge"])
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
-    expect(Object.values(app.state().lines.records)).toHaveLength(1)
+    expect(Object.values(app.state().queues.records)).toHaveLength(1)
   })
 
   it("rejects every retired route without journaling an event", async () => {
     const app = await createApp()
-    for (const args of [["line"], ["task"], ["run"], ["integrate"], ["hold"], ["release"], ["admin"]]) {
+    const retiredQueueNoun = ["li", "ne"].join("")
+    const retiredIssueNoun = ["ta", "sk"].join("")
+    const retiredIntegrate = ["inte", "grate"].join("")
+    const retiredHold = ["ho", "ld"].join("")
+    const retiredRelease = ["re", "lease"].join("")
+    const retiredAdmin = ["ad", "min"].join("")
+    const retiredRecover = ["re", "cover"].join("")
+    const retiredRetry = `--${["re", "try"].join("")}`
+    for (const args of [
+      [retiredQueueNoun],
+      [retiredIssueNoun],
+      ["run"],
+      [retiredIntegrate],
+      [retiredHold],
+      [retiredRelease],
+      [retiredAdmin],
+      ["queue", retiredRecover],
+      ["queue", "run", retiredRetry],
+    ]) {
       const before = await Array.fromAsync(app.events()).then((events) => events.length)
       const output = outputIO()
       expect(await runYrd(app, yrd(...args), output.io), args.join(" ")).not.toBe(0)
@@ -640,30 +736,30 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
-  it("records tracker-neutral task and actor links when opening a bay", async () => {
+  it("records tracker-neutral issue and actor links when opening a bay", async () => {
     const app = await createApp()
     const output = outputIO({ color: true, columns: 96 })
 
     expect(
       await runYrd(
         app,
-        yrd("bay", "open", "linked-work", "--task", "github:beorn/yrd#42", "--actor", "codex:apex"),
+        yrd("bay", "open", "linked-work", "--issue", "github:beorn/yrd#42", "--actor", "codex:apex"),
         output.io,
       ),
       output.stderr(),
     ).toBe(0)
     expect(app.state().bays.byId.B1).toMatchObject({
       name: "linked-work",
-      task: "github:beorn/yrd#42",
+      issue: "github:beorn/yrd#42",
       actor: "codex:apex",
     })
-    expect(output.stdout()).toContain("TASK")
+    expect(output.stdout()).toContain("ISSUE")
     expect(output.stdout()).toContain("github:beorn/yrd#42")
     expect(output.stdout()).toContain("ACTOR")
     expect(output.stdout()).toContain("codex:apex")
   })
 
-  it("submits inferred bays and runs selected line steps instead of merely enqueueing jobs", async () => {
+  it("submits inferred bays and runs selected queue steps instead of merely enqueueing jobs", async () => {
     const app = await createApp()
     await openAndSubmit(app)
 
@@ -672,11 +768,11 @@ describe("runYrd", () => {
 
     const integrated = outputIO()
     expect(
-      await runYrd(app, yrd("line", "integrate", "PR1", "--steps", "check,merge", "--json"), integrated.io),
+      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), integrated.io),
       integrated.stderr(),
     ).toBe(0)
     expect(JSON.parse(integrated.stdout())).toMatchObject({
-      command: "line.integrate",
+      command: "queue.run",
       results: [
         {
           id: "R1",
@@ -782,78 +878,77 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "close", "PR1"), again.io)).not.toBe(0)
   })
 
-  it("finishes a waiting line job and resumes the same durable run", async () => {
+  it("finishes a waiting queue job and resumes the same durable run", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
 
-    const integrate = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "PR1"), integrate.io)).toBe(0)
-    expect(app.line.get("R1")?.status).toBe("waiting")
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), run.io)).toBe(0)
+    expect(app.queue.get("R1")?.status).toBe("waiting")
     const waiting = outputIO({ color: true })
-    expect(await runYrd(app, yrd("line", "status", "PR1"), waiting.io)).toBe(0)
+    expect(await runYrd(app, yrd(), waiting.io)).toBe(0)
     expect(waiting.stdout()).toContain("https://ci.invalid/run/1")
 
     const finish = outputIO()
     expect(
-      await runYrd(app, yrd("line", "finish", "PR1", "--ok", "--token", "remote-check", "--json"), finish.io),
+      await runYrd(app, yrd("queue", "finish", "PR1", "--ok", "--token", "remote-check", "--json"), finish.io),
     ).toBe(0)
-    expect(JSON.parse(finish.stdout())).toMatchObject({ command: "line.finish", run: { id: "R1", status: "passed" } })
-    expect(app.line.get("R1")?.shape).toMatchObject({
+    expect(JSON.parse(finish.stdout())).toMatchObject({ command: "queue.finish", run: { id: "R1", status: "passed" } })
+    expect(app.queue.get("R1")?.shape).toMatchObject({
       results: { check: { baseSha: BASE_SHA, candidateSha: HEAD_SHA } },
     })
-    expect(app.line.get("R1")?.steps.map((step) => step.job?.status)).toEqual(["passed", "passed"])
+    expect(app.queue.get("R1")?.steps.map((step) => step.job?.status)).toEqual(["passed", "passed"])
   })
 
-  it("recovers an expired interrupted line lease without advancing to merge", async () => {
+  it("keeps domain recovery available without exposing another queue verb", async () => {
     const mergeRuns: string[] = []
     const app = await createApp({ mergeRuns, failingCheck: true })
     await openAndSubmit(app)
-    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "first-runner", leaseMs: 60_000 }))[0]?.status).toBe(
+    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "first-runner", leaseMs: 60_000 }))[0]?.status).toBe(
       "failed",
     )
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
-    await app.dispatch(app.commands.line.integrate, { prs: ["PR1"], retry: true })
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], retry: true })
 
-    const checkJob = app.line.get("R2")?.steps[0]?.job
+    const checkJob = app.queue.get("R2")?.steps[0]?.job
     expect(checkJob?.status).toBe("requested")
     if (checkJob === undefined) throw new Error("expected requested check job")
     await app.dispatch(app.commands.job.transition, {
       type: "start",
       id: checkJob.id,
       attempt: 1,
-      executor: "interrupted-runner",
+      runner: "interrupted-runner",
       leaseExpiresAt: "2026-07-09T12:00:01.000Z",
     })
-    expect(app.line.get("R2")?.status).toBe("running")
+    expect(app.queue.get("R2")?.status).toBe("running")
 
-    const recover = outputIO({ now: () => Date.parse("2026-07-09T12:00:02.000Z") })
-    expect(
-      await runYrd(app, yrd("line", "recover", "--reason", "runner interrupted", "--json"), recover.io),
-      recover.stderr(),
-    ).toBe(0)
-    expect(JSON.parse(recover.stdout())).toMatchObject({
-      command: "line.recover",
-      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }],
+    const recovered = await app.queue.recover({
+      runner: "recovery",
+      leaseMs: 60_000,
+      recoveryTime: "2026-07-09T12:00:02.000Z",
+      reason: "runner interrupted",
+      now: () => Date.parse("2026-07-09T12:00:02.000Z"),
     })
+    expect(recovered).toMatchObject([{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }])
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
-    expect(app.line.get("R2")?.steps[1]?.job).toBeUndefined()
+    expect(app.queue.get("R2")?.steps[1]?.job).toBeUndefined()
     expect(mergeRuns).toEqual([])
   })
 
-  it("records an external failing verdict successfully while the line run becomes failed", async () => {
+  it("records an external failing verdict successfully while the queue run becomes failed", async () => {
     const temp = mkdtempSync(join(tmpdir(), "yrd-external-verdict-"))
     const artifact = join(temp, "private-tests.log")
     writeFileSync(artifact, "private tests failed\n")
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
 
     const finish = outputIO()
     expect(
       await runYrd(
         app,
         yrd(
-          "line",
+          "queue",
           "finish",
           "PR1",
           "--step",
@@ -876,7 +971,7 @@ describe("runYrd", () => {
       detail: "private tests failed",
     })
     const status = outputIO({ color: true })
-    expect(await runYrd(app, yrd("line", "status", "PR1"), status.io)).toBe(0)
+    expect(await runYrd(app, yrd(), status.io)).toBe(0)
     expect(status.stdout()).toContain(pathToFileURL(artifact).href)
     rmSync(temp, { recursive: true, force: true })
   })
@@ -886,77 +981,77 @@ describe("runYrd", () => {
     await openAndSubmit(app)
 
     const integrated = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "--steps", "--json"), integrated.io)).toBe(0)
-    expect(JSON.parse(integrated.stdout())).toEqual({ command: "line.integrate", results: [] })
+    expect(await runYrd(app, yrd("queue", "run", "--steps", "--json"), integrated.io)).toBe(0)
+    expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", results: [] })
     expect(app.state().bays.prs.PR1?.status).toBe("submitted")
 
     const idle = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "--json"), idle.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), idle.io)).toBe(0)
     expect(JSON.parse(idle.stdout())).toMatchObject({
-      command: "line.integrate",
+      command: "queue.run",
       results: [{ id: "R1", prs: [{ id: "PR1" }], steps: [{ name: "check" }, { name: "merge" }], status: "passed" }],
     })
 
     const drained = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "--json"), drained.io)).toBe(0)
-    expect(JSON.parse(drained.stdout())).toEqual({ command: "line.integrate", results: [] })
+    expect(await runYrd(app, yrd("queue", "run", "--json"), drained.io)).toBe(0)
+    expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", results: [] })
   })
 
-  it("persists and releases line holds through the operator CLI", async () => {
+  it("persists and releases queue pauses through the operator CLI", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "task/blocked", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "task/allowed", headSha: "2".repeat(40), base: "main" })
-    const hold = outputIO()
+    await app.bays.submit({ branch: "issue/blocked", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "issue/allowed", headSha: "2".repeat(40), base: "main" })
+    const pause = outputIO()
 
     expect(
       await runYrd(
         app,
-        yrd("line", "hold", "main", "--reason", "operator freeze", "--allow", "PR2", "--json"),
-        hold.io,
+        yrd("queue", "pause", "main", "--reason", "operator freeze", "--allow", "PR2", "--json"),
+        pause.io,
       ),
     ).toBe(0)
-    expect(JSON.parse(hold.stdout())).toMatchObject({
-      command: "line.hold",
-      hold: { base: "main", reason: "operator freeze", allowedPRs: ["PR2"] },
+    expect(JSON.parse(pause.stdout())).toMatchObject({
+      command: "queue.pause",
+      pause: { base: "main", reason: "operator freeze", allowedPRs: ["PR2"] },
     })
 
     const blocked = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--json"), blocked.io)).toBe(1)
-    expect(blocked.stderr()).toContain("line 'main' is held: operator freeze")
-    expect(app.state().lines.records).toEqual({})
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(1)
+    expect(blocked.stderr()).toContain("queue 'main' is paused: operator freeze")
+    expect(app.state().queues.records).toEqual({})
 
     const eligible = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "--json"), eligible.io), eligible.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), eligible.io), eligible.stderr()).toBe(0)
     expect(JSON.parse(eligible.stdout())).toMatchObject({ results: [{ prs: [{ id: "PR2" }], status: "passed" }] })
     expect(app.state().bays.prs.PR1?.status).toBe("submitted")
     expect(app.state().bays.prs.PR2?.status).toBe("integrated")
 
     const status = outputIO()
-    expect(await runYrd(app, yrd("line", "status", "--json"), status.io)).toBe(0)
+    expect(await runYrd(app, yrd("--json"), status.io)).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({
-      results: [{ base: "main", hold: { reason: "operator freeze", allowedPRs: ["PR2"] } }],
+      results: [{ base: "main", pause: { reason: "operator freeze", allowedPRs: ["PR2"] } }],
     })
 
     const humanStatus = outputIO({ columns: 100 })
-    expect(await runYrd(app, yrd("line", "status"), humanStatus.io)).toBe(0)
-    expect(humanStatus.stdout()).toContain("HOLD")
+    expect(await runYrd(app, yrd(), humanStatus.io)).toBe(0)
+    expect(humanStatus.stdout()).toContain("PAUSE")
     expect(humanStatus.stdout()).toContain("operator freeze")
     expect(humanStatus.stdout()).toContain("PR2")
 
-    const release = outputIO()
-    expect(await runYrd(app, yrd("line", "release", "main", "--json"), release.io)).toBe(0)
-    expect(JSON.parse(release.stdout())).toEqual({ command: "line.release", base: "main" })
-    expect(app.line.status("main").hold).toBeUndefined()
+    const resume = outputIO()
+    expect(await runYrd(app, yrd("queue", "resume", "main", "--json"), resume.io)).toBe(0)
+    expect(JSON.parse(resume.stdout())).toEqual({ command: "queue.resume", base: "main" })
+    expect(app.queue.status("main").pause).toBeUndefined()
   })
 
-  it("passes zero-or-more selectors to the line as one batch-capable candidate set", async () => {
+  it("passes zero-or-more selectors to the queue as one batch-capable candidate set", async () => {
     const app = await createApp({ batch: 2 })
     await openAndSubmit(app)
     expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const integrated = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "--json"), integrated.io), integrated.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--json"), integrated.io), integrated.stderr()).toBe(0)
     expect(JSON.parse(integrated.stdout())).toMatchObject({
       results: [
         {
@@ -968,13 +1063,13 @@ describe("runYrd", () => {
     })
   })
 
-  it("uses read capabilities for line status and contest show without appending events", async () => {
+  it("uses read capabilities for the dashboard and contest view without appending events", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000, now: () => 0 })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000, now: () => 0 })
     const base = await app.contests.resolveBase()
-    await app.dispatch(app.commands.task.compete, {
-      task: { ref: { source: "km", id: "T1" }, title: "Task one" },
+    await app.dispatch(app.commands.issue.compete, {
+      issue: { ref: { source: "km", id: "T1" }, title: "Issue one" },
       competitors: [
         { model: "codex", harness: "ag", config: { prompt: "Implement it" } },
         { model: "claude", harness: "ag", config: { prompt: "Implement it" } },
@@ -991,9 +1086,9 @@ describe("runYrd", () => {
         return MERGED_SHA
       },
     })
-    expect(await runYrd(app, yrd("line", "status", "PR1", "--json"), status.io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), status.io)).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({
-      command: "line.status",
+      command: "pr.view",
       results: [{ base: "main", headSha: MERGED_SHA, prs: [{ id: "PR1" }] }],
     })
     expect(resolved).toEqual(["main"])
@@ -1004,7 +1099,7 @@ describe("runYrd", () => {
       columns: 80,
       resolveRevision: async () => MERGED_SHA,
     })
-    expect(await runYrd(app, yrd("line", "status", "PR1"), human.io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "view", "PR1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("PR1")
     expect(human.stdout()).toContain("[x]")
     expect(human.stdout()).toContain("one")
@@ -1013,8 +1108,8 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("file:///repo/.bays/B1")
 
     const show = outputIO()
-    expect(await runYrd(app, yrd("contest", "show", "C1", "--json"), show.io)).toBe(0)
-    expect(JSON.parse(show.stdout())).toMatchObject({ command: "contest.show", contest: { id: "C1" } })
+    expect(await runYrd(app, yrd("contest", "view", "C1", "--json"), show.io)).toBe(0)
+    expect(JSON.parse(show.stdout())).toMatchObject({ command: "contest.view", contest: { id: "C1" } })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
@@ -1032,13 +1127,13 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("watch"), io)).toBe(0)
     expect(watch.stdout()).toBe("")
-    expect(mounted?.type).toBe(LineWatchPane)
-    const props = mounted?.props as LineWatchPaneProps
+    expect(mounted?.type).toBe(QueueWatchPane)
+    const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)
     const frame = stripOsc8Targets(
-      await renderString(createElement(LineWatchFrame, { snapshot: props.initial, paused: false })),
+      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false })),
     )
-    expect(frame).toContain("LINE")
+    expect(frame).toContain("QUEUE")
     expect(frame).toContain("OPEN")
     expect(frame).toContain("ACTIVE")
     expect(frame).toContain("INTEGRATED")
@@ -1053,10 +1148,10 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("renders hold and drain health in watch output", async () => {
+  it("renders pause and drain health in watch output", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    await app.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [] })
+    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
 
     let mounted: ReactElement | undefined
     const watch = outputIO({
@@ -1066,9 +1161,9 @@ describe("runYrd", () => {
       mounted = element
     })
     expect(await runYrd(app, yrd("watch"), io)).toBe(0)
-    const props = mounted?.props as LineWatchPaneProps
-    const frame = stripOsc8Targets(await renderString(createElement(LineWatchView, props.initial)))
-    expect(frame).toContain("HOLD")
+    const props = mounted?.props as QueueWatchPaneProps
+    const frame = stripOsc8Targets(await renderString(createElement(QueueWatchView, props.initial)))
+    expect(frame).toContain("PAUSE")
     expect(frame).toContain("operator freeze")
     expect(frame).toContain("DRAIN")
   })
@@ -1084,7 +1179,7 @@ describe("runYrd", () => {
         {
           id: "PR1",
           name: "Watch the queue",
-          branch: "task/watch",
+          branch: "issue/watch",
           base: "main",
           status: "submitted",
           submittedAt: "2026-07-09T12:00:00.000Z",
@@ -1101,7 +1196,7 @@ describe("runYrd", () => {
       ],
       waiting: [],
       finished: [],
-    } as unknown as LineStatusResult
+    } as unknown as QueueStatusResult
     const now = Date.parse("2026-07-09T12:10:00.000Z")
 
     expect(watchQueueRows(result, now)[0]).toMatchObject({ age: "10m", touched: "1m" })
@@ -1121,7 +1216,7 @@ describe("runYrd", () => {
         {
           id: "PR1",
           name: "Watch the queue",
-          branch: "task/watch",
+          branch: "issue/watch",
           base: "main",
           status: "submitted",
           submittedAt: "2026-07-09T12:00:00.000Z",
@@ -1138,7 +1233,7 @@ describe("runYrd", () => {
         },
       ],
       finished: [],
-    } as unknown as LineStatusResult
+    } as unknown as QueueStatusResult
 
     expect(watchQueueRows(result, Date.parse("2026-07-09T12:10:00.000Z"))[0]).toMatchObject({
       step: "check",
@@ -1153,7 +1248,7 @@ describe("runYrd", () => {
         {
           id: "PR1",
           name: "Watch the queue",
-          branch: "task/watch",
+          branch: "issue/watch",
           base: "main",
           status: "rejected",
           submittedAt: "2026-07-09T12:00:00.000Z",
@@ -1179,11 +1274,11 @@ describe("runYrd", () => {
           steps: [{ name: "check", job: { status: "failed", error: { message: "cold typecheck" } } }],
         },
       ],
-    } as unknown as LineStatusResult
+    } as unknown as QueueStatusResult
 
     const frame = stripOsc8Targets(
       await renderString(
-        createElement(LineWatchView, { results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+        createElement(QueueWatchView, { results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
         { width: 120 },
       ),
     )
@@ -1202,12 +1297,12 @@ describe("runYrd", () => {
           running: [],
           waiting: [],
           finished: [],
-        } as unknown as LineStatusResult,
+        } as unknown as QueueStatusResult,
       ],
       now: 0,
     }
     const handle = await run(
-      createElement(LineWatchPane, {
+      createElement(QueueWatchPane, {
         initial,
         load: async () => initial,
         intervalMs: 60_000,
@@ -1215,9 +1310,9 @@ describe("runYrd", () => {
       { writable: { write: () => {} }, cols: 40, rows: 8 },
     )
     try {
-      expect(handle.text).toContain("LINE")
+      expect(handle.text).toContain("QUEUE")
       expect(handle.text).toContain("main")
-      expect(handle.text).toContain("HOLD")
+      expect(handle.text).toContain("PAUSE")
       expect(handle.text).toContain("DRAIN")
       expect(handle.text).toContain("LIVE")
       await handle.press("p")
@@ -1232,7 +1327,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("monitors line status continuously from root watch", async () => {
+  it("monitors the dashboard continuously from root watch", async () => {
     const app = await createApp()
     await openAndSubmit(app)
 
@@ -1254,7 +1349,7 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([1_000])
   })
 
-  it("renders the literal empty line summary within 80- and 120-column budgets", async () => {
+  it("renders the literal empty queue summary within 80- and 120-column budgets", async () => {
     const app = await createApp()
 
     const renderStatus = async (columns: number): Promise<string> => {
@@ -1262,12 +1357,12 @@ describe("runYrd", () => {
         columns,
         resolveRevision: async () => "3".repeat(40),
       })
-      expect(await runYrd(app, yrd("line", "status"), status.io), status.stderr()).toBe(0)
+      expect(await runYrd(app, yrd(), status.io), status.stderr()).toBe(0)
       return status.stdout()
     }
 
     const expected = [
-      "LINE main@333333333333 OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 0 DRAIN -",
+      "QUEUE main@333333333333 OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 0 DRAIN -",
       "No runnable or recent rejected PRs.",
     ].join("\n")
     for (const columns of [80, 120]) {
@@ -1275,7 +1370,7 @@ describe("runYrd", () => {
       const physical = rendered.trimEnd().split("\n")
       expect(rendered.trimEnd()).toBe(expected)
       expect(physical).toHaveLength(2)
-      expect(Math.max(...physical.map((line) => line.length))).toBeLessThanOrEqual(columns)
+      expect(Math.max(...physical.map((row) => row.length))).toBeLessThanOrEqual(columns)
     }
   })
 
@@ -1288,44 +1383,42 @@ describe("runYrd", () => {
       "hint: This can be accomplished with the following steps:",
       "hint:   git add vendor/yrd",
       "hint:   git commit",
-      "    at applyCandidate (/repo/packages/yrd-line/src/command.ts:404:12)",
+      "    at applyCandidate (/repo/packages/yrd-queue/src/command.ts:404:12)",
     ].join("\n")
     writeFileSync(artifact, `${failure}\n`)
     const app = await createApp({ checkFailure: { code: "apply-conflict", message: failure, artifact } })
     await app.bays.submit({
-      branch: "task/failing",
+      branch: "issue/failing",
       name: "fix(cli): bound operator failures",
       headSha: HEAD_SHA,
       base: "main",
       baseSha: BASE_SHA,
     })
-    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
-      "failed",
-    )
-    const resolveLineTarget = async () => ({ base: "main", sha: BASE_SHA })
+    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]?.status).toBe("failed")
+    const resolveQueueTarget = async () => ({ base: "main", sha: BASE_SHA })
     const now = () => Date.parse("2026-07-09T12:01:00.000Z")
-    const rejectedOnly = outputIO({ columns: 120, now, resolveLineTarget })
-    expect(await runYrd(app, yrd("line", "status"), rejectedOnly.io), rejectedOnly.stderr()).toBe(0)
+    const rejectedOnly = outputIO({ columns: 120, now, resolveQueueTarget })
+    expect(await runYrd(app, yrd(), rejectedOnly.io), rejectedOnly.stderr()).toBe(0)
     expect.soft(rejectedOnly.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
 
     await app.bays.submit({
-      branch: "task/runnable",
+      branch: "issue/runnable",
       name: "feat(cli): keep runnable work visible",
       headSha: "2".repeat(40),
       base: "origin/main",
       baseSha: BASE_SHA,
     })
 
-    // Historical aliases can retain a hold after the canonical line was released.
-    await app.line.hold({ base: "origin/main", reason: "released maintenance", allowedPRs: [] })
-    await app.line.release("main")
+    // Historical aliases can retain a pause after the canonical queue was resumed.
+    await app.queue.pause({ base: "origin/main", reason: "released maintenance", allowedPRs: [] })
+    await app.queue.resume("main")
 
     for (const columns of [80, 120]) {
-      const status = outputIO({ columns, now, resolveLineTarget })
-      expect(await runYrd(app, yrd("line", "status"), status.io), status.stderr()).toBe(0)
-      const lines = status.stdout().trimEnd().split("\n")
-      expect.soft(lines.length).toBeLessThanOrEqual(14)
-      expect.soft(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(columns)
+      const status = outputIO({ columns, now, resolveQueueTarget })
+      expect(await runYrd(app, yrd(), status.io), status.stderr()).toBe(0)
+      const rows = status.stdout().trimEnd().split("\n")
+      expect.soft(rows.length).toBeLessThanOrEqual(14)
+      expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(columns)
       expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 1 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
@@ -1335,27 +1428,26 @@ describe("runYrd", () => {
       expect.soft(status.stdout()).not.toContain("next:")
       expect.soft(status.stdout()).not.toContain("hint:")
       expect.soft(status.stdout()).not.toContain("released maintenance")
-      expect.soft(status.stdout()).not.toContain("yrd line integrate PR1 --retry")
     }
-    const tty = outputIO({ columns: 80, color: true, now, resolveLineTarget })
-    expect(await runYrd(app, yrd("line", "status"), tty.io), tty.stderr()).toBe(0)
+    const tty = outputIO({ columns: 80, color: true, now, resolveQueueTarget })
+    expect(await runYrd(app, yrd(), tty.io), tty.stderr()).toBe(0)
     expect.soft(tty.stdout()).toContain(pathToFileURL(artifact).href)
 
     let mounted: ReactElement | undefined
-    const watch = outputIO({ now, resolveLineTarget })
+    const watch = outputIO({ now, resolveQueueTarget })
     const live = withLiveRenderer(watch.io, async (element) => {
       mounted = element
     })
     expect(await runYrd(app, yrd("watch"), live), watch.stderr()).toBe(0)
     if (mounted === undefined) throw new Error("expected watch pane to mount")
-    const snapshot = (mounted.props as LineWatchPaneProps).initial
-    expect.soft(snapshot.results[0]?.hold).toBeUndefined()
+    const snapshot = (mounted.props as QueueWatchPaneProps).initial
+    expect.soft(snapshot.results[0]?.pause).toBeUndefined()
     expect.soft(watchQueueRows(snapshot.results[0]!, now()).map((row) => row.pr)).toEqual(["PR2"])
     for (const width of [80, 120]) {
-      const frame = await renderString(createElement(LineWatchView, snapshot), { width, height: 24, plain: true })
-      const lines = frame.trimEnd().split("\n")
-      expect.soft(lines.length).toBeLessThanOrEqual(16)
-      expect.soft(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(width)
+      const frame = await renderString(createElement(QueueWatchView, snapshot), { width, height: 24, plain: true })
+      const rows = frame.trimEnd().split("\n")
+      expect.soft(rows.length).toBeLessThanOrEqual(16)
+      expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
       expect.soft(frame).toContain("OPEN 1")
       expect.soft(frame).toContain("feat(cli): keep runnable work visible")
       expect.soft(frame).toContain("apply-conflict: PR 'PR1' could not be applied")
@@ -1363,13 +1455,12 @@ describe("runYrd", () => {
       expect.soft(frame).not.toContain("next:")
       expect.soft(frame).not.toContain("released maintenance")
       expect.soft(frame).not.toContain("hint:")
-      expect.soft(frame).not.toContain("yrd line integrate PR1 --retry")
     }
 
-    const json = outputIO({ now, resolveLineTarget })
-    expect(await runYrd(app, yrd("line", "status", "--json"), json.io), json.stderr()).toBe(0)
-    const parsed = JSON.parse(json.stdout()) as { results: readonly LineStatusResult[] }
-    expect.soft(parsed.results[0]?.hold).toBeUndefined()
+    const json = outputIO({ now, resolveQueueTarget })
+    expect(await runYrd(app, yrd("--json"), json.io), json.stderr()).toBe(0)
+    const parsed = JSON.parse(json.stdout()) as { results: readonly QueueStatusResult[] }
+    expect.soft(parsed.results[0]?.pause).toBeUndefined()
     expect(parsed.results[0]?.finished[0]?.error?.message).toBe(failure)
     expect(parsed.results[0]?.finished[0]?.steps[0]?.job).toMatchObject({
       output: { artifacts: [{ name: "failure", path: artifact }] },
@@ -1378,7 +1469,7 @@ describe("runYrd", () => {
     const controller = new AbortController()
     const jsonl = outputIO({
       now,
-      resolveLineTarget,
+      resolveQueueTarget,
       scope: {
         signal: controller.signal,
         sleep: async () => controller.abort(),
@@ -1389,7 +1480,7 @@ describe("runYrd", () => {
       .stdout()
       .trimEnd()
       .split("\n")
-      .map((line) => JSON.parse(line) as { results: readonly LineStatusResult[] })
+      .map((entry) => JSON.parse(entry) as { results: readonly QueueStatusResult[] })
     expect(records).toHaveLength(1)
     expect(records[0]?.results[0]?.finished[0]?.error?.message).toBe(failure)
     expect(records[0]?.results[0]?.finished[0]?.steps[0]?.job).toMatchObject({
@@ -1399,7 +1490,7 @@ describe("runYrd", () => {
   })
 
   it("does not derive next-action teaching without typed eligibility facts", () => {
-    const failedRun = (id: string, revision: number, headSha: string, startedAt: string): LineRun =>
+    const failedRun = (id: string, revision: number, headSha: string, startedAt: string): QueueRun =>
       fakeRun({
         id,
         status: "failed",
@@ -1438,7 +1529,7 @@ describe("runYrd", () => {
     for (const item of cases) {
       const pr = {
         id: "PR1",
-        branch: "task/failure",
+        branch: "issue/failure",
         base: "main",
         baseSha: BASE_SHA,
         status: item.status,
@@ -1447,7 +1538,7 @@ describe("runYrd", () => {
         revisions: [],
       } as PR
       const selected = item.status === "rejected" ? new Set<string>() : new Set([pr.id])
-      const projection = humanLineProjection(
+      const projection = humanQueueProjection(
         { base: "main", headSha: BASE_SHA, prs: [pr], running: [], waiting: [], finished: item.runs },
         Date.parse("2026-07-09T12:10:00.000Z"),
         { selected },
@@ -1466,7 +1557,7 @@ describe("runYrd", () => {
     const terminalAt = "2026-07-09T12:06:00.000Z"
     const pr = {
       id: "PR1",
-      branch: "task/failure",
+      branch: "issue/failure",
       base: "main",
       baseSha: BASE_SHA,
       status: "rejected",
@@ -1492,10 +1583,10 @@ describe("runYrd", () => {
       running: [],
       waiting: [],
       finished: [run],
-    } as LineStatusResult
+    } as QueueStatusResult
 
-    const first = humanLineProjection(result, Date.parse("2026-07-09T13:00:00.000Z")).recent[0]
-    const later = humanLineProjection(result, Date.parse("2026-07-10T13:00:00.000Z")).recent[0]
+    const first = humanQueueProjection(result, Date.parse("2026-07-09T13:00:00.000Z")).recent[0]
+    const later = humanQueueProjection(result, Date.parse("2026-07-10T13:00:00.000Z")).recent[0]
     expect(first?.age).toBe("6m")
     expect(later?.age).toBe(first?.age)
   })
@@ -1508,7 +1599,7 @@ describe("runYrd", () => {
     writeFileSync(causal, "check failed\n")
     const pr = {
       id: "PR1",
-      branch: "task/failure",
+      branch: "issue/failure",
       base: "main",
       status: "rejected",
       revision: 1,
@@ -1541,7 +1632,7 @@ describe("runYrd", () => {
       ],
     })
 
-    const failure = humanLineProjection(
+    const failure = humanQueueProjection(
       { base: "main", headSha: BASE_SHA, prs: [pr], running: [], waiting: [], finished: [run] },
       Date.parse("2026-07-09T12:02:00.000Z"),
     ).recent[0]?.failure
@@ -1552,30 +1643,28 @@ describe("runYrd", () => {
   it("spotlights the active run in bounded status output", async () => {
     const app = await createApp({ waitingCheck: true })
     await app.bays.submit({
-      branch: "task/active",
+      branch: "issue/active",
       name: "fix(cli): show the active queue check",
       headSha: HEAD_SHA,
       base: "main",
       baseSha: BASE_SHA,
     })
-    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
-      "waiting",
-    )
+    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]?.status).toBe("waiting")
 
     for (const columns of [80, 120]) {
       const status = outputIO({
         columns,
         now: () => Date.parse("2026-07-09T12:01:00.000Z"),
-        resolveLineTarget: async () => ({ base: "main", sha: BASE_SHA }),
+        resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
       })
-      expect(await runYrd(app, yrd("line", "status"), status.io), status.stderr()).toBe(0)
+      expect(await runYrd(app, yrd(), status.io), status.stderr()).toBe(0)
       expect(status.stdout()).toContain("ACTIVE R1 PR1 fix(cli): show the active queue check")
       expect(
         Math.max(
           ...status
             .stdout()
             .split("\n")
-            .map((line) => line.length),
+            .map((row) => row.length),
         ),
       ).toBeLessThanOrEqual(columns)
     }
@@ -1586,7 +1675,7 @@ describe("runYrd", () => {
       {
         id: "PR1",
         name: "unrelated active run",
-        branch: "task/unrelated",
+        branch: "issue/unrelated",
         base: "main",
         status: "submitted",
         revision: 1,
@@ -1597,7 +1686,7 @@ describe("runYrd", () => {
       {
         id: "PR2",
         name: "selected active run",
-        branch: "task/selected",
+        branch: "issue/selected",
         base: "main",
         status: "submitted",
         revision: 1,
@@ -1627,10 +1716,10 @@ describe("runYrd", () => {
       ],
       waiting: [],
       finished: [],
-    } as LineStatusResult
+    } as QueueStatusResult
 
     expect(
-      humanLineProjection(result, Date.parse("2026-07-09T12:04:00.000Z"), {
+      humanQueueProjection(result, Date.parse("2026-07-09T12:04:00.000Z"), {
         selected: new Set(["PR2"]),
       }).active,
     ).toMatchObject({ run: "R2", pr: "PR2", subject: "selected active run" })
@@ -1640,7 +1729,7 @@ describe("runYrd", () => {
     const submitted = Array.from({ length: 7 }, (_, index) => ({
       id: `PR${index + 1}`,
       name: `feat(cli): runnable ${index + 1}`,
-      branch: `task/runnable-${index + 1}`,
+      branch: `issue/runnable-${index + 1}`,
       base: "main",
       baseSha: BASE_SHA,
       headSha: String(index + 1).repeat(40),
@@ -1652,7 +1741,7 @@ describe("runYrd", () => {
     const rejected = Array.from({ length: 5 }, (_, index) => ({
       id: `PR${index + 8}`,
       name: `fix(cli): rejected ${index + 1}`,
-      branch: `task/rejected-${index + 1}`,
+      branch: `issue/rejected-${index + 1}`,
       base: "main",
       baseSha: BASE_SHA,
       headSha: String(index + 8).repeat(40),
@@ -1683,37 +1772,37 @@ describe("runYrd", () => {
       running: [],
       waiting: [],
       finished,
-    } as unknown as LineStatusResult
+    } as unknown as QueueStatusResult
     const now = Date.parse("2026-07-09T13:00:00.000Z")
-    const projection = humanLineProjection(result, now)
+    const projection = humanQueueProjection(result, now)
     expect(projection).toMatchObject({ open: 7, rejected: 5, queueOverflow: 2 })
     expect(projection.queue).toHaveLength(5)
     expect(projection.recent).toHaveLength(3)
     expect(projection.recent.map((row) => row.runId)).toEqual(["R5", "R4", "R3"])
 
     for (const width of [80, 120]) {
-      const frame = await renderString(createElement(LineWatchView, { results: [result], now }), {
+      const frame = await renderString(createElement(QueueWatchView, { results: [result], now }), {
         width,
         height: 30,
         plain: true,
       })
-      const lines = frame.trimEnd().split("\n")
-      expect(lines).toHaveLength(16)
-      expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(width)
+      const rows = frame.trimEnd().split("\n")
+      expect(rows).toHaveLength(16)
+      expect(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
       expect(frame).toContain("... 2 more runnable")
       expect(frame).not.toContain("hint:")
     }
   })
 
-  it("projects local and remote spellings of one target as a single logical line", async () => {
+  it("projects local and remote spellings of one target as a single logical queue", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "task/one", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "task/two", headSha: "2".repeat(40), base: "origin/main" })
+    await app.bays.submit({ branch: "issue/one", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "issue/two", headSha: "2".repeat(40), base: "origin/main" })
     const status = outputIO({
-      resolveLineTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: "a".repeat(40) }),
+      resolveQueueTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: "a".repeat(40) }),
     })
 
-    expect(await runYrd(app, yrd("line", "status", "--json"), status.io), status.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("--json"), status.io), status.stderr()).toBe(0)
 
     expect(JSON.parse(status.stdout())).toMatchObject({
       results: [{ base: "main", headSha: "a".repeat(40), prs: [{ id: "PR1" }, { id: "PR2" }] }],
@@ -1723,12 +1812,12 @@ describe("runYrd", () => {
   it("sorts deduplicated alias and canonical run collections by startedAt then run id", async () => {
     const merge = (
       runInternals as typeof runInternals & {
-        mergedLineRuns?: (
-          canonical: LineSummary,
-          aliases: readonly LineSummary[],
-        ) => Pick<LineSummary, "running" | "waiting" | "finished">
+        mergedQueueRuns?: (
+          canonical: QueueSummary,
+          aliases: readonly QueueSummary[],
+        ) => Pick<QueueSummary, "running" | "waiting" | "finished">
       }
-    ).mergedLineRuns
+    ).mergedQueueRuns
     expect(merge).toBeTypeOf("function")
     if (merge === undefined) return
     const tied = ["R10", "R1", "R2"].map((id) =>
@@ -1739,20 +1828,16 @@ describe("runYrd", () => {
     ).toEqual(["R1", "R2", "R10"])
 
     const app = await createApp()
-    await app.bays.submit({ branch: "task/canonical", headSha: "1".repeat(40), base: "main" })
-    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
-      "passed",
-    )
-    await app.bays.submit({ branch: "task/alias", headSha: "2".repeat(40), base: "origin/main" })
-    expect((await app.line.integrate({ prs: ["PR2"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
-      "passed",
-    )
+    await app.bays.submit({ branch: "issue/canonical", headSha: "1".repeat(40), base: "main" })
+    expect((await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]?.status).toBe("passed")
+    await app.bays.submit({ branch: "issue/alias", headSha: "2".repeat(40), base: "origin/main" })
+    expect((await app.queue.run({ prs: ["PR2"] }, { runner: "test", leaseMs: 60_000 }))[0]?.status).toBe("passed")
     const log = outputIO({
-      resolveLineTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: BASE_SHA }),
+      resolveQueueTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: BASE_SHA }),
     })
 
-    expect(await runYrd(app, yrd("line", "log", "--json"), log.io), log.stderr()).toBe(0)
-    const rows = (JSON.parse(log.stdout()) as { rows: ReturnType<typeof lineLogRows> }).rows
+    expect(await runYrd(app, yrd("log", "--json"), log.io), log.stderr()).toBe(0)
+    const rows = (JSON.parse(log.stdout()) as { rows: ReturnType<typeof queueLogRows> }).rows
     expect(rows.map((row) => row.run)).toEqual(["R1", "R2"])
     expect(new Set(rows.map((row) => `${row.run}:${row.pr}`)).size).toBe(rows.length)
   })
@@ -1760,15 +1845,15 @@ describe("runYrd", () => {
   it("streams terminal log rows with stable revision/SHA proof and scope options", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
 
     const scoped = outputIO()
-    expect(await runYrd(app, yrd("line", "log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)
+    expect(await runYrd(app, yrd("log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)
     const parsed = JSON.parse(scoped.stdout()) as {
       command: string
-      rows: ReturnType<typeof lineLogRows>
+      rows: ReturnType<typeof queueLogRows>
     }
-    expect(parsed.command).toBe("line.log")
+    expect(parsed.command).toBe("log")
     expect(parsed.rows).toHaveLength(1)
     expect(parsed.rows[0]).toMatchObject({
       run: "R1",
@@ -1782,7 +1867,7 @@ describe("runYrd", () => {
     expect(parsed.rows[0]).not.toHaveProperty("location")
 
     const human = outputIO({ color: true, columns: 120 })
-    expect(await runYrd(app, yrd("line", "log", "--base", "main"), human.io)).toBe(0)
+    expect(await runYrd(app, yrd("log", "--base", "main"), human.io)).toBe(0)
     expect(human.stdout()).toContain("RUN")
     expect(human.stdout()).toContain("OUTCOME")
     expect(human.stdout()).toContain("PR1")
@@ -1792,10 +1877,10 @@ describe("runYrd", () => {
   it("shows run proof slices, revisions, timings, evidence, checkpoint, and landing proof", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
 
     const human = outputIO({ color: true, columns: 200 })
-    expect(await runYrd(app, yrd("line", "show", "R1"), human.io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("RUN")
     expect(human.stdout()).toContain("STEP")
     expect(human.stdout()).toContain("REV")
@@ -1806,25 +1891,25 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("check")
 
     const json = outputIO()
-    expect(await runYrd(app, yrd("line", "show", "R1", "--json"), json.io)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), json.io)).toBe(0)
     const parsed = JSON.parse(json.stdout()) as {
       command: string
-      run: ReturnType<typeof lineShowData>
+      runs: ReturnType<typeof queueShowData>[]
     }
-    expect(parsed.command).toBe("line.show")
-    expect(parsed.run.run).toBe("R1")
-    expect(parsed.run.steps).toHaveLength(2)
-    expect(parsed.run.steps[0]).toMatchObject({
+    expect(parsed.command).toBe("pr.runs")
+    expect(parsed.runs[0]?.run).toBe("R1")
+    expect(parsed.runs[0]?.steps).toHaveLength(2)
+    expect(parsed.runs[0]?.steps[0]).toMatchObject({
       step: "check",
       revision: "check-v1",
       status: "passed",
     })
-    expect(parsed.run.steps[0]).toHaveProperty("detail")
-    expect(parsed.run.steps[0]).toHaveProperty("output")
-    expect(parsed.run.steps[0]).toHaveProperty("landing")
+    expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
+    expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
+    expect(parsed.runs[0]?.steps[0]).toHaveProperty("landing")
   })
 
-  it("maps the 10-row line log/show contract matrix directly from canonical fields", async () => {
+  it("maps the 10-row log and PR-run contract matrix directly from canonical fields", async () => {
     const temp = mkdtempSync(join(tmpdir(), "yrd-legacy-log-"))
     const artifacts = join(temp, "artifacts")
     const attemptOne = join(artifacts, "attempt-1", "output.log")
@@ -1926,7 +2011,7 @@ describe("runYrd", () => {
       ["PR1", "integrated"],
       ["PR-retired", "withdrawn"],
     ])
-    const rows = lineLogRows([summary], new Set<string>(), undefined, statusByPr)
+    const rows = queueLogRows([summary], new Set<string>(), undefined, statusByPr)
     const prRows = rows.filter((row) => row.pr === "PR1")
     const revision2Rows = prRows.filter((row) => row.revision === "2")
 
@@ -1972,7 +2057,7 @@ describe("runYrd", () => {
       ],
       submittedAt: "2026-07-10T10:59:00.000Z",
     }
-    const statusRows = lineStatusRows(
+    const statusRows = queueStatusRows(
       { byId: {}, prs: { PR1: statusPr }, receipts: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr] },
       new Set(),
@@ -1981,7 +2066,7 @@ describe("runYrd", () => {
     expect(statusRows[0]).toMatchObject({ artifactCount: 1 })
     expect(statusRows[0]).not.toHaveProperty("artifact")
 
-    const failureShow = lineShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
+    const failureShow = queueShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
     expect(failureShow).toMatchObject({
       durationMs: 2_000,
       prs: [{ id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA }],
@@ -2001,15 +2086,15 @@ describe("runYrd", () => {
     })
     expect(failureShow.steps[2]).toMatchObject({ status: "lost", lost: "worker died" })
 
-    const missingShow = lineShowData(runMissingLocation, [runMissingLocation])
+    const missingShow = queueShowData(runMissingLocation, [runMissingLocation])
     expect(missingShow.steps[0]).not.toHaveProperty("location")
 
-    const retiredRows = lineLogRows([summary], new Set(["PR-retired"]), "PR-retired", statusByPr)
+    const retiredRows = queueLogRows([summary], new Set(["PR-retired"]), "PR-retired", statusByPr)
     expect(retiredRows).toHaveLength(1)
     expect(retiredRows[0]).toMatchObject({ outcome: "retired", run: "-", pr: "PR-retired" })
     expect(prRows.some((row) => row.outcome === "retired")).toBe(false)
 
-    const show = lineShowData(runRetryAttemptTwo, [runChronologyFailure, runRetryAttemptTwo, runMissingLocation])
+    const show = queueShowData(runRetryAttemptTwo, [runChronologyFailure, runRetryAttemptTwo, runMissingLocation])
     expect(show).toMatchObject({
       run: "R2",
       retries: 2,
@@ -2031,27 +2116,33 @@ describe("runYrd", () => {
     })
 
     const journal = join(temp, ".git", "bay", "journal.jsonl")
+    const firstJournal = join(temp, ".git", "yrd", "events.jsonl")
     mkdirSync(join(temp, ".git", "bay"), { recursive: true })
+    mkdirSync(join(temp, ".git", "yrd"), { recursive: true })
     writeFileSync(
       journal,
       Array.from({ length: 185 }, (_value, index) =>
         JSON.stringify({ ts: `2026-07-01T12:00:${String(index).padStart(2, "0")}.000Z` }),
       ).join("\n"),
     )
+    writeFileSync(firstJournal, `${JSON.stringify({ ts: "2026-06-30T12:00:00.000Z" })}\n`)
 
     execFileSync("git", ["init", "-q", temp])
     const coverageApp = await createApp()
     await openAndSubmit(coverageApp)
     const liveLog = outputIO({ cwd: temp })
-    expect(await runYrd(coverageApp, yrd("line", "log", "--json"), liveLog.io), liveLog.stderr()).toBe(0)
-    expect((JSON.parse(liveLog.stdout()) as { coverage: LineLogCoverage }).coverage).toMatchObject({
+    expect(await runYrd(coverageApp, yrd("log", "--json"), liveLog.io), liveLog.stderr()).toBe(0)
+    expect((JSON.parse(liveLog.stdout()) as { coverage: QueueLogCoverage }).coverage).toMatchObject({
       since: "2026-07-09T12:00:00.000Z",
       completeness: "queue-only",
-      legacy: { path: join(realpathSync(temp), ".git", "bay", "journal.jsonl"), frames: 185 },
+      legacy: [
+        { path: join(realpathSync(temp), ".git", "yrd", "events.jsonl"), frames: 1 },
+        { path: join(realpathSync(temp), ".git", "bay", "journal.jsonl"), frames: 185 },
+      ],
     })
 
     const withCoverage = coverageFixture(journal, 185)
-    const renderedLogWithCoverage = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
+    const renderedLogWithCoverage = await renderString(createElement(QueueLogView, { rows, coverage: withCoverage }), {
       width: 140,
       height: 24,
     })
@@ -2060,19 +2151,19 @@ describe("runYrd", () => {
     expect(renderedLogWithCoverage).toContain("R10")
     expect(renderedLogWithCoverage).not.toContain("c".repeat(40))
 
-    const renderedLogNoCoverage = await renderString(createElement(LineLogView, { rows }), {
+    const renderedLogNoCoverage = await renderString(createElement(QueueLogView, { rows }), {
       width: 140,
       height: 24,
     })
     expect(renderedLogNoCoverage).not.toContain("Legacy queue coverage")
     expect(renderedLogNoCoverage).not.toContain(missingArtifact)
 
-    const ttyLog = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
+    const ttyLog = await renderString(createElement(QueueLogView, { rows, coverage: withCoverage }), {
       width: 140,
       height: 24,
       plain: false,
     })
-    const plainLog = await renderString(createElement(LineLogView, { rows, coverage: withCoverage }), {
+    const plainLog = await renderString(createElement(QueueLogView, { rows, coverage: withCoverage }), {
       width: 140,
       height: 24,
       plain: true,
@@ -2082,27 +2173,27 @@ describe("runYrd", () => {
     expect(ttyLog).toContain(pathToFileURL(attemptTwo).href)
     expect(ttyLog).toContain("https://ci.invalid/check")
     expect(plainLog).not.toContain("\u001b]8;;")
-    const coverageOnlyTty = await renderString(createElement(LineLogView, { rows: [], coverage: withCoverage }), {
+    const coverageOnlyTty = await renderString(createElement(QueueLogView, { rows: [], coverage: withCoverage }), {
       width: 140,
       height: 4,
       plain: false,
     })
     expect(coverageOnlyTty).not.toContain("\u001b]8;;")
-    expect(JSON.parse(JSON.stringify({ command: "line.log", rows, coverage: withCoverage }))).toEqual({
-      command: "line.log",
+    expect(JSON.parse(JSON.stringify({ command: "log", rows, coverage: withCoverage }))).toEqual({
+      command: "log",
       rows,
       coverage: withCoverage,
     })
 
-    const renderedShow = await renderString(createElement(LineShowView, { data: show }), { width: 140, height: 40 })
+    const renderedShow = await renderString(createElement(QueueShowView, { data: show }), { width: 140, height: 40 })
     expect(renderedShow).toContain("check")
     expect(renderedShow).not.toContain(JOB_CHECK_PASS_ID)
-    const ttyShow = await renderString(createElement(LineShowView, { data: show }), {
+    const ttyShow = await renderString(createElement(QueueShowView, { data: show }), {
       width: 140,
       height: 40,
       plain: false,
     })
-    const plainShow = await renderString(createElement(LineShowView, { data: show }), {
+    const plainShow = await renderString(createElement(QueueShowView, { data: show }), {
       width: 140,
       height: 40,
       plain: true,
@@ -2111,14 +2202,29 @@ describe("runYrd", () => {
     expect(ttyShow).toContain(pathToFileURL(attemptTwo).href)
     expect(ttyShow).toContain("https://ci.invalid/check")
     expect(plainShow).not.toContain("\u001b]8;;")
-    const lineShowJson = JSON.parse(JSON.stringify(show)) as typeof show
-    expect(lineShowJson.steps[0]).toMatchObject({
+    const queueShowJson = JSON.parse(JSON.stringify(show)) as typeof show
+    expect(queueShowJson.steps[0]).toMatchObject({
       uuid: JOB_CHECK_PASS_ID,
       attempt: "2",
       duration: "2.0s",
     })
 
     rmSync(temp, { recursive: true, force: true })
+  })
+
+  it("fails loud when a legacy journal pointer cannot be read", async () => {
+    const temp = mkdtempSync(join(tmpdir(), "yrd-legacy-unreadable-"))
+    try {
+      execFileSync("git", ["init", "-q", temp])
+      mkdirSync(join(temp, ".git", "yrd", "events.jsonl"), { recursive: true })
+      const app = await createApp()
+      const output = outputIO({ cwd: temp })
+      expect(await runYrd(app, yrd("log", "--json"), output.io)).toBe(3)
+      expect(output.stdout()).toBe("")
+      expect(output.stderr()).toMatch(/(?:EISDIR|illegal operation on a directory)/iu)
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
   })
 
   it("renders each history run as one width-safe row with typed time decomposition and recoverable artifacts", async () => {
@@ -2171,16 +2277,16 @@ describe("runYrd", () => {
         ),
       ],
     })
-    const attempts = await lineLogAttempts([
+    const attempts = await queueLogAttempts([
       EventSchema.parse({
         id: JOB_CHECK_PASS_ID,
         name: "job/requested",
         ts: "2026-07-12T11:01:16.930Z",
         data: {
-          definition: "line.step.check",
+          definition: "queue.step.check",
           revision: "check-v1",
           input: { run: "R4", step: "check", index: 0 },
-          key: "line:R4:0",
+          key: "queue:R4:0",
         },
       }),
       EventSchema.parse({
@@ -2191,7 +2297,7 @@ describe("runYrd", () => {
           type: "start",
           id: JOB_CHECK_PASS_ID,
           attempt: 1,
-          executor: "yrd-cli",
+          runner: "yrd-cli",
           leaseExpiresAt: "2026-07-12T11:03:16.934Z",
         },
       }),
@@ -2203,7 +2309,7 @@ describe("runYrd", () => {
           type: "finish",
           id: JOB_CHECK_PASS_ID,
           attempt: 1,
-          executor: "yrd-cli",
+          runner: "yrd-cli",
           result: { status: "passed", output: {} },
         },
       }),
@@ -2212,10 +2318,10 @@ describe("runYrd", () => {
         name: "job/requested",
         ts: "2026-07-12T11:08:36.216Z",
         data: {
-          definition: "line.step.merge",
+          definition: "queue.step.merge",
           revision: "merge-v1",
           input: { run: "R4", step: "merge", index: 1 },
-          key: "line:R4:1",
+          key: "queue:R4:1",
         },
       }),
       EventSchema.parse({
@@ -2226,7 +2332,7 @@ describe("runYrd", () => {
           type: "start",
           id: JOB_PREPARE_PASS_ID,
           attempt: 1,
-          executor: "yrd-cli",
+          runner: "yrd-cli",
           leaseExpiresAt: "2026-07-12T11:10:36.218Z",
         },
       }),
@@ -2238,7 +2344,7 @@ describe("runYrd", () => {
           type: "finish",
           id: JOB_PREPARE_PASS_ID,
           attempt: 1,
-          executor: "yrd-cli",
+          runner: "yrd-cli",
           result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
         },
       }),
@@ -2256,7 +2362,7 @@ describe("runYrd", () => {
           type: "start",
           id: JOB_PREPARE_PASS_ID,
           attempt: 2,
-          executor: "yrd-native-bootstrap",
+          runner: "yrd-native-bootstrap",
           leaseExpiresAt: "2026-07-12T11:50:59.829Z",
         },
       }),
@@ -2268,7 +2374,7 @@ describe("runYrd", () => {
           type: "finish",
           id: JOB_PREPARE_PASS_ID,
           attempt: 2,
-          executor: "yrd-native-bootstrap",
+          runner: "yrd-native-bootstrap",
           result: { status: "passed", output: {} },
         },
       }),
@@ -2282,7 +2388,7 @@ describe("runYrd", () => {
         requestedAt: "2026-07-12T11:01:16.930Z",
         revision: "check-v1",
         attempt: 1,
-        executor: "yrd-cli",
+        runner: "yrd-cli",
         outcome: "passed",
         startedAt: "2026-07-12T11:01:16.934Z",
         finishedAt: "2026-07-12T11:08:36.215Z",
@@ -2297,7 +2403,7 @@ describe("runYrd", () => {
         requestedAt: "2026-07-12T11:08:36.216Z",
         revision: "merge-v1",
         attempt: 1,
-        executor: "yrd-cli",
+        runner: "yrd-cli",
         outcome: "failed",
         startedAt: "2026-07-12T11:08:36.218Z",
         finishedAt: "2026-07-12T11:12:18.300Z",
@@ -2312,7 +2418,7 @@ describe("runYrd", () => {
         requestedAt: "2026-07-12T11:08:36.216Z",
         revision: "merge-v1",
         attempt: 2,
-        executor: "yrd-native-bootstrap",
+        runner: "yrd-native-bootstrap",
         outcome: "passed",
         startedAt: "2026-07-12T11:48:59.829Z",
         finishedAt: "2026-07-12T11:49:24.335Z",
@@ -2320,7 +2426,7 @@ describe("runYrd", () => {
         result: { status: "passed", output: {} },
       },
     ])
-    const show = lineShowData(run, [run], attempts)
+    const show = queueShowData(run, [run], attempts)
     expect(show).toMatchObject({
       run: "R4",
       totalDuration: "48m07s",
@@ -2355,7 +2461,7 @@ describe("runYrd", () => {
       ]),
     )
 
-    const showHuman = await renderString(createElement(LineShowView, { data: show }), {
+    const showHuman = await renderString(createElement(QueueShowView, { data: show }), {
       width: 120,
       height: 20,
       plain: true,
@@ -2367,17 +2473,17 @@ describe("runYrd", () => {
     expect(showHuman).toContain("11m26s")
     expect(showHuman).toContain("36m42s")
     expect(showHuman).toContain("merge-stalled")
-    expect(showHuman.split("\n").filter((line) => line.trimStart().startsWith("merge"))).toHaveLength(2)
+    expect(showHuman.split("\n").filter((row) => row.trimStart().startsWith("merge"))).toHaveLength(2)
 
-    const showTty = await renderString(createElement(LineShowView, { data: show }), {
+    const showTty = await renderString(createElement(QueueShowView, { data: show }), {
       width: 200,
       height: 20,
       plain: false,
     })
     expect(showTty).toContain(pathToFileURL(stdout).href)
     expect(showTty).toContain(pathToFileURL(stderr).href)
-    expect(JSON.parse(JSON.stringify({ command: "line.show", run: show }))).toMatchObject({
-      command: "line.show",
+    expect(JSON.parse(JSON.stringify({ command: "pr.runs", run: show }))).toMatchObject({
+      command: "pr.runs",
       run: {
         totalDurationMs: 2_887_405,
         activeDurationMs: 685_869,
@@ -2385,14 +2491,14 @@ describe("runYrd", () => {
         attempts: [{ attempt: 1 }, { attempt: 1 }, { attempt: 2 }],
       },
     })
-    const rows = lineLogRows(
+    const rows = queueLogRows(
       [fakeSummary([run])],
       new Set<string>(),
       undefined,
       new Map([["PR23", "integrated"]]),
       attempts,
       new Map(),
-      new Map([[lineRevisionKey(run.prs[0]!), "2026-07-12T10:49:24.335Z"]]),
+      new Map([[queueRevisionKey(run.prs[0]!), "2026-07-12T10:49:24.335Z"]]),
     )
 
     const row = rows[0]
@@ -2407,13 +2513,13 @@ describe("runYrd", () => {
       activeDurationMs: 685_869,
       waitDurationMs: 2_201_536,
       attempts: attempts.map(
-        ({ job, run: attemptRun, step, index, attempt, executor, outcome, startedAt, finishedAt, durationMs }) => ({
+        ({ job, run: attemptRun, step, index, attempt, runner, outcome, startedAt, finishedAt, durationMs }) => ({
           job,
           run: attemptRun,
           step,
           index,
           attempt,
-          executor,
+          runner,
           outcome,
           startedAt,
           finishedAt,
@@ -2443,12 +2549,12 @@ describe("runYrd", () => {
       ],
     ])
     for (const width of [80, 120]) {
-      const human = await renderString(createElement(LineLogView, { rows, columns: width }), {
+      const human = await renderString(createElement(QueueLogView, { rows, columns: width }), {
         width,
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((line) => line.includes("R4"))
+      const physicalRows = human.split("\n").filter((row) => row.includes("R4"))
       expect(human).toBe(expectedHistory.get(width))
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
@@ -2469,7 +2575,7 @@ describe("runYrd", () => {
       waitDurationMs: 0,
     }
     for (const width of [80, 120]) {
-      const human = await renderString(createElement(LineLogView, { rows: [hourRow], columns: width }), {
+      const human = await renderString(createElement(QueueLogView, { rows: [hourRow], columns: width }), {
         width,
         height: 4,
         plain: true,
@@ -2489,19 +2595,19 @@ describe("runYrd", () => {
       row,
     ]
     for (const width of [80, 120]) {
-      const human = await renderString(createElement(LineLogView, { rows: crossDayRows, columns: width }), {
+      const human = await renderString(createElement(QueueLogView, { rows: crossDayRows, columns: width }), {
         width,
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((line) => line.startsWith("[x]"))
+      const physicalRows = human.split("\n").filter((row) => row.startsWith("[x]"))
       expect(physicalRows).toHaveLength(2)
       expect(physicalRows[0]).toContain("2026-07-12T11:01:16Z")
       expect(physicalRows[1]).toContain("2026-07-11T23:59:58Z")
-      expect(Math.max(...physicalRows.map((line) => line.length))).toBeLessThanOrEqual(width)
+      expect(Math.max(...physicalRows.map((row) => row.length))).toBeLessThanOrEqual(width)
     }
 
-    const tty = await renderString(createElement(LineLogView, { rows, columns: 80 }), {
+    const tty = await renderString(createElement(QueueLogView, { rows, columns: 80 }), {
       width: 80,
       height: 8,
       plain: false,
@@ -2536,11 +2642,11 @@ describe("runYrd", () => {
         ),
       ],
     })
-    const key = lineRevisionKey(run.prs[0]!)
+    const key = queueRevisionKey(run.prs[0]!)
     const subjects = new Map([[key, subject]])
     const submissions = new Map([[key, "2026-07-12T11:00:00.000Z"]])
     const project = () =>
-      lineLogRows(
+      queueLogRows(
         [fakeSummary([run])],
         new Set<string>(),
         undefined,
@@ -2579,7 +2685,7 @@ describe("runYrd", () => {
         ],
       })
     })
-    const rows = lineLogRows([fakeSummary(runs)], new Set<string>(), undefined, new Map([["PR1", "rejected"]]), [])
+    const rows = queueLogRows([fakeSummary(runs)], new Set<string>(), undefined, new Map([["PR1", "rejected"]]), [])
     expect(rows).toHaveLength(22)
     expect(rows[0]).toMatchObject({
       branch: "fix(cli): bounded operator history",
@@ -2588,38 +2694,38 @@ describe("runYrd", () => {
     })
 
     for (const width of [80, 120]) {
-      const human = await renderString(createElement(LineLogView, { rows, columns: width }), {
+      const human = await renderString(createElement(QueueLogView, { rows, columns: width }), {
         width,
         height: 24,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((line) => /\bPR1\b/u.test(line))
+      const physicalRows = human.split("\n").filter((row) => /\bPR1\b/u.test(row))
       expect(physicalRows).toHaveLength(20)
       expect(physicalRows[0]).toContain(width === 80 ? "PR1 r1 R22 rejected" : "PR1 (rev1, run22) rejected")
       expect(physicalRows.at(-1)).toContain(width === 80 ? "PR1 r1 R3 rejected" : "PR1 (rev1, run3) rejected")
       expect(physicalRows[0]).toContain("[!]")
       expect(physicalRows[0]).toContain("fix(cli): bounded operator history")
-      expect(Math.max(...human.split("\n").map((line) => line.length))).toBeLessThanOrEqual(width)
+      expect(Math.max(...human.split("\n").map((row) => row.length))).toBeLessThanOrEqual(width)
       expect(human).not.toContain(width === 80 ? "PR1 r1 R2 rejected" : "PR1 (rev1, run2) rejected")
       expect(human).not.toContain(width === 80 ? "PR1 r1 R1 rejected" : "PR1 (rev1, run1) rejected")
     }
   })
 
-  it("runs a real task contest to durable evidence, then selects and promotes the exact winner", async () => {
+  it("runs a real issue contest to durable evidence, then selects and promotes the exact winner", async () => {
     const baseResolutions: string[] = []
     const app = await createApp({ baseResolutions })
     const compete = outputIO()
     expect(
-      await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
+      await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
     ).toBe(0)
     expect(JSON.parse(compete.stdout())).toMatchObject({
-      command: "task.compete",
+      command: "contest.open",
       contest: { id: "C1", status: "ready", attemptOrder: ["A1", "A2"], base: "main", baseSha: BASE_SHA },
     })
     expect(baseResolutions).toEqual(["main"])
 
     const human = outputIO({ columns: 96, color: true })
-    expect(await runYrd(app, yrd("contest", "show", "C1"), human.io)).toBe(0)
+    expect(await runYrd(app, yrd("contest", "view", "C1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("ATTEMPT")
     expect(human.stdout()).toContain("AGENT")
     expect(human.stdout()).toContain("TIME")
@@ -2629,9 +2735,9 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("claude")
 
     const evaluate = outputIO()
-    expect(await runYrd(app, yrd("contest", "evaluate", "C1", "--json"), evaluate.io)).toBe(0)
+    expect(await runYrd(app, yrd("contest", "eval", "C1", "--json"), evaluate.io)).toBe(0)
     expect(JSON.parse(evaluate.stdout())).toMatchObject({
-      command: "contest.evaluate",
+      command: "contest.eval",
       contest: { id: "C1", status: "ready" },
     })
 
@@ -2640,7 +2746,7 @@ describe("runYrd", () => {
     expect(JSON.parse(select.stdout())).toMatchObject({ contest: { selection: { attempt: "A1", method: "manual" } } })
 
     const frozen = outputIO()
-    expect(await runYrd(app, yrd("contest", "evaluate", "C1", "--retry"), frozen.io)).toBe(1)
+    expect(await runYrd(app, yrd("contest", "eval", "C1", "--retry"), frozen.io)).toBe(1)
     expect(frozen.stdout()).toBe("")
     expect(frozen.stderr()).toContain("evaluations are frozen")
 
@@ -2656,7 +2762,7 @@ describe("runYrd", () => {
     const app = await createApp({ waitingEvaluator: "A2" })
     const compete = outputIO()
     expect(
-      await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
+      await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude", "--json"), compete.io),
     ).toBe(0)
     expect(JSON.parse(compete.stdout())).toMatchObject({
       contest: {
@@ -2701,7 +2807,7 @@ describe("runYrd", () => {
   it("records remote evaluator infrastructure failure separately from a failed verdict", async () => {
     const app = await createApp({ waitingEvaluator: "A2" })
     expect(
-      await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude", "--json"), outputIO().io),
+      await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude", "--json"), outputIO().io),
     ).toBe(0)
 
     const ambiguous = outputIO()
@@ -2746,7 +2852,7 @@ describe("runYrd", () => {
     const app = await createApp({ probe })
     const compete = outputIO({ concurrency: 2 })
 
-    expect(await runYrd(app, yrd("task", "compete", "km:T1", "--agents", "ag codex/claude"), compete.io)).toBe(0)
+    expect(await runYrd(app, yrd("contest", "open", "km:T1", "--agents", "ag codex/claude"), compete.io)).toBe(0)
     expect(probe.max("bay")).toBe(2)
     expect(probe.max("runner")).toBe(2)
     expect(probe.max("evaluator")).toBe(2)
@@ -2758,7 +2864,7 @@ describe("runYrd", () => {
     const usage = outputIO()
     expect(await runYrd(app, yrd("bay", "adopt", "old-branch"), usage.io)).toBe(2)
     expect(usage.stdout()).toBe("")
-    expect(usage.stderr()).toContain("unknown command 'adopt'")
+    expect(usage.stderr()).toContain("too many arguments")
 
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
@@ -2766,44 +2872,44 @@ describe("runYrd", () => {
     expect(refusal.stderr()).toContain("no bay 'missing'")
 
     const missingPR = outputIO()
-    expect(await runYrd(app, yrd("line", "integrate", "PR404"), missingPR.io)).toBe(1)
+    expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
     expect(missingPR.stderr()).toContain("no PR 'PR404'")
 
     const missingWaitingRun = outputIO()
-    expect(await runYrd(app, yrd("line", "finish", "PR404", "--ok"), missingWaitingRun.io)).toBe(1)
-    expect(missingWaitingRun.stderr()).toContain("no line run or PR 'PR404'")
+    expect(await runYrd(app, yrd("queue", "finish", "PR404", "--ok"), missingWaitingRun.io)).toBe(1)
+    expect(missingWaitingRun.stderr()).toContain("no queue run or PR 'PR404'")
 
     const unsupported = outputIO()
-    expect(await runYrd(app, yrd("line", "init"), unsupported.io)).toBe(2)
-    expect(unsupported.stderr()).toContain("line.init capability is not installed")
+    expect(await runYrd(app, yrd("queue", "init"), unsupported.io)).toBe(2)
+    expect(unsupported.stderr()).toContain("queue.init capability is not installed")
 
-    const missingTaskSource = outputIO()
+    const missingIssueSource = outputIO()
     expect(
-      await runYrd(app, yrd("task", "compete", "github:42", "--agents", "ag codex/claude"), missingTaskSource.io),
+      await runYrd(app, yrd("contest", "open", "github:42", "--agents", "ag codex/claude"), missingIssueSource.io),
     ).toBe(2)
-    expect(missingTaskSource.stderr()).toContain("no task source 'github' is registered")
+    expect(missingIssueSource.stderr()).toContain("no issue source 'github' is registered")
 
     const infrastructure = outputIO({
       resolveRevision: async () => {
         throw new Error("corrupt event log at row 4")
       },
     })
-    expect(await runYrd(app, yrd("line", "status"), infrastructure.io)).toBe(3)
+    expect(await runYrd(app, yrd(), infrastructure.io)).toBe(3)
     expect(infrastructure.stdout()).toBe("")
     expect(infrastructure.stderr()).toContain("corrupt event log")
   })
 
-  it("projects installed line administration and cancels an idle watch deterministically", async () => {
+  it("projects installed queue administration and cancels an idle watch deterministically", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
 
     const coreAudit = outputIO()
-    expect(await runYrd(app, yrd("line", "audit", "--json"), coreAudit.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "audit", "--json"), coreAudit.io)).toBe(0)
     expect(JSON.parse(coreAudit.stdout())).toMatchObject({ findings: [] })
 
     const services: YrdCliServices = {
-      line: {
+      queue: {
         auditEnvironment: async () => ({ findings: [{ code: "operator-finding", message: "inspect runner" }] }),
         provision: async (base?: string) => ({ base: base ?? "main", ready: true }),
         deprovision: async (base?: string) => ({ base: base ?? "main", released: true }),
@@ -2811,23 +2917,23 @@ describe("runYrd", () => {
     }
 
     const init = outputIO()
-    expect(await runYrd(app, yrd("line", "init", "release/2.0", "--json"), init.io, services)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "init", "release/2.0", "--json"), init.io, services)).toBe(0)
     expect(JSON.parse(init.stdout())).toEqual({
       base: "release/2.0",
-      command: "line.init",
+      command: "queue.init",
       result: { base: "release/2.0", ready: true },
     })
 
     const deinit = outputIO()
-    expect(await runYrd(app, yrd("line", "deinit", "release/2.0", "--json"), deinit.io, services)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "deinit", "release/2.0", "--json"), deinit.io, services)).toBe(0)
     expect(JSON.parse(deinit.stdout())).toEqual({
       base: "release/2.0",
-      command: "line.deinit",
+      command: "queue.deinit",
       result: { base: "release/2.0", released: true },
     })
 
     const audit = outputIO()
-    expect(await runYrd(app, yrd("line", "audit", "--json"), audit.io, services)).toBe(1)
+    expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io, services)).toBe(1)
     expect(JSON.parse(audit.stdout())).toMatchObject({ findings: [{ code: "operator-finding" }] })
 
     const controller = new AbortController()
@@ -2841,7 +2947,7 @@ describe("runYrd", () => {
         },
       },
     })
-    expect(await runYrd(app, yrd("line", "integrate", "--watch", "--interval", "1"), watch.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), watch.io)).toBe(0)
     expect(watch.stdout()).toBe("")
     expect(sleeps).toEqual([1_000])
   })

@@ -6,7 +6,7 @@
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type Journal } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { withTasks } from "@yrd/task"
+import { withIssues } from "@yrd/issue"
 import { describe, expect, it } from "vitest"
 import {
   withContests,
@@ -19,7 +19,7 @@ import {
 const BASE_SHA = "a".repeat(40)
 const CODEX_SHA = "1".repeat(40)
 const CLAUDE_SHA = "2".repeat(40)
-const runtime = { executor: "test", leaseMs: 60_000, concurrency: 1 }
+const runtime = { runner: "test", leaseMs: 60_000, concurrency: 1 }
 
 function ids(): () => string {
   let value = 0
@@ -141,7 +141,7 @@ async function createApp(journal: Journal<unknown>, setup = fixtures()) {
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, contests.jobDefs] }),
-    withTasks({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Finish Yrd", revision: "r7" }) }] }),
+    withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Finish Yrd", revision: "r7" }) }] }),
     withBays({ jobs: bayJobs, defaultBase: "main" }),
   )
   return createYrd(contests(base), {
@@ -150,10 +150,10 @@ async function createApp(journal: Journal<unknown>, setup = fixtures()) {
 }
 
 async function startContest(app: Awaited<ReturnType<typeof createApp>>): Promise<void> {
-  const task = await app.tasks.resolve({ source: "km", id: "@yrd/core/21012" })
+  const issue = await app.issues.resolve({ source: "km", id: "@yrd/core/21012" })
   const base = await app.contests.resolveBase()
   await app.contests.compete({
-    task,
+    issue,
     competitors: [
       { model: "codex", harness: "ag", config: { effort: "max" } },
       { model: "claude", harness: "ag", config: { effort: "max" } },
@@ -243,11 +243,11 @@ describe("Contests", () => {
 
     const runner = app.contests.get("C1")?.attempts.A2?.runner
     if (runner?.status !== "waiting") throw new Error("runner did not remain waiting")
-    const output = outputFor("A2", "claude", "B2", "task/contest-c1-a2")
+    const output = outputFor("A2", "claude", "B2", "issue/contest-c1-a2")
     setup.pins.set(output.pin.ref, output.pin.commit)
     await app.jobs.finish(runner.id, {
       attempt: runner.attempt,
-      executor: runner.executor,
+      runner: runner.runner,
       token: runner.token,
       result: { status: "passed", output },
     })

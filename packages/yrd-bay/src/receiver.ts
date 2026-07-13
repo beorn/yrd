@@ -192,13 +192,13 @@ export function parseReceiverUpdates(input: string): ReceiverRefUpdate[] {
   const refs = new Set<string>()
   return input
     .split("\n")
-    .map((line) => line.trim())
+    .map((entry) => entry.trim())
     .filter(Boolean)
-    .map((line) => {
-      const parts = line.split(/\s+/u)
-      check(parts.length === 3, `malformed receive line '${line}'`)
+    .map((entry) => {
+      const parts = entry.split(/\s+/u)
+      check(parts.length === 3, `malformed receive entry '${entry}'`)
       const [oldSha, newSha, ref] = parts as [string, string, string]
-      check(HEX_SHA.test(oldSha) && HEX_SHA.test(newSha), `malformed commit id in receive line '${line}'`)
+      check(HEX_SHA.test(oldSha) && HEX_SHA.test(newSha), `malformed commit id in receive entry '${entry}'`)
       check(!refs.has(ref), `duplicate update for '${ref}'`)
       refs.add(ref)
       return ReceiverRefUpdateSchema.parse({ oldSha, newSha, ref })
@@ -547,9 +547,9 @@ function normalizeTarget(target: ReceiverTarget, receiver: GitPushReceiver): Rec
 async function refValue(receiver: GitPushReceiver, ref: string, env?: Environment): Promise<string | null> {
   const output = (await receiverGit(receiver, ["for-each-ref", "--format=%(refname)%00%(objectname)", ref], { env }))
     .stdout
-  for (const line of output.split("\n")) {
-    const separator = line.indexOf("\0")
-    if (separator >= 0 && line.slice(0, separator) === ref) return line.slice(separator + 1)
+  for (const entry of output.split("\n")) {
+    const separator = entry.indexOf("\0")
+    if (separator >= 0 && entry.slice(0, separator) === ref) return entry.slice(separator + 1)
   }
   return null
 }

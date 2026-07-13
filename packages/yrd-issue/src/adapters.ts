@@ -1,6 +1,6 @@
 import type { Process } from "@yrd/process"
 import * as z from "zod"
-import { Task, TaskRefSchema, TaskSchema, type TaskRef, type TaskSource } from "./tasks.ts"
+import { Issue, IssueRefSchema, IssueSchema, type IssueRef, type IssueSource } from "./issues.ts"
 
 type SourceOptions = Readonly<{
   process: Pick<Process, "run">
@@ -10,7 +10,7 @@ type SourceOptions = Readonly<{
   env?: NodeJS.ProcessEnv
 }>
 
-const TaskFieldsSchema = TaskSchema.omit({ ref: true })
+const IssueFieldsSchema = IssueSchema.omit({ ref: true })
 const KmContextSchema = z.object({
   node: z.object({
     title: z.string().optional(),
@@ -23,26 +23,26 @@ const KmContextSchema = z.object({
   blocks: z.array(z.object({ body: z.array(z.string()).optional() })).optional(),
 })
 
-export function createCommandTaskSource(
+export function createCommandIssueSource(
   options: SourceOptions & { id: string; command: readonly string[] },
-): TaskSource {
-  if (options.command.length === 0) throw new Error("yrd: task source command must not be empty")
-  return createTaskSource(
+): IssueSource {
+  if (options.command.length === 0) throw new Error("yrd: issue source command must not be empty")
+  return createIssueSource(
     options,
     (id) => [...options.command, id],
     (value, ref) => ({
-      ...TaskFieldsSchema.parse(value),
+      ...IssueFieldsSchema.parse(value),
       ref,
     }),
   )
 }
 
-export function createKmTaskSource(options: SourceOptions): TaskSource {
+export function createKmIssueSource(options: SourceOptions): IssueSource {
   const id = options.id ?? "km"
   const command = options.command ?? ["km"]
-  return createTaskSource(
+  return createIssueSource(
     { ...options, id },
-    (task) => [...command, "show", "--one", "--context", "--json", task],
+    (issue) => [...command, "show", "--one", "--context", "--json", issue],
     (value, ref) => {
       const context = KmContextSchema.parse(value)
       const body = context.blocks?.at(-1)?.body?.join("\n").trim()
@@ -59,31 +59,31 @@ export function createKmTaskSource(options: SourceOptions): TaskSource {
   )
 }
 
-function createTaskSource(
+function createIssueSource(
   options: SourceOptions & { id: string },
   argv: (id: string) => readonly string[],
-  project: (value: unknown, ref: TaskRef) => unknown,
-): TaskSource {
-  const sourceId = TaskRefSchema.shape.source.parse(options.id)
+  project: (value: unknown, ref: IssueRef) => unknown,
+): IssueSource {
+  const sourceId = IssueRefSchema.shape.source.parse(options.id)
   return {
     id: sourceId,
     async resolve(ref) {
-      if (ref.source !== sourceId) throw new Error(`yrd: task source '${sourceId}' cannot resolve '${ref.source}'`)
+      if (ref.source !== sourceId) throw new Error(`yrd: issue source '${sourceId}' cannot resolve '${ref.source}'`)
       const result = await options.process.run({
         argv: argv(ref.id),
         cwd: options.cwd,
-        env: cleanEnvironment({ ...options.env, YRD_TASK_SOURCE: ref.source, YRD_TASK_ID: ref.id }),
+        env: cleanEnvironment({ ...options.env, YRD_ISSUE_SOURCE: ref.source, YRD_ISSUE_ID: ref.id }),
       })
       if (result.exitCode !== 0) {
         throw new Error(
-          `yrd: task source '${sourceId}' exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`,
+          `yrd: issue source '${sourceId}' exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`,
         )
       }
       try {
-        return Task.parse(project(JSON.parse(result.stdout), ref))
+        return Issue.parse(project(JSON.parse(result.stdout), ref))
       } catch (error) {
         if (error instanceof SyntaxError) {
-          throw new Error(`yrd: task source '${sourceId}' returned invalid JSON for '${ref.id}'`)
+          throw new Error(`yrd: issue source '${sourceId}' returned invalid JSON for '${ref.id}'`)
         }
         throw error
       }
@@ -95,7 +95,7 @@ function cleanEnvironment(overrides: NodeJS.ProcessEnv | undefined): NodeJS.Proc
   return Object.fromEntries(
     Object.entries({ ...process.env, ...overrides }).filter(
       ([key, value]) =>
-        value !== undefined && !key.startsWith("GIT_") && (!key.startsWith("YRD_") || key.startsWith("YRD_TASK_")),
+        value !== undefined && !key.startsWith("GIT_") && (!key.startsWith("YRD_") || key.startsWith("YRD_ISSUE_")),
     ),
   )
 }

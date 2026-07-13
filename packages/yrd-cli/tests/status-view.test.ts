@@ -42,7 +42,7 @@ function settledRun(
     changedAt: AT,
     status: "passed",
     startedAt: AT,
-    executor: "test",
+    runner: "test",
     finishedAt: AT,
     output: result,
   }
@@ -70,7 +70,7 @@ function waitingEvaluation(evaluator: string): ContestEvaluation {
     changedAt: AT,
     status: "waiting",
     startedAt: AT,
-    executor: "test",
+    runner: "test",
     token: "resume-token",
     detail: "awaiting external evaluator",
     url: "https://example.test/jobs/gate",
@@ -105,7 +105,7 @@ function contestFixture(): Contest {
 
   return {
     id: "C1",
-    task: { ref: { source: "km", id: "T1" }, title: "Exercise contest status" },
+    issue: { ref: { source: "km", id: "T1" }, title: "Exercise contest status" },
     base: "main",
     baseSha: BASE_SHA,
     createdAt: "2026-07-09T12:00:00.000Z",
@@ -145,7 +145,7 @@ async function render(contest: Contest, width: number, plain = true): Promise<st
 describe("ContestStatusView held-out evaluations", () => {
   it("shows every evaluation generation with its verdict and summary", async () => {
     const output = await render(contestFixture(), 160)
-    const rows = output.split("\n").filter((line) => /\b(?:verify|gate)\b/u.test(line))
+    const rows = output.split("\n").filter((row) => /\b(?:verify|gate)\b/u.test(row))
 
     expect(rows).toHaveLength(5)
     expect(rows).toEqual(
@@ -174,9 +174,9 @@ describe("ContestStatusView held-out evaluations", () => {
 
   it("preserves each evaluation row's attempt ID and state while shrinking", async () => {
     const output = await render(contestFixture(), 26)
-    const lines = output.split("\n")
+    const rows = output.split("\n")
 
-    expect(lines.filter((line) => /A1\s+passing/u.test(line))).toHaveLength(3)
-    expect(lines.filter((line) => /A2\s+waiting/u.test(line))).toHaveLength(2)
+    expect(rows.filter((row) => /A1\s+passing/u.test(row))).toHaveLength(3)
+    expect(rows.filter((row) => /A2\s+waiting/u.test(row))).toHaveLength(2)
   })
 })

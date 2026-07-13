@@ -57,7 +57,7 @@ const RevisionSchema = z.number().int().positive()
 const OpenBayArgsSchema = z
   .object({
     name: TextSchema,
-    task: TextSchema.optional(),
+    issue: TextSchema.optional(),
     actor: TextSchema.optional(),
     from: GitRefSchema.optional(),
     base: GitRefSchema.optional(),
@@ -73,6 +73,7 @@ const IntakePRArgsSchema = z
   .object({
     bay: TextSchema.optional(),
     name: TextSchema.optional(),
+    issue: TextSchema.optional(),
     branch: GitRefSchema.optional(),
     base: GitRefSchema.optional(),
     headSha: GitShaSchema,
@@ -97,6 +98,7 @@ const SubmitArgsSchema = z.union([
       base: GitRefSchema.optional(),
       baseSha: GitShaSchema.optional(),
       name: TextSchema.optional(),
+      issue: TextSchema.optional(),
     })
     .strict(),
 ])
@@ -104,6 +106,7 @@ export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
 
 export type SubmitSelectionOptions = Readonly<{
   base?: string
+  issue?: string
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
 }>
@@ -113,12 +116,17 @@ export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 
 const PrCloseArgsSchema = z.object({ pr: TextSchema }).strict()
 export type PrCloseArgs = z.infer<typeof PrCloseArgsSchema>
+const PrEditArgsSchema = z
+  .object({ pr: TextSchema, issue: TextSchema.optional(), note: TextSchema.optional() })
+  .strict()
+  .refine(({ issue, note }) => issue !== undefined || note !== undefined, { message: "'issue' or 'note' is required" })
+export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
 const BayOpenedSchema = z
   .object({
     id: BayIdSchema,
     name: TextSchema,
-    task: TextSchema.optional(),
+    issue: TextSchema.optional(),
     actor: TextSchema.optional(),
     from: GitRefSchema.optional(),
     branch: GitRefSchema,
@@ -132,6 +140,7 @@ const PRPushedSchema = z
     pr: PRIdSchema,
     bay: BayIdSchema.optional(),
     name: TextSchema.optional(),
+    issue: TextSchema.optional(),
     branch: GitRefSchema,
     base: GitRefSchema,
     headSha: GitShaSchema,
@@ -215,6 +224,7 @@ export type BayCommands = Readonly<{
   }>
   pr: Readonly<{
     close: CommandHandler<PrCloseArgs, BayState>
+    edit: CommandHandler<PrEditArgs, BayState>
   }>
 }>
 
@@ -231,11 +241,12 @@ export type Bays = Readonly<{
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
   close(args: CloseBayArgs): Promise<CommandResult>
   closePr(args: PrCloseArgs): Promise<CommandResult>
+  editPr(args: PrEditArgs): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
 
-type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close" | "closePr">
+type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close" | "closePr" | "editPr">
 
 export type BayBaseTarget = Readonly<{ base: string; baseSha?: string }>
 export type ResolveBayBase = (base: string) => BayBaseTarget | Promise<BayBaseTarget>
@@ -262,8 +273,8 @@ export function createBays(
     if (baseSha !== undefined && resolved.baseSha !== undefined && baseSha !== resolved.baseSha) {
       raiseFailure(
         "refusal",
-        "line-base-moved",
-        `yrd: line '${resolved.base}' resolved to ${resolved.baseSha.slice(0, 12)}, not pinned ${baseSha.slice(0, 12)}`,
+        "queue-base-moved",
+        `yrd: queue '${resolved.base}' resolved to ${resolved.baseSha.slice(0, 12)}, not pinned ${baseSha.slice(0, 12)}`,
       )
     }
     return { ...resolved, ...(baseSha === undefined ? {} : { baseSha }) }
@@ -326,7 +337,12 @@ export function createBays(
       }
       const resolved = await target(options.base ?? pr.base, undefined)
       if (headSha !== pr.headSha || resolved.base !== pr.base || resolved.baseSha !== pr.baseSha) {
-        await intake({ branch: pr.branch, headSha, ...resolved })
+        await intake({
+          branch: pr.branch,
+          headSha,
+          ...resolved,
+          ...(options.issue === undefined ? {} : { issue: options.issue }),
+        })
         pr = resolvePR(state(), pr.id)
         if (pr === undefined) {
           raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${selector}' disappeared after revision intake`)
@@ -369,6 +385,7 @@ export function createBays(
         branch: selector,
         headSha,
         ...resolved,
+        ...(options.issue === undefined ? {} : { issue: options.issue }),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -403,6 +420,7 @@ export function createBays(
     submit,
     close: actions.close,
     closePr: actions.closePr,
+    editPr: actions.editPr,
   })
 }
 
@@ -430,6 +448,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/withdrawn": z.object({ pr: PRIdSchema }).strict(),
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
+        "pr/edited": PrEditArgsSchema,
       },
       project: projectBays,
       create(yrd) {
@@ -446,6 +465,7 @@ export function withBays(options: WithBaysOptions) {
               submit: (args) => yrd.dispatch(commands.bay.submit, args),
               close: (args) => yrd.dispatch(commands.bay.close, args),
               closePr: (args) => yrd.dispatch(commands.pr.close, args),
+              editPr: (args) => yrd.dispatch(commands.pr.edit, args),
             },
             { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
           ),
@@ -501,6 +521,12 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         params: PrCloseArgsSchema,
         apply: (state: BayState, args: PrCloseArgs) => closePr(state, args),
       }),
+      edit: command({
+        title: "Edit a PR",
+        visibility: "public",
+        params: PrEditArgsSchema,
+        apply: (state: BayState, args: PrEditArgs) => editPr(state, args),
+      }),
     },
   }
 }
@@ -524,7 +550,7 @@ function openBay(
   const opened = {
     id,
     name: args.name,
-    ...(args.task === undefined ? {} : { task: args.task }),
+    ...(args.issue === undefined ? {} : { issue: args.issue }),
     ...(args.actor === undefined ? {} : { actor: args.actor }),
     ...(args.from === undefined ? {} : { from: args.from }),
     ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
@@ -592,6 +618,9 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
         pr: id,
         ...(bay === undefined ? {} : { bay: bay.id }),
         ...((args.name ?? bay?.name) ? { name: args.name ?? bay?.name } : {}),
+        ...((args.issue ?? bay?.issue ?? existing?.issue)
+          ? { issue: args.issue ?? bay?.issue ?? existing?.issue }
+          : {}),
         branch,
         base,
         headSha: args.headSha,
@@ -623,6 +652,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   const pushed = {
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
+    ...(args.issue === undefined ? {} : { issue: args.issue }),
     branch: args.branch,
     base,
     headSha: args.headSha,
@@ -639,7 +669,7 @@ function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string,
     (pr) => pr.id !== except && pr.headSha === headSha && pr.base === base,
   )
   if (duplicate !== undefined) {
-    throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on line '${base}'`)
+    throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on queue '${base}'`)
   }
 }
 
@@ -652,7 +682,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   if (bay.status === "closed") throw new Error(`yrd: bay '${bay.id}' is already closed`)
   const pr = prForBay(current, bay.id)
   if (pr !== undefined && isLivePR(pr.status) && args.withdraw !== true) {
-    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; integrate it or close with withdraw=true`)
+    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; run it through the queue or withdraw it before closing`)
   }
   return {
     events: [
@@ -674,6 +704,19 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
   return { events: [event("pr/withdrawn", { pr: pr.id })] }
+}
+
+function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  return {
+    events: [
+      event("pr/edited", {
+        pr: pr.id,
+        ...(args.issue === undefined ? {} : { issue: args.issue }),
+        ...(args.note === undefined ? {} : { note: args.note }),
+      }),
+    ],
+  }
 }
 
 function bayState(bays: BaysState): BayState {
@@ -713,6 +756,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               id: pushed.pr,
               ...(pushed.bay === undefined ? {} : { bay: pushed.bay }),
               ...(pushed.name === undefined ? {} : { name: pushed.name }),
+              ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
               branch: pushed.branch,
               base: pushed.base,
               status: "pushed",
@@ -723,6 +767,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             }
           : {
               ...existing,
+              ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
               base: pushed.base,
               status: "pushed",
               revision: pushed.revision,
@@ -784,6 +829,16 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: applied.ts,
         integration: { commit: changed.commit, baseSha: changed.baseSha },
       })
+    }
+    case "pr/edited": {
+      const changed = PrEditArgsSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      return pr === undefined
+        ? state
+        : patchPR(pr, {
+            ...(changed.issue === undefined ? {} : { issue: changed.issue }),
+            ...(changed.note === undefined ? {} : { note: changed.note }),
+          })
     }
     case "job/requested": {
       if (typeof data.definition !== "string" || !isBayJob(data.definition)) return state

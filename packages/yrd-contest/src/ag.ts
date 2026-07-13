@@ -47,7 +47,7 @@ export type AgContestRunnerOptions = Readonly<{
   timeoutMs?: number
   artifactRoot?: string | ((input: ContestRunnerInput, context: JobContext) => string | Promise<string>)
   environment?: (input: ContestRunnerInput, context: JobContext) => NodeJS.ProcessEnv
-  /** Replaces only provider launch policy; task prompt and evidence handling remain mandatory. */
+  /** Replaces only provider launch policy; issue prompt and evidence handling remain mandatory. */
   resolveLaunch?: (input: ContestRunnerInput) => AgContestLaunch
   inject: Readonly<{ process: Pick<Process, "run">; env?: NodeJS.ProcessEnv }>
 }>
@@ -110,7 +110,9 @@ function stringList(value: JsonValue | undefined, label: string): readonly strin
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item === "")) {
     throw new Error(`yrd: Ag ${label} must be an array of non-empty strings`)
   }
-  if (value.includes("--")) throw new Error(`yrd: Ag ${label} must not contain '--'; Yrd owns the task prompt boundary`)
+  if (value.includes("--")) {
+    throw new Error(`yrd: Ag ${label} must not contain '--'; Yrd owns the issue prompt boundary`)
+  }
   return value as readonly string[]
 }
 
@@ -168,33 +170,33 @@ function launchArgv(command: readonly string[], input: ContestRunnerInput, launc
   if (launch.effort !== undefined) {
     argv.push(launch.provider === "codex" ? "--model-reasoning-effort" : "--effort", launch.effort)
   }
-  argv.push(...launch.args, "--", taskPrompt(input, launch.instructions))
+  argv.push(...launch.args, "--", issuePrompt(input, launch.instructions))
   return argv
 }
 
-function taskPrompt(input: ContestRunnerInput, instructions?: string): string {
-  const task = input.task
-  const lines = [
-    "Implement the following real task in the isolated Yrd Work Bay that is your current working directory.",
+function issuePrompt(input: ContestRunnerInput, instructions?: string): string {
+  const issue = input.issue
+  const parts = [
+    "Implement the following real issue in the isolated Yrd Work Bay that is your current working directory.",
     "",
-    `Task source: ${task.ref.source}`,
-    `Task id: ${task.ref.id}`,
-    `Title: ${task.title}`,
+    `Issue source: ${issue.ref.source}`,
+    `Issue id: ${issue.ref.id}`,
+    `Title: ${issue.title}`,
   ]
-  if (task.url !== undefined) lines.push(`URL: ${task.url}`)
-  if (task.revision !== undefined) lines.push(`Task revision: ${task.revision}`)
-  if (task.labels !== undefined && task.labels.length > 0) lines.push(`Labels: ${task.labels.join(", ")}`)
-  lines.push("", "Task description:", task.description ?? "No additional description was supplied.", "")
-  if (instructions !== undefined) lines.push("Additional instructions:", instructions, "")
-  lines.push(
+  if (issue.url !== undefined) parts.push(`URL: ${issue.url}`)
+  if (issue.revision !== undefined) parts.push(`Issue revision: ${issue.revision}`)
+  if (issue.labels !== undefined && issue.labels.length > 0) parts.push(`Labels: ${issue.labels.join(", ")}`)
+  parts.push("", "Issue description:", issue.description ?? "No additional description was supplied.", "")
+  if (instructions !== undefined) parts.push("Additional instructions:", instructions, "")
+  parts.push(
     `Base branch: ${input.base}`,
     `Base commit: ${input.bay.baseSha ?? "missing"}`,
     `Work branch: ${input.bay.branch}`,
     "",
-    "Complete the task end to end, run focused verification, and commit all intended changes to the current branch.",
+    "Complete the issue end to end, run focused verification, and commit all intended changes to the current branch.",
     "Do not create or switch branches. Leave the working tree clean. Do not merely describe the implementation.",
   )
-  return lines.join("\n")
+  return parts.join("\n")
 }
 
 function agEnvironment(
@@ -206,8 +208,8 @@ function agEnvironment(
   return executionEnvironment(base, extra, {
     YRD_CONTEST: input.contest,
     YRD_ATTEMPT: input.attempt,
-    YRD_TASK_SOURCE: input.task.ref.source,
-    YRD_TASK_ID: input.task.ref.id,
+    YRD_ISSUE_SOURCE: input.issue.ref.source,
+    YRD_ISSUE_ID: input.issue.ref.id,
     YRD_BAY: input.bay.id,
     YRD_BRANCH: input.bay.branch,
     YRD_BASE: input.base,
@@ -280,21 +282,21 @@ async function workspacePreflight(
 }
 
 function jsonRecords(stdout: string): { transcript: string; records: readonly Record<string, unknown>[] } {
-  const lines: string[] = []
+  const entries: string[] = []
   const records: Record<string, unknown>[] = []
-  for (const line of stdout.split(/\r?\n/u)) {
-    const trimmed = line.trim()
+  for (const entry of stdout.split(/\r?\n/u)) {
+    const trimmed = entry.trim()
     if (trimmed === "") continue
     try {
       const value: unknown = JSON.parse(trimmed)
       if (typeof value !== "object" || value === null || Array.isArray(value)) continue
-      lines.push(trimmed)
+      entries.push(trimmed)
       records.push(value as Record<string, unknown>)
     } catch {
       // Ag may write a launch banner before the provider's JSONL stream; stdout.log retains it.
     }
   }
-  return { transcript: lines.length === 0 ? "" : `${lines.join("\n")}\n`, records }
+  return { transcript: entries.length === 0 ? "" : `${entries.join("\n")}\n`, records }
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

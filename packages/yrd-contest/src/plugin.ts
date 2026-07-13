@@ -11,7 +11,7 @@ import {
   type YrdDef,
 } from "@yrd/core"
 import { createJobDef, Job, type HasJobs, type JobDef, type JobDefs, type JobResult, type Jobs } from "@yrd/job"
-import type { HasTasks } from "@yrd/task"
+import type { HasIssues } from "@yrd/issue"
 import { computed } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -82,7 +82,7 @@ type EvaluatorJobDef = JobDef<ContestEvaluatorInput, EvaluatorResult>
 type PromotionRequest = z.infer<typeof PromotionRequestSchema>
 type PromotionJobDef = JobDef<PromotionRequest, z.infer<typeof PromotionVerifiedSchema>>
 type ContestState = Readonly<{ contests: ContestsState }>
-type ContestFeatures = HasJobs & HasTasks & HasBays
+type ContestFeatures = HasJobs & HasIssues & HasBays
 
 export type ContestPlugin = (<State extends object, Commands extends CommandTree, Features extends ContestFeatures>(
   definition: YrdDef<State, Commands, Features>,
@@ -138,7 +138,7 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
             signal: yrd.scope.signal,
             log: yrd.log.child("contests"),
             actions: {
-              compete: (args) => yrd.dispatch(commands.task.compete, args),
+              compete: (args) => yrd.dispatch(commands.issue.compete, args),
               request: (contest, retry) =>
                 yrd.dispatch(commands.contest.request, { contest, ...(retry === undefined ? {} : { retry }) }),
               select: (args) => yrd.dispatch(commands.contest.select, args),
@@ -162,7 +162,7 @@ function createContestCommands(
   promotionJob: PromotionJobDef,
 ): ContestCommands {
   const compete = command({
-    title: "Compete on task",
+    title: "Compete on issue",
     visibility: "public",
     params: CompeteArgsSchema,
     apply(state: DeepReadonly<ContestRuntimeState>, args: CompeteArgs) {
@@ -185,7 +185,7 @@ function createContestCommands(
         return ContestEvaluatorSpecSchema.parse({ id, authority: evaluator.authority })
       })
       if (!selectedEvaluators.some(({ authority }) => authority === "held-out")) {
-        throw new Error("yrd: task.compete requires at least one held-out evaluator")
+        throw new Error("yrd: issue.compete requires at least one held-out evaluator")
       }
 
       const id = nextId("C", state.contests.records)
@@ -210,7 +210,7 @@ function createContestCommands(
           event("contest/opened", {
             contest: {
               id,
-              task: args.task,
+              issue: args.issue,
               base: args.base,
               baseSha: args.baseSha,
               evaluators: selectedEvaluators,
@@ -246,7 +246,7 @@ function createContestCommands(
               ContestRunnerInputSchema.parse({
                 contest: record.id,
                 attempt: attempt.id,
-                task: record.task,
+                issue: record.issue,
                 competitor: attempt.competitor,
                 base: record.base,
                 bay: baySnapshot(bay),
@@ -271,7 +271,7 @@ function createContestCommands(
               ContestEvaluatorInputSchema.parse({
                 contest: record.id,
                 attempt: attempt.id,
-                task: record.task,
+                issue: record.issue,
                 competitor: attempt.competitor,
                 pin: output.pin,
                 artifacts: output.artifacts,
@@ -376,7 +376,7 @@ function createContestCommands(
     },
   })
 
-  return { task: { compete }, contest: { request, select, promote, finalize } }
+  return { issue: { compete }, contest: { request, select, promote, finalize } }
 }
 
 function createContests(
@@ -478,10 +478,10 @@ function createContests(
         .map(required)
     },
     async compete(args) {
-      using _span = options.log.span?.("compete", { task: args.task.ref, competitors: args.competitors.length })
+      using _span = options.log.span?.("compete", { issue: args.issue.ref, competitors: args.competitors.length })
       const result = await options.actions.compete(args)
       const opened = result.events.find(({ name }) => name === "contest/opened")
-      if (opened === undefined) throw new Error("yrd: task.compete did not open a contest")
+      if (opened === undefined) throw new Error("yrd: issue.compete did not open a contest")
       return required(OpenedSchema.parse(opened.data).contest.id)
     },
     async select(args) {
@@ -508,7 +508,7 @@ function createContests(
       const token = TextSchema.parse(args.token)
       await options.jobs.finish(current.job.id, {
         attempt: current.job.attempt,
-        executor: current.job.executor,
+        runner: current.job.runner,
         token,
         result: args.result,
       })
@@ -545,7 +545,7 @@ async function ensureBays(contestId: string, options: Parameters<typeof createCo
     try {
       await options.bays.open({
         name: attempt.bayName,
-        task: `${record.task.ref.source}:${record.task.ref.id}`,
+        issue: `${record.issue.ref.source}:${record.issue.ref.id}`,
         actor: attempt.competitor.id,
         base: attempt.base,
         baseSha: record.baseSha,
@@ -710,7 +710,7 @@ function contestView(record: DeepReadonly<ContestRecord>, state: DeepReadonly<Co
   }
   return {
     id: record.id,
-    task: record.task,
+    issue: record.issue,
     base: record.base,
     baseSha: record.baseSha,
     createdAt: record.createdAt,

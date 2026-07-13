@@ -170,15 +170,15 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
 
   it("accepts an authorized pinned push and leaves a pending receipt for Bay intake", async () => {
     const f = await fixture("push")
-    await git(f.mainRepo, "switch", "-qc", "task/good")
+    await git(f.mainRepo, "switch", "-qc", "issue/good")
     const headSha = await commit(f.mainRepo, "good.txt")
     const result = await push(
       f,
-      "task/good:refs/heads/task/good",
-      await installHookHost(f.root, { "task/good": target(f.baseSha) }),
+      "issue/good:refs/heads/issue/good",
+      await installHookHost(f.root, { "issue/good": target(f.baseSha) }),
     )
     expect(result.code, result.stderr).toBe(0)
-    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/task/good")).toBe(headSha)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/good")).toBe(headSha)
     expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
 
     const delivered: ReceiverReceipt[] = []
@@ -189,11 +189,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect(drained).toMatchObject({ delivered: [expect.any(String)], failed: [], ambiguous: [] })
     expect(delivered).toEqual([
       expect.objectContaining({
-        branch: "task/good",
-        ref: "refs/heads/task/good",
+        branch: "issue/good",
+        ref: "refs/heads/issue/good",
         oldSha: zero,
         headSha,
-        intake: { bay: "B1", name: "receiver-test", branch: "task/good", base: "main", baseSha: f.baseSha, headSha },
+        intake: { bay: "B1", name: "receiver-test", branch: "issue/good", base: "main", baseSha: f.baseSha, headSha },
       }),
     ])
     expect(await inboxFiles(f.receiver)).toEqual([])
@@ -201,27 +201,27 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
 
   it("rejects unknown branches, deletes, and commits outside the pinned base", async () => {
     const f = await fixture("reject")
-    await git(f.mainRepo, "switch", "--orphan", "task/unrelated")
+    await git(f.mainRepo, "switch", "--orphan", "issue/unrelated")
     await run(["git", "-C", f.mainRepo, "rm", "-qrf", "."], f.mainRepo)
     const unrelated = await commit(f.mainRepo, "unrelated.txt")
-    const env = await installHookHost(f.root, { "task/unrelated": target(f.baseSha) })
+    const env = await installHookHost(f.root, { "issue/unrelated": target(f.baseSha) })
 
-    const ancestry = await push(f, "task/unrelated:refs/heads/task/unrelated", env)
+    const ancestry = await push(f, "issue/unrelated:refs/heads/issue/unrelated", env)
     expect(ancestry.code).not.toBe(0)
     expect(ancestry.stderr).toContain("does not descend from pinned base")
     expect(ancestry.stderr).toContain(unrelated.slice(0, 12))
 
     const wrongPin = await push(
       f,
-      "task/unrelated:refs/heads/task/unrelated",
-      await installHookHost(f.root, { "task/unrelated": target(unrelated) }),
+      "issue/unrelated:refs/heads/issue/unrelated",
+      await installHookHost(f.root, { "issue/unrelated": target(unrelated) }),
     )
     expect(wrongPin.stderr).toContain("is not in the history of base branch 'main'")
 
     await git(f.mainRepo, "switch", "-q", "main")
-    await git(f.mainRepo, "switch", "-qc", "task/unknown")
+    await git(f.mainRepo, "switch", "-qc", "issue/unknown")
     await commit(f.mainRepo, "unknown.txt")
-    expect((await push(f, "task/unknown:refs/heads/task/unknown", env)).stderr).toContain(
+    expect((await push(f, "issue/unknown:refs/heads/issue/unknown", env)).stderr).toContain(
       "is not authorized for Yrd intake",
     )
 
@@ -236,10 +236,10 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
 
   it("recovers prepared receipts by ref and retries the same receipt id after ambiguous intake", async () => {
     const f = await fixture("recover")
-    await git(f.mainRepo, "switch", "-qc", "task/recover")
+    await git(f.mainRepo, "switch", "-qc", "issue/recover")
     const headSha = await commit(f.mainRepo, "recover.txt")
     await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${headSha}:refs/yrd/test/recover`)
-    const update = `${zero} ${headSha} refs/heads/task/recover\n`
+    const update = `${zero} ${headSha} refs/heads/issue/recover\n`
     const [receipt] = await f.receiver.prepare(update, { resolveTarget: async () => target(f.baseSha) })
     expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.prepared.json`])
     expect(
@@ -251,7 +251,7 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       }),
     ).toEqual({ delivered: [], failed: [], ambiguous: [receipt!.id] })
     expect(await inboxFiles(f.receiver)).toEqual([`${receipt!.id}.prepared.json`])
-    await git(f.receiver.receiverPath, "update-ref", "refs/heads/task/recover", headSha, zero)
+    await git(f.receiver.receiverPath, "update-ref", "refs/heads/issue/recover", headSha, zero)
 
     const applied = new Set<string>()
     const failed = await f.receiver.drain({
@@ -279,11 +279,11 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
 
   it("drains each branch in ref-update order rather than receipt-name order", async () => {
     const f = await fixture("order")
-    await git(f.mainRepo, "switch", "-qc", "task/source")
+    await git(f.mainRepo, "switch", "-qc", "issue/source")
     const first = await commit(f.mainRepo, "one.txt")
     const second = await commit(f.mainRepo, "two.txt")
     await git(f.receiver.receiverPath, "fetch", "-q", f.mainRepo, `+${second}:refs/yrd/test/order`)
-    const branch = Array.from({ length: 1_000 }, (_, index) => `task/order-${index}`).find((candidate) => {
+    const branch = Array.from({ length: 1_000 }, (_, index) => `issue/order-${index}`).find((candidate) => {
       const ref = `refs/heads/${candidate}`
       return receiverId(ref, zero, first) > receiverId(ref, first, second)
     })!

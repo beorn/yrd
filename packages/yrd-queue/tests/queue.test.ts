@@ -1,7 +1,7 @@
 /**
- * @failure Line composition or projection can accept corrupt runs, lose pinned plans, or misstate integration results.
+ * @failure Queue composition or projection can accept corrupt runs, lose pinned plans, or misstate integration results.
  * @level l2
- * @consumer @yrd/line
+ * @consumer @yrd/queue
  */
 import { describe, expect, expectTypeOf, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
@@ -9,21 +9,21 @@ import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yr
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
 import {
-  withLine,
+  withQueue,
   withMerge,
   withStep,
   type AddStepResult,
   type IntegratedShape,
-  type Line,
+  type Queue,
   type PRShape,
   type StepExecution,
-} from "@yrd/line"
+} from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
 const MERGED = "b".repeat(40)
 const UPDATED = "3".repeat(40)
-const runtime = { executor: "local", leaseMs: 60_000 }
+const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 const ReviewResultSchema = z.object({ approved: z.boolean() }).strict()
 const DeployResultSchema = z.object({ environment: z.string() }).strict()
@@ -56,7 +56,7 @@ function workspace(): BayWorkspace {
   }
 }
 
-function linePlugin(
+function queuePlugin(
   options: Readonly<{
     batch?: false | number
     check?: (input: StepExecution<PRShape>) => JobResult<CheckResult>
@@ -90,28 +90,28 @@ function linePlugin(
       options.deploy?.(input) ?? { status: "passed", output: { environment: "staging" } },
     { revision: "deploy-v1", needsIntegration: true, output: DeployResultSchema },
   )
-  return withLine({
+  return withQueue({
     steps: [check, review, merge, deploy] as const,
     batch: options.batch ?? false,
     defaultSteps: ["check", "review", "merge", "deploy"],
   })
 }
 
-async function createLineApp(
-  options: Parameters<typeof linePlugin>[0] = {},
+async function createQueueApp(
+  options: Parameters<typeof queuePlugin>[0] = {},
   journal = createMemoryJournal(),
   clock: () => string = () => "2026-01-01T00:00:00.000Z",
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const line = linePlugin(options)
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
-  const definition = line(base)
+  const queue = queuePlugin(options)
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const definition = queue(base)
   return createYrd(definition, {
     inject: { journal, id: ids(), clock },
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createLineApp>>, branch: string, base = "main") {
+async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, branch: string, base = "main") {
   const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
   await app.bays.submit({ branch, headSha: digit.repeat(40), base })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
@@ -119,11 +119,11 @@ async function submitBranch(app: Awaited<ReturnType<typeof createLineApp>>, bran
   return pr
 }
 
-describe("Line", () => {
+describe("Queue", () => {
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
-    await using app = await createLineApp()
-    expectTypeOf(app.line).toMatchTypeOf<Line<DeployedShape>>()
-    expect(app.line.steps().map((step) => step.name)).toEqual(["check", "review", "merge", "deploy"])
+    await using app = await createQueueApp()
+    expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()
+    expect(app.queue.steps().map((step) => step.name)).toEqual(["check", "review", "merge", "deploy"])
 
     const check = withStep(
       "check",
@@ -137,54 +137,54 @@ describe("Line", () => {
     )
     const invalid = (): void => {
       // @ts-expect-error deploy requires the shape produced by withMerge
-      void withLine({ steps: [check, deploy] as const })
+      void withQueue({ steps: [check, deploy] as const })
     }
     void invalid
   })
 
   it("treats an explicit empty step selection as a true no-op", async () => {
-    await using app = await createLineApp()
-    const pr = await submitBranch(app, "task/no-steps")
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/no-steps")
 
-    const result = await app.dispatch(app.commands.line.integrate, { prs: [pr.id], steps: [] })
+    const result = await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: [] })
     expect(result.events).toEqual([])
-    await expect(app.line.integrate({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
-    expect(app.state().lines.records).toEqual({})
+    await expect(app.queue.run({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
+    expect(app.state().queues.records).toEqual({})
     expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
   })
 
   it("keys a selected step suffix by run order rather than installed order", async () => {
-    await using app = await createLineApp()
-    const pr = await submitBranch(app, "task/selected-suffix")
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/selected-suffix")
 
-    const run = (await app.line.integrate({ prs: [pr.id], steps: ["merge", "deploy"] }, runtime))[0]
+    const run = (await app.queue.run({ prs: [pr.id], steps: ["merge", "deploy"] }, runtime))[0]
 
     expect(run).toMatchObject({
       status: "passed",
       steps: [{ name: "merge" }, { name: "deploy" }],
       shape: { integration: { commit: MERGED }, results: { deploy: { environment: "staging" } } },
     })
-    expect(app.state().lines.records.R1?.steps).toEqual([
+    expect(app.state().queues.records.R1?.steps).toEqual([
       expect.not.objectContaining({ index: expect.anything() }),
       expect.not.objectContaining({ index: expect.anything() }),
     ])
-    expect(app.state().jobs.byKey).toMatchObject({ "line:R1:0": expect.any(String), "line:R1:1": expect.any(String) })
+    expect(app.state().jobs.byKey).toMatchObject({ "queue:R1:0": expect.any(String), "queue:R1:1": expect.any(String) })
   })
 
-  it("rejects a failure event for an unknown Line run as journal corruption", async () => {
+  it("rejects a failure event for an unknown Queue run as journal corruption", async () => {
     const journal = createMemoryJournal([
       {
         cause: {
           id: "00000000-0000-7000-8000-000000000002",
           commandId: "00000000-0000-7000-8000-000000000001",
-          op: "line.advance",
-          commandHash: Command.hash({ op: "line.advance" }),
+          op: "queue.advance",
+          commandHash: Command.hash({ op: "queue.advance" }),
         },
-        command: { id: "00000000-0000-7000-8000-000000000001", op: "line.advance" },
+        command: { id: "00000000-0000-7000-8000-000000000001", op: "queue.advance" },
         events: [
           {
             id: "00000000-0000-7000-8000-000000000003",
-            name: "line/run/failed",
+            name: "queue/run/failed",
             ts: "2026-07-10T00:00:00.000Z",
             data: { run: "R404", error: { code: "missing-run", message: "missing" } },
           },
@@ -192,19 +192,19 @@ describe("Line", () => {
       },
     ])
 
-    await expect(createLineApp({}, journal)).rejects.toThrow("no line run 'R404'")
+    await expect(createQueueApp({}, journal)).rejects.toThrow("no queue run 'R404'")
   })
 
-  it("runs checks, merge, and deploy across base lines and derives every Job field", async () => {
-    await using app = await createLineApp({
+  it("runs checks, merge, and deploy across base queues and derives every Job field", async () => {
+    await using app = await createQueueApp({
       batch: 2,
       deploy: (input) => ({ status: "passed", output: { environment: input.prs[0]!.base } }),
     })
-    const first = await submitBranch(app, "task/one")
-    const second = await submitBranch(app, "task/two")
-    const release = await submitBranch(app, "task/release", "release/2.0")
+    const first = await submitBranch(app, "issue/one")
+    const second = await submitBranch(app, "issue/two")
+    const release = await submitBranch(app, "issue/release", "release/2.0")
 
-    const runs = await app.line.integrate({ prs: [] }, runtime)
+    const runs = await app.queue.run({ prs: [] }, runtime)
 
     expect(runs.map((run) => [run.base, run.prs.map((pr) => pr.id)])).toEqual([
       ["main", [first.id, second.id]],
@@ -228,7 +228,7 @@ describe("Line", () => {
           (step) => step.job?.status === "passed" && step.job.startedAt !== "" && step.job.finishedAt !== "",
         ),
       ).toBe(true)
-      const record = app.state().lines.records[run.id]
+      const record = app.state().queues.records[run.id]
       expect(record).not.toHaveProperty("status")
       expect(record).not.toHaveProperty("jobIds")
       expect(record).not.toHaveProperty("shape")
@@ -238,15 +238,15 @@ describe("Line", () => {
       { commit: MERGED, baseSha: BASE },
       { commit: MERGED, baseSha: BASE },
     ])
-    expect(app.line.status("main").finished).toHaveLength(1)
-    expect(app.line.status("release/2.0").finished).toHaveLength(1)
+    expect(app.queue.status("main").finished).toHaveLength(1)
+    expect(app.queue.status("release/2.0").finished).toHaveLength(1)
   })
 
   it("reconciles historical same-payload PRs from one integration proof", async () => {
     const journal = createMemoryJournal<unknown>()
-    await using app = await createLineApp({}, journal)
-    const canonical = await submitBranch(app, "task/one")
-    const run = (await app.line.integrate({ prs: [canonical.id], steps: ["check", "review", "merge"] }, runtime))[0]
+    await using app = await createQueueApp({}, journal)
+    const canonical = await submitBranch(app, "issue/one")
+    const run = (await app.queue.run({ prs: [canonical.id], steps: ["check", "review", "merge"] }, runtime))[0]
     let cursor = 0
     for await (const batch of journal.read()) cursor = batch.cursor
     const command = { id: "00000000-0000-7000-8000-000000000101", op: "fixture.duplicate" }
@@ -267,7 +267,7 @@ describe("Line", () => {
               ts: "2026-01-01T00:00:01.000Z",
               data: {
                 pr: "PR2",
-                branch: "origin/task/one",
+                branch: "origin/issue/one",
                 base: "main",
                 headSha: canonical.headSha,
                 revision: 1,
@@ -285,7 +285,7 @@ describe("Line", () => {
       ),
     ).toMatchObject({ appended: true })
 
-    const reconciled = await app.dispatch(app.commands.line.advance, { run: run?.id ?? "missing" })
+    const reconciled = await app.dispatch(app.commands.queue.advance, { run: run?.id ?? "missing" })
 
     expect(run).toMatchObject({ status: "passed", integration: { commit: MERGED } })
     expect(reconciled.events).toEqual([
@@ -297,59 +297,59 @@ describe("Line", () => {
 
   it("integrates the implicit queue in PR revision submission order", async () => {
     let tick = 0
-    await using app = await createLineApp({ batch: 1 }, createMemoryJournal(), () =>
+    await using app = await createQueueApp({ batch: 1 }, createMemoryJournal(), () =>
       new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
     )
-    await app.bays.intake({ branch: "task/created-first", headSha: HEAD, base: "main" })
-    await app.bays.intake({ branch: "task/submitted-first", headSha: UPDATED, base: "main" })
+    await app.bays.intake({ branch: "issue/created-first", headSha: HEAD, base: "main" })
+    await app.bays.intake({ branch: "issue/submitted-first", headSha: UPDATED, base: "main" })
     await app.bays.submit({ pr: "PR2" })
     await app.bays.submit({ pr: "PR1" })
 
-    const runs = await app.line.integrate({}, runtime)
+    const runs = await app.queue.run({}, runtime)
 
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
   })
 
-  it("persists a line hold and refuses unlisted PRs before creating a run", async () => {
+  it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
     const journal = createMemoryJournal()
-    const first = await createLineApp({}, journal)
-    const allowed = await submitBranch(first, "task/allowed")
-    const blocked = await submitBranch(first, "task/blocked")
+    const first = await createQueueApp({}, journal)
+    const allowed = await submitBranch(first, "issue/allowed")
+    const blocked = await submitBranch(first, "issue/blocked")
 
-    await first.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
+    await first.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
 
-    expect(first.line.status("main").hold).toMatchObject({
+    expect(first.queue.status("main").pause).toMatchObject({
       base: "main",
       reason: "operator freeze",
       allowedPRs: [allowed.id],
     })
-    await expect(first.line.integrate({ prs: [blocked.id] }, runtime)).rejects.toThrow(
-      `line 'main' is held: operator freeze`,
+    await expect(first.queue.run({ prs: [blocked.id] }, runtime)).rejects.toThrow(
+      `queue 'main' is paused: operator freeze`,
     )
-    await expect(first.dispatch(first.commands.line.integrate, { prs: [blocked.id] })).rejects.toThrow(
-      `line 'main' is held: operator freeze`,
+    await expect(first.dispatch(first.commands.queue.run, { prs: [blocked.id] })).rejects.toThrow(
+      `queue 'main' is paused: operator freeze`,
     )
-    expect(first.state().lines.records).toEqual({})
-    await expect(first.line.integrate({ prs: [allowed.id] }, runtime)).resolves.toHaveLength(1)
-    await first.line.release("main")
-    await expect(first.line.integrate({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
-    expect(first.line.status("main").hold).toBeUndefined()
-    await first.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
+    expect(first.state().queues.records).toEqual({})
+    await expect(first.queue.run({ prs: [allowed.id] }, runtime)).resolves.toHaveLength(1)
+    await first.queue.resume("main")
+    await expect(first.queue.run({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
+    expect(first.queue.status("main").pause).toBeUndefined()
+    await first.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [allowed.id] })
     await first.close()
 
-    await using replay = await createLineApp({}, journal)
-    expect(replay.line.status("main").hold).toMatchObject({ allowedPRs: [allowed.id] })
+    await using replay = await createQueueApp({}, journal)
+    expect(replay.queue.status("main").pause).toMatchObject({ allowedPRs: [allowed.id] })
   })
 
-  it("selects the first queue-ordered eligible submitted PR under a hold", async () => {
+  it("selects the first queue-ordered eligible submitted PR under a pause", async () => {
     let tick = 0
-    await using app = await createLineApp({ batch: 23 }, createMemoryJournal(), () =>
+    await using app = await createQueueApp({ batch: 23 }, createMemoryJournal(), () =>
       new Date(Date.UTC(2026, 0, 1, 0, 0, 0, tick++)).toISOString(),
     )
     const prs = []
     for (let index = 1; index <= 23; index++) {
       await app.bays.submit({
-        branch: `task/pr-${index}`,
+        branch: `issue/pr-${index}`,
         headSha: index.toString(16).padStart(40, "0"),
         base: "main",
       })
@@ -362,7 +362,7 @@ describe("Line", () => {
     if (oldExcluded === undefined || allowed === undefined) throw new Error("PR fixture is incomplete")
     expect([oldExcluded.id, allowed.id]).toEqual(["PR11", "PR23"])
 
-    await app.line.integrate(
+    await app.queue.run(
       {
         prs: prs.filter((pr) => pr.id !== oldExcluded.id && pr.id !== allowed.id).map((pr) => pr.id),
         steps: ["check", "review", "merge"],
@@ -371,9 +371,9 @@ describe("Line", () => {
     )
     expect(app.state().bays.prs.PR11?.status).toBe("submitted")
     expect(app.state().bays.prs.PR23?.status).toBe("submitted")
-    await app.line.hold({ base: "main", reason: "operator freeze", allowedPRs: ["PR23"] })
+    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: ["PR23"] })
 
-    const runs = await app.line.integrate({}, runtime)
+    const runs = await app.queue.run({}, runtime)
 
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR23"]])
     expect(app.state().bays.prs.PR11?.status).toBe("submitted")
@@ -382,17 +382,17 @@ describe("Line", () => {
 
   it("keeps completed history readable and refuses queued work after revision drift", async () => {
     const journal = createMemoryJournal()
-    const first = await createLineApp({}, journal)
-    await first.bays.submit({ branch: "task/completed", headSha: HEAD, base: "main" })
-    const completed = await first.line.integrate({ prs: ["PR1"], steps: ["check"] }, runtime)
-    await first.bays.submit({ branch: "task/queued", headSha: UPDATED, base: "main" })
-    const queued = await first.dispatch(first.commands.line.integrate, { prs: ["PR2"], steps: ["check"] })
+    const first = await createQueueApp({}, journal)
+    await first.bays.submit({ branch: "issue/completed", headSha: HEAD, base: "main" })
+    const completed = await first.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+    await first.bays.submit({ branch: "issue/queued", headSha: UPDATED, base: "main" })
+    const queued = await first.dispatch(first.commands.queue.run, { prs: ["PR2"], steps: ["check"] })
     const queuedJob = first.jobs.requested(queued)[0]
-    if (queuedJob === undefined) throw new Error("line did not request a Job")
+    if (queuedJob === undefined) throw new Error("queue did not request a Job")
     await first.close()
 
     let changedExecutions = 0
-    const changed = await createLineApp(
+    const changed = await createQueueApp(
       {
         checkRevision: "check-v2",
         check: () => {
@@ -402,7 +402,7 @@ describe("Line", () => {
       },
       journal,
     )
-    expect(changed.line.get(completed[0]!.id)).toMatchObject({
+    expect(changed.queue.get(completed[0]!.id)).toMatchObject({
       status: "passed",
       shape: { results: { check: { checked: true } } },
     })
@@ -411,29 +411,29 @@ describe("Line", () => {
     await changed.close()
 
     const bayJobs = createBayJobDefs(workspace())
-    const withoutSteps = withLine({ steps: [] as const })
+    const withoutSteps = withQueue({ steps: [] as const })
     const historyBase = pipe(createYrdDef(), withJobs({ definitions: bayJobs }), withBays({ jobs: bayJobs }))
     await using history = await createYrd(withoutSteps(historyBase), { inject: { journal } })
-    expect(history.line.get(completed[0]!.id)).toMatchObject({ status: "passed" })
+    expect(history.queue.get(completed[0]!.id)).toMatchObject({ status: "passed" })
   })
 
   it("rejects before merge but preserves integration when deployment fails", async () => {
     let merged = false
-    await using rejectedApp = await createLineApp({
+    await using rejectedApp = await createQueueApp({
       check: () => ({ status: "failed", error: { code: "check-failed", message: "tests failed" } }),
       merge: () => {
         merged = true
         return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
       },
     })
-    const rejected = await submitBranch(rejectedApp, "task/rejected")
-    expect((await rejectedApp.line.integrate({ prs: [rejected.id] }, runtime))[0]).toMatchObject({
+    const rejected = await submitBranch(rejectedApp, "issue/rejected")
+    expect((await rejectedApp.queue.run({ prs: [rejected.id] }, runtime))[0]).toMatchObject({
       status: "failed",
       error: { code: "check-failed" },
     })
     expect(merged).toBe(false)
     expect(rejectedApp.state().bays.prs[rejected.id]).toMatchObject({ status: "rejected" })
-    await rejectedApp.bays.submit({ branch: "task/rejected", headSha: UPDATED, base: "main" })
+    await rejectedApp.bays.submit({ branch: "issue/rejected", headSha: UPDATED, base: "main" })
     expect(rejectedApp.state().bays.prs[rejected.id]).toMatchObject({
       status: "submitted",
       revision: 2,
@@ -444,13 +444,13 @@ describe("Line", () => {
       ],
     })
 
-    await using deployApp = await createLineApp({
+    await using deployApp = await createQueueApp({
       batch: 2,
       deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
     })
-    const deployed = await submitBranch(deployApp, "task/deploy-fails")
-    const companion = await submitBranch(deployApp, "task/deploy-companion")
-    const run = (await deployApp.line.integrate({ prs: [deployed.id, companion.id] }, runtime))[0]
+    const deployed = await submitBranch(deployApp, "issue/deploy-fails")
+    const companion = await submitBranch(deployApp, "issue/deploy-companion")
+    const run = (await deployApp.queue.run({ prs: [deployed.id, companion.id] }, runtime))[0]
     expect(run).toMatchObject({ status: "failed", error: { code: "deploy-failed" } })
     expect(deployApp.state().bays.prs).toMatchObject({
       [deployed.id]: { status: "integrated" },
@@ -460,9 +460,9 @@ describe("Line", () => {
 
   it("allows unrelated work while waiting and refuses a completed stale revision", async () => {
     let merges = 0
-    await using app = await createLineApp({
+    await using app = await createQueueApp({
       check: (input) =>
-        input.prs[0]?.branch === "task/next"
+        input.prs[0]?.branch === "issue/next"
           ? { status: "passed", output: { checked: true } }
           : { status: "waiting", token: `remote-${input.prs[0]?.id}` },
       merge: () => {
@@ -470,21 +470,21 @@ describe("Line", () => {
         return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
       },
     })
-    const remote = await submitBranch(app, "task/remote")
-    const waiting = (await app.line.integrate({ prs: [remote.id] }, runtime))[0]!
+    const remote = await submitBranch(app, "issue/remote")
+    const waiting = (await app.queue.run({ prs: [remote.id] }, runtime))[0]!
     const waitingJob = waiting.steps[0]?.job
     if (waitingJob?.status !== "waiting") throw new Error("check did not wait")
-    expect(app.line.waiting(remote.id)).toMatchObject({
+    expect(app.queue.waiting(remote.id)).toMatchObject({
       run: { id: waiting.id },
       step: { name: "check", job: { id: waitingJob.id, status: "waiting" } },
     })
 
-    const next = await submitBranch(app, "task/next")
-    expect((await app.line.integrate({ prs: [next.id] }, runtime))[0]).toMatchObject({ status: "passed" })
+    const next = await submitBranch(app, "issue/next")
+    expect((await app.queue.run({ prs: [next.id] }, runtime))[0]).toMatchObject({ status: "passed" })
 
     await app.bays.intake({ branch: remote.branch, headSha: UPDATED, base: "main" })
     expect(
-      await app.line.finish(
+      await app.queue.finish(
         remote.id,
         {
           step: "check",
@@ -498,7 +498,7 @@ describe("Line", () => {
       error: { code: "stale-pr" },
     })
     await expect(
-      app.line.finish(
+      app.queue.finish(
         remote.id,
         {
           step: "check",
@@ -514,7 +514,7 @@ describe("Line", () => {
 
   it("recursively bisects a red batch and rejects only the isolated PR", async () => {
     const checked: string[][] = []
-    await using app = await createLineApp({
+    await using app = await createQueueApp({
       batch: 4,
       check: (input) => {
         const prs = input.prs.map((pr) => pr.id)
@@ -524,12 +524,12 @@ describe("Line", () => {
           : { status: "passed", output: { checked: true } }
       },
     })
-    await submitBranch(app, "task/one")
-    await submitBranch(app, "task/two")
-    await submitBranch(app, "task/bad")
-    await submitBranch(app, "task/four")
+    await submitBranch(app, "issue/one")
+    await submitBranch(app, "issue/two")
+    await submitBranch(app, "issue/bad")
+    await submitBranch(app, "issue/four")
 
-    const runs = await app.line.integrate({ prs: [] }, runtime)
+    const runs = await app.queue.run({ prs: [] }, runtime)
 
     expect(checked).toEqual([["PR1", "PR2", "PR3", "PR4"], ["PR1", "PR2"], ["PR3", "PR4"], ["PR3"], ["PR4"]])
     expect(runs.map((run) => [run.prs.map((pr) => pr.id), run.status])).toEqual([

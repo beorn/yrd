@@ -7,7 +7,7 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
 
-const VERSION = 2
+const VERSION = 3
 const SCAN_BYTES = 64 * 1024
 const WARN_BYTES = 10 * 1024 * 1024
 const WARN_FRAMES = 10_000
@@ -53,7 +53,7 @@ export function createJournal(
     }>
   }>,
 ): Journal<unknown> {
-  const path = join(options.dir, "events.jsonl")
+  const path = join(options.dir, "events-v3.jsonl")
   const exclusive = options.inject?.exclusive ?? createExclusive(options.dir, options.lock)
   const io: JournalIO = { ...defaultIO, ...options.inject?.io }
   const log = options.inject?.log?.child("journal") ?? createLogger("yrd:journal")
