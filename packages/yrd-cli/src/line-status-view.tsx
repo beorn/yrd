@@ -352,14 +352,23 @@ function preciseDuration(milliseconds: number, compact = false): string {
   return `${remainder}s`
 }
 
+function mediaDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000))
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  const remainder = String(seconds % 60).padStart(2, "0")
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`
+}
+
 function relativeAge(milliseconds: number): string {
   if (milliseconds >= 3_600_000) return `${Math.round(milliseconds / 3_600_000)}h`
   return preciseDuration(milliseconds, true)
 }
 
-function lineLogClock(timestamp: string, compact: boolean): string {
+function lineLogClock(timestamp: string, compact: boolean, includeDate: boolean): string {
   if (timestamp === "-") return timestamp
   const iso = new Date(timestamp).toISOString()
+  if (includeDate) return `${iso.slice(0, 19)}Z`
   return compact ? iso.slice(11, 16) : iso.slice(11, 19)
 }
 
@@ -789,6 +798,17 @@ function projectPR(
   const stateLabel = lineState(pr, run)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
+  const terminalAt =
+    runOverride?.finishedAt ??
+    (pr.status === "rejected"
+      ? pr.rejectedAt
+      : pr.status === "integrated"
+        ? pr.integratedAt
+        : pr.status === "withdrawn"
+          ? pr.withdrawnAt
+          : undefined)
+  const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
+  const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
   const failure =
     fact === undefined || run === undefined
       ? undefined
@@ -808,7 +828,7 @@ function projectPR(
     ...(run === undefined ? {} : { runId: run.id }),
     ...(pr.submittedAt === undefined ? {} : { submittedAt: pr.submittedAt }),
     target: pr.base,
-    age: age(pr.submittedAt ?? revision?.pushedAt, now),
+    age: age(pr.submittedAt ?? revision?.pushedAt, ageAt),
     touched: age(touchedAt, now),
     ...(touchedAt === undefined ? {} : { touchedAt }),
     run: runDuration,
@@ -1465,6 +1485,13 @@ export function LineLogView({
 }) {
   const compact = columns <= 80
   const visibleRows = rows.toReversed().slice(0, 20)
+  const visibleDates = new Set(
+    visibleRows.flatMap((row) => {
+      const timestamp = Date.parse(row.startedAt)
+      return Number.isFinite(timestamp) ? [new Date(timestamp).toISOString().slice(0, 10)] : []
+    }),
+  )
+  const includeDate = visibleDates.size > 1
   void coverage
   return (
     <Box flexDirection="column">
@@ -1481,8 +1508,8 @@ export function LineLogView({
           </Box>
           {visibleRows.map((row) => {
             const identity = compact
-              ? `${row.glyph} ${lineLogClock(row.startedAt, true)} ${row.pr} r${row.revision} ${row.run} ${row.outcome}`
-              : `${row.glyph} ${lineLogClock(row.startedAt, false)} ${lineLogLevel(row.outcome)} [${row.base}] ${row.pr} (rev${row.revision}, run${row.run.replace(/^R/u, "")}) ${row.outcome}`
+              ? `${row.glyph} ${lineLogClock(row.startedAt, true, includeDate)} ${row.pr} r${row.revision} ${row.run} ${row.outcome}`
+              : `${row.glyph} ${lineLogClock(row.startedAt, false, includeDate)} ${lineLogLevel(row.outcome)} [${row.base}] ${row.pr} (rev${row.revision}, run${row.run.replace(/^R/u, "")}) ${row.outcome}`
             const hasWait = Math.round((row.waitDurationMs ?? 0) / 1_000) > 0
             return (
               <Box key={`${row.run}:${row.pr}:${row.revision}`} height={1}>
@@ -1496,13 +1523,11 @@ export function LineLogView({
                   )}{" "}
                   {row.subject}
                   {row.ageMs === undefined ? null : ` age=${relativeAge(row.ageMs)}`}
-                  {row.totalDurationMs === undefined ? null : ` total=${preciseDuration(row.totalDurationMs, compact)}`}
+                  {row.totalDurationMs === undefined ? null : ` total=${mediaDuration(row.totalDurationMs)}`}
                   {!hasWait || row.activeDurationMs === undefined
                     ? null
-                    : ` active=${preciseDuration(row.activeDurationMs, compact)}`}
-                  {!hasWait || row.waitDurationMs === undefined
-                    ? null
-                    : ` wait=${preciseDuration(row.waitDurationMs, compact)}`}
+                    : ` active=${mediaDuration(row.activeDurationMs)}`}
+                  {!hasWait || row.waitDurationMs === undefined ? null : ` wait=${mediaDuration(row.waitDurationMs)}`}
                 </Text>
               </Box>
             )

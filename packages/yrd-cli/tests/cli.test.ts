@@ -1302,7 +1302,7 @@ describe("runYrd", () => {
     rmSync(temp, { recursive: true, force: true })
   })
 
-  it("suppresses retry teaching for positive, stale, superseded, retired, and unchanged failure states", () => {
+  it("does not derive next-action teaching without typed eligibility facts", () => {
     const failedRun = (id: string, revision: number, headSha: string, startedAt: string): LineRun =>
       fakeRun({
         id,
@@ -2361,6 +2361,22 @@ describe("runYrd", () => {
       expect(physicalRows[0]).toContain("art:12")
       expect(human).not.toMatch(/\n\s*\n\s*\n/u)
       expect(human).not.toContain("stdout=/")
+    }
+
+    const hourRow = {
+      ...rows[0]!,
+      subject: "topic",
+      locations: [],
+      totalDurationMs: 3_600_000,
+      waitDurationMs: 0,
+    }
+    for (const width of [80, 120]) {
+      const human = await renderString(createElement(LineLogView, { rows: [hourRow], columns: width }), {
+        width,
+        height: 4,
+        plain: true,
+      })
+      expect(human).toContain("total=1:00:00")
     }
 
     const crossDayRows = [

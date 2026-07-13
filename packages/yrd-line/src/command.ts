@@ -492,7 +492,13 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               checkpoint: GitCheckEvidenceSchema.parse({ ...(outcome.checkpoint as CommandEvidence), ...evidence }),
             }
           }
-          return { status: "failed", error: outcome.error }
+          return {
+            status: "failed",
+            error: outcome.error,
+            ...(outcome.output === undefined
+              ? {}
+              : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }),
+          }
         },
       )
     } catch (cause) {
