@@ -16,7 +16,6 @@ import {
   QueueRunsView,
   QueueWatchView,
   QueueStatusView,
-  humanQueueProjection,
   type QueueLogCoverage,
   PRResultView,
   queueLogAttempts,
@@ -26,6 +25,7 @@ import {
   queueSubmissionTimes,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
+import { submittedPrPositions } from "./queue-position.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
@@ -426,7 +426,7 @@ async function viewPr(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const position = queuedPrPosition(app, state, pr, io.now?.() ?? Date.now())
+  const position = queuedPrPosition(state, pr)
   await printResult(
     io,
     jsonEnabled(options),
@@ -519,17 +519,10 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
   return pr as PR
 }
 
-function queuedPrPosition(app: YrdCliApp, state: YrdCliState, pr: PR, now: number): number | undefined {
+function queuedPrPosition(state: YrdCliState, pr: PR): number | undefined {
   if (pr.status !== "submitted") return undefined
-  const projection = humanQueueProjection(
-    {
-      ...app.queue.status(pr.base),
-      prs: Object.values(state.bays.prs).filter((candidate) => candidate.base === pr.base),
-    },
-    now,
-    { state: state.bays },
-  )
-  return projection.queue.find((row) => row.pr === pr.id)?.position
+  const candidates = Object.values(state.bays.prs).filter((candidate) => candidate.base === pr.base)
+  return submittedPrPositions(candidates).get(pr.id)
 }
 
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
@@ -801,7 +794,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       bay: bay?.id,
       pr: pr?.id,
       base: pr?.base ?? bay?.base,
-      position: pr === undefined ? undefined : queuedPrPosition(app, state, pr, io.now?.() ?? Date.now()),
+      position: pr === undefined ? undefined : queuedPrPosition(state, pr),
       pause: queue?.pause,
     },
     boundaries: ["the queue is the only merger", "issues are read-only references; edit them in the tracker"],
@@ -880,7 +873,14 @@ async function logRuns(
   for (const group of await queueTargetGroups(target.bases, io)) {
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
-    const runs = mergedQueueRuns(canonical, aliases)
+    const merged = mergedQueueRuns(canonical, aliases)
+    const inScope = (run: QueueRun) =>
+      target.selected.size === 0 || run.prs.some((member) => target.selected.has(member.id))
+    const runs = {
+      running: merged.running.filter(inScope),
+      waiting: merged.waiting.filter(inScope),
+      finished: merged.finished.filter(inScope),
+    }
     summaries.push({
       base: group.base,
       ...runs,
@@ -901,7 +901,10 @@ async function logRuns(
     const subject = commitSubject(cwd, pr.headSha)
     if (subject !== undefined) revisionSubjects.set(key, subject)
   }
-  const attempts = await queueLogAttempts(app.events())
+  const runIds = new Set(
+    summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
+  )
+  const attempts = (await queueLogAttempts(app.events())).filter((attempt) => runIds.has(attempt.run))
   const submissionTimes = await queueSubmissionTimes(app.events())
   const rows = queueLogRows(
     summaries,
@@ -1319,7 +1322,7 @@ function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io
     refusal(message)
   }
 
-  const position = queuedPrPosition(app, stateOf(app), pr, io.now?.() ?? Date.now())
+  const position = queuedPrPosition(stateOf(app), pr)
   const detail = prMergeRefusalDetail(pr, position)
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {

@@ -16,7 +16,9 @@ function scannedFiles(path: string): string[] {
     if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") continue
     const child = join(path, entry.name)
     if (entry.isDirectory()) files.push(...scannedFiles(child))
-    else if (scannedExtensions.has(extname(entry.name)) || entry.name === "bun.lock") files.push(child)
+    else if (extname(entry.name) === "" || scannedExtensions.has(extname(entry.name)) || entry.name === "bun.lock") {
+      files.push(child)
+    }
   }
   return files
 }
@@ -24,8 +26,9 @@ function scannedFiles(path: string): string[] {
 describe("noun cutover ratchet", () => {
   it("documents public recovery and the command-event core model", () => {
     const readme = readFileSync(join(root, "README.md"), "utf8")
-    expect(readme).toContain("`yrd queue recover` is the public repair path")
-    expect(readme).toContain("documents Commands, Events, projection, and the private Journal transaction contract")
+    const prose = readme.replaceAll(/\s+/gu, " ")
+    expect(prose).toContain("`yrd queue recover` is the public repair path")
+    expect(prose).toContain("documents Commands, Events, projection, and the private Journal transaction contract")
     expect(readme).toContain("| `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal")
     expect(readme).not.toContain("Runner-lease recovery remains\nan embedded/API capability")
     expect(readme).not.toContain("documents Operations, transaction\nframes")
@@ -71,8 +74,10 @@ describe("noun cutover ratchet", () => {
       join(root, "TODO.md"),
       join(root, "package.json"),
       join(root, "bun.lock"),
+      ...scannedFiles(join(root, "bin")),
       ...scannedFiles(join(root, "docs")),
       ...scannedFiles(join(root, "packages")),
+      ...scannedFiles(join(root, "scripts")),
     ]) {
       const relative = file.slice(root.length + 1)
       for (const [index, text] of readFileSync(file, "utf8").split(/\r?\n/u).entries()) {

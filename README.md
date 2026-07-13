@@ -277,8 +277,8 @@ retry <PR-or-run>` for rejected work.
 The bare dashboard shows active and recent work. `AGE` is immutable queue
 lifetime—submission to terminal outcome—while `TOUCHED` is the latest state or
 step event and `RUN` is execution duration. `yrd pr runs <PR>` is the canonical
-drill into attempts, proofs, logs, and artifacts. Runner-lease recovery remains
-an embedded/API capability, not another operator verb.
+drill into attempts, proofs, logs, and artifacts. `yrd queue recover` is the
+public repair path for expired runner leases; it never retries or executes work.
 
 ### Issues and Contests
 
@@ -574,8 +574,8 @@ stable Job id and fence stale attempts. Configured commands receive `YRD_JOB`,
 `YRD_ATTEMPT`, and `YRD_RUNNER` for that purpose. Yrd never guesses that a
 side effect did or did not happen.
 
-[`@yrd/core`](packages/yrd-core/README.md) documents Operations, transaction
-frames, projection, and the Journal contract. [`@yrd/job`](packages/yrd-job/README.md)
+[`@yrd/core`](packages/yrd-core/README.md) documents Commands, Events,
+projection, and the private Journal transaction contract. [`@yrd/job`](packages/yrd-job/README.md)
 documents Job states, leases, waiting work, retries, and backend idempotency.
 
 `prs.git` is a Git object/ref receiver, not the state store. Its pre-receive
@@ -599,7 +599,7 @@ The low-level packages remain usable by a single developer with no agent fleet.
 
 | Package            | Responsibility                                                   |
 | ------------------ | ---------------------------------------------------------------- |
-| `@yrd/core`        | Immutable composition, Operations, Frames, projection, Journal   |
+| `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal      |
 | `@yrd/persistence` | Checksummed JSONL Journal and cross-process append exclusion     |
 | `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
 | `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |

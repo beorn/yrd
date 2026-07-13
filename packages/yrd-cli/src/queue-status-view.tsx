@@ -6,6 +6,7 @@ import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
 import type { QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Link, Table, Text } from "silvery"
+import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
 export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
@@ -863,6 +864,12 @@ function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): num
   return order === 0 ? left.pr.localeCompare(right.pr, undefined, { numeric: true }) : order
 }
 
+function requiredQueuePosition(positions: ReadonlyMap<string, number>, pr: string): number {
+  const position = positions.get(pr)
+  if (position === undefined) throw new Error(`yrd: submitted PR '${pr}' is missing its queue position`)
+  return position
+}
+
 export function humanQueueProjection(
   result: QueueStatusResult,
   now: number,
@@ -870,16 +877,10 @@ export function humanQueueProjection(
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const rows = projectedPRRows(options.state, result, now)
+  const positions = submittedPrPositions(result.prs)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted")
-    .toSorted((left, right) => {
-      if (left.submittedAt === right.submittedAt) {
-        return left.pr.localeCompare(right.pr, undefined, { numeric: true })
-      }
-      if (left.submittedAt === undefined) return 1
-      if (right.submittedAt === undefined) return -1
-      return left.submittedAt.localeCompare(right.submittedAt)
-    })
+    .toSorted((left, right) => requiredQueuePosition(positions, left.pr) - requiredQueuePosition(positions, right.pr))
   const historical = result.finished.flatMap((run) =>
     run.prs.flatMap((member) => {
       const pr = result.prs.find((candidate) => candidate.id === member.id)
@@ -899,7 +900,9 @@ export function humanQueueProjection(
         : selected.has(row.pr) && row.nativeStatus !== "submitted"
     }),
   ]
-  const queue = queueRows.slice(0, QUEUE_ROW_LIMIT).map((row, index) => ({ ...row, position: index + 1 }))
+  const queue = queueRows
+    .slice(0, QUEUE_ROW_LIMIT)
+    .map((row) => ({ ...row, position: requiredQueuePosition(positions, row.pr) }))
   const active = activeWatchRow(result, now, selected)
   return {
     target: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
