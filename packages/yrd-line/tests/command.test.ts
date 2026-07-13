@@ -326,6 +326,34 @@ describe("Line command adapters", () => {
     },
   )
 
+  it("retains failed configured-check output after Git candidate wrapping", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    await using app = await checkedLine(
+      process,
+      repo,
+      shellCommand("printf 'check stdout\\n'; printf 'check stderr\\n' >&2; exit 17"),
+    )
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("check did not fail")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      exitCode: 17,
+      baseSha,
+      candidateRef: "refs/yrd/candidates/R1/check/attempt-1",
+      artifacts: [{ name: "stdout" }, { name: "stderr" }],
+    })
+    expect(evidence.candidateSha).toHaveLength(40)
+    const artifacts = new Map(evidence.artifacts.map((artifact) => [artifact.name, artifact.path]))
+    expect(await readFile(artifacts.get("stdout")!, "utf8")).toBe("check stdout\n")
+    expect(await readFile(artifacts.get("stderr")!, "utf8")).toBe("check stderr\n")
+  })
+
   it("lands the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

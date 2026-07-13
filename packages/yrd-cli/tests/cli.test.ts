@@ -1366,6 +1366,44 @@ describe("runYrd", () => {
     }
   })
 
+  it("freezes recent rejected age at the terminal timestamp", () => {
+    const terminalAt = "2026-07-09T12:06:00.000Z"
+    const pr = {
+      id: "PR1",
+      branch: "task/failure",
+      base: "main",
+      baseSha: BASE_SHA,
+      status: "rejected",
+      revision: 1,
+      headSha: HEAD_SHA,
+      revisions: [],
+      submittedAt: "2026-07-09T12:00:00.000Z",
+      rejectedAt: terminalAt,
+    } as PR
+    const run = fakeRun({
+      id: "R1",
+      status: "failed",
+      pr: { id: pr.id, revision: pr.revision, headSha: pr.headSha, baseSha: pr.baseSha },
+      startedAt: "2026-07-09T12:05:00.000Z",
+      finishedAt: terminalAt,
+      steps: [],
+      error: { code: "check-failed", message: "check failed" },
+    })
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [pr],
+      running: [],
+      waiting: [],
+      finished: [run],
+    } as LineStatusResult
+
+    const first = humanLineProjection(result, Date.parse("2026-07-09T13:00:00.000Z")).recent[0]
+    const later = humanLineProjection(result, Date.parse("2026-07-10T13:00:00.000Z")).recent[0]
+    expect(first?.age).toBe("6m")
+    expect(later?.age).toBe(first?.age)
+  })
+
   it("projects failure evidence only from the causative failed step", () => {
     const temp = mkdtempSync(join(tmpdir(), "yrd-causal-evidence-"))
     const prior = join(temp, "prepare.log")
@@ -2295,14 +2333,14 @@ describe("runYrd", () => {
         80,
         [
           "GLYPH TIME PR REV RUN OUTCOME ART SUBJECT AGE TOTAL",
-          "[x] 11:01 PR23 r4 R4 integrated art:12 topic/R4 age=1h total=48m7s active=11m26…",
+          "[x] 11:01 PR23 r4 R4 integrated art:12 topic/R4 age=1h total=48:07 active=11:26…",
         ].join("\n"),
       ],
       [
         120,
         [
           "GLYPH TIME LEVEL [BASE] PR (REV,RUN) OUTCOME ART SUBJECT AGE TOTAL ACTIVE WAIT",
-          "[x] 11:01:16 INFO [main] PR23 (rev4, run4) integrated art:12 topic/R4 age=1h total=48m07s active=11m26s wait=36m42s",
+          "[x] 11:01:16 INFO [main] PR23 (rev4, run4) integrated art:12 topic/R4 age=1h total=48:07 active=11:26 wait=36:42",
         ].join("\n"),
       ],
     ])
@@ -2317,12 +2355,36 @@ describe("runYrd", () => {
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
       expect(physicalRows[0]).toContain(width === 80 ? "PR23 r4 R4 integrated" : "PR23 (rev4, run4) integrated")
-      expect(physicalRows[0]).toContain(width === 80 ? "48m7s" : "48m07s")
-      expect(physicalRows[0]).toContain(width === 80 ? "11m26" : "11m26s")
-      if (width === 120) expect(physicalRows[0]).toContain("36m42s")
+      expect(physicalRows[0]).toContain("48:07")
+      expect(physicalRows[0]).toContain("11:26")
+      if (width === 120) expect(physicalRows[0]).toContain("36:42")
       expect(physicalRows[0]).toContain("art:12")
       expect(human).not.toMatch(/\n\s*\n\s*\n/u)
       expect(human).not.toContain("stdout=/")
+    }
+
+    const crossDayRows = [
+      {
+        ...rows[0]!,
+        run: "R3",
+        pr: "PR22",
+        startedAt: "2026-07-11T23:59:58.000Z",
+        started: "2026-07-11T23:59:58.000Z",
+        locations: [],
+      },
+      rows[0]!,
+    ]
+    for (const width of [80, 120]) {
+      const human = await renderString(createElement(LineLogView, { rows: crossDayRows, columns: width }), {
+        width,
+        height: 8,
+        plain: true,
+      })
+      const physicalRows = human.split("\n").filter((line) => line.startsWith("[x]"))
+      expect(physicalRows).toHaveLength(2)
+      expect(physicalRows[0]).toContain("2026-07-12T11:01:16Z")
+      expect(physicalRows[1]).toContain("2026-07-11T23:59:58Z")
+      expect(Math.max(...physicalRows.map((line) => line.length))).toBeLessThanOrEqual(width)
     }
 
     const tty = await renderString(createElement(LineLogView, { rows, columns: 80 }), {

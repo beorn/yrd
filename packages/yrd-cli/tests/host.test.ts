@@ -10,6 +10,7 @@ import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
+import { GitCheckEvidenceSchema } from "@yrd/line"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
@@ -535,12 +536,29 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
 
   it("reports a failed line against origin when the operator HEAD is detached", async () => {
     const { repo, featureSha } = await repository()
-    await writeFile(join(repo, ".yrd.yml"), "steps:\n  check: exit 7\n")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      "steps:\n  check: printf 'real stdout\\n'; printf 'real stderr\\n' >&2; exit 7\n",
+    )
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
     await first.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
     const run = (await first.app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
     expect(run.status).toBe("failed")
+    const failedJob = run.steps.find((step) => step.job?.status === "failed")?.job
+    if (failedJob?.status !== "failed") throw new Error("missing failed configured check")
+    const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
+    expect(evidence).toMatchObject({
+      exitCode: 7,
+      baseSha,
+      artifacts: [{ name: "stdout" }, { name: "stderr" }],
+    })
+    const artifacts = new Map(evidence.artifacts.map((artifact) => [artifact.name, artifact.path]))
+    const stdoutArtifact = artifacts.get("stdout")
+    const stderrArtifact = artifacts.get("stderr")
+    if (stdoutArtifact === undefined || stderrArtifact === undefined) throw new Error("missing command artifacts")
+    expect(await readFile(stdoutArtifact, "utf8")).toBe("real stdout\n")
+    expect(await readFile(stderrArtifact, "utf8")).toBe("real stderr\n")
     const submittedAt = first.app.state().bays.prs.PR1?.submittedAt
     const finishedAt = run.finishedAt
     if (submittedAt === undefined || finishedAt === undefined) throw new Error("missing immutable history timestamps")
@@ -571,6 +589,43 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(stdout).toMatch(/PR1\s+task\/feature\s+rejected/u)
     expect(stdout).not.toContain(featureSha.slice(0, 12))
     expect(stderr).toBe("")
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+        columns: 120,
+        color: true,
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stdout).toContain(pathToFileURL(stdoutArtifact).href)
+
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "show", run.id], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+        columns: 120,
+        color: true,
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stdout).toContain(pathToFileURL(stdoutArtifact).href)
+    expect(stdout).toContain(pathToFileURL(stderrArtifact).href)
 
     const machineHistory = async (now: string) => {
       let json = ""
