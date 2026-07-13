@@ -46,6 +46,7 @@ import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmTaskSource, withTasks, type TaskSource } from "@yrd/task"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
+import { resolveBaySubmitArgv } from "./bay-selection.ts"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
@@ -661,9 +662,14 @@ export async function runYrdProcess(
   try {
     const activeHost = await createYrdHost({ cwd: io.cwd })
     host = activeHost
+    const selectedArgv = await resolveBaySubmitArgv(invocation, {
+      worktree: activeHost.repository.worktree,
+      process: activeHost.process,
+      env: cleanEnvironment(globalThis.process.env),
+    })
     return await runYrd(
       activeHost.app,
-      argv,
+      selectedArgv ?? argv,
       {
         ...io,
         concurrency: io.concurrency ?? activeHost.config.contest.concurrency,

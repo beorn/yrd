@@ -369,6 +369,59 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await reopened.close()
   })
 
+  it("submits the current linked-worktree branch when no bay selector is given", async () => {
+    const { repo, featureSha } = await repository()
+    const linked = join(repo, "..", "current")
+    let setupStderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "open", "stale"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: (text) => {
+          setupStderr += text
+        },
+      }),
+      setupStderr,
+    ).toBe(0)
+    await git(repo, "worktree", "add", "-q", linked, "task/feature")
+
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "submit", "--base", "main", "--json"], {
+        cwd: linked,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(JSON.parse(stdout)).toMatchObject({
+      prs: [{ branch: "task/feature", headSha: featureSha, base: "main", status: "submitted" }],
+    })
+
+    await git(linked, "switch", "-q", "--detach")
+    stdout = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "submit", "--base", "main", "--json"], {
+        cwd: linked,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(1)
+    expect(stdout).toBe("")
+    expect(stderr).toContain("no current Git branch; pass a bay or branch selector")
+  })
+
   it("reports a failed line against origin when the operator HEAD is detached", async () => {
     const { repo, featureSha } = await repository()
     await writeFile(join(repo, ".yrd.yml"), "steps:\n  check: exit 7\n")
