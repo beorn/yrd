@@ -775,10 +775,14 @@ function advanceQueue(
     const before = shapeThrough(record, state.jobs, index)
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
+    const failure = jobFailure(job)
     return {
       events:
-        !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
-          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: jobFailure(job).message })]
+        failure.code !== "queue-environment-refused" &&
+        !isIntegrated(before) &&
+        pr !== undefined &&
+        current?.status === "submitted"
+          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: failure.message })]
           : [],
     }
   }

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import type { JsonValue } from "@yrd/core"
+import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { parseJobLaunch, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
@@ -40,7 +40,21 @@ export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 export const GitCheckFailureEvidenceSchema = z.object({ artifacts: z.array(StepArtifactSchema) }).strict()
 export type GitCheckFailureEvidence = Readonly<z.infer<typeof GitCheckFailureEvidenceSchema>>
 
-export const GitCheckResultEvidenceSchema = z.union([GitCheckEvidenceSchema, GitCheckFailureEvidenceSchema])
+export const QueueAuthorityRefusalEvidenceSchema = z
+  .object({
+    kind: z.literal("queue-authority-refusal"),
+    base: z.string().min(1),
+    remote: z.literal("origin"),
+    attempts: z.number().int().min(1).max(3),
+  })
+  .strict()
+export type QueueAuthorityRefusalEvidence = Readonly<z.infer<typeof QueueAuthorityRefusalEvidenceSchema>>
+
+export const GitCheckResultEvidenceSchema = z.union([
+  GitCheckEvidenceSchema,
+  GitCheckFailureEvidenceSchema,
+  QueueAuthorityRefusalEvidenceSchema,
+])
 export type GitCheckResultEvidence = Readonly<z.infer<typeof GitCheckResultEvidenceSchema>>
 
 type ProcessDependency = Readonly<{ inject: Readonly<{ process: Pick<Process, "run"> }> }>
@@ -442,13 +456,6 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
       const target = await authoritativeQueueBase(git, repo, branch)
-      if (target.diverged) {
-        return failed(
-          "queue-target-diverged",
-          `queue '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
-            `${target.remote}/${branch} ${target.remoteSha?.slice(0, 12)}; align the local branch before integration`,
-        )
-      }
       const baseSha = target.sha
       return await withScratch(
         git,
@@ -504,6 +511,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
       )
     } catch (cause) {
+      const refusal = queueAuthorityRefusal(cause)
+      if (refusal !== undefined) {
+        return failed(failureFact(cause)?.code ?? "queue-environment-refused", cause.message, refusal)
+      }
       return failed("check-failed", messageOf(cause))
     }
   }
@@ -576,11 +587,42 @@ async function authoritativeQueueBase(git: Git, repo: string, branch: string): P
   if (remote.code !== 0 || remote.stdout === "") return inspectQueueBase(git, repo, branch)
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
-  const fetched = await git.run(repo, ["fetch", "--quiet", "origin", `+${source}:${target}`], true)
-  if (fetched.code !== 0) {
-    throw new Error(fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`)
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const fetched = await git.run(repo, ["fetch", "--quiet", "origin", `+${source}:${target}`], true)
+    if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
+    if (attempt === 3) {
+      const detail = fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`
+      throw createQueueAuthorityRefusal(branch, attempt, detail)
+    }
   }
-  return inspectQueueBase(git, repo, branch)
+  throw new Error("yrd: unreachable queue authority retry state")
+}
+
+type QueueAuthorityFailure = YrdFailure & Readonly<{ evidence: QueueAuthorityRefusalEvidence }>
+
+function createQueueAuthorityRefusal(base: string, attempts: number, detail: string): QueueAuthorityFailure {
+  const evidence = QueueAuthorityRefusalEvidenceSchema.parse({
+    kind: "queue-authority-refusal",
+    base,
+    remote: "origin",
+    attempts,
+  })
+  return Object.assign(
+    createFailure({
+      kind: "infrastructure",
+      code: "queue-environment-refused",
+      message: `yrd: could not refresh authoritative origin/${base} after ${attempts} attempts: ${detail}`,
+    }),
+    { evidence },
+  )
+}
+
+function queueAuthorityRefusal(cause: unknown): QueueAuthorityRefusalEvidence | undefined {
+  if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
+    return undefined
+  }
+  const parsed = QueueAuthorityRefusalEvidenceSchema.safeParse(cause.evidence)
+  return parsed.success ? parsed.data : undefined
 }
 
 export async function resolveGitQueueTarget(options: {
