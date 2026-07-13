@@ -627,23 +627,24 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
-  it("uses one canonical submitted-at and PR-id ordering for status, prime, and merge refusal", async () => {
+  it("keeps queue positions lossless beyond the rendered row budget", async () => {
     const app = await createApp()
-    await app.bays.submit({ branch: "topic/first", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "topic/second", headSha: "2".repeat(40), base: "main" })
-    expect(app.state().bays.prs.PR1?.submittedAt).toBe(app.state().bays.prs.PR2?.submittedAt)
+    for (const index of Array.from({ length: 6 }, (_, offset) => offset + 1)) {
+      await app.bays.submit({ branch: `topic/${index}`, headSha: String(index).repeat(40), base: "main" })
+    }
+    expect(app.state().bays.prs.PR1?.submittedAt).toBe(app.state().bays.prs.PR6?.submittedAt)
 
-    const status = outputIO({ currentBranch: () => "topic/second" })
+    const status = outputIO({ currentBranch: () => "topic/6" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
-    expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { id: "PR2" }, position: 2 })
+    expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { id: "PR6" }, position: 6 })
 
-    const prime = outputIO({ currentBranch: () => "topic/second" })
+    const prime = outputIO({ currentBranch: () => "topic/6" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR2", position: 2 } })
+    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR6", position: 6 } })
 
     const refusal = outputIO()
-    expect(await runYrd(app, yrd("pr", "merge", "PR2", "--json"), refusal.io)).toBe(1)
-    expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR2", position: 2 })
+    expect(await runYrd(app, yrd("pr", "merge", "PR6", "--json"), refusal.io)).toBe(1)
+    expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR6", position: 6 })
   })
 
   it("executes bare projections with their canonical JSON discriminators", async () => {
@@ -710,6 +711,30 @@ describe("runYrd", () => {
         }),
       ],
     })
+  })
+
+  it("keeps lossless log results and attempts inside base and PR scopes", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    await app.bays.submit({ branch: "topic/main-two", headSha: "2".repeat(40), base: "main" })
+    await app.queue.run({ prs: ["PR2"] }, { runner: "test", leaseMs: 60_000 })
+    await app.bays.submit({ branch: "topic/release", headSha: "3".repeat(40), base: "release/2.0" })
+    await app.queue.run({ prs: ["PR3"] }, { runner: "test", leaseMs: 60_000 })
+
+    const assertScope = async (args: readonly string[], expectedRuns: readonly string[]) => {
+      const output = outputIO()
+      expect(await runYrd(app, yrd("log", "--all", "--json", ...args), output.io), output.stderr()).toBe(0)
+      const parsed = JSON.parse(output.stdout()) as {
+        results: readonly QueueStatusResult[]
+        attempts: readonly { run: string }[]
+      }
+      expect(parsed.results.flatMap((result) => result.finished.map((run) => run.id))).toEqual(expectedRuns)
+      expect([...new Set(parsed.attempts.map((attempt) => attempt.run))]).toEqual(expectedRuns)
+    }
+
+    await assertScope(["--base", "main"], ["R1", "R2"])
+    await assertScope(["--pr", "PR1"], ["R1"])
   })
 
   it("preserves failed output and lost retry evidence in lossless log JSON", async () => {

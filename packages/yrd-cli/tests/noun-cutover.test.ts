@@ -22,6 +22,15 @@ function scannedFiles(path: string): string[] {
 }
 
 describe("noun cutover ratchet", () => {
+  it("documents public recovery and the command-event core model", () => {
+    const readme = readFileSync(join(root, "README.md"), "utf8")
+    expect(readme).toContain("`yrd queue recover` is the public repair path")
+    expect(readme).toContain("documents Commands, Events, projection, and the private Journal transaction contract")
+    expect(readme).toContain("| `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal")
+    expect(readme).not.toContain("Runner-lease recovery remains\nan embedded/API capability")
+    expect(readme).not.toContain("documents Operations, transaction\nframes")
+  })
+
   it("keeps retired nouns and routes out of product code and current documentation", () => {
     const queueNoun = ["li", "ne"].join("")
     const issueNoun = ["ta", "sk"].join("")
