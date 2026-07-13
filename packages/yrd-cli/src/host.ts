@@ -3,6 +3,7 @@ import { join, relative, resolve, sep } from "node:path"
 import { createScope, type Scope } from "@silvery/scope"
 import {
   createBayJobDefs,
+  createCorrelationSettlementJobDef,
   createGitPushReceiver,
   createGitWorkspace,
   baseIdentity,
@@ -10,6 +11,7 @@ import {
   runReceiverHookFromEnvironment,
   withBays,
   type BayWorkspace,
+  type CorrelationSettlement,
   type GitPushReceiver,
   type ReceiverReceipt,
   type ReceiverTarget,
@@ -75,6 +77,7 @@ export type DefaultYrdAppOptions = Readonly<{
   contestGit?: ContestGit
   scope?: Scope
   log?: ConditionalLogger
+  correlationSettlement?: CorrelationSettlement
 }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
@@ -407,10 +410,16 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     }))
   const bayJobs = createBayJobDefs(workspace)
+  const terminal =
+    options.correlationSettlement === undefined
+      ? undefined
+      : createCorrelationSettlementJobDef(options.correlationSettlement)
+  const terminalDefs = terminal === undefined ? {} : { [terminal.name]: terminal }
   const queue = withQueue({
     steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
+    terminal,
   })
   const contestAdapters = defaultContestAdapters(options)
   const contests = withContests({
@@ -419,12 +428,13 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
   })
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, terminalDefs] }),
     withIssues({
       sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
     }),
     withBays({
       jobs: bayJobs,
+      terminal,
       defaultBase: baseIdentity(options.config.base),
       resolveBase: async (base) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
@@ -434,13 +444,64 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       },
     }),
   )
-  return createYrd(contests(queue(base)), {
+  const app = await createYrd(contests(queue(base)), {
     inject: {
       journal: options.journal,
       ...(options.scope === undefined ? {} : { scope: options.scope }),
       ...(options.log === undefined ? {} : { log: options.log }),
     },
   })
+  try {
+    await catchUpCorrelationSettlements(app, terminal)
+    return app
+  } catch (error) {
+    await app.close()
+    throw error
+  }
+}
+
+async function catchUpCorrelationSettlements(
+  app: YrdCliApp,
+  terminal: ReturnType<typeof createCorrelationSettlementJobDef> | undefined,
+): Promise<void> {
+  if (terminal === undefined) return
+  const jobs = Object.values(app.state().jobs.byId).filter((job) => job.definition === terminal.name)
+  const interrupted = jobs.find((job) => job.status === "running" || job.status === "waiting")
+  if (interrupted !== undefined) {
+    raiseFailure(
+      "infrastructure",
+      "correlation-settlement-incomplete",
+      `yrd: terminal correlation settlement '${interrupted.id}' is ${interrupted.status}; ` +
+        "run 'yrd queue recover' before continuing",
+    )
+  }
+  const pending: string[] = []
+  for (const job of jobs) {
+    if (job.status === "failed" || job.status === "lost") {
+      await app.jobs.retry(job.id)
+      pending.push(job.id)
+    } else if (job.status === "requested") {
+      pending.push(job.id)
+    }
+  }
+  const settled = await app.jobs.runMany(pending, { runner: "yrd-host", leaseMs: 60_000 })
+  const failed = settled.find((job) => job.status !== "passed")
+  if (failed !== undefined) {
+    const detail =
+      failed.status === "failed"
+        ? `${failed.error.code}: ${failed.error.message}`
+        : failed.status === "lost"
+          ? failed.lostReason
+          : failed.status === "waiting"
+            ? (failed.detail ?? "settlement is waiting")
+            : `settlement is ${failed.status}`
+    raiseFailure(
+      "infrastructure",
+      "correlation-settlement-failed",
+      `yrd: terminal correlation settlement '${failed.id}' is ${failed.status} (${detail}); ` +
+        "fix the reported settlement error and rerun the same Yrd command",
+    )
+  }
 }
 
 export type YrdHost = Readonly<{
@@ -539,7 +600,13 @@ function bindProcessShutdown(shutdown: () => Promise<void>): () => void {
   return remove
 }
 
-export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
+export type YrdHostOptions = Readonly<{
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  correlationSettlement?: CorrelationSettlement
+}>
+
+export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   const scope = createScope("yrd-host")
   const log = createLogger("yrd")
   const process = createProcess({ cwd: options.cwd, env: options.env, inject: { scope, log } })
@@ -562,6 +629,7 @@ export async function createYrdHost(options: { cwd?: string; env?: NodeJS.Proces
       config: loaded.config,
       scope,
       log,
+      ...(options.correlationSettlement === undefined ? {} : { correlationSettlement: options.correlationSettlement }),
     })
     const runtimeApp = app
     const resolveTarget = receiverTarget(runtimeApp)
@@ -655,6 +723,7 @@ function defaultIO(): YrdCliIO {
 export async function runYrdProcess(
   argv: readonly string[] = process.argv,
   io: YrdCliIO = defaultIO(),
+  options: Pick<YrdHostOptions, "correlationSettlement"> = {},
 ): Promise<YrdCliExitCode> {
   const invocation = resolveInvocation(argv)
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
@@ -685,7 +754,7 @@ export async function runYrdProcess(
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
   let removeShutdownSignals: () => void = () => undefined
   try {
-    const activeHost = await createYrdHost({ cwd: io.cwd })
+    const activeHost = await createYrdHost({ cwd: io.cwd, ...options })
     host = activeHost
     removeShutdownSignals = bindProcessShutdown(closeHost)
     const selectedArgv = await resolveSubmitArgv(invocation, {

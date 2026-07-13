@@ -7,7 +7,13 @@ import { describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
-import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import {
+  createBayJobDefs,
+  createCorrelationSettlementJobDef,
+  withBays,
+  type BayWorkspace,
+  type CorrelationSettlement,
+} from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -19,15 +25,33 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace) {
+async function createApp(workspace: BayWorkspace, journal = createMemoryJournal(), id = ids()) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
   return createYrd(definition, {
     inject: {
-      journal: createMemoryJournal(),
+      journal,
       clock: () => "2026-01-01T00:00:00.000Z",
-      id: ids(),
+      id,
     },
+  })
+}
+
+async function createSettlingApp(
+  workspace: BayWorkspace,
+  settlement: CorrelationSettlement,
+  journal = createMemoryJournal(),
+  id = ids(),
+) {
+  const jobs = createBayJobDefs(workspace)
+  const terminal = createCorrelationSettlementJobDef(settlement)
+  const definition = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [jobs, { [terminal.name]: terminal }] }),
+    withBays({ jobs, terminal, defaultBase: "main" }),
+  )
+  return createYrd(definition, {
+    inject: { journal, clock: () => "2026-01-01T00:00:00.000Z", id },
   })
 }
 
@@ -70,6 +94,51 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("persists an opaque correlation and settles one withdrawal once across replay", async () => {
+    const { adapter } = createWorkspaceHarness()
+    const correlation = { namespace: "tribe-request", id: "pr 61's docs" }
+    const pending = new Set([correlation.id, "unrelated-request"])
+    const calls: Array<{ correlation: typeof correlation; outcome: string; eventId: string; disposition: string }> = []
+    const settlement: CorrelationSettlement = {
+      revision: "test-correlation-v1",
+      settle(input, context) {
+        const disposition = pending.delete(input.correlation.id) ? "settled" : "already-settled"
+        calls.push({ correlation: input.correlation, outcome: input.outcome, eventId: context.id, disposition })
+        return { status: "passed", output: { correlation: input.correlation, disposition } }
+      },
+    }
+    const journal = createMemoryJournal()
+    const app = await createSettlingApp(adapter, settlement, journal)
+
+    await app.bays.submit({ branch: "issue/custom-correlation", headSha: HEAD_1, correlation })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      correlation,
+      revisions: [{ revision: 1, correlation }],
+    })
+
+    const withdrawn = await app.bays.closePr({ pr: "PR1" })
+    expect(withdrawn.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/withdrawn",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, correlation },
+      }),
+    )
+    const settlementIds = app.jobs.requested(withdrawn)
+    expect(settlementIds).toHaveLength(1)
+    await app.jobs.run(settlementIds[0]!, runtime)
+    expect(calls).toEqual([expect.objectContaining({ correlation, outcome: "retired", disposition: "settled" })])
+    expect([...pending]).toEqual(["unrelated-request"])
+    await app.close()
+
+    await using replayed = await createSettlingApp(adapter, settlement, journal)
+    expect(replayed.bays.pr("PR1")).toMatchObject({ status: "withdrawn", correlation })
+    expect(Object.values(replayed.state().jobs.byId)).toEqual([
+      expect.objectContaining({ definition: "correlation.settle", status: "passed", attempt: 1 }),
+    ])
+    expect(calls).toHaveLength(1)
+    expect([...pending]).toEqual(["unrelated-request"])
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 

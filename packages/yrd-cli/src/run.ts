@@ -3,7 +3,16 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import {
+  CorrelationSchema,
+  baseIdentity,
+  resolveBay,
+  resolvePR,
+  type Bay,
+  type BaysState,
+  type Correlation,
+  type PR,
+} from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { QueueRun, QueueSummary } from "@yrd/queue"
@@ -306,7 +315,8 @@ async function closePrs(
   if (selectors.length === 0) usage("pr close requires at least one PR selector")
   const prs: PR[] = []
   for (const selector of selectors) {
-    await app.bays.closePr({ pr: selector })
+    const result = await app.bays.closePr({ pr: selector })
+    assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `PR '${selector}' close`)
     const pr = app.bays.pr(selector)
     if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after close`)
     prs.push(pr)
@@ -353,7 +363,7 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
 async function submitBays(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { base?: string; queue?: string; issue?: string; json?: boolean },
+  options: { base?: string; queue?: string; issue?: string; correlation?: string; json?: boolean },
   io: YrdCliIO,
   command: "bay.submit" | "pr.submit",
 ): Promise<YrdCliExitCode> {
@@ -364,10 +374,12 @@ async function submitBays(
       : selectedBays(state.bays, [], io.cwd ?? process.cwd(), "submit").map((bay) => bay.id)
   const prs: PR[] = []
   const base = oneOfAliases(options.base, options.queue, "base", "queue")
+  const correlation = parseCorrelation(options.correlation)
   for (const selector of inferred) {
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
+      ...(correlation === undefined ? {} : { correlation }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
@@ -375,6 +387,15 @@ async function submitBays(
   }
   await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
   return 0
+}
+
+function parseCorrelation(value: string | undefined): Correlation | undefined {
+  if (value === undefined) return undefined
+  const separator = value.indexOf(":")
+  if (separator <= 0 || separator === value.length - 1) {
+    usage("--correlation must be <namespace>:<id>")
+  }
+  return CorrelationSchema.parse({ namespace: value.slice(0, separator), id: value.slice(separator + 1) })
 }
 
 function requiredPr(app: YrdCliApp, selector: string): PR {
@@ -1530,6 +1551,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind a transport-neutral submission correlation")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
@@ -1665,6 +1687,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind a transport-neutral submission correlation")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   pr.command("view <selector>")

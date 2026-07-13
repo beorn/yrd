@@ -187,7 +187,8 @@ yrd prime                   agent briefing plus current delivery context
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay refresh [selector...] [--json]
-yrd bay submit [selector...] [--base <branch>] [--json]
+yrd bay submit [selector...] [--base <branch>]
+  [--correlation <namespace:id>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
 
@@ -210,6 +211,13 @@ or `github:beorn/yrd#42`. `--actor` records the worker or implementation
 identity. Yrd preserves these links but does not import tracker lifecycle or
 fleet policy. Actor attribution does not launch a process; an explicit composed
 runner, such as Contest's `ag` runner, mans the Bay.
+
+`--correlation <namespace:id>` binds an opaque, transport-neutral correlation
+to the submitted PR revision. Yrd carries it through PR, Queue Run, journal,
+and JSON projections. A composed host may inject a versioned settlement Job for
+terminal outcomes (`integrated`, `rejected`, or `retired`); Yrd itself does not
+interpret the namespace or import the external transport. The internal PR
+status remains `withdrawn`; `retired` is the public terminal outcome noun.
 
 `open --from` uses an existing branch; there is no `adopt` command. Direct
 branch submission does not provision a worktree:
