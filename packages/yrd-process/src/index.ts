@@ -105,11 +105,33 @@ export function createProcess(
   const env = definedEnv(options.env ?? process.env)
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? 16 * 1024 * 1024, "maxOutputBytes")
   const killGraceMs = positiveInteger(options.killGraceMs ?? 5_000, "killGraceMs")
+  const closingSignal = new AbortController()
+  const active = new Set<Promise<void>>()
+  let closing = false
+  let closePromise: Promise<void> | undefined
 
-  const close = () => scope.disposeAsync()
+  scope.use({
+    async [Symbol.asyncDispose]() {
+      closing = true
+      closingSignal.abort()
+      await Promise.allSettled(active)
+    },
+  })
+  const close = () => {
+    closing = true
+    return (closePromise ??= scope[Symbol.asyncDispose]())
+  }
   return {
     async run(request) {
-      if (scope.disposed) throw new Error("yrd: Process is closed")
+      if (closing || scope.disposed) throw new Error("yrd: Process is closed")
+      const settled = Promise.withResolvers<void>()
+      active.add(settled.promise)
+      using _activeRun = {
+        [Symbol.dispose]() {
+          active.delete(settled.promise)
+          settled.resolve()
+        },
+      }
       const argv = validateArgv(request.argv)
       if (request.timeoutMs !== undefined && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1)) {
         throw new RangeError("yrd: Process timeoutMs must be a positive integer")
@@ -121,8 +143,14 @@ export function createProcess(
         throw new RangeError("yrd: Process noProgressTimeoutMs must be a positive integer")
       }
 
-      const runScope = scope.child(argv[0])
-      const signal = request.signal === undefined ? runScope.signal : AbortSignal.any([runScope.signal, request.signal])
+      // Keep the run scope independent: parent Scope disposal is child-first,
+      // which would cancel this run's SIGKILL grace before close can drain it.
+      const runScope = createScope(argv[0])
+      const signal = AbortSignal.any([
+        runScope.signal,
+        closingSignal.signal,
+        ...(request.signal === undefined ? [] : [request.signal]),
+      ])
       const started = now()
       let timedOut = false
       let stalled = false
@@ -185,6 +213,7 @@ export function createProcess(
         }
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
+        if (signal.aborted) terminate()
         const renewProgressLease = (bytes = 0): void => {
           lastProgressAtMs = now()
           lastProgressBytes += bytes
@@ -247,7 +276,7 @@ export function createProcess(
         cancelTimeout?.()
         cancelProgressLease?.()
         cancelKill?.()
-        await runScope.disposeAsync()
+        await runScope[Symbol.asyncDispose]()
       }
     },
     close,

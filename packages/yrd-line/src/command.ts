@@ -119,6 +119,7 @@ function configuredCommand<Shape extends PRShape>(
       argv,
       cwd,
       env: commandEnvironment(options.env ?? globalThis.process.env, variables),
+      signal: context.signal,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
     })

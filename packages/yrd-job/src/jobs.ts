@@ -352,7 +352,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     const scope = options.scope.child(`job:${id}:${attempt}`)
     const outcome = await executeWithHeartbeat(
       scope,
-      () => installed.execute(requested.input, { id, attempt, executor: parsed.executor, signal: scope.signal }),
+      (signal) => installed.execute(requested.input, { id, attempt, executor: parsed.executor, signal }),
       heartbeatMs,
       async () => {
         const active = current(id)
@@ -570,29 +570,37 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
 
 async function executeWithHeartbeat(
   scope: JobScope,
-  execute: () => Promise<JobResult>,
+  execute: (signal: AbortSignal) => Promise<JobResult>,
   heartbeatMs: number,
   heartbeat: () => Promise<void>,
 ): Promise<{ result: JobResult; heartbeatError?: unknown }> {
   let heartbeatError: unknown
   let heartbeats = Promise.resolve()
-  scope.interval(() => {
+  const executionScope = scope.child("execute")
+  const cancelHeartbeat = scope.interval(() => {
     heartbeats = heartbeats.then(async () => {
       if (heartbeatError === undefined) {
         try {
           await heartbeat()
         } catch (error) {
           heartbeatError = error
-          await scope.disposeAsync()
+          await executionScope[Symbol.asyncDispose]()
         }
       }
       return undefined
     })
   }, heartbeatMs)
+  const execution = execute(executionScope.signal)
+  scope.use({
+    async [Symbol.asyncDispose]() {
+      cancelHeartbeat()
+      await execution.catch(() => undefined)
+    },
+  })
 
   let result: JobResult
   try {
-    result = await execute()
+    result = await execution
   } catch (error) {
     result = failed("executor-error", error)
   } finally {

@@ -419,6 +419,8 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "line", "integrate", "PR1", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
+    const cliStdout = new Response(cli.stdout).text()
+    const cliStderr = new Response(cli.stderr).text()
     let childPid: number | undefined
     let grandchildPid: number | undefined
     try {
@@ -448,9 +450,16 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
           steps: expect.arrayContaining([expect.objectContaining({ job: expect.objectContaining({ attempt: 1 }) })]),
         }),
       ])
+      expect(
+        recovered.flatMap((run) => run.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.attempt]))),
+      ).toEqual([1])
       expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
       expect(await Bun.file(finishedPath).exists()).toBe(false)
-      expect(existsSync((await readFile(scratchPath, "utf8")).trim())).toBe(false)
+      const scratch = (await readFile(scratchPath, "utf8")).trim()
+      expect(
+        existsSync(scratch),
+        [await cliStdout, await cliStderr, await git(repo, "worktree", "list", "--porcelain")].join("\n"),
+      ).toBe(false)
     } finally {
       if (childPid !== undefined && processExists(childPid)) {
         try {

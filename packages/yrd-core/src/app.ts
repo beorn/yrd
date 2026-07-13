@@ -380,8 +380,11 @@ export async function createYrd<State extends object, Commands extends CommandTr
     if (closePromise !== undefined) return closePromise
     closing = true
     closePromise = (async () => {
-      await Promise.allSettled(active)
-      await scope.disposeAsync()
+      try {
+        await scope[Symbol.asyncDispose]()
+      } finally {
+        await Promise.allSettled(active)
+      }
     })()
     return closePromise
   }
@@ -424,7 +427,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return mergeFields(core, features, "feature")
   } catch (error) {
     closing = true
-    await scope.disposeAsync()
+    await scope[Symbol.asyncDispose]()
     throw error
   }
 }

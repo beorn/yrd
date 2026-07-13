@@ -440,6 +440,36 @@ describe("Jobs", () => {
     await app.close()
   })
 
+  it("aborts and awaits active executor cleanup when the runtime closes", async () => {
+    const started = Promise.withResolvers<void>()
+    let cleaned = false
+    const app = await jobsApp(
+      delivery(async (_input, context) => {
+        started.resolve()
+        await new Promise<void>((resolve) => {
+          if (context.signal.aborted) resolve()
+          else context.signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        await Bun.sleep(10)
+        cleaned = true
+        return { status: "passed", output: { receipt: "too-late" } }
+      }),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "slow" })
+    const running = app.jobs.run(JOB_ID, { executor: "worker-1", leaseMs: 60_000 })
+    const settled = running.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    )
+    await started.promise
+
+    await app.close()
+
+    expect(cleaned).toBe(true)
+    await expect(settled).resolves.toEqual({ error: expect.objectContaining({ message: "yrd: runtime is closed" }) })
+  })
+
   it("aborts an executor after heartbeat observes lost ownership", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()

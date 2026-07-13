@@ -3,7 +3,7 @@
  * @level l1
  * @consumer @yrd/process
  */
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createProcess, shellCommand, type Spawn } from "@yrd/process"
 
 function bytes(value: string): ReadableStream<Uint8Array> {
@@ -59,28 +59,24 @@ describe("Process", () => {
       signalCode: "SIGKILL",
       kill(signal = "SIGTERM") {
         kills.push(signal as NodeJS.Signals)
-        if (signal === "SIGKILL") exited.resolve(137)
       },
     })
     const process = createProcess({ killGraceMs: 1, inject: { spawn } })
     const running = process.run({ argv: ["stubborn"] })
-    const hung = Symbol("hung")
-    let closed: typeof hung | "closed" | unknown
+    let closed = false
+    const close = process.close().then(() => {
+      closed = true
+    })
     try {
-      closed = await Promise.race([
-        process.close().then(
-          () => "closed" as const,
-          (error: unknown) => error,
-        ),
-        Bun.sleep(100).then(() => hung),
-      ])
+      await vi.waitFor(() => expect(kills).toEqual(["SIGTERM", "SIGKILL"]))
+      expect(closed).toBe(false)
     } finally {
       exited.resolve(137)
     }
 
-    expect(closed).toBe("closed")
+    await close
+    expect(closed).toBe(true)
     await expect(running).resolves.toMatchObject({ exitCode: 137 })
-    expect(kills).toEqual(["SIGTERM", "SIGKILL"])
   })
 
   it("bounds captured stdout and terminates a process that exceeds it", async () => {

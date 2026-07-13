@@ -508,9 +508,41 @@ async function closeRuntime(app: YrdCliApp | undefined, process: Process, scope:
     try {
       await process.close()
     } finally {
-      await scope.disposeAsync()
+      await scope[Symbol.asyncDispose]()
     }
   }
+}
+
+type ShutdownSignal = "SIGINT" | "SIGTERM"
+
+/** Own process signals at the run-to-exit CLI boundary, then restore native
+ * signal exit semantics only after the host has drained its resources. */
+function bindProcessShutdown(shutdown: () => Promise<void>): () => void {
+  let received: ShutdownSignal | undefined
+  const remove = (): void => {
+    globalThis.process.off("SIGINT", onSigint)
+    globalThis.process.off("SIGTERM", onSigterm)
+  }
+  const forward = (signal: ShutdownSignal): void => {
+    remove()
+    globalThis.process.kill(globalThis.process.pid, signal)
+  }
+  const onSignal = (signal: ShutdownSignal): void => {
+    if (received !== undefined) {
+      forward(signal)
+      return
+    }
+    received = signal
+    void shutdown().then(
+      () => forward(signal),
+      () => forward(signal),
+    )
+  }
+  const onSigint = () => onSignal("SIGINT")
+  const onSigterm = () => onSignal("SIGTERM")
+  globalThis.process.once("SIGINT", onSigint)
+  globalThis.process.once("SIGTERM", onSigterm)
+  return remove
 }
 
 export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
@@ -663,6 +695,9 @@ export async function runYrdProcess(
   }
 
   let host: YrdHost | undefined
+  let closePromise: Promise<void> | undefined
+  const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
+  const removeShutdownSignals = bindProcessShutdown(closeHost)
   try {
     const activeHost = await createYrdHost({ cwd: io.cwd })
     host = activeHost
@@ -689,6 +724,7 @@ export async function runYrdProcess(
     await diagnostic(io, invocation.name, error)
     return classifyFailure(error).exitCode
   } finally {
-    await host?.close()
+    removeShutdownSignals()
+    await closeHost()
   }
 }
