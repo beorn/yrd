@@ -155,7 +155,7 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
 }
 
 describe("Queue command adapters", () => {
-  it.fails("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
+  it("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
     type CheckedCommand = AddStepResult<PRShape, "check", z.infer<typeof CommandEvidenceSchema>>
     const encoder = new TextEncoder()
 
@@ -164,9 +164,11 @@ describe("Queue command adapters", () => {
       roots.push(cwd)
       const started = Promise.withResolvers<ProcessRequest>()
       const completed = Promise.withResolvers<ProcessResult>()
+      const aborted = Promise.withResolvers<void>()
       const mergeRuns: string[] = []
       const process: Pick<Process, "run"> = {
         run(request) {
+          request.signal?.addEventListener("abort", () => aborted.resolve(), { once: true })
           started.resolve(request)
           return completed.promise
         },
@@ -198,7 +200,7 @@ describe("Queue command adapters", () => {
       )
       const app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
       await app.bays.submit({ branch: "issue/progress", headSha: "a".repeat(40), base: "main" })
-      return { app, completed, mergeRuns, started, [Symbol.asyncDispose]: () => app.close() }
+      return { aborted, app, completed, mergeRuns, started, [Symbol.asyncDispose]: () => app.close() }
     }
 
     const result = (stdout: string): ProcessResult => ({
@@ -246,9 +248,14 @@ describe("Queue command adapters", () => {
       leaseMs: 80,
       heartbeatMs: 20,
     })
+    const ownershipAborted = await Promise.race([
+      stalled.aborted.promise.then(() => true),
+      Bun.sleep(250).then(() => false),
+    ])
     stalled.completed.resolve(result("too late\n"))
     await stalledRun
 
+    expect(ownershipAborted).toBe(true)
     expect(recovered).toEqual([
       expect.objectContaining({
         status: "failed",

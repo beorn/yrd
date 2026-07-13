@@ -352,13 +352,22 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     const scope = options.scope.child(`job:${id}:${attempt}`)
     const outcome = await executeWithHeartbeat(
       scope,
-      (signal) => installed.execute(requested.input, { id, attempt, runner: parsed.runner, signal }),
+      (progress) =>
+        installed.execute(requested.input, {
+          id,
+          attempt,
+          runner: parsed.runner,
+          signal: progress.signal,
+          observeProgress: progress.observe,
+          reportProgress: progress.report,
+        }),
       heartbeatMs,
-      async () => {
+      async (renew) => {
         const active = current(id)
         if (!Job.owns(active, attempt, parsed.runner, "running")) {
           throw new Error(`yrd: job '${id}' lost execution ownership`)
         }
+        if (!renew) return
         await commit({
           type: "heartbeat",
           id,
@@ -570,18 +579,23 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
 
 async function executeWithHeartbeat(
   scope: JobScope,
-  execute: (signal: AbortSignal) => Promise<JobResult>,
+  execute: (progress: Readonly<{ signal: AbortSignal; observe(): void; report(): void }>) => Promise<JobResult>,
   heartbeatMs: number,
-  heartbeat: () => Promise<void>,
+  heartbeat: (renew: boolean) => Promise<void>,
 ): Promise<{ result: JobResult; heartbeatError?: unknown }> {
   let heartbeatError: unknown
   let heartbeats = Promise.resolve()
+  let observesProgress = false
+  let progressRevision = 0
+  let renewedRevision = 0
   const executionScope = scope.child("execute")
   const cancelHeartbeat = scope.interval(() => {
+    const renew = !observesProgress || progressRevision !== renewedRevision
+    if (renew) renewedRevision = progressRevision
     heartbeats = heartbeats.then(async () => {
       if (heartbeatError === undefined) {
         try {
-          await heartbeat()
+          await heartbeat(renew)
         } catch (error) {
           heartbeatError = error
           await executionScope[Symbol.asyncDispose]()
@@ -590,7 +604,16 @@ async function executeWithHeartbeat(
       return undefined
     })
   }, heartbeatMs)
-  const execution = execute(executionScope.signal)
+  const execution = execute({
+    signal: executionScope.signal,
+    observe() {
+      observesProgress = true
+    },
+    report() {
+      observesProgress = true
+      progressRevision += 1
+    },
+  })
   scope.use({
     async [Symbol.asyncDispose]() {
       cancelHeartbeat()

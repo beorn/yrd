@@ -8,8 +8,8 @@ export type ProcessRequest = Readonly<{
   stdin?: string | Uint8Array
   onOutput?: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void
   timeoutMs?: number
-  /** Explicit output-silence lease. Only set this when the command contract
-   * guarantees observable output more frequently than the bound. */
+  /** Explicit inter-output silence lease. It starts with the first observed
+   * byte, so queue or scheduler startup latency is not child-stall evidence. */
   noProgressTimeoutMs?: number
   signal?: AbortSignal
 }>
@@ -215,7 +215,7 @@ export function createProcess(
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
         if (signal.aborted) terminate()
-        const renewProgressLease = (bytes = 0): void => {
+        const renewProgressLease = (bytes: number): void => {
           lastProgressAtMs = now()
           lastProgressBytes += bytes
           cancelProgressLease?.()
@@ -226,7 +226,6 @@ export function createProcess(
             }, request.noProgressTimeoutMs)
           }
         }
-        renewProgressLease()
         let outputError: unknown
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {

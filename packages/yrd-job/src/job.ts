@@ -49,6 +49,10 @@ export type JobContext = Readonly<{
   runner: string
   /** Aborts when this execution loses ownership or its runtime closes. */
   signal: AbortSignal
+  /** Select progress-gated lease renewal for an execution with observable work. */
+  observeProgress?: () => void
+  /** Record one observed unit of progress after progress-gated renewal is selected. */
+  reportProgress?: () => void
 }>
 
 export type JobHandler<Input extends JsonValue, Output extends JsonValue> = (

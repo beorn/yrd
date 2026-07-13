@@ -65,6 +65,13 @@ requested -> running -> passed
 definition, and settles only while the same runner still owns that attempt.
 Losing ownership aborts the handler's `JobContext.signal` instead of allowing a
 stale external operation to keep running.
+Handlers with observable work may call `context.observeProgress()` once and
+`context.reportProgress()` whenever that work advances. Heartbeat ticks still
+verify ownership, but renew the lease only after new progress; command-backed
+Queue steps wire each child stdout/stderr chunk through this path. A stalled
+child therefore expires and recovers as `lost`, while queue or scheduler delay
+before the child's first output is governed by the Job lease and command's
+wall-clock bound rather than misclassified as an inter-output stall.
 `recover()` marks an expired running lease as lost only if a concurrent
 heartbeat has not changed it. `retry()` returns a failed or lost Job to
 `requested`; the same Job id is retained.

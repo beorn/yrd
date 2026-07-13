@@ -187,7 +187,7 @@ describe("createProcess — explicit output-progress lease (21057)", () => {
     expect(runner.kills).toEqual([])
   })
 
-  test.fails("queue-delayed child startup is not an output-progress stall", async () => {
+  test("queue-delayed child startup is not an output-progress stall", async () => {
     const runner = fakeRunner(
       [
         { afterMs: 30, text: "one\n" },
