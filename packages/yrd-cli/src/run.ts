@@ -6,7 +6,7 @@ import { createElement } from "react"
 import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
-import type { LineRun } from "@yrd/line"
+import type { LineRun, LineSummary } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
@@ -116,6 +116,19 @@ function sortedBays(state: BaysState): Bay[] {
 
 function unique<Value extends { id: string }>(values: readonly Value[]): Value[] {
   return [...new Map(values.map((value) => [value.id, value])).values()]
+}
+
+function mergedLineRuns(
+  canonical: LineSummary,
+  aliases: readonly LineSummary[],
+): Pick<LineSummary, "running" | "waiting" | "finished"> {
+  const canonicalIds = new Set([...canonical.running, ...canonical.waiting, ...canonical.finished].map((run) => run.id))
+  const merge = (key: "running" | "waiting" | "finished"): LineRun[] =>
+    unique([
+      ...aliases.flatMap((summary) => summary[key]).filter((run) => !canonicalIds.has(run.id)),
+      ...canonical[key],
+    ])
+  return { running: merge("running"), waiting: merge("waiting"), finished: merge("finished") }
 }
 
 function selectedBays(state: BaysState, selectors: readonly string[], cwd: string, action: string): Bay[] {
@@ -417,14 +430,13 @@ async function lineStatusSnapshots(
   }
   const results: LineStatusResult[] = []
   for (const group of await lineTargetGroups(target.bases, io)) {
-    const status = [...group.aliases].map((base) => app.line.status(base))
-    const hold = status.find((entry) => entry.hold !== undefined)?.hold
+    const canonical = app.line.status(group.base)
+    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.line.status(base))
+    const runs = mergedLineRuns(canonical, aliases)
     results.push({
       base: group.base,
-      running: status.flatMap((summary) => summary.running),
-      waiting: status.flatMap((summary) => summary.waiting),
-      finished: status.flatMap((summary) => summary.finished),
-      ...(hold === undefined ? {} : { hold }),
+      ...runs,
+      ...(canonical.hold === undefined ? {} : { hold: canonical.hold }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs: Object.values(state.bays.prs).filter(
         (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
@@ -485,12 +497,12 @@ async function lineLog(
   const target = lineLogTargets(state, selectors, options.base, options.pr)
   const summaries: LineStatusResult[] = []
   for (const group of await lineTargetGroups(target.bases, io)) {
-    const records = [...group.aliases].map((base) => app.line.status(base))
+    const canonical = app.line.status(group.base)
+    const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.line.status(base))
+    const runs = mergedLineRuns(canonical, aliases)
     summaries.push({
       base: group.base,
-      running: records.flatMap((record) => record.running),
-      waiting: records.flatMap((record) => record.waiting),
-      finished: records.flatMap((record) => record.finished),
+      ...runs,
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
       prs: Object.values(state.bays.prs).filter(
         (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
@@ -500,6 +512,9 @@ async function lineLog(
   const prStatusById = new Map<string, PR["status"]>(
     summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.status])),
   )
+  const prSubjectById = new Map<string, string>(
+    summaries.flatMap((result) => result.prs.map((pr) => [pr.id, pr.name ?? pr.branch])),
+  )
   const attempts = await lineLogAttempts(app.events())
   const rows = lineLogRows(
     summaries,
@@ -508,6 +523,7 @@ async function lineLog(
     prStatusById,
     io.now?.() ?? Date.now(),
     attempts,
+    prSubjectById,
   )
   const coverage = await lineLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(

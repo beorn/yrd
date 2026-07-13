@@ -5,7 +5,7 @@ import type { BaysState, PR } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
 import type { LineRun, LineStep, LineSummary } from "@yrd/line"
-import { Box, Link, Table, Text, type TableColumn } from "silvery"
+import { Box, Link, Table, Text } from "silvery"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
 export type LineStatusResult = LineSummary & { headSha?: string; prs: PR[] }
@@ -14,6 +14,9 @@ export type LineLogRow = Readonly<{
   run: string
   base: string
   pr: string
+  branch: string
+  subject: string
+  glyph: string
   revision: string
   headSha: string
   baseSha: string
@@ -153,6 +156,39 @@ type Row = Readonly<{
   path?: string
 }>
 
+export type HumanFailureProjection = Readonly<{
+  code: string
+  summary: string
+  evidence: Readonly<{ text: string; href?: string }>
+  next?: string
+}>
+
+export type HumanPRProjection = Row &
+  Readonly<{
+    branch: string
+    subject: string
+    nativeStatus: PR["status"]
+    glyph: string
+    runId?: string
+    submittedAt?: string
+    touchedAt?: string
+    failure?: HumanFailureProjection
+  }>
+
+export type HumanLineProjection = Readonly<{
+  line: string
+  open: number
+  activeCount: number
+  integrated: number
+  rejected: number
+  hold?: LineSummary["hold"]
+  active?: WatchActiveRow
+  oldestOpen: string
+  queue: readonly (HumanPRProjection & Readonly<{ position: number }>)[]
+  queueOverflow: number
+  recent: readonly HumanPRProjection[]
+}>
+
 type LineShowRow = Readonly<{
   step: string
   revision: string
@@ -261,6 +297,12 @@ function singleLine(value: string): string {
   return normalized === "" ? "-" : normalized
 }
 
+function boundedLine(value: string, limit = 120): string {
+  const normalized = singleLine(value)
+  if (normalized.length <= limit) return normalized
+  return `${normalized.slice(0, Math.max(1, limit - 1)).trimEnd()}…`
+}
+
 function toIso(timestamp: string | undefined): string {
   if (timestamp === undefined) return "-"
   const when = new Date(timestamp)
@@ -292,12 +334,22 @@ function preciseDuration(milliseconds: number, compact = false): string {
   return `${remainder}s`
 }
 
-function compactTimestamp(timestamp: string, compact: boolean): string {
+function relativeAge(milliseconds: number): string {
+  if (milliseconds >= 3_600_000) return `${Math.round(milliseconds / 3_600_000)}h`
+  return preciseDuration(milliseconds, true)
+}
+
+function lineLogClock(timestamp: string, compact: boolean): string {
   if (timestamp === "-") return timestamp
   const iso = new Date(timestamp).toISOString()
-  return compact
-    ? `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}Z`
-    : `${iso.slice(0, 16)}Z`
+  return compact ? iso.slice(11, 16) : iso.slice(11, 19)
+}
+
+function lineLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
+  if (["integrated", "submitted"].includes(outcome)) return "INFO"
+  if (["rejected", "paused", "resumed"].includes(outcome)) return "WARN"
+  if (["failed", "lost"].includes(outcome)) return "ERROR"
+  return "DEBUG"
 }
 
 function runDurations(
@@ -632,13 +684,214 @@ function LineLogLocationLinks({ entries, compact }: { entries: readonly LineLogL
   )
 }
 
+const QUEUE_ROW_LIMIT = 5
+const RECENT_ROW_LIMIT = 3
+const RETRYABLE_FAILURE_CODES = new Set([
+  "check-stalled",
+  "infrastructure-failure",
+  "job-lost",
+  "lease-expired",
+  "merge-stalled",
+  "process-stalled",
+  "runner-interrupted",
+  "runner-lost",
+])
+
+function statusGlyph(status: string): string {
+  if (["checking", "running", "waiting"].includes(status)) return "[/]"
+  if (["integrated", "passed"].includes(status)) return "[x]"
+  if (["rejected", "failed", "lost"].includes(status)) return "[!]"
+  if (["withdrawn", "retired"].includes(status)) return "[-]"
+  return "[ ]"
+}
+
+function failureFact(
+  run: LineRun | undefined,
+  step: LineStep | undefined,
+): { code: string; message: string } | undefined {
+  const job = step?.job
+  if (job?.status === "failed") return { code: job.error.code, message: job.error.message }
+  if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
+  return run?.error
+}
+
+function causalSummary(message: string): string {
+  const lines = message
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !/^at\s+/u.test(line))
+  const candidate = lines.find((line) => !/^hint:/iu.test(line)) ?? lines[0] ?? "failed"
+  const first = candidate.replace(/^hint:\s*/iu, "")
+  const [rawCause, hint] = first.split(/\s+hint:\s*/iu, 2)
+  const cause = rawCause ?? first
+  const usefulHint = hint === undefined || /^(?:please|this can|[-])/iu.test(hint) ? undefined : hint
+  return boundedLine(`${cause.replace(/[:\s]+$/u, "")}${usefulHint === undefined ? "" : `: ${usefulHint}`}`, 104)
+}
+
+function failureEvidence(run: LineRun): HumanFailureProjection["evidence"] {
+  const location = runLocations(run)[0]?.location
+  if (location === undefined) return { text: `yrd line show ${run.id}` }
+  return "path" in location
+    ? { text: location.path, href: pathToFileURL(location.path).href }
+    : { text: location.url, href: location.url }
+}
+
+function correctiveAction(pr: PR, run: LineRun, result: LineStatusResult, code: string): string | undefined {
+  if (pr.status !== "rejected" || run.status !== "failed") return undefined
+  if (latestRun(pr, result)?.id !== run.id) return undefined
+  const snapshot = run.prs.find((candidate) => candidate.id === pr.id)
+  if (snapshot === undefined || snapshot.revision !== pr.revision || snapshot.headSha !== pr.headSha) return undefined
+  if (result.headSha !== undefined && pr.baseSha !== undefined && result.headSha !== pr.baseSha) {
+    return `next: yrd bay submit ${pr.branch} --base ${result.base}`
+  }
+  if (RETRYABLE_FAILURE_CODES.has(code)) return `next: yrd line integrate ${pr.id} --retry`
+  return `next: fix ${pr.branch}; yrd bay submit ${pr.branch} --base ${result.base}`
+}
+
+function projectPR(
+  state: BaysState | undefined,
+  result: LineStatusResult,
+  pr: PR,
+  now: number,
+  runOverride?: LineRun,
+): HumanPRProjection {
+  const run = runOverride ?? latestRun(pr, result)
+  const step = relevantStep(run)
+  const job = step?.job
+  const path = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
+  const revision = pr.revisions?.at(-1)
+  const touchedAt = latest(
+    ...(runOverride === undefined
+      ? [revision?.pushedAt, pr.submittedAt, pr.rejectedAt, pr.integratedAt, pr.withdrawnAt]
+      : []),
+    run?.startedAt,
+    run?.finishedAt,
+    ...(run?.steps ?? []).flatMap((item) => {
+      const itemJob = item.job
+      return itemJob === undefined
+        ? []
+        : [
+            itemJob.requestedAt,
+            itemJob.changedAt,
+            "startedAt" in itemJob ? itemJob.startedAt : undefined,
+            "finishedAt" in itemJob ? itemJob.finishedAt : undefined,
+          ]
+    }),
+  )
+  const runDuration =
+    run === undefined
+      ? "-"
+      : formatDuration((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt))
+  const artifacts = stepArtifacts(step)
+  const artifact = artifactHref(artifacts[0])
+  const stateLabel = lineState(pr, run)
+  const fact = failureFact(run, step)
+  const next = fact === undefined || run === undefined ? undefined : correctiveAction(pr, run, result, fact.code)
+  const failure =
+    fact === undefined || run === undefined
+      ? undefined
+      : {
+          code: fact.code,
+          summary: `${fact.code}: ${causalSummary(fact.message)}`,
+          evidence: failureEvidence(run),
+          ...(next === undefined ? {} : { next }),
+        }
+  return {
+    pr: pr.id,
+    ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
+    branch: pr.branch,
+    subject: boundedLine(pr.name ?? pr.branch, 80),
+    nativeStatus: pr.status,
+    state: stateLabel,
+    glyph: statusGlyph(stateLabel),
+    ...(run === undefined ? {} : { runId: run.id }),
+    ...(pr.submittedAt === undefined ? {} : { submittedAt: pr.submittedAt }),
+    target: pr.base,
+    age: age(pr.submittedAt ?? revision?.pushedAt, now),
+    touched: age(touchedAt, now),
+    ...(touchedAt === undefined ? {} : { touchedAt }),
+    run: runDuration,
+    step: step?.name ?? "-",
+    result:
+      failure?.summary ??
+      (job !== undefined && "detail" in job && typeof job.detail === "string" ? boundedLine(job.detail) : undefined) ??
+      (step === undefined ? "-" : jobStatus(step)),
+    ...(job !== undefined && "url" in job && job.url !== undefined ? { log: job.url } : {}),
+    artifactCount: artifacts.length,
+    ...(artifact === undefined ? {} : { artifact }),
+    ...(failure === undefined ? {} : { failure }),
+  }
+}
+
+function projectedPRRows(state: BaysState | undefined, result: LineStatusResult, now: number): HumanPRProjection[] {
+  return result.prs.map((pr) => projectPR(state, result, pr, now))
+}
+
+function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): number {
+  const order = (right.touchedAt ?? "").localeCompare(left.touchedAt ?? "")
+  return order === 0 ? left.pr.localeCompare(right.pr, undefined, { numeric: true }) : order
+}
+
+export function humanLineProjection(
+  result: LineStatusResult,
+  now: number,
+  options: Readonly<{ selected?: ReadonlySet<string>; state?: BaysState }> = {},
+): HumanLineProjection {
+  const selected = options.selected ?? new Set<string>()
+  const rows = projectedPRRows(options.state, result, now)
+  const queueRows = rows
+    .filter((row) => row.nativeStatus === "submitted")
+    .toSorted((left, right) => {
+      if (left.submittedAt === right.submittedAt) {
+        return left.pr.localeCompare(right.pr, undefined, { numeric: true })
+      }
+      if (left.submittedAt === undefined) return 1
+      if (right.submittedAt === undefined) return -1
+      return left.submittedAt.localeCompare(right.submittedAt)
+    })
+  const historical = result.finished.flatMap((run) =>
+    run.prs.flatMap((member) => {
+      const pr = result.prs.find((candidate) => candidate.id === member.id)
+      if (pr === undefined) return []
+      if (selected.size === 0 && (pr.status !== "rejected" || run.status !== "failed")) return []
+      if (selected.size > 0 && (!selected.has(pr.id) || pr.status === "submitted")) return []
+      return [projectPR(options.state, result, pr, now, run)]
+    }),
+  )
+  const represented = new Set(historical.map((row) => row.pr))
+  const recentCandidates = [
+    ...historical,
+    ...rows.filter((row) => {
+      if (represented.has(row.pr)) return false
+      return selected.size === 0
+        ? row.nativeStatus === "rejected"
+        : selected.has(row.pr) && row.nativeStatus !== "submitted"
+    }),
+  ]
+  const queue = queueRows.slice(0, QUEUE_ROW_LIMIT).map((row, index) => ({ ...row, position: index + 1 }))
+  const active = activeWatchRow(result, now)
+  return {
+    line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
+    open: queueRows.length,
+    activeCount: queueRows.filter((row) => ["checking", "waiting"].includes(row.state)).length,
+    integrated: rows.filter((row) => row.nativeStatus === "integrated").length,
+    rejected: rows.filter((row) => row.nativeStatus === "rejected").length,
+    ...(result.hold === undefined ? {} : { hold: result.hold }),
+    ...(active === undefined ? {} : { active }),
+    oldestOpen: queueRows[0]?.age ?? "-",
+    queue,
+    queueOverflow: Math.max(0, queueRows.length - queue.length),
+    recent: recentCandidates.toSorted(byTouchedNewest).slice(0, RECENT_ROW_LIMIT),
+  }
+}
+
 export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Line idle.</Text>
   const data = runs.map((run) => ({
     run: run.id,
     prs: run.prs.map((pr) => pr.id).join(","),
     state: run.status,
-    steps: run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" "),
+    steps: boundedLine(run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")),
   }))
   return (
     <Table
@@ -677,112 +930,116 @@ export function lineStatusRows(
   selected: ReadonlySet<string>,
   now: number,
 ): Row[] {
-  return result.prs
-    .filter((pr) => selected.has(pr.id) || (pr.status !== "integrated" && pr.status !== "withdrawn"))
-    .map((pr) => {
-      const run = latestRun(pr, result)
-      const step = relevantStep(run)
-      const job = step?.job
-      const path = pr.bay === undefined ? undefined : state.byId[pr.bay]?.path
-      const revision = pr.revisions.at(-1)
-      const touched = latest(
-        revision?.pushedAt,
-        pr.submittedAt,
-        pr.rejectedAt,
-        pr.integratedAt,
-        pr.withdrawnAt,
-        run?.startedAt,
-        run?.finishedAt,
-        ...(run?.steps ?? []).flatMap((item) => {
-          const itemJob = item.job
-          return itemJob === undefined
-            ? []
-            : [
-                itemJob.requestedAt,
-                itemJob.changedAt,
-                "startedAt" in itemJob ? itemJob.startedAt : undefined,
-                "finishedAt" in itemJob ? itemJob.finishedAt : undefined,
-              ]
-        }),
-      )
-      const duration =
-        run === undefined
-          ? "-"
-          : formatDuration(
-              (run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt),
-            )
-      const artifacts = stepArtifacts(step)
-      const artifact = artifactHref(artifacts[0])
-      return {
-        pr: pr.id,
-        ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
-        state: lineState(pr, run),
-        target: pr.base,
-        age: age(pr.submittedAt ?? revision?.pushedAt, now),
-        touched: age(touched, now),
-        run: duration,
-        step: step?.name ?? "-",
-        result:
-          (job !== undefined && "error" in job ? job.error.message : undefined) ??
-          (job !== undefined && "lostReason" in job ? job.lostReason : undefined) ??
-          (job !== undefined && "detail" in job ? job.detail : undefined) ??
-          (step === undefined ? "-" : jobStatus(step)),
-        ...(job !== undefined && "url" in job && job.url !== undefined ? { log: job.url } : {}),
-        artifactCount: artifacts.length,
-        ...(artifact === undefined ? {} : { artifact }),
-      }
-    })
+  return projectedPRRows(state, result, now).filter(
+    (row) => selected.has(row.pr) || (row.nativeStatus !== "integrated" && row.nativeStatus !== "withdrawn"),
+  )
 }
 
-function detailColumns(): TableColumn<Row>[] {
-  return [
-    {
-      header: "PR",
-      key: "pr",
-      minWidth: 6,
-      render: (row) => (row.prHref === undefined ? row.pr : <CellLink href={row.prHref}>{row.pr}</CellLink>),
-    },
-    {
-      header: "STATE",
-      key: "state",
-      minWidth: 11,
-      render: (row) => <StatusValue value={row.state} href={row.log} />,
-    },
-    { header: "TARGET", key: "target" },
-    { header: "AGE", key: "age" },
-    { header: "TOUCHED", key: "touched", minWidth: 8 },
-    { header: "RUN", key: "run" },
-    { header: "STEP", key: "step" },
-    {
-      header: "RESULT",
-      key: "result",
-      grow: true,
-      render: (row) => (row.log === undefined ? row.result : <CellLink href={row.log}>{row.result}</CellLink>),
-    },
-    {
-      header: "LOG",
-      render: (row) => (row.log === undefined ? "-" : <CellLink href={row.log}>open</CellLink>),
-    },
-    {
-      header: "ART",
-      key: "artifactCount",
-      render: (row) =>
-        row.artifactCount === 0 ? (
-          "-"
-        ) : row.artifact === undefined ? (
-          String(row.artifactCount)
-        ) : (
-          <CellLink href={row.artifact}>{String(row.artifactCount)}</CellLink>
-        ),
-    },
-    {
-      header: "PATH",
-      key: "path",
-      grow: true,
-      render: (row) =>
-        row.path === undefined ? "-" : <CellLink href={pathToFileURL(row.path).href}>{row.path}</CellLink>,
-    },
-  ]
+function SummaryLine({ projection }: { projection: HumanLineProjection }) {
+  return (
+    <Box height={1}>
+      <Text wrap="truncate">
+        <Text bold>LINE</Text> {projection.line} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
+        {projection.activeCount} <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text>{" "}
+        {projection.rejected} <Text bold>DRAIN</Text> {projection.oldestOpen}
+      </Text>
+    </Box>
+  )
+}
+
+function ActiveLine({ active }: { active: WatchActiveRow }) {
+  return (
+    <Box height={1}>
+      <Text wrap="truncate">
+        <Text bold>ACTIVE</Text> {active.run} {active.pr} {active.subject} {active.glyph} {active.step} {active.elapsed}
+      </Text>
+    </Box>
+  )
+}
+
+function ProjectedPRLine({ row, position }: { row: HumanPRProjection; position?: number }) {
+  return (
+    <Box height={1}>
+      <Text wrap="truncate">
+        {position === undefined ? "" : `${position}. `}
+        {row.glyph} {row.prHref === undefined ? row.pr : <CellLink href={row.prHref}>{row.pr}</CellLink>} {row.subject}{" "}
+        <StatusValue value={row.state} href={row.log} /> age={row.age}
+      </Text>
+    </Box>
+  )
+}
+
+function FailureLines({ failure }: { failure: HumanFailureProjection }) {
+  return (
+    <Box flexDirection="column">
+      <Box height={1}>
+        <Text wrap="truncate"> {failure.summary}</Text>
+      </Box>
+      <Box height={1}>
+        <Text wrap="truncate">
+          {"    evidence: "}
+          {failure.evidence.href === undefined ? (
+            failure.evidence.text
+          ) : (
+            <CellLink href={failure.evidence.href}>{failure.evidence.text}</CellLink>
+          )}
+        </Text>
+      </Box>
+      {failure.next === undefined ? null : (
+        <Box height={1}>
+          <Text wrap="truncate"> {failure.next}</Text>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+function ProjectionRows({
+  projection,
+  queueHeading = "QUEUE",
+}: {
+  projection: HumanLineProjection
+  queueHeading?: string
+}) {
+  return (
+    <Box flexDirection="column">
+      {projection.queue.length === 0 ? null : (
+        <>
+          <Box height={1}>
+            <Text bold>{queueHeading}</Text>
+          </Box>
+          {projection.queue.map((row) => (
+            <ProjectedPRLine key={row.pr} row={row} position={row.position} />
+          ))}
+          {projection.queueOverflow === 0 ? null : (
+            <Box height={1}>
+              <Text color="$fg-muted">... {projection.queueOverflow} more runnable</Text>
+            </Box>
+          )}
+        </>
+      )}
+      {projection.recent.length === 0 ? null : (
+        <>
+          <Box height={1}>
+            <Text bold>
+              {projection.recent.some((row) => row.nativeStatus === "rejected") ? "Recent failures" : "Recent results"}
+            </Text>
+          </Box>
+          {projection.recent.map((row, index) => (
+            <Box key={`${row.pr}:${row.runId ?? index}`} flexDirection="column">
+              <ProjectedPRLine row={row} />
+              {row.failure === undefined ? null : <FailureLines failure={row.failure} />}
+            </Box>
+          ))}
+        </>
+      )}
+      {projection.queue.length === 0 && projection.recent.length === 0 ? (
+        <Box height={1}>
+          <Text color="$fg-muted">No runnable or recent rejected PRs.</Text>
+        </Box>
+      ) : null}
+    </Box>
+  )
 }
 
 export function LineStatusView({
@@ -799,50 +1056,23 @@ export function LineStatusView({
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const all = Object.values(state.prs).filter((pr) => pr.base === result.base)
-        const rows = lineStatusRows(state, result, selected, now)
-        const summary = [
-          {
-            line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
-            open: all.filter((pr) => !["integrated", "withdrawn"].includes(pr.status)).length,
-            active: all.filter((pr) => ["checking", "waiting"].includes(lineState(pr, latestRun(pr, result)))).length,
-            integrated: all.filter((pr) => pr.status === "integrated").length,
-            rejected: all.filter((pr) => pr.status === "rejected").length,
-          },
-        ]
-        const allowed = result.hold?.allowedPRs.length === 0 ? "none" : result.hold?.allowedPRs.join(", ")
+        const projection = humanLineProjection(result, now, { selected, state })
+        const allowed = projection.hold?.allowedPRs.length === 0 ? "none" : projection.hold?.allowedPRs.join(", ")
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-            {result.hold !== undefined && (
-              <Box marginBottom={1}>
-                <Text>
+            <SummaryLine projection={projection} />
+            {projection.hold !== undefined && (
+              <Box height={1}>
+                <Text wrap="truncate">
                   <Text color="$fg-warning" bold>
                     HOLD
                   </Text>
-                  {`: ${result.hold.reason} (allowed: ${allowed})`}
+                  {`: ${projection.hold.reason} (allowed: ${allowed})`}
                 </Text>
               </Box>
             )}
-            <Table
-              data={summary}
-              padding={1}
-              columns={[
-                { header: "LINE", key: "line", grow: true, minWidth: 6, maxWidth: 24 },
-                { header: "OPEN", key: "open", align: "right" },
-                { header: "ACTIVE", key: "active", align: "right" },
-                { header: "INTEGRATED", key: "integrated", align: "right" },
-                { header: "REJECTED", key: "rejected", align: "right" },
-              ]}
-            />
-            {rows.length === 0 ? (
-              <Box marginTop={1}>
-                <Text color="$fg-muted">No matching PRs.</Text>
-              </Box>
-            ) : (
-              <Box marginTop={1}>
-                <Table data={rows} columns={detailColumns()} padding={1} />
-              </Box>
-            )}
+            {projection.active === undefined ? null : <ActiveLine active={projection.active} />}
+            <ProjectionRows projection={projection} />
           </Box>
         )
       })}
@@ -853,6 +1083,8 @@ export function LineStatusView({
 export type WatchQueueRow = Readonly<{
   pos: number
   pr: string
+  subject: string
+  glyph: string
   state: string
   step: string
   age: string
@@ -862,56 +1094,18 @@ export type WatchQueueRow = Readonly<{
 }>
 
 export function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] {
-  return result.prs
-    .filter((pr) => !["integrated", "withdrawn"].includes(pr.status))
-    .toSorted((left, right) => {
-      if (left.submittedAt === right.submittedAt) return left.id.localeCompare(right.id, undefined, { numeric: true })
-      if (left.submittedAt === undefined) return 1
-      if (right.submittedAt === undefined) return -1
-      return left.submittedAt.localeCompare(right.submittedAt)
-    })
-    .map((pr, index) => {
-      const run = latestRun(pr, result)
-      const step = relevantStep(run)
-      const job = step?.job
-      const touched = latest(
-        pr.submittedAt,
-        pr.rejectedAt,
-        pr.withdrawnAt,
-        run?.startedAt,
-        run?.finishedAt,
-        ...(run?.steps ?? []).flatMap((item) => {
-          const itemJob = item.job
-          return itemJob === undefined
-            ? []
-            : [
-                itemJob.requestedAt,
-                itemJob.changedAt,
-                "startedAt" in itemJob ? itemJob.startedAt : undefined,
-                "finishedAt" in itemJob ? itemJob.finishedAt : undefined,
-              ]
-        }),
-      )
-      return {
-        pos: index + 1,
-        pr: pr.id,
-        state: lineState(pr, run),
-        step: step?.name ?? "-",
-        age: age(pr.submittedAt, now),
-        touched: touched === undefined ? "-" : age(touched, now),
-        run:
-          run === undefined || run.startedAt === undefined
-            ? "-"
-            : formatDuration(
-                (run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt),
-              ),
-        result:
-          (job !== undefined && "error" in job ? job.error.message : undefined) ??
-          (job !== undefined && "lostReason" in job ? job.lostReason : undefined) ??
-          (job !== undefined && "detail" in job ? job.detail : undefined) ??
-          (step === undefined ? "-" : jobStatus(step)),
-      }
-    })
+  return humanLineProjection(result, now).queue.map((row) => ({
+    pos: row.position,
+    pr: row.pr,
+    subject: row.subject,
+    glyph: row.glyph,
+    state: row.state,
+    step: row.step,
+    age: row.age,
+    touched: row.touched,
+    run: row.run,
+    result: row.result,
+  }))
 }
 
 export type WatchActiveRow = Readonly<{
@@ -933,112 +1127,29 @@ export function activeWatchRow(result: LineStatusResult, now: number): WatchActi
   return {
     run: run.id,
     pr: member.id,
-    subject: pr?.name ?? member.id,
+    subject: boundedLine(pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
-    glyph: run.status === "waiting" ? "o" : ">",
+    glyph: statusGlyph(run.status),
     elapsed: age(run.startedAt, now),
   }
-}
-
-function watchFailureReason(run: LineRun): string {
-  if (run.error !== undefined) return run.error.message
-  const job = run.steps
-    .toReversed()
-    .map((step) => step.job)
-    .find((candidate) => candidate?.status === "failed" || candidate?.status === "lost")
-  if (job === undefined) return "failed"
-  // The find() predicate narrows to the failed and lost variants, which carry
-  // `error` and `lostReason` respectively — no other Job variant reaches here.
-  if ("error" in job) return job.error.message
-  return job.lostReason
-}
-
-function retryHint(run: LineRun): string {
-  const firstPr = run.prs.at(0)
-  const pr = firstPr?.id
-  return pr === undefined ? "retry: unavailable" : `retry: yrd line integrate ${pr} --retry`
 }
 
 export function LineWatchView({ results, now }: { results: readonly LineStatusResult[]; now: number }) {
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const all = result.prs.filter((pr) => pr.base === result.base)
-        const hold = result.hold
-        const rows = watchQueueRows(result, now)
-        const failed = [...result.finished]
-          .filter((run) => run.status === "failed")
-          .toSorted(byRunStarted)
-          .toReversed()
-          .slice(0, 3)
-        const active = activeWatchRow(result, now)
-        const holdState = hold === undefined ? "active" : `held: ${hold.reason}`
-        const oldestOpen = rows[0] === undefined ? "-" : rows[0].age
-        const summary = {
-          line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
-          open: all.filter((pr) => !["integrated", "withdrawn"].includes(pr.status)).length,
-          active: all.filter((pr) => ["checking", "waiting"].includes(lineState(pr, latestRun(pr, result)))).length,
-          integrated: all.filter((pr) => pr.status === "integrated").length,
-          rejected: all.filter((pr) => pr.status === "rejected").length,
-        }
+        const projection = humanLineProjection(result, now)
+        const holdState = projection.hold === undefined ? "active" : `held: ${projection.hold.reason}`
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-            <Text>
-              <Text bold>LINE</Text> {summary.line} <Text bold>OPEN</Text> {summary.open} <Text bold>ACTIVE</Text>{" "}
-              {summary.active} <Text bold>INTEGRATED</Text> {summary.integrated} <Text bold>REJECTED</Text>{" "}
-              {summary.rejected}
-            </Text>
-            <Box marginTop={1}>
-              <Text>
-                <Text bold>HOLD</Text> {holdState} <Text bold>DRAIN</Text> {oldestOpen}
+            <SummaryLine projection={projection} />
+            <Box height={1}>
+              <Text wrap="truncate">
+                <Text bold>HOLD</Text> {holdState} <Text bold>DRAIN</Text> {projection.oldestOpen}
               </Text>
             </Box>
-            {active !== undefined && (
-              <Box marginTop={1}>
-                <Text>
-                  <Text bold>ACTIVE</Text> {active.run} {active.pr} {active.subject} {active.glyph} {active.step}{" "}
-                  {active.elapsed}
-                </Text>
-              </Box>
-            )}
-            {rows.length === 0 ? (
-              <Box marginTop={1}>
-                <Text color="$fg-muted">No matching PRs.</Text>
-              </Box>
-            ) : (
-              <Box marginTop={1}>
-                <Table
-                  data={rows}
-                  columns={[
-                    { header: "POS", key: "pos", minWidth: 5, align: "right" },
-                    { header: "PR", key: "pr", minWidth: 6 },
-                    {
-                      header: "STATE",
-                      key: "state",
-                      minWidth: 10,
-                      render: (row) => <StatusValue value={row.state} />,
-                    },
-                    { header: "STEP", key: "step" },
-                    { header: "AGE", key: "age" },
-                    { header: "TOUCHED", key: "touched", minWidth: 8 },
-                    { header: "RUN", key: "run" },
-                    { header: "RESULT", key: "result", grow: true },
-                  ]}
-                  padding={1}
-                />
-              </Box>
-            )}
-            {failed.length > 0 && (
-              <Box marginTop={1} flexDirection="column">
-                <Text>Recent failures</Text>
-                {failed.map((run) => (
-                  <Text key={run.id}>
-                    <Text color="$fg-error">{run.id}</Text> {run.prs.map((pr) => pr.id).join(",")}{" "}
-                    {duration(run.startedAt, run.finishedAt)} {watchFailureReason(run)} {retryHint(run)}
-                  </Text>
-                ))}
-              </Box>
-            )}
+            {projection.active === undefined ? null : <ActiveLine active={projection.active} />}
+            <ProjectionRows projection={projection} queueHeading="QUEUE POS" />
           </Box>
         )
       })}
@@ -1053,6 +1164,7 @@ export function lineLogRows(
   prStatus?: ReadonlyMap<string, PR["status"]>,
   now = Date.now(),
   attempts: readonly LineLogAttempt[] = [],
+  prSubjects: ReadonlyMap<string, string> = new Map(),
 ): LineLogRow[] {
   const rows: LineLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
@@ -1109,6 +1221,9 @@ export function lineLogRows(
           run: run.id,
           base: run.base,
           pr: pr.id,
+          branch: pr.branch,
+          subject: boundedLine(prSubjects.get(pr.id) ?? pr.branch, 80),
+          glyph: statusGlyph(outcome),
           revision: String(pr.revision),
           headSha: pr.headSha,
           baseSha: pr.baseSha ?? "-",
@@ -1162,6 +1277,9 @@ export function lineLogRows(
         run: "-",
         base: exampleResult?.base ?? "-",
         pr: prFilter,
+        branch: exampleResult?.branch ?? "-",
+        subject: boundedLine(prSubjects.get(prFilter) ?? exampleResult?.branch ?? prFilter, 80),
+        glyph: statusGlyph("retired"),
         revision: String(exampleResult?.revision ?? 0),
         headSha,
         baseSha,
@@ -1334,36 +1452,45 @@ export function LineLogView({
   columns?: number
 }) {
   const compact = columns <= 80
+  const visibleRows = rows.toReversed().slice(0, 20)
+  void coverage
   return (
     <Box flexDirection="column">
-      {coverage !== undefined ? (
-        <Text color="$fg-muted">
-          Legacy queue coverage: <Link href={pathToFileURL(coverage.legacy.path).href}>{coverage.legacy.path}</Link>{" "}
-          (since {coverage.since}; {coverage.legacy.frames} frames)
-        </Text>
-      ) : null}
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching terminal log rows.</Text>
       ) : (
         <Box flexDirection="column">
-          <Text color="$fg-muted">
-            {compact
-              ? "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE WAIT ART"
-              : "RUN/PR@REV/OUTCOME AT(UTC) AGE TOTAL ACTIVE WAIT ARTIFACTS"}
-          </Text>
-          {rows.map((row) => {
-            const identity = `${row.run}/${row.pr}@${row.revision}/${row.outcome}`
-            const active = row.activeDurationMs === undefined ? "-" : preciseDuration(row.activeDurationMs, compact)
+          <Box height={1}>
+            <Text color="$fg-muted" wrap="truncate">
+              {compact
+                ? "GLYPH TIME PR REV RUN OUTCOME ART SUBJECT AGE TOTAL"
+                : "GLYPH TIME LEVEL [BASE] PR (REV,RUN) OUTCOME ART SUBJECT AGE TOTAL ACTIVE WAIT"}
+            </Text>
+          </Box>
+          {visibleRows.map((row) => {
+            const identity = compact
+              ? `${row.glyph} ${lineLogClock(row.startedAt, true)} ${row.pr} r${row.revision} ${row.run} ${row.outcome}`
+              : `${row.glyph} ${lineLogClock(row.startedAt, false)} ${lineLogLevel(row.outcome)} [${row.base}] ${row.pr} (rev${row.revision}, run${row.run.replace(/^R/u, "")}) ${row.outcome}`
+            const hasWait = Math.round((row.waitDurationMs ?? 0) / 1_000) > 0
             return (
               <Box key={`${row.run}:${row.pr}:${row.revision}`} height={1}>
                 <Text wrap="truncate">
-                  {identity} {compact ? null : `head:${row.headSha.slice(0, 12)} `}
-                  {compactTimestamp(row.startedAt, compact)}{" "}
-                  {row.ageMs === undefined ? "-" : preciseDuration(row.ageMs, compact)}{" "}
-                  {row.totalDurationMs === undefined ? "-" : preciseDuration(row.totalDurationMs, compact)}{" "}
-                  {active === "" ? "-" : active}{" "}
-                  {row.waitDurationMs === undefined ? "-" : preciseDuration(row.waitDurationMs, compact)}{" "}
-                  <LineLogLocationLinks entries={row.locations} compact={compact} />
+                  {identity}
+                  {row.locations.length === 0 ? null : (
+                    <>
+                      {" "}
+                      <LineLogLocationLinks entries={row.locations} compact />
+                    </>
+                  )}{" "}
+                  {row.subject}
+                  {row.ageMs === undefined ? null : ` age=${relativeAge(row.ageMs)}`}
+                  {row.totalDurationMs === undefined ? null : ` total=${preciseDuration(row.totalDurationMs, compact)}`}
+                  {!hasWait || row.activeDurationMs === undefined
+                    ? null
+                    : ` active=${preciseDuration(row.activeDurationMs, compact)}`}
+                  {!hasWait || row.waitDurationMs === undefined
+                    ? null
+                    : ` wait=${preciseDuration(row.waitDurationMs, compact)}`}
                 </Text>
               </Box>
             )

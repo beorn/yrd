@@ -38,6 +38,7 @@ import {
   LineLogView,
   LineWatchView,
   activeWatchRow,
+  humanLineProjection,
   lineLogAttempts,
   lineLogRows,
   lineShowData,
@@ -902,14 +903,14 @@ describe("runYrd", () => {
     const human = outputIO({
       now: () => Date.parse("2026-07-09T12:01:00.000Z"),
       color: true,
-      columns: 64,
+      columns: 80,
       resolveRevision: async () => MERGED_SHA,
     })
     expect(await runYrd(app, yrd("line", "status", "PR1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("PR1")
+    expect(human.stdout()).toContain("[x]")
+    expect(human.stdout()).toContain("one")
     expect(human.stdout()).toContain("integrated")
-    expect(human.stdout()).toContain("TOUCHED")
-    expect(human.stdout()).toContain("PATH")
     expect(human.stdout()).toContain(MERGED_SHA.slice(0, 12))
     expect(human.stdout()).toContain("file:///repo/.bays/B1")
 
@@ -1155,7 +1156,7 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([1_000])
   })
 
-  it("keeps the line summary readable at 40 columns and bounded at 120 and 240 columns", async () => {
+  it("renders the literal empty line summary within 80- and 120-column budgets", async () => {
     const app = await createApp()
 
     const renderStatus = async (columns: number): Promise<string> => {
@@ -1167,28 +1168,20 @@ describe("runYrd", () => {
       return status.stdout()
     }
 
-    const narrow = await renderStatus(40)
-    const narrowLines = narrow.split("\n")
-    const narrowHeader = narrowLines.find((line) => line.startsWith("LINE"))
-    expect(narrowHeader).toBe("LINE    OPEN ACTIVE INTEGRATED  REJECTED")
-    expect(Math.max(...narrowLines.map((line) => line.length))).toBeLessThanOrEqual(40)
-
-    const standardLines = (await renderStatus(120)).split("\n")
-    expect(Math.max(...standardLines.map((line) => line.length))).toBeLessThanOrEqual(120)
-
-    const wideLines = (await renderStatus(240)).split("\n")
-    const wideHeader = wideLines.find((line) => line.startsWith("LINE"))
-    const wideSummary = wideLines.find((line) => line.startsWith("main@"))
-    expect(wideHeader).toBeDefined()
-    expect(wideSummary).toBeDefined()
-    expect(Math.max(...wideLines.map((line) => line.length))).toBeLessThanOrEqual(120)
-    expect(wideHeader).toBe("LINE                    OPEN ACTIVE INTEGRATED  REJECTED")
-    expect(wideSummary).toBe("main@333333333333          0      0          0         0")
-    expect(wideHeader?.trimEnd().length).toBeLessThan(64)
-    expect(wideSummary?.trimEnd().length).toBe(wideHeader?.trimEnd().length)
+    const expected = [
+      "LINE main@333333333333 OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 0 DRAIN -",
+      "No runnable or recent rejected PRs.",
+    ].join("\n")
+    for (const columns of [80, 120]) {
+      const rendered = await renderStatus(columns)
+      const physical = rendered.trimEnd().split("\n")
+      expect(rendered.trimEnd()).toBe(expected)
+      expect(physical).toHaveLength(2)
+      expect(Math.max(...physical.map((line) => line.length))).toBeLessThanOrEqual(columns)
+    }
   })
 
-  it.fails("projects runnable work and bounded rejection evidence without stale holds or unsafe retry teaching", async () => {
+  it("projects runnable work and bounded rejection evidence without stale holds or unsafe retry teaching", async () => {
     const temp = mkdtempSync("/tmp/yrd-output-polish-")
     const artifact = join(temp, "failure.log")
     const failure = [
@@ -1215,7 +1208,7 @@ describe("runYrd", () => {
     const now = () => Date.parse("2026-07-09T12:01:00.000Z")
     const rejectedOnly = outputIO({ columns: 120, now, resolveLineTarget })
     expect(await runYrd(app, yrd("line", "status"), rejectedOnly.io), rejectedOnly.stderr()).toBe(0)
-    expect.soft(rejectedOnly.stdout()).toMatch(/main@[a-f0-9]{12}\s+0\s+0\s+0\s+1/u)
+    expect.soft(rejectedOnly.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
 
     await app.bays.submit({
       branch: "task/runnable",
@@ -1235,7 +1228,7 @@ describe("runYrd", () => {
       const lines = status.stdout().trimEnd().split("\n")
       expect.soft(lines.length).toBeLessThanOrEqual(14)
       expect.soft(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(columns)
-      expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12}\s+1\s+0\s+0\s+1/u)
+      expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 1 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
       expect.soft(status.stdout()).toContain("[!]")
@@ -1283,10 +1276,31 @@ describe("runYrd", () => {
     expect(parsed.results[0]?.finished[0]?.steps[0]?.job).toMatchObject({
       output: { artifacts: [{ name: "failure", path: artifact }] },
     })
+
+    const controller = new AbortController()
+    const jsonl = outputIO({
+      now,
+      resolveLineTarget,
+      scope: {
+        signal: controller.signal,
+        sleep: async () => controller.abort(),
+      },
+    })
+    expect(await runYrd(app, yrd("watch", "--json"), jsonl.io), jsonl.stderr()).toBe(0)
+    const records = jsonl
+      .stdout()
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { results: readonly LineStatusResult[] })
+    expect(records).toHaveLength(1)
+    expect(records[0]?.results[0]?.finished[0]?.error?.message).toBe(failure)
+    expect(records[0]?.results[0]?.finished[0]?.steps[0]?.job).toMatchObject({
+      output: { artifacts: [{ name: "failure", path: artifact }] },
+    })
     rmSync(temp, { recursive: true, force: true })
   })
 
-  it.fails("spotlights the active run in bounded status output", async () => {
+  it("spotlights the active run in bounded status output", async () => {
     const app = await createApp({ waitingCheck: true })
     await app.bays.submit({
       branch: "task/active",
@@ -1315,6 +1329,75 @@ describe("runYrd", () => {
             .map((line) => line.length),
         ),
       ).toBeLessThanOrEqual(columns)
+    }
+  })
+
+  it("caps queue and rejection projections independently at 80 and 120 columns", async () => {
+    const submitted = Array.from({ length: 7 }, (_, index) => ({
+      id: `PR${index + 1}`,
+      name: `feat(cli): runnable ${index + 1}`,
+      branch: `task/runnable-${index + 1}`,
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: String(index + 1).repeat(40),
+      revision: 1,
+      revisions: [],
+      status: "submitted",
+      submittedAt: `2026-07-09T12:0${index}:00.000Z`,
+    }))
+    const rejected = Array.from({ length: 5 }, (_, index) => ({
+      id: `PR${index + 8}`,
+      name: `fix(cli): rejected ${index + 1}`,
+      branch: `task/rejected-${index + 1}`,
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: String(index + 8).repeat(40),
+      revision: 1,
+      revisions: [],
+      status: "rejected",
+      submittedAt: `2026-07-09T11:0${index}:00.000Z`,
+      rejectedAt: `2026-07-09T12:1${index}:00.000Z`,
+    }))
+    const finished = rejected.map((pr, index) =>
+      fakeRun({
+        id: `R${index + 1}`,
+        pr: { id: pr.id, revision: 1, headSha: pr.headSha, baseSha: BASE_SHA },
+        status: "failed",
+        steps: [],
+        startedAt: `2026-07-09T12:0${index}:00.000Z`,
+        finishedAt: `2026-07-09T12:1${index}:00.000Z`,
+        error: {
+          code: "check-failed",
+          message: `failure ${index + 1}\nhint: repeated advice\n    at check (/repo/check.ts:1:1)`,
+        },
+      }),
+    )
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [...submitted, ...rejected],
+      running: [],
+      waiting: [],
+      finished,
+    } as unknown as LineStatusResult
+    const now = Date.parse("2026-07-09T13:00:00.000Z")
+    const projection = humanLineProjection(result, now)
+    expect(projection).toMatchObject({ open: 7, rejected: 5, queueOverflow: 2 })
+    expect(projection.queue).toHaveLength(5)
+    expect(projection.recent).toHaveLength(3)
+    expect(projection.recent.map((row) => row.runId)).toEqual(["R5", "R4", "R3"])
+
+    for (const width of [80, 120]) {
+      const frame = await renderString(createElement(LineWatchView, { results: [result], now }), {
+        width,
+        height: 30,
+        plain: true,
+      })
+      const lines = frame.trimEnd().split("\n")
+      expect(lines).toHaveLength(22)
+      expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(width)
+      expect(frame).toContain("... 2 more runnable")
+      expect(frame).not.toContain("hint:")
     }
   })
 
@@ -1631,10 +1714,9 @@ describe("runYrd", () => {
       width: 140,
       height: 24,
     })
-    expect(renderedLogWithCoverage).toContain("Legacy queue coverage")
-    expect(renderedLogWithCoverage).toContain("185")
+    expect(renderedLogWithCoverage).not.toContain("Legacy queue coverage")
+    expect(renderedLogWithCoverage).not.toContain("185")
     expect(renderedLogWithCoverage).toContain("R10")
-    expect(renderedLogWithCoverage).toContain("c".repeat(12))
     expect(renderedLogWithCoverage).not.toContain("c".repeat(40))
 
     const renderedLogNoCoverage = await renderString(createElement(LineLogView, { rows }), {
@@ -1664,7 +1746,7 @@ describe("runYrd", () => {
       height: 4,
       plain: false,
     })
-    expect(coverageOnlyTty).toContain("\u001b]8;;")
+    expect(coverageOnlyTty).not.toContain("\u001b]8;;")
     expect(JSON.parse(JSON.stringify({ command: "line.log", rows, coverage: withCoverage }))).toEqual({
       command: "line.log",
       rows,
@@ -2000,6 +2082,22 @@ describe("runYrd", () => {
       ],
     })
 
+    const expectedHistory = new Map([
+      [
+        80,
+        [
+          "GLYPH TIME PR REV RUN OUTCOME ART SUBJECT AGE TOTAL",
+          "[x] 11:01 PR23 r4 R4 integrated art:12 topic/R4 age=1h total=48m7s active=11m26…",
+        ].join("\n"),
+      ],
+      [
+        120,
+        [
+          "GLYPH TIME LEVEL [BASE] PR (REV,RUN) OUTCOME ART SUBJECT AGE TOTAL ACTIVE WAIT",
+          "[x] 11:01:16 INFO [main] PR23 (rev4, run4) integrated art:12 topic/R4 age=1h total=48m07s active=11m26s wait=36m42s",
+        ].join("\n"),
+      ],
+    ])
     for (const width of [80, 120]) {
       const human = await renderString(createElement(LineLogView, { rows, columns: width }), {
         width,
@@ -2007,15 +2105,14 @@ describe("runYrd", () => {
         plain: true,
       })
       const physicalRows = human.split("\n").filter((line) => line.includes("R4"))
+      expect(human).toBe(expectedHistory.get(width))
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
-      expect(physicalRows[0]).toContain("R4/PR23@4/integrated")
-      expect(physicalRows[0]).toContain(width === 80 ? "20260712T1101Z" : "2026-07-12T11:01Z")
-      expect(physicalRows[0]).toContain(width === 80 ? "1h" : "1h00m")
+      expect(physicalRows[0]).toContain(width === 80 ? "PR23 r4 R4 integrated" : "PR23 (rev4, run4) integrated")
       expect(physicalRows[0]).toContain(width === 80 ? "48m7s" : "48m07s")
-      expect(physicalRows[0]).toContain(width === 80 ? "11m26s" : "11m26s")
-      expect(physicalRows[0]).toContain("36m42s")
-      expect(physicalRows[0]).toContain(width === 80 ? "art:12" : "art:stdout+stderr")
+      expect(physicalRows[0]).toContain(width === 80 ? "11m26" : "11m26s")
+      if (width === 120) expect(physicalRows[0]).toContain("36m42s")
+      expect(physicalRows[0]).toContain("art:12")
       expect(human).not.toMatch(/\n\s*\n\s*\n/u)
       expect(human).not.toContain("stdout=/")
     }
@@ -2034,7 +2131,7 @@ describe("runYrd", () => {
     rmSync(temp, { recursive: true, force: true })
   })
 
-  it.fails("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {
+  it("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {
     const runs = Array.from({ length: 22 }, (_, index) => {
       const minute = String(index).padStart(2, "0")
       return fakeRun({
@@ -2065,7 +2162,11 @@ describe("runYrd", () => {
       [],
     )
     expect(rows).toHaveLength(22)
-    expect(rows[0]).toMatchObject({ subject: "fix(cli): bounded operator history" })
+    expect(rows[0]).toMatchObject({
+      branch: "fix(cli): bounded operator history",
+      subject: "fix(cli): bounded operator history",
+      glyph: "[!]",
+    })
 
     for (const width of [80, 120]) {
       const human = await renderString(createElement(LineLogView, { rows, columns: width }), {
@@ -2073,15 +2174,15 @@ describe("runYrd", () => {
         height: 24,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((line) => /R\d+\/PR1/u.test(line))
+      const physicalRows = human.split("\n").filter((line) => /\bPR1\b/u.test(line))
       expect(physicalRows).toHaveLength(20)
-      expect(physicalRows[0]).toContain("R22/PR1@1/rejected")
-      expect(physicalRows.at(-1)).toContain("R3/PR1@1/rejected")
+      expect(physicalRows[0]).toContain(width === 80 ? "PR1 r1 R22 rejected" : "PR1 (rev1, run22) rejected")
+      expect(physicalRows.at(-1)).toContain(width === 80 ? "PR1 r1 R3 rejected" : "PR1 (rev1, run3) rejected")
       expect(physicalRows[0]).toContain("[!]")
       expect(physicalRows[0]).toContain("fix(cli): bounded operator history")
       expect(Math.max(...human.split("\n").map((line) => line.length))).toBeLessThanOrEqual(width)
-      expect(human).not.toContain("R2/PR1@1/rejected")
-      expect(human).not.toContain("R1/PR1@1/rejected")
+      expect(human).not.toContain(width === 80 ? "PR1 r1 R2 rejected" : "PR1 (rev1, run2) rejected")
+      expect(human).not.toContain(width === 80 ? "PR1 r1 R1 rejected" : "PR1 (rev1, run1) rejected")
     }
   })
 
