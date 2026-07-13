@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
@@ -389,6 +389,70 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(releases).toBe(1)
   })
 
+  it("reaps an active configured child before SIGINT releases its executor lease", async () => {
+    const { repo, featureSha } = await repository()
+    const baseSha = await git(repo, "rev-parse", "main")
+    const childPidPath = join(repo, "active-check.pid")
+    const progressPath = join(repo, "active-check.progress")
+    const finishedPath = join(repo, "active-check.finished")
+    const command = [
+      `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
+      "i=0",
+      `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
+      `touch ${JSON.stringify(finishedPath)}`,
+    ].join("; ")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `steps:\n  check:\n    run: ${JSON.stringify(command)}\n    timeoutMs: 30000\n`,
+    )
+
+    await using submitter = await createYrdHost({ cwd: repo })
+    await submitter.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await submitter.close()
+
+    const cli = Bun.spawn(
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "line", "integrate", "PR1", "--json"],
+      { cwd: repo, stdout: "pipe", stderr: "pipe" },
+    )
+    let childPid: number | undefined
+    try {
+      await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true))
+      childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
+      expect(Number.isSafeInteger(childPid)).toBe(true)
+      await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""))
+
+      cli.kill("SIGINT")
+      await expect(cli.exited).resolves.toBe(130)
+      await vi.waitFor(() => expect(processExists(childPid!)).toBe(false))
+
+      await using recovery = await createYrdHost({ cwd: repo })
+      const recovered = await recovery.app.line.recover({
+        recoveryTime: "2100-01-01T00:00:00.000Z",
+        executor: "recovery",
+        leaseMs: 100,
+      })
+      expect(recovered).toEqual([
+        expect.objectContaining({
+          status: "failed",
+          error: expect.objectContaining({ code: "job-lost" }),
+          steps: expect.arrayContaining([expect.objectContaining({ job: expect.objectContaining({ attempt: 1 }) })]),
+        }),
+      ])
+      expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
+      expect(await Bun.file(finishedPath).exists()).toBe(false)
+    } finally {
+      if (childPid !== undefined && processExists(childPid)) {
+        try {
+          process.kill(-childPid, "SIGKILL")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+      cli.kill("SIGKILL")
+      await cli.exited
+    }
+  })
+
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()
     const linked = join(repo, "..", "current")
@@ -584,6 +648,16 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(stderr).toBe("")
   })
 })
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false
+    throw error
+  }
+}
 
 describe("discoverYrdRepository", { timeout: 20_000 }, () => {
   it("resolves a relative core.worktree from a separate Git directory", async () => {
