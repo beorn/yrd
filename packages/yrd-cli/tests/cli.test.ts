@@ -264,7 +264,7 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
     cwd: "/repo",
     runner: "cli-test",
     leaseMs: 60_000,
-    now: () => 0,
+    now: () => Date.parse("2026-07-09T12:01:00.000Z"),
     ...overrides,
   }
   return { io, stdout: () => stdout, stderr: () => stderr }
@@ -634,7 +634,10 @@ describe("runYrd", () => {
     }
     expect(app.state().bays.prs.PR1?.submittedAt).toBe(app.state().bays.prs.PR6?.submittedAt)
 
-    const humanStatus = outputIO({ currentBranch: () => "topic/6" })
+    const humanStatus = outputIO({
+      currentBranch: () => "topic/6",
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+    })
     expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
     expect(humanStatus.stdout()).toContain("6. [ ] PR6")
 
@@ -2017,17 +2020,34 @@ describe("runYrd", () => {
     }
   })
 
-  it("projects local and remote spellings of one target as a single logical queue", async () => {
+  it("projects local and remote spellings as one queue with command position parity", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "issue/one", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/two", headSha: "2".repeat(40), base: "origin/main" })
-    const status = outputIO({
-      resolveQueueTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: "a".repeat(40) }),
-    })
+    const now = () => Date.parse("2026-07-09T12:01:00.000Z")
+    const resolveQueueTarget = (ref: string) =>
+      Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: "a".repeat(40) })
 
-    expect(await runYrd(app, yrd("--json"), status.io), status.stderr()).toBe(0)
+    const dashboard = outputIO({ now, resolveQueueTarget })
+    expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
+    expect.soft(dashboard.stdout()).toContain("1. [ ] PR1")
+    expect.soft(dashboard.stdout()).toContain("2. [ ] PR2")
 
-    expect(JSON.parse(status.stdout())).toMatchObject({
+    const status = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
+    expect(await runYrd(app, yrd("pr", "status"), status.io), status.stderr()).toBe(0)
+    expect.soft(status.stdout()).toContain("2. [ ] PR2")
+
+    const prime = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
+    expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
+    expect.soft(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR2", position: 2 } })
+
+    const refusal = outputIO({ now, resolveQueueTarget })
+    expect(await runYrd(app, yrd("pr", "merge", "PR2", "--json"), refusal.io)).toBe(1)
+    expect.soft(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR2", position: 2 })
+
+    const json = outputIO({ now, resolveQueueTarget })
+    expect(await runYrd(app, yrd("--json"), json.io), json.stderr()).toBe(0)
+    expect(JSON.parse(json.stdout())).toMatchObject({
       results: [{ base: "main", headSha: "a".repeat(40), prs: [{ id: "PR1" }, { id: "PR2" }] }],
     })
   })
@@ -2974,6 +2994,56 @@ describe("runYrd", () => {
       steps: [failedStep("2026-07-12T12:00:00.000Z", "2026-07-12T12:01:00.000Z")],
     })
     expect(() => project(valid, "2026-07-12T12:02:00.000Z")).toThrow(/precedes/u)
+  })
+
+  it("fails loud when human projection chronology goes backwards", () => {
+    const future = {
+      id: "PR94",
+      branch: "issue/future",
+      base: "main",
+      baseSha: BASE_SHA,
+      status: "submitted",
+      revision: 1,
+      headSha: HEAD_SHA,
+      revisions: [],
+      submittedAt: "2026-07-12T12:05:00.000Z",
+    } as PR
+    const futureResult = {
+      base: "main",
+      prs: [future],
+      running: [],
+      waiting: [],
+      finished: [],
+    } as QueueStatusResult
+    expect.soft(() => humanQueueProjection(futureResult, Date.parse("2026-07-12T12:00:00.000Z"))).toThrow(/precedes/u)
+
+    const rejected = {
+      ...future,
+      id: "PR95",
+      branch: "issue/backwards-run",
+      status: "rejected",
+      submittedAt: "2026-07-12T11:59:00.000Z",
+      rejectedAt: "2026-07-12T12:01:00.000Z",
+    } as PR
+    const backwards = fakeRun({
+      id: "R95",
+      pr: { id: rejected.id, revision: rejected.revision, headSha: rejected.headSha, baseSha: rejected.baseSha },
+      status: "failed",
+      startedAt: "2026-07-12T12:02:00.000Z",
+      finishedAt: "2026-07-12T12:01:00.000Z",
+      steps: [],
+      error: { code: "check-failed", message: "check failed" },
+    })
+    const backwardsResult = {
+      base: "main",
+      prs: [rejected],
+      running: [],
+      waiting: [],
+      finished: [backwards],
+    } as QueueStatusResult
+    expect
+      .soft(() => humanQueueProjection(backwardsResult, Date.parse("2026-07-12T12:03:00.000Z")))
+      .toThrow(/precedes/u)
   })
 
   it("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {

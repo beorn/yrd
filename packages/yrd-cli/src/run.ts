@@ -426,8 +426,8 @@ async function viewPr(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const positions = queuedPrPositions(state, pr.base)
-  const position = pr.status === "submitted" ? positions.get(pr.id) : undefined
+  const positions = pr.status === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
+  const position = positions?.get(pr.id)
   await printResult(
     io,
     jsonEnabled(options),
@@ -436,7 +436,7 @@ async function viewPr(
       state: state.bays,
       results,
       selected: target.selected,
-      positions,
+      ...(positions === undefined ? {} : { positions }),
       now: io.now?.() ?? Date.now(),
     }),
   )
@@ -521,13 +521,17 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
   return pr as PR
 }
 
-function queuedPrPosition(state: YrdCliState, pr: PR): number | undefined {
+async function queuedPrPosition(state: YrdCliState, pr: PR, io: YrdCliIO): Promise<number | undefined> {
   if (pr.status !== "submitted") return undefined
-  return queuedPrPositions(state, pr.base).get(pr.id)
+  return (await queuedPrPositions(state, pr.base, io)).get(pr.id)
 }
 
-function queuedPrPositions(state: YrdCliState, base: string): ReadonlyMap<string, number> {
-  const candidates = Object.values(state.bays.prs).filter((candidate) => candidate.base === base)
+async function queuedPrPositions(state: YrdCliState, base: string, io: YrdCliIO): Promise<ReadonlyMap<string, number>> {
+  const prs = Object.values(state.bays.prs)
+  const groups = await queueTargetGroups(new Set(prs.map((candidate) => candidate.base)), io)
+  const group = groups.find((candidate) => candidate.aliases.has(base))
+  if (group === undefined) throw new Error(`yrd: queue target group for base '${base}' disappeared`)
+  const candidates = prs.filter((candidate) => group.aliases.has(candidate.base))
   return submittedPrPositions(candidates)
 }
 
@@ -800,7 +804,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       bay: bay?.id,
       pr: pr?.id,
       base: pr?.base ?? bay?.base,
-      position: pr === undefined ? undefined : queuedPrPosition(state, pr),
+      position: pr === undefined ? undefined : await queuedPrPosition(state, pr, io),
       pause: queue?.pause,
     },
     boundaries: ["the queue is the only merger", "issues are read-only references; edit them in the tracker"],
@@ -1308,7 +1312,12 @@ async function listContests(app: YrdCliApp, options: JsonOption, io: YrdCliIO): 
   await printResult(io, jsonEnabled(options), { command: "contest.list", contests }, human)
 }
 
-function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): YrdCliExitCode {
+async function refusePrMerge(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
   const pr = app.bays.pr(selector)
   if (pr === undefined) {
     const next = `yrd pr submit ${selector}`
@@ -1328,7 +1337,7 @@ function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io
     refusal(message)
   }
 
-  const position = queuedPrPosition(stateOf(app), pr)
+  const position = await queuedPrPosition(stateOf(app), pr, io)
   const detail = prMergeRefusalDetail(pr, position)
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {
@@ -1678,7 +1687,7 @@ function buildProgram(
   pr.command("merge <selector>")
     .description("teach that the queue is the only merger")
     .option("--json", "emit stable JSON")
-    .action((selector, options) => setExit(refusePrMerge(installed(), selector, options, io)))
+    .action(async (selector, options) => setExit(await refusePrMerge(installed(), selector, options, io)))
 
   const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)

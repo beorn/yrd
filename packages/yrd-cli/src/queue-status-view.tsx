@@ -278,10 +278,10 @@ export type QueueLogCoverage = Readonly<{
 type QueueLogLocation = Readonly<{ path: string }> | Readonly<{ url: string }>
 type QueueLogLocationEntry = Readonly<{ label: string; location: QueueLogLocation }>
 
-function age(timestamp: string | undefined, now: number): string {
+function age(timestamp: string | undefined, now: number, subject: string): string {
   if (timestamp === undefined) return "-"
-  const time = Date.parse(timestamp)
-  return Number.isFinite(time) ? formatDuration(now - time) : "-"
+  const value = elapsedMs(timestamp, new Date(now).toISOString(), subject)
+  return value === undefined ? "-" : formatDuration(value)
 }
 
 function latest(...timestamps: (string | undefined)[]): string | undefined {
@@ -800,10 +800,11 @@ function projectPR(
           ]
     }),
   )
-  const runDuration =
+  const runDurationMs =
     run === undefined
-      ? "-"
-      : formatDuration((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt))
+      ? undefined
+      : elapsedMs(run.startedAt, run.finishedAt ?? new Date(now).toISOString(), `run '${run.id}' duration`)
+  const runDuration = runDurationMs === undefined ? "-" : formatDuration(runDurationMs)
   const artifacts = stepArtifacts(step)
   const artifact = artifactHref(artifacts[0])
   const stateLabel = queueState(pr, run)
@@ -839,8 +840,8 @@ function projectPR(
     ...(run === undefined ? {} : { runId: run.id }),
     ...(pr.submittedAt === undefined ? {} : { submittedAt: pr.submittedAt }),
     target: pr.base,
-    age: age(pr.submittedAt ?? revision?.pushedAt, ageAt),
-    touched: age(touchedAt, now),
+    age: age(pr.submittedAt ?? revision?.pushedAt, ageAt, `PR '${pr.id}' submitted age`),
+    touched: age(touchedAt, now, `PR '${pr.id}' touched age`),
     ...(touchedAt === undefined ? {} : { touchedAt }),
     run: runDuration,
     step: step?.name ?? "-",
@@ -1184,7 +1185,7 @@ export function activeWatchRow(
     subject: boundedQueue(pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
     glyph: statusGlyph(run.status),
-    elapsed: age(run.startedAt, now),
+    elapsed: age(run.startedAt, now, `run '${run.id}' elapsed`),
   }
 }
 
