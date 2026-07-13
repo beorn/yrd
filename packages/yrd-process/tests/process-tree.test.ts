@@ -187,6 +187,22 @@ describe("createProcess — explicit output-progress lease (21057)", () => {
     expect(runner.kills).toEqual([])
   })
 
+  test.fails("queue-delayed child startup is not an output-progress stall", async () => {
+    const runner = fakeRunner(
+      [
+        { afterMs: 30, text: "one\n" },
+        { afterMs: 40, text: "two\n" },
+      ],
+      45,
+    )
+    await using proc = createProcess({ inject: { spawn: runner.spawn }, killGraceMs: 10 })
+
+    const result = await proc.run({ argv: ["fake-test"], noProgressTimeoutMs: 15 })
+
+    expect(result).toMatchObject({ exitCode: 0, stalled: false, stdout: "one\ntwo\n", lastProgressBytes: 8 })
+    expect(runner.kills).toEqual([])
+  })
+
   test("silent output gracefully stops only the owned runner and retains partial output", async () => {
     const runner = fakeRunner([{ afterMs: 0, text: "started\n" }], null)
     await using proc = createProcess({ inject: { spawn: runner.spawn }, killGraceMs: 10 })

@@ -155,6 +155,109 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
 }
 
 describe("Queue command adapters", () => {
+  it.fails("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
+    type CheckedCommand = AddStepResult<PRShape, "check", z.infer<typeof CommandEvidenceSchema>>
+    const encoder = new TextEncoder()
+
+    const controlledQueue = async () => {
+      const cwd = await mkdtemp(join(tmpdir(), "yrd-command-lease-"))
+      roots.push(cwd)
+      const started = Promise.withResolvers<ProcessRequest>()
+      const completed = Promise.withResolvers<ProcessResult>()
+      const mergeRuns: string[] = []
+      const process: Pick<Process, "run"> = {
+        run(request) {
+          started.resolve(request)
+          return completed.promise
+        },
+      }
+      const bayJobs = createBayJobDefs(unusedWorkspace)
+      const check = withStep(
+        "check",
+        configuredCommandStep<PRShape>({
+          inject: { process },
+          command: ["progressing-check"],
+          cwd,
+          purpose: "check",
+          artifactRoot: join(cwd, "artifacts"),
+        }),
+        { revision: "progressing-check-v1", output: CommandEvidenceSchema },
+      )
+      const merge = withMerge(
+        (_input: StepExecution<CheckedCommand>) => {
+          mergeRuns.push("merge")
+          return { status: "passed" as const, output: { commit: "b".repeat(40), baseSha: "b".repeat(40) } }
+        },
+        { revision: "merge-v1" },
+      )
+      const queue = withQueue({ steps: [check, merge] as const })
+      const base = pipe(
+        createYrdDef(),
+        withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+        withBays({ jobs: bayJobs }),
+      )
+      const app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+      await app.bays.submit({ branch: "issue/progress", headSha: "a".repeat(40), base: "main" })
+      return { app, completed, mergeRuns, started, [Symbol.asyncDispose]: () => app.close() }
+    }
+
+    const result = (stdout: string): ProcessResult => ({
+      exitCode: 0,
+      signal: null,
+      stdout,
+      stderr: "",
+      durationMs: 60,
+      timedOut: false,
+    })
+    await using progressing = await controlledQueue()
+    const progressingRun = progressing.app.queue.run(
+      { prs: ["PR1"] },
+      { runner: "same-runner", leaseMs: 120, heartbeatMs: 30 },
+    )
+    const progressingRequest = await progressing.started.promise
+    for (let tick = 1; tick <= 8; tick += 1) {
+      progressingRequest.onOutput?.({ stream: "stdout", chunk: encoder.encode(`progress ${tick}\n`) })
+      await Bun.sleep(20)
+    }
+
+    expect(await progressing.app.jobs.recover({ now: new Date().toISOString() })).toEqual([])
+    progressing.completed.resolve(result("progress complete\n"))
+    await expect(progressingRun).resolves.toEqual([
+      expect.objectContaining({
+        status: "passed",
+        steps: expect.arrayContaining([expect.objectContaining({ name: "merge" })]),
+      }),
+    ])
+    const heartbeatLeases = (await Array.fromAsync(progressing.app.events()))
+      .filter(({ name }) => name === "job/transitioned")
+      .map(({ data }) => data as { type?: string; leaseExpiresAt?: string })
+      .filter(({ type }) => type === "heartbeat")
+      .map(({ leaseExpiresAt }) => leaseExpiresAt)
+    expect(heartbeatLeases.length).toBeGreaterThan(1)
+    expect(progressing.mergeRuns).toEqual(["merge"])
+
+    await using stalled = await controlledQueue()
+    const stalledRun = stalled.app.queue.run({ prs: ["PR1"] }, { runner: "same-runner", leaseMs: 80, heartbeatMs: 20 })
+    await stalled.started.promise
+    await Bun.sleep(120)
+    const recovered = await stalled.app.queue.recover({
+      recoveryTime: new Date().toISOString(),
+      runner: "recovery-runner",
+      leaseMs: 80,
+      heartbeatMs: 20,
+    })
+    stalled.completed.resolve(result("too late\n"))
+    await stalledRun
+
+    expect(recovered).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+      }),
+    ])
+    expect(stalled.mergeRuns).toEqual([])
+  })
+
   it("persists candidate-conflict evidence on the causative check step before scratch cleanup", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "conflict.txt"), "base\n")
