@@ -155,7 +155,7 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
 }
 
 describe("Line command adapters", () => {
-  it.fails("renews a configured child lease only while the owning executor observes progress", async () => {
+  it("renews a configured child lease only while the owning executor observes progress", async () => {
     type CheckedCommand = AddStepResult<PRShape, "check", z.infer<typeof CommandEvidenceSchema>>
     const encoder = new TextEncoder()
 

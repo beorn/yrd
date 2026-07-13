@@ -48,6 +48,10 @@ export type JobContext = Readonly<{
   attempt: number
   executor: string
   signal: AbortSignal
+  /** Switch lease renewal from time-based heartbeats to explicitly reported progress. */
+  observeProgress?: () => void
+  /** Report progress after observeProgress() has selected progress-gated renewal. */
+  reportProgress?: () => void
 }>
 
 export type JobHandler<Input extends JsonValue, Output extends JsonValue> = (

@@ -97,6 +97,7 @@ function configuredCommand<Shape extends PRShape>(
     .update(JSON.stringify(argv))
     .digest("hex")
   return async (input, context): Promise<JobResult<CommandEvidence>> => {
+    context.observeProgress?.()
     const { process } = options.inject
     const primary = primaryPR(input)
     const cwd = resolve(typeof options.cwd === "function" ? await options.cwd(input) : options.cwd)
@@ -121,6 +122,7 @@ function configuredCommand<Shape extends PRShape>(
       env: commandEnvironment(options.env ?? globalThis.process.env, variables),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
+      onOutput: () => context.reportProgress?.(),
     })
     const artifacts = await writeArtifacts(
       resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts")),

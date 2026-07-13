@@ -352,7 +352,15 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     const scope = options.scope.child(`job:${id}:${attempt}`)
     const outcome = await executeWithHeartbeat(
       scope,
-      () => installed.execute(requested.input, { id, attempt, executor: parsed.executor, signal: scope.signal }),
+      (progress) =>
+        installed.execute(requested.input, {
+          id,
+          attempt,
+          executor: parsed.executor,
+          signal: scope.signal,
+          observeProgress: progress.observe,
+          reportProgress: progress.report,
+        }),
       heartbeatMs,
       async () => {
         const active = current(id)
@@ -570,13 +578,18 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
 
 async function executeWithHeartbeat(
   scope: JobScope,
-  execute: () => Promise<JobResult>,
+  execute: (progress: Readonly<{ observe(): void; report(): void }>) => Promise<JobResult>,
   heartbeatMs: number,
   heartbeat: () => Promise<void>,
 ): Promise<{ result: JobResult; heartbeatError?: unknown }> {
   let heartbeatError: unknown
   let heartbeats = Promise.resolve()
+  let observesProgress = false
+  let progressRevision = 0
+  let renewedRevision = 0
   scope.interval(() => {
+    if (observesProgress && progressRevision === renewedRevision) return
+    renewedRevision = progressRevision
     heartbeats = heartbeats.then(async () => {
       if (heartbeatError === undefined) {
         try {
@@ -592,7 +605,15 @@ async function executeWithHeartbeat(
 
   let result: JobResult
   try {
-    result = await execute()
+    result = await execute({
+      observe() {
+        observesProgress = true
+      },
+      report() {
+        observesProgress = true
+        progressRevision += 1
+      },
+    })
   } catch (error) {
     result = failed("executor-error", error)
   } finally {
