@@ -906,15 +906,10 @@ export function watchQueueRows(result: LineStatusResult, now: number): WatchQueu
                 (run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt),
               ),
         result:
-          job !== undefined && "error" in job
-            ? job.error.message
-            : job !== undefined && "lostReason" in job
-              ? job.lostReason
-              : job !== undefined && "detail" in job
-                ? job.detail
-                : step === undefined
-                  ? "-"
-                  : jobStatus(step),
+          (job !== undefined && "error" in job ? job.error.message : undefined) ??
+          (job !== undefined && "lostReason" in job ? job.lostReason : undefined) ??
+          (job !== undefined && "detail" in job ? job.detail : undefined) ??
+          (step === undefined ? "-" : jobStatus(step)),
       }
     })
 }
@@ -952,10 +947,10 @@ function watchFailureReason(run: LineRun): string {
     .map((step) => step.job)
     .find((candidate) => candidate?.status === "failed" || candidate?.status === "lost")
   if (job === undefined) return "failed"
+  // The find() predicate narrows to the failed and lost variants, which carry
+  // `error` and `lostReason` respectively — no other Job variant reaches here.
   if ("error" in job) return job.error.message
-  if ("lostReason" in job) return job.lostReason
-  if ("detail" in job) return singleLine(String(job.detail))
-  return job.status
+  return job.lostReason
 }
 
 function retryHint(run: LineRun): string {

@@ -1002,6 +1002,84 @@ describe("runYrd", () => {
     })
   })
 
+  it("falls back to job status when a watch queue job carries no evidence detail", () => {
+    const result = {
+      base: "main",
+      prs: [
+        {
+          id: "PR1",
+          name: "Watch the queue",
+          branch: "task/watch",
+          base: "main",
+          status: "submitted",
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [
+        {
+          id: "R1",
+          status: "waiting",
+          startedAt: "2026-07-09T12:09:00.000Z",
+          prs: [{ id: "PR1" }],
+          steps: [{ name: "check", job: { status: "waiting", detail: undefined } }],
+        },
+      ],
+      finished: [],
+    } as unknown as LineStatusResult
+
+    expect(watchQueueRows(result, Date.parse("2026-07-09T12:10:00.000Z"))[0]).toMatchObject({
+      step: "check",
+      result: "waiting",
+    })
+  })
+
+  it("names the failing job reason for each recent watch failure", async () => {
+    const result = {
+      base: "main",
+      prs: [
+        {
+          id: "PR1",
+          name: "Watch the queue",
+          branch: "task/watch",
+          base: "main",
+          status: "rejected",
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [],
+      finished: [
+        {
+          id: "R1",
+          status: "failed",
+          startedAt: "2026-07-09T12:00:00.000Z",
+          finishedAt: "2026-07-09T12:01:00.000Z",
+          prs: [{ id: "PR1" }],
+          steps: [{ name: "check", job: { status: "lost", lostReason: "lease expired" } }],
+        },
+        {
+          id: "R2",
+          status: "failed",
+          startedAt: "2026-07-09T12:02:00.000Z",
+          finishedAt: "2026-07-09T12:03:00.000Z",
+          prs: [{ id: "PR1" }],
+          steps: [{ name: "check", job: { status: "failed", error: { message: "cold typecheck" } } }],
+        },
+      ],
+    } as unknown as LineStatusResult
+
+    const frame = stripOsc8Targets(
+      await renderString(
+        createElement(LineWatchView, { results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+        { width: 120 },
+      ),
+    )
+    expect(frame).toContain("Recent failures")
+    expect(frame).toContain("lease expired")
+    expect(frame).toContain("cold typecheck")
+  })
+
   it("handles pause and quit inside the live Silvery runtime", async () => {
     const initial = {
       results: [
