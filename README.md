@@ -514,9 +514,14 @@ external side effect before its settlement frame is committed. Yrd accepts only
 one settlement for a Job attempt, but a backend must deduplicate effects by the
 stable Job id and fence stale attempts. Configured commands receive `YRD_JOB`,
 `YRD_ATTEMPT`, `YRD_EXECUTOR`, and a host-owned `YRD_JOB_ROOT`; their `TMPDIR`
-is contained by that root. Success, failure, interruption, and expired-lease
-recovery release only the exact durable attempt root before settlement can be
-considered clean. Yrd never guesses that a side effect did or did not happen.
+is contained by that root. The host also supplies a sibling
+`YRD_JOB_RUNTIME_REGISTRY`: a detached runtime registers before reporting ready,
+publishes final acknowledgement after its own cleanup, and holds a kernel lease
+until its process exits. Success, failure, interruption, and expired-lease
+recovery close that exact registry, remove only the exact durable attempt root,
+and await every registered lifetime before settlement can be considered clean.
+Yrd never scans for processes, signals a product-owned runtime, or guesses that
+a side effect did or did not happen.
 
 [`@yrd/core`](packages/yrd-core/README.md) documents Operations, transaction
 frames, projection, and the Journal contract. [`@yrd/job`](packages/yrd-job/README.md)

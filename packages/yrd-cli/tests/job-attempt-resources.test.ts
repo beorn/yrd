@@ -116,6 +116,32 @@ describe("Job attempt resources", () => {
       await waitForExit(runtime).catch(() => undefined)
     }
   })
+
+  it("fails loud and preserves provenance when a registered runtime exits without acknowledgement", async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), "yrd-job-runtime-crash-"))
+    roots.push(stateDir)
+    const resources = createJobAttemptResources({ stateDir, runtimeReleaseTimeoutMs: 500 })
+    const attempt: JobAttempt = { id: "J-crashed-runtime", attempt: 1, executor: "worker-1" }
+    await resources.prepare(attempt)
+
+    const registry = `${resources.path(attempt)}.runtimes`
+    const runtime = spawn(
+      process.execPath,
+      [RUNTIME_LEASE_FIXTURE, registry, "crashed-runtime", join(stateDir, "never")],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    )
+    await waitForReady(runtime)
+    runtime.kill("SIGKILL")
+    await waitForExit(runtime)
+
+    await expect(resources.release(attempt)).rejects.toThrow(
+      "Job attempt runtime 'crashed-runtime' exited without final acknowledgement",
+    )
+    expect(existsSync(resources.path(attempt))).toBe(false)
+    expect(existsSync(join(registry, "closing", "crashed-runtime", "runtime.json"))).toBe(true)
+  })
 })
 
 async function waitForReady(child: ChildProcess, timeoutMs = 2_000): Promise<void> {

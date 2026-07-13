@@ -171,6 +171,13 @@ recovery durably fences the expired owner before idempotent release. This keeps
 filesystem/process cleanup explicit without teaching `@yrd/job` about a host's
 state directory or resident-process implementation.
 
+Detached runtimes join the same lifecycle through the host's exact-attempt
+runtime registry. Registration is published before readiness and holds a
+kernel-released lifetime lease. Release atomically closes registration, removes
+only `YRD_JOB_ROOT` to request shutdown, then awaits final acknowledgement and
+lease release before settlement. The host observes registered lifetime proof;
+it does not discover processes or duplicate a runtime's stop implementation.
+
 Public `Yrd`, `Process`, and `YrdHost` objects implement `AsyncDisposable`, so
 callers can own them with `await using`. Their async-dispose hooks share the
 same idempotent lifecycle as `close()` and release owned scopes and resources
