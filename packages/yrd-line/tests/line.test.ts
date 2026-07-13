@@ -36,8 +36,8 @@ type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 type MergedShape = ReviewedShape & IntegratedShape
 type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 
-function ids(): () => string {
-  let value = 0
+function ids(initial = 0): () => string {
+  let value = initial
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
@@ -63,6 +63,8 @@ function linePlugin(
     merge?: (input: StepExecution<ReviewedShape>) => JobResult<{ commit: string; baseSha: string }>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
+    requires?: readonly ["review"]
+    resolveBaseSha?: (base: string) => string | Promise<string>
   }> = {},
 ) {
   const check = withStep(
@@ -94,6 +96,8 @@ function linePlugin(
     steps: [check, review, merge, deploy] as const,
     batch: options.batch ?? false,
     defaultSteps: ["check", "review", "merge", "deploy"],
+    ...(options.requires === undefined ? {} : { requires: options.requires }),
+    ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
   })
 }
 
@@ -101,19 +105,20 @@ async function createLineApp(
   options: Parameters<typeof linePlugin>[0] = {},
   journal = createMemoryJournal(),
   clock: () => string = () => "2026-01-01T00:00:00.000Z",
+  id: () => string = ids(),
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const line = linePlugin(options)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
   const definition = line(base)
   return createYrd(definition, {
-    inject: { journal, id: ids(), clock },
+    inject: { journal, id, clock },
   })
 }
 
 async function submitBranch(app: Awaited<ReturnType<typeof createLineApp>>, branch: string, base = "main") {
   const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base })
+  await app.bays.submit({ branch, headSha: digit.repeat(40), base, baseSha: BASE })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
   return pr
@@ -310,6 +315,324 @@ describe("Line", () => {
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR2"], ["PR1"]])
   })
 
+  it("uses one typed eligibility projection for draft, review, and revision freshness", async () => {
+    await using app = await createLineApp({ requires: ["review"] })
+    await app.bays.submit({ branch: "task/review-me", headSha: HEAD, base: "main", draft: true })
+
+    expect(app.line.eligibility("PR1")).toMatchObject({
+      pr: "PR1",
+      runnable: false,
+      reason: { code: "draft", message: "PR 'PR1' is pushed, not ready" },
+      review: { required: true, approved: false },
+    })
+    await app.bays.comment({ pr: "PR1", actor: "@cto", ref: "question-1", note: "Why this shape?" })
+    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-red" })
+    await app.bays.ready({ pr: "PR1" })
+    expect(app.line.eligibility("PR1")).toMatchObject({
+      runnable: false,
+      reason: { code: "review-rejected", message: "PR 'PR1' was rejected by @cto for revision 1" },
+      review: { required: true, approved: false, decision: "reject", actor: "@cto", ref: "verdict-red" },
+    })
+    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "verdict-1" })
+    expect(app.line.eligibility("PR1")).toMatchObject({
+      runnable: true,
+      review: { required: true, approved: true, decision: "approve", actor: "@cto", ref: "verdict-1" },
+    })
+
+    await app.bays.ready({ pr: "PR1" })
+    expect(app.line.eligibility("PR1")).toMatchObject({ runnable: true })
+    expect(app.line.eligibility("PR1").reason).toBeUndefined()
+    await expect(app.line.integrate({ prs: ["PR1"] }, runtime)).resolves.toHaveLength(1)
+
+    await app.bays.submit({ branch: "task/review-stales", headSha: UPDATED, base: "main", draft: true })
+    await app.bays.review({ pr: "PR2", actor: "@cto", decision: "approve", ref: "verdict-2" })
+    await app.bays.ready({ pr: "PR2" })
+    await app.bays.intake({ branch: "task/review-stales", headSha: "4".repeat(40), base: "main" })
+    await app.bays.ready({ pr: "PR2" })
+    expect(app.line.eligibility("PR2")).toMatchObject({
+      runnable: false,
+      reason: { code: "review-required" },
+      review: { required: true, approved: false, stale: true },
+    })
+    await expect(app.line.integrate({ prs: ["PR2"] }, runtime)).rejects.toThrow(
+      "PR 'PR2' needs approval for revision 2",
+    )
+
+    await app.bays.submit({ branch: "task/rejection-stales", headSha: "5".repeat(40), base: "main", draft: true })
+    await app.bays.review({ pr: "PR3", actor: "@cto", decision: "reject", ref: "verdict-3" })
+    await app.bays.ready({ pr: "PR3" })
+    expect(app.line.eligibility("PR3")).toMatchObject({
+      runnable: false,
+      reason: { code: "review-rejected" },
+      review: { required: true, approved: false, decision: "reject", stale: false },
+    })
+    await app.bays.intake({ branch: "task/rejection-stales", headSha: "6".repeat(40), base: "main" })
+    await app.bays.ready({ pr: "PR3" })
+    expect(app.line.eligibility("PR3")).toMatchObject({
+      runnable: false,
+      reason: { code: "review-required" },
+      review: { required: true, approved: false, stale: true },
+    })
+
+    expect(app.state().lines.records).toHaveProperty("R1")
+    expect(Object.keys(app.state().lines.records)).toHaveLength(1)
+  })
+
+  it("admits configured checks through Line once and reuses their journaled result for integration", async () => {
+    let checks = 0
+    await using app = await createLineApp({
+      check: () => {
+        checks++
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const pr = await submitBranch(app, "task/admitted")
+    await app.bays.requestChecks({ pr: pr.id })
+
+    expect(app.line.eligibility(pr.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-pending" },
+      checks: { status: "queued", position: 1, queuedAt: expect.any(String) },
+    })
+    const admission = (await app.line.admit({ prs: [pr.id] }))[0]
+    expect(admission).toMatchObject({
+      id: "R1",
+      status: "running",
+      prs: [{ id: pr.id, headSha: pr.headSha }],
+      steps: [{ name: "check" }, { name: "review" }],
+    })
+    expect(checks).toBe(0)
+    expect(app.line.eligibility(pr.id)).toMatchObject({
+      runnable: false,
+      reason: { code: "checking" },
+      checks: { status: "checking", run: "R1" },
+    })
+
+    expect(await app.line.run("R1", runtime)).toMatchObject({ status: "passed" })
+    expect(checks).toBe(1)
+    expect(app.line.eligibility(pr.id)).toMatchObject({
+      runnable: true,
+      checks: { status: "passed", run: "R1" },
+    })
+
+    const integrated = (await app.line.integrate({ prs: [pr.id] }, runtime))[0]
+    expect(integrated).toMatchObject({
+      id: "R2",
+      status: "passed",
+      steps: [{ name: "merge" }, { name: "deploy" }],
+      shape: {
+        results: { check: { checked: true }, review: { approved: true }, deploy: { environment: "staging" } },
+        integration: { commit: MERGED, baseSha: BASE },
+      },
+    })
+    expect(checks).toBe(1)
+  })
+
+  it("owns the admission drain inside Line before integrating the same cached proof", async () => {
+    let checks = 0
+    await using app = await createLineApp({
+      check: () => {
+        checks++
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const pr = await submitBranch(app, "task/line-owned-drain")
+    await app.bays.requestChecks({ pr: pr.id })
+    expect(await app.line.admit({ prs: [pr.id] })).toHaveLength(1)
+    expect(checks).toBe(0)
+
+    const integrated = await app.line.integrate({ prs: [pr.id] }, runtime)
+
+    expect(integrated).toMatchObject([{ id: "R2", status: "passed", reusedFrom: "R1" }])
+    expect(checks).toBe(1)
+  })
+
+  it("does not let an unrelated waiting admission monopolize Line capacity", async () => {
+    await using app = await createLineApp({
+      check: (input) =>
+        input.prs[0]?.id === "PR1"
+          ? { status: "waiting", token: "remote-one" }
+          : { status: "passed", output: { checked: true } },
+    })
+    const waiting = await submitBranch(app, "task/waiting-check")
+    const healthy = await submitBranch(app, "task/healthy-check")
+    await app.bays.requestChecks({ pr: waiting.id })
+    await app.bays.requestChecks({ pr: healthy.id })
+
+    expect(await app.line.admit({ prs: [waiting.id] }, runtime)).toMatchObject([
+      { status: "waiting", prs: [{ id: waiting.id }] },
+    ])
+    expect(await app.line.admit({ prs: [healthy.id] }, runtime)).toMatchObject([
+      { status: "passed", prs: [{ id: healthy.id }] },
+    ])
+    expect(app.line.eligibility(waiting.id)).toMatchObject({ checks: { status: "checking" } })
+    expect(app.line.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
+  })
+
+  it("keys admission reuse by the freshly resolved base SHA", async () => {
+    let baseSha = BASE
+    let checks = 0
+    const checkedBases: Array<string | undefined> = []
+    await using app = await createLineApp({
+      resolveBaseSha: () => baseSha,
+      check: (input) => {
+        checks++
+        checkedBases.push(input.prs[0]?.baseSha)
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const pr = await submitBranch(app, "task/base-keyed-cache")
+    await app.bays.requestChecks({ pr: pr.id })
+    expect(await app.line.admit({ prs: [pr.id] }, runtime)).toMatchObject([{ status: "passed" }])
+    expect(checks).toBe(1)
+
+    baseSha = UPDATED
+    const integrated = await app.line.integrate({ prs: [pr.id] }, runtime)
+
+    expect(integrated).toMatchObject([{ status: "passed", reusedFrom: "R2" }])
+    expect(checks).toBe(2)
+    expect(checkedBases).toEqual([BASE, UPDATED])
+    expect(app.line.get("R2")?.prs).toMatchObject([{ baseSha: UPDATED }])
+  })
+
+  it("projects a pinned-run failure as a failed check fact before its Job starts", async () => {
+    await using app = await createLineApp()
+    const pr = await submitBranch(app, "task/stale-before-job")
+    await app.bays.requestChecks({ pr: pr.id })
+    expect(await app.line.admit({ prs: [pr.id] })).toHaveLength(1)
+    await app.bays.closePr({ pr: pr.id })
+
+    expect(await app.line.run("R1", runtime)).toMatchObject({ status: "failed", error: { code: "stale-pr" } })
+    expect(app.line.checks([pr.id])).toMatchObject([
+      { pr: pr.id, revision: 1, run: "R1", step: "check", status: "failed", error: { code: "stale-pr" } },
+    ])
+  })
+
+  it("keeps admission globally FIFO even when a later PR is selected explicitly", async () => {
+    const checked: string[] = []
+    await using app = await createLineApp({
+      check: (input) => {
+        checked.push(input.prs[0]!.id)
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const first = await submitBranch(app, "task/first-check")
+    const second = await submitBranch(app, "task/second-check")
+    await app.bays.requestChecks({ pr: first.id })
+    await app.bays.requestChecks({ pr: second.id })
+
+    expect(app.line.eligibility(second.id)).toMatchObject({ checks: { status: "queued", position: 2 } })
+    expect(await app.line.admit({ prs: [second.id] })).toEqual([])
+    const firstRun = (await app.line.admit({}))[0]
+    if (firstRun === undefined) throw new Error("expected the first queued admission")
+    expect(firstRun.prs).toMatchObject([{ id: first.id }])
+    await app.line.run(firstRun.id, runtime)
+
+    const secondRun = (await app.line.admit({}))[0]
+    if (secondRun === undefined) throw new Error("expected the second queued admission")
+    expect(secondRun.prs).toMatchObject([{ id: second.id }])
+    await app.line.run(secondRun.id, runtime)
+    expect(checked).toEqual([first.id, second.id])
+  })
+
+  it("orders admission age and position from the check request fact, not the earlier push", async () => {
+    let now = "2026-01-01T00:00:00.000Z"
+    await using app = await createLineApp({}, createMemoryJournal(), () => now)
+    const pushedFirst = await submitBranch(app, "task/pushed-first")
+    now = "2026-01-01T00:01:00.000Z"
+    const requestedFirst = await submitBranch(app, "task/requested-first")
+    now = "2026-01-01T00:02:00.000Z"
+    await app.bays.requestChecks({ pr: requestedFirst.id })
+    now = "2026-01-01T00:03:00.000Z"
+    await app.bays.requestChecks({ pr: pushedFirst.id })
+
+    expect(app.line.eligibility(requestedFirst.id)).toMatchObject({
+      checks: { status: "queued", position: 1, queuedAt: "2026-01-01T00:02:00.000Z" },
+    })
+    expect(app.line.eligibility(pushedFirst.id)).toMatchObject({
+      checks: { status: "queued", position: 2, queuedAt: "2026-01-01T00:03:00.000Z" },
+    })
+    const admitted = (await app.line.admit({}))[0]
+    expect(admitted?.prs).toMatchObject([{ id: requestedFirst.id }])
+  })
+
+  it("naturally misses the journal cache when the installed-step identity changes", async () => {
+    const journal = createMemoryJournal()
+    const first = await createLineApp({}, journal)
+    const pr = await submitBranch(first, "task/cache-identity")
+    await first.bays.requestChecks({ pr: pr.id })
+    const admitted = (await first.line.admit({ prs: [pr.id] }))[0]
+    if (admitted === undefined) throw new Error("expected an admission run")
+    await first.line.run(admitted.id, runtime)
+    await first.close()
+
+    let changedChecks = 0
+    await using changed = await createLineApp(
+      {
+        checkRevision: "check-v2",
+        check: () => {
+          changedChecks++
+          return { status: "passed", output: { checked: true } }
+        },
+      },
+      journal,
+      () => "2026-01-01T00:00:00.000Z",
+      ids(100),
+    )
+    const readmission = (await changed.line.admit({ prs: [pr.id] }))[0]
+    if (readmission === undefined) throw new Error("expected a cache-miss admission run")
+    expect(readmission).toMatchObject({
+      status: "running",
+      steps: [{ name: "check", revision: "check-v2" }, { name: "review" }],
+    })
+    await changed.line.run(readmission.id, runtime)
+
+    const integrated = (await changed.line.integrate({ prs: [pr.id] }, runtime))[0]
+    expect(integrated).toMatchObject({
+      status: "passed",
+      reusedFrom: readmission.id,
+      steps: [{ name: "merge" }, { name: "deploy" }],
+    })
+    expect(changedChecks).toBe(1)
+  })
+
+  it("keeps a draft admission failure ineligible after ready until an explicit retry", async () => {
+    let fail = true
+    await using app = await createLineApp({
+      check: (input) =>
+        fail && input.prs[0]?.id === "PR1"
+          ? { status: "failed", error: { code: "typecheck-failed", message: "src/model.ts:12 failed" } }
+          : { status: "passed", output: { checked: true } },
+    })
+    await app.bays.submit({ branch: "task/draft-red", headSha: HEAD, base: "main", baseSha: BASE, draft: true })
+    await app.bays.requestChecks({ pr: "PR1" })
+    const admitted = (await app.line.admit({ prs: ["PR1"] }))[0]
+    if (admitted === undefined) throw new Error("expected an admission run")
+    expect(await app.line.run(admitted.id, runtime)).toMatchObject({ status: "failed" })
+    expect(app.state().bays.prs.PR1?.status).toBe("pushed")
+
+    const healthy = await submitBranch(app, "task/healthy-after-red")
+    await app.bays.requestChecks({ pr: healthy.id })
+    const healthyAdmission = (await app.line.admit({}))[0]
+    if (healthyAdmission === undefined) throw new Error("expected unrelated checks to bypass failed history")
+    expect(healthyAdmission.prs).toMatchObject([{ id: healthy.id }])
+    await app.line.run(healthyAdmission.id, runtime)
+
+    await app.bays.ready({ pr: "PR1" })
+    expect(app.line.eligibility("PR1")).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-failed" },
+      checks: { status: "failed", run: "R1" },
+    })
+    await expect(app.line.integrate({ prs: ["PR1"] }, runtime)).rejects.toThrow("checks failed in R1")
+
+    fail = false
+    const retry = (await app.line.admit({ prs: ["PR1"], retry: true }))[0]
+    if (retry === undefined) throw new Error("expected a retry admission run")
+    await app.line.run(retry.id, runtime)
+    expect(app.line.eligibility("PR1")).toMatchObject({ runnable: true, checks: { status: "passed" } })
+  })
+
   it("persists a line hold and refuses unlisted PRs before creating a run", async () => {
     const journal = createMemoryJournal()
     const first = await createLineApp({}, journal)
@@ -444,9 +767,13 @@ describe("Line", () => {
       ],
     })
 
+    let deploymentAvailable = false
     await using deployApp = await createLineApp({
       batch: 2,
-      deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
+      deploy: () =>
+        deploymentAvailable
+          ? { status: "passed", output: { environment: "staging" } }
+          : { status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } },
     })
     const deployed = await submitBranch(deployApp, "task/deploy-fails")
     const companion = await submitBranch(deployApp, "task/deploy-companion")
@@ -456,6 +783,10 @@ describe("Line", () => {
       [deployed.id]: { status: "integrated" },
       [companion.id]: { status: "integrated" },
     })
+    deploymentAvailable = true
+    expect(
+      (await deployApp.line.integrate({ prs: [deployed.id, companion.id], steps: ["deploy"] }, runtime))[0],
+    ).toMatchObject({ status: "passed", steps: [{ name: "deploy" }] })
   })
 
   it("allows unrelated work while waiting and refuses a completed stale revision", async () => {

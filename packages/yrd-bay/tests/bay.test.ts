@@ -151,6 +151,78 @@ describe("withBays", () => {
     await app.close()
   })
 
+  it("journals revision-bound review and comment facts without inventing a draft status", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "task/review-me", headSha: HEAD_1, draft: true })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 1, headSha: HEAD_1 })
+    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).events).toHaveLength(1)
+    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).events).toHaveLength(0)
+    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: HEAD_2 })).events).toHaveLength(1)
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+    expect(app.bays.pr("PR1")?.checkRequests.at(-1)).toMatchObject({ baseSha: HEAD_2 })
+
+    const comment = {
+      pr: "PR1",
+      actor: "@cto",
+      ref: "dialog-1",
+      note: "Please explain the failure mode.",
+    }
+    expect((await app.bays.comment(comment)).events).toHaveLength(1)
+    expect((await app.bays.comment(comment)).events).toHaveLength(0)
+
+    const approval = {
+      pr: "PR1",
+      actor: "@cto",
+      decision: "approve" as const,
+      ref: "verdict-1",
+      note: "Exact revision reviewed.",
+    }
+    expect((await app.bays.review(approval)).events).toHaveLength(1)
+    expect((await app.bays.review(approval)).events).toHaveLength(0)
+    await expect(app.bays.review({ ...approval, decision: "reject" })).rejects.toThrow(
+      "review ref 'verdict-1' already records a different fact",
+    )
+    const { note: _note, ...approvalWithoutNote } = approval
+    await expect(app.bays.review(approvalWithoutNote)).rejects.toThrow(
+      "review ref 'verdict-1' already records a different fact",
+    )
+
+    expect(app.bays.reviewState("PR1")).toMatchObject({
+      approved: true,
+      current: { revision: 1, headSha: HEAD_1, actor: "@cto", decision: "approve", ref: "verdict-1" },
+      stale: [],
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "pushed",
+      reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", actor: "@cto", ref: "verdict-1" }],
+      comments: [{ revision: 1, headSha: HEAD_1, actor: "@cto", ref: "dialog-1" }],
+    })
+
+    expect((await app.bays.ready({ pr: "PR1" })).events).toHaveLength(1)
+    expect((await app.bays.ready({ pr: "PR1" })).events).toHaveLength(0)
+    expect(app.bays.pr("PR1")?.status).toBe("submitted")
+
+    await app.bays.intake({ branch: "task/review-me", headSha: HEAD_2, base: "main" })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 2, headSha: HEAD_2 })
+    expect(app.bays.reviewState("PR1")).toMatchObject({
+      approved: false,
+      stale: [{ revision: 1, headSha: HEAD_1, decision: "approve", ref: "verdict-1" }],
+    })
+    expect(app.bays.reviewState("PR1").current).toBeUndefined()
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+  })
+
+  it("refuses to append check requests to terminal PR history", async () => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "task/terminal-checks", headSha: HEAD_1 })
+    await app.bays.closePr({ pr: "PR1" })
+
+    await expect(app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).rejects.toThrow(
+      "PR 'PR1' is withdrawn, not checkable",
+    )
+  })
+
   it("closes a direct bayless PR so it leaves live selection while history remains", async () => {
     const { app, workspace } = await createHarness()
 

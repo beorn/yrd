@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
-import type { LineRun, LineStep, LineSummary } from "@yrd/line"
+import type { LineRun, LineStep, LineSummary, PRCheckRecord, PREligibility } from "@yrd/line"
 import { Box, Link, Table, Text } from "silvery"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
@@ -561,7 +561,7 @@ function stepOutput(step: LineStep): string {
 }
 
 function lineOutcome(run: LineRun): string {
-  if (run.status === "passed") return "integrated"
+  if (run.status === "passed") return lineIntegration(run) === undefined ? "passed" : "integrated"
   if (run.status === "failed") return "rejected"
   return run.status
 }
@@ -932,13 +932,127 @@ export function LineRunsView({ runs }: { runs: readonly LineRun[] }) {
   )
 }
 
-export function PRResultView({ prs, runs }: { prs: readonly PR[]; runs: readonly LineRun[] }) {
+export function PREligibilityView({ rows }: { rows: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[] }) {
+  const data = rows.map(({ pr, eligibility }) => ({
+    pr: pr.id,
+    branch: pr.branch,
+    revision: pr.revision,
+    ready: eligibility.runnable ? "yes" : "no",
+    why: eligibility.reason?.message ?? "ready",
+    review: eligibility.review.required
+      ? eligibility.review.approved
+        ? `approved${eligibility.review.actor === undefined ? "" : ` by ${eligibility.review.actor}`}`
+        : eligibility.review.decision === "reject"
+          ? `rejected${eligibility.review.actor === undefined ? "" : ` by ${eligibility.review.actor}`}`
+          : "required"
+      : "not required",
+    checks: `${eligibility.checks.status}${
+      eligibility.checks.position === undefined ? "" : ` #${eligibility.checks.position}`
+    }`,
+  }))
+  return (
+    <Table
+      data={data}
+      columns={[
+        { header: "PR", key: "pr" },
+        { header: "BRANCH", key: "branch" },
+        { header: "REV", key: "revision" },
+        { header: "READY", key: "ready" },
+        { header: "WHY", key: "why", grow: true },
+        { header: "REVIEW", key: "review" },
+        { header: "CHECKS", key: "checks" },
+      ]}
+    />
+  )
+}
+
+export type PRCheckViewRecord = PRCheckRecord
+
+function explicitArtifactHref(artifact: string): string {
+  return /^[a-z][a-z0-9+.-]*:\/\//iu.test(artifact) ? artifact : pathToFileURL(resolve(artifact)).href
+}
+
+function checkDiagnosticText(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) return singleLine(safeText(value))
+  const first = isObjectValue(value[0]) ? value[0] : undefined
+  const location =
+    typeof first?.file === "string" && typeof first.line === "number"
+      ? `${first.file}:${first.line}${typeof first.column === "number" ? `:${first.column}` : ""}`
+      : undefined
+  const detail = typeof first?.message === "string" ? first.message : safeText(value[0])
+  return singleLine(
+    `${location === undefined ? "" : `${location} `}${detail}${value.length > 1 ? ` (+${value.length - 1})` : ""}`,
+  )
+}
+
+export function PRChecksView({ records, now = Date.now() }: { records: readonly PRCheckViewRecord[]; now?: number }) {
+  const data = records.map((record) => ({
+    pr: record.pr,
+    revision: record.revision,
+    check: record.step ?? (record.position === undefined ? "-" : `queue #${record.position}`),
+    state: record.status,
+    classification: record.classification ?? "-",
+    age:
+      record.queuedAt === undefined || !Number.isFinite(Date.parse(record.queuedAt))
+        ? "-"
+        : formatDuration(Math.max(0, now - Date.parse(record.queuedAt))),
+    command: singleLine(record.command?.join(" ") ?? "-"),
+    diagnostic: checkDiagnosticText(record.diagnostics ?? record.error?.message),
+    artifact: record.artifact,
+  }))
+  return (
+    <Table
+      data={data}
+      columns={[
+        { header: "PR", key: "pr" },
+        { header: "REV", key: "revision" },
+        { header: "CHECK", key: "check" },
+        {
+          header: "STATE",
+          key: "state",
+          render: (row) => <StatusValue value={row.state} />,
+        },
+        { header: "CLASS", key: "classification" },
+        { header: "AGE", key: "age" },
+        { header: "COMMAND", key: "command" },
+        { header: "DIAGNOSTIC", key: "diagnostic", grow: true },
+        {
+          header: "ARTIFACT",
+          key: "artifact",
+          render: (row) =>
+            row.artifact === undefined ? (
+              <Text>-</Text>
+            ) : (
+              <CellLink href={explicitArtifactHref(row.artifact)}>{row.artifact}</CellLink>
+            ),
+        },
+      ]}
+    />
+  )
+}
+
+export function PRResultView({
+  prs,
+  runs,
+  checks,
+  now,
+}: {
+  prs: readonly PR[]
+  runs: readonly LineRun[]
+  checks?: readonly PRCheckViewRecord[]
+  now?: number
+}) {
   return (
     <Box flexDirection="column">
       <PRStatusView prs={prs} />
-      {runs.length > 0 && (
+      {checks === undefined && runs.length > 0 && (
         <Box marginTop={1}>
           <LineRunsView runs={runs} />
+        </Box>
+      )}
+      {checks !== undefined && (
+        <Box marginTop={1}>
+          <PRChecksView records={checks} now={now} />
         </Box>
       )}
     </Box>
@@ -1462,7 +1576,7 @@ export function lineShowData(
     ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
     retries: lineShowRetries(finished, run),
     landing: lineLanding(run),
-    integration: run.status === "passed" ? lineOutcomeIntegration(run) : undefined,
+    integration: run.status === "passed" ? lineIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     prs: run.prs,
