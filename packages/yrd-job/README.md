@@ -64,10 +64,10 @@ requested -> running -> passed
 `run()` starts the next attempt, heartbeats its lease, executes the pinned
 definition, and settles only while the same executor still owns that attempt.
 Handlers without an observable progress source retain periodic heartbeats.
-Adapters for long-running child work call `context.observeProgress()` before
-starting it and `context.reportProgress()` whenever that child produces output;
-after opting in, a quiet child does not renew the lease merely because its
-executor timer remains alive.
+Adapters for long-running child work call `context.observeProgress?.()` before
+starting it and `context.reportProgress?.()` whenever that child produces
+output; after opting in, a quiet child does not renew the lease merely because
+its executor timer remains alive.
 Losing ownership aborts the handler's `JobContext.signal` instead of allowing a
 stale external operation to keep running.
 `recover()` marks an expired running lease as lost only if a concurrent
