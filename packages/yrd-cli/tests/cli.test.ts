@@ -634,6 +634,10 @@ describe("runYrd", () => {
     }
     expect(app.state().bays.prs.PR1?.submittedAt).toBe(app.state().bays.prs.PR6?.submittedAt)
 
+    const humanStatus = outputIO({ currentBranch: () => "topic/6" })
+    expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
+    expect(humanStatus.stdout()).toContain("6. [ ] PR6")
+
     const status = outputIO({ currentBranch: () => "topic/6" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { id: "PR6" }, position: 6 })

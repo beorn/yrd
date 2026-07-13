@@ -426,7 +426,8 @@ async function viewPr(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  const position = queuedPrPosition(state, pr)
+  const positions = queuedPrPositions(state, pr.base)
+  const position = pr.status === "submitted" ? positions.get(pr.id) : undefined
   await printResult(
     io,
     jsonEnabled(options),
@@ -435,6 +436,7 @@ async function viewPr(
       state: state.bays,
       results,
       selected: target.selected,
+      positions,
       now: io.now?.() ?? Date.now(),
     }),
   )
@@ -521,8 +523,12 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
 
 function queuedPrPosition(state: YrdCliState, pr: PR): number | undefined {
   if (pr.status !== "submitted") return undefined
-  const candidates = Object.values(state.bays.prs).filter((candidate) => candidate.base === pr.base)
-  return submittedPrPositions(candidates).get(pr.id)
+  return queuedPrPositions(state, pr.base).get(pr.id)
+}
+
+function queuedPrPositions(state: YrdCliState, base: string): ReadonlyMap<string, number> {
+  const candidates = Object.values(state.bays.prs).filter((candidate) => candidate.base === base)
+  return submittedPrPositions(candidates)
 }
 
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {

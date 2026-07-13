@@ -873,11 +873,15 @@ function requiredQueuePosition(positions: ReadonlyMap<string, number>, pr: strin
 export function humanQueueProjection(
   result: QueueStatusResult,
   now: number,
-  options: Readonly<{ selected?: ReadonlySet<string>; state?: BaysState }> = {},
+  options: Readonly<{
+    selected?: ReadonlySet<string>
+    state?: BaysState
+    positions?: ReadonlyMap<string, number>
+  }> = {},
 ): HumanQueueProjection {
   const selected = options.selected ?? new Set<string>()
   const rows = projectedPRRows(options.state, result, now)
-  const positions = submittedPrPositions(result.prs)
+  const positions = options.positions ?? submittedPrPositions(result.prs)
   const queueRows = rows
     .filter((row) => row.nativeStatus === "submitted")
     .toSorted((left, right) => requiredQueuePosition(positions, left.pr) - requiredQueuePosition(positions, right.pr))
@@ -1087,17 +1091,19 @@ export function QueueStatusView({
   state,
   results,
   selected,
+  positions,
   now,
 }: {
   state: BaysState
   results: readonly QueueStatusResult[]
   selected: ReadonlySet<string>
+  positions?: ReadonlyMap<string, number>
   now: number
 }) {
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {
-        const projection = humanQueueProjection(result, now, { selected, state })
+        const projection = humanQueueProjection(result, now, { selected, state, positions })
         const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(", ")
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
