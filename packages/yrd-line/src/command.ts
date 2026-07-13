@@ -249,16 +249,42 @@ async function writeArtifacts(
   return artifacts
 }
 
-type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
+type GitResult = Readonly<{
+  code: number
+  stdout: string
+  stderr: string
+  signal: NodeJS.Signals | null
+  timedOut: boolean
+  sweepFailure?: string
+}>
+type GitRunOptions = Readonly<{ signal?: AbortSignal; timeoutMs?: number }>
 type Git = ReturnType<typeof createGit>
 
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
-  const run = async (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> => {
-    const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
-    const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+  const run = async (
+    repo: string,
+    args: readonly string[],
+    allowFailure = false,
+    options: GitRunOptions = {},
+  ): Promise<GitResult> => {
+    const result = await process.run({
+      argv: ["git", "-C", repo, ...args],
+      cwd: repo,
+      env,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    })
+    const completed = {
+      code: result.exitCode,
+      stdout: result.stdout.trim(),
+      stderr: result.stderr.trim(),
+      signal: result.signal,
+      timedOut: result.timedOut,
+      ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+    }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
     }
@@ -541,7 +567,16 @@ type CheckedCandidateResult = Readonly<{ checked: GitCheckEvidence }> | CheckedC
 
 type Gitlink = Readonly<{ path: string; sha: string }>
 type GitlinkAuthority = Readonly<{ url: string; branch: string }>
-type GitlinkFailureCode = "gitlink-not-on-remote-branch" | "gitlink-reachability-unavailable"
+type TreeChange = Readonly<{ path: string; beforeMode: string; afterMode: string; afterSha: string }>
+type GitlinkFailureCode =
+  | "gitlink-authority-changed"
+  | "gitlink-not-on-remote-branch"
+  | "gitlink-reachability-cancelled"
+  | "gitlink-reachability-timeout"
+  | "gitlink-reachability-transport-failed"
+  | "gitlink-reachability-unavailable"
+
+const GITLINK_REACHABILITY_TIMEOUT_MS = 30_000
 
 function gitlinkFailure(code: GitlinkFailureCode, message: string): CheckedCandidateFailure {
   return { error: { code, message } }
@@ -555,6 +590,95 @@ function unpublishedGitlink(link: Gitlink, authority: GitlinkAuthority): Checked
   )
 }
 
+function cancelledGitlink(path: string): CheckedCandidateFailure {
+  return gitlinkFailure(
+    "gitlink-reachability-cancelled",
+    `changed gitlink '${path}' reachability validation was cancelled because the merge job lost ownership`,
+  )
+}
+
+function gitDiagnostic(result: GitResult, fallback: string): string {
+  return result.sweepFailure ?? (result.stderr || result.stdout || fallback)
+}
+
+function treeChanges(output: string): readonly TreeChange[] {
+  if (output === "") return []
+  const fields = output.split("\0")
+  if (fields.pop() !== "" || fields.length % 2 !== 0) throw new Error("git returned invalid raw tree changes")
+  const changes: TreeChange[] = []
+  for (let index = 0; index < fields.length; index += 2) {
+    const header = fields[index]
+    const path = fields[index + 1]
+    if (header === undefined || path === undefined) throw new Error("git returned incomplete raw tree changes")
+    const parsed = /^:(\d{6}) (\d{6}) ([0-9a-f]{40,64}) ([0-9a-f]{40,64}) [A-Z]$/iu.exec(header)
+    if (parsed === null) throw new Error(`git returned invalid raw tree change '${header}'`)
+    const [, beforeMode, afterMode, , afterSha] = parsed
+    if (beforeMode === undefined || afterMode === undefined || afterSha === undefined) {
+      throw new Error(`git returned incomplete raw tree change '${header}'`)
+    }
+    changes.push({ path, beforeMode, afterMode, afterSha })
+  }
+  return changes
+}
+
+function isRawRelativeSubmoduleUrl(url: string): boolean {
+  return url.startsWith("./") || url.startsWith("../")
+}
+
+async function resolveGitlinkUrl(
+  git: Git,
+  repo: string,
+  baseSha: string,
+  name: string,
+  link: Gitlink,
+  rawUrl: string,
+  signal: AbortSignal,
+): Promise<Readonly<{ url: string }> | CheckedCandidateFailure> {
+  if (!isRawRelativeSubmoduleUrl(rawUrl)) return { url: rawUrl }
+  if (signal.aborted) return cancelledGitlink(link.path)
+  const superprojectRemote = await git.run(repo, ["config", "--get", "remote.origin.url"], true, { signal })
+  if (signal.aborted) return cancelledGitlink(link.path)
+  if (superprojectRemote.code !== 0 || superprojectRemote.stdout === "") {
+    return gitlinkFailure(
+      "gitlink-reachability-unavailable",
+      `changed gitlink '${link.path}' uses relative URL '${rawUrl}', but the canonical superproject remote is unavailable`,
+    )
+  }
+
+  const root = await mkdtemp(join(tmpdir(), "yrd-gitlink-authority-"))
+  try {
+    const commands = [
+      { cwd: repo, args: ["clone", "--quiet", "--shared", "--no-checkout", "--", repo, root] },
+      { cwd: root, args: ["config", "remote.origin.url", superprojectRemote.stdout] },
+      { cwd: root, args: ["read-tree", baseSha] },
+      { cwd: root, args: ["checkout-index", "--force", "--", ".gitmodules"] },
+      { cwd: root, args: ["submodule", "init", "--", link.path] },
+    ] as const
+    for (const command of commands) {
+      const result = await git.run(command.cwd, command.args, true, { signal })
+      if (signal.aborted) return cancelledGitlink(link.path)
+      if (result.code !== 0) {
+        return gitlinkFailure(
+          "gitlink-reachability-unavailable",
+          `changed gitlink '${link.path}' could not resolve relative URL '${rawUrl}': ` +
+            gitDiagnostic(result, "git failed"),
+        )
+      }
+    }
+    const resolved = await git.run(root, ["config", "--get", `submodule.${name}.url`], true, { signal })
+    if (signal.aborted) return cancelledGitlink(link.path)
+    if (resolved.code !== 0 || resolved.stdout === "") {
+      return gitlinkFailure(
+        "gitlink-reachability-unavailable",
+        `changed gitlink '${link.path}' could not resolve relative URL '${rawUrl}' from '${superprojectRemote.stdout}'`,
+      )
+    }
+    return { url: isRawRelativeSubmoduleUrl(resolved.stdout) ? resolve(repo, resolved.stdout) : resolved.stdout }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
 function nullTerminatedValue(output: string): string {
   return output.endsWith("\0") ? output.slice(0, -1) : output
 }
@@ -564,36 +688,67 @@ async function gitlinkReachabilityError(
   repo: string,
   link: Gitlink,
   authority: GitlinkAuthority,
+  signal: AbortSignal,
 ): Promise<CheckedCandidateFailure | undefined> {
+  if (signal.aborted) return cancelledGitlink(link.path)
   const root = await mkdtemp(join(tmpdir(), "yrd-gitlink-reachability-"))
   try {
-    const cloned = await git.run(
-      repo,
-      [
-        "clone",
-        "--quiet",
-        "--bare",
-        "--single-branch",
-        "--no-tags",
-        "--branch",
-        authority.branch,
-        "--",
-        authority.url,
-        root,
-      ],
-      true,
-    )
-    if (cloned.code !== 0) {
+    const initialized = await git.run(repo, ["init", "--quiet", "--bare", root], true, { signal })
+    if (signal.aborted) return cancelledGitlink(link.path)
+    if (initialized.code !== 0) {
       return gitlinkFailure(
         "gitlink-reachability-unavailable",
-        `changed gitlink '${link.path}' could not verify canonical branch '${authority.branch}' ` +
-          `at '${authority.url}': ${cloned.stderr || cloned.stdout || "clone failed"}; ` +
-          "restore canonical remote access before retrying",
+        `changed gitlink '${link.path}' could not initialize isolated reachability evidence: ` +
+          gitDiagnostic(initialized, "git init failed"),
       )
     }
-    const present = await git.run(root, ["cat-file", "-e", `${link.sha}^{commit}`], true)
+    let fetched: GitResult
+    try {
+      fetched = await git.run(
+        root,
+        [
+          "fetch",
+          "--quiet",
+          "--no-tags",
+          "--force",
+          "--",
+          authority.url,
+          `+refs/heads/${authority.branch}:refs/yrd/canonical`,
+        ],
+        true,
+        { signal, timeoutMs: GITLINK_REACHABILITY_TIMEOUT_MS },
+      )
+    } catch (cause) {
+      if (signal.aborted) return cancelledGitlink(link.path)
+      return gitlinkFailure(
+        "gitlink-reachability-transport-failed",
+        `changed gitlink '${link.path}' could not fetch exact canonical branch ` +
+          `'refs/heads/${authority.branch}' from '${authority.url}': ${messageOf(cause)}`,
+      )
+    }
+    if (signal.aborted) return cancelledGitlink(link.path)
+    if (fetched.timedOut) {
+      return gitlinkFailure(
+        "gitlink-reachability-timeout",
+        `changed gitlink '${link.path}' canonical branch fetch from '${authority.url}' exceeded ` +
+          `${GITLINK_REACHABILITY_TIMEOUT_MS}ms` +
+          (fetched.sweepFailure === undefined ? "" : `; ${fetched.sweepFailure}`),
+      )
+    }
+    if (fetched.code !== 0 || fetched.sweepFailure !== undefined) {
+      return gitlinkFailure(
+        "gitlink-reachability-transport-failed",
+        `changed gitlink '${link.path}' could not fetch exact canonical branch ` +
+          `'refs/heads/${authority.branch}' from '${authority.url}': ${gitDiagnostic(fetched, "git fetch failed")}`,
+      )
+    }
+    const present = await git.run(root, ["cat-file", "-e", `${link.sha}^{commit}`], true, { signal })
+    if (signal.aborted) return cancelledGitlink(link.path)
     if (present.code !== 0) return unpublishedGitlink(link, authority)
-    const reachable = await git.run(root, ["merge-base", "--is-ancestor", link.sha, "HEAD"], true)
+    const reachable = await git.run(root, ["merge-base", "--is-ancestor", link.sha, "refs/yrd/canonical"], true, {
+      signal,
+    })
+    if (signal.aborted) return cancelledGitlink(link.path)
     if (reachable.code === 0) return undefined
     if (reachable.code === 1) return unpublishedGitlink(link, authority)
     return gitlinkFailure(
@@ -618,27 +773,15 @@ function configEntries(output: string): ReadonlyArray<Readonly<{ key: string; va
     })
 }
 
-async function configValue(git: Git, repo: string, blob: string, key: string): Promise<string | undefined> {
-  const result = await git.run(repo, ["config", "-z", "--blob", blob, "--get", key], true)
+async function configValue(
+  git: Git,
+  repo: string,
+  blob: string,
+  key: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const result = await git.run(repo, ["config", "-z", "--blob", blob, "--get", key], true, { signal })
   return result.code === 0 ? nullTerminatedValue(result.stdout) : undefined
-}
-
-function selectedGitlink(output: string, path: string): Gitlink | undefined {
-  if (output === "") return undefined
-  if (!output.endsWith("\0") || output.slice(0, -1).includes("\0")) {
-    throw new Error(`git returned invalid tree evidence for '${path}'`)
-  }
-  const record = output.slice(0, -1)
-  const separator = record.indexOf("\t")
-  if (separator < 0 || record.slice(separator + 1) !== path) {
-    throw new Error(`git returned invalid tree evidence for '${path}'`)
-  }
-  const [mode, type, sha] = record.slice(0, separator).split(" ")
-  if (mode !== "160000") return undefined
-  if (type !== "commit" || sha === undefined || !/^[0-9a-f]{40,64}$/iu.test(sha)) {
-    throw new Error(`git returned invalid gitlink evidence for '${path}'`)
-  }
-  return { path, sha }
 }
 
 async function validateChangedBranchGitlinks(
@@ -647,36 +790,88 @@ async function validateChangedBranchGitlinks(
   baseSha: string,
   candidateSha: string,
   lineBranch: string,
+  signal: AbortSignal,
 ): Promise<CheckedCandidateFailure | undefined> {
+  const changed = await git.run(
+    repo,
+    ["diff-tree", "--no-commit-id", "--raw", "--no-abbrev", "-r", "-z", "--no-renames", baseSha, candidateSha, "--"],
+    true,
+    { signal },
+  )
+  if (signal.aborted) return cancelledGitlink("candidate")
+  if (changed.code !== 0) {
+    return gitlinkFailure(
+      "gitlink-reachability-unavailable",
+      `could not compare candidate gitlinks: ${gitDiagnostic(changed, "git diff-tree failed")}`,
+    )
+  }
+  const changes = treeChanges(changed.stdout)
+  const gitlinks = new Map(
+    changes
+      .filter((change) => change.afterMode === "160000")
+      .map((change) => [change.path, { path: change.path, sha: change.afterSha }] as const),
+  )
+  const changesGitlink = changes.some((change) => change.beforeMode === "160000" || change.afterMode === "160000")
+  if (!changesGitlink) return undefined
+  if (changes.some((change) => change.path === ".gitmodules")) {
+    return gitlinkFailure(
+      "gitlink-authority-changed",
+      `candidate '${candidateSha}' changes .gitmodules authority and a gitlink in one delivery; ` +
+        "land and audit the authority transition separately before changing its pin",
+    )
+  }
+
   const blob = `${baseSha}:.gitmodules`
-  if ((await git.run(repo, ["ls-tree", "-z", baseSha, "--", ".gitmodules"])).stdout === "") return undefined
+  if ((await git.run(repo, ["ls-tree", "-z", baseSha, "--", ".gitmodules"], false, { signal })).stdout === "") {
+    return undefined
+  }
   const branches = await git.run(
     repo,
     ["config", "-z", "--blob", blob, "--get-regexp", "^submodule\\..*\\.branch$"],
     true,
+    { signal },
   )
+  if (signal.aborted) return cancelledGitlink("candidate")
   if (branches.code === 1) return undefined
-  if (branches.code !== 0) throw new Error(branches.stderr || branches.stdout || `could not read '${blob}'`)
+  if (branches.code !== 0) {
+    return gitlinkFailure(
+      "gitlink-reachability-unavailable",
+      `could not read canonical submodule branches from '${blob}': ${gitDiagnostic(branches, "git config failed")}`,
+    )
+  }
   for (const entry of configEntries(branches.stdout)) {
     const name = entry.key.slice("submodule.".length, -".branch".length)
-    const path = await configValue(git, repo, blob, `submodule.${name}.path`)
-    const url = await configValue(git, repo, blob, `submodule.${name}.url`)
-    if (path === undefined || url === undefined || path === "" || url === "") {
+    const path = await configValue(git, repo, blob, `submodule.${name}.path`, signal)
+    if (signal.aborted) return cancelledGitlink(path ?? name)
+    if (path === undefined || path === "") {
       return gitlinkFailure(
         "gitlink-reachability-unavailable",
-        `branch-tracked submodule '${name}' has incomplete canonical remote evidence in '${blob}'; ` +
-          "define its path and URL before retrying",
+        `branch-tracked submodule '${name}' has no canonical path evidence in '${blob}'`,
       )
     }
-    const changed = await git.run(repo, ["diff", "--quiet", baseSha, candidateSha, "--", path], true)
-    if (changed.code === 0) continue
-    if (changed.code !== 1) throw new Error(changed.stderr || changed.stdout || `could not compare gitlink '${path}'`)
-    const selected = await git.run(repo, ["ls-tree", "-z", candidateSha, "--", path])
-    const link = selectedGitlink(selected.stdout, path)
+    const link = gitlinks.get(path)
     if (link === undefined) continue
+    const rawUrl = await configValue(git, repo, blob, `submodule.${name}.url`, signal)
+    if (signal.aborted) return cancelledGitlink(link.path)
+    if (rawUrl === undefined || rawUrl === "") {
+      return gitlinkFailure(
+        "gitlink-reachability-unavailable",
+        `branch-tracked submodule '${name}' has no canonical URL evidence in '${blob}'`,
+      )
+    }
     const branch = entry.value === "." ? lineBranch : entry.value
-    const authority = { url, branch }
-    const error = await gitlinkReachabilityError(git, repo, link, authority)
+    const validBranch = await git.run(repo, ["check-ref-format", "--branch", branch], true, { signal })
+    if (signal.aborted) return cancelledGitlink(link.path)
+    if (validBranch.code !== 0) {
+      return gitlinkFailure(
+        "gitlink-reachability-unavailable",
+        `branch-tracked submodule '${name}' has invalid canonical branch '${branch}' in '${blob}'`,
+      )
+    }
+    const resolved = await resolveGitlinkUrl(git, repo, baseSha, name, link, rawUrl, signal)
+    if ("error" in resolved) return resolved
+    const authority = { url: resolved.url, branch }
+    const error = await gitlinkReachabilityError(git, repo, link, authority, signal)
     if (error !== undefined) return error
   }
   return undefined
@@ -687,6 +882,7 @@ async function validateCheckedCandidate(
   repo: string,
   input: StepExecution,
   baseSha: string,
+  signal: AbortSignal,
 ): Promise<CheckedCandidateResult> {
   const checked = checkedCandidate(input.shape)
   if (checked === undefined) return { error: { code: "check-missing", message: "merge requires a pinned check" } }
@@ -712,6 +908,7 @@ async function validateCheckedCandidate(
     checked.baseSha,
     checked.candidateSha,
     primaryPR(input).base,
+    signal,
   )
   if (gitlinkError !== undefined) return gitlinkError
   return { checked }
@@ -727,6 +924,13 @@ async function authoritativeLineBase(git: Git, repo: string, branch: string): Pr
     throw new Error(fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`)
   }
   return inspectLineBase(git, repo, branch)
+}
+
+async function configuredLineAuthority(git: Git, repo: string): Promise<string | undefined> {
+  const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  if (remote.code === 0 && remote.stdout !== "") return remote.stdout
+  if (remote.code === 1 || remote.stdout === "") return undefined
+  throw new Error(gitDiagnostic(remote, "could not read remote.origin.url"))
 }
 
 export async function resolveGitLineTarget(options: {
@@ -755,12 +959,12 @@ async function landingError(
 export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return async (input): Promise<JobResult<IntegrationProof>> => {
+  return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
       const base = await authoritativeLineBase(git, repo, branch)
       const baseSha = base.sha
-      const candidate = await validateCheckedCandidate(git, repo, input, baseSha)
+      const candidate = await validateCheckedCandidate(git, repo, input, baseSha, context.signal)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
       const { checked } = candidate
       const remote = base.remote
@@ -852,6 +1056,7 @@ export function configuredMergeStep<Shape extends PRShape>(
     variables: (input) => {
       const checked = checkedCandidate(input.shape)
       return {
+        YRD_BASE_SHA: checked?.baseSha,
         YRD_CANDIDATE_SHA: checked?.candidateSha,
         YRD_CANDIDATE_REF: checked?.candidateRef,
         ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
@@ -861,10 +1066,29 @@ export function configuredMergeStep<Shape extends PRShape>(
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
+      const authority = await configuredLineAuthority(git, repo)
       const base = await authoritativeLineBase(git, repo, branch)
-      const candidate = await validateCheckedCandidate(git, repo, input, base.sha)
+      const candidate = await validateCheckedCandidate(git, repo, input, base.sha, context.signal)
       if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
 
+      const current = await authoritativeLineBase(git, repo, branch)
+      const currentAuthority = await configuredLineAuthority(git, repo)
+      if (currentAuthority !== authority) {
+        return failed("stale-base", `line '${branch}' authority changed before the merge command could land`)
+      }
+      if (current.sha !== base.sha) {
+        const missing = await landingError(git, repo, input, candidate.checked, current.sha)
+        if (missing === undefined) {
+          return {
+            status: "passed",
+            output: IntegrationProofSchema.parse({ commit: current.sha, baseSha: current.sha }),
+          }
+        }
+        return failed(
+          "stale-base",
+          `line '${branch}' moved from '${base.sha}' to '${current.sha}' before the merge command could land`,
+        )
+      }
       const outcome = await command(input, context)
       let landing: GitLineTarget
       try {
