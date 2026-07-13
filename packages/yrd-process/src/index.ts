@@ -45,6 +45,7 @@ export type ProcessResult = ProcessResultBase &
 
 export type Process = Readonly<{
   run(request: ProcessRequest): Promise<ProcessResult>
+  /** Aborts and awaits every active run, including process-group settlement. */
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
 }>

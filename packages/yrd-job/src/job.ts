@@ -47,6 +47,7 @@ export type JobContext = Readonly<{
   id: string
   attempt: number
   executor: string
+  /** Aborts when this execution loses ownership or its runtime closes. */
   signal: AbortSignal
 }>
 

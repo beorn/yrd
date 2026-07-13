@@ -697,10 +697,11 @@ export async function runYrdProcess(
   let host: YrdHost | undefined
   let closePromise: Promise<void> | undefined
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
-  const removeShutdownSignals = bindProcessShutdown(closeHost)
+  let removeShutdownSignals: () => void = () => undefined
   try {
     const activeHost = await createYrdHost({ cwd: io.cwd })
     host = activeHost
+    removeShutdownSignals = bindProcessShutdown(closeHost)
     const selectedArgv = await resolveBaySubmitArgv(invocation, {
       worktree: activeHost.repository.worktree,
       process: activeHost.process,
@@ -724,7 +725,10 @@ export async function runYrdProcess(
     await diagnostic(io, invocation.name, error)
     return classifyFailure(error).exitCode
   } finally {
-    removeShutdownSignals()
-    await closeHost()
+    try {
+      await closeHost()
+    } finally {
+      removeShutdownSignals()
+    }
   }
 }
