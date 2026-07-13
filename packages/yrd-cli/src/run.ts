@@ -354,8 +354,17 @@ async function submitBays(
     })
     prs.push(pr)
   }
-  const runs =
-    options.wait === true ? await app.line.integrate({ prs: prs.map((pr) => pr.id) }, runtimeOptions(io)) : []
+  let runs: readonly LineRun[] = []
+  if (options.wait === true) {
+    try {
+      runs = await app.line.integrate({ prs: prs.map((pr) => pr.id) }, runtimeOptions(io))
+    } catch (error) {
+      const { exitCode, failure } = classifyFailure(error)
+      if (!jsonEnabled(options) || failure.kind !== "refusal" || failure.code !== "line-held") throw error
+      io.stdout(stableJson({ command: "bay.submit", prs, blocked: failure }))
+      return exitCode
+    }
+  }
   await printResult(
     io,
     jsonEnabled(options),

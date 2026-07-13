@@ -618,6 +618,27 @@ describe("runYrd", () => {
     expect(Object.keys(dirty.state().bays.prs)).toEqual([])
   })
 
+  it("returns the created PR with a typed block when submit --wait hits a line hold", async () => {
+    const app = await createApp()
+    expect(
+      await runYrd(
+        app,
+        yrd("line", "hold", "main", "--reason", "operator freeze", "--json"),
+        outputIO().io,
+      ),
+    ).toBe(0)
+    expect(await runYrd(app, yrd("bay", "open", "held-submit"), outputIO().io)).toBe(0)
+
+    const submit = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("bay", "submit", "--wait", "--json"), submit.io)).toBe(1)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "bay.submit",
+      prs: [{ id: "PR1", base: "main", status: "submitted" }],
+      blocked: { code: "line-held" },
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ base: "main", status: "submitted" })
+  })
+
   it("submits and revises an existing source branch through the injected Git revision boundary", async () => {
     const app = await createApp()
     const resolved: string[] = []
