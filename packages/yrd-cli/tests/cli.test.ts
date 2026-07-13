@@ -2299,7 +2299,9 @@ describe("runYrd", () => {
       new Map([[lineRevisionKey(run.prs[0]!), "2026-07-12T10:49:24.335Z"]]),
     )
 
-    expect(rows[0]).toMatchObject({
+    const row = rows[0]
+    if (row === undefined) throw new Error("missing history row")
+    expect(row).toMatchObject({
       run: "R4",
       pr: "PR23",
       revision: "4",
@@ -2364,7 +2366,7 @@ describe("runYrd", () => {
     }
 
     const hourRow = {
-      ...rows[0]!,
+      ...row,
       subject: "topic",
       locations: [],
       totalDurationMs: 3_600_000,
@@ -2381,14 +2383,14 @@ describe("runYrd", () => {
 
     const crossDayRows = [
       {
-        ...rows[0]!,
+        ...row,
         run: "R3",
         pr: "PR22",
         startedAt: "2026-07-11T23:59:58.000Z",
         started: "2026-07-11T23:59:58.000Z",
         locations: [],
       },
-      rows[0]!,
+      row,
     ]
     for (const width of [80, 120]) {
       const human = await renderString(createElement(LineLogView, { rows: crossDayRows, columns: width }), {

@@ -337,7 +337,8 @@ describe("Line command adapters", () => {
     )
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
 
-    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]
+    if (run === undefined) throw new Error("missing integration run")
     expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
     const job = run.steps[0]?.job
     if (job?.status !== "failed") throw new Error("check did not fail")
@@ -350,8 +351,11 @@ describe("Line command adapters", () => {
     })
     expect(evidence.candidateSha).toHaveLength(40)
     const artifacts = new Map(evidence.artifacts.map((artifact) => [artifact.name, artifact.path]))
-    expect(await readFile(artifacts.get("stdout")!, "utf8")).toBe("check stdout\n")
-    expect(await readFile(artifacts.get("stderr")!, "utf8")).toBe("check stderr\n")
+    const stdoutArtifact = artifacts.get("stdout")
+    const stderrArtifact = artifacts.get("stderr")
+    if (stdoutArtifact === undefined || stderrArtifact === undefined) throw new Error("missing command artifacts")
+    expect(await readFile(stdoutArtifact, "utf8")).toBe("check stdout\n")
+    expect(await readFile(stderrArtifact, "utf8")).toBe("check stderr\n")
   })
 
   it("lands the exact audited candidate and its durable artifacts", async () => {
