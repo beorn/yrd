@@ -461,6 +461,31 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
 }
 
 describe("runYrd", () => {
+  it.fails("preserves an opaque originating request id at PR admission", async () => {
+    const app = await createApp()
+    const requestId = "pr 61's docs"
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/request-bound", "--correlation", `tribe-request:${requestId}`, "--json"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [
+        {
+          id: "PR1",
+          correlation: { namespace: "tribe-request", id: requestId },
+          revisions: [{ revision: 1, correlation: { namespace: "tribe-request", id: requestId } }],
+        },
+      ],
+    })
+  })
+
   it("projects git bay onto the public bay subtree and exposes no internal operations", async () => {
     const app = await createApp()
     const gitHelp = outputIO()
