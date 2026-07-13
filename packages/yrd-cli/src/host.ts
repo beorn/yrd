@@ -457,7 +457,10 @@ export type YrdHost = Readonly<{
   process: Process
   services: YrdCliServices
   drain(): Promise<void>
+  /** Releases the owned app, process, and scope. Idempotent with async disposal. */
   close(): Promise<void>
+  /** Releases the host through the same lifecycle as close(). */
+  [Symbol.asyncDispose](): Promise<void>
 }>
 
 function receiverTarget(app: YrdCliApp) {
@@ -563,6 +566,7 @@ export async function createYrdHost(options: { cwd?: string; env?: NodeJS.Proces
       services,
       drain,
       close,
+      [Symbol.asyncDispose]: close,
     })
   } catch (error) {
     await closeRuntime(app, process, scope)

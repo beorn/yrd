@@ -165,6 +165,11 @@ Every runtime owns a child `Scope`. Timers, subprocesses, subscriptions, and
 temporary resources belong to that scope or one of its children. Package code
 does not create unmanaged timers.
 
+Public `Yrd`, `Process`, and `YrdHost` objects implement `AsyncDisposable`, so
+callers can own them with `await using`. Their async-dispose hooks share the
+same idempotent lifecycle as `close()` and release owned scopes and resources
+exactly once.
+
 All diagnostic output and timing uses Loggily namespaces and spans. Domain
 results remain return values and events; CLI formatting is a presentation
 layer over those values, not a second logging path. Core replay spans report
