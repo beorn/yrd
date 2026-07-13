@@ -2,7 +2,8 @@
 // @level l2
 // @consumer Yrd packages, product docs, and frozen workspace lock
 
-import { readdirSync, readFileSync } from "node:fs"
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { extname, join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
@@ -77,13 +78,30 @@ describe("noun cutover ratchet", () => {
   })
 
   it("accepts the checked-in workspace lock in frozen mode", () => {
-    const result = Bun.spawnSync({
-      cmd: ["bun", "install", "--frozen-lockfile", "--lockfile-only", "--ignore-scripts"],
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const detail = `${result.stdout.toString()}${result.stderr.toString()}`
-    expect(result.exitCode, detail).toBe(0)
+    const standalone = mkdtempSync(join(tmpdir(), "yrd-frozen-lock-"))
+    try {
+      copyFileSync(join(root, "package.json"), join(standalone, "package.json"))
+      copyFileSync(join(root, "bun.lock"), join(standalone, "bun.lock"))
+      for (const entry of readdirSync(join(root, "packages"), { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue
+        const manifest = join(root, "packages", entry.name, "package.json")
+        if (!existsSync(manifest)) continue
+        const target = join(standalone, "packages", entry.name)
+        mkdirSync(target, { recursive: true })
+        copyFileSync(manifest, join(target, "package.json"))
+      }
+      const before = readFileSync(join(standalone, "bun.lock"), "utf8")
+      const result = Bun.spawnSync({
+        cmd: ["bun", "install", "--frozen-lockfile", "--lockfile-only", "--ignore-scripts"],
+        cwd: standalone,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const detail = `${result.stdout.toString()}${result.stderr.toString()}`
+      expect(result.exitCode, detail).toBe(0)
+      expect(readFileSync(join(standalone, "bun.lock"), "utf8"), detail).toBe(before)
+    } finally {
+      rmSync(standalone, { recursive: true, force: true })
+    }
   })
 })
