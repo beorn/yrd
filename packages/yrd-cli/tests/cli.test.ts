@@ -190,6 +190,7 @@ async function createApp(
     waitingEvaluator?: string
     mergeRuns?: string[]
     failingCheck?: boolean
+    checkFailure?: Readonly<{ code: string; message: string; artifact?: string }>
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -206,9 +207,20 @@ async function createApp(
             url: "https://ci.invalid/run/1",
             checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
           }
-        : options.failingCheck
-          ? { status: "failed", error: { code: "check-failed", message: "check failed" } }
-          : { status: "passed", output: { checked: true } },
+        : options.checkFailure !== undefined
+          ? {
+              status: "failed",
+              error: { code: options.checkFailure.code, message: options.checkFailure.message },
+              output: {
+                artifacts:
+                  options.checkFailure.artifact === undefined
+                    ? []
+                    : [{ name: "failure", path: options.checkFailure.artifact }],
+              },
+            }
+          : options.failingCheck
+            ? { status: "failed", error: { code: "check-failed", message: "check failed" } }
+            : { status: "passed", output: { checked: true } },
     { revision: "check-v1", output: JsonSchema },
   )
   const merge = withMerge(
@@ -392,6 +404,7 @@ function fakeRun(input: {
   isolationPart?: 0 | 1
   integration?: { commit: string; baseSha: string }
   error?: { code: string; message: string }
+  subject?: string
 }): LineRun {
   const startedAt = input.startedAt
   return {
@@ -399,7 +412,7 @@ function fakeRun(input: {
     prs: [
       {
         id: input.pr?.id ?? "PR1",
-        branch: `topic/${input.id}`,
+        branch: input.subject ?? `topic/${input.id}`,
         base: input.base ?? "main",
         revision: input.pr?.revision ?? 1,
         headSha: input.pr?.headSha ?? HEAD_SHA,
@@ -1175,6 +1188,136 @@ describe("runYrd", () => {
     expect(wideSummary?.trimEnd().length).toBe(wideHeader?.trimEnd().length)
   })
 
+  it.fails("projects runnable work and bounded rejection evidence without stale holds or unsafe retry teaching", async () => {
+    const temp = mkdtempSync("/tmp/yrd-output-polish-")
+    const artifact = join(temp, "failure.log")
+    const failure = [
+      "PR 'PR1' could not be applied: hint: Recursive merging with submodules currently only supports trivial cases.",
+      "hint: Please manually handle the merging of each conflicted submodule.",
+      "hint: This can be accomplished with the following steps:",
+      "hint:   git add vendor/yrd",
+      "hint:   git commit",
+      "    at applyCandidate (/repo/packages/yrd-line/src/command.ts:404:12)",
+    ].join("\n")
+    writeFileSync(artifact, `${failure}\n`)
+    const app = await createApp({ checkFailure: { code: "apply-conflict", message: failure, artifact } })
+    await app.bays.submit({
+      branch: "task/failing",
+      name: "fix(cli): bound operator failures",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
+      "failed",
+    )
+    const resolveLineTarget = async () => ({ base: "main", sha: BASE_SHA })
+    const now = () => Date.parse("2026-07-09T12:01:00.000Z")
+    const rejectedOnly = outputIO({ columns: 120, now, resolveLineTarget })
+    expect(await runYrd(app, yrd("line", "status"), rejectedOnly.io), rejectedOnly.stderr()).toBe(0)
+    expect.soft(rejectedOnly.stdout()).toMatch(/main@[a-f0-9]{12}\s+0\s+0\s+0\s+1/u)
+
+    await app.bays.submit({
+      branch: "task/runnable",
+      name: "feat(cli): keep runnable work visible",
+      headSha: "2".repeat(40),
+      base: "origin/main",
+      baseSha: BASE_SHA,
+    })
+
+    // Historical aliases can retain a hold after the canonical line was released.
+    await app.line.hold({ base: "origin/main", reason: "released maintenance", allowedPRs: [] })
+    await app.line.release("main")
+
+    for (const columns of [80, 120]) {
+      const status = outputIO({ columns, now, resolveLineTarget })
+      expect(await runYrd(app, yrd("line", "status"), status.io), status.stderr()).toBe(0)
+      const lines = status.stdout().trimEnd().split("\n")
+      expect.soft(lines.length).toBeLessThanOrEqual(14)
+      expect.soft(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(columns)
+      expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12}\s+1\s+0\s+0\s+1/u)
+      expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
+      expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
+      expect.soft(status.stdout()).toContain("[!]")
+      expect.soft(status.stdout()).toContain("apply-conflict: PR 'PR1' could not be applied")
+      expect.soft(status.stdout()).toContain(`evidence: ${artifact}`)
+      expect.soft(status.stdout()).toContain("next: fix task/failing; yrd bay submit task/failing --base main")
+      expect.soft(status.stdout()).not.toContain("hint:")
+      expect.soft(status.stdout()).not.toContain("released maintenance")
+      expect.soft(status.stdout()).not.toContain("yrd line integrate PR1 --retry")
+    }
+    const tty = outputIO({ columns: 80, color: true, now, resolveLineTarget })
+    expect(await runYrd(app, yrd("line", "status"), tty.io), tty.stderr()).toBe(0)
+    expect.soft(tty.stdout()).toContain(pathToFileURL(artifact).href)
+
+    let mounted: ReactElement | undefined
+    const watch = outputIO({ now, resolveLineTarget })
+    const live = withLiveRenderer(watch.io, async (element) => {
+      mounted = element
+    })
+    expect(await runYrd(app, yrd("watch"), live), watch.stderr()).toBe(0)
+    if (mounted === undefined) throw new Error("expected watch pane to mount")
+    const snapshot = (mounted.props as LineWatchPaneProps).initial
+    expect.soft(snapshot.results[0]?.hold).toBeUndefined()
+    expect.soft(watchQueueRows(snapshot.results[0]!, now()).map((row) => row.pr)).toEqual(["PR2"])
+    for (const width of [80, 120]) {
+      const frame = await renderString(createElement(LineWatchView, snapshot), { width, height: 24, plain: true })
+      const lines = frame.trimEnd().split("\n")
+      expect.soft(lines.length).toBeLessThanOrEqual(16)
+      expect.soft(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(width)
+      expect.soft(frame).toContain("OPEN 1")
+      expect.soft(frame).toContain("feat(cli): keep runnable work visible")
+      expect.soft(frame).toContain("apply-conflict: PR 'PR1' could not be applied")
+      expect.soft(frame).toContain(`evidence: ${artifact}`)
+      expect.soft(frame).toContain("next: fix task/failing; yrd bay submit task/failing --base main")
+      expect.soft(frame).not.toContain("released maintenance")
+      expect.soft(frame).not.toContain("hint:")
+      expect.soft(frame).not.toContain("yrd line integrate PR1 --retry")
+    }
+
+    const json = outputIO({ now, resolveLineTarget })
+    expect(await runYrd(app, yrd("line", "status", "--json"), json.io), json.stderr()).toBe(0)
+    const parsed = JSON.parse(json.stdout()) as { results: readonly LineStatusResult[] }
+    expect.soft(parsed.results[0]?.hold).toBeUndefined()
+    expect(parsed.results[0]?.finished[0]?.error?.message).toBe(failure)
+    expect(parsed.results[0]?.finished[0]?.steps[0]?.job).toMatchObject({
+      output: { artifacts: [{ name: "failure", path: artifact }] },
+    })
+    rmSync(temp, { recursive: true, force: true })
+  })
+
+  it.fails("spotlights the active run in bounded status output", async () => {
+    const app = await createApp({ waitingCheck: true })
+    await app.bays.submit({
+      branch: "task/active",
+      name: "fix(cli): show the active queue check",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+    })
+    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
+      "waiting",
+    )
+
+    for (const columns of [80, 120]) {
+      const status = outputIO({
+        columns,
+        now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+        resolveLineTarget: async () => ({ base: "main", sha: BASE_SHA }),
+      })
+      expect(await runYrd(app, yrd("line", "status"), status.io), status.stderr()).toBe(0)
+      expect(status.stdout()).toContain("ACTIVE R1 PR1 fix(cli): show the active queue check")
+      expect(
+        Math.max(
+          ...status
+            .stdout()
+            .split("\n")
+            .map((line) => line.length),
+        ),
+      ).toBeLessThanOrEqual(columns)
+    }
+  })
+
   it("projects local and remote spellings of one target as a single logical line", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "task/one", headSha: "1".repeat(40), base: "main" })
@@ -1889,6 +2032,57 @@ describe("runYrd", () => {
     expect(visibleTty).not.toContain(stderr)
 
     rmSync(temp, { recursive: true, force: true })
+  })
+
+  it.fails("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {
+    const runs = Array.from({ length: 22 }, (_, index) => {
+      const minute = String(index).padStart(2, "0")
+      return fakeRun({
+        id: `R${index + 1}`,
+        status: "failed",
+        subject: "fix(cli): bounded operator history",
+        startedAt: `2026-07-09T12:${minute}:00.000Z`,
+        finishedAt: `2026-07-09T12:${minute}:30.000Z`,
+        steps: [
+          fakeStep(
+            "check",
+            "failed",
+            fakeJob({
+              id: `00000000-0000-7000-8000-${String(index + 200).padStart(12, "0")}`,
+              status: "failed",
+              error: { code: "check-failed", message: `failure ${index + 1}` },
+            }),
+          ),
+        ],
+      })
+    })
+    const rows = lineLogRows(
+      [fakeSummary(runs)],
+      new Set<string>(),
+      undefined,
+      new Map([["PR1", "rejected"]]),
+      Date.parse("2026-07-09T13:00:00.000Z"),
+      [],
+    )
+    expect(rows).toHaveLength(22)
+    expect(rows[0]).toMatchObject({ subject: "fix(cli): bounded operator history" })
+
+    for (const width of [80, 120]) {
+      const human = await renderString(createElement(LineLogView, { rows, columns: width }), {
+        width,
+        height: 24,
+        plain: true,
+      })
+      const physicalRows = human.split("\n").filter((line) => /R\d+\/PR1/u.test(line))
+      expect(physicalRows).toHaveLength(20)
+      expect(physicalRows[0]).toContain("R22/PR1@1/rejected")
+      expect(physicalRows.at(-1)).toContain("R3/PR1@1/rejected")
+      expect(physicalRows[0]).toContain("[!]")
+      expect(physicalRows[0]).toContain("fix(cli): bounded operator history")
+      expect(Math.max(...human.split("\n").map((line) => line.length))).toBeLessThanOrEqual(width)
+      expect(human).not.toContain("R2/PR1@1/rejected")
+      expect(human).not.toContain("R1/PR1@1/rejected")
+    }
   })
 
   it("runs a real task contest to durable evidence, then selects and promotes the exact winner", async () => {
