@@ -305,7 +305,7 @@ async function resolveQueueTarget(
   repo: string,
   configuredBase: string,
   requestedBase: string,
-  options: Readonly<{ requireAligned?: boolean }> = {},
+  options: Readonly<{ refreshAuthority?: boolean }> = {},
 ): Promise<Readonly<{ base: string; sha: string }>> {
   const configured = baseIdentity(configuredBase)
   const requested = baseIdentity(requestedBase)
@@ -313,16 +313,8 @@ async function resolveQueueTarget(
   if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
     throw new Error(`yrd: queue base '${requestedBase}' does not resolve`)
   }
-  const inspect = options.requireAligned === true ? resolveGitQueueTarget : inspectGitQueueTarget
+  const inspect = options.refreshAuthority === true ? resolveGitQueueTarget : inspectGitQueueTarget
   const target = await inspect({ inject: { process }, repo, branch: base })
-  if (target.diverged && options.requireAligned === true) {
-    raiseFailure(
-      "refusal",
-      "queue-target-diverged",
-      `yrd: queue '${base}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
-        `${target.remote}/${base} ${target.remoteSha?.slice(0, 12)}; align the local branch before admission`,
-    )
-  }
   return { base, sha: target.sha }
 }
 
@@ -428,7 +420,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       defaultBase: baseIdentity(options.config.base),
       resolveBase: async (base) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
-          requireAligned: true,
+          refreshAuthority: true,
         })
         return { base: target.base, baseSha: target.sha }
       },

@@ -468,13 +468,6 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
       const target = await authoritativeQueueBase(git, repo, branch)
-      if (target.diverged) {
-        return failed(
-          "queue-target-diverged",
-          `queue '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
-            `${target.remote}/${branch} ${target.remoteSha?.slice(0, 12)}; align the local branch before integration`,
-        )
-      }
       const baseSha = target.sha
       return await withScratch(
         git,

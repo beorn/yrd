@@ -140,8 +140,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
-  it("refuses stale local queue authority before recording a PR", async () => {
+  it("refreshes queue authority without touching dirty behind operator main", async () => {
     const { repo, featureSha } = await repository()
+    const localMain = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
     await git(repo, "init", "-q", "--bare", remote)
     await git(repo, "remote", "add", "origin", remote)
@@ -150,8 +151,10 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await writeFile(join(repo, "remote.txt"), "remote\n")
     await git(repo, "add", "remote.txt")
     await git(repo, "commit", "-qm", "remote main")
+    const remoteMain = await git(repo, "rev-parse", "HEAD")
     await git(repo, "push", "-q", "origin", "HEAD:main")
     await git(repo, "switch", "-q", "main")
+    await writeFile(join(repo, "operator-wip.txt"), "preserve these bytes\n")
 
     const config: ResolvedYrdProjectConfig = {
       base: "main",
@@ -170,13 +173,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(
-      app.bays.submitSelection("issue/feature", {
-        resolveRevision: async () => featureSha,
-        run: { runner: "test", leaseMs: 60_000 },
-      }),
-    ).rejects.toThrow("differs from authoritative")
-    expect(app.state().bays.prs).toEqual({})
+    const submitted = await app.bays.submitSelection("issue/feature", {
+      resolveRevision: async () => featureSha,
+      run: { runner: "test", leaseMs: 60_000 },
+    })
+
+    expect(submitted).toMatchObject({ revision: 1, headSha: featureSha, baseSha: remoteMain, status: "submitted" })
+    expect(await git(repo, "rev-parse", "main")).toBe(localMain)
+    expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
   it("refreshes a shared journal before the host selects queued PRs", async () => {
