@@ -511,6 +511,44 @@ describe("runYrd", () => {
     expect(line.stdout()).toContain("$ yrd line integrate PR7 --steps check,merge")
   })
 
+  it("exposes the locked noun-cutover surface and teaches that only the queue merges", async () => {
+    const app = await createApp()
+    const root = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("--help"), root.io)).toBe(0)
+    expect(root.stdout()).toContain("Pick an issue")
+    for (const command of ["pr", "bay", "issue", "contest", "queue", "log", "watch", "prime"]) {
+      expect(root.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
+    }
+    for (const removed of ["line", "task", "integrate", "hold", "release", "admin"]) {
+      expect(root.stdout()).not.toMatch(new RegExp(`^\\s+${removed}\\b`, "mu"))
+    }
+
+    const queue = outputIO()
+    expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
+    for (const command of ["run", "pause", "resume", "finish", "init", "deinit", "audit"]) {
+      expect(queue.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
+    }
+
+    const pr = outputIO()
+    expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
+    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "retry", "close"]) {
+      expect(pr.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
+    }
+
+    const contest = outputIO()
+    expect(await runYrd(app, yrd("contest", "--help"), contest.io)).toBe(0)
+    expect(contest.stdout()).toMatch(/^\s+eval\b/mu)
+    expect(contest.stdout()).toMatch(/^\s+view\b/mu)
+    expect(contest.stdout()).not.toMatch(/^\s+(?:evaluate|show)\b/mu)
+
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
+    const merge = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", "PR1"), merge.io)).toBe(2)
+    expect(merge.stdout()).toBe("")
+    expect(merge.stderr()).toContain("the queue is the only merger")
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+  })
+
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
     const app = await createApp()
     const open = outputIO({ color: true, columns: 64 })
