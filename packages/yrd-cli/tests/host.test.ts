@@ -55,6 +55,53 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   return { repo, featureSha }
 }
 
+async function compositionRepository(): Promise<{
+  repo: string
+  oldPinSha: string
+  newPinSha: string
+  sourceTipSha: string
+  rootBaseSha: string
+}> {
+  const { repo } = await repository()
+  const module = join(repo, "..", "module")
+  await git(repo, "config", "protocol.file.allow", "always")
+  await git(repo, "switch", "-q", "main")
+  await git(repo, "init", "-q", "-b", "main", module)
+  await git(module, "config", "user.name", "Yrd Test")
+  await git(module, "config", "user.email", "yrd@example.invalid")
+  await writeFile(join(module, "README.md"), "base\n")
+  await git(module, "add", "README.md")
+  await git(module, "commit", "-qm", "base")
+  const oldPinSha = await git(module, "rev-parse", "HEAD")
+
+  await git(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep")
+  await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "true"\nmerge: {}\n')
+  await git(repo, "add", ".yrd.yml", ".gitmodules", "dep")
+  await git(repo, "commit", "-qm", "add dependency and queue")
+
+  await git(module, "switch", "-qc", "issue/source")
+  await mkdir(join(module, "src"), { recursive: true })
+  await writeFile(join(module, "src/candidate.ts"), "export const candidate = true\n")
+  await git(module, "add", "src/candidate.ts")
+  await git(module, "commit", "-qm", "candidate payload")
+  const sourceTipSha = await git(module, "rev-parse", "HEAD")
+
+  await git(module, "switch", "-q", "main")
+  await mkdir(join(module, "src"), { recursive: true })
+  await writeFile(join(module, "src/upstream.ts"), "export const upstream = true\n")
+  await git(module, "add", "src/upstream.ts")
+  await git(module, "commit", "-qm", "upstream payload")
+  const newPinSha = await git(module, "rev-parse", "HEAD")
+
+  await git(join(repo, "dep"), "fetch", "-q", "origin")
+  await git(join(repo, "dep"), "checkout", "-q", newPinSha)
+  await git(repo, "add", "dep")
+  await git(repo, "commit", "-qm", "advance dependency")
+  const rootBaseSha = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "branch", "issue/source", rootBaseSha)
+  return { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha }
+}
+
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
@@ -767,19 +814,40 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stdout = ""
     let stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "submit", "--base", "main", "--json"], {
-        cwd: linked,
-        stdout: (text) => {
-          stdout += text
+      await runYrdProcess(
+        [
+          "/usr/bin/bun",
+          "/usr/local/bin/yrd",
+          "bay",
+          "submit",
+          "--base",
+          "main",
+          "--issue",
+          "github:beorn/yrd#42",
+          "--json",
+        ],
+        {
+          cwd: linked,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
         },
-        stderr: (text) => {
-          stderr += text
-        },
-      }),
+      ),
       stderr,
     ).toBe(0)
     expect(JSON.parse(stdout)).toMatchObject({
-      prs: [{ branch: "issue/feature", headSha: featureSha, base: "main", status: "submitted" }],
+      prs: [
+        {
+          branch: "issue/feature",
+          headSha: featureSha,
+          base: "main",
+          issue: "github:beorn/yrd#42",
+          status: "submitted",
+        },
+      ],
     })
 
     await git(linked, "switch", "-q", "--detach")
@@ -798,6 +866,114 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     ).toBe(1)
     expect(stdout).toBe("")
     expect(stderr).toContain("no current Git branch; pass a bay or branch selector")
+  })
+
+  it("submits and lands one composed source packet through the public CLI", async () => {
+    const { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await compositionRepository()
+    const manifest = join(repo, "..", "composition.json")
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      }),
+    )
+    let submitStdout = ""
+    let submitStderr = ""
+    expect(
+      await runYrdProcess(
+        [
+          "/usr/bin/bun",
+          "/usr/local/bin/yrd",
+          "bay",
+          "submit",
+          "issue/source",
+          "--base",
+          "main",
+          "--composition",
+          manifest,
+          "--json",
+        ],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            submitStdout += text
+          },
+          stderr: (text) => {
+            submitStderr += text
+          },
+        },
+      ),
+      submitStderr,
+    ).toBe(0)
+    expect(JSON.parse(submitStdout)).toMatchObject({
+      prs: [{ id: "PR1", composition: { sources: [{ repo: "dep", tipSha: sourceTipSha }] } }],
+    })
+    await rm(manifest)
+
+    let diffStdout = ""
+    let diffStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "diff", "PR1"], {
+        cwd: repo,
+        stdout: (text) => {
+          diffStdout += text
+        },
+        stderr: (text) => {
+          diffStderr += text
+        },
+      }),
+      diffStderr,
+    ).toBe(0)
+    expect(diffStdout).toContain("Source composition")
+    expect(diffStdout).toContain("dep issue/source")
+    expect(diffStdout).toContain("src/candidate.ts")
+
+    let runStdout = ""
+    let runStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          runStdout += text
+        },
+        stderr: (text) => {
+          runStderr += text
+        },
+      }),
+      runStderr,
+    ).toBe(0)
+    const result = JSON.parse(runStdout).results[0]
+    expect(result).toMatchObject({
+      status: "passed",
+      integration: {
+        commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        sourceRewrites: [
+          {
+            repo: "dep",
+            oldBaseSha: oldPinSha,
+            oldTipSha: sourceTipSha,
+            newBaseSha: newPinSha,
+            newTipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+    const candidateSha = result.integration.commit as string
+    const landedPinSha = result.integration.sourceRewrites[0].newTipSha as string
+    expect(await git(repo, "rev-parse", "main")).toBe(candidateSha)
+    expect(await git(repo, "rev-parse", "main^")).toBe(rootBaseSha)
+    expect(await git(join(repo, "dep"), "rev-parse", "HEAD")).toBe(landedPinSha)
+    expect(await git(repo, "status", "--porcelain")).toBe("")
   })
 
   it("reports a failed queue against origin when the operator HEAD is detached", async () => {
