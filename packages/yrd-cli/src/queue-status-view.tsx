@@ -1561,21 +1561,21 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
       <Table
         data={[data]}
         columns={[
-          { header: "RUN", key: "run" },
-          { header: "BASE", key: "base" },
+          { header: "RUN", key: "run", minWidth: 4 },
+          { header: "BASE", key: "base", minWidth: 5 },
           {
             header: "STATUS",
             key: "status",
             minWidth: 11,
             render: (row) => <StatusValue value={row.status} />,
           },
-          { header: "OUTCOME", key: "outcome" },
+          { header: "OUTCOME", key: "outcome", minWidth: 11 },
           { header: "START", key: "started", grow: true },
           { header: "END", key: "finished", grow: true },
-          { header: "TOTAL", key: "totalDuration", align: "right" },
-          { header: "ACTIVE", key: "activeDuration", align: "right" },
-          { header: "WAIT", key: "waitDuration", align: "right" },
-          { header: "RETRY", key: "retries", align: "right" },
+          { header: "TOTAL", key: "totalDuration", minWidth: 7, align: "right" },
+          { header: "ACTIVE", key: "activeDuration", minWidth: 7, align: "right" },
+          { header: "WAIT", key: "waitDuration", minWidth: 7, align: "right" },
+          { header: "RETRY", key: "retries", minWidth: 6, align: "right" },
           {
             header: "PARENT",
             key: "parent",
@@ -1675,7 +1675,9 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
           {data.steps.map((row) => (
             <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
               <Text wrap="truncate">
-                {`PROOF ${row.step}#${row.attempt} EVIDENCE ${singleQueue(
+                {`PROOF ${row.step}#${row.attempt} ART `}
+                <QueueLogLocationLinks entries={row.locations} compact={false} />
+                {` EVIDENCE ${singleQueue(
                   typeof row.evidence === "string" ? row.evidence : safeText(row.evidence),
                 )} CHECKPOINT ${singleQueue(row.checkpoint)}`}
               </Text>
