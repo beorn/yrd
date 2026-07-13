@@ -517,6 +517,15 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
   return pr as PR
 }
 
+function queuedPrPosition(state: YrdCliState, pr: PR): number | undefined {
+  if (pr.status !== "submitted") return undefined
+  const index = Object.values(state.bays.prs)
+    .filter((candidate) => candidate.base === pr.base && candidate.status === "submitted")
+    .toSorted((left, right) => (left.submittedAt ?? "").localeCompare(right.submittedAt ?? ""))
+    .findIndex((candidate) => candidate.id === pr.id)
+  return index < 0 ? undefined : index + 1
+}
+
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
   const pr = currentPr(app, io)
   await viewPr(app, pr.id, options, io, "pr.status")
@@ -620,8 +629,23 @@ async function pauseQueue(
   options: JsonOption & Readonly<{ reason?: unknown; allow?: unknown }>,
   io: YrdCliIO,
 ): Promise<void> {
-  const target = await resolvedQueueTarget(base ?? "main", io)
+  if (options.reason === undefined) {
+    if (csv(options.allow) !== undefined) usage("--allow requires --reason")
+    const pauses = await queuePauses(app, base, io)
+    const human =
+      pauses.length === 0
+        ? "No paused queues."
+        : pauses
+            .map((pause) => {
+              const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(", ")
+              return `Queue ${pause.base} paused: ${pause.reason} (allowed: ${allowed})`
+            })
+            .join("\n")
+    await printResult(io, jsonEnabled(options), { command: "queue.pause", pauses }, human)
+    return
+  }
   if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
+  const target = await resolvedQueueTarget(base ?? "main", io)
   const pause = await app.queue.pause({
     base: target.base,
     reason: options.reason,
@@ -633,6 +657,34 @@ async function pauseQueue(
     jsonEnabled(options),
     { command: "queue.pause", pause },
     `Queue ${pause.base} paused: ${pause.reason} (allowed: ${allowed})`,
+  )
+}
+
+async function queuePauses(app: YrdCliApp, base: string | undefined, io: YrdCliIO) {
+  if (base === undefined) {
+    return Object.values(stateOf(app).queues.pauses).toSorted((left, right) => left.base.localeCompare(right.base))
+  }
+  const target = await resolvedQueueTarget(base, io)
+  const pause = stateOf(app).queues.pauses[target.base]
+  return pause === undefined ? [] : [pause]
+}
+
+async function recoverQueue(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ reason?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.reason?.trim() === "") usage("--reason requires text")
+  const runs = await app.queue.recover({
+    ...runtimeOptions(io),
+    recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
+    ...(options.reason === undefined ? {} : { reason: options.reason }),
+  })
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "queue.recover", results: runs },
+    createElement(QueueRunsView, { runs }),
   )
 }
 
@@ -744,13 +796,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       bay: bay?.id,
       pr: pr?.id,
       base: pr?.base ?? bay?.base,
-      position:
-        pr === undefined
-          ? undefined
-          : Object.values(state.bays.prs)
-              .filter((candidate) => candidate.base === pr.base && candidate.status === "submitted")
-              .toSorted((left, right) => (left.submittedAt ?? "").localeCompare(right.submittedAt ?? ""))
-              .findIndex((candidate) => candidate.id === pr.id) + 1,
+      position: pr === undefined ? undefined : queuedPrPosition(state, pr),
       pause: queue?.pause,
     },
     boundaries: ["the queue is the only merger", "issues are read-only references; edit them in the tracker"],
@@ -820,7 +866,7 @@ function queueLogTargets(
 async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { base?: string; pr?: string; json?: boolean },
+  options: { all?: boolean; base?: string; pr?: string; json?: boolean },
   io: YrdCliIO,
 ): Promise<void> {
   const state = stateOf(app)
@@ -865,7 +911,12 @@ async function logRuns(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "log", rows, ...(coverage === undefined ? {} : { coverage }) },
+    {
+      command: "log",
+      rows,
+      ...(options.all === true ? { results: summaries } : {}),
+      ...(coverage === undefined ? {} : { coverage }),
+    },
     createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
   )
 }
@@ -1244,21 +1295,35 @@ async function listContests(app: YrdCliApp, options: JsonOption, io: YrdCliIO): 
 }
 
 function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): YrdCliExitCode {
-  const pr = requiredPr(app, selector)
-  const next =
-    pr.status === "submitted"
-      ? `yrd queue run ${pr.id}`
-      : pr.status === "rejected"
-        ? `yrd pr retry ${pr.id}`
-        : pr.status === "pushed"
-          ? `yrd pr submit ${pr.id}`
-          : `yrd pr view ${pr.id}`
-  const message = `the queue is the only merger; PR '${pr.id}' is ${pr.status}; run '${next}'`
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) {
+    const next = `yrd pr submit ${selector}`
+    const message = `the queue is the only merger; branch '${selector}' is not submitted; submit it: ${next}`
+    const guidance = {
+      command: "pr.merge",
+      branch: selector,
+      status: "not-submitted",
+      next,
+      guidance: { submit: next },
+      failure: { kind: "refusal", code: "queue-only-merger", message },
+    }
+    if (jsonEnabled(options)) {
+      io.stderr(stableJson(guidance))
+      return 1
+    }
+    refusal(message)
+  }
+
+  const position = queuedPrPosition(stateOf(app), pr)
+  const detail = prMergeRefusalDetail(pr, position)
+  const message = `the queue is the only merger; ${detail.message}`
   const guidance = {
     command: "pr.merge",
     pr: pr.id,
     status: pr.status,
-    next,
+    ...(position === undefined ? {} : { position }),
+    next: detail.next,
+    guidance: detail.guidance,
     failure: { kind: "refusal", code: "queue-only-merger", message },
   }
   if (jsonEnabled(options)) {
@@ -1266,6 +1331,36 @@ function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io
     return 1
   }
   refusal(message)
+}
+
+function prMergeRefusalDetail(
+  pr: PR,
+  position: number | undefined,
+): Readonly<{ next: string; guidance: Readonly<Record<string, string>>; message: string }> {
+  if (pr.status === "submitted") {
+    const watch = `yrd watch --pr ${pr.id}`
+    return {
+      next: watch,
+      guidance: { watch },
+      message: `PR '${pr.id}' is queued${position === undefined ? "" : ` at position ${position}`}; watch: ${watch}`,
+    }
+  }
+  if (pr.status === "rejected") {
+    const inspect = `yrd pr runs ${pr.id}`
+    const retry = `yrd pr retry ${pr.id}`
+    const resubmit = "fix the branch and run yrd pr submit again"
+    return {
+      next: inspect,
+      guidance: { inspect, retry, resubmit },
+      message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${retry} or ${resubmit}`,
+    }
+  }
+  if (pr.status === "pushed") {
+    const submit = `yrd pr submit ${pr.branch}`
+    return { next: submit, guidance: { submit }, message: `PR '${pr.id}' is not queued; submit it: ${submit}` }
+  }
+  const view = `yrd pr view ${pr.id}`
+  return { next: view, guidance: { view }, message: `PR '${pr.id}' is ${pr.status}; see: ${view}` }
 }
 
 function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
@@ -1321,6 +1416,7 @@ function addQueueExamples(queue: CliCommand, name: string): void {
     [`$ ${name} log --base release/2.0`, "show completed work for a base"],
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
     [`$ ${name} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
+    [`$ ${name} queue recover --json`, "recover expired runner leases"],
     [`$ ${name} queue run --watch`, "keep the default queue moving"],
   ])
 }
@@ -1415,6 +1511,7 @@ function buildProgram(
     .description("show queue history, newest first")
     .option("--base <branch>", "scope log to one base branch")
     .option("--pr <pr>", "scope log to one PR")
+    .option("--all", "include lossless queue and run records in JSON")
     .option("--json", "emit stable JSON")
     .action(async (options) => logRuns(installed(), [], options, io))
 
@@ -1460,7 +1557,7 @@ function buildProgram(
   queue
     .command("pause [base]")
     .description("pause new queue runs")
-    .requiredOption("--reason <text>", "record the pause reason")
+    .option("--reason <text>", "record the pause reason")
     .option("--allow [pr...]", "PR ids allowed through the pause")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => pauseQueue(installed(), base, options, io))
@@ -1469,6 +1566,12 @@ function buildProgram(
     .description("resume a paused queue")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => resumeQueue(installed(), base, options, io))
+  queue
+    .command("recover")
+    .description("recover expired runner leases")
+    .option("--reason <text>", "record the recovery reason")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => recoverQueue(installed(), options, io))
   queue
     .command("run [selector...]")
     .description("run queue steps for PRs")

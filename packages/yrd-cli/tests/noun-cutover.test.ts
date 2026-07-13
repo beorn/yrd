@@ -29,7 +29,6 @@ describe("noun cutover ratchet", () => {
     const integrateVerb = ["inte", "grate"].join("")
     const holdVerb = ["ho", "ld"].join("")
     const releaseVerb = ["re", "lease"].join("")
-    const recoverVerb = ["re", "cover"].join("")
     const statusVerb = ["sta", "tus"].join("")
     const showVerb = ["sh", "ow"].join("")
     const logVerb = ["lo", "g"].join("")
@@ -45,7 +44,7 @@ describe("noun cutover ratchet", () => {
       new RegExp(runnerNoun, "iu"),
       new RegExp(waitOption, "u"),
       new RegExp(
-        `\\bqueue\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${recoverVerb}|${statusVerb}|${showVerb}|${logVerb})\\b`,
+        `\\bqueue\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${statusVerb}|${showVerb}|${logVerb})\\b`,
         "iu",
       ),
       new RegExp(`\\byrd\\s+(?:${integrateVerb}|${holdVerb}|${releaseVerb}|${adminNoun})\\b`, "iu"),

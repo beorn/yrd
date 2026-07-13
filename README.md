@@ -174,9 +174,9 @@ yrd pr                      list PRs; submit, view, runs, diff, checkout,
 yrd bay                     list bays; open, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
-yrd queue                   list queues; run, pause, resume, finish, init,
-                            deinit, audit
-yrd log                     terminal queue history
+yrd queue                   list queues; run, pause, resume, recover, finish,
+                            init, deinit, audit
+yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   live read-only dashboard
 yrd prime                   agent briefing plus current delivery context
 ```
@@ -248,24 +248,27 @@ turning actor attribution into a hidden side effect of `bay open`.
 ```text
 yrd queue [--base <branch>] [--json]
 yrd queue run [selector...] [--steps [step...]] [--watch] [--json]
+yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
+yrd queue recover [--reason <text>] [--json]
 yrd queue finish <selector> [--step <name>] (--ok | --fail) [evidence options]
 yrd queue audit [--json]
 yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command  | Input                                  | Output and state                                                                        |
-| -------- | -------------------------------------- | --------------------------------------------------------------------------------------- |
-| bare     | Optional base                          | One queue row per base: counts, pause, target, and oldest-open age                      |
-| `run`    | Zero or more eligible PRs              | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
-| `pause`  | Optional base, reason, and allowlist   | Pauses new intake while allowing active work to settle                                  |
-| `resume` | Optional base                          | Removes the queue pause                                                                 |
-| `finish` | One waiting PR/step plus token/verdict | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`  | Repository                             | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`   | Optional base                          | Resolves and validates queue environment resources                                      |
-| `deinit` | Optional base                          | Releases resources owned by the installed queue adapter                                 |
+| Command   | Input                                         | Output and state                                                                        |
+| --------- | --------------------------------------------- | --------------------------------------------------------------------------------------- |
+| bare      | Optional base                                 | One queue row per base: counts, pause, target, and oldest-open age                      |
+| `run`     | Zero or more eligible PRs                     | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
+| `pause`   | Optional base; reason and allowlist to mutate | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
+| `resume`  | Optional base                                 | Removes the queue pause                                                                 |
+| `recover` | Optional reason                               | Marks only work with expired runner leases lost; a no-op appends nothing                |
+| `finish`  | One waiting PR/step plus token/verdict        | Records external-runner evidence and resumes that exact durable run                     |
+| `audit`   | Repository                                    | Journal, projection, pinned-plan, and installed-step findings; no state change          |
+| `init`    | Optional base                                 | Resolves and validates queue environment resources                                      |
+| `deinit`  | Optional base                                 | Releases resources owned by the installed queue adapter                                 |
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owned: use `yrd pr
@@ -521,7 +524,7 @@ cache to reconcile.
 
 Pre-cutover `.git/yrd/events.jsonl` and `.git/bay/journal.jsonl` files remain
 opaque, read-only legacy data. Yrd never decodes, migrates, appends, or rewrites
-them; `yrd log --json` reports their paths and frame counts only as a coverage
+them; `yrd log --all --json` reports their paths and frame counts only as a coverage
 pointer while all new authority starts in `events-v3.jsonl`.
 
 Serialized callers may retry a stable UUIDv7 Command id; trusted adapters may

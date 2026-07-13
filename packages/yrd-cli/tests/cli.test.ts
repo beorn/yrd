@@ -540,10 +540,9 @@ describe("runYrd", () => {
 
     const queue = outputIO()
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
-    for (const command of ["run", "pause", "resume", "finish", "init", "deinit", "audit"]) {
+    for (const command of ["run", "pause", "resume", "recover", "finish", "init", "deinit", "audit"]) {
       expect(queue.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
-    expect(queue.stdout()).not.toMatch(/^\s+recover\b/mu)
     const queueRun = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--help"), queueRun.io)).toBe(0)
     expect(queueRun.stdout()).not.toContain("--retry")
@@ -560,14 +559,29 @@ describe("runYrd", () => {
     expect(contest.stdout()).toMatch(/^\s+view\b/mu)
     expect(contest.stdout()).not.toMatch(/^\s+(?:evaluate|show)\b/mu)
 
-    await openAndSubmit(app)
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
+    const direct = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", "topic/direct", "--json"), direct.io)).toBe(1)
+    expect(direct.stdout()).toBe("")
+    expect(JSON.parse(direct.stderr())).toMatchObject({
+      command: "pr.merge",
+      branch: "topic/direct",
+      status: "not-submitted",
+      next: "yrd pr submit topic/direct",
+      guidance: { submit: "yrd pr submit topic/direct" },
+      failure: { kind: "refusal", code: "queue-only-merger" },
+    })
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+
+    await openAndSubmit(app)
+    const submitted = await Array.fromAsync(app.events()).then((events) => events.length)
     const merge = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1"), merge.io)).toBe(1)
     expect(merge.stdout()).toBe("")
     expect(merge.stderr()).toContain("the queue is the only merger")
-    expect(merge.stderr()).toContain("yrd queue run PR1")
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+    expect(merge.stderr()).toContain("queued at position 1")
+    expect(merge.stderr()).toContain("yrd watch --pr PR1")
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(submitted)
 
     const mergeJson = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), mergeJson.io)).toBe(1)
@@ -575,10 +589,12 @@ describe("runYrd", () => {
     expect(JSON.parse(mergeJson.stderr())).toMatchObject({
       command: "pr.merge",
       pr: "PR1",
-      next: "yrd queue run PR1",
+      position: 1,
+      next: "yrd watch --pr PR1",
+      guidance: { watch: "yrd watch --pr PR1" },
       failure: { kind: "refusal", code: "queue-only-merger" },
     })
-    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(submitted)
   })
 
   it("keeps JSON discriminators faithful and finds a direct-branch PR for status", async () => {
@@ -611,6 +627,55 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
+  it("executes bare projections with their canonical JSON discriminators", async () => {
+    const app = await createApp()
+    const surfaces = [
+      { args: ["--json"], command: "dashboard" },
+      { args: ["queue", "--json"], command: "queue.list" },
+      { args: ["pr", "--json"], command: "pr.list" },
+      { args: ["issue", "--json"], command: "issue.list" },
+      { args: ["log", "--json"], command: "log" },
+      { args: ["prime", "--json"], command: "prime" },
+    ] as const
+
+    for (const surface of surfaces) {
+      const output = outputIO()
+      expect(await runYrd(app, yrd(...surface.args), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({ command: surface.command })
+      expect(output.stdout()).not.toContain("Usage:")
+    }
+  })
+
+  it("emits lossless queue runs only when log --all is requested", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+
+    const ordinary = outputIO()
+    expect(await runYrd(app, yrd("log", "--json"), ordinary.io), ordinary.stderr()).toBe(0)
+    expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("results")
+
+    const lossless = outputIO()
+    expect(await runYrd(app, yrd("log", "--all", "--json"), lossless.io), lossless.stderr()).toBe(0)
+    expect(JSON.parse(lossless.stdout())).toMatchObject({
+      command: "log",
+      results: [
+        {
+          base: "main",
+          finished: [
+            {
+              id: "R1",
+              prs: [{ id: "PR1", revision: 1 }],
+              shape: { results: { check: expect.any(Object) } },
+              steps: [{ name: "check" }, { name: "merge" }],
+              integration: expect.any(Object),
+            },
+          ],
+        },
+      ],
+    })
+  })
+
   it("teaches PR-owned retry when pr merge is invoked for rejected work", async () => {
     const app = await createApp({ failingCheck: true })
     await openAndSubmit(app)
@@ -621,7 +686,12 @@ describe("runYrd", () => {
     expect(JSON.parse(output.stderr())).toMatchObject({
       command: "pr.merge",
       status: "rejected",
-      next: "yrd pr retry PR1",
+      next: "yrd pr runs PR1",
+      guidance: {
+        inspect: "yrd pr runs PR1",
+        retry: "yrd pr retry PR1",
+        resubmit: "fix the branch and run yrd pr submit again",
+      },
     })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
@@ -659,7 +729,6 @@ describe("runYrd", () => {
     const retiredHold = ["ho", "ld"].join("")
     const retiredRelease = ["re", "lease"].join("")
     const retiredAdmin = ["ad", "min"].join("")
-    const retiredRecover = ["re", "cover"].join("")
     const retiredRetry = `--${["re", "try"].join("")}`
     for (const args of [
       [retiredQueueNoun],
@@ -669,7 +738,6 @@ describe("runYrd", () => {
       [retiredHold],
       [retiredRelease],
       [retiredAdmin],
-      ["queue", retiredRecover],
       ["queue", "run", retiredRetry],
     ]) {
       const before = await Array.fromAsync(app.events()).then((events) => events.length)
@@ -900,10 +968,16 @@ describe("runYrd", () => {
     expect(app.queue.get("R1")?.steps.map((step) => step.job?.status)).toEqual(["passed", "passed"])
   })
 
-  it("keeps domain recovery available without exposing another queue verb", async () => {
+  it("recovers only expired queue work through the public JSON command", async () => {
     const mergeRuns: string[] = []
     const app = await createApp({ mergeRuns, failingCheck: true })
     await openAndSubmit(app)
+    const beforeNoop = await Array.fromAsync(app.events()).then((events) => events.length)
+    const noop = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    expect(await runYrd(app, yrd("queue", "recover", "--json"), noop.io), noop.stderr()).toBe(0)
+    expect(JSON.parse(noop.stdout())).toEqual({ command: "queue.recover", results: [] })
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeNoop)
+
     expect((await app.queue.run({ prs: ["PR1"] }, { runner: "first-runner", leaseMs: 60_000 }))[0]?.status).toBe(
       "failed",
     )
@@ -922,14 +996,15 @@ describe("runYrd", () => {
     })
     expect(app.queue.get("R2")?.status).toBe("running")
 
-    const recovered = await app.queue.recover({
-      runner: "recovery",
-      leaseMs: 60_000,
-      recoveryTime: "2026-07-09T12:00:02.000Z",
-      reason: "runner interrupted",
-      now: () => Date.parse("2026-07-09T12:00:02.000Z"),
+    const recovery = outputIO({ now: () => Date.parse("2026-07-09T12:00:02.000Z") })
+    expect(
+      await runYrd(app, yrd("queue", "recover", "--reason", "runner interrupted", "--json"), recovery.io),
+      recovery.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(recovery.stdout())).toMatchObject({
+      command: "queue.recover",
+      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }],
     })
-    expect(recovered).toMatchObject([{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }])
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
     expect(app.queue.get("R2")?.steps[1]?.job).toBeUndefined()
     expect(mergeRuns).toEqual([])
@@ -1001,6 +1076,12 @@ describe("runYrd", () => {
     const app = await createApp()
     await app.bays.submit({ branch: "issue/blocked", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "issue/allowed", headSha: "2".repeat(40), base: "main" })
+    const beforeRead = await Array.fromAsync(app.events()).then((events) => events.length)
+    const unpaused = outputIO()
+    expect(await runYrd(app, yrd("queue", "pause", "--json"), unpaused.io)).toBe(0)
+    expect(JSON.parse(unpaused.stdout())).toEqual({ command: "queue.pause", pauses: [] })
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRead)
+
     const pause = outputIO()
 
     expect(
@@ -1014,6 +1095,14 @@ describe("runYrd", () => {
       command: "queue.pause",
       pause: { base: "main", reason: "operator freeze", allowedPRs: ["PR2"] },
     })
+    const afterPause = await Array.fromAsync(app.events()).then((events) => events.length)
+    const paused = outputIO()
+    expect(await runYrd(app, yrd("queue", "pause", "--json"), paused.io)).toBe(0)
+    expect(JSON.parse(paused.stdout())).toMatchObject({
+      command: "queue.pause",
+      pauses: [{ base: "main", reason: "operator freeze", allowedPRs: ["PR2"] }],
+    })
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterPause)
 
     const blocked = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(1)

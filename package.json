@@ -2,7 +2,7 @@
   "name": "git-yrd",
   "version": "0.0.1",
   "private": true,
-  "description": "Software delivery orchestration",
+  "description": "Agentic software delivery",
   "homepage": "https://yrd.dev",
   "license": "MIT",
   "author": "Bjørn Stabell <bjorn@stabell.org>",

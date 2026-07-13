@@ -466,6 +466,29 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
   it("finds a direct-branch PR for status and refuses pr merge without appending", async () => {
     const { repo } = await repository()
     await git(repo, "switch", "-q", "issue/feature")
+    const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
+    let missingJson = ""
+    let missingStdout = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "merge", "issue/feature", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          missingStdout += text
+        },
+        stderr: (text) => {
+          missingJson += text
+        },
+      }),
+    ).toBe(1)
+    expect(missingStdout).toBe("")
+    expect(JSON.parse(missingJson)).toMatchObject({
+      command: "pr.merge",
+      branch: "issue/feature",
+      status: "not-submitted",
+      next: "yrd pr submit issue/feature",
+    })
+    expect(await Bun.file(journal).exists()).toBe(false)
+
     let submitJson = ""
     let submitError = ""
     expect(
@@ -498,7 +521,6 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     ).toBe(0)
     expect(JSON.parse(statusJson)).toMatchObject({ command: "pr.status", pr: { id: "PR1" } })
 
-    const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
     const before = await readFile(journal, "utf8")
     let mergeJson = ""
     expect(
@@ -510,7 +532,91 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
         },
       }),
     ).toBe(1)
-    expect(JSON.parse(mergeJson)).toMatchObject({ command: "pr.merge", next: "yrd queue run PR1" })
+    expect(JSON.parse(mergeJson)).toMatchObject({
+      command: "pr.merge",
+      position: 1,
+      next: "yrd watch --pr PR1",
+      guidance: { watch: "yrd watch --pr PR1" },
+    })
+    expect(await readFile(journal, "utf8")).toBe(before)
+  })
+
+  it("executes every bare read and no-op recovery without creating journal state", async () => {
+    const { repo } = await repository()
+    const surfaces = [
+      { args: ["--json"], command: "dashboard" },
+      { args: ["queue", "--json"], command: "queue.list" },
+      { args: ["pr", "--json"], command: "pr.list" },
+      { args: ["issue", "--json"], command: "issue.list" },
+      { args: ["log", "--all", "--json"], command: "log" },
+      { args: ["prime", "--json"], command: "prime" },
+      { args: ["queue", "pause", "--json"], command: "queue.pause" },
+      { args: ["queue", "recover", "--json"], command: "queue.recover" },
+    ] as const
+
+    for (const surface of surfaces) {
+      let stdout = ""
+      let stderr = ""
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", ...surface.args], {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        }),
+        `${surface.args.join(" ")}: ${stderr}`,
+      ).toBe(0)
+      expect(JSON.parse(stdout), surface.args.join(" ")).toMatchObject({ command: surface.command })
+      expect(stderr).toBe("")
+    }
+
+    expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
+  })
+
+  it("teaches runs, retry, and fix-resubmit for a rejected direct-branch PR without appending", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await git(repo, "switch", "-q", "issue/feature")
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: () => undefined,
+      }),
+    ).toBe(0)
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--json"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: () => undefined,
+      }),
+    ).toBe(1)
+
+    const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
+    const before = await readFile(journal, "utf8")
+    let refusal = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "merge", "PR1", "--json"], {
+        cwd: repo,
+        stdout: () => undefined,
+        stderr: (text) => {
+          refusal += text
+        },
+      }),
+    ).toBe(1)
+    expect(JSON.parse(refusal)).toMatchObject({
+      command: "pr.merge",
+      status: "rejected",
+      next: "yrd pr runs PR1",
+      guidance: {
+        inspect: "yrd pr runs PR1",
+        retry: "yrd pr retry PR1",
+        resubmit: "fix the branch and run yrd pr submit again",
+      },
+    })
     expect(await readFile(journal, "utf8")).toBe(before)
   })
 
@@ -584,6 +690,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const cliStderr = new Response(cli.stderr).text()
     let childPid: number | undefined
     let grandchildPid: number | undefined
+    let cleanupError: unknown
     try {
       await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true))
       childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
@@ -626,19 +733,20 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
         try {
           process.kill(-childPid, "SIGKILL")
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
         }
       }
       if (grandchildPid !== undefined && processExists(grandchildPid)) {
         try {
           process.kill(grandchildPid, "SIGKILL")
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
         }
       }
       cli.kill("SIGKILL")
       await cli.exited
     }
+    if (cleanupError !== undefined) throw cleanupError
   })
 
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
