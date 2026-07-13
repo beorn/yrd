@@ -613,6 +613,48 @@ describe("Queue command adapters", () => {
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
+  it("rebinds the local queue base after each resident-runner landing", async () => {
+    const branches = ["pr4", "pr5", "pr6", "pr7"] as const
+    const { repo, pr4, pr5, pr6, pr7 } = await repository(...branches)
+    const heads = { pr4, pr5, pr6, pr7 }
+    const initialBase = await git(repo, ["rev-parse", "main"])
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", ...branches.map((branch) => `issue/${branch}`)])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    for (const branch of branches) {
+      await app.bays.submit({ branch: `issue/${branch}`, headSha: heads[branch], base: "main" })
+    }
+
+    const runs = await app.queue.run({ prs: [] }, runtime)
+
+    expect(runs).toHaveLength(branches.length)
+    expect(runs.map((run) => [run.status, run.error?.code])).toEqual([
+      ["passed", undefined],
+      ["passed", undefined],
+      ["passed", undefined],
+      ["passed", undefined],
+    ])
+    expect(
+      runs.flatMap((run) => run.steps.map((step) => step.job?.attempt)).filter((attempt) => attempt !== undefined),
+    ).toEqual(Array.from({ length: branches.length * 2 }, () => 1))
+    const checks = runs.map((run) => {
+      const job = run.steps[0]?.job
+      if (job?.status !== "passed") throw new Error(`run '${run.id}' check did not pass`)
+      return GitCheckEvidenceSchema.parse(job.output)
+    })
+    expect(checks[0]?.baseSha).toBe(initialBase)
+    for (let index = 1; index < runs.length; index += 1) {
+      expect(checks[index]?.baseSha).toBe(runs[index - 1]?.integration?.commit)
+    }
+    const finalLanding = runs.at(-1)?.integration?.commit
+    expect(finalLanding).toBeDefined()
+    expect(await git(remote, ["rev-parse", "main"])).toBe(finalLanding)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(finalLanding)
+  }, 15_000)
+
   it("refuses local and authoritative remote base divergence before creating a candidate", async () => {
     const { repo, feature: featureSha, competing: remoteBaseSha } = await repository("feature", "competing")
     const remote = join(repo, "..", "origin.git")
@@ -620,6 +662,9 @@ describe("Queue command adapters", () => {
     await git(repo, ["remote", "add", "origin", remote])
     await git(repo, ["push", "-q", "origin", "main", "issue/feature", "issue/competing"])
     await git(repo, ["push", "-q", "origin", `${remoteBaseSha}:refs/heads/main`])
+    await writeFile(join(repo, "local-only.txt"), "local-only\n")
+    await git(repo, ["add", "local-only.txt"])
+    await git(repo, ["commit", "-qm", "local-only"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["false"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -793,7 +838,11 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "passed", prs: [{ headSha: featureSha }] })
+    const landing = await git(remote, ["rev-parse", "main"])
     expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(landing)
+    expect(await readFile(join(repo, "dep", "version.txt"), "utf8")).toBe("candidate\n")
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
   it("rejects a checked candidate that fails a hook even when the operator tree passes it", async () => {
@@ -818,8 +867,6 @@ describe("Queue command adapters", () => {
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
     await git(repo, ["push", "-q", "origin", "main", "issue/one", "issue/two"])
-    const localMain = await git(repo, ["rev-parse", "main"])
-
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"])
     await app.bays.submit({ branch: "issue/one", headSha: firstSha, base: "main" })
@@ -840,7 +887,7 @@ describe("Queue command adapters", () => {
     const landing = await git(remote, ["rev-parse", "main"])
     const landedPaths = (await git(remote, ["ls-tree", "--name-only", landing])).split("\n")
     expect(landedPaths.filter((path) => path === "one.txt" || path === "two.txt")).toHaveLength(1)
-    expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(landing)
   })
 
   it("refuses an intervening remote move instead of retrying the stale Candidate", async () => {
@@ -947,6 +994,39 @@ describe("Queue command adapters", () => {
     expect(run).toMatchObject({ status: "failed", error: { code: "stale-check" } })
     expect(existsSync(join(repo, "feature.txt"))).toBe(false)
     expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
+  })
+
+  it("rebinds the local queue base after a remote-only delegated landing", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const check = withStep(
+      "check",
+      gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
+      { revision: "check-v1", output: GitCheckResultEvidenceSchema },
+    )
+    const merge = withMerge(
+      configuredMergeStep<Checked>({
+        inject: { process },
+        repo,
+        command: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main'),
+      }),
+      { revision: "delegated-merge-v1" },
+    )
+    const queue = withQueue({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "passed", integration: { commit: expect.any(String) } })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(run.integration?.commit)
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
   it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {

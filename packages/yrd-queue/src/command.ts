@@ -617,6 +617,23 @@ async function authoritativeQueueBase(git: Git, repo: string, branch: string): P
   return inspectQueueBase(git, repo, branch)
 }
 
+async function rebindLocalQueueBase(git: Git, repo: string, base: GitQueueTarget, landingSha: string): Promise<void> {
+  const expected = base.localSha
+  if (expected === undefined || expected !== base.sha || expected === landingSha) return
+  const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
+  if (checkedOut === undefined) {
+    await git.run(repo, ["update-ref", base.branchRef, landingSha, expected], true)
+    return
+  }
+
+  if ((await git.optionalCommit(checkedOut, "HEAD")) !== expected) return
+  const status = await git.run(checkedOut, ["status", "--porcelain"], true)
+  if (status.code !== 0 || status.stdout !== "") return
+  const moved = await git.run(checkedOut, ["merge", "--ff-only", landingSha], true)
+  if (moved.code !== 0) return
+  await git.run(checkedOut, ["submodule", "update", "--init", "--recursive"], true)
+}
+
 export async function resolveGitQueueTarget(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
   repo: string
@@ -687,6 +704,10 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         const landing = await authoritativeQueueBase(git, repo, branch)
         const missing = await landingError(git, repo, input, checked, landing.sha)
         if (missing === undefined) {
+          // Remote integration is already durable. Rebind only the exact clean local base that
+          // produced this candidate; dirty or concurrently moved operator state remains untouched
+          // and the next check's queue-target-diverged guard continues to fail closed.
+          await rebindLocalQueueBase(git, repo, base, landing.sha)
           return {
             status: "passed",
             output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
@@ -764,6 +785,7 @@ export function configuredMergeStep<Shape extends PRShape>(
       }
       const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
       if (missing === undefined) {
+        await rebindLocalQueueBase(git, repo, base, landing.sha)
         return {
           status: "passed",
           output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
