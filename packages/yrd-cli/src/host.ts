@@ -657,6 +657,7 @@ export async function runYrdProcess(
   io: YrdCliIO = defaultIO(),
 ): Promise<YrdCliExitCode> {
   const invocation = resolveInvocation(argv)
+  const wantsRootHelp = invocation.projection === "root" && invocation.args.length === 0
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
     const mode = invocation.args[1]
     if (mode !== "pre-receive" && mode !== "post-receive") {
@@ -673,11 +674,12 @@ export async function runYrdProcess(
   }
 
   if (
+    wantsRootHelp ||
     invocation.args.some(
       (argument) => argument === "--help" || argument === "-h" || argument === "--version" || argument === "-V",
     )
   ) {
-    return runYrdHelp(argv, io)
+    return runYrdHelp(wantsRootHelp ? [...argv, "--help"] : argv, io)
   }
 
   let host: YrdHost | undefined

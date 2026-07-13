@@ -1426,6 +1426,7 @@ function configureCanonicalHelp(program: CliCommand): void {
     return alias === "" ? value : value.replace(`|${alias}`, "")
   }
   program.configureHelp({
+    ...program.configureHelp(),
     subcommandTerm: (command) => withoutAlias(standard.subcommandTerm(command), command as unknown as CliCommand),
     commandUsage: (command) => withoutAlias(standard.commandUsage(command), command as unknown as CliCommand),
   })
