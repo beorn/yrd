@@ -543,7 +543,7 @@ describe("runYrd", () => {
 
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     const merge = outputIO()
-    expect(await runYrd(app, yrd("pr", "merge", "PR1"), merge.io)).toBe(2)
+    expect(await runYrd(app, yrd("pr", "merge", "PR1"), merge.io)).toBe(1)
     expect(merge.stdout()).toBe("")
     expect(merge.stderr()).toContain("the queue is the only merger")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
