@@ -244,9 +244,6 @@ describe("Queue command adapters", () => {
     await Bun.sleep(120)
     const recovered = await stalled.app.queue.recover({
       recoveryTime: new Date().toISOString(),
-      runner: "recovery-runner",
-      leaseMs: 80,
-      heartbeatMs: 20,
     })
     const ownershipAborted = await Promise.race([
       stalled.aborted.promise.then(() => true),

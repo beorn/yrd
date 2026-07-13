@@ -16,6 +16,7 @@ import {
   QueueRunsView,
   QueueWatchView,
   QueueStatusView,
+  humanQueueProjection,
   type QueueLogCoverage,
   PRResultView,
   queueLogAttempts,
@@ -425,10 +426,11 @@ async function viewPr(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
   const { results } = await queueStatusSnapshots(app, state, target, io)
+  const position = queuedPrPosition(app, state, pr, io.now?.() ?? Date.now())
   await printResult(
     io,
     jsonEnabled(options),
-    { command, pr, results },
+    { command, pr, ...(position === undefined ? {} : { position }), results },
     createElement(QueueStatusView, {
       state: state.bays,
       results,
@@ -517,13 +519,17 @@ function currentPr(app: YrdCliApp, io: YrdCliIO): PR {
   return pr as PR
 }
 
-function queuedPrPosition(state: YrdCliState, pr: PR): number | undefined {
+function queuedPrPosition(app: YrdCliApp, state: YrdCliState, pr: PR, now: number): number | undefined {
   if (pr.status !== "submitted") return undefined
-  const index = Object.values(state.bays.prs)
-    .filter((candidate) => candidate.base === pr.base && candidate.status === "submitted")
-    .toSorted((left, right) => (left.submittedAt ?? "").localeCompare(right.submittedAt ?? ""))
-    .findIndex((candidate) => candidate.id === pr.id)
-  return index < 0 ? undefined : index + 1
+  const projection = humanQueueProjection(
+    {
+      ...app.queue.status(pr.base),
+      prs: Object.values(state.bays.prs).filter((candidate) => candidate.base === pr.base),
+    },
+    now,
+    { state: state.bays },
+  )
+  return projection.queue.find((row) => row.pr === pr.id)?.position
 }
 
 async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
@@ -676,7 +682,6 @@ async function recoverQueue(
 ): Promise<void> {
   if (options.reason?.trim() === "") usage("--reason requires text")
   const runs = await app.queue.recover({
-    ...runtimeOptions(io),
     recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
     ...(options.reason === undefined ? {} : { reason: options.reason }),
   })
@@ -796,7 +801,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       bay: bay?.id,
       pr: pr?.id,
       base: pr?.base ?? bay?.base,
-      position: pr === undefined ? undefined : queuedPrPosition(state, pr),
+      position: pr === undefined ? undefined : queuedPrPosition(app, state, pr, io.now?.() ?? Date.now()),
       pause: queue?.pause,
     },
     boundaries: ["the queue is the only merger", "issues are read-only references; edit them in the tracker"],
@@ -914,7 +919,7 @@ async function logRuns(
     {
       command: "log",
       rows,
-      ...(options.all === true ? { results: summaries } : {}),
+      ...(options.all === true ? { results: summaries, attempts } : {}),
       ...(coverage === undefined ? {} : { coverage }),
     },
     createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
@@ -1314,7 +1319,7 @@ function refusePrMerge(app: YrdCliApp, selector: string, options: JsonOption, io
     refusal(message)
   }
 
-  const position = queuedPrPosition(stateOf(app), pr)
+  const position = queuedPrPosition(app, stateOf(app), pr, io.now?.() ?? Date.now())
   const detail = prMergeRefusalDetail(pr, position)
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {

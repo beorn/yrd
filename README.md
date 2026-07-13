@@ -525,7 +525,9 @@ cache to reconcile.
 Pre-cutover `.git/yrd/events.jsonl` and `.git/bay/journal.jsonl` files remain
 opaque, read-only legacy data. Yrd never decodes, migrates, appends, or rewrites
 them; `yrd log --all --json` reports their paths and frame counts only as a coverage
-pointer while all new authority starts in `events-v3.jsonl`.
+pointer while all new authority starts in `events-v3.jsonl`. The same lossless
+view includes complete typed Queue runs and every historical Job attempt, including
+failed output, artifacts, lost reasons, runner identity, and integration proof.
 
 Serialized callers may retry a stable UUIDv7 Command id; trusted adapters may
 instead supply a stable dispatch key. Yrd records the Command and a canonical
@@ -559,6 +561,11 @@ Yrd owns the Job record and imports backend lifecycle events. Running work has
 an expiring, heartbeated runner lease; crashed work becomes `lost` and can be
 retried. A `waiting` Job has no launcher lease and remains durable until a
 token-matched finish arrives.
+
+`yrd queue recover` expires stale running leases and reconciles already-terminal
+failure facts. Recovery has no runner options and never executes requested Jobs,
+creates batch-isolation work, or merges a PR; normal queue execution remains the
+only path that can advance those effects.
 
 Execution is **at least once** across crashes: a runner may perform an
 external side effect before its settlement frame is committed. Yrd accepts only

@@ -143,6 +143,10 @@ export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<E
     const request = requested.get(transition.id)
     const start = started.get(`${transition.id}:${transition.attempt}`)
     if (request === undefined || start === undefined) continue
+    const durationMs = elapsedMs(start.startedAt, event.ts, `queue attempt '${transition.id}:${transition.attempt}'`)
+    if (durationMs === undefined) {
+      throw new Error(`yrd: queue attempt '${transition.id}:${transition.attempt}' has invalid time`)
+    }
     attempts.push({
       job: transition.id,
       ...request,
@@ -151,7 +155,7 @@ export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<E
       outcome: transition.type === "lose" ? "lost" : transition.result.status === "passed" ? "passed" : "failed",
       startedAt: start.startedAt,
       finishedAt: event.ts,
-      durationMs: Date.parse(event.ts) - Date.parse(start.startedAt),
+      durationMs,
       result: transition.type === "lose" ? { status: "lost", reason: transition.reason } : transition.result,
     })
   }
@@ -332,11 +336,17 @@ function duration(started: string | undefined, finished: string | undefined): st
   return value === undefined ? "-" : formatDuration(value)
 }
 
-function elapsedMs(started: string | undefined, finished: string | undefined): number | undefined {
+function elapsedMs(
+  started: string | undefined,
+  finished: string | undefined,
+  subject = "duration",
+): number | undefined {
   if (started === undefined || finished === undefined) return undefined
   const start = Date.parse(started)
   const end = Date.parse(finished)
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined
+  if (end < start) throw new Error(`yrd: ${subject} finish '${finished}' precedes start '${started}'`)
+  return end - start
 }
 
 function preciseDuration(milliseconds: number, compact = false): string {
@@ -1251,10 +1261,7 @@ export function queueLogRows(
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
         const submittedAt = submissionTimes.get(queueRevisionKey(pr))
-        const ageMs =
-          submittedAt === undefined || finishedAt === undefined
-            ? undefined
-            : Math.max(0, Date.parse(finishedAt) - Date.parse(submittedAt))
+        const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
           run: run.id,

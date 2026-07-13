@@ -708,8 +708,6 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       await using recovery = await createYrdHost({ cwd: repo })
       const recovered = await recovery.app.queue.recover({
         recoveryTime: "2100-01-01T00:00:00.000Z",
-        runner: "recovery",
-        leaseMs: 100,
       })
       expect(recovered).toEqual([
         expect.objectContaining({

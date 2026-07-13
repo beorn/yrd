@@ -81,6 +81,7 @@ export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
 export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
+export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string }>
 const PauseQueueArgsSchema = z
   .object({
     base: GitRefSchema,
@@ -226,7 +227,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   run(args: QueueRunArgs, options: RunJobOptions): Promise<readonly QueueRun[]>
   waiting(selector: string, step?: string): WaitingQueueStep
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<QueueRun>
-  recover(options: RunJobOptions & Readonly<{ recoveryTime: string; reason?: string }>): Promise<readonly QueueRun[]>
+  recover(options: RecoverQueueOptions): Promise<readonly QueueRun[]>
   audit(): QueueAuditResult
   get(run: QueueRunId): QueueRun | undefined
   status(base: string): QueueSummary
@@ -479,18 +480,24 @@ function createQueue<Shape extends PRShape>(
           ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
         }),
       )
-      const recovered: QueueRun[] = []
-      const snapshot = runtime()
+      const affected = new Set<QueueRunId>()
+      let snapshot = runtime()
       for (const candidate of orderedQueues(snapshot.queues, snapshot.jobs)) {
-        if (Queues.terminal(candidate) && !needsAdvance(snapshot, candidate) && !bisectable(candidate)) {
-          if (candidate.steps.some((step) => step.job !== undefined && recoveredJobs.has(step.job.id))) {
-            recovered.push(candidate)
-          }
-          continue
+        const ownsRecoveredJob = candidate.steps.some(
+          (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
+        )
+        const hasTerminalFailure = candidate.steps.some(
+          (step) => step.job?.status === "failed" || step.job?.status === "lost",
+        )
+        if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
+          const reconciled = await actions.advance(candidate.id)
+          if (reconciled.events.length > 0) affected.add(candidate.id)
+          snapshot = runtime()
         }
-        recovered.push(await settle(candidate.id, recoverOptions))
+        if (ownsRecoveredJob) affected.add(candidate.id)
       }
-      return recovered
+      const final = runtime()
+      return [...affected].map((id) => materializeRun(Queues.record(final.queues, id), final.jobs))
     },
     audit: () => auditQueues(runtime(), steps),
     get(id) {
