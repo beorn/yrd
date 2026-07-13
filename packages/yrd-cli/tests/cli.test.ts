@@ -48,6 +48,7 @@ import {
   type LineStatusResult,
 } from "../src/line-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
+import * as runInternals from "../src/run.ts"
 import { LineWatchFrame, LineWatchPane, reduceWatchControl, type LineWatchPaneProps } from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
@@ -1234,7 +1235,7 @@ describe("runYrd", () => {
       expect.soft(status.stdout()).toContain("[!]")
       expect.soft(status.stdout()).toContain("apply-conflict: PR 'PR1' could not be applied")
       expect.soft(status.stdout()).toContain(`evidence: ${artifact}`)
-      expect.soft(status.stdout()).toContain("next: fix task/failing; yrd bay submit task/failing --base main")
+      expect.soft(status.stdout()).not.toContain("next:")
       expect.soft(status.stdout()).not.toContain("hint:")
       expect.soft(status.stdout()).not.toContain("released maintenance")
       expect.soft(status.stdout()).not.toContain("yrd line integrate PR1 --retry")
@@ -1262,7 +1263,7 @@ describe("runYrd", () => {
       expect.soft(frame).toContain("feat(cli): keep runnable work visible")
       expect.soft(frame).toContain("apply-conflict: PR 'PR1' could not be applied")
       expect.soft(frame).toContain(`evidence: ${artifact}`)
-      expect.soft(frame).toContain("next: fix task/failing; yrd bay submit task/failing --base main")
+      expect.soft(frame).not.toContain("next:")
       expect.soft(frame).not.toContain("released maintenance")
       expect.soft(frame).not.toContain("hint:")
       expect.soft(frame).not.toContain("yrd line integrate PR1 --retry")
@@ -1300,6 +1301,119 @@ describe("runYrd", () => {
     rmSync(temp, { recursive: true, force: true })
   })
 
+  it("suppresses retry teaching for positive, stale, superseded, retired, and unchanged failure states", () => {
+    const failedRun = (id: string, revision: number, headSha: string, startedAt: string): LineRun =>
+      fakeRun({
+        id,
+        status: "failed",
+        pr: { id: "PR1", revision, headSha, baseSha: BASE_SHA },
+        startedAt,
+        finishedAt: new Date(Date.parse(startedAt) + 1_000).toISOString(),
+        steps: [
+          fakeStep(
+            "check",
+            "failed",
+            fakeJob({
+              id: `00000000-0000-7000-8000-${String(Number(id.slice(1)) + 400).padStart(12, "0")}`,
+              status: "failed",
+              error: { code: "runner-lost", message: "runner disappeared" },
+            }),
+          ),
+        ],
+      })
+    const positive = failedRun("R1", 1, HEAD_SHA, "2026-07-09T12:00:00.000Z")
+    const superseded = failedRun("R2", 1, HEAD_SHA, "2026-07-09T12:02:00.000Z")
+    const stale = failedRun("R3", 1, HEAD_SHA, "2026-07-09T12:04:00.000Z")
+    const cases = [
+      { name: "positive", status: "rejected" as const, revision: 1, headSha: HEAD_SHA, runs: [positive] },
+      { name: "stale", status: "rejected" as const, revision: 2, headSha: "2".repeat(40), runs: [stale] },
+      {
+        name: "superseded",
+        status: "rejected" as const,
+        revision: 1,
+        headSha: HEAD_SHA,
+        runs: [positive, superseded],
+      },
+      { name: "retired", status: "withdrawn" as const, revision: 1, headSha: HEAD_SHA, runs: [positive] },
+      { name: "unchanged", status: "pushed" as const, revision: 1, headSha: HEAD_SHA, runs: [positive] },
+    ]
+
+    for (const item of cases) {
+      const pr = {
+        id: "PR1",
+        branch: "task/failure",
+        base: "main",
+        baseSha: BASE_SHA,
+        status: item.status,
+        revision: item.revision,
+        headSha: item.headSha,
+        revisions: [],
+      } as PR
+      const selected = item.status === "rejected" ? new Set<string>() : new Set([pr.id])
+      const projection = humanLineProjection(
+        { base: "main", headSha: BASE_SHA, prs: [pr], running: [], waiting: [], finished: item.runs },
+        Date.parse("2026-07-09T12:10:00.000Z"),
+        { selected },
+      )
+      expect(projection.recent, item.name).not.toHaveLength(0)
+      for (const row of projection.recent) {
+        if (row.failure !== undefined) {
+          expect(row.failure, item.name).not.toHaveProperty("next")
+          expect(row.failure, item.name).not.toHaveProperty("evidence")
+        }
+      }
+    }
+  })
+
+  it("projects failure evidence only from the causative failed step", () => {
+    const temp = mkdtempSync(join(tmpdir(), "yrd-causal-evidence-"))
+    const prior = join(temp, "prepare.log")
+    const causal = join(temp, "check.log")
+    writeFileSync(prior, "prepare passed\n")
+    writeFileSync(causal, "check failed\n")
+    const pr = {
+      id: "PR1",
+      branch: "task/failure",
+      base: "main",
+      status: "rejected",
+      revision: 1,
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      revisions: [],
+    } as PR
+    const run = fakeRun({
+      id: "R1",
+      status: "failed",
+      pr: { id: pr.id, revision: pr.revision, headSha: pr.headSha, baseSha: pr.baseSha },
+      startedAt: "2026-07-09T12:00:00.000Z",
+      finishedAt: "2026-07-09T12:01:00.000Z",
+      steps: [
+        fakeStep(
+          "prepare",
+          "passed",
+          fakeJob({ id: JOB_PREPARE_PASS_ID, status: "passed", output: { artifacts: [{ path: prior }] } }),
+        ),
+        fakeStep(
+          "check",
+          "failed",
+          fakeJob({
+            id: JOB_CHECK_FAILED_ID,
+            status: "failed",
+            error: { code: "check-failed", message: "check failed" },
+            output: { artifacts: [{ path: causal }] },
+          }),
+        ),
+      ],
+    })
+
+    const failure = humanLineProjection(
+      { base: "main", headSha: BASE_SHA, prs: [pr], running: [], waiting: [], finished: [run] },
+      Date.parse("2026-07-09T12:02:00.000Z"),
+    ).recent[0]?.failure
+    expect(failure?.evidence).toEqual({ text: causal, href: pathToFileURL(causal).href })
+    rmSync(temp, { recursive: true, force: true })
+  })
+
   it("spotlights the active run in bounded status output", async () => {
     const app = await createApp({ waitingCheck: true })
     await app.bays.submit({
@@ -1330,6 +1444,61 @@ describe("runYrd", () => {
         ),
       ).toBeLessThanOrEqual(columns)
     }
+  })
+
+  it("restricts the selected status spotlight to the selected PR ids", () => {
+    const prs = [
+      {
+        id: "PR1",
+        name: "unrelated active run",
+        branch: "task/unrelated",
+        base: "main",
+        status: "submitted",
+        revision: 1,
+        headSha: HEAD_SHA,
+        revisions: [],
+        submittedAt: "2026-07-09T12:00:00.000Z",
+      },
+      {
+        id: "PR2",
+        name: "selected active run",
+        branch: "task/selected",
+        base: "main",
+        status: "submitted",
+        revision: 1,
+        headSha: "2".repeat(40),
+        revisions: [],
+        submittedAt: "2026-07-09T12:01:00.000Z",
+      },
+    ] as PR[]
+    const result = {
+      base: "main",
+      prs,
+      running: [
+        fakeRun({
+          id: "R1",
+          pr: { id: "PR1", revision: 1, headSha: HEAD_SHA },
+          status: "running",
+          steps: [],
+          startedAt: "2026-07-09T12:02:00.000Z",
+        }),
+        fakeRun({
+          id: "R2",
+          pr: { id: "PR2", revision: 1, headSha: "2".repeat(40) },
+          status: "running",
+          steps: [],
+          startedAt: "2026-07-09T12:03:00.000Z",
+        }),
+      ],
+      waiting: [],
+      finished: [],
+    } as LineStatusResult
+
+    expect(
+      humanLineProjection(result, Date.parse("2026-07-09T12:04:00.000Z"), {
+        selected: new Set(["PR2"]),
+      }).active,
+    ).toMatchObject({ run: "R2", pr: "PR2", subject: "selected active run" })
   })
 
   it("caps queue and rejection projections independently at 80 and 120 columns", async () => {
@@ -1414,6 +1583,43 @@ describe("runYrd", () => {
     expect(JSON.parse(status.stdout())).toMatchObject({
       results: [{ base: "main", headSha: "a".repeat(40), prs: [{ id: "PR1" }, { id: "PR2" }] }],
     })
+  })
+
+  it("sorts deduplicated alias and canonical run collections by startedAt then run id", async () => {
+    const merge = (
+      runInternals as typeof runInternals & {
+        mergedLineRuns?: (
+          canonical: LineSummary,
+          aliases: readonly LineSummary[],
+        ) => Pick<LineSummary, "running" | "waiting" | "finished">
+      }
+    ).mergedLineRuns
+    expect(merge).toBeTypeOf("function")
+    if (merge === undefined) return
+    const tied = ["R10", "R1", "R2"].map((id) =>
+      fakeRun({ id, status: "failed", steps: [], startedAt: "2026-07-09T12:00:00.000Z" }),
+    )
+    expect(
+      merge(fakeSummary([tied[2]!]), [fakeSummary([tied[0]!, tied[1]!, tied[2]!])]).finished.map(({ id }) => id),
+    ).toEqual(["R1", "R2", "R10"])
+
+    const app = await createApp()
+    await app.bays.submit({ branch: "task/canonical", headSha: "1".repeat(40), base: "main" })
+    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
+      "passed",
+    )
+    await app.bays.submit({ branch: "task/alias", headSha: "2".repeat(40), base: "origin/main" })
+    expect((await app.line.integrate({ prs: ["PR2"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status).toBe(
+      "passed",
+    )
+    const log = outputIO({
+      resolveLineTarget: (ref) => Promise.resolve({ base: ref === "origin/main" ? "main" : ref, sha: BASE_SHA }),
+    })
+
+    expect(await runYrd(app, yrd("line", "log", "--json"), log.io), log.stderr()).toBe(0)
+    const rows = (JSON.parse(log.stdout()) as { rows: ReturnType<typeof lineLogRows> }).rows
+    expect(rows.map((row) => row.run)).toEqual(["R1", "R2"])
+    expect(new Set(rows.map((row) => `${row.run}:${row.pr}`)).size).toBe(rows.length)
   })
 
   it("streams terminal log rows with stable revision/SHA proof and scope options", async () => {
@@ -2129,6 +2335,49 @@ describe("runYrd", () => {
     expect(visibleTty).not.toContain(stderr)
 
     rmSync(temp, { recursive: true, force: true })
+  })
+
+  it("preserves the raw pinned-revision subject and immutable submitted-to-terminal age in machine history", () => {
+    const headSha = "7".repeat(40)
+    const subject = `fix(cli): ${"preserve the complete raw commit subject ".repeat(4).trim()}`
+    const run = fakeRun({
+      id: "R42",
+      status: "failed",
+      pr: { id: "PR42", revision: 7, headSha, baseSha: BASE_SHA },
+      startedAt: "2026-07-12T11:10:00.000Z",
+      finishedAt: "2026-07-12T11:20:00.000Z",
+      steps: [
+        fakeStep(
+          "check",
+          "failed",
+          fakeJob({
+            id: JOB_CHECK_FAILED_ID,
+            status: "failed",
+            error: { code: "check-failed", message: "failed" },
+          }),
+        ),
+      ],
+    })
+    const key = `PR42:7:${headSha}`
+    const subjects = new Map([[key, subject]])
+    const submissions = new Map([[key, "2026-07-12T11:00:00.000Z"]])
+    const project = (now: string) =>
+      lineLogRows(
+        [fakeSummary([run])],
+        new Set<string>(),
+        undefined,
+        new Map([['PR42', 'rejected']]),
+        Date.parse(now),
+        [],
+        subjects,
+        submissions,
+      )[0]
+
+    const first = project("2026-07-12T12:00:00.000Z")
+    const later = project("2026-07-13T12:00:00.000Z")
+    expect(first).toMatchObject({ subject, ageMs: 20 * 60_000, age: "20m00s" })
+    expect(later).toMatchObject({ subject, ageMs: 20 * 60_000, age: "20m00s" })
+    expect(first?.subject.length).toBeGreaterThan(80)
   })
 
   it("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {

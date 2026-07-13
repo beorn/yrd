@@ -3,9 +3,10 @@
  * @level l3
  * @consumer @yrd/cli host
  */
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
+import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
@@ -430,6 +431,10 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await first.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
     const run = (await first.app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
     expect(run.status).toBe("failed")
+    const submittedAt = first.app.state().bays.prs.PR1?.submittedAt
+    const finishedAt = run.finishedAt
+    if (submittedAt === undefined || finishedAt === undefined) throw new Error("missing immutable history timestamps")
+    const expectedAgeMs = Date.parse(finishedAt) - Date.parse(submittedAt)
     await first.close()
 
     await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
@@ -453,9 +458,82 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }),
     ).toBe(0)
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
-    expect(stdout).toMatch(/PR1\s+rejected/u)
+    expect(stdout).toMatch(/PR1\s+task\/feature\s+rejected/u)
     expect(stdout).not.toContain(featureSha.slice(0, 12))
     expect(stderr).toBe("")
+
+    const machineHistory = async (now: string) => {
+      let json = ""
+      let error = ""
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "log", "--json"], {
+          cwd: repo,
+          stdout: (text) => {
+            json += text
+          },
+          stderr: (text) => {
+            error += text
+          },
+          now: () => Date.parse(now),
+        }),
+        error,
+      ).toBe(0)
+      return (JSON.parse(json) as { rows: readonly { subject: string; ageMs?: number }[] }).rows[0]
+    }
+    expect(await machineHistory("2026-07-13T12:00:00.000Z")).toMatchObject({ subject: "feature", ageMs: expectedAgeMs })
+    expect(await machineHistory("2026-07-14T12:00:00.000Z")).toMatchObject({ subject: "feature", ageMs: expectedAgeMs })
+  })
+
+  it("renders clickable candidate-conflict evidence written by the real Git check adapter", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, "conflict.txt"), "main\n")
+    await git(repo, "add", "conflict.txt")
+    await git(repo, "commit", "-qm", "main conflict")
+    await git(repo, "switch", "-q", "task/feature")
+    await writeFile(join(repo, "conflict.txt"), "feature\n")
+    await git(repo, "add", "conflict.txt")
+    await git(repo, "commit", "-qm", "feature conflict")
+    const featureSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    await writeFile(join(repo, ".yrd.yml"), 'steps:\n  check:\n    run: "true"\n')
+
+    const host = await createYrdHost({ cwd: repo })
+    let artifact: string | undefined
+    try {
+      await host.app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+      const run = (await host.app.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]!
+      expect(run).toMatchObject({ status: "failed", error: { code: "candidate-conflict" } })
+      const failedStep = run.steps.find((step) => step.job?.status === "failed")
+      const artifacts = (failedStep?.job as { output?: { artifacts?: readonly { path: string }[] } } | undefined)
+        ?.output?.artifacts
+      artifact = artifacts?.[0]?.path
+      expect(artifact).toMatch(/\/\.git\/yrd\/artifacts\/R1\/0-check\/attempt-1\/(?:stdout|stderr)\.log$/u)
+      expect(artifact === undefined ? "" : await readFile(artifact, "utf8")).toContain("CONFLICT")
+    } finally {
+      await host.close()
+    }
+
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "line", "status"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+        columns: 120,
+        color: true,
+      }),
+      stderr,
+    ).toBe(0)
+    expect(stdout).toContain("candidate-conflict")
+    expect(stdout).not.toContain("yrd line show")
+    expect(artifact === undefined ? stdout : stdout).toContain(
+      artifact === undefined ? "candidate-conflict" : pathToFileURL(artifact).href,
+    )
   })
 
   it("reports the authoritative remote line head when local main is stale", async () => {

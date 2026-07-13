@@ -153,6 +153,51 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
 }
 
 describe("Line command adapters", () => {
+  it("persists candidate-conflict evidence on the causative check step before scratch cleanup", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, "conflict.txt"), "base\n")
+    await git(repo, ["add", "conflict.txt"])
+    await git(repo, ["commit", "-qm", "conflict base"])
+    await git(repo, ["switch", "-qc", "task/conflict"])
+    await writeFile(join(repo, "conflict.txt"), "feature\n")
+    await git(repo, ["commit", "-qam", "conflicting feature"])
+    const featureSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "conflict.txt"), "main\n")
+    await git(repo, ["commit", "-qam", "conflicting main"])
+
+    const artifactRoot = join(repo, ".git", "yrd", "artifacts")
+    await using process = createProcess()
+    const outcome = await gitCheckStep({
+      inject: { process },
+      repo,
+      command: ["true"],
+      artifactRoot,
+    })(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "task/conflict", base: "main", revision: 1, headSha: featureSha }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, executor: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({ status: "failed", error: { code: "candidate-conflict" } })
+    if (outcome.status !== "failed") return
+    const artifacts = (outcome.output as { artifacts?: readonly { name: string; path: string }[] } | undefined)
+      ?.artifacts
+    expect(artifacts).toEqual([
+      expect.objectContaining({
+        path: expect.stringMatching(/\/R1\/0-check\/attempt-1\/(?:stdout|stderr)\.log$/u),
+      }),
+    ])
+    const artifact = artifacts?.[0]
+    expect(artifact === undefined ? false : existsSync(artifact.path)).toBe(true)
+    expect(artifact === undefined ? "" : await readFile(artifact.path, "utf8")).toContain("CONFLICT")
+  })
+
   it("executes argv directly and requires an explicit gate for shell text", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "yrd-command-argv-"))
     roots.push(cwd)
