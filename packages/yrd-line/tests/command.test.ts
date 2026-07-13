@@ -497,7 +497,7 @@ describe("Line command adapters", () => {
       "YRD_BASE=main",
       `YRD_BASE_SHA=${baseSha}`,
       "YRD_CUSTOM=custom",
-      "YRD_EXECUTOR=test",
+      "YRD_RUNNER=test",
       "YRD_JOB=J1",
       "YRD_PR=PR1",
       'YRD_PRS=["PR1"]',
@@ -507,6 +507,7 @@ describe("Line command adapters", () => {
       "YRD_STEP=check",
       `YRD_TARGET=${headSha}`,
     ])
+    expect(result.output.detail).not.toContain("YRD_EXECUTOR")
   })
 
   it("checks and lands one combined candidate for a passing batch", async () => {

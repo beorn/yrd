@@ -549,6 +549,64 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("keeps submission observational and gives queue run sole ownership of execution", async () => {
+    const mergeRuns: string[] = []
+    const app = await createApp({ mergeRuns })
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "one"), open.io), open.stderr()).toBe(0)
+
+    const submit = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("pr", "submit"), submit.io), submit.stderr()).toBe(0)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
+    expect(Object.values(app.state().lines.records)).toHaveLength(0)
+    expect(mergeRuns).toEqual([])
+
+    const beforeRejectedWait = await Array.fromAsync(app.events()).then((events) => events.length)
+    const rejectedWait = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("bay", "submit", "--wait"), rejectedWait.io)).toBe(2)
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRejectedWait)
+
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
+    expect(mergeRuns).toEqual(["merge"])
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
+    expect(Object.values(app.state().lines.records)).toHaveLength(1)
+  })
+
+  it("rejects every retired route without journaling an event", async () => {
+    const app = await createApp()
+    for (const args of [["line"], ["task"], ["run"], ["integrate"], ["hold"], ["release"], ["admin"]]) {
+      const before = await Array.fromAsync(app.events()).then((events) => events.length)
+      const output = outputIO()
+      expect(await runYrd(app, yrd(...args), output.io), args.join(" ")).not.toBe(0)
+      expect(await Array.fromAsync(app.events()).then((events) => events.length), args.join(" ")).toBe(before)
+    }
+  })
+
+  it("renders bare read surfaces and accepts only silent plural noun aliases", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const dashboard = outputIO()
+    expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
+    expect(dashboard.stdout()).toContain("OPEN")
+    expect(dashboard.stdout()).not.toContain("Usage: yrd")
+
+    const prs = outputIO()
+    expect(await runYrd(app, yrd("pr"), prs.io), prs.stderr()).toBe(0)
+    expect(prs.stdout()).toContain("PR1")
+
+    const queues = outputIO()
+    expect(await runYrd(app, yrd("queue"), queues.io), queues.stderr()).toBe(0)
+    expect(queues.stdout()).toContain("main")
+
+    for (const noun of ["prs", "bays", "issues", "contests", "queues"]) {
+      const alias = outputIO()
+      expect(await runYrd(app, yrd(noun, "--help"), alias.io), noun).toBe(0)
+      expect(alias.stdout(), noun).not.toMatch(new RegExp(`^\\s+${noun}\\b`, "mu"))
+    }
+  })
+
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
     const app = await createApp()
     const open = outputIO({ color: true, columns: 64 })

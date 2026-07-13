@@ -43,11 +43,13 @@ it("resolves source-owned ids and composes without mutating its host", async () 
   expect(argv).toEqual(["issue", "show", "--json", "release:2.0"])
   expect(environment).toMatchObject({
     TASK_TEST_MARKER: "preserved",
-    YRD_TASK_SOURCE: "issues",
-    YRD_TASK_ID: "release:2.0",
+    YRD_ISSUE_SOURCE: "issues",
+    YRD_ISSUE_ID: "release:2.0",
   })
   expect(environment).not.toHaveProperty("GIT_DIR")
   expect(environment).not.toHaveProperty("YRD_JOB")
+  expect(environment).not.toHaveProperty("YRD_TASK_SOURCE")
+  expect(environment).not.toHaveProperty("YRD_TASK_ID")
   expect(() => createTasks({ sources: [source, source] })).toThrow("duplicate task source 'issues'")
   await expect(tasks.resolve({ source: "missing", id: "1" })).rejects.toThrow("no task source")
   await app.close()

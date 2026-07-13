@@ -7,6 +7,40 @@ import { describe, expect, it } from "vitest"
 import { loadYrdConfig, parseYrdConfig } from "../src/config.ts"
 
 describe("Yrd config", () => {
+  it("parses the flat queue policy and top-level step definitions", () => {
+    expect(
+      parseYrdConfig(
+        Bun.YAML.parse(`
+base: main
+batch: 4
+steps: [check, review, merge, deploy]
+check: bun run check
+review: { run: bun run review, runner: waiting }
+merge: { run: git merge --no-ff "$YRD_TARGET" }
+deploy: bun run deploy
+contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
+`),
+      ),
+    ).toEqual({
+      base: "main",
+      batch: 4,
+      steps: ["check", "review", "merge", "deploy"],
+      definitions: {
+        check: { run: "bun run check", runner: "local" },
+        review: { run: "bun run review", runner: "waiting" },
+        merge: { run: 'git merge --no-ff "$YRD_TARGET"', runner: "local" },
+        deploy: { run: "bun run deploy", runner: "local" },
+      },
+      contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
+    })
+  })
+
+  it("refuses the retired line wrapper and teaches the flat shape", () => {
+    expect(() => parseYrdConfig({ line: { base: "main", batch: 1, steps: ["check", "merge"] } })).toThrow(
+      "remove 'line:' and configure base, batch, steps, and step definitions at the top level",
+    )
+  })
+
   it("parses the complete project policy", () => {
     expect(
       parseYrdConfig(

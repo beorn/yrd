@@ -372,6 +372,24 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await reopened.close()
   })
 
+  it("starts a fresh v3 journal without reading or rewriting legacy journal files", async () => {
+    const { repo } = await repository()
+    const oldYrdJournal = join(repo, ".git", "yrd", "events.jsonl")
+    const oldBayJournal = join(repo, ".git", "bay", "journal.jsonl")
+    await mkdir(join(repo, ".git", "yrd"), { recursive: true })
+    await mkdir(join(repo, ".git", "bay"), { recursive: true })
+    await writeFile(oldYrdJournal, "old yrd journal remains opaque\n")
+    await writeFile(oldBayJournal, "old bay journal remains opaque\n")
+
+    await using host = await createYrdHost({ cwd: repo })
+    const headSha = await git(repo, "rev-parse", "task/feature")
+    await host.app.bays.submit({ branch: "task/feature", headSha, base: "main" })
+
+    expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(true)
+    expect(await readFile(oldYrdJournal, "utf8")).toBe("old yrd journal remains opaque\n")
+    expect(await readFile(oldBayJournal, "utf8")).toBe("old bay journal remains opaque\n")
+  })
+
   it("disposes its owned runtime exactly once across close and await using", async () => {
     const { repo } = await repository()
     let releases = 0
