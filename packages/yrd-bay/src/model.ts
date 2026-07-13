@@ -15,6 +15,16 @@ export type BayFailure = Readonly<{
 
 export type BayStatus = "opening" | "active" | "closing" | "closed" | "failed"
 
+export type PRReviewDecision = "approve" | "reject" | "comment"
+
+export type PRReview = Readonly<{
+  revision: number
+  actor: string
+  decision: PRReviewDecision
+  at: string
+  ref?: string
+}>
+
 export type Bay = Readonly<{
   id: BayId
   name: string
@@ -57,9 +67,11 @@ export type PR = Readonly<{
   headSha: string
   baseSha?: string
   revisions: readonly PRRevision[]
+  requirements?: readonly string[]
   submittedAt?: string
   rejectedAt?: string
   integratedAt?: string
+  reviews?: readonly PRReview[]
   integration?: Readonly<{ commit: string; baseSha: string }>
   withdrawnAt?: string
   detail?: string
