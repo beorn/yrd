@@ -928,6 +928,30 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([15_000])
   })
 
+  it("renders hold and drain health in watch output", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    await app.line.hold({ base: "main", reason: "operator freeze", allowedPRs: [] })
+
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    const watch = outputIO({
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds)
+          controller.abort()
+        },
+      },
+    })
+    expect(await runYrd(app, yrd("watch"), watch.io)).toBe(0)
+    const frame = stripOsc8Targets(watch.stdout())
+    expect(frame).toContain("HOLD")
+    expect(frame).toContain("operator freeze")
+    expect(frame).toContain("DRAIN")
+    expect(sleeps).toEqual([15_000])
+  })
+
   it("monitors line status continuously from root watch", async () => {
     const app = await createApp()
     await openAndSubmit(app)

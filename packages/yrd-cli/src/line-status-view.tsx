@@ -864,6 +864,12 @@ type WatchQueueRow = Readonly<{
 function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] {
   return result.prs
     .filter((pr) => !["integrated", "withdrawn"].includes(pr.status))
+    .toSorted((left, right) => {
+      if (left.submittedAt === right.submittedAt) return left.id.localeCompare(right.id, undefined, { numeric: true })
+      if (left.submittedAt === undefined) return 1
+      if (right.submittedAt === undefined) return -1
+      return left.submittedAt.localeCompare(right.submittedAt)
+    })
     .map((pr, index) => {
       const run = latestRun(pr, result)
       const step = relevantStep(run)
@@ -922,13 +928,18 @@ export function LineWatchView({ results, now }: { results: readonly LineStatusRe
     <Box flexDirection="column">
       {results.map((result, index) => {
         const all = result.prs.filter((pr) => pr.base === result.base)
+        const hold = result.hold
         const rows = watchQueueRows(result, now)
         const failed = [...result.finished].filter((run) => run.status === "failed").toSorted(byRunStarted).toReversed().slice(0, 3)
+        const holdState = hold === undefined ? "active" : `held: ${hold.reason}`
+        const oldestOpen = rows[0] === undefined ? "-" : rows[0].touched
         const summary = [
           {
             line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
             open: all.filter((pr) => !["integrated", "withdrawn"].includes(pr.status)).length,
             active: all.filter((pr) => ["checking", "waiting"].includes(lineState(pr, latestRun(pr, result)))).length,
+            hold: holdState,
+            drain: oldestOpen,
             integrated: all.filter((pr) => pr.status === "integrated").length,
             rejected: all.filter((pr) => pr.status === "rejected").length,
           },
@@ -940,6 +951,8 @@ export function LineWatchView({ results, now }: { results: readonly LineStatusRe
               padding={1}
               columns={[
                 { header: "LINE", key: "line", grow: true, minWidth: 6, maxWidth: 24 },
+                { header: "HOLD", key: "hold", grow: true, maxWidth: 24 },
+                { header: "DRAIN", key: "drain", align: "right", maxWidth: 12 },
                 { header: "OPEN", key: "open", align: "right" },
                 { header: "ACTIVE", key: "active", align: "right" },
                 { header: "INTEGRATED", key: "integrated", align: "right" },
