@@ -498,6 +498,42 @@ describe("Queue command adapters", () => {
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
   })
 
+  it("preserves an occupied derived candidate ref and publishes the candidate under a fresh identity", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const occupiedSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    let occupiedRef: string | undefined
+    const racingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (
+          occupiedRef === undefined &&
+          request.argv[0] === "git" &&
+          request.argv[3] === "update-ref" &&
+          request.argv[4] === "--create-reflog" &&
+          request.argv[5]?.startsWith("refs/yrd/candidates/")
+        ) {
+          occupiedRef = request.argv[5]
+          await git(repo, ["update-ref", occupiedRef, occupiedSha])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(racingProcess, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ id: "R1", status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    if (occupiedRef === undefined) throw new Error("candidate publication was not intercepted")
+
+    expect(evidence.candidateRef).not.toBe(occupiedRef)
+    expect(await git(repo, ["rev-parse", occupiedRef])).toBe(occupiedSha)
+    expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
+  })
+
   it("lands the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

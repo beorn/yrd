@@ -428,10 +428,14 @@ export type GitCheckOptions = ProcessDependency &
     noProgressTimeoutMs?: number
   }>
 
-async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<void> {
-  const created = await git.run(repo, ["update-ref", "--create-reflog", ref, sha, "0".repeat(sha.length)], true)
-  if (created.code === 0 || (await git.commit(repo, ref)) === sha) return
-  throw new Error(created.stderr || created.stdout || `candidate ref '${ref}' has a different commit`)
+async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<string> {
+  const collisionLimit = 32
+  for (let collision = 0; collision <= collisionLimit; collision += 1) {
+    const candidate = collision === 0 ? ref : `${ref}-collision-${collision}`
+    const created = await git.run(repo, ["update-ref", "--create-reflog", candidate, sha, "0".repeat(sha.length)], true)
+    if (created.code === 0 || (await git.optionalCommit(repo, candidate)) === sha) return candidate
+  }
+  throw new Error(`candidate ref '${ref}' exhausted ${collisionLimit} collision identities`)
 }
 
 function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, attempt: number, sha: string): string {
@@ -475,8 +479,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
           )
           if (candidate.status === "failed") return candidate
-          const ref = candidateRef(input, context.id, context.attempt, candidate.output)
-          await pinCandidate(git, repo, ref, candidate.output)
+          const ref = await pinCandidate(
+            git,
+            repo,
+            candidateRef(input, context.id, context.attempt, candidate.output),
+            candidate.output,
+          )
           const configured: ConfiguredCommandOptions<PRShape> = {
             inject: options.inject,
             command: options.command,
