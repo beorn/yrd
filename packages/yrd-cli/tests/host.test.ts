@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { PRTerminalSettlement } from "@yrd/bay"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { GitCheckEvidenceSchema } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
@@ -56,6 +57,56 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
+  it("composes one injected terminal settlement job and preserves its replay proof", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const requestId = "pr 61's docs"
+    const pending = new Set([requestId, "unrelated-request"])
+    const calls: Array<{ requestId: string; outcome: string }> = []
+    const terminalSettlement: PRTerminalSettlement = {
+      revision: "host-terminal-v1",
+      settle(input) {
+        calls.push({ requestId: input.requestId, outcome: input.outcome })
+        if (!pending.delete(input.requestId)) {
+          return { status: "failed", error: { code: "request-missing", message: "request is not pending" } }
+        }
+        return { status: "passed", output: { requestId: input.requestId, disposition: "settled" } }
+      },
+    }
+    const journal = createMemoryJournal()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+      terminalSettlement,
+    }
+    const app = await createDefaultYrdApp(options)
+
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", requestId })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    expect(calls).toEqual([{ requestId, outcome: "integrated" }])
+    expect([...pending]).toEqual(["unrelated-request"])
+    await app.close()
+
+    await using replayed = await createDefaultYrdApp(options)
+    expect(replayed.state().bays.prs.PR1).toMatchObject({ status: "integrated", requestId })
+    expect(Object.values(replayed.state().jobs.byId)).toContainEqual(
+      expect.objectContaining({ definition: "pr.terminal", status: "passed", attempt: 1 }),
+    )
+    expect(calls).toHaveLength(1)
+    expect([...pending]).toEqual(["unrelated-request"])
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
@@ -381,7 +432,6 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       join(repo, ".yrd.yml"),
       ["base: main", "batch: 1", "steps: [check, merge]", "check: 'true'", "merge: {}", ""].join("\n"),
     )
-
     let plain = ""
     let plainError = ""
     expect(
@@ -461,6 +511,55 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       status: "submitted",
     })
     await reopened.close()
+  })
+
+  it("carries an injected terminal settlement through the process host and durable replay", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      ["base: main", "batch: 1", "steps: [check, merge]", "check: 'true'", "merge: {}", ""].join("\n"),
+    )
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "configure yrd")
+    const requestId = "pr61-pane-host-docs"
+    const pending = new Set([requestId, "unrelated-request"])
+    const calls: Array<{ requestId: string; outcome: string }> = []
+    const terminalSettlement: PRTerminalSettlement = {
+      revision: "process-terminal-v1",
+      settle(input) {
+        calls.push({ requestId: input.requestId, outcome: input.outcome })
+        if (!pending.delete(input.requestId)) {
+          return { status: "failed", error: { code: "request-missing", message: "request is not pending" } }
+        }
+        return { status: "passed", output: { requestId: input.requestId, disposition: "settled" } }
+      },
+    }
+    let stdout = ""
+    let stderr = ""
+    const io = { cwd: repo, stdout: (text: string) => (stdout += text), stderr: (text: string) => (stderr += text) }
+
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--request-id", requestId, "--json"],
+        io,
+        { terminalSettlement },
+      ),
+    ).toBe(0)
+    stdout = ""
+    stderr = ""
+    const queueExit = await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--json"], io, {
+      terminalSettlement,
+    })
+    if (queueExit !== 0) throw new Error(JSON.stringify({ queueExit, stdout, stderr }))
+    expect(calls).toEqual([{ requestId, outcome: "integrated" }])
+    expect([...pending]).toEqual(["unrelated-request"])
+
+    await using replayed = await createYrdHost({ cwd: repo, terminalSettlement })
+    expect(replayed.app.state().bays.prs.PR1).toMatchObject({ status: "integrated", requestId })
+    expect(Object.values(replayed.app.state().jobs.byId)).toContainEqual(
+      expect.objectContaining({ definition: "pr.terminal", status: "passed", attempt: 1 }),
+    )
+    expect(calls).toHaveLength(1)
   })
 
   it("finds a direct-branch PR for status and refuses pr merge without appending", async () => {

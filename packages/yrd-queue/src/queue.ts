@@ -1,4 +1,13 @@
-import { GitRefSchema, PRIdSchema, resolvePR, type BaysState, type HasBays, type PR } from "@yrd/bay"
+import {
+  GitRefSchema,
+  PRIdSchema,
+  requestPRTerminal,
+  resolvePR,
+  type BaysState,
+  type HasBays,
+  type PR,
+  type PRTerminalJobDef,
+} from "@yrd/bay"
 import {
   command,
   event,
@@ -200,6 +209,7 @@ export type QueueOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   steps: Steps
   batch?: BatchConfig
   defaultSteps?: readonly string[]
+  terminal?: PRTerminalJobDef
 }>
 
 type QueueState = Readonly<{ queues: QueuesState }>
@@ -267,7 +277,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
     ...(defaults === undefined ? {} : { defaultSteps: defaults.map((step) => step.name) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
-  const commands = createQueueCommands(steps, byName)
+  const commands = createQueueCommands(steps, byName, options.terminal)
 
   const install = <State extends object, Commands extends CommandTree, Features extends HasJobs & HasBays>(
     definition: YrdDef<State, Commands, Features>,
@@ -292,6 +302,9 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       project: projectQueues,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
+        if (options.terminal !== undefined) {
+          yrd.jobs.requireDefinitions({ [options.terminal.name]: options.terminal })
+        }
         return {
           queue: createQueue(
             computed(() => yrd.state().queues),
@@ -306,6 +319,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
             },
             steps,
+            options.terminal,
             yrd.log.child("queue"),
           ),
         }
@@ -332,6 +346,7 @@ function createQueue<Shape extends PRShape>(
   jobs: HasJobs["jobs"],
   actions: QueueActions,
   steps: readonly RuntimeStep[],
+  terminal: PRTerminalJobDef | undefined,
   log: ConditionalLogger,
 ): Queue<Shape> {
   const current = (id: QueueRunId): QueueRun => materializeRun(Queues.record(state(), id), runtime().jobs)
@@ -388,6 +403,28 @@ function createQueue<Shape extends PRShape>(
     return { run: selected, step: step as WaitingQueueStep["step"] }
   }
 
+  const runTerminalJobs = async (result: CommandResult, options: RunJobOptions): Promise<void> => {
+    if (terminal === undefined) return
+    const ids = jobs.requested(result).filter((id) => jobs.get(id)?.definition === terminal.name)
+    if (ids.length === 0) return
+    const settled = await jobs.runMany(ids, options)
+    const failed = settled.find((job) => job.status !== "passed")
+    if (failed === undefined) return
+    const detail =
+      failed.status === "failed"
+        ? failed.error.message
+        : failed.status === "lost"
+          ? failed.lostReason
+          : failed.status === "waiting"
+            ? (failed.detail ?? "settlement is waiting")
+            : `settlement is ${failed.status}`
+    raiseFailure(
+      "infrastructure",
+      "request-settlement-failed",
+      `yrd: terminal request settlement '${failed.id}' ${failed.status}: ${detail}`,
+    )
+  }
+
   const drive = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
     while (true) {
       const snapshot = runtime()
@@ -396,12 +433,14 @@ function createQueue<Shape extends PRShape>(
       const active = run.steps[run.cursor]
       if (active?.job?.status === "requested") {
         const guarded = await actions.advance(id)
+        await runTerminalJobs(guarded, options)
         if (guarded.events.length > 0) continue
         await jobs.run(active.job.id, options)
         continue
       }
       if (active?.job?.status === "running" || active?.job?.status === "waiting") return run
       const advanced = await actions.advance(id)
+      await runTerminalJobs(advanced, options)
       if (advanced.events.length === 0) return current(id)
     }
   }
@@ -501,7 +540,11 @@ function createQueue<Shape extends PRShape>(
   }) as Queue<Shape>
 }
 
-function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): QueueCommands {
+function createQueueCommands(
+  steps: readonly RuntimeStep[],
+  byName: ReadonlyMap<string, RuntimeStep>,
+  terminal?: PRTerminalJobDef,
+): QueueCommands {
   const pause = command({
     title: "Pause queue",
     visibility: "public",
@@ -571,7 +614,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     title: "Advance queue run",
     params: AdvanceArgsSchema,
     apply: (state: DeepReadonly<RuntimeState>, args) =>
-      advanceQueue(state, Queues.record(state.queues, args.run), byName),
+      advanceQueue(state, Queues.record(state.queues, args.run), byName, terminal),
   })
 
   const isolate = command({
@@ -722,6 +765,7 @@ function advanceQueue(
   state: DeepReadonly<RuntimeState>,
   record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
+  terminal?: PRTerminalJobDef,
 ): Readonly<{ events: readonly EventDraft[] }> {
   const stale = pinnedPRError(state.bays, record.prs)
   if (stale !== undefined && record.failure === undefined) {
@@ -742,10 +786,21 @@ function advanceQueue(
     const before = shapeThrough(record, state.jobs, index)
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
+    const detail = jobFailure(job).message
+    const settlement = current === undefined ? undefined : requestPRTerminal(terminal, current, "rejected", detail)
     return {
       events:
         !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
-          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: jobFailure(job).message })]
+          ? [
+              event("pr/rejected", {
+                pr: pr.id,
+                revision: pr.revision,
+                headSha: pr.headSha,
+                ...(current.requestId === undefined ? {} : { requestId: current.requestId }),
+                detail,
+              }),
+              settlement,
+            ].filter((draft) => draft !== undefined)
           : [],
     }
   }
@@ -767,10 +822,13 @@ function advanceQueue(
           pr: current.id,
           revision: current.revision,
           headSha: current.headSha,
+          ...(current.requestId === undefined ? {} : { requestId: current.requestId }),
           commit: shape.integration.commit,
           baseSha: shape.integration.baseSha,
         }),
       )
+      const settlement = requestPRTerminal(terminal, current, "integrated")
+      if (settlement !== undefined) events.push(settlement)
     }
   }
 

@@ -305,7 +305,8 @@ async function closePrs(
   if (selectors.length === 0) usage("pr close requires at least one PR selector")
   const prs: PR[] = []
   for (const selector of selectors) {
-    await app.bays.closePr({ pr: selector })
+    const result = await app.bays.closePr({ pr: selector })
+    assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `PR '${selector}' close`)
     const pr = app.bays.pr(selector)
     if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after close`)
     prs.push(pr)
@@ -348,7 +349,7 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
 async function submitBays(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { base?: string; queue?: string; issue?: string; json?: boolean },
+  options: { base?: string; queue?: string; issue?: string; requestId?: string; json?: boolean },
   io: YrdCliIO,
   command: "bay.submit" | "pr.submit",
 ): Promise<YrdCliExitCode> {
@@ -363,6 +364,7 @@ async function submitBays(
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
+      ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
@@ -1491,6 +1493,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--request-id <id>", "bind the originating request to this PR revision")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
@@ -1623,6 +1626,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--request-id <id>", "bind the originating request to this PR revision")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   pr.command("view <selector>")

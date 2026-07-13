@@ -3,6 +3,7 @@ import { join, relative, resolve, sep } from "node:path"
 import { createScope, type Scope } from "@silvery/scope"
 import {
   createBayJobDefs,
+  createPRTerminalJobDef,
   createGitPushReceiver,
   createGitWorkspace,
   loadGitPushReceiver,
@@ -12,6 +13,7 @@ import {
   type GitPushReceiver,
   type ReceiverReceipt,
   type ReceiverTarget,
+  type PRTerminalSettlement,
 } from "@yrd/bay"
 import {
   createAgContestRunner,
@@ -72,6 +74,7 @@ export type DefaultYrdAppOptions = Readonly<{
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
   contestGit?: ContestGit
+  terminalSettlement?: PRTerminalSettlement
   scope?: Scope
   log?: ConditionalLogger
 }>
@@ -413,25 +416,30 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
       ...(options.receiverPath === undefined ? {} : { intakeRemote: options.receiverPath }),
     }))
   const bayJobs = createBayJobDefs(workspace)
+  const terminal =
+    options.terminalSettlement === undefined ? undefined : createPRTerminalJobDef(options.terminalSettlement)
   const queue = withQueue({
     steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
+    ...(terminal === undefined ? {} : { terminal }),
   })
   const contestAdapters = defaultContestAdapters(options)
   const contests = withContests({
     ...contestAdapters,
     defaultBase: options.config.base,
   })
+  const terminalDefs = terminal === undefined ? {} : { [terminal.name]: terminal }
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, terminalDefs] }),
     withIssues({
       sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],
     }),
     withBays({
       jobs: bayJobs,
       defaultBase: queueBranch(options.config.base),
+      ...(terminal === undefined ? {} : { terminal }),
       resolveBase: async (base) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           requireAligned: true,
@@ -545,7 +553,13 @@ function bindProcessShutdown(shutdown: () => Promise<void>): () => void {
   return remove
 }
 
-export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
+export type YrdHostOptions = Readonly<{
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  terminalSettlement?: PRTerminalSettlement
+}>
+
+export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   const scope = createScope("yrd-host")
   const log = createLogger("yrd")
   const process = createProcess({ cwd: options.cwd, env: options.env, inject: { scope, log } })
@@ -566,6 +580,7 @@ export async function createYrdHost(options: { cwd?: string; env?: NodeJS.Proces
       journal: createJournal({ dir: repository.stateDir, inject: { log } }),
       process,
       config: loaded.config,
+      ...(options.terminalSettlement === undefined ? {} : { terminalSettlement: options.terminalSettlement }),
       scope,
       log,
     })
@@ -658,9 +673,14 @@ function defaultIO(): YrdCliIO {
 }
 
 /** Process entrypoint shared by yrd, git-yrd, and git-bay. */
+export type YrdProcessOptions = Readonly<{
+  terminalSettlement?: PRTerminalSettlement
+}>
+
 export async function runYrdProcess(
   argv: readonly string[] = process.argv,
   io: YrdCliIO = defaultIO(),
+  options: YrdProcessOptions = {},
 ): Promise<YrdCliExitCode> {
   const invocation = resolveInvocation(argv)
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
@@ -691,7 +711,10 @@ export async function runYrdProcess(
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
   let removeShutdownSignals: () => void = () => undefined
   try {
-    const activeHost = await createYrdHost({ cwd: io.cwd })
+    const activeHost = await createYrdHost({
+      cwd: io.cwd,
+      ...(options.terminalSettlement === undefined ? {} : { terminalSettlement: options.terminalSettlement }),
+    })
     host = activeHost
     removeShutdownSignals = bindProcessShutdown(closeHost)
     const selectedArgv = await resolveSubmitArgv(invocation, {

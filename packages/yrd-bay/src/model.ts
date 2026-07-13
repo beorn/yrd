@@ -4,6 +4,12 @@ export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^[0-9a-f]{40,64}$/iu)
+export const RequestIdSchema = z
+  .string()
+  .min(1)
+  .refine((value) => value.trim().length > 0, {
+    message: "request id must contain a non-whitespace character",
+  })
 
 export type BayId = string
 export type PRId = string
@@ -43,6 +49,7 @@ export type PRRevision = Readonly<{
   headSha: string
   base: string
   baseSha?: string
+  requestId?: string
   pushedAt: string
 }>
 
@@ -58,6 +65,7 @@ export type PR = Readonly<{
   revision: number
   headSha: string
   baseSha?: string
+  requestId?: string
   revisions: readonly PRRevision[]
   submittedAt?: string
   rejectedAt?: string
