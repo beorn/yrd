@@ -5,6 +5,7 @@ import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
 import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
+import type { Event } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { LineRun, LineSummary } from "@yrd/line"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
@@ -25,6 +26,7 @@ import {
   type LineStatusResult,
 } from "./line-status-view.tsx"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
+import { queueMetricsProjection, queueTerminalFacts, type QueueMetricsProjection } from "./queue-metrics.ts"
 import { BayStatusView, ContestStatusView } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { YRD_VERSION } from "./version.ts"
@@ -421,18 +423,20 @@ async function lineStatus(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<void> {
+  const events = await Array.fromAsync(app.events())
   const state = stateOf(app)
   const target = resolveLineTargets(state, selectors, undefined, undefined)
-  const { results } = await lineStatusSnapshots(app, state, target, io)
+  const now = io.now?.() ?? Date.now()
+  const { projection, results } = await lineStatusSnapshots(app, state, target, events, now, io)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "line.status", results },
+    { command: "line.status", projection, results },
     createElement(LineStatusView, {
       state: state.bays,
       results,
       selected: target.selected,
-      now: io.now?.() ?? Date.now(),
+      now,
     }),
   )
 }
@@ -441,8 +445,10 @@ async function lineStatusSnapshots(
   app: YrdCliApp,
   state: YrdCliState,
   target: { bases: Set<string>; selected: Set<string>; prFilter: string | undefined },
+  events: readonly Event[],
+  now: number,
   io: YrdCliIO,
-): Promise<{ results: readonly LineStatusResult[] }> {
+): Promise<{ projection: QueueMetricsProjection; results: readonly LineStatusResult[] }> {
   if (target.selected.size === 0 && target.bases.size === 0) {
     for (const pr of Object.values(state.bays.prs)) target.bases.add(pr.base)
     for (const run of Object.values(state.lines.records)) target.bases.add(run.base)
@@ -463,7 +469,12 @@ async function lineStatusSnapshots(
       ),
     })
   }
-  return { results }
+  const submissionTimes = await lineSubmissionTimes(events)
+  const metricRows = lineLogRows(results, target.selected, target.prFilter, undefined, [], new Map(), submissionTimes)
+  return {
+    projection: queueMetricsProjection(queueTerminalFacts(metricRows), now),
+    results,
+  }
 }
 
 function resolveLineTargets(
@@ -752,11 +763,13 @@ async function watchLine(
 async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const load = async (): Promise<LineWatchSnapshot> => {
+  const load = async (): Promise<LineWatchSnapshot & Readonly<{ projection: QueueMetricsProjection }>> => {
+    const events = await Array.fromAsync(app.events())
     const state = stateOf(app)
     const target = resolveLineTargets(state, [], options.base, options.pr)
-    const { results } = await lineStatusSnapshots(app, state, target, io)
-    return { results, now: io.now?.() ?? Date.now() }
+    const now = io.now?.() ?? Date.now()
+    const { projection, results } = await lineStatusSnapshots(app, state, target, events, now, io)
+    return { now, projection, results }
   }
 
   if (!jsonEnabled(options)) {
@@ -773,7 +786,12 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
 
   while (true) {
     const snapshot = await load()
-    await printResult(io, true, { command: "watch", results: snapshot.results }, createElement(LineWatchView, snapshot))
+    await printResult(
+      io,
+      true,
+      { command: "watch", projection: snapshot.projection, results: snapshot.results },
+      createElement(LineWatchView, snapshot),
+    )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
     if (scope.signal.aborted) return 0

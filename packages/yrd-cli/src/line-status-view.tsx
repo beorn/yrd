@@ -6,6 +6,7 @@ import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
 import type { LineRun, LineStep, LineSummary } from "@yrd/line"
 import { Box, Link, Table, Text } from "silvery"
+import { queueTerminalFact } from "./queue-metrics.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
 export type LineStatusResult = LineSummary & { headSha?: string; prs: PR[] }
@@ -1241,10 +1242,13 @@ export function lineLogRows(
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
         const submittedAt = submissionTimes.get(lineRevisionKey(pr))
-        const ageMs =
-          submittedAt === undefined || finishedAt === undefined
-            ? undefined
-            : Math.max(0, Date.parse(finishedAt) - Date.parse(submittedAt))
+        const terminal = queueTerminalFact({
+          outcome,
+          finishedAt,
+          ...(submittedAt === undefined || finishedAt === undefined
+            ? {}
+            : { ageMs: Date.parse(finishedAt) - Date.parse(submittedAt) }),
+        })
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
           run: run.id,
@@ -1261,8 +1265,8 @@ export function lineLogRows(
           ...(finishedAt === undefined ? {} : { finishedAt }),
           started: toIso(run.startedAt),
           finished: finishedAt ?? "-",
-          age: ageMs === undefined ? "-" : preciseDuration(ageMs),
-          ...(ageMs === undefined ? {} : { ageMs }),
+          age: terminal.ageMs === null ? "-" : preciseDuration(terminal.ageMs),
+          ...(terminal.ageMs === null ? {} : { ageMs: terminal.ageMs }),
           duration: duration(run.startedAt, run.finishedAt),
           ...(durationMs === undefined ? {} : { durationMs }),
           totalDuration: durationMs === undefined ? "-" : preciseDuration(durationMs),

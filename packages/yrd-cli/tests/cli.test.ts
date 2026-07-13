@@ -10,7 +10,16 @@ import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
-import { createMemoryJournal, createYrd, createYrdDef, EventSchema, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import {
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  EventSchema,
+  JsonSchema,
+  pipe,
+  type Journal,
+  type JsonValue,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import {
   type LineRun,
@@ -49,6 +58,7 @@ import {
   type LineStatusResult,
 } from "../src/line-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
+import { queueMetrics, queueTerminalFacts } from "../src/queue-metrics.ts"
 import * as runInternals from "../src/run.ts"
 import { LineWatchFrame, LineWatchPane, reduceWatchControl, type LineWatchPaneProps } from "../src/watch-pane.tsx"
 
@@ -194,6 +204,9 @@ async function createApp(
     mergeRuns?: string[]
     failingCheck?: boolean
     checkFailure?: Readonly<{ code: string; message: string; artifact?: string }>
+    journal?: Journal<unknown>
+    clock?: () => string
+    id?: () => string
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -245,7 +258,11 @@ async function createApp(
     withBays({ jobs: bayJobs, defaultBase: "main" }),
   )
   return createYrd(contests(line(base)), {
-    inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
+    inject: {
+      journal: options.journal ?? createMemoryJournal(),
+      clock: options.clock ?? (() => "2026-07-09T12:00:00.000Z"),
+      id: options.id ?? ids(),
+    },
   })
 }
 
@@ -922,6 +939,98 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("aggregates rolling queue metrics from canonical history rows without collapsing retries", () => {
+    const minute = 60_000
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const integration = { commit: "a".repeat(40), baseSha: "b".repeat(40) }
+    const passed = (id: string, pr: string, headSha: string, finishedAt: number) =>
+      fakeRun({
+        id,
+        pr: { id: pr, revision: 1, headSha },
+        status: "passed",
+        steps: [],
+        startedAt: new Date(finishedAt - minute).toISOString(),
+        finishedAt: new Date(finishedAt).toISOString(),
+        integration,
+      })
+    const failed = (id: string, pr: string, headSha: string, finishedAt: number) =>
+      fakeRun({
+        id,
+        pr: { id: pr, revision: 1, headSha },
+        status: "failed",
+        steps: [],
+        startedAt: new Date(finishedAt - minute).toISOString(),
+        finishedAt: new Date(finishedAt).toISOString(),
+        error: { code: "check-failed", message: "failed" },
+      })
+    const singles = Array.from({ length: 6 }, (_, index) => {
+      const number = index + 1
+      return passed(`R${number}`, `PR${number}`, String(number).repeat(40), now)
+    })
+    const retryA = "7".repeat(40)
+    const retryB = "8".repeat(40)
+    const runs = [
+      ...singles,
+      failed("R7", "PR-retry-a", retryA, now - 10 * minute),
+      passed("R8", "PR-retry-a", retryA, now),
+      failed("R9", "PR-retry-b", retryB, now - 10 * minute),
+      passed("R10", "PR-retry-b", retryB, now),
+      passed("R-old", "PR-old", "9".repeat(40), now - 24 * 60 * minute - 1),
+    ]
+    const submissions = new Map(
+      singles.map((run, index) => [
+        lineRevisionKey(run.prs[0]!),
+        new Date(now - (index + 1) * 10 * minute).toISOString(),
+      ]),
+    )
+    submissions.set(lineRevisionKey(runs[6]!.prs[0]!), new Date(now - 80 * minute).toISOString())
+    submissions.set(lineRevisionKey(runs[8]!.prs[0]!), new Date(now - 100 * minute).toISOString())
+    submissions.set(lineRevisionKey(runs[10]!.prs[0]!), new Date(now - 25 * 60 * minute).toISOString())
+    const rows = lineLogRows([fakeSummary(runs)], new Set<string>(), undefined, undefined, [], new Map(), submissions)
+
+    expect(queueMetrics(queueTerminalFacts(rows), now)).toEqual({
+      windowMs: 24 * 60 * minute,
+      queueAge: { samples: 10, medianMs: 55 * minute, p90Ms: 90 * minute },
+      throughput: { landed: 8 },
+      rejectRate: { rejected: 2, terminal: 10, ratio: 0.2 },
+    })
+    expect(
+      queueMetrics(
+        [
+          { terminalAtMs: now - 24 * 60 * minute, outcome: "integrated", ageMs: 60 * minute },
+          { terminalAtMs: now, outcome: "rejected", ageMs: null },
+        ],
+        now,
+      ),
+    ).toEqual({
+      windowMs: 24 * 60 * minute,
+      queueAge: { samples: 1, medianMs: 60 * minute, p90Ms: 60 * minute },
+      throughput: { landed: 1 },
+      rejectRate: { rejected: 1, terminal: 2, ratio: 0.5 },
+    })
+    expect(queueMetrics([], now)).toEqual({
+      windowMs: 24 * 60 * minute,
+      queueAge: { samples: 0, medianMs: null, p90Ms: null },
+      throughput: { landed: 0 },
+      rejectRate: { rejected: 0, terminal: 0, ratio: 0 },
+    })
+    expect(() =>
+      queueTerminalFacts([{ finishedAt: new Date(now).toISOString(), outcome: "rejected", ageMs: -1 }]),
+    ).toThrow("negative queue age")
+    const reversed = failed("R-reversed", "PR-reversed", "f".repeat(40), now - minute)
+    expect(() =>
+      lineLogRows(
+        [fakeSummary([reversed])],
+        new Set<string>(),
+        undefined,
+        undefined,
+        [],
+        new Map(),
+        new Map([[lineRevisionKey(reversed.prs[0]!), new Date(now).toISOString()]]),
+      ),
+    ).toThrow("negative queue age")
+  })
+
   it("mounts watch as one read-only queue-focused live pane", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -1156,6 +1265,71 @@ describe("runYrd", () => {
     expect(watch.stdout()).toContain('"base":"main"')
     expect(watch.stdout()).toContain('"id":"PR1"')
     expect(sleeps).toEqual([1_000])
+  })
+
+  it("refreshes one shared queue projection from a second runtime for status and watch JSON", async () => {
+    const journal = createMemoryJournal()
+    const reader = await createApp({ journal, id: ids() })
+    const writer = await createApp({ journal, id: ids() })
+    const now = () => Date.parse("2026-07-09T12:01:00.000Z")
+    const controller = new AbortController()
+    let sleeps = 0
+    let writtenEvents = 0
+    const watch = outputIO({
+      now,
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          sleeps += 1
+          if (sleeps === 1) {
+            await openAndSubmit(writer)
+            expect(
+              (await writer.line.integrate({ prs: ["PR1"] }, { executor: "test", leaseMs: 60_000 }))[0]?.status,
+            ).toBe("passed")
+            writtenEvents = await Array.fromAsync(writer.events()).then((events) => events.length)
+            return
+          }
+          controller.abort()
+        },
+      },
+    })
+    try {
+      expect(await runYrd(reader, yrd("watch", "--json"), watch.io), watch.stderr()).toBe(0)
+      const watchRecords = watch
+        .stdout()
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      expect(watchRecords).toHaveLength(2)
+      expect(watchRecords[0]?.projection).toMatchObject({
+        metrics: {
+          queueAge: { samples: 0, medianMs: null, p90Ms: null },
+          throughput: { landed: 0 },
+          rejectRate: { rejected: 0, terminal: 0, ratio: 0 },
+        },
+      })
+      expect(watchRecords[1]?.projection).toMatchObject({
+        metrics: {
+          windowMs: 86_400_000,
+          queueAge: { samples: 1, medianMs: 0, p90Ms: 0 },
+          throughput: { landed: 1 },
+          rejectRate: { rejected: 0, terminal: 1, ratio: 0 },
+        },
+      })
+
+      const status = outputIO({ now })
+      expect(await runYrd(reader, yrd("line", "status", "--json"), status.io), status.stderr()).toBe(0)
+      const statusRecord = JSON.parse(status.stdout()) as Record<string, unknown>
+      expect(statusRecord.projection).toEqual(watchRecords[1]?.projection)
+      expect(statusRecord.results).toEqual(watchRecords[1]?.results)
+
+      const human = outputIO({ now })
+      expect(await runYrd(reader, yrd("line", "status"), human.io), human.stderr()).toBe(0)
+      expect(human.stdout()).toContain("INTEGRATED 1")
+      expect(await Array.fromAsync(reader.events()).then((events) => events.length)).toBe(writtenEvents)
+    } finally {
+      await Promise.all([reader.close(), writer.close()])
+    }
   })
 
   it("renders the literal empty line summary within 80- and 120-column budgets", async () => {
