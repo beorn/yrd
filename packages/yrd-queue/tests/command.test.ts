@@ -1371,6 +1371,61 @@ describe("Queue command adapters", () => {
     })
   })
 
+  it("rolls back a configured root landing when its source Candidate ref disappears", async () => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const remote = join(repo, "..", "root-origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/source"])
+
+    await using process = createProcess()
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const check = withStep("check", gitCheckStep({ inject: { process }, repo, command: ["true"] }), {
+      revision: "check-v1",
+      output: GitCheckResultEvidenceSchema,
+    })
+    const merge = withMerge(
+      configuredMergeStep<Checked>({
+        inject: { process },
+        repo,
+        command: shellCommand(
+          'git push origin "$YRD_CANDIDATE_SHA:refs/heads/main" && ' +
+            'source_ref=$(git -C dep for-each-ref --format="%(refname)" refs/heads/yrd/candidates) && ' +
+            'test -n "$source_ref" && git -C dep push origin ":$source_ref"',
+        ),
+      }),
+      { revision: "delegated-merge-v1" },
+    )
+    const queue = withQueue({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "invalid-candidate" } })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
+    expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(rootBaseSha)
+    expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
+  })
+
   it("fails a delegated merge command that exits zero without landing the PR", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()

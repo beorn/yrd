@@ -1074,6 +1074,56 @@ async function landingError(
   return undefined
 }
 
+async function rollbackQueueBase(
+  git: Git,
+  repo: string,
+  base: GitQueueTarget,
+  landing: GitQueueTarget,
+): Promise<string | undefined> {
+  try {
+    if (base.remote !== undefined) {
+      const rolledBack = await git.run(
+        repo,
+        [
+          "push",
+          "--porcelain",
+          `--force-with-lease=${base.branchRef}:${landing.sha}`,
+          base.remote,
+          `${base.sha}:${base.branchRef}`,
+        ],
+        true,
+      )
+      const restored = await authoritativeQueueBase(git, repo, base.branch)
+      return rolledBack.code === 0 && restored.sha === base.sha
+        ? undefined
+        : rolledBack.stderr || rolledBack.stdout || `could not restore '${base.branch}' after source ref loss`
+    }
+
+    const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
+    if (checkedOut !== undefined) {
+      if ((await git.commit(checkedOut, "HEAD")) !== landing.sha) return `'${base.branch}' moved during rollback`
+      const rolledBack = await git.run(checkedOut, ["reset", "--merge", base.sha], true)
+      const restored = await git.run(
+        checkedOut,
+        ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+        true,
+      )
+      if (rolledBack.code !== 0 || restored.code !== 0) {
+        const detail = [rolledBack.stderr, restored.stderr].filter((value) => value !== "").join("\n")
+        return detail || `could not restore '${base.branch}' after source ref loss`
+      }
+    } else {
+      const rolledBack = await git.run(repo, ["update-ref", base.branchRef, base.sha, landing.sha], true)
+      if (rolledBack.code !== 0)
+        return rolledBack.stderr || rolledBack.stdout || `'${base.branch}' moved during rollback`
+    }
+    const restored = await authoritativeQueueBase(git, repo, base.branch)
+    return restored.sha === base.sha ? undefined : `could not restore '${base.branch}' after source ref loss`
+  } catch (cause) {
+    return messageOf(cause)
+  }
+}
+
 export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
@@ -1125,24 +1175,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if (missing === undefined) {
           const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
           if (sourceRefError !== undefined) {
-            const rolledBack = await git.run(
-              repo,
-              [
-                "push",
-                "--porcelain",
-                `--force-with-lease=${branchRef}:${landing.sha}`,
-                remote,
-                `${baseSha}:${branchRef}`,
-              ],
-              true,
-            )
-            const restored = await authoritativeQueueBase(git, repo, branch)
-            if (rolledBack.code !== 0 || restored.sha !== baseSha) {
-              return failed(
-                "merge-rollback-failed",
-                rolledBack.stderr || rolledBack.stdout || `could not restore '${branch}' after source ref loss`,
-              )
-            }
+            const rollbackError = await rollbackQueueBase(git, repo, base, landing)
+            if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
             return failed("invalid-candidate", sourceRefError)
           }
           return {
@@ -1261,6 +1295,12 @@ export function configuredMergeStep<Shape extends PRShape>(
       }
       const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
       if (missing === undefined) {
+        const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
+        if (sourceRefError !== undefined) {
+          const rollbackError = await rollbackQueueBase(git, repo, base, landing)
+          if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+          return failed("invalid-candidate", sourceRefError)
+        }
         return {
           status: "passed",
           output: integrationProof(landing.sha, candidate.checked),
