@@ -5,6 +5,7 @@ import {
   createBayJobDefs,
   createGitPushReceiver,
   createGitWorkspace,
+  baseIdentity,
   loadGitPushReceiver,
   runReceiverHookFromEnvironment,
   withBays,
@@ -299,13 +300,6 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
   return undefined
 }
 
-function queueBranch(ref: string): string {
-  if (ref.startsWith("refs/heads/")) return ref.slice("refs/heads/".length)
-  if (ref.startsWith("refs/remotes/origin/")) return ref.slice("refs/remotes/origin/".length)
-  if (ref.startsWith("origin/")) return ref.slice("origin/".length)
-  return ref
-}
-
 async function resolveQueueTarget(
   process: Pick<Process, "run">,
   repo: string,
@@ -313,8 +307,8 @@ async function resolveQueueTarget(
   requestedBase: string,
   options: Readonly<{ requireAligned?: boolean }> = {},
 ): Promise<Readonly<{ base: string; sha: string }>> {
-  const configured = queueBranch(configuredBase)
-  const requested = queueBranch(requestedBase)
+  const configured = baseIdentity(configuredBase)
+  const requested = baseIdentity(requestedBase)
   const base = requested === configured ? configured : requested
   if (requestedBase !== base && (await resolveCommit(process, repo, requestedBase)) === undefined) {
     throw new Error(`yrd: queue base '${requestedBase}' does not resolve`)
@@ -431,7 +425,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     }),
     withBays({
       jobs: bayJobs,
-      defaultBase: queueBranch(options.config.base),
+      defaultBase: baseIdentity(options.config.base),
       resolveBase: async (base) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           requireAligned: true,

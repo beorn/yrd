@@ -8,6 +8,15 @@ export const GitShaSchema = z.string().regex(/^[0-9a-f]{40,64}$/iu)
 export type BayId = string
 export type PRId = string
 
+/** Stable persisted queue key for local and origin-qualified base refs. */
+export function baseIdentity(ref: string): string {
+  const parsed = GitRefSchema.parse(ref)
+  for (const prefix of ["refs/heads/", "refs/remotes/origin/", "origin/"]) {
+    if (parsed.startsWith(prefix)) return parsed.slice(prefix.length)
+  }
+  return parsed
+}
+
 export type BayFailure = Readonly<{
   code: string
   message: string

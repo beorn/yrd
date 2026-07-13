@@ -33,6 +33,7 @@ import {
   ProvisionedBaySchema,
   RefreshBayInputSchema,
   RefreshedBaySchema,
+  baseIdentity,
   defaultBayBranch,
   emptyBaysState,
   isLivePR,
@@ -266,10 +267,12 @@ export function createBays(
   }
 
   const target = async (base: string | undefined, baseSha: string | undefined): Promise<BayBaseTarget> => {
-    const resolved =
+    const requested = base ?? options.defaultBase
+    const selected =
       options.resolveBase === undefined
-        ? { base: base ?? options.defaultBase, ...(baseSha === undefined ? {} : { baseSha }) }
-        : await options.resolveBase(base ?? options.defaultBase)
+        ? { base: requested, ...(baseSha === undefined ? {} : { baseSha }) }
+        : await options.resolveBase(requested)
+    const resolved = { ...selected, base: baseIdentity(selected.base) }
     if (baseSha !== undefined && resolved.baseSha !== undefined && baseSha !== resolved.baseSha) {
       raiseFailure(
         "refusal",
@@ -431,7 +434,7 @@ export type WithBaysOptions = Readonly<{
 }>
 
 export function withBays(options: WithBaysOptions) {
-  const defaultBase = options.defaultBase ?? "main"
+  const defaultBase = baseIdentity(options.defaultBase ?? "main")
   const commands = createBayCommands(options.jobs, defaultBase)
 
   return <State extends object, Commands extends CommandTree, Features extends HasJobs>(
@@ -542,7 +545,7 @@ function openBay(
     throw new Error(`yrd: bay '${args.name}' is already open`)
   }
   const id = nextId("B", current.byId)
-  const base = args.base ?? defaultBase
+  const base = baseIdentity(args.base ?? defaultBase)
   const branch = args.from ?? defaultBayBranch(args.name)
   if (Object.values(current.byId).some((bay) => bay.status !== "closed" && bay.branch === branch)) {
     throw new Error(`yrd: branch '${branch}' is already open in another bay`)
@@ -593,7 +596,7 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
   const branch = args.branch ?? bay?.branch
   if (branch === undefined) throw new Error("yrd: bay.intake: 'bay' or 'branch' is required")
-  const base = args.base ?? bay?.base ?? defaultBase
+  const base = baseIdentity(args.base ?? bay?.base ?? defaultBase)
   if (args.receipt !== undefined) {
     const received = current.receipts[args.receipt]
     if (received !== undefined) {
@@ -640,7 +643,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     return { events: [event("pr/submitted", { pr: pr.id, revision: pr.revision, headSha: pr.headSha })] }
   }
 
-  const base = args.base ?? defaultBase
+  const base = baseIdentity(args.base ?? defaultBase)
   const existing = resolvePR(current, args.branch)
   if (existing?.status === "pushed" || existing?.status === "submitted") {
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
@@ -665,11 +668,12 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
 }
 
 function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string, base: string, except?: string): void {
+  const identity = baseIdentity(base)
   const duplicate = Object.values(state.prs).find(
-    (pr) => pr.id !== except && pr.headSha === headSha && pr.base === base,
+    (pr) => pr.id !== except && pr.headSha === headSha && baseIdentity(pr.base) === identity,
   )
   if (duplicate !== undefined) {
-    throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on queue '${base}'`)
+    throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on queue '${identity}'`)
   }
 }
 
@@ -734,7 +738,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   switch (applied.name) {
     case "bay/opened": {
       const opened = BayOpenedSchema.parse(data)
-      return saveBay({ ...opened, status: "opening", openedAt: applied.ts, refreshedAt: applied.ts })
+      return saveBay({
+        ...opened,
+        base: baseIdentity(opened.base),
+        status: "opening",
+        openedAt: applied.ts,
+        refreshedAt: applied.ts,
+      })
     }
     case "bay/closing": {
       const bay = current.byId[data.bay as string]
@@ -742,11 +752,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     }
     case "pr/pushed": {
       const pushed = PRPushedSchema.parse(data)
+      const base = baseIdentity(pushed.base)
       const existing = current.prs[pushed.pr]
       const record: PRRevision = {
         revision: pushed.revision,
         headSha: pushed.headSha,
-        base: pushed.base,
+        base,
         ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
         pushedAt: applied.ts,
       }
@@ -758,7 +769,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               ...(pushed.name === undefined ? {} : { name: pushed.name }),
               ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
               branch: pushed.branch,
-              base: pushed.base,
+              base,
               status: "pushed",
               revision: pushed.revision,
               headSha: pushed.headSha,
@@ -768,7 +779,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           : {
               ...existing,
               ...(pushed.issue === undefined ? {} : { issue: pushed.issue }),
-              base: pushed.base,
+              base,
               status: "pushed",
               revision: pushed.revision,
               headSha: pushed.headSha,
@@ -790,7 +801,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
                   pr: pushed.pr,
                   branch: pushed.branch,
                   headSha: pushed.headSha,
-                  base: pushed.base,
+                  base,
                   ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
                 },
               },

@@ -1,4 +1,4 @@
-import { GitRefSchema, GitShaSchema, PRIdSchema, type PR } from "@yrd/bay"
+import { GitRefSchema, GitShaSchema, PRIdSchema, baseIdentity, type PR } from "@yrd/bay"
 import type { JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
@@ -179,7 +179,7 @@ export const Queues = Object.freeze({
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
       ...(pr.name === undefined ? {} : { name: pr.name }),
       branch: pr.branch,
-      base: pr.base,
+      base: baseIdentity(pr.base),
       revision: pr.revision,
       headSha: pr.headSha,
       ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),

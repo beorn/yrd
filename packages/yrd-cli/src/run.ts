@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
 import type { QueueRun, QueueSummary } from "@yrd/queue"
@@ -326,9 +326,12 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
 
 async function resolvedQueueTarget(ref: string, io: YrdCliIO): Promise<Readonly<{ base: string; sha?: string }>> {
   const cwd = io.cwd ?? process.cwd()
-  if (io.resolveQueueTarget !== undefined) return io.resolveQueueTarget(ref, cwd)
+  if (io.resolveQueueTarget !== undefined) {
+    const target = await io.resolveQueueTarget(ref, cwd)
+    return { ...target, base: baseIdentity(target.base) }
+  }
   const sha = await optionalRevision(ref, io)
-  return { base: ref, ...(sha === undefined ? {} : { sha }) }
+  return { base: baseIdentity(ref), ...(sha === undefined ? {} : { sha }) }
 }
 
 type QueueTargetGroup = Readonly<{ base: string; aliases: ReadonlySet<string>; headSha?: string }>
@@ -339,6 +342,7 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
     const target = await resolvedQueueTarget(ref, io)
     const group = groups.get(target.base) ?? { aliases: new Set<string>() }
     group.aliases.add(ref)
+    group.aliases.add(baseIdentity(ref))
     group.aliases.add(target.base)
     if (target.sha !== undefined) group.headSha = target.sha
     groups.set(target.base, group)
@@ -402,7 +406,7 @@ async function listPrs(
 ): Promise<void> {
   const prs = app.bays
     .prs()
-    .filter((pr) => options.base === undefined || pr.base === options.base)
+    .filter((pr) => options.base === undefined || baseIdentity(pr.base) === baseIdentity(options.base))
     .filter((pr) => options.state === undefined || pr.status === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
   const selected = new Set(prs.map((pr) => pr.id))

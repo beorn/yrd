@@ -59,7 +59,7 @@ function workspace(): BayWorkspace {
 function queuePlugin(
   options: Readonly<{
     batch?: false | number
-    check?: (input: StepExecution<PRShape>) => JobResult<CheckResult>
+    check?: (input: StepExecution<PRShape>) => JobResult<CheckResult> | Promise<JobResult<CheckResult>>
     merge?: (input: StepExecution<ReviewedShape>) => JobResult<{ commit: string; baseSha: string }>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
@@ -67,7 +67,7 @@ function queuePlugin(
 ) {
   const check = withStep(
     "check",
-    (input: StepExecution<PRShape>): JobResult<CheckResult> =>
+    (input: StepExecution<PRShape>): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
       options.check?.(input) ?? { status: "passed", output: { checked: true } },
     { revision: options.checkRevision ?? "check-v1", output: CheckResultSchema },
   )
@@ -456,6 +456,114 @@ describe("Queue", () => {
 
     await using replay = await createQueueApp({}, journal)
     expect(replay.queue.status("main").pause).toMatchObject({ allowedPRs: [allowed.id] })
+  })
+
+  it("does not bypass a canonical pause through a base alias", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/alias-paused", "origin/main")
+    await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: [] })
+
+    await expect(app.queue.run({ prs: [pr.id] }, runtime)).rejects.toThrow(`queue 'main' is paused: operator freeze`)
+    await expect(app.dispatch(app.commands.queue.run, { prs: [pr.id] })).rejects.toThrow(
+      `queue 'main' is paused: operator freeze`,
+    )
+    expect(app.state().queues.records).toEqual({})
+  })
+
+  it("treats base aliases as one active queue before a second run starts", async () => {
+    const firstEntered = Promise.withResolvers<void>()
+    const releaseFirst = Promise.withResolvers<void>()
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      batch: 1,
+      check: async (input) => {
+        checkCalls++
+        if (input.prs[0]?.branch === "issue/active-main") {
+          firstEntered.resolve()
+          await releaseFirst.promise
+        }
+        return { status: "waiting", token: `remote-${input.prs[0]?.id}` }
+      },
+    })
+    const main = await submitBranch(app, "issue/active-main", "main")
+    const alias = await submitBranch(app, "issue/active-alias", "origin/main")
+
+    const firstRun = app.queue.run({ prs: [main.id] }, runtime)
+    await firstEntered.promise
+    let secondError: unknown
+    try {
+      await app.queue.run({ prs: [alias.id] }, runtime)
+    } catch (error) {
+      secondError = error
+    } finally {
+      releaseFirst.resolve()
+      await firstRun
+    }
+
+    expect(secondError).toMatchObject({ message: "yrd: queue 'main' is running 'R1'" })
+    expect(checkCalls).toBe(1)
+  })
+
+  it("canonically replays historical base aliases before pause lookup and partitioning", async () => {
+    const command = { id: "00000000-0000-7000-8000-000000000201", op: "legacy.queue.fixture" }
+    const journal = createMemoryJournal<unknown>([
+      {
+        command,
+        cause: {
+          id: "00000000-0000-7000-8000-000000000202",
+          commandId: command.id,
+          op: command.op,
+          commandHash: Command.hash(command),
+        },
+        events: [
+          {
+            id: "00000000-0000-7000-8000-000000000203",
+            name: "pr/pushed",
+            ts: "2026-01-01T00:00:00.000Z",
+            data: { pr: "PR1", branch: "issue/legacy-main", base: "main", headSha: HEAD, revision: 1 },
+          },
+          {
+            id: "00000000-0000-7000-8000-000000000204",
+            name: "pr/submitted",
+            ts: "2026-01-01T00:00:00.001Z",
+            data: { pr: "PR1", revision: 1, headSha: HEAD },
+          },
+          {
+            id: "00000000-0000-7000-8000-000000000205",
+            name: "pr/pushed",
+            ts: "2026-01-01T00:00:00.002Z",
+            data: { pr: "PR2", branch: "issue/legacy-alias", base: "origin/main", headSha: UPDATED, revision: 1 },
+          },
+          {
+            id: "00000000-0000-7000-8000-000000000206",
+            name: "pr/submitted",
+            ts: "2026-01-01T00:00:00.003Z",
+            data: { pr: "PR2", revision: 1, headSha: UPDATED },
+          },
+          {
+            id: "00000000-0000-7000-8000-000000000207",
+            name: "queue/paused",
+            ts: "2026-01-01T00:00:00.004Z",
+            data: {
+              base: "origin/main",
+              reason: "legacy freeze",
+              allowedPRs: ["PR1", "PR2"],
+            },
+          },
+        ],
+      },
+    ])
+    await using app = await createQueueApp({ batch: 2 }, journal)
+
+    expect(Object.values(app.state().bays.prs).map((pr) => pr.base)).toEqual(["main", "main"])
+    expect(Object.keys(app.state().queues.pauses)).toEqual(["main"])
+    expect(app.queue.status("origin/main")).toMatchObject({
+      base: "main",
+      pause: { base: "main", allowedPRs: ["PR1", "PR2"] },
+    })
+
+    const runs = await app.queue.run({}, runtime)
+    expect(runs.map((run) => [run.base, run.prs.map((pr) => pr.id)])).toEqual([["main", ["PR1", "PR2"]]])
   })
 
   it("selects the first queue-ordered eligible submitted PR under a pause", async () => {

@@ -1,4 +1,4 @@
-import { GitRefSchema, PRIdSchema, resolvePR, type BaysState, type HasBays, type PR } from "@yrd/bay"
+import { GitRefSchema, PRIdSchema, baseIdentity, resolvePR, type BaysState, type HasBays, type PR } from "@yrd/bay"
 import {
   command,
   event,
@@ -429,13 +429,14 @@ function createQueue<Shape extends PRShape>(
     state,
     steps: () => steps.map(descriptor),
     async pause(args) {
-      await actions.pause(args)
-      const pause = state().pauses[args.base]
-      if (pause === undefined) throw new Error(`yrd: queue '${args.base}' did not retain its pause`)
+      const base = baseIdentity(args.base)
+      await actions.pause({ ...args, base })
+      const pause = state().pauses[base]
+      if (pause === undefined) throw new Error(`yrd: queue '${base}' did not retain its pause`)
       return pause
     },
     async resume(base) {
-      await actions.resume(base)
+      await actions.resume(baseIdentity(base))
     },
     async run(args, runOptions) {
       using _span = log.span?.("run", { prs: args.prs, steps: args.steps, retry: args.retry === true })
@@ -504,7 +505,7 @@ function createQueue<Shape extends PRShape>(
       const record = state().records[id]
       return record === undefined ? undefined : materializeRun(record, runtime().jobs)
     },
-    status: (base) => queueSummary(state(), runtime().jobs, base),
+    status: (base) => queueSummary(state(), runtime().jobs, baseIdentity(base)),
   }) as Queue<Shape>
 }
 
@@ -514,13 +515,15 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     visibility: "public",
     params: PauseQueueArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: PauseQueueArgs) {
+      const base = baseIdentity(args.base)
       const paused = {
         ...args,
+        base,
         allowedPRs: [...args.allowedPRs].toSorted((left, right) =>
           left.localeCompare(right, undefined, { numeric: true }),
         ),
       }
-      const current = state.queues.pauses[args.base]
+      const current = state.queues.pauses[base]
       if (
         current?.reason === paused.reason &&
         current.allowedPRs.length === paused.allowedPRs.length &&
@@ -537,7 +540,8 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     visibility: "public",
     params: ResumeQueueArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ base: string }>) {
-      return { events: state.queues.pauses[args.base] === undefined ? [] : [event("queue/resumed", args)] }
+      const base = baseIdentity(args.base)
+      return { events: state.queues.pauses[base] === undefined ? [] : [event("queue/resumed", { base })] }
     },
   })
 
@@ -549,9 +553,11 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       if (args.steps?.length === 0) return { events: [] }
       const prs = runnablePRs(state, args)
       if (prs.length === 0) return { events: [] }
-      const base = prs[0]?.base
+      const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
       if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
-      if (prs.some((pr) => pr.base !== base)) throw new Error("yrd: one queue candidate cannot span base branches")
+      if (prs.some((pr) => baseIdentity(pr.base) !== base)) {
+        throw new Error("yrd: one queue candidate cannot span base branches")
+      }
       if (prs.length > state.queues.batchSize) {
         throw new Error(
           `yrd: queue candidate has ${prs.length} PRs; configured batch size is ${state.queues.batchSize}`,
@@ -618,11 +624,12 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
 
 function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
   if (applied.name === "queue/paused") {
-    const paused = QueuePauseSchema.parse({ ...PauseQueueArgsSchema.parse(applied.data), pausedAt: applied.ts })
+    const parsed = PauseQueueArgsSchema.parse(applied.data)
+    const paused = QueuePauseSchema.parse({ ...parsed, base: baseIdentity(parsed.base), pausedAt: applied.ts })
     return { queues: { ...state.queues, pauses: { ...state.queues.pauses, [paused.base]: paused } } }
   }
   if (applied.name === "queue/resumed") {
-    const { base } = ResumeQueueArgsSchema.parse(applied.data)
+    const base = baseIdentity(ResumeQueueArgsSchema.parse(applied.data).base)
     return {
       queues: {
         ...state.queues,
@@ -633,7 +640,12 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   if (applied.name === "queue/run/started") {
     const started = QueueStartSchema.parse((applied.data as { run?: unknown }).run)
     if (state.queues.records[started.id] !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
-    const record = QueueRecordSchema.parse({ ...started, startedAt: applied.ts })
+    const record = QueueRecordSchema.parse({
+      ...started,
+      base: baseIdentity(started.base),
+      prs: started.prs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
+      startedAt: applied.ts,
+    })
     return { queues: { ...state.queues, records: { ...state.queues.records, [record.id]: record } } }
   }
   if (applied.name === "queue/run/failed") {
@@ -707,7 +719,7 @@ function startRun(
   const run: QueueStart = {
     id,
     prs,
-    base: pr.base,
+    base: baseIdentity(pr.base),
     steps: selected.map(descriptor),
     ...(integration === undefined ? {} : { initialIntegration: integration }),
     ...lineage,
@@ -790,8 +802,10 @@ function samePayloadPRs(
   state: DeepReadonly<BaysState>,
   snapshots: readonly DeepReadonly<PRSnapshot>[],
 ): readonly DeepReadonly<PR>[] {
-  const payloads = new Set(snapshots.map((pr) => `${pr.base}\0${pr.headSha}`))
-  return Object.values(state.prs).filter((pr) => pr.status !== "withdrawn" && payloads.has(`${pr.base}\0${pr.headSha}`))
+  const payloads = new Set(snapshots.map((pr) => `${baseIdentity(pr.base)}\0${pr.headSha}`))
+  return Object.values(state.prs).filter(
+    (pr) => pr.status !== "withdrawn" && payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
+  )
 }
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): QueueRun {
@@ -909,7 +923,10 @@ function runningQueue(
   base: string,
   except?: QueueRunId,
 ): QueueRun | undefined {
-  return orderedQueues(queues, jobs).find((run) => run.id !== except && run.base === base && run.status === "running")
+  const identity = baseIdentity(base)
+  return orderedQueues(queues, jobs).find(
+    (run) => run.id !== except && baseIdentity(run.base) === identity && run.status === "running",
+  )
 }
 
 function childQueue(
@@ -938,13 +955,14 @@ function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsSta
 }
 
 function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, base: string): QueueSummary {
-  const runs = orderedQueues(queues, jobs).filter((run) => run.base === base)
+  const identity = baseIdentity(base)
+  const runs = orderedQueues(queues, jobs).filter((run) => baseIdentity(run.base) === identity)
   return {
-    base,
+    base: identity,
     running: runs.filter((run) => run.status === "running"),
     waiting: runs.filter((run) => run.status === "waiting"),
     finished: runs.filter(Queues.terminal),
-    ...(queues.pauses[base] === undefined ? {} : { pause: queues.pauses[base] }),
+    ...(queues.pauses[identity] === undefined ? {} : { pause: queues.pauses[identity] }),
   }
 }
 
@@ -1049,13 +1067,14 @@ function runnablePRs(state: DeepReadonly<RuntimeState>, args: QueueRunArgs): PR[
   const requested = requestedPRs(state.bays, args)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const eligible = requested.filter((pr) => {
-    const pause = state.queues.pauses[pr.base]
+    const base = baseIdentity(pr.base)
+    const pause = state.queues.pauses[base]
     if (pause === undefined || pause.allowedPRs.includes(pr.id)) return true
     if (implicitQueue) return false
     raiseFailure(
       "refusal",
       "queue-paused",
-      `yrd: queue '${pr.base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
+      `yrd: queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
     )
   })
   const claimed = new Set(
@@ -1070,7 +1089,7 @@ function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {
   const groups = new Map<string, PR[]>()
   for (const pr of prs) {
     const proof = pr.integration
-    const key = `${pr.base}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
+    const key = `${baseIdentity(pr.base)}\0${proof?.commit ?? ""}\0${proof?.baseSha ?? ""}`
     const group = groups.get(key)
     if (group === undefined) groups.set(key, [pr])
     else group.push(pr)
@@ -1111,7 +1130,7 @@ function pinnedPRError(state: DeepReadonly<BaysState>, snapshots: readonly PRSna
       current === undefined ||
       current.revision !== snapshot.revision ||
       current.headSha !== snapshot.headSha ||
-      current.base !== snapshot.base ||
+      baseIdentity(current.base) !== baseIdentity(snapshot.base) ||
       current.status === "withdrawn"
     ) {
       return {
