@@ -241,7 +241,7 @@ yrd pr submit fix/release --base release/2.0
 ### PR Eligibility and Checks
 
 ```text
-yrd pr submit [selector...] [--draft] [--follow] [--base <branch>] [--json]
+yrd pr submit [selector...] [--issue <ref>] [--draft] [--follow] [--base <branch>] [--json]
 yrd pr list [--needs-review] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
@@ -256,6 +256,18 @@ configured pre-merge Queue steps, and returns. `--follow` stays attached to that
 same journaled Run. `pr checks` renders the same typed evidence in human or
 one-record-per-line JSON output, including command argv, concise diagnostics,
 base-versus-carrier classification, and artifact paths.
+
+Linked PR transitions retain the exact tracker-neutral reference instead of
+recovering identity from branch names or commit prose. Rejection and withdrawal
+facts carry `{pr, revision, headSha, issueRef}`; integration adds the exact
+`landingSha` recorded by the Queue.
+
+`yrd log --all --json` exposes those journal-owned facts as a versioned
+`trackerBridge` snapshot. Its `asOf` cursor and timestamp identify the exact
+projection, and each linked PR appears once in one native state: `pushed`,
+`submitted`, `rejected`, `integrated`, or `withdrawn`. This is a read-only,
+regenerable bridge for tracker adapters, not another PR store or plugin
+registry; the consuming tracker remains the only writer of its own lifecycle.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
@@ -582,8 +594,9 @@ Pre-cutover `.git/yrd/events.jsonl` and `.git/bay/journal.jsonl` files remain
 opaque, read-only legacy data. Yrd never decodes, migrates, appends, or rewrites
 them; `yrd log --all --json` reports their paths and frame counts only as a coverage
 pointer while all new authority starts in `events-v3.jsonl`. The same lossless
-view includes complete typed Queue runs and every historical Job attempt, including
-failed output, artifacts, lost reasons, runner identity, and integration proof.
+view includes the cursor-stamped tracker bridge, complete typed Queue runs, and
+every historical Job attempt, including failed output, artifacts, lost reasons,
+runner identity, and integration proof.
 
 Serialized callers may retry a stable UUIDv7 Command id; trusted adapters may
 instead supply a stable dispatch key. Yrd records the Command and a canonical

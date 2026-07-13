@@ -1010,7 +1010,15 @@ function advanceQueue(
         !isIntegrated(before) &&
         pr !== undefined &&
         current?.status === "submitted"
-          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: failure.message })]
+          ? [
+              event("pr/rejected", {
+                pr: current.id,
+                revision: current.revision,
+                headSha: current.headSha,
+                ...(current.issue === undefined ? {} : { issueRef: current.issue }),
+                detail: failure.message,
+              }),
+            ]
           : [],
     }
   }
@@ -1032,7 +1040,9 @@ function advanceQueue(
           pr: current.id,
           revision: current.revision,
           headSha: current.headSha,
+          ...(current.issue === undefined ? {} : { issueRef: current.issue }),
           commit: shape.integration.commit,
+          landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
         }),
       )

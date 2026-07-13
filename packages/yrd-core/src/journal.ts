@@ -1,5 +1,12 @@
 export type Cursor = number
 
+/** Exact append-only journal position exposed to read-only projection consumers. */
+export type JournalStamp = Readonly<{
+  cursor: Cursor
+  /** Timestamp of the last event at this cursor; absent for an empty journal. */
+  at?: string
+}>
+
 export type JournalBatch<Value> = Readonly<{
   cursor: Cursor
   values: readonly Value[]
