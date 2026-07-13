@@ -1,4 +1,12 @@
-import { GitRefSchema, GitShaSchema, PRIdSchema, baseIdentity, checkRequest, type PR } from "@yrd/bay"
+import {
+  CorrelationSchema,
+  GitRefSchema,
+  GitShaSchema,
+  PRIdSchema,
+  baseIdentity,
+  checkRequest,
+  type PR,
+} from "@yrd/bay"
 import { JsonSchema, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
@@ -18,6 +26,7 @@ export const PRSnapshotSchema = z
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    correlation: CorrelationSchema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -250,6 +259,7 @@ export const Queues = Object.freeze({
       revision: pr.revision,
       headSha: pr.headSha,
       ...(baseSha === undefined ? {} : { baseSha }),
+      ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
     })
   },
 

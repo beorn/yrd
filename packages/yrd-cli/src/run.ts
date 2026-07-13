@@ -3,7 +3,16 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import {
+  CorrelationSchema,
+  baseIdentity,
+  resolveBay,
+  resolvePR,
+  type Bay,
+  type BaysState,
+  type Correlation,
+  type PR,
+} from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
@@ -473,6 +482,7 @@ async function submitBays(
     base?: string
     queue?: string
     issue?: string
+    correlation?: string
     json?: boolean
   },
   io: YrdCliIO,
@@ -485,11 +495,13 @@ async function submitBays(
       : selectedBays(state.bays, [], io.cwd ?? process.cwd(), "submit").map((bay) => bay.id)
   const prs: PR[] = []
   const base = oneOfAliases(options.base, options.queue, "base", "queue")
+  const correlation = parseCorrelation(options.correlation)
   for (const selector of inferred) {
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(options.draft === true ? { draft: true } : {}),
+      ...(correlation === undefined ? {} : { correlation }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
@@ -519,6 +531,13 @@ async function submitBays(
     }),
   )
   return checks.some((check) => check.status === "failed") || followed.some((run) => run.status === "failed") ? 1 : 0
+}
+
+function parseCorrelation(value: string | undefined): Correlation | undefined {
+  if (value === undefined) return undefined
+  const separator = value.indexOf(":")
+  if (separator <= 0 || separator === value.length - 1) usage("--correlation must be <namespace>:<id>")
+  return CorrelationSchema.parse({ namespace: value.slice(0, separator), id: value.slice(separator + 1) })
 }
 
 function requiredPr(app: YrdCliApp, selector: string): PR {
@@ -1713,6 +1732,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind a transport-neutral submission correlation")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
@@ -1859,6 +1879,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind a transport-neutral submission correlation")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   pr.command("view <selector>")

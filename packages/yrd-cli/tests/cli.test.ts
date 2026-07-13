@@ -495,6 +495,40 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
 }
 
 describe("runYrd", () => {
+  it("carries an opaque CLI correlation through PR, Run, log, and terminal JSON", async () => {
+    const app = await createApp()
+    const correlation = { namespace: "tribe-request", id: "pr 61's docs" }
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/direct", "--correlation", `${correlation.namespace}:${correlation.id}`, "--json"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", correlation, revisions: [{ revision: 1, correlation }] }],
+    })
+
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
+    expect(JSON.parse(run.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ prs: [{ id: "PR1", correlation }] }],
+    })
+
+    const log = outputIO()
+    expect(await runYrd(app, yrd("log", "--all", "--json"), log.io), log.stderr()).toBe(0)
+    const history = JSON.parse(log.stdout()) as { command: string; results: Array<{ finished: unknown[] }> }
+    expect(history.command).toBe("log")
+    expect(history.results[0]?.finished).toEqual(
+      expect.arrayContaining([expect.objectContaining({ prs: [expect.objectContaining({ id: "PR1", correlation })] })]),
+    )
+  })
+
   it("projects git bay onto the public bay subtree and exposes no internal operations", async () => {
     const app = await createApp()
     const gitHelp = outputIO()

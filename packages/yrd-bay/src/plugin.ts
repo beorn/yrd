@@ -24,6 +24,7 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import * as z from "zod"
 import {
   BayIdSchema,
+  CorrelationSchema,
   DeprovisionBayInputSchema,
   DeprovisionedBaySchema,
   GitRefSchema,
@@ -45,6 +46,7 @@ import {
   resolvePR,
   type Bay,
   type BaysState,
+  type Correlation,
   type DeprovisionBayInput,
   type DeprovisionedBay,
   type PR,
@@ -97,7 +99,7 @@ const IntakePRArgsSchema = z
 export type IntakePRArgs = z.infer<typeof IntakePRArgsSchema>
 
 const SubmitArgsSchema = z.union([
-  z.object({ pr: TextSchema }).strict(),
+  z.object({ pr: TextSchema, correlation: CorrelationSchema.optional() }).strict(),
   z
     .object({
       branch: GitRefSchema,
@@ -107,6 +109,7 @@ const SubmitArgsSchema = z.union([
       name: TextSchema.optional(),
       issue: TextSchema.optional(),
       draft: z.boolean().optional(),
+      correlation: CorrelationSchema.optional(),
     })
     .strict(),
 ])
@@ -116,6 +119,7 @@ export type SubmitSelectionOptions = Readonly<{
   base?: string
   issue?: string
   draft?: boolean
+  correlation?: Correlation
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
 }>
@@ -183,13 +187,40 @@ const PRPushedSchema = z
     revision: RevisionSchema,
   })
   .strict()
-const PRRevisionSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const PRRejectedSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, detail: z.string().optional() }).strict()
+const PRRevisionSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    correlation: CorrelationSchema.optional(),
+  })
+  .strict()
+const PRCorrelationBoundSchema = z
+  .object({ pr: PRIdSchema, revision: RevisionSchema, correlation: CorrelationSchema })
+  .strict()
+const PRWithdrawnSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema.optional(),
+    headSha: GitShaSchema.optional(),
+    correlation: CorrelationSchema.optional(),
+  })
+  .strict()
+const PRRejectedSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema.optional(),
+    correlation: CorrelationSchema.optional(),
+    detail: z.string().optional(),
+  })
+  .strict()
 const PRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema,
+    correlation: CorrelationSchema.optional(),
     commit: GitShaSchema,
     baseSha: GitShaSchema,
   })
@@ -215,7 +246,17 @@ const PRCommentFactSchema = z
     ref: TextSchema.optional(),
   })
   .strict()
-const PRCheckRequestFactSchema = PRRevisionSchema.extend({ baseSha: GitShaSchema.optional() }).strict()
+const PRCheckRequestFactSchema = PRRevisionSchema.omit({ correlation: true })
+  .extend({ baseSha: GitShaSchema.optional() })
+  .strict()
+
+function terminalCorrelation(pr: DeepReadonly<PR>) {
+  return {
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
+  }
+}
 
 export type BayWorkspace = Readonly<{
   revision: string
@@ -374,10 +415,44 @@ export function createBays(
   }
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+    if (options.draft === true && options.correlation !== undefined) {
+      raiseFailure(
+        "refusal",
+        "correlation-requires-submission",
+        "yrd: --correlation binds an admitted PR; remove --draft or submit the draft with the same correlation later",
+      )
+    }
+    const sameCorrelation = (left: DeepReadonly<Correlation>, right: DeepReadonly<Correlation>): boolean =>
+      left.namespace === right.namespace && left.id === right.id
+    const bindCorrelation = async (pr: DeepReadonly<PR>): Promise<DeepReadonly<PR>> => {
+      if (options.correlation === undefined) return pr
+      if (pr.correlation !== undefined && sameCorrelation(pr.correlation, options.correlation)) return pr
+      if (pr.correlation !== undefined) {
+        raiseFailure(
+          "refusal",
+          "correlation-conflict",
+          `yrd: PR '${pr.id}' revision ${pr.revision} is already bound to correlation '${pr.correlation.namespace}:${pr.correlation.id}'`,
+        )
+      }
+      if (pr.status !== "submitted") {
+        raiseFailure(
+          "refusal",
+          "correlation-too-late",
+          `yrd: PR '${pr.id}' is ${pr.status}; correlation cannot be bound after submission`,
+        )
+      }
+      await submit({ pr: pr.id, correlation: options.correlation })
+      const bound = resolvePR(state(), pr.id)
+      if (bound === undefined) {
+        raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after correlation binding`)
+      }
+      return bound
+    }
+
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
-    if (pr?.status === "integrated") return pr
+    if (pr?.status === "integrated") return bindCorrelation(pr)
 
     if (bay?.status === "active") {
       const refreshed = await actions.refresh({ bay: bay.id })
@@ -428,15 +503,15 @@ export function createBays(
       }
     }
 
-    if (pr?.status === "submitted") return pr
+    if (pr?.status === "submitted") return bindCorrelation(pr)
     if (pr?.status === "pushed") {
       if (options.draft === true) return pr
-      await submit({ pr: pr.id })
+      await submit({ pr: pr.id, ...(options.correlation === undefined ? {} : { correlation: options.correlation }) })
       const submitted = resolvePR(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
       }
-      return submitted
+      return bindCorrelation(submitted)
     }
 
     if (bay === undefined) {
@@ -452,14 +527,17 @@ export function createBays(
           candidate.base === resolved.base,
       )
       if (live !== undefined) {
-        if (live.status === "submitted") return live
+        if (live.status === "submitted") return bindCorrelation(live)
         if (options.draft === true) return live
-        await actions.submit({ pr: live.id })
+        await actions.submit({
+          pr: live.id,
+          ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
+        })
         const submitted = resolvePR(state(), live.id)
         if (submitted === undefined) {
           raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${live.id}' disappeared after submit`)
         }
-        return submitted
+        return bindCorrelation(submitted)
       }
       await actions.submit({
         branch: selector,
@@ -467,6 +545,7 @@ export function createBays(
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.draft === true ? { draft: true } : {}),
+        ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -476,7 +555,7 @@ export function createBays(
           `yrd: direct branch submit '${selector}' did not create a PR`,
         )
       }
-      return submitted
+      return bindCorrelation(submitted)
     }
 
     if (bay.status !== "active") {
@@ -532,7 +611,8 @@ export function withBays(options: WithBaysOptions) {
         "bay/closing": BayClosingSchema,
         "pr/pushed": PRPushedSchema,
         "pr/submitted": PRRevisionSchema,
-        "pr/withdrawn": z.object({ pr: PRIdSchema }).strict(),
+        "pr/correlation-bound": PRCorrelationBoundSchema,
+        "pr/withdrawn": PRWithdrawnSchema,
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/edited": PrEditArgsSchema,
@@ -753,8 +833,32 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   const current = state.bays
   if ("pr" in args) {
     const pr = required(resolvePR(current, args.pr), "PR", args.pr)
+    if (pr.status === "submitted" && args.correlation !== undefined) {
+      if (pr.correlation?.namespace === args.correlation.namespace && pr.correlation.id === args.correlation.id) {
+        return { events: [] }
+      }
+      if (pr.correlation !== undefined) {
+        raiseFailure(
+          "refusal",
+          "correlation-conflict",
+          `yrd: PR '${pr.id}' revision ${pr.revision} is already bound to correlation '${pr.correlation.namespace}:${pr.correlation.id}'`,
+        )
+      }
+      return {
+        events: [event("pr/correlation-bound", { pr: pr.id, revision: pr.revision, correlation: args.correlation })],
+      }
+    }
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
-    return { events: [event("pr/submitted", { pr: pr.id, revision: pr.revision, headSha: pr.headSha })] }
+    return {
+      events: [
+        event("pr/submitted", {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
+        }),
+      ],
+    }
   }
 
   const base = baseIdentity(args.base ?? defaultBase)
@@ -779,7 +883,16 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   return {
     events: [
       event("pr/pushed", pushed),
-      ...(args.draft === true ? [] : [event("pr/submitted", { pr: id, revision, headSha: args.headSha })]),
+      ...(args.draft === true
+        ? []
+        : [
+            event("pr/submitted", {
+              pr: id,
+              revision,
+              headSha: args.headSha,
+              ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
+            }),
+          ]),
     ],
   }
 }
@@ -883,7 +996,9 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
   return {
     events: [
-      ...(pr !== undefined && isLivePR(pr.status) ? [event("pr/withdrawn", { pr: pr.id })] : []),
+      ...(pr !== undefined && isLivePR(pr.status)
+        ? [event("pr/withdrawn", { pr: pr.id, ...terminalCorrelation(pr) })]
+        : []),
       event("bay/closing", { bay: bay.id }),
       deprovision.request({
         bay: bay.id,
@@ -900,7 +1015,7 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
-  return { events: [event("pr/withdrawn", { pr: pr.id })] }
+  return { events: [event("pr/withdrawn", { pr: pr.id, ...terminalCorrelation(pr) })] }
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
@@ -980,6 +1095,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revision: pushed.revision,
               headSha: pushed.headSha,
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+              correlation: undefined,
               revisions: [...existing.revisions, record],
               submittedAt: undefined,
               rejectedAt: undefined,
@@ -1011,16 +1127,64 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
         throw new Error(`yrd: stale PR event for '${pr.id}'`)
       }
-      return patchPR(pr, { status: "submitted", submittedAt: applied.ts })
+      return patchPR(pr, {
+        status: "submitted",
+        submittedAt: applied.ts,
+        correlation: changed.correlation,
+        revisions: pr.revisions.map((revision) =>
+          revision.revision === changed.revision
+            ? { ...revision, ...(changed.correlation === undefined ? {} : { correlation: changed.correlation }) }
+            : revision,
+        ),
+      })
+    }
+    case "pr/correlation-bound": {
+      const changed = PRCorrelationBoundSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined || pr.revision !== changed.revision || pr.status !== "submitted") {
+        throw new Error(`yrd: stale PR correlation binding for '${changed.pr}' revision ${changed.revision}`)
+      }
+      if (
+        pr.correlation !== undefined &&
+        (pr.correlation.namespace !== changed.correlation.namespace || pr.correlation.id !== changed.correlation.id)
+      ) {
+        throw new Error(`yrd: conflicting PR correlation binding for '${pr.id}' revision ${pr.revision}`)
+      }
+      return patchPR(pr, {
+        correlation: changed.correlation,
+        revisions: pr.revisions.map((revision) =>
+          revision.revision === changed.revision ? { ...revision, correlation: changed.correlation } : revision,
+        ),
+      })
     }
     case "pr/withdrawn": {
-      const pr = current.prs[data.pr as string]
+      const changed = PRWithdrawnSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (
+        pr !== undefined &&
+        ((changed.revision !== undefined && changed.revision !== pr.revision) ||
+          (changed.headSha !== undefined && changed.headSha !== pr.headSha) ||
+          (changed.correlation !== undefined &&
+            (changed.correlation.namespace !== pr.correlation?.namespace ||
+              changed.correlation.id !== pr.correlation?.id)))
+      ) {
+        throw new Error(`yrd: stale PR withdrawal for '${changed.pr}'`)
+      }
       return pr === undefined ? state : patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
     }
     case "pr/rejected": {
       const changed = PRRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision) return state
+      if (
+        pr === undefined ||
+        pr.revision !== changed.revision ||
+        (changed.headSha !== undefined && changed.headSha !== pr.headSha) ||
+        (changed.correlation !== undefined &&
+          (changed.correlation.namespace !== pr.correlation?.namespace ||
+            changed.correlation.id !== pr.correlation?.id))
+      ) {
+        return state
+      }
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
@@ -1030,7 +1194,16 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/integrated": {
       const changed = PRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision || pr.headSha !== changed.headSha) return state
+      if (
+        pr === undefined ||
+        pr.revision !== changed.revision ||
+        pr.headSha !== changed.headSha ||
+        (changed.correlation !== undefined &&
+          (changed.correlation.namespace !== pr.correlation?.namespace ||
+            changed.correlation.id !== pr.correlation?.id))
+      ) {
+        return state
+      }
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,

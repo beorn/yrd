@@ -121,15 +121,89 @@ async function createQueueApp(
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, branch: string, base = "main") {
+type TestCorrelation = Readonly<{ namespace: string; id: string }>
+
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createQueueApp>>,
+  branch: string,
+  base = "main",
+  correlation?: TestCorrelation,
+) {
   const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base, baseSha: BASE })
+  await app.bays.submit({
+    branch,
+    headSha: digit.repeat(40),
+    base,
+    baseSha: BASE,
+    ...(correlation === undefined ? {} : { correlation }),
+  })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
   return pr
 }
 
 describe("Queue", () => {
+  it("echoes integrated and rejected correlations while uncorrelated terminals stay absent", async () => {
+    const integratedCorrelation = { namespace: "tribe-request", id: "integrate custom/61" }
+    const retriedCorrelation = { namespace: "tribe-request", id: "reject custom/62" }
+    let rejectFirstRevision = true
+    const app = await createQueueApp({
+      check: (input) =>
+        input.prs[0]?.branch === "issue/retried-request" && rejectFirstRevision
+          ? { status: "failed", error: { code: "check-failed", message: "tests failed" } }
+          : { status: "passed", output: { checked: true } },
+    })
+    const integrated = await submitBranch(app, "issue/integrated-request", "main", integratedCorrelation)
+    const retried = await submitBranch(app, "issue/retried-request", "main", retriedCorrelation)
+    const uncorrelated = await submitBranch(app, "issue/uncorrelated-request")
+
+    const integratedRuns = await app.queue.run({ prs: [integrated.id] }, runtime)
+    await app.queue.run({ prs: [retried.id] }, runtime)
+    await app.queue.run({ prs: [uncorrelated.id] }, runtime)
+    expect(integratedRuns[0]?.prs[0]).toMatchObject({ correlation: integratedCorrelation })
+
+    rejectFirstRevision = false
+    await app.bays.submit({
+      branch: retried.branch,
+      headSha: "4".repeat(40),
+      base: retried.base,
+      baseSha: BASE,
+      correlation: retriedCorrelation,
+    })
+    await app.queue.run({ prs: [retried.id] }, runtime)
+
+    expect(app.bays.pr(integrated.id)).toMatchObject({ status: "integrated", correlation: integratedCorrelation })
+    expect(app.bays.pr(retried.id)).toMatchObject({
+      status: "integrated",
+      revision: 2,
+      correlation: retriedCorrelation,
+    })
+
+    const terminalEvents = (await Array.fromAsync(app.events())).filter(
+      (event) => event.name === "pr/integrated" || event.name === "pr/rejected",
+    )
+    expect(terminalEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "pr/integrated",
+          data: expect.objectContaining({ pr: integrated.id, correlation: integratedCorrelation }),
+        }),
+        expect.objectContaining({
+          name: "pr/rejected",
+          data: expect.objectContaining({ pr: retried.id, correlation: retriedCorrelation }),
+        }),
+        expect.objectContaining({
+          name: "pr/integrated",
+          data: expect.objectContaining({ pr: retried.id, revision: 2, correlation: retriedCorrelation }),
+        }),
+        expect.objectContaining({
+          name: "pr/integrated",
+          data: expect.not.objectContaining({ correlation: expect.anything() }),
+        }),
+      ]),
+    )
+  })
+
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()

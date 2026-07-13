@@ -19,14 +19,14 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace) {
+async function createApp(workspace: BayWorkspace, journal = createMemoryJournal(), id = ids()) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
   return createYrd(definition, {
     inject: {
-      journal: createMemoryJournal(),
+      journal,
       clock: () => "2026-01-01T00:00:00.000Z",
-      id: ids(),
+      id,
     },
   })
 }
@@ -70,6 +70,48 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("persists an opaque correlation and echoes a committed withdrawal without an execution capability", async () => {
+    const { adapter } = createWorkspaceHarness()
+    const correlation = { namespace: "tribe-request", id: "pr 61's docs" }
+    const journal = createMemoryJournal()
+    const app = await createApp(adapter, journal)
+    const submission = { branch: "issue/correlated", headSha: HEAD_1, correlation }
+
+    await app.bays.submit(submission)
+    expect(app.bays.pr("PR1")).toMatchObject({
+      correlation,
+      revisions: [{ revision: 1, correlation }],
+    })
+    expect((await app.bays.submit({ pr: "PR1", correlation })).events).toEqual([])
+
+    const lateCorrelation = { namespace: "tribe-request", id: "late-bound-request" }
+    await app.bays.submit({ branch: "issue/late-correlation", headSha: HEAD_2 })
+    const bound = await app.bays.submit({ pr: "PR2", correlation: lateCorrelation })
+    expect(bound.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/correlation-bound",
+        data: { pr: "PR2", revision: 1, correlation: lateCorrelation },
+      }),
+    )
+    expect(app.bays.pr("PR2")).toMatchObject({
+      revision: 1,
+      correlation: lateCorrelation,
+      revisions: [{ revision: 1, correlation: lateCorrelation }],
+    })
+
+    const withdrawn = await app.bays.closePr({ pr: "PR1" })
+    expect(withdrawn.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/withdrawn",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, correlation },
+      }),
+    )
+    await app.close()
+
+    await using replayed = await createApp(adapter, journal)
+    expect(replayed.bays.pr("PR1")).toMatchObject({ status: "withdrawn", correlation })
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 

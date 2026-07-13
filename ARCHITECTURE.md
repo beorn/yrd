@@ -32,6 +32,12 @@ function per implementation detail.
 loggers, and scopes are injected capabilities. A capability may be one
 function or a small plain object; it is not a global singleton.
 
+An opaque PR correlation is domain data, not an execution capability. Yrd
+validates only its `{ namespace, id }` shape, persists it on the PR revision,
+and echoes it on terminal facts and projections. Meaning and settlement belong
+to an outer composition reading the committed journal; Yrd does not schedule a
+correlation callback or import the external transport.
+
 ## Domain Data
 
 The objects above operate on plain records:
@@ -110,6 +116,10 @@ Commands are synchronous state decisions. External work is requested as a Job
 event and executed after the transaction commits. This keeps cursor-conflict retries
 safe: Yrd can refresh state and run the decision again without repeating an
 external side effect.
+
+PR terminal events remain observational facts. A level-triggered outer
+composition may reread those committed events and perform an idempotent
+settlement; terminal projection never depends on that external mutation.
 
 Silvery's command-tree contracts supply command metadata, lookup, and argument
 schemas. Yrd adds durable command identity and event projection; it does not
