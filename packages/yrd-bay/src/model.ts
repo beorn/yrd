@@ -5,6 +5,74 @@ export const PRIdSchema = z.string().trim().min(1)
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^[0-9a-f]{40,64}$/iu)
 
+export const GitPayloadPathSchema = z
+  .string()
+  .min(1)
+  .superRefine((path, context) => {
+    if (
+      path !== path.trim() ||
+      path.startsWith("/") ||
+      path.endsWith("/") ||
+      path.includes("\\") ||
+      path.includes("\0") ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      context.addIssue({ code: "custom", message: "must be a normalized repository-relative Git path" })
+    }
+  })
+
+const GitPayloadPathsSchema = z
+  .array(GitPayloadPathSchema)
+  .min(1)
+  .superRefine((paths, context) => {
+    const duplicate = paths.find((path, index) => paths.indexOf(path) !== index)
+    if (duplicate !== undefined) {
+      context.addIssue({ code: "custom", message: `contains duplicate path '${duplicate}'` })
+    }
+  })
+  .transform((paths) => paths.toSorted())
+
+export type CompositionSource = Readonly<{
+  repo: string
+  branch: string
+  baseSha: string
+  tipSha: string
+  payload: readonly string[]
+}>
+
+export const CompositionSourceSchema = z
+  .object({
+    repo: GitPayloadPathSchema,
+    branch: GitRefSchema,
+    baseSha: GitShaSchema,
+    tipSha: GitShaSchema,
+    payload: GitPayloadPathsSchema,
+  })
+  .strict() as z.ZodType<CompositionSource>
+
+export type CompositionV1 = Readonly<{
+  version: 1
+  sources: readonly CompositionSource[]
+}>
+
+export const CompositionV1Schema = z
+  .object({
+    version: z.literal(1),
+    sources: z
+      .array(CompositionSourceSchema)
+      .min(1)
+      .superRefine((sources, context) => {
+        const duplicate = sources.find(
+          (source, index) => sources.findIndex((row) => row.repo === source.repo) !== index,
+        )
+        if (duplicate !== undefined) {
+          context.addIssue({ code: "custom", message: `contains duplicate repository '${duplicate.repo}'` })
+        }
+      })
+      .transform((sources) => sources.toSorted((left, right) => left.repo.localeCompare(right.repo))),
+  })
+  .strict() as z.ZodType<CompositionV1>
+
 export type BayId = string
 export type PRId = string
 
@@ -43,6 +111,7 @@ export type PRRevision = Readonly<{
   headSha: string
   base: string
   baseSha?: string
+  composition?: CompositionV1
   pushedAt: string
 }>
 
@@ -58,6 +127,7 @@ export type PR = Readonly<{
   revision: number
   headSha: string
   baseSha?: string
+  composition?: CompositionV1
   revisions: readonly PRRevision[]
   submittedAt?: string
   rejectedAt?: string
@@ -71,7 +141,17 @@ export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
   prs: Readonly<Record<PRId, PR>>
   receipts: Readonly<
-    Record<string, Readonly<{ pr: PRId; branch: string; headSha: string; base: string; baseSha?: string }>>
+    Record<
+      string,
+      Readonly<{
+        pr: PRId
+        branch: string
+        headSha: string
+        base: string
+        baseSha?: string
+        composition?: CompositionV1
+      }>
+    >
   >
 }>
 

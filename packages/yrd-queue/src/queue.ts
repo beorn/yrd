@@ -790,8 +790,12 @@ function samePayloadPRs(
   state: DeepReadonly<BaysState>,
   snapshots: readonly DeepReadonly<PRSnapshot>[],
 ): readonly DeepReadonly<PR>[] {
-  const payloads = new Set(snapshots.map((pr) => `${pr.base}\0${pr.headSha}`))
-  return Object.values(state.prs).filter((pr) => pr.status !== "withdrawn" && payloads.has(`${pr.base}\0${pr.headSha}`))
+  const payloads = new Set(snapshots.map(payloadIdentity))
+  return Object.values(state.prs).filter((pr) => pr.status !== "withdrawn" && payloads.has(payloadIdentity(pr)))
+}
+
+function payloadIdentity(pr: Pick<DeepReadonly<PR>, "base" | "headSha" | "composition">): string {
+  return `${pr.base}\0${pr.headSha}\0${JSON.stringify(pr.composition)}`
 }
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): QueueRun {
