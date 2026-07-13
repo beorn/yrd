@@ -162,7 +162,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
-  it("refreshes stale local queue authority before recording the same PR payload", async () => {
+  it("refreshes queue authority without touching dirty behind operator main", async () => {
     const { repo, featureSha } = await repository()
     const localBaseSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
@@ -176,6 +176,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const remoteBaseSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "push", "-q", "origin", "HEAD:main")
     await git(repo, "switch", "-q", "main")
+    await writeFile(join(repo, "operator-wip.txt"), "preserve these bytes\n")
 
     const config: ResolvedYrdProjectConfig = {
       base: "main",
@@ -202,6 +203,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     expect(submitted).toMatchObject({ revision: 1, headSha: featureSha, baseSha: remoteBaseSha, status: "submitted" })
     expect(await git(repo, "rev-parse", "main")).toBe(localBaseSha)
+    expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 

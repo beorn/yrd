@@ -663,6 +663,58 @@ describe("Queue command adapters", () => {
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
+  it("drains from the authoritative queue base without touching dirty behind operator main", async () => {
+    const branches = ["pr4", "pr5", "pr6", "pr7"] as const
+    const { repo, pr4, pr5, pr6, pr7 } = await repository(...branches)
+    const heads = { pr4, pr5, pr6, pr7 }
+    const localMain = await git(repo, ["rev-parse", "main"])
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", ...branches.map((branch) => `issue/${branch}`)])
+    await git(repo, ["switch", "-qc", "issue/remote-main"])
+    await writeFile(join(repo, "remote-main.txt"), "authoritative\n")
+    await git(repo, ["add", "remote-main.txt"])
+    await git(repo, ["commit", "-qm", "remote main"])
+    const initialQueueBase = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["push", "-q", "origin", "HEAD:main"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "operator-wip.txt"), "preserve these bytes\n")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    for (const branch of branches) {
+      await app.bays.submit({ branch: `issue/${branch}`, headSha: heads[branch], base: "main" })
+    }
+
+    const runs = await app.queue.run({ prs: [] }, runtime)
+
+    expect(runs).toHaveLength(branches.length)
+    expect(runs.map((run) => [run.status, run.error?.code])).toEqual([
+      ["passed", undefined],
+      ["passed", undefined],
+      ["passed", undefined],
+      ["passed", undefined],
+    ])
+    expect(
+      runs.flatMap((run) => run.steps.map((step) => step.job?.attempt)).filter((attempt) => attempt !== undefined),
+    ).toEqual(Array.from({ length: branches.length * 2 }, () => 1))
+    const checks = runs.map((run) => {
+      const job = run.steps[0]?.job
+      if (job?.status !== "passed") throw new Error(`run '${run.id}' check did not pass`)
+      return GitCheckEvidenceSchema.parse(job.output)
+    })
+    expect(checks[0]?.baseSha).toBe(initialQueueBase)
+    for (let index = 1; index < runs.length; index += 1) {
+      expect(checks[index]?.baseSha).toBe(runs[index - 1]?.integration?.commit)
+    }
+    const finalLanding = runs.at(-1)?.integration?.commit
+    expect(finalLanding).toBeDefined()
+    expect(await git(remote, ["rev-parse", "main"])).toBe(finalLanding)
+    expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(finalLanding)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
+    expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
+  }, 15_000)
+
   it("refreshes authoritative remote base divergence and evaluates the unchanged payload", async () => {
     const { repo, feature: featureSha, competing: remoteBaseSha } = await repository("feature", "competing")
     const localBaseSha = await git(repo, ["rev-parse", "main"])
