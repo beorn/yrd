@@ -252,7 +252,8 @@ yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
 yrd queue recover [--reason <text>] [--json]
-yrd queue finish <selector> [--step <name>] (--ok | --fail) [evidence options]
+yrd queue finish <selector> [--step <name>] --runner <runner> --attempt <number>
+  --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
 yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
@@ -265,7 +266,7 @@ yrd queue deinit [base] [--json]
 | `pause`   | Optional base; reason and allowlist to mutate | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
 | `resume`  | Optional base                                 | Removes the queue pause                                                                 |
 | `recover` | Optional reason                               | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`  | One waiting PR/step plus token/verdict        | Records external-runner evidence and resumes that exact durable run                     |
+| `finish`  | One waiting PR/step plus runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
 | `audit`   | Repository                                    | Journal, projection, pinned-plan, and installed-step findings; no state change          |
 | `init`    | Optional base                                 | Resolves and validates queue environment resources                                      |
 | `deinit`  | Optional base                                 | Releases resources owned by the installed queue adapter                                 |
@@ -455,7 +456,8 @@ share this Job launcher contract. The remote system or an operator completes a
 Queue step with:
 
 ```bash
-yrd queue finish PR7 --step coderabbit --ok --token run-123 \
+yrd queue finish PR7 --step coderabbit --ok \
+  --runner "$YRD_RUNNER" --attempt "$YRD_ATTEMPT" --token run-123 \
   --artifact report=https://ci.example/runs/123/report
 ```
 

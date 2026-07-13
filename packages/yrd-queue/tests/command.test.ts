@@ -795,6 +795,8 @@ describe("Queue command adapters", () => {
     const finished = await app.queue.finish(
       run.id,
       {
+        attempt: waiting.attempt,
+        runner: waiting.runner,
         token: waiting.token,
         result: { status: "passed", output: checkpoint },
       },

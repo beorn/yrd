@@ -20,9 +20,8 @@ import {
   type JobDef,
   type JobDefs,
   type JobError,
+  type JobCompletion,
   type JobHandler,
-  type JobResult,
-  type JobWaiting,
   type JobsState,
   type RunJobOptions,
 } from "@yrd/job"
@@ -238,11 +237,7 @@ export type WaitingQueueStep = Readonly<{
   step: QueueStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
 }>
 
-export type FinishQueueArgs = Readonly<{
-  step?: string
-  token?: string
-  result: Exclude<JobResult, JobWaiting>
-}>
+export type FinishQueueArgs = Omit<JobCompletion, "token"> & Readonly<{ step?: string; token: string }>
 
 export type HasQueue<Shape extends PRShape = PRShape> = Readonly<{ queue: Queue<Shape> }>
 
@@ -442,10 +437,14 @@ function createQueue<Shape extends PRShape>(
       using _span = log.span?.("run", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
       await actions.refresh()
-      const snapshot = runtime()
-      const prs = runnablePRs(snapshot, args)
-      if (prs.length === 0) return []
-      const roots: QueueRunId[] = []
+      let snapshot = runtime()
+      const resumable = resumableQueueRoots(snapshot, args)
+      const consumed = new Set(resumable.flatMap((run) => run.prs.map((pr) => pr.id)))
+      const roots = resumable.map((run) => run.id)
+      for (const run of resumable) await settle(run.id, runOptions)
+
+      snapshot = runtime()
+      const prs = runnablePRs(snapshot, args, consumed)
       for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
         const started = await actions.run({
           prs: candidate.map((pr) => pr.id),
@@ -466,9 +465,9 @@ function createQueue<Shape extends PRShape>(
       using _span = log.span?.("finish", { selector, step: completion.step })
       const selected = waiting(selector, completion.step)
       await jobs.finish(selected.step.job.id, {
-        attempt: selected.step.job.attempt,
-        runner: selected.step.job.runner,
-        ...(completion.token === undefined ? {} : { token: completion.token }),
+        attempt: completion.attempt,
+        runner: completion.runner,
+        token: completion.token,
         result: completion.result,
       })
       return await settle(selected.run.id, runOptions)
@@ -1028,31 +1027,44 @@ function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: In
   return current
 }
 
-function requestedPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] {
+function explicitPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] | undefined {
   const selectors = args.prs === undefined || args.prs.length === 0 ? undefined : args.prs
-  const prs =
-    selectors === undefined
-      ? Object.values(state.prs)
-          .filter((pr) => pr.status === "submitted" || (args.retry === true && pr.status === "rejected"))
-          .toSorted((left, right) => {
-            if (left.submittedAt === undefined) throw new Error(`yrd: queued PR '${left.id}' has no submission time`)
-            if (right.submittedAt === undefined) throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
-            return (
-              left.submittedAt.localeCompare(right.submittedAt) ||
-              left.id.localeCompare(right.id, undefined, { numeric: true })
-            )
-          })
-      : selectors.map((selector) => {
-          const pr = resolvePR(state, selector)
-          if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-          return pr
-        })
+  if (selectors === undefined) return undefined
+  const prs = selectors.map((selector) => {
+    const pr = resolvePR(state, selector)
+    if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+    return pr
+  })
   const ids = new Set<string>()
   for (const pr of prs) {
     if (ids.has(pr.id)) {
       raiseFailure("usage", "duplicate-pr", `yrd: queue.run: duplicate PR '${pr.id}'`)
     }
     ids.add(pr.id)
+  }
+  return prs
+}
+
+function requestedPRs(
+  state: DeepReadonly<BaysState>,
+  args: QueueRunArgs,
+  excluded: ReadonlySet<string> = new Set(),
+): PR[] {
+  const explicit = explicitPRs(state, args)
+  const prs = (
+    explicit ??
+    Object.values(state.prs)
+      .filter((pr) => pr.status === "submitted" || (args.retry === true && pr.status === "rejected"))
+      .toSorted((left, right) => {
+        if (left.submittedAt === undefined) throw new Error(`yrd: queued PR '${left.id}' has no submission time`)
+        if (right.submittedAt === undefined) throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
+        return (
+          left.submittedAt.localeCompare(right.submittedAt) ||
+          left.id.localeCompare(right.id, undefined, { numeric: true })
+        )
+      })
+  ).filter((pr) => !excluded.has(pr.id))
+  for (const pr of prs) {
     if (pr.status === "rejected" && args.retry !== true) {
       raiseFailure("refusal", "retry-required", `yrd: PR '${pr.id}' is rejected; retry=true is required`)
     }
@@ -1063,8 +1075,12 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: QueueRunArgs): PR[] 
   return prs
 }
 
-function runnablePRs(state: DeepReadonly<RuntimeState>, args: QueueRunArgs): PR[] {
-  const requested = requestedPRs(state.bays, args)
+function runnablePRs(
+  state: DeepReadonly<RuntimeState>,
+  args: QueueRunArgs,
+  excluded: ReadonlySet<string> = new Set(),
+): PR[] {
+  const requested = requestedPRs(state.bays, args, excluded)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const eligible = requested.filter((pr) => {
     const base = baseIdentity(pr.base)
@@ -1077,12 +1093,34 @@ function runnablePRs(state: DeepReadonly<RuntimeState>, args: QueueRunArgs): PR[
       `yrd: queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
     )
   })
-  const claimed = new Set(
+  const claimed = new Set(pendingQueueRoots(state).flatMap((run) => run.prs.map((pr) => pr.id)))
+  const activeBases = new Set(
     orderedQueues(state.queues, state.jobs)
-      .filter((run) => !Queues.terminal(run))
-      .flatMap((run) => run.prs.map((pr) => pr.id)),
+      .filter((run) => run.status === "running")
+      .map((run) => baseIdentity(run.base)),
   )
-  return eligible.filter((pr) => !claimed.has(pr.id))
+  return eligible.filter((pr) => !claimed.has(pr.id) && (!implicitQueue || !activeBases.has(baseIdentity(pr.base))))
+}
+
+function resumableQueueRoots(state: DeepReadonly<RuntimeState>, args: QueueRunArgs): QueueRun[] {
+  const explicit = explicitPRs(state.bays, args)
+  const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
+  return pendingQueueRoots(state).filter((run) => selected === undefined || run.prs.some((pr) => selected.has(pr.id)))
+}
+
+function pendingQueueRoots(state: DeepReadonly<RuntimeState>): QueueRun[] {
+  return orderedQueues(state.queues, state.jobs).filter(
+    (run) => run.parent === undefined && needsSettlement(state, run),
+  )
+}
+
+function needsSettlement(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean {
+  if (!Queues.terminal(run) || needsAdvance(state, run)) return true
+  if (!bisectable(run)) return false
+  return ([0, 1] as const).some((part) => {
+    const child = childQueue(state.queues, state.jobs, run.id, part)
+    return child === undefined || needsSettlement(state, child)
+  })
 }
 
 function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {

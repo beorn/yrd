@@ -1014,6 +1014,8 @@ async function finishQueue(
     step?: string
     ok?: boolean
     fail?: boolean
+    runner?: string
+    attempt?: string
     token?: string
     detail?: string
     url?: string
@@ -1025,6 +1027,12 @@ async function finishQueue(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.ok === options.fail) usage("queue finish requires exactly one of --ok or --fail")
+  const { runner, token } = options
+  if (options.attempt === undefined || runner === undefined || token === undefined) {
+    usage("queue finish requires --runner, --attempt, and --token")
+  }
+  const attempt = Number(options.attempt)
+  if (!Number.isSafeInteger(attempt) || attempt < 1) usage("--attempt must be a positive integer")
   const waiting = app.queue.waiting(selector, options.step)
   const job = waiting.step.job
   const recordedArtifacts = artifacts(options.artifact)
@@ -1044,7 +1052,9 @@ async function finishQueue(
     selector,
     {
       step: waiting.step.name,
-      ...(options.token === undefined ? {} : { token: options.token }),
+      runner,
+      attempt,
+      token,
       result:
         options.ok === true
           ? { status: "passed", output: evidence }
@@ -1626,6 +1636,8 @@ function buildProgram(
     .option("--step <name>", "waiting step name")
     .option("--ok", "record a passing result")
     .option("--fail", "record a failing result")
+    .option("--runner <runner>", "waiting-job runner identity")
+    .option("--attempt <attempt>", "waiting-job attempt number")
     .option("--token <token>", "waiting-job correlation token")
     .option("--detail <text>", "human-readable result detail")
     .option("--url <url>", "external runner URL")

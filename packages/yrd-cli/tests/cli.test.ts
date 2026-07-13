@@ -1083,7 +1083,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "close", "PR1"), again.io)).not.toBe(0)
   })
 
-  it("finishes a waiting queue job and resumes the same durable run", async () => {
+  it("requires the exact waiting Job owner to finish and resume the same durable run", async () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
 
@@ -1094,9 +1094,44 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd(), waiting.io)).toBe(0)
     expect(waiting.stdout()).toContain("https://ci.invalid/run/1")
 
+    const incomplete = outputIO()
+    expect(
+      await runYrd(app, yrd("queue", "finish", "PR1", "--ok", "--token", "remote-check", "--json"), incomplete.io),
+    ).toBe(2)
+    expect(incomplete.stderr()).toContain("queue finish requires --runner, --attempt, and --token")
+    expect(app.queue.get("R1")?.status).toBe("waiting")
+
+    const invalidAttempt = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("queue", "finish", "PR1", "--ok", "--runner", "cli-test", "--attempt", "0", "--token", "remote-check"),
+        invalidAttempt.io,
+      ),
+    ).toBe(2)
+    expect(invalidAttempt.stderr()).toContain("--attempt must be a positive integer")
+    expect(app.queue.get("R1")?.status).toBe("waiting")
+
     const finish = outputIO()
     expect(
-      await runYrd(app, yrd("queue", "finish", "PR1", "--ok", "--token", "remote-check", "--json"), finish.io),
+      await runYrd(
+        app,
+        yrd(
+          "queue",
+          "finish",
+          "PR1",
+          "--ok",
+          "--runner",
+          "cli-test",
+          "--attempt",
+          "1",
+          "--token",
+          "remote-check",
+          "--json",
+        ),
+        finish.io,
+      ),
+      finish.stderr(),
     ).toBe(0)
     expect(JSON.parse(finish.stdout())).toMatchObject({ command: "queue.finish", run: { id: "R1", status: "passed" } })
     expect(app.queue.get("R1")?.shape).toMatchObject({
@@ -1166,6 +1201,10 @@ describe("runYrd", () => {
           "--step",
           "check",
           "--fail",
+          "--runner",
+          "cli-test",
+          "--attempt",
+          "1",
           "--token",
           "remote-check",
           "--detail",
@@ -1176,6 +1215,7 @@ describe("runYrd", () => {
         ),
         finish.io,
       ),
+      finish.stderr(),
     ).toBe(0)
     expect(JSON.parse(finish.stdout())).toMatchObject({ run: { id: "R1", status: "failed" } })
     expect(app.state().bays.prs.PR1).toMatchObject({
@@ -3259,7 +3299,24 @@ describe("runYrd", () => {
     expect(missingPR.stderr()).toContain("no PR 'PR404'")
 
     const missingWaitingRun = outputIO()
-    expect(await runYrd(app, yrd("queue", "finish", "PR404", "--ok"), missingWaitingRun.io)).toBe(1)
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "queue",
+          "finish",
+          "PR404",
+          "--ok",
+          "--runner",
+          "missing-runner",
+          "--attempt",
+          "1",
+          "--token",
+          "missing-token",
+        ),
+        missingWaitingRun.io,
+      ),
+    ).toBe(1)
     expect(missingWaitingRun.stderr()).toContain("no queue run or PR 'PR404'")
 
     const unsupported = outputIO()

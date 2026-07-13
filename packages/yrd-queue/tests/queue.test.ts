@@ -175,6 +175,127 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(0)
   })
 
+  it.each(["requested", "passed"] as const)(
+    "resumes a replayed %s Job only when queue.run grants execution authority",
+    async (crashPoint) => {
+      const journal = createMemoryJournal()
+      const id = ids()
+      let checkCalls = 0
+      let mergeCalls = 0
+      const options = {
+        check: () => {
+          checkCalls += 1
+          return { status: "passed" as const, output: { checked: true } }
+        },
+        merge: () => {
+          mergeCalls += 1
+          return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+        },
+      }
+
+      {
+        await using app = await createQueueApp(options, journal, undefined, id)
+        const pr = await submitBranch(app, `issue/${crashPoint}-resume`)
+        await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+        const job = app.queue.get("R1")?.steps[0]?.job
+        if (job === undefined) throw new Error(`expected ${crashPoint} crash-window Job`)
+        if (crashPoint === "passed") await app.jobs.run(job.id, runtime)
+      }
+
+      await using replayed = await createQueueApp(options, journal, undefined, id)
+      await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
+        expect.objectContaining({ id: "R1", status: "passed" }),
+      ])
+      expect(replayed.state().bays.prs.PR1?.status).toBe("integrated")
+      expect(checkCalls).toBe(1)
+      expect(mergeCalls).toBe(1)
+    },
+  )
+
+  it.each(["merge-passed", "post-merge-requested"] as const)(
+    "settles a replayed %s fact once without admitting a duplicate run",
+    async (crashPoint) => {
+      const journal = createMemoryJournal()
+      const id = ids()
+      let mergeCalls = 0
+      let deployCalls = 0
+      const options = {
+        merge: () => {
+          mergeCalls += 1
+          return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+        },
+        deploy: () => {
+          deployCalls += 1
+          return { status: "passed" as const, output: { environment: "staging" } }
+        },
+      }
+
+      {
+        await using app = await createQueueApp(options, journal, undefined, id)
+        const pr = await submitBranch(app, `issue/${crashPoint}`)
+        await app.dispatch(app.commands.queue.run, {
+          prs: [pr.id],
+          steps: crashPoint === "merge-passed" ? ["merge"] : ["merge", "deploy"],
+        })
+        const mergeJob = app.queue.get("R1")?.steps[0]?.job
+        if (mergeJob === undefined) throw new Error("expected requested merge")
+        await app.jobs.run(mergeJob.id, runtime)
+        if (crashPoint === "post-merge-requested") {
+          await app.dispatch(app.commands.queue.advance, { run: "R1" })
+          expect(app.state().bays.prs[pr.id]?.status).toBe("integrated")
+          expect(app.queue.get("R1")?.steps[1]?.job?.status).toBe("requested")
+          await app.queue.pause({ base: "main", reason: "maintenance", allowedPRs: [] })
+        }
+      }
+
+      await using replayed = await createQueueApp(options, journal, undefined, id)
+      await expect(replayed.queue.run({}, runtime)).resolves.toEqual([
+        expect.objectContaining({ id: "R1", status: "passed" }),
+      ])
+      await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
+      expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+      expect(replayed.state().bays.prs.PR1?.status).toBe("integrated")
+      expect(mergeCalls).toBe(1)
+      expect(deployCalls).toBe(crashPoint === "post-merge-requested" ? 1 : 0)
+    },
+  )
+
+  it("returns a replayed running Job without stealing it or admitting same-base intake", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let checkCalls = 0
+    const options = {
+      check: () => {
+        checkCalls += 1
+        return { status: "passed" as const, output: { checked: true } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const active = await submitBranch(app, "issue/active")
+      await submitBranch(app, "issue/queued")
+      await app.dispatch(app.commands.queue.run, { prs: [active.id], steps: ["check"] })
+      const job = app.queue.get("R1")?.steps[0]?.job
+      if (job === undefined) throw new Error("expected requested active Job")
+      await app.dispatch(app.commands.job.transition, {
+        type: "start",
+        id: job.id,
+        attempt: 1,
+        runner: "active-runner",
+        leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+      })
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await expect(replayed.queue.run({}, runtime)).resolves.toEqual([
+      expect.objectContaining({ id: "R1", status: "running" }),
+    ])
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+    expect(replayed.state().bays.prs.PR2?.status).toBe("submitted")
+    expect(checkCalls).toBe(0)
+  })
+
   it("recovers an expired batch without executing, bisecting, or landing", async () => {
     let checkCalls = 0
     let mergeCalls = 0
@@ -713,6 +834,8 @@ describe("Queue", () => {
         remote.id,
         {
           step: "check",
+          attempt: waitingJob.attempt,
+          runner: waitingJob.runner,
           token: waitingJob.token,
           result: { status: "passed", output: { checked: true } },
         },
@@ -727,6 +850,8 @@ describe("Queue", () => {
         remote.id,
         {
           step: "check",
+          attempt: waitingJob.attempt,
+          runner: waitingJob.runner,
           token: waitingJob.token,
           result: { status: "passed", output: { checked: true } },
         },
@@ -735,6 +860,62 @@ describe("Queue", () => {
     ).rejects.toThrow("no waiting 'check' step")
     expect(merges).toBe(1)
     expect(app.state().bays.prs[remote.id]).toMatchObject({ revision: 2, headSha: UPDATED, status: "pushed" })
+  })
+
+  it("refuses a delayed completion from an earlier attempt when a retry reuses its token", async () => {
+    let merges = 0
+    await using app = await createQueueApp({
+      check: () => ({ status: "waiting", token: "shared-token" }),
+      merge: () => {
+        merges += 1
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/reused-token")
+    const first = (
+      await app.queue.run(
+        { prs: [pr.id], steps: ["check", "merge"] },
+        {
+          runner: "runner-1",
+          leaseMs: 60_000,
+        },
+      )
+    )[0]
+    const firstJob = first?.steps[0]?.job
+    if (firstJob?.status !== "waiting") throw new Error("first attempt did not wait")
+
+    await app.jobs.finish(firstJob.id, {
+      attempt: firstJob.attempt,
+      runner: firstJob.runner,
+      token: firstJob.token,
+      result: { status: "failed", error: { code: "remote-failed", message: "retry requested" } },
+    })
+    await app.jobs.retry(firstJob.id)
+    const retried = await app.jobs.run(firstJob.id, { runner: "runner-2", leaseMs: 60_000 })
+    expect(retried).toMatchObject({
+      id: firstJob.id,
+      status: "waiting",
+      attempt: 2,
+      runner: "runner-2",
+      token: "shared-token",
+    })
+
+    const delayedAttemptOne = {
+      step: "check",
+      attempt: firstJob.attempt,
+      runner: firstJob.runner,
+      token: firstJob.token,
+      result: { status: "passed" as const, output: { checked: true } },
+    }
+    await expect(app.queue.finish(pr.id, delayedAttemptOne, runtime)).rejects.toThrow("attempt 1 is stale")
+
+    expect(app.queue.get(first!.id)?.steps[0]?.job).toMatchObject({
+      status: "waiting",
+      attempt: 2,
+      runner: "runner-2",
+    })
+    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(merges).toBe(0)
   })
 
   it("recursively bisects a red batch and rejects only the isolated PR", async () => {
