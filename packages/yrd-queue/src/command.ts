@@ -434,6 +434,17 @@ async function pinCandidate(git: Git, repo: string, ref: string, sha: string): P
   throw new Error(created.stderr || created.stdout || `candidate ref '${ref}' has a different commit`)
 }
 
+function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, attempt: number, sha: string): string {
+  const identity = createHash("sha256")
+    .update(job)
+    .update("\0")
+    .update(String(attempt))
+    .update("\0")
+    .update(sha)
+    .digest("hex")
+  return `refs/yrd/candidates/${input.run}/${input.step}/attempt-${attempt}-${identity}`
+}
+
 export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
@@ -464,8 +475,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
           )
           if (candidate.status === "failed") return candidate
-          const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
-          await pinCandidate(git, repo, candidateRef, candidate.output)
+          const ref = candidateRef(input, context.id, context.attempt, candidate.output)
+          await pinCandidate(git, repo, ref, candidate.output)
           const configured: ConfiguredCommandOptions<PRShape> = {
             inject: options.inject,
             command: options.command,
@@ -484,7 +495,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           const runner =
             options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
           const outcome = await runner({ ...input, targetSha: candidate.output }, context)
-          const evidence = { baseSha, candidateSha: candidate.output, candidateRef }
+          const evidence = { baseSha, candidateSha: candidate.output, candidateRef: ref }
           if (outcome.status === "passed") {
             return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
           }
