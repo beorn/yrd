@@ -352,7 +352,7 @@ describe("Yrd domain objects", () => {
       "injected replay failure",
     )
     expect(runtime.signal.aborted).toBe(true)
-    await parent.disposeAsync()
+    await parent[Symbol.asyncDispose]()
   })
 
   it("records eventless commands while keeping internal commands off the public boundary", async () => {
