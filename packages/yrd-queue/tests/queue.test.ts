@@ -212,6 +212,30 @@ describe("Queue", () => {
     },
   )
 
+  it("settles a stale revision and admits its resubmission in one explicit run", async () => {
+    await using app = await createQueueApp({
+      check: () => ({ status: "waiting", token: "shared-token" }),
+    })
+    const pr = await submitBranch(app, "issue/one-call-resubmit")
+    const first = (await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime))[0]
+    expect(first).toMatchObject({ id: "R1", status: "waiting" })
+
+    await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: "main" })
+    await app.bays.submit({ pr: pr.id })
+    expect(app.state().bays.prs[pr.id]).toMatchObject({ revision: 2, status: "submitted", headSha: UPDATED })
+
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "failed",
+        error: expect.objectContaining({ code: "stale-pr" }),
+      }),
+      expect.objectContaining({ id: "R2", status: "waiting" }),
+    ])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({ revision: 2, status: "submitted", headSha: UPDATED })
+  })
+
   it.each(["merge-passed", "post-merge-requested"] as const)(
     "settles a replayed %s fact once without admitting a duplicate run",
     async (crashPoint) => {
@@ -833,6 +857,7 @@ describe("Queue", () => {
       await app.queue.finish(
         remote.id,
         {
+          job: waitingJob.id,
           step: "check",
           attempt: waitingJob.attempt,
           runner: waitingJob.runner,
@@ -849,6 +874,7 @@ describe("Queue", () => {
       app.queue.finish(
         remote.id,
         {
+          job: waitingJob.id,
           step: "check",
           attempt: waitingJob.attempt,
           runner: waitingJob.runner,
@@ -901,6 +927,7 @@ describe("Queue", () => {
     })
 
     const delayedAttemptOne = {
+      job: firstJob.id,
       step: "check",
       attempt: firstJob.attempt,
       runner: firstJob.runner,
@@ -914,6 +941,62 @@ describe("Queue", () => {
       attempt: 2,
       runner: "runner-2",
     })
+    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(merges).toBe(0)
+  })
+
+  it("refuses a delayed completion from an earlier Job with the same owner credential", async () => {
+    let merges = 0
+    await using app = await createQueueApp({
+      check: () => ({ status: "waiting", token: "shared-token" }),
+      merge: () => {
+        merges += 1
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/reused-owner")
+    const first = (await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime))[0]
+    const firstJob = first?.steps[0]?.job
+    if (firstJob?.status !== "waiting") throw new Error("first Job did not wait")
+
+    await app.jobs.finish(firstJob.id, {
+      attempt: firstJob.attempt,
+      runner: firstJob.runner,
+      token: firstJob.token,
+      result: { status: "failed", error: { code: "remote-failed", message: "resubmit requested" } },
+    })
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
+      expect.objectContaining({ id: first?.id, status: "failed" }),
+    ])
+
+    await app.bays.submit({ branch: pr.branch, headSha: UPDATED, base: "main" })
+    const second = (await app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).find(
+      (run) => run.id === "R2",
+    )
+    const secondJob = second?.steps[0]?.job
+    if (secondJob?.status !== "waiting") throw new Error("second Job did not wait")
+    expect(secondJob).toMatchObject({
+      attempt: firstJob.attempt,
+      runner: firstJob.runner,
+      token: firstJob.token,
+    })
+    expect(secondJob.id).not.toBe(firstJob.id)
+
+    await expect(
+      app.queue.finish(
+        pr.id,
+        {
+          job: firstJob.id,
+          step: "check",
+          attempt: firstJob.attempt,
+          runner: firstJob.runner,
+          token: firstJob.token,
+          result: { status: "passed", output: { checked: true } },
+        },
+        runtime,
+      ),
+    ).rejects.toThrow(firstJob.id)
+    expect(app.queue.get(second!.id)?.steps[0]?.job).toMatchObject({ id: secondJob.id, status: "waiting" })
     expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
     expect(merges).toBe(0)
   })

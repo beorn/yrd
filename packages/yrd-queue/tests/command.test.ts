@@ -795,6 +795,7 @@ describe("Queue command adapters", () => {
     const finished = await app.queue.finish(
       run.id,
       {
+        job: waiting.id,
         attempt: waiting.attempt,
         runner: waiting.runner,
         token: waiting.token,

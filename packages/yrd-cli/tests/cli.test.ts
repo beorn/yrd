@@ -1090,6 +1090,8 @@ describe("runYrd", () => {
     const run = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1"), run.io)).toBe(0)
     expect(app.queue.get("R1")?.status).toBe("waiting")
+    const waitingJob = app.queue.get("R1")?.steps[0]?.job
+    if (waitingJob?.status !== "waiting") throw new Error("expected waiting check Job")
     const waiting = outputIO({ color: true })
     expect(await runYrd(app, yrd(), waiting.io)).toBe(0)
     expect(waiting.stdout()).toContain("https://ci.invalid/run/1")
@@ -1098,18 +1100,55 @@ describe("runYrd", () => {
     expect(
       await runYrd(app, yrd("queue", "finish", "PR1", "--ok", "--token", "remote-check", "--json"), incomplete.io),
     ).toBe(2)
-    expect(incomplete.stderr()).toContain("queue finish requires --runner, --attempt, and --token")
+    expect(incomplete.stderr()).toContain("queue finish requires --job, --runner, --attempt, and --token")
     expect(app.queue.get("R1")?.status).toBe("waiting")
 
     const invalidAttempt = outputIO()
     expect(
       await runYrd(
         app,
-        yrd("queue", "finish", "PR1", "--ok", "--runner", "cli-test", "--attempt", "0", "--token", "remote-check"),
+        yrd(
+          "queue",
+          "finish",
+          "PR1",
+          "--ok",
+          "--job",
+          waitingJob.id,
+          "--runner",
+          "cli-test",
+          "--attempt",
+          "0",
+          "--token",
+          "remote-check",
+        ),
         invalidAttempt.io,
       ),
     ).toBe(2)
     expect(invalidAttempt.stderr()).toContain("--attempt must be a positive integer")
+    expect(app.queue.get("R1")?.status).toBe("waiting")
+
+    const staleJob = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "queue",
+          "finish",
+          "PR1",
+          "--ok",
+          "--job",
+          "stale-job",
+          "--runner",
+          "cli-test",
+          "--attempt",
+          "1",
+          "--token",
+          "remote-check",
+        ),
+        staleJob.io,
+      ),
+    ).toBe(1)
+    expect(staleJob.stderr()).toContain("Job 'stale-job' is not the waiting 'check' Job")
     expect(app.queue.get("R1")?.status).toBe("waiting")
 
     const finish = outputIO()
@@ -1121,6 +1160,8 @@ describe("runYrd", () => {
           "finish",
           "PR1",
           "--ok",
+          "--job",
+          waitingJob.id,
           "--runner",
           "cli-test",
           "--attempt",
@@ -1189,6 +1230,8 @@ describe("runYrd", () => {
     const app = await createApp({ waitingCheck: true })
     await openAndSubmit(app)
     expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
+    const waitingJob = app.queue.get("R1")?.steps[0]?.job
+    if (waitingJob?.status !== "waiting") throw new Error("expected waiting check Job")
 
     const finish = outputIO()
     expect(
@@ -1201,6 +1244,8 @@ describe("runYrd", () => {
           "--step",
           "check",
           "--fail",
+          "--job",
+          waitingJob.id,
           "--runner",
           "cli-test",
           "--attempt",
@@ -3307,6 +3352,8 @@ describe("runYrd", () => {
           "finish",
           "PR404",
           "--ok",
+          "--job",
+          "missing-job",
           "--runner",
           "missing-runner",
           "--attempt",

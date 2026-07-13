@@ -1014,6 +1014,7 @@ async function finishQueue(
     step?: string
     ok?: boolean
     fail?: boolean
+    job?: string
     runner?: string
     attempt?: string
     token?: string
@@ -1027,30 +1028,31 @@ async function finishQueue(
   io: YrdCliIO,
 ): Promise<void> {
   if (options.ok === options.fail) usage("queue finish requires exactly one of --ok or --fail")
-  const { runner, token } = options
-  if (options.attempt === undefined || runner === undefined || token === undefined) {
-    usage("queue finish requires --runner, --attempt, and --token")
+  const { job: jobId, runner, token } = options
+  if (jobId === undefined || options.attempt === undefined || runner === undefined || token === undefined) {
+    usage("queue finish requires --job, --runner, --attempt, and --token")
   }
   const attempt = Number(options.attempt)
   if (!Number.isSafeInteger(attempt) || attempt < 1) usage("--attempt must be a positive integer")
   const waiting = app.queue.waiting(selector, options.step)
-  const job = waiting.step.job
+  const selectedJob = waiting.step.job
   const recordedArtifacts = artifacts(options.artifact)
   const exitCode = positiveInteger(options.exitCode, "--exit-code")
   const durationMs = positiveInteger(options.durationMs, "--duration-ms")
   const evidence = {
-    ...jsonRecord(job.checkpoint),
+    ...jsonRecord(selectedJob.checkpoint),
     ...(options.detail === undefined ? {} : { detail: options.detail }),
     ...(options.url === undefined ? {} : { url: options.url }),
-    ...(job.artifacts === undefined && recordedArtifacts === undefined
+    ...(selectedJob.artifacts === undefined && recordedArtifacts === undefined
       ? {}
-      : { artifacts: [...(job.artifacts ?? []), ...(recordedArtifacts ?? [])] }),
+      : { artifacts: [...(selectedJob.artifacts ?? []), ...(recordedArtifacts ?? [])] }),
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(durationMs === undefined ? {} : { durationMs }),
   }
   const resumed = await app.queue.finish(
     selector,
     {
+      job: jobId,
       step: waiting.step.name,
       runner,
       attempt,
@@ -1636,6 +1638,7 @@ function buildProgram(
     .option("--step <name>", "waiting step name")
     .option("--ok", "record a passing result")
     .option("--fail", "record a failing result")
+    .option("--job <id>", "waiting-job id")
     .option("--runner <runner>", "waiting-job runner identity")
     .option("--attempt <attempt>", "waiting-job attempt number")
     .option("--token <token>", "waiting-job correlation token")

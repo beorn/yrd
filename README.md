@@ -252,24 +252,24 @@ yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
 yrd queue recover [--reason <text>] [--json]
-yrd queue finish <selector> [--step <name>] --runner <runner> --attempt <number>
-  --token <token> (--ok | --fail) [evidence options]
+yrd queue finish <selector> [--step <name>] --job <id> --runner <runner>
+  --attempt <number> --token <token> (--ok | --fail) [evidence options]
 yrd queue audit [--json]
 yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command   | Input                                         | Output and state                                                                        |
-| --------- | --------------------------------------------- | --------------------------------------------------------------------------------------- |
-| bare      | Optional base                                 | One queue row per base: counts, pause, target, and oldest-open age                      |
-| `run`     | Zero or more eligible PRs                     | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
-| `pause`   | Optional base; reason and allowlist to mutate | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
-| `resume`  | Optional base                                 | Removes the queue pause                                                                 |
-| `recover` | Optional reason                               | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`  | One waiting PR/step plus runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`   | Repository                                    | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`    | Optional base                                 | Resolves and validates queue environment resources                                      |
-| `deinit`  | Optional base                                 | Releases resources owned by the installed queue adapter                                 |
+| Command   | Input                                             | Output and state                                                                        |
+| --------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| bare      | Optional base                                     | One queue row per base: counts, pause, target, and oldest-open age                      |
+| `run`     | Zero or more eligible PRs                         | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
+| `pause`   | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
+| `resume`  | Optional base                                     | Removes the queue pause                                                                 |
+| `recover` | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
+| `finish`  | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
+| `audit`   | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
+| `init`    | Optional base                                     | Resolves and validates queue environment resources                                      |
+| `deinit`  | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owned: use `yrd pr
@@ -457,7 +457,7 @@ Queue step with:
 
 ```bash
 yrd queue finish PR7 --step coderabbit --ok \
-  --runner "$YRD_RUNNER" --attempt "$YRD_ATTEMPT" --token run-123 \
+  --job "$YRD_JOB" --runner "$YRD_RUNNER" --attempt "$YRD_ATTEMPT" --token run-123 \
   --artifact report=https://ci.example/runs/123/report
 ```
 

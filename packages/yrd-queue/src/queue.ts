@@ -237,7 +237,7 @@ export type WaitingQueueStep = Readonly<{
   step: QueueStep & Readonly<{ job: Extract<Job, { status: "waiting" }> }>
 }>
 
-export type FinishQueueArgs = Omit<JobCompletion, "token"> & Readonly<{ step?: string; token: string }>
+export type FinishQueueArgs = Omit<JobCompletion, "token"> & Readonly<{ job: Job["id"]; step?: string; token: string }>
 
 export type HasQueue<Shape extends PRShape = PRShape> = Readonly<{ queue: Queue<Shape> }>
 
@@ -396,7 +396,11 @@ function createQueue<Shape extends PRShape>(
         await jobs.run(active.job.id, options)
         continue
       }
-      if (active?.job?.status === "running" || active?.job?.status === "waiting") return run
+      if (active?.job?.status === "running" || active?.job?.status === "waiting") {
+        const guarded = await actions.advance(id)
+        if (guarded.events.length > 0) continue
+        return run
+      }
       const advanced = await actions.advance(id)
       if (advanced.events.length === 0) return current(id)
     }
@@ -439,11 +443,15 @@ function createQueue<Shape extends PRShape>(
       await actions.refresh()
       let snapshot = runtime()
       const resumable = resumableQueueRoots(snapshot, args)
-      const consumed = new Set(resumable.flatMap((run) => run.prs.map((pr) => pr.id)))
       const roots = resumable.map((run) => run.id)
       for (const run of resumable) await settle(run.id, runOptions)
 
       snapshot = runtime()
+      const consumed = new Set(
+        resumable.flatMap((run) =>
+          run.prs.filter((pr) => pinnedPRError(snapshot.bays, [pr]) === undefined).map((pr) => pr.id),
+        ),
+      )
       const prs = runnablePRs(snapshot, args, consumed)
       for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
         const started = await actions.run({
@@ -462,9 +470,16 @@ function createQueue<Shape extends PRShape>(
     },
     waiting,
     async finish(selector, completion, runOptions) {
-      using _span = log.span?.("finish", { selector, step: completion.step })
+      using _span = log.span?.("finish", { selector, step: completion.step, job: completion.job })
       const selected = waiting(selector, completion.step)
-      await jobs.finish(selected.step.job.id, {
+      if (selected.step.job.id !== completion.job) {
+        raiseFailure(
+          "refusal",
+          "queue-job-mismatch",
+          `yrd: Job '${completion.job}' is not the waiting '${selected.step.name}' Job '${selected.step.job.id}' for queue run '${selected.run.id}'`,
+        )
+      }
+      await jobs.finish(completion.job, {
         attempt: completion.attempt,
         runner: completion.runner,
         token: completion.token,
