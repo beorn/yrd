@@ -2667,6 +2667,7 @@ describe("runYrd", () => {
     expect(showHuman).toContain("11m26s")
     expect(showHuman).toContain("36m42s")
     expect(showHuman).toContain("merge-stalled")
+    expect(showHuman).toContain("ART art:stdout+stderr")
     expect(showHuman.split("\n").filter((row) => row.trimStart().startsWith("merge"))).toHaveLength(2)
 
     const showTty = await renderString(createElement(QueueShowView, { data: show }), {
