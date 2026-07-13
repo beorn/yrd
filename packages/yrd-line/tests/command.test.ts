@@ -7,7 +7,7 @@ import { existsSync } from "node:fs"
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
@@ -155,6 +155,123 @@ async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<v
 }
 
 describe("Line command adapters", () => {
+  it.fails("renews a configured child lease only while the owning executor observes progress", async () => {
+    type CheckedCommand = AddStepResult<PRShape, "check", z.infer<typeof CommandEvidenceSchema>>
+    const encoder = new TextEncoder()
+
+    const controlledLine = async () => {
+      const cwd = await mkdtemp(join(tmpdir(), "yrd-command-lease-"))
+      roots.push(cwd)
+      const started = Promise.withResolvers<ProcessRequest>()
+      const completed = Promise.withResolvers<ProcessResult>()
+      const mergeRuns: string[] = []
+      const process: Pick<Process, "run"> = {
+        run(request) {
+          started.resolve(request)
+          return completed.promise
+        },
+      }
+      const bayJobs = createBayJobDefs(unusedWorkspace)
+      const check = withStep(
+        "check",
+        configuredCommandStep<PRShape>({
+          inject: { process },
+          command: ["progressing-check"],
+          cwd,
+          purpose: "check",
+          artifactRoot: join(cwd, "artifacts"),
+        }),
+        { revision: "progressing-check-v1", output: CommandEvidenceSchema },
+      )
+      const merge = withMerge(
+        (_input: StepExecution<CheckedCommand>) => {
+          mergeRuns.push("merge")
+          return { status: "passed" as const, output: { commit: "b".repeat(40), baseSha: "b".repeat(40) } }
+        },
+        { revision: "merge-v1" },
+      )
+      const line = withLine({ steps: [check, merge] as const })
+      const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, line.jobDefs] }), withBays({ jobs: bayJobs }))
+      const app = await createYrd(line(base), { inject: { journal: createMemoryJournal() } })
+      await app.bays.submit({ branch: "task/progress", headSha: "a".repeat(40), base: "main" })
+      return { app, completed, mergeRuns, started, [Symbol.asyncDispose]: () => app.close() }
+    }
+
+    const result = (stdout: string): ProcessResult => ({
+      exitCode: 0,
+      signal: null,
+      stdout,
+      stderr: "",
+      durationMs: 60,
+      timedOut: false,
+    })
+    const lease = (milliseconds: number) => new Date(milliseconds).toISOString()
+
+    vi.useFakeTimers()
+    try {
+      let now = 0
+      await using progressing = await controlledLine()
+      const progressingRun = progressing.app.line.integrate(
+        { prs: ["PR1"] },
+        { executor: "same-runner", leaseMs: 30, heartbeatMs: 10, now: () => now },
+      )
+      const progressingRequest = await progressing.started.promise
+
+      now = 10
+      await vi.advanceTimersByTimeAsync(10)
+      for (const tick of [20, 30, 40, 50, 60]) {
+        progressingRequest.onOutput?.({ stream: "stdout", chunk: encoder.encode(`progress ${tick}\n`) })
+        now = tick
+        await vi.advanceTimersByTimeAsync(10)
+      }
+
+      expect(await progressing.app.jobs.recover({ now: lease(65) })).toEqual([])
+      progressing.completed.resolve(result("progress complete\n"))
+      await expect(progressingRun).resolves.toEqual([
+        expect.objectContaining({
+          status: "passed",
+          steps: expect.arrayContaining([expect.objectContaining({ name: "merge" })]),
+        }),
+      ])
+      const heartbeatLeases = (await Array.fromAsync(progressing.app.events()))
+        .filter(({ name }) => name === "job/transitioned")
+        .map(({ data }) => data as { type?: string; leaseExpiresAt?: string })
+        .filter(({ type }) => type === "heartbeat")
+        .map(({ leaseExpiresAt }) => leaseExpiresAt)
+      expect(heartbeatLeases[0]).toBe(lease(50))
+      expect(progressing.mergeRuns).toEqual(["merge"])
+
+      now = 0
+      await using stalled = await controlledLine()
+      const stalledRun = stalled.app.line.integrate(
+        { prs: ["PR1"] },
+        { executor: "same-runner", leaseMs: 30, heartbeatMs: 10, now: () => now },
+      )
+      await stalled.started.promise
+      now = 31
+      await vi.advanceTimersByTimeAsync(31)
+      const recovered = await stalled.app.line.recover({
+        recoveryTime: lease(now),
+        executor: "recovery-runner",
+        leaseMs: 30,
+        heartbeatMs: 10,
+        now: () => now,
+      })
+      stalled.completed.resolve(result("too late\n"))
+      await stalledRun
+
+      expect(recovered).toEqual([
+        expect.objectContaining({
+          status: "failed",
+          steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+        }),
+      ])
+      expect(stalled.mergeRuns).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("persists candidate-conflict evidence on the causative check step before scratch cleanup", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "conflict.txt"), "base\n")
