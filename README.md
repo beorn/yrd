@@ -414,14 +414,14 @@ YAML adapter validates the same ordering while composing plugins.
 
 An empty `merge: {}` uses Yrd's native Git merge. With `origin` configured,
 Yrd fast-forwards the remote base directly to the exact checked Candidate; the
-remote ref update is the atomic landing decision. After verifying that landing,
-Yrd fast-forwards an exactly aligned, clean local base checkout and its
-submodules to the same commit so one resident runner can select the next PR.
-Dirty, absent, detached, or concurrently moved local state remains untouched;
-the next check still refuses genuine local/remote divergence. Repositories
-without a remote retain the local-ref adapter for embedded/test use. The
-existing Queue and Job records retain the attempt, timing, error, and landing
-proof for `yrd log` and `yrd pr runs`.
+remote ref update is the atomic landing decision. Yrd refreshes its remote
+tracking ref after every verified landing and builds the next Candidate from
+that authoritative queue head. A checked-out local base and operator WIP are
+never required or mutated; stale-candidate refusal compares pinned check proof
+with the current authoritative queue head instead. Repositories without a
+remote retain the local-ref adapter for embedded/test use. The existing Queue
+and Job records retain the attempt, timing, error, and landing proof for
+`yrd log` and `yrd pr runs`.
 
 Native merge never amends the Candidate after checks or asks a later step to
 push the base again. Its durable audit proof is the Run's integration record in
@@ -433,10 +433,10 @@ A configured `merge.run` delegates the landing to a repository command while
 Yrd keeps queue and Run authority. The command receives `$YRD_SHA`/`$YRD_SHAS`
 for submitted heads and `$YRD_CANDIDATE_SHA`/`$YRD_CANDIDATE_REF` for the exact
 checked candidate. After it returns, Yrd refreshes the base branch and records
-the actual landing SHA; success without a landing fails closed. A verified
-remote-only delegated landing uses the same safe local-base rebind as native
-merge. The base branch's tracked config is the single command authority;
-submitted revisions cannot replace it.
+the actual landing SHA; success without a landing fails closed. The same
+authoritative remote-tracking ref feeds the next Candidate without rebinding an
+operator checkout. The base branch's tracked config is the single command
+authority; submitted revisions cannot replace it.
 
 Local pre-merge checks and held-out evaluators use detached scratch worktrees
 under the configured bays root. The configured command owns dependency
