@@ -7,7 +7,13 @@ import { describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
-import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
+import {
+  createBayJobDefs,
+  createPRTerminalJobDef,
+  withBays,
+  type BayWorkspace,
+  type PRTerminalSettlement,
+} from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
 const HEAD_2 = "2".repeat(40)
@@ -19,14 +25,36 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace) {
+async function createApp(workspace: BayWorkspace, journal = createMemoryJournal(), id = ids()) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
   return createYrd(definition, {
     inject: {
-      journal: createMemoryJournal(),
+      journal,
       clock: () => "2026-01-01T00:00:00.000Z",
-      id: ids(),
+      id,
+    },
+  })
+}
+
+async function createTerminalApp(
+  workspace: BayWorkspace,
+  terminal: PRTerminalSettlement,
+  journal = createMemoryJournal(),
+  id = ids(),
+) {
+  const jobs = createBayJobDefs(workspace)
+  const terminalJob = createPRTerminalJobDef(terminal)
+  const definition = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [jobs, { [terminalJob.name]: terminalJob }] }),
+    withBays({ jobs, terminal: terminalJob, defaultBase: "main" }),
+  )
+  return createYrd(definition, {
+    inject: {
+      journal,
+      clock: () => "2026-01-01T00:00:00.000Z",
+      id,
     },
   })
 }
@@ -70,6 +98,76 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("refuses to retire a request-bound PR when the host settlement capability is missing", async () => {
+    const { adapter } = createWorkspaceHarness()
+    const journal = createMemoryJournal()
+    const id = ids()
+    const configured = await createTerminalApp(
+      adapter,
+      {
+        revision: "test-terminal-v1",
+        settle(input) {
+          return { status: "passed", output: { requestId: input.requestId, disposition: "settled" } }
+        },
+      },
+      journal,
+      id,
+    )
+    await configured.bays.submit({ branch: "issue/config-required", headSha: HEAD_1, requestId: "request-61" })
+    await configured.close()
+
+    await using unconfigured = await createApp(adapter, journal, id)
+    await expect(unconfigured.bays.closePr({ pr: "PR1" })).rejects.toThrow("no PR terminal settlement is configured")
+    expect(unconfigured.bays.pr("PR1")).toMatchObject({ status: "submitted", requestId: "request-61" })
+  })
+
+  it("settles one exact request on retirement and never replays it", async () => {
+    const { adapter } = createWorkspaceHarness()
+    const requestId = "pr 61's docs"
+    const pending = new Set([requestId, "unrelated-request"])
+    const calls: Array<{ requestId: string; outcome: string }> = []
+    const terminal: PRTerminalSettlement = {
+      revision: "test-terminal-v1",
+      settle(input) {
+        calls.push({ requestId: input.requestId, outcome: input.outcome })
+        if (!pending.delete(input.requestId)) {
+          return { status: "failed", error: { code: "request-missing", message: "request is not pending" } }
+        }
+        return { status: "passed", output: { requestId: input.requestId, disposition: "settled" } }
+      },
+    }
+    const journal = createMemoryJournal()
+    const app = await createTerminalApp(adapter, terminal, journal)
+
+    await app.bays.submit({ branch: "issue/custom-request", headSha: HEAD_1, requestId })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      requestId,
+      revisions: [{ revision: 1, requestId }],
+    })
+
+    const retired = await app.bays.closePr({ pr: "PR1" })
+    expect(retired.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/withdrawn",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, requestId },
+      }),
+    )
+    const settlementIds = app.jobs.requested(retired)
+    expect(settlementIds).toHaveLength(1)
+    await app.jobs.run(settlementIds[0]!, runtime)
+    expect(calls).toEqual([{ requestId, outcome: "retired" }])
+    expect([...pending]).toEqual(["unrelated-request"])
+    await app.close()
+
+    await using replayed = await createTerminalApp(adapter, terminal, journal)
+    expect(replayed.bays.pr("PR1")).toMatchObject({ status: "withdrawn", requestId })
+    expect(Object.values(replayed.state().jobs.byId)).toEqual([
+      expect.objectContaining({ definition: "pr.terminal", status: "passed", attempt: 1 }),
+    ])
+    expect(calls).toEqual([{ requestId, outcome: "retired" }])
+    expect([...pending]).toEqual(["unrelated-request"])
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 

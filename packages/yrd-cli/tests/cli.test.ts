@@ -8,7 +8,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  createPRTerminalJobDef,
+  withBays,
+  type BayWorkspace,
+  type PR,
+  type PRTerminalJobDef,
+  type PRTerminalSettlement,
+} from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, EventSchema, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -194,6 +202,7 @@ async function createApp(
     mergeRuns?: string[]
     failingCheck?: boolean
     checkFailure?: Readonly<{ code: string; message: string; artifact?: string }>
+    terminal?: PRTerminalJobDef
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -236,13 +245,22 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? false })
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: options.batch ?? false,
+    ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+  })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
+  const terminalDefs = options.terminal === undefined ? {} : { [options.terminal.name]: options.terminal }
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, terminalDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main" }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: "main",
+      ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
@@ -644,6 +662,60 @@ describe("runYrd", () => {
     const refusal = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR2", "--json"), refusal.io)).toBe(1)
     expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR2", position: 2 })
+  })
+
+  it("forwards an exact custom request id from pr submit into its terminal Queue job", async () => {
+    const calls: Array<{ requestId: string; outcome: string }> = []
+    const settlement: PRTerminalSettlement = {
+      revision: "test-terminal-v1",
+      settle(input) {
+        calls.push({ requestId: input.requestId, outcome: input.outcome })
+        return { status: "passed", output: { requestId: input.requestId, disposition: "settled" } }
+      },
+    }
+    const app = await createApp({ terminal: createPRTerminalJobDef(settlement) })
+    const requestId = "pr61-pane-host-docs"
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/direct", "--request-id", requestId, "--json"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", requestId, revisions: [{ revision: 1, requestId }] }],
+    })
+
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
+    expect(calls).toEqual([{ requestId, outcome: "integrated" }])
+  })
+
+  it("runs the exact request settlement recorded by pr close", async () => {
+    const calls: Array<{ requestId: string; outcome: string }> = []
+    const settlement: PRTerminalSettlement = {
+      revision: "test-terminal-v1",
+      settle(input) {
+        calls.push({ requestId: input.requestId, outcome: input.outcome })
+        return { status: "passed", output: { requestId: input.requestId, disposition: "settled" } }
+      },
+    }
+    const app = await createApp({ terminal: createPRTerminalJobDef(settlement) })
+    const requestId = "retire custom/63"
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/retired", "--request-id", requestId, "--json"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
+    expect(JSON.parse(close.stdout())).toMatchObject({
+      command: "pr.close",
+      prs: [{ id: "PR1", status: "withdrawn", requestId }],
+    })
+    expect(calls).toEqual([{ requestId, outcome: "retired" }])
   })
 
   it("executes bare projections with their canonical JSON discriminators", async () => {

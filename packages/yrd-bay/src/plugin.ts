@@ -33,6 +33,7 @@ import {
   ProvisionedBaySchema,
   RefreshBayInputSchema,
   RefreshedBaySchema,
+  RequestIdSchema,
   defaultBayBranch,
   emptyBaysState,
   isLivePR,
@@ -90,7 +91,7 @@ const IntakePRArgsSchema = z
 export type IntakePRArgs = z.infer<typeof IntakePRArgsSchema>
 
 const SubmitArgsSchema = z.union([
-  z.object({ pr: TextSchema }).strict(),
+  z.object({ pr: TextSchema, requestId: RequestIdSchema.optional() }).strict(),
   z
     .object({
       branch: GitRefSchema,
@@ -99,6 +100,7 @@ const SubmitArgsSchema = z.union([
       baseSha: GitShaSchema.optional(),
       name: TextSchema.optional(),
       issue: TextSchema.optional(),
+      requestId: RequestIdSchema.optional(),
     })
     .strict(),
 ])
@@ -107,6 +109,7 @@ export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
 export type SubmitSelectionOptions = Readonly<{
   base?: string
   issue?: string
+  requestId?: string
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
 }>
@@ -152,17 +155,127 @@ const PRPushedSchema = z
     revision: RevisionSchema,
   })
   .strict()
-const PRRevisionSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const PRRejectedSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, detail: z.string().optional() }).strict()
+const PRRevisionSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    requestId: RequestIdSchema.optional(),
+  })
+  .strict()
+const PRRequestBoundSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, requestId: RequestIdSchema }).strict()
+const PRWithdrawnSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema.optional(),
+    headSha: GitShaSchema.optional(),
+    requestId: RequestIdSchema.optional(),
+  })
+  .strict()
+const PRRejectedSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema.optional(),
+    requestId: RequestIdSchema.optional(),
+    detail: z.string().optional(),
+  })
+  .strict()
 const PRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema,
+    requestId: RequestIdSchema.optional(),
     commit: GitShaSchema,
     baseSha: GitShaSchema,
   })
   .strict()
+
+export const PRTerminalOutcomeSchema = z.enum(["integrated", "rejected", "retired"])
+export type PRTerminalOutcome = z.infer<typeof PRTerminalOutcomeSchema>
+export const PRTerminalInputSchema = z
+  .object({
+    requestId: RequestIdSchema,
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    branch: GitRefSchema,
+    base: GitRefSchema,
+    headSha: GitShaSchema,
+    outcome: PRTerminalOutcomeSchema,
+    detail: z.string().min(1).optional(),
+  })
+  .strict()
+export type PRTerminalInput = z.infer<typeof PRTerminalInputSchema>
+export const PRTerminalProofSchema = z
+  .object({
+    requestId: RequestIdSchema,
+    disposition: z.enum(["settled", "already-settled"]),
+  })
+  .strict()
+export type PRTerminalProof = z.infer<typeof PRTerminalProofSchema>
+
+export type PRTerminalSettlement = Readonly<{
+  revision: string
+  settle(input: PRTerminalInput, context: JobContext): JobResult<PRTerminalProof> | Promise<JobResult<PRTerminalProof>>
+}>
+export type PRTerminalJobDef = JobDef<PRTerminalInput, PRTerminalProof>
+
+export function createPRTerminalJobDef(settlement: PRTerminalSettlement): PRTerminalJobDef {
+  return createJobDef({
+    name: "pr.terminal",
+    title: "Settle originating request",
+    revision: settlement.revision,
+    input: PRTerminalInputSchema,
+    output: PRTerminalProofSchema,
+    async execute(input, context) {
+      const result = await settlement.settle(input, context)
+      if (result.status === "passed" && result.output.requestId !== input.requestId) {
+        throw new Error(
+          `yrd: PR terminal settlement returned request '${result.output.requestId}', expected '${input.requestId}'`,
+        )
+      }
+      return result
+    },
+  })
+}
+
+export function requestPRTerminal(
+  terminal: PRTerminalJobDef | undefined,
+  pr: DeepReadonly<PR>,
+  outcome: PRTerminalOutcome,
+  detail?: string,
+) {
+  if (pr.requestId === undefined) return undefined
+  if (terminal === undefined) {
+    raiseFailure(
+      "configuration",
+      "request-settlement-unavailable",
+      `yrd: PR '${pr.id}' request '${pr.requestId}' cannot advance because no PR terminal settlement is configured`,
+    )
+  }
+  return terminal.request(
+    {
+      requestId: pr.requestId,
+      pr: pr.id,
+      revision: pr.revision,
+      branch: pr.branch,
+      base: pr.base,
+      headSha: pr.headSha,
+      outcome,
+      ...(detail === undefined || detail.length === 0 ? {} : { detail }),
+    },
+    { key: `pr-terminal:${encodeURIComponent(pr.requestId)}` },
+  )
+}
+
+function terminalCorrelation(pr: DeepReadonly<PR>) {
+  return {
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.requestId === undefined ? {} : { requestId: pr.requestId }),
+  }
+}
 
 export type BayWorkspace = Readonly<{
   revision: string
@@ -296,10 +409,35 @@ export function createBays(
   }
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+    const bindRequest = async (pr: DeepReadonly<PR>): Promise<DeepReadonly<PR>> => {
+      if (options.requestId === undefined) return pr
+      if (pr.requestId === options.requestId) return pr
+      if (pr.requestId !== undefined) {
+        raiseFailure(
+          "refusal",
+          "request-id-conflict",
+          `yrd: PR '${pr.id}' revision ${pr.revision} is already bound to request '${pr.requestId}'`,
+        )
+      }
+      if (pr.status !== "submitted") {
+        raiseFailure(
+          "refusal",
+          "request-id-too-late",
+          `yrd: PR '${pr.id}' is ${pr.status}; request '${options.requestId}' cannot be bound after submission`,
+        )
+      }
+      await submit({ pr: pr.id, requestId: options.requestId })
+      const bound = resolvePR(state(), pr.id)
+      if (bound === undefined) {
+        raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after request binding`)
+      }
+      return bound
+    }
+
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
-    if (pr?.status === "integrated") return pr
+    if (pr?.status === "integrated") return bindRequest(pr)
 
     if (bay?.status === "active") {
       const refreshed = await actions.refresh({ bay: bay.id })
@@ -350,14 +488,14 @@ export function createBays(
       }
     }
 
-    if (pr?.status === "submitted") return pr
+    if (pr?.status === "submitted") return bindRequest(pr)
     if (pr?.status === "pushed") {
-      await submit({ pr: pr.id })
+      await submit({ pr: pr.id, ...(options.requestId === undefined ? {} : { requestId: options.requestId }) })
       const submitted = resolvePR(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
       }
-      return submitted
+      return bindRequest(submitted)
     }
 
     if (bay === undefined) {
@@ -373,19 +511,23 @@ export function createBays(
           candidate.base === resolved.base,
       )
       if (live !== undefined) {
-        if (live.status === "submitted") return live
-        await actions.submit({ pr: live.id })
+        if (live.status === "submitted") return bindRequest(live)
+        await actions.submit({
+          pr: live.id,
+          ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+        })
         const submitted = resolvePR(state(), live.id)
         if (submitted === undefined) {
           raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${live.id}' disappeared after submit`)
         }
-        return submitted
+        return bindRequest(submitted)
       }
       await actions.submit({
         branch: selector,
         headSha,
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
+        ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -395,7 +537,7 @@ export function createBays(
           `yrd: direct branch submit '${selector}' did not create a PR`,
         )
       }
-      return submitted
+      return bindRequest(submitted)
     }
 
     if (bay.status !== "active") {
@@ -426,13 +568,14 @@ export function createBays(
 
 export type WithBaysOptions = Readonly<{
   jobs: BayJobDefs
+  terminal?: PRTerminalJobDef
   defaultBase?: string
   resolveBase?: ResolveBayBase
 }>
 
 export function withBays(options: WithBaysOptions) {
   const defaultBase = options.defaultBase ?? "main"
-  const commands = createBayCommands(options.jobs, defaultBase)
+  const commands = createBayCommands(options.jobs, defaultBase, options.terminal)
 
   return <State extends object, Commands extends CommandTree, Features extends HasJobs>(
     definition: YrdDef<State, Commands, Features>,
@@ -445,7 +588,8 @@ export function withBays(options: WithBaysOptions) {
         "bay/closing": BayClosingSchema,
         "pr/pushed": PRPushedSchema,
         "pr/submitted": PRRevisionSchema,
-        "pr/withdrawn": z.object({ pr: PRIdSchema }).strict(),
+        "pr/request-bound": PRRequestBoundSchema,
+        "pr/withdrawn": PRWithdrawnSchema,
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/edited": PrEditArgsSchema,
@@ -453,6 +597,9 @@ export function withBays(options: WithBaysOptions) {
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
+        if (options.terminal !== undefined) {
+          yrd.jobs.requireDefinitions({ [options.terminal.name]: options.terminal })
+        }
         const state = computed(() => yrd.state().bays)
         return {
           bays: createBays(
@@ -481,7 +628,7 @@ function jobDetail(job: DeepReadonly<Job>): string {
   return job.status
 }
 
-function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
+function createBayCommands(jobs: BayJobDefs, defaultBase: string, terminal?: PRTerminalJobDef): BayCommands {
   return {
     bay: {
       open: command({
@@ -505,13 +652,13 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         title: "Submit work",
         visibility: "public",
         params: SubmitArgsSchema,
-        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase),
+        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase, terminal),
       }),
       close: command({
         title: "Close bay",
         visibility: "public",
         params: CloseBayArgsSchema,
-        apply: (state: BayState, args: CloseBayArgs) => closeBay(state, args, jobs["bay.deprovision"]),
+        apply: (state: BayState, args: CloseBayArgs) => closeBay(state, args, jobs["bay.deprovision"], terminal),
       }),
     },
     pr: {
@@ -519,7 +666,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         title: "Close a PR",
         visibility: "public",
         params: PrCloseArgsSchema,
-        apply: (state: BayState, args: PrCloseArgs) => closePr(state, args),
+        apply: (state: BayState, args: PrCloseArgs) => closePr(state, args, terminal),
       }),
       edit: command({
         title: "Edit a PR",
@@ -632,12 +779,41 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   }
 }
 
-function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string) {
+function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string, terminal?: PRTerminalJobDef) {
   const current = state.bays
+  if (args.requestId !== undefined && terminal === undefined) {
+    raiseFailure(
+      "configuration",
+      "request-settlement-unavailable",
+      `yrd: request '${args.requestId}' cannot be bound because no PR terminal settlement is configured`,
+    )
+  }
   if ("pr" in args) {
     const pr = required(resolvePR(current, args.pr), "PR", args.pr)
+    if (pr.status === "submitted" && args.requestId !== undefined) {
+      if (pr.requestId === args.requestId) return { events: [] }
+      if (pr.requestId !== undefined) {
+        raiseFailure(
+          "refusal",
+          "request-id-conflict",
+          `yrd: PR '${pr.id}' revision ${pr.revision} is already bound to request '${pr.requestId}'`,
+        )
+      }
+      return {
+        events: [event("pr/request-bound", { pr: pr.id, revision: pr.revision, requestId: args.requestId })],
+      }
+    }
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
-    return { events: [event("pr/submitted", { pr: pr.id, revision: pr.revision, headSha: pr.headSha })] }
+    return {
+      events: [
+        event("pr/submitted", {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+        }),
+      ],
+    }
   }
 
   const base = args.base ?? defaultBase
@@ -660,7 +836,15 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     revision,
   }
   return {
-    events: [event("pr/pushed", pushed), event("pr/submitted", { pr: id, revision, headSha: args.headSha })],
+    events: [
+      event("pr/pushed", pushed),
+      event("pr/submitted", {
+        pr: id,
+        revision,
+        headSha: args.headSha,
+        ...(args.requestId === undefined ? {} : { requestId: args.requestId }),
+      }),
+    ],
   }
 }
 
@@ -673,7 +857,12 @@ function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string,
   }
 }
 
-function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision: BayJobDefs["bay.deprovision"]) {
+function closeBay(
+  state: DeepReadonly<BayState>,
+  args: CloseBayArgs,
+  deprovision: BayJobDefs["bay.deprovision"],
+  terminal?: PRTerminalJobDef,
+) {
   const current = state.bays
   const bay = required(resolveBay(current, args.bay), "bay", args.bay)
   if (bay.status === "opening" || bay.status === "closing") {
@@ -686,7 +875,12 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
   return {
     events: [
-      ...(pr !== undefined && isLivePR(pr.status) ? [event("pr/withdrawn", { pr: pr.id })] : []),
+      ...(pr !== undefined && isLivePR(pr.status)
+        ? [
+            event("pr/withdrawn", { pr: pr.id, ...terminalCorrelation(pr) }),
+            requestPRTerminal(terminal, pr, "retired"),
+          ].filter((draft) => draft !== undefined)
+        : []),
       event("bay/closing", { bay: bay.id }),
       deprovision.request({
         bay: bay.id,
@@ -698,12 +892,17 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
 }
 
-function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
+function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs, terminal?: PRTerminalJobDef) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
-  return { events: [event("pr/withdrawn", { pr: pr.id })] }
+  return {
+    events: [
+      event("pr/withdrawn", { pr: pr.id, ...terminalCorrelation(pr) }),
+      requestPRTerminal(terminal, pr, "retired"),
+    ].filter((draft) => draft !== undefined),
+  }
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
@@ -773,6 +972,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revision: pushed.revision,
               headSha: pushed.headSha,
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+              requestId: undefined,
               revisions: [...existing.revisions, record],
               submittedAt: undefined,
               rejectedAt: undefined,
@@ -804,16 +1004,57 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
         throw new Error(`yrd: stale PR event for '${pr.id}'`)
       }
-      return patchPR(pr, { status: "submitted", submittedAt: applied.ts })
+      return patchPR(pr, {
+        status: "submitted",
+        submittedAt: applied.ts,
+        requestId: changed.requestId,
+        revisions: pr.revisions.map((revision) =>
+          revision.revision === changed.revision
+            ? { ...revision, ...(changed.requestId === undefined ? {} : { requestId: changed.requestId }) }
+            : revision,
+        ),
+      })
+    }
+    case "pr/request-bound": {
+      const changed = PRRequestBoundSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined || pr.revision !== changed.revision || pr.status !== "submitted") {
+        throw new Error(`yrd: stale PR request binding for '${changed.pr}' revision ${changed.revision}`)
+      }
+      if (pr.requestId !== undefined && pr.requestId !== changed.requestId) {
+        throw new Error(`yrd: conflicting PR request binding for '${pr.id}' revision ${pr.revision}`)
+      }
+      return patchPR(pr, {
+        requestId: changed.requestId,
+        revisions: pr.revisions.map((revision) =>
+          revision.revision === changed.revision ? { ...revision, requestId: changed.requestId } : revision,
+        ),
+      })
     }
     case "pr/withdrawn": {
-      const pr = current.prs[data.pr as string]
+      const changed = PRWithdrawnSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (
+        pr !== undefined &&
+        ((changed.revision !== undefined && changed.revision !== pr.revision) ||
+          (changed.headSha !== undefined && changed.headSha !== pr.headSha) ||
+          (changed.requestId !== undefined && changed.requestId !== pr.requestId))
+      ) {
+        throw new Error(`yrd: stale PR withdrawal for '${changed.pr}'`)
+      }
       return pr === undefined ? state : patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
     }
     case "pr/rejected": {
       const changed = PRRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision) return state
+      if (
+        pr === undefined ||
+        pr.revision !== changed.revision ||
+        (changed.headSha !== undefined && pr.headSha !== changed.headSha) ||
+        (changed.requestId !== undefined && pr.requestId !== changed.requestId)
+      ) {
+        return state
+      }
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
@@ -823,7 +1064,14 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/integrated": {
       const changed = PRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision || pr.headSha !== changed.headSha) return state
+      if (
+        pr === undefined ||
+        pr.revision !== changed.revision ||
+        pr.headSha !== changed.headSha ||
+        (changed.requestId !== undefined && pr.requestId !== changed.requestId)
+      ) {
+        return state
+      }
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,
