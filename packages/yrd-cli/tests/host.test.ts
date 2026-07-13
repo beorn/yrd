@@ -140,8 +140,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
-  it("refuses stale local queue authority before recording a PR", async () => {
+  it("refreshes stale local queue authority before recording the same PR payload", async () => {
     const { repo, featureSha } = await repository()
+    const localBaseSha = await git(repo, "rev-parse", "main")
     const remote = join(repo, "..", "origin.git")
     await git(repo, "init", "-q", "--bare", remote)
     await git(repo, "remote", "add", "origin", remote)
@@ -150,6 +151,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await writeFile(join(repo, "remote.txt"), "remote\n")
     await git(repo, "add", "remote.txt")
     await git(repo, "commit", "-qm", "remote main")
+    const remoteBaseSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "push", "-q", "origin", "HEAD:main")
     await git(repo, "switch", "-q", "main")
 
@@ -170,13 +172,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       config,
     })
 
-    await expect(
-      app.bays.submitSelection("issue/feature", {
-        resolveRevision: async () => featureSha,
-        run: { runner: "test", leaseMs: 60_000 },
-      }),
-    ).rejects.toThrow("differs from authoritative")
-    expect(app.state().bays.prs).toEqual({})
+    const submitted = await app.bays.submitSelection("issue/feature", {
+      resolveRevision: async () => featureSha,
+      run: { runner: "test", leaseMs: 60_000 },
+    })
+
+    expect(submitted).toMatchObject({ revision: 1, headSha: featureSha, baseSha: remoteBaseSha, status: "submitted" })
+    expect(await git(repo, "rev-parse", "main")).toBe(localBaseSha)
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
   it("refreshes a shared journal before the host selects queued PRs", async () => {

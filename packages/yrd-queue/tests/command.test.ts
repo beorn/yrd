@@ -613,20 +613,103 @@ describe("Queue command adapters", () => {
     await expectLanded(repo, GitCheckEvidenceSchema.parse(job.output))
   })
 
-  it("refuses local and authoritative remote base divergence before creating a candidate", async () => {
+  it("refreshes authoritative remote base divergence and evaluates the unchanged payload", async () => {
     const { repo, feature: featureSha, competing: remoteBaseSha } = await repository("feature", "competing")
+    const localBaseSha = await git(repo, ["rev-parse", "main"])
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
     await git(repo, ["push", "-q", "origin", "main", "issue/feature", "issue/competing"])
     await git(repo, ["push", "-q", "origin", `${remoteBaseSha}:refs/heads/main`])
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, ["false"])
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
-    expect(run).toMatchObject({ status: "failed", error: { code: "queue-target-diverged" } })
+    expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
+    const job = run.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("check did not pass")
+    expect(GitCheckEvidenceSchema.parse(job.output).baseSha).toBe(remoteBaseSha)
+    expect(await git(repo, ["rev-parse", "main"])).toBe(localBaseSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+  })
+
+  it("retries authoritative refresh at most three times without changing the PR payload", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let recoveryAttempts = 0
+    let recovered = false
+    const flakyProcess: Pick<Process, "run"> = {
+      run(request) {
+        const refresh = request.argv[0] === "git" && request.argv.includes("fetch")
+        if (refresh && !recovered) {
+          recoveryAttempts += 1
+          if (recoveryAttempts < 3) {
+            return Promise.resolve({
+              exitCode: 1,
+              signal: null,
+              stdout: "",
+              stderr: "temporary origin failure",
+              durationMs: 1,
+              timedOut: false,
+            })
+          }
+          recovered = true
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(flakyProcess, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(recoveryAttempts).toBe(3)
+    expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
+  })
+
+  it("records exhausted authority refresh as an environment refusal without rejecting the author", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let refreshAttempts = 0
+    const unavailableOrigin: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("fetch")) {
+          refreshAttempts += 1
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "origin unavailable",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailableOrigin, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(refreshAttempts).toBe(3)
+    expect(run).toMatchObject({ status: "failed", error: { code: "queue-environment-refused" } })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
