@@ -899,6 +899,28 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("monitors line status continuously from root watch", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    const watch = outputIO({
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds)
+          controller.abort()
+        },
+      },
+    })
+    expect(await runYrd(app, yrd("watch", "--json"), watch.io)).toBe(0)
+    expect(watch.stdout()).toContain('"command":"watch"')
+    expect(watch.stdout()).toContain('"base":"main"')
+    expect(watch.stdout()).toContain('"id":"PR1"')
+    expect(sleeps).toEqual([15_000])
+  })
+
   it("keeps the line summary readable at 40 columns and bounded at 120 and 240 columns", async () => {
     const app = await createApp()
 

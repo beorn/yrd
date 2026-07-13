@@ -63,6 +63,8 @@ type RuntimeOptions = {
   now?: () => number
 }
 
+type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
+
 type JsonOption = { json?: boolean }
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
@@ -384,37 +386,8 @@ async function lineStatus(
   io: YrdCliIO,
 ): Promise<void> {
   const state = stateOf(app)
-  const bases = new Set<string>()
-  const selected = new Set<string>()
-  for (const selector of selectors) {
-    const pr = resolvePR(state.bays, selector)
-    if (pr === undefined) bases.add(selector)
-    else {
-      bases.add(pr.base)
-      selected.add(pr.id)
-    }
-  }
-  if (selectors.length === 0) {
-    for (const pr of Object.values(state.bays.prs)) bases.add(pr.base)
-    for (const run of Object.values(state.lines.records)) bases.add(run.base)
-    if (bases.size === 0) bases.add("main")
-  }
-  const results: LineStatusResult[] = []
-  for (const target of await lineTargetGroups(bases, io)) {
-    const summaries = [...target.aliases].map((base) => app.line.status(base))
-    const hold = summaries.find((summary) => summary.hold !== undefined)?.hold
-    results.push({
-      base: target.base,
-      running: summaries.flatMap((summary) => summary.running),
-      waiting: summaries.flatMap((summary) => summary.waiting),
-      finished: summaries.flatMap((summary) => summary.finished),
-      ...(hold === undefined ? {} : { hold }),
-      ...(target.headSha === undefined ? {} : { headSha: target.headSha }),
-      prs: Object.values(state.bays.prs).filter(
-        (pr) => target.aliases.has(pr.base) && (selected.size === 0 || selected.has(pr.id)),
-      ),
-    })
-  }
+  const target = resolveLineTargets(state, selectors, undefined, undefined)
+  const { results } = await lineStatusSnapshots(app, state, target, io)
   await printResult(
     io,
     jsonEnabled(options),
@@ -422,10 +395,40 @@ async function lineStatus(
     createElement(LineStatusView, {
       state: state.bays,
       results,
-      selected,
+      selected: target.selected,
       now: io.now?.() ?? Date.now(),
     }),
   )
+}
+
+async function lineStatusSnapshots(
+  app: YrdCliApp,
+  state: YrdCliState,
+  target: { bases: Set<string>; selected: Set<string>; prFilter: string | undefined },
+  io: YrdCliIO,
+): Promise<{ results: readonly LineStatusResult[] }> {
+  if (target.selected.size === 0 && target.bases.size === 0) {
+    for (const pr of Object.values(state.bays.prs)) target.bases.add(pr.base)
+    for (const run of Object.values(state.lines.records)) target.bases.add(run.base)
+    if (target.bases.size === 0) target.bases.add("main")
+  }
+  const results: LineStatusResult[] = []
+  for (const group of await lineTargetGroups(target.bases, io)) {
+    const status = [...group.aliases].map((base) => app.line.status(base))
+    const hold = status.find((entry) => entry.hold !== undefined)?.hold
+    results.push({
+      base: group.base,
+      running: status.flatMap((summary) => summary.running),
+      waiting: status.flatMap((summary) => summary.waiting),
+      finished: status.flatMap((summary) => summary.finished),
+      ...(hold === undefined ? {} : { hold }),
+      ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
+      prs: Object.values(state.bays.prs).filter(
+        (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
+      ),
+    })
+  }
+  return { results }
 }
 
 function resolveLineTargets(
@@ -556,7 +559,7 @@ async function recoverLine(
   options: JsonOption & Readonly<{ reason?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.reason !== undefined && options.reason.trim() === "") usage("--reason requires text")
+  if (options.reason?.trim() === "") usage("--reason requires text")
   const runs = await app.line.recover({
     ...runtimeOptions(io),
     recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
@@ -698,6 +701,30 @@ async function watchLine(
     if (selectors.length > 0 || scope.signal.aborted) return exit
     await scope.sleep(interval)
     if (scope.signal.aborted) return exit
+  }
+}
+
+async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const interval = 15_000
+  const scope = io.scope ?? app.scope
+  while (true) {
+    const state = stateOf(app)
+    const target = resolveLineTargets(state, [], options.base, options.pr)
+    const { results } = await lineStatusSnapshots(app, state, target, io)
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "watch", results },
+      createElement(LineStatusView, {
+        state: state.bays,
+        results,
+        selected: target.selected,
+        now: io.now?.() ?? Date.now(),
+      }),
+    )
+    if (scope.signal.aborted) return 0
+    await scope.sleep(interval)
+    if (scope.signal.aborted) return 0
   }
 }
 
@@ -900,6 +927,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
     examples.push(
       [`$ ${name} line status`, "inspect active PRs"],
       [`$ ${name} line integrate --steps check,merge`, "run selected steps"],
+      [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
       [`$ ${name} task compete km:T1 -a codex/claude`, "compare implementations"],
     )
   }
@@ -980,6 +1008,16 @@ function buildProgram(
     configureOutput(program, io, commanderOutput)
     return program
   }
+
+  program
+    .command("watch")
+    .description("monitor line progress")
+    .option("--base <branch>", "scope watch to one base")
+    .option("--pr <pr>", "scope watch to one PR")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => {
+      setExit(await watchQueue(installed(), options, io))
+    })
 
   const line = program.command("line").description("manage integration lines")
   line.helpCommand(false)
