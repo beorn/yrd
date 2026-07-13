@@ -551,6 +551,25 @@ async function lineAudit(
   return result.findings.length === 0 ? 0 : 1
 }
 
+async function recoverLine(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ reason?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.reason !== undefined && options.reason.trim() === "") usage("--reason requires text")
+  const runs = await app.line.recover({
+    ...runtimeOptions(io),
+    recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
+    ...(options.reason === undefined ? {} : { reason: options.reason }),
+  })
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "line.recover", results: runs },
+    createElement(LineRunsView, { runs }),
+  )
+}
+
 async function lineAdministration(
   services: YrdCliServices,
   command: "init" | "deinit",
@@ -1008,6 +1027,12 @@ function buildProgram(
     .description("release a line hold")
     .option("--json", "emit stable JSON")
     .action(async (base, options) => releaseLine(installed(), base, options, io))
+  line
+    .command("recover")
+    .description("recover expired runner leases")
+    .option("--reason <text>", "record the recovery reason")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => recoverLine(installed(), options, io))
   line
     .command("integrate [selector...]")
     .description("run line steps for PRs")

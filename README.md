@@ -212,6 +212,7 @@ yrd line status [selector...] [--json]
 yrd line audit [--json]
 yrd line init [base] [--json]
 yrd line deinit [base] [--json]
+yrd line recover [--reason <text>] [--json]
 yrd line integrate [selector...] [--steps [step...]] [--retry] [--watch]
 yrd line finish <selector> [--step <name>] (--ok | --fail) [evidence options]
 ```
@@ -222,6 +223,7 @@ yrd line finish <selector> [--step <name>] (--ok | --fail) [evidence options]
 | `audit`     | Repository                             | Journal, projection, pinned-plan, and installed-step findings; no state change                               |
 | `init`      | Optional base                          | Resolves and validates line environment resources                                                            |
 | `deinit`    | Optional base                          | Releases resources owned by the installed line adapter                                                       |
+| `recover`   | Expired runner leases                  | Marks them lost and settles affected durable runs without starting queued merge work after a failed step     |
 | `integrate` | Zero or more eligible PRs              | Runs configured steps; `--watch` keeps draining until cancelled                                              |
 | `finish`    | One waiting PR/step plus token/verdict | Records external evidence and resumes that exact durable run                                                 |
 

@@ -475,14 +475,21 @@ function createLine<Shape extends PRShape>(
     },
     async recover(recoverOptions) {
       using _span = log.span?.("recover", { at: recoverOptions.recoveryTime })
-      await jobs.recover({
-        now: recoverOptions.recoveryTime,
-        ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
-      })
+      const recoveredJobs = new Set(
+        await jobs.recover({
+          now: recoverOptions.recoveryTime,
+          ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+        }),
+      )
       const recovered: LineRun[] = []
       const snapshot = runtime()
       for (const candidate of orderedLines(snapshot.lines, snapshot.jobs)) {
-        if (Lines.terminal(candidate) && !needsAdvance(snapshot, candidate) && !bisectable(candidate)) continue
+        if (Lines.terminal(candidate) && !needsAdvance(snapshot, candidate) && !bisectable(candidate)) {
+          if (candidate.steps.some((step) => step.job !== undefined && recoveredJobs.has(step.job.id))) {
+            recovered.push(candidate)
+          }
+          continue
+        }
         recovered.push(await run(candidate.id, recoverOptions))
       }
       return recovered

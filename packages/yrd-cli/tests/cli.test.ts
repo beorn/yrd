@@ -181,6 +181,8 @@ async function createApp(
     baseResolutions?: string[]
     batch?: false | number
     waitingEvaluator?: string
+    mergeRuns?: string[]
+    failingCheck?: boolean
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -197,14 +199,19 @@ async function createApp(
             url: "https://ci.invalid/run/1",
             checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
           }
-        : { status: "passed", output: { checked: true } },
+        : options.failingCheck
+          ? { status: "failed", error: { code: "check-failed", message: "check failed" } }
+          : { status: "passed", output: { checked: true } },
     { revision: "check-v1", output: JsonSchema },
   )
   const merge = withMerge(
-    (_input: StepExecution<CheckedShape>): JobResult<{ commit: string; baseSha: string }> => ({
-      status: "passed",
-      output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
-    }),
+    (_input: StepExecution<CheckedShape>): JobResult<{ commit: string; baseSha: string }> => {
+      options.mergeRuns?.push("merge")
+      return {
+        status: "passed",
+        output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+      }
+    },
     { revision: "merge-v1" },
   )
   const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? false })
@@ -676,6 +683,42 @@ describe("runYrd", () => {
       results: { check: { baseSha: BASE_SHA, candidateSha: HEAD_SHA } },
     })
     expect(app.line.get("R1")?.steps.map((step) => step.job?.status)).toEqual(["passed", "passed"])
+  })
+
+  it("recovers an expired interrupted line lease without advancing to merge", async () => {
+    const mergeRuns: string[] = []
+    const app = await createApp({ mergeRuns, failingCheck: true })
+    await openAndSubmit(app)
+    expect((await app.line.integrate({ prs: ["PR1"] }, { executor: "first-runner", leaseMs: 60_000 }))[0]?.status).toBe(
+      "failed",
+    )
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
+    await app.dispatch(app.commands.line.integrate, { prs: ["PR1"], retry: true })
+
+    const checkJob = app.line.get("R2")?.steps[0]?.job
+    expect(checkJob?.status).toBe("requested")
+    if (checkJob === undefined) throw new Error("expected requested check job")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: checkJob.id,
+      attempt: 1,
+      executor: "interrupted-runner",
+      leaseExpiresAt: "2026-07-09T12:00:01.000Z",
+    })
+    expect(app.line.get("R2")?.status).toBe("running")
+
+    const recover = outputIO({ now: () => Date.parse("2026-07-09T12:00:02.000Z") })
+    expect(
+      await runYrd(app, yrd("line", "recover", "--reason", "runner interrupted", "--json"), recover.io),
+      recover.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(recover.stdout())).toMatchObject({
+      command: "line.recover",
+      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }],
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
+    expect(app.line.get("R2")?.steps[1]?.job).toBeUndefined()
+    expect(mergeRuns).toEqual([])
   })
 
   it("records an external failing verdict successfully while the line run becomes failed", async () => {
