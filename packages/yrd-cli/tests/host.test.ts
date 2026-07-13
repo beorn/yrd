@@ -370,6 +370,25 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await reopened.close()
   })
 
+  it("disposes its owned runtime exactly once across close and await using", async () => {
+    const { repo } = await repository()
+    let releases = 0
+
+    {
+      await using host = await createYrdHost({ cwd: repo })
+      host.app.scope.defer(() => {
+        releases += 1
+      })
+
+      const close = host.close()
+      expect(host[Symbol.asyncDispose]()).toBe(close)
+      await close
+      expect(releases).toBe(1)
+    }
+
+    expect(releases).toBe(1)
+  })
+
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()
     const linked = join(repo, "..", "current")
