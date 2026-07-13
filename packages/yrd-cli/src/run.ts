@@ -5,16 +5,16 @@ import { Command as CliCommand, CommanderError, Help, int } from "@silvery/comma
 import { createElement } from "react"
 import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
+import type { Event } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { QueueRun, QueueSummary } from "@yrd/queue"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
-  QueueListView,
+  QueueTimelineView,
   PRRunsView,
   QueueRunsView,
-  QueueWatchView,
   QueueStatusView,
   type QueueLogCoverage,
   PRResultView,
@@ -23,6 +23,9 @@ import {
   queueRevisionKey,
   queueShowData,
   queueSubmissionTimes,
+  queueTimelineProjection,
+  type QueueTimelineProjection,
+  type QueueTimelineStatusFilter,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
@@ -92,9 +95,64 @@ type RuntimeOptions = {
   now?: () => number
 }
 
-type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
+type QueueListOptions = Readonly<{
+  base?: string
+  status?: string
+  since?: string
+  latest?: boolean
+  watch?: boolean
+  json?: boolean
+}>
+
+type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
+
+const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
+const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
+  "pending",
+  "running",
+  "rejected",
+  "integrated",
+  "other",
+]
+
+function queueTimelineWindow(value: string | undefined): number {
+  if (value === undefined) return QUEUE_TIMELINE_DEFAULT_WINDOW_MS
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/iu.exec(value.trim())
+  if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
+  const amount = Number(match?.[1])
+  const unit = match?.[2]?.toLocaleLowerCase()
+  const multiplier =
+    unit === "ms" ? 1 : unit === "s" ? 1_000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000
+  const milliseconds = amount * multiplier
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) usage("--since must be a finite non-negative duration")
+  return milliseconds
+}
+
+function queueTimelineStatuses(value: string | undefined): QueueTimelineStatusFilter[] {
+  if (value === undefined) return [...QUEUE_TIMELINE_STATUSES]
+  const statuses = [
+    ...new Set(
+      value
+        .split(",")
+        .map((status) => status.trim().toLocaleLowerCase())
+        .filter(Boolean),
+    ),
+  ]
+  if (statuses.length === 0) usage("--status must name at least one timeline status")
+  const invalid = statuses.find((status) => !QUEUE_TIMELINE_STATUSES.includes(status as QueueTimelineStatusFilter))
+  if (invalid !== undefined) {
+    usage(`--status '${invalid}' is invalid; expected ${QUEUE_TIMELINE_STATUSES.join(",")}`)
+  }
+  return statuses as QueueTimelineStatusFilter[]
+}
+
+function queueTimelineRowLimit(io: YrdCliIO): number {
+  // Header + four FLOW lines + Table header + optional pause/coverage/cap
+  // disclosures + the live-mode footer consume at most eleven physical rows.
+  return Math.max(1, (io.rows ?? 24) - 11)
+}
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   return {
@@ -427,21 +485,29 @@ async function viewPr(
   command = "pr.view",
 ): Promise<void> {
   const pr = requiredPr(app, selector)
+  const events = await Array.fromAsync(app.events())
   const state = stateOf(app)
+  const now = io.now?.() ?? Date.now()
   const target = resolveQueueTargets(state, [pr.id], undefined, pr.id)
-  const { results } = await queueStatusSnapshots(app, state, target, io)
+  const { projection, results } = await queueStatusSnapshots(app, state, target, events, now, io, {
+    base: pr.base,
+    windowMs: QUEUE_TIMELINE_DEFAULT_WINDOW_MS,
+    statuses: QUEUE_TIMELINE_STATUSES,
+    terms: [],
+    latest: false,
+  })
   const positions = pr.status === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   await printResult(
     io,
     jsonEnabled(options),
-    { command, pr, ...(position === undefined ? {} : { position }), results },
+    { command, pr, ...(position === undefined ? {} : { position }), projection, results },
     createElement(QueueStatusView, {
       state: state.bays,
       results,
       selected: target.selected,
       ...(positions === undefined ? {} : { positions }),
-      now: io.now?.() ?? Date.now(),
+      now,
     }),
   )
 }
@@ -717,28 +783,48 @@ async function renderDashboard(
   options: JsonOption,
   io: YrdCliIO,
 ): Promise<void> {
+  const events = await Array.fromAsync(app.events())
   const state = stateOf(app)
+  const now = io.now?.() ?? Date.now()
   const target = resolveQueueTargets(state, selectors, undefined, undefined)
-  const { results } = await queueStatusSnapshots(app, state, target, io)
+  const { projection, results } = await queueStatusSnapshots(app, state, target, events, now, io, {
+    base: selectors[0] ?? "main",
+    windowMs: QUEUE_TIMELINE_DEFAULT_WINDOW_MS,
+    statuses: QUEUE_TIMELINE_STATUSES,
+    terms: [],
+    latest: false,
+  })
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "dashboard", results },
+    { command: "dashboard", projection, results },
     createElement(QueueStatusView, {
       state: state.bays,
       results,
       selected: target.selected,
-      now: io.now?.() ?? Date.now(),
+      now,
     }),
   )
 }
+
+type QueueSnapshotProjectionOptions = Readonly<{
+  base: string
+  windowMs: number
+  statuses: readonly QueueTimelineStatusFilter[]
+  terms: readonly string[]
+  latest: boolean
+  siblingBases?: readonly string[]
+}>
 
 async function queueStatusSnapshots(
   app: YrdCliApp,
   state: YrdCliState,
   target: { bases: Set<string>; selected: Set<string>; prFilter: string | undefined },
+  events: readonly Event[],
+  now: number,
   io: YrdCliIO,
-): Promise<{ results: readonly QueueStatusResult[] }> {
+  projectionOptions: QueueSnapshotProjectionOptions,
+): Promise<{ projection: QueueTimelineProjection; results: readonly QueueStatusResult[] }> {
   if (target.selected.size === 0 && target.bases.size === 0) {
     for (const pr of Object.values(state.bays.prs)) target.bases.add(pr.base)
     for (const run of Object.values(state.queues.records)) target.bases.add(run.base)
@@ -759,22 +845,71 @@ async function queueStatusSnapshots(
       ),
     })
   }
-  return { results }
+  const submissionTimes = await queueSubmissionTimes(events)
+  const attempts = await queueLogAttempts(events)
+  const retainedSinceMs = events[0] === undefined ? undefined : Date.parse(events[0].ts)
+  return {
+    projection: queueTimelineProjection(results, {
+      now,
+      windowMs: projectionOptions.windowMs,
+      statuses: projectionOptions.statuses,
+      terms: projectionOptions.terms,
+      latest: projectionOptions.latest,
+      rowLimit: queueTimelineRowLimit(io),
+      submissionTimes,
+      attempts,
+      ...(retainedSinceMs === undefined || !Number.isFinite(retainedSinceMs) ? {} : { retainedSinceMs }),
+      ...(projectionOptions.siblingBases === undefined ? {} : { siblingBases: projectionOptions.siblingBases }),
+      base: projectionOptions.base,
+    }),
+    results,
+  }
+}
+
+function queueBases(state: YrdCliState): string[] {
+  return [
+    ...new Set([
+      ...Object.values(state.bays.prs).map((pr) => baseIdentity(pr.base)),
+      ...Object.values(state.queues.records).map((run) => baseIdentity(run.base)),
+    ]),
+  ].toSorted()
+}
+
+async function queueListSnapshot(
+  app: YrdCliApp,
+  filters: readonly string[],
+  options: QueueListOptions,
+  io: YrdCliIO,
+): Promise<QueueWatchSnapshot> {
+  const events = await Array.fromAsync(app.events())
+  const state = stateOf(app)
+  const now = io.now?.() ?? Date.now()
+  const base = options.base ?? io.defaultBase ?? "main"
+  const target = resolveQueueTargets(state, [], base, undefined)
+  const bases = queueBases(state)
+  const { projection, results } = await queueStatusSnapshots(app, state, target, events, now, io, {
+    base,
+    windowMs: queueTimelineWindow(options.since),
+    statuses: queueTimelineStatuses(options.status),
+    terms: filters,
+    latest: options.latest === true,
+    siblingBases: bases,
+  })
+  return { now, projection, results }
 }
 
 async function listQueues(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ base?: string }>,
+  filters: readonly string[],
+  options: QueueListOptions,
   io: YrdCliIO,
 ): Promise<void> {
-  const state = stateOf(app)
-  const target = resolveQueueTargets(state, [], options.base, undefined)
-  const { results } = await queueStatusSnapshots(app, state, target, io)
+  const snapshot = await queueListSnapshot(app, filters, options, io)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.list", results },
-    createElement(QueueListView, { results, now: io.now?.() ?? Date.now() }),
+    { command: "queue.list", projection: snapshot.projection, results: snapshot.results },
+    createElement(QueueTimelineView, { projection: snapshot.projection, interactive: false }),
   )
 }
 
@@ -875,6 +1010,18 @@ function queueLogTargets(
   return target
 }
 
+function queueLogDisclosure(
+  selectors: readonly string[],
+  options: Readonly<{ base?: string; pr?: string }>,
+): string | undefined {
+  const filters = [
+    ...selectors.map((selector) => `match=${selector}`),
+    ...(options.base === undefined ? [] : [`base=${options.base}`]),
+    ...(options.pr === undefined ? [] : [`pr=${options.pr}`]),
+  ]
+  return filters.length === 0 ? undefined : `filter: ${filters.join(" · ")}`
+}
+
 async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -939,7 +1086,12 @@ async function logRuns(
       ...(options.all === true ? { results: summaries, attempts } : {}),
       ...(coverage === undefined ? {} : { coverage }),
     },
-    createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
+    createElement(QueueLogView, {
+      rows,
+      coverage,
+      columns: Math.min(io.columns ?? 120, 120),
+      disclosure: queueLogDisclosure(selectors, options),
+    }),
   )
 }
 
@@ -1106,15 +1258,15 @@ async function watchQueueRuns(
   }
 }
 
-async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+async function watchQueue(
+  app: YrdCliApp,
+  filters: readonly string[],
+  options: WatchOptions,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const load = async (): Promise<QueueWatchSnapshot> => {
-    const state = stateOf(app)
-    const target = resolveQueueTargets(state, [], options.base, options.pr)
-    const { results } = await queueStatusSnapshots(app, state, target, io)
-    return { results, now: io.now?.() ?? Date.now() }
-  }
+  const load = async (): Promise<QueueWatchSnapshot> => queueListSnapshot(app, filters, options, io)
 
   if (!jsonEnabled(options)) {
     const renderLive = getLiveRenderer(io)
@@ -1133,8 +1285,8 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
     await printResult(
       io,
       true,
-      { command: "watch", results: snapshot.results },
-      createElement(QueueWatchView, snapshot),
+      { command: "queue.list", projection: snapshot.projection, results: snapshot.results },
+      createElement(QueueTimelineView, { projection: snapshot.projection, interactive: false }),
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
@@ -1377,7 +1529,7 @@ function prMergeRefusalDetail(
   position: number | undefined,
 ): Readonly<{ next: string; guidance: Readonly<Record<string, string>>; message: string }> {
   if (pr.status === "submitted") {
-    const watch = `yrd watch --pr ${pr.id}`
+    const watch = `yrd queue ls ${pr.id} --watch`
     return {
       next: watch,
       guidance: { watch },
@@ -1441,7 +1593,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
     examples.push(
       [`$ ${name} pr`, "inspect active PRs"],
       [`$ ${name} queue run --steps check,merge`, "run selected steps"],
-      [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
+      [`$ ${name} queue ls PR7 --watch`, "monitor PR and queue health"],
       [`$ ${name} contest open km:T1 -a codex/claude`, "compare implementations"],
     )
   }
@@ -1555,13 +1707,15 @@ function buildProgram(
     .action(async (options) => logRuns(installed(), [], options, io))
 
   program
-    .command("watch")
-    .description("monitor queue progress")
-    .option("--base <branch>", "scope watch to one base")
-    .option("--pr <pr>", "scope watch to one PR")
+    .command("watch [filter...]")
+    .description("alias for queue ls --watch")
+    .option("--base <branch>", "select one base queue")
+    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--since <duration>", "timeline window", "6h")
+    .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
-    .action(async (options) => {
-      setExit(await watchQueue(installed(), options, io))
+    .action(async (filters, options) => {
+      setExit(await watchQueue(installed(), filters, options, io))
     })
 
   program
@@ -1574,10 +1728,37 @@ function buildProgram(
   queue.helpCommand(false)
   queue.alias("queues")
   queue
-    .command("_list", { isDefault: true, hidden: true })
-    .option("--base <branch>", "scope queues to one base")
+    .command("_list [filter...]", { isDefault: true, hidden: true })
+    .option("--base <branch>", "select one base queue")
+    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--since <duration>", "timeline window", "6h")
+    .option("--latest", "show only the latest Run for each PR")
+    .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
-    .action(async (options) => listQueues(installed(), options, io))
+    .action(async (filters, options) => {
+      if (options.watch === true) {
+        setExit(await watchQueue(installed(), filters, options, io))
+        return
+      }
+      await listQueues(installed(), filters, options, io)
+    })
+  queue
+    .command("list [filter...]")
+    .alias("ls")
+    .description("show the queue timeline")
+    .option("--base <branch>", "select one base queue")
+    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--since <duration>", "timeline window", "6h")
+    .option("--latest", "show only the latest Run for each PR")
+    .option("--watch", "keep this projection live and interactive")
+    .option("--json", "emit stable JSON")
+    .action(async (filters, options) => {
+      if (options.watch === true) {
+        setExit(await watchQueue(installed(), filters, options, io))
+        return
+      }
+      await listQueues(installed(), filters, options, io)
+    })
   queue
     .command("audit")
     .description("check queue state")

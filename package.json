@@ -26,6 +26,7 @@
     "yrd": "bun ./bin/yrd",
     "git-yrd": "bun ./bin/git-yrd",
     "git-bay": "bun ./bin/git-bay",
+    "storybook:queue": "bun ./packages/yrd-cli/dev/queue-timeline-storybook.tsx",
     "build": "bun ./scripts/build.ts",
     "prepack": "bun run build",
     "test": "NODE_ENV=test bun --bun x vitest run",

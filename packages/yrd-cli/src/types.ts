@@ -40,6 +40,8 @@ export type YrdCliIO = {
    * process host supplies terminal capabilities. */
   color?: boolean
   columns?: number
+  rows?: number
+  defaultBase?: string
   cwd?: string
   runner?: string
   leaseMs?: number

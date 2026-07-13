@@ -642,11 +642,12 @@ function defaultIO(): YrdCliIO {
     stderr: (text) => process.stderr.write(text),
     color,
     columns: process.stdout.columns,
+    rows: process.stdout.rows,
     cwd: process.cwd(),
   }
   if (!interactive) return io
   return withLiveRenderer(io, async (element, options) => {
-    using handle = await run(element, { signal: options.signal, mode: "fullscreen", mouse: false })
+    using handle = await run(element, { signal: options.signal, mode: "fullscreen", mouse: true })
     await handle.waitUntilExit()
   })
 }
@@ -699,6 +700,7 @@ export async function runYrdProcess(
       {
         ...io,
         concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
+        defaultBase: io.defaultBase ?? activeHost.config.base,
         resolveRevision: io.resolveRevision ?? ((ref, cwd) => resolveCommit(activeHost.process, cwd, ref)),
         resolveQueueTarget:
           io.resolveQueueTarget ??
