@@ -667,7 +667,6 @@ describe("Queue command adapters", () => {
     const branches = ["pr4", "pr5", "pr6", "pr7"] as const
     const { repo, pr4, pr5, pr6, pr7 } = await repository(...branches)
     const heads = { pr4, pr5, pr6, pr7 }
-    const localMain = await git(repo, ["rev-parse", "main"])
     const remote = join(repo, "..", "origin.git")
     await Bun.$`git init -q --bare ${remote}`
     await git(repo, ["remote", "add", "origin", remote])
@@ -679,12 +678,23 @@ describe("Queue command adapters", () => {
     const initialQueueBase = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["push", "-q", "origin", "HEAD:main"])
     await git(repo, ["switch", "-q", "main"])
-    await writeFile(join(repo, "operator-wip.txt"), "preserve these bytes\n")
+    const sentinel = join(repo, "operator-wip.txt")
+    await writeFile(sentinel, "preserve these bytes\n")
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"])
     for (const branch of branches) {
       await app.bays.submit({ branch: `issue/${branch}`, headSha: heads[branch], base: "main" })
     }
+    const operatorSnapshot = async () => ({
+      headSha: await git(repo, ["rev-parse", "--verify", "HEAD"]),
+      headIdentityState: await git(repo, ["status", "--porcelain=v2", "--branch", "--untracked-files=no"]),
+      status: await git(repo, ["status", "--porcelain", "--untracked-files=all"]),
+      sentinelBytes: await readFile(sentinel, "utf8"),
+    })
+    const operatorBefore = await operatorSnapshot()
+    expect(operatorBefore.headIdentityState).toContain("# branch.head main")
+    expect(operatorBefore.status).toBe("?? operator-wip.txt")
+    expect(operatorBefore.sentinelBytes).toBe("preserve these bytes\n")
 
     const runs = await app.queue.run({ prs: [] }, runtime)
 
@@ -711,8 +721,7 @@ describe("Queue command adapters", () => {
     expect(finalLanding).toBeDefined()
     expect(await git(remote, ["rev-parse", "main"])).toBe(finalLanding)
     expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(finalLanding)
-    expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
-    expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
+    expect(await operatorSnapshot()).toEqual(operatorBefore)
   }, 15_000)
 
   it("refreshes authoritative remote base divergence and evaluates the unchanged payload", async () => {
