@@ -899,6 +899,35 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("renders watch as a queue-focused pane", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    const watch = outputIO({
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds)
+          controller.abort()
+        },
+      },
+    })
+    expect(await runYrd(app, yrd("watch"), watch.io)).toBe(0)
+    const frame = stripOsc8Targets(watch.stdout())
+    expect(frame).toContain("LINE")
+    expect(frame).toContain("OPEN")
+    expect(frame).toContain("ACTIVE")
+    expect(frame).toContain("INTEGRATED")
+    expect(frame).toContain("REJECTED")
+    expect(frame).toContain("POS")
+    expect(frame).toContain("PR1")
+    expect(frame).not.toContain("PATH")
+    expect(frame).not.toContain("file:///repo/.bays/B1")
+    expect(sleeps).toEqual([15_000])
+  })
+
   it("monitors line status continuously from root watch", async () => {
     const app = await createApp()
     await openAndSubmit(app)

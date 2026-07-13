@@ -11,6 +11,7 @@ import { classifyFailure, configuration, refusal, resolveInvocation, stableJson,
 import {
   LineLogView,
   LineRunsView,
+  LineWatchView,
   LineShowView,
   LineStatusView,
   type LineLogCoverage,
@@ -715,10 +716,8 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
       io,
       jsonEnabled(options),
       { command: "watch", results },
-      createElement(LineStatusView, {
-        state: state.bays,
+      createElement(LineWatchView, {
         results,
-        selected: target.selected,
         now: io.now?.() ?? Date.now(),
       }),
     )

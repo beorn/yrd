@@ -850,6 +850,147 @@ export function LineStatusView({
   )
 }
 
+type WatchQueueRow = Readonly<{
+  pos: number
+  pr: string
+  state: string
+  step: string
+  age: string
+  touched: string
+  run: string
+  result: string
+}>
+
+function watchQueueRows(result: LineStatusResult, now: number): WatchQueueRow[] {
+  return result.prs
+    .filter((pr) => !["integrated", "withdrawn"].includes(pr.status))
+    .map((pr, index) => {
+      const run = latestRun(pr, result)
+      const step = relevantStep(run)
+      const job = step?.job
+      const touched = latest(
+        pr.submittedAt,
+        pr.rejectedAt,
+        pr.withdrawnAt,
+        run?.startedAt,
+        run?.finishedAt,
+        ...(run?.steps ?? []).flatMap((item) => {
+          const itemJob = item.job
+          return itemJob === undefined
+            ? []
+            : [
+                itemJob.requestedAt,
+                itemJob.changedAt,
+                "startedAt" in itemJob ? itemJob.startedAt : undefined,
+                "finishedAt" in itemJob ? itemJob.finishedAt : undefined,
+              ]
+        }),
+      )
+      return {
+        pos: index + 1,
+        pr: pr.id,
+        state: lineState(pr, run),
+        step: step?.name ?? "-",
+        age: age(pr.submittedAt, now),
+        touched: touched === undefined ? "-" : age(touched, now),
+        run:
+          run === undefined || run.startedAt === undefined
+            ? "-"
+            : formatDuration((run.finishedAt === undefined ? now : Date.parse(run.finishedAt)) - Date.parse(run.startedAt)),
+        result:
+          (job !== undefined && "error" in job
+            ? job.error.message
+            : job !== undefined && "lostReason" in job
+              ? job.lostReason
+              : job !== undefined && "detail" in job
+                ? job.detail
+                : step === undefined
+                  ? "-"
+                  : jobStatus(step)),
+      }
+    })
+}
+
+function retryHint(run: LineRun): string {
+  const firstPr = run.prs.at(0)
+  const pr = firstPr?.id
+  return pr === undefined ? "retry: unavailable" : `retry: yrd line integrate ${pr} --retry`
+}
+
+export function LineWatchView({ results, now }: { results: readonly LineStatusResult[]; now: number }) {
+  return (
+    <Box flexDirection="column">
+      {results.map((result, index) => {
+        const all = result.prs.filter((pr) => pr.base === result.base)
+        const rows = watchQueueRows(result, now)
+        const failed = [...result.finished].filter((run) => run.status === "failed").toSorted(byRunStarted).toReversed().slice(0, 3)
+        const summary = [
+          {
+            line: `${result.base}${result.headSha === undefined ? "" : `@${result.headSha.slice(0, 12)}`}`,
+            open: all.filter((pr) => !["integrated", "withdrawn"].includes(pr.status)).length,
+            active: all.filter((pr) => ["checking", "waiting"].includes(lineState(pr, latestRun(pr, result)))).length,
+            integrated: all.filter((pr) => pr.status === "integrated").length,
+            rejected: all.filter((pr) => pr.status === "rejected").length,
+          },
+        ]
+        return (
+          <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
+            <Table
+              data={summary}
+              padding={1}
+              columns={[
+                { header: "LINE", key: "line", grow: true, minWidth: 6, maxWidth: 24 },
+                { header: "OPEN", key: "open", align: "right" },
+                { header: "ACTIVE", key: "active", align: "right" },
+                { header: "INTEGRATED", key: "integrated", align: "right" },
+                { header: "REJECTED", key: "rejected", align: "right" },
+              ]}
+            />
+            {rows.length === 0 ? (
+              <Box marginTop={1}>
+                <Text color="$fg-muted">No matching PRs.</Text>
+              </Box>
+            ) : (
+              <Box marginTop={1}>
+                <Table
+                  data={rows}
+                  columns={[
+                    { header: "POS", key: "pos", minWidth: 5, align: "right" },
+                    { header: "PR", key: "pr", minWidth: 6 },
+                    {
+                      header: "STATE",
+                      key: "state",
+                      minWidth: 10,
+                      render: (row) => <StatusValue value={row.state} />,
+                    },
+                    { header: "STEP", key: "step" },
+                    { header: "AGE", key: "age" },
+                    { header: "TOUCHED", key: "touched", minWidth: 8 },
+                    { header: "RUN", key: "run" },
+                    { header: "RESULT", key: "result", grow: true },
+                  ]}
+                  padding={1}
+                />
+              </Box>
+            )}
+            {failed.length > 0 && (
+              <Box marginTop={1} flexDirection="column">
+                <Text>Recent failures</Text>
+                {failed.map((run) => (
+                  <Text key={run.id}>
+                    <Text color="$fg-error">{run.id}</Text>{" "}
+                    {run.prs.map((pr) => pr.id).join(",")} {duration(run.startedAt, run.finishedAt)} {retryHint(run)}
+                  </Text>
+                ))}
+              </Box>
+            )}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
 export function lineLogRows(
   results: readonly LineSummary[],
   selectedPrs: ReadonlySet<string>,
