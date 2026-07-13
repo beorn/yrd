@@ -67,12 +67,13 @@ $ cd /work/my-repository/.bays/B1
 $ ...edit and test...
 $ git commit -am "fix: release ordering"
 
-$ yrd bay submit --wait
+$ yrd pr submit --follow
 PR     STATUS       BRANCH                 BASE    REV    HEAD
 PR1    submitted    task/fix-release       main      1    a13f09b1c821
 
+$ yrd line integrate PR1
 RUN    PRS    STATE     STEPS
-R1     PR1    passed    check=passed merge=passed
+R2     PR1    passed    merge=passed
 
 $ yrd line status
 LINE                    OPEN ACTIVE INTEGRATED  REJECTED
@@ -83,17 +84,34 @@ BAY    STATUS    BRANCH                    BASE    PATH
 B1     closed    task/fix-release          main    /work/my-repository/.bays/B1
 ```
 
-Without `--wait`, submit is a handoff and an integrator runs the line:
+Plain PR submit is a handoff: it schedules checks and returns, while an
+integrator follows the same journaled Run and drains the line:
 
 ```console
-$ yrd bay submit
+$ yrd pr submit
 PR     STATUS       BRANCH                 BASE    REV    HEAD
 PR2    submitted    task/another-fix       main      1    b7144cc7d201
 
+$ yrd pr checks PR2 --follow
 $ yrd line integrate PR2
 RUN     PRS             STATE       STEPS
 R2      PR2              passed      check=passed merge=passed
 ```
+
+For a review-gated repository, the PR-native flow admits checks before the
+revision is queueable:
+
+```console
+$ yrd pr submit task/another-fix --draft
+$ yrd pr checks PR2 --follow
+$ yrd pr review PR2 --approve --by @cto --ref verdict-42
+$ yrd pr ready PR2
+```
+
+`--draft` is the existing `pushed` state, not a second flag or status. Review
+and comment facts pin the current revision and head SHA; a new head makes old
+verdicts visibly stale. Reviewer assignment and richer policy belong to the
+calling coordination system.
 
 During development in this repository:
 
@@ -155,7 +173,8 @@ yrd bay submit [selector...] [--wait] [--base <branch>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
 
-The same commands are available through the `git bay` alias.
+The same commands are available through the `git bay` alias. `bay submit` is a
+compatibility projection; new callers use the PR-native admission surface below.
 
 | Command   | Input                                                | Output and state                                                            |
 | --------- | ---------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -178,8 +197,32 @@ branch submission does not provision a worktree:
 
 ```bash
 yrd bay open release-fix --from fix/release --base release/2.0
-yrd bay submit fix/release --base release/2.0
+yrd pr submit fix/release --base release/2.0
 ```
+
+### PR Eligibility and Checks
+
+```text
+yrd pr submit [selector...] [--draft] [--follow] [--base <branch>] [--json]
+yrd pr list [--needs-review] [--json]
+yrd pr ready <selector> [--json]
+yrd pr review <selector> (--approve | --reject)
+  [--by <actor>] [--ref <id>] [--note <text>] [--json]
+yrd pr comment <selector> --note <text> [--by <actor>] [--ref <id>] [--json]
+yrd pr checks <selector...> [--follow] [--json]
+yrd pr close [selector...] [--json]
+```
+
+Plain `pr submit` appends the revision, records a check request, schedules the
+configured pre-merge Line steps, and returns. `--follow` stays attached to that
+same journaled Run. `pr checks` renders the same typed evidence in human or
+one-record-per-line JSON output, including command argv, concise diagnostics,
+base-versus-carrier classification, and artifact paths.
+
+The Line is the only scheduler. Its journaled passed Run is also the cache:
+integration reuses the matching pre-merge plan only when resolved base SHA,
+head SHA, installed-step revision/config, and toolchain fingerprint all match.
+There is no TTL, invalidation database, or second workflow engine.
 
 #### Manning an Ordinary Bay
 
@@ -195,7 +238,7 @@ cd /path/printed/by/yrd
 ag code codex --new --name @agent/3 -- "Implement github:beorn/yrd#42 and commit the result."
 
 cd -
-yrd bay submit fix-42
+yrd pr submit fix-42 --follow
 yrd line integrate fix-42
 ```
 
@@ -345,6 +388,8 @@ line:
   batch: 8
   steps: [check, coderabbit, sec-check, merge, deploy]
 
+requires: [review]
+
 steps:
   check: bun run test
   coderabbit:
@@ -364,6 +409,13 @@ contest:
 Names before `merge` run against the checked candidate. Names after `merge` run
 against the integrated commit. The TypeScript API enforces this statically; the
 YAML adapter validates the same ordering while composing plugins.
+Object-form steps may declare `classification: base` when their evidence is
+about the resolved base rather than the submitted carrier; all other steps
+default to `carrier`. The classification is part of the installed-step cache
+identity and appears in typed check evidence.
+`requires: [review]` is the only built-in review policy: the latest verdict for
+the current revision must approve. Comments never gate, and omitting
+`requires` leaves reviews informational.
 
 An empty `merge: {}` uses Yrd's native Git merge. With `origin` configured,
 Yrd fast-forwards the remote base directly to the exact checked Candidate; the
@@ -450,7 +502,7 @@ event journal, receiver, artifacts, and configured plugins:
 
 ```bash
 yrd bay open release-fix --base release/2.0
-yrd bay submit --base release/2.0
+yrd pr submit --base release/2.0
 yrd line status release/2.0
 ```
 

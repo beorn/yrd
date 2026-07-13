@@ -15,6 +15,30 @@ export type LineWatchPaneProps = Readonly<{
   intervalMs: number
 }>
 
+export type JournalTailOptions<Snapshot> = Readonly<{
+  initial: Snapshot
+  load(): Promise<Snapshot>
+  intervalMs: number
+  scope: Readonly<{ signal: AbortSignal; sleep(milliseconds: number): Promise<void> }>
+  done(snapshot: Snapshot): boolean
+  visit?(snapshot: Snapshot): void | Promise<void>
+  visitInitial?: boolean
+}>
+
+/** The one bounded refresh loop shared by the watch pane and attached command followers. */
+export async function tailJournal<Snapshot>(options: JournalTailOptions<Snapshot>): Promise<Snapshot> {
+  let snapshot = options.initial
+  if (options.visitInitial !== false) await options.visit?.(snapshot)
+  while (!options.done(snapshot) && !options.scope.signal.aborted) {
+    await options.scope.sleep(options.intervalMs)
+    if (options.scope.signal.aborted) return snapshot
+    snapshot = await options.load()
+    if (options.scope.signal.aborted) return snapshot
+    await options.visit?.(snapshot)
+  }
+  return snapshot
+}
+
 export function reduceWatchControl(control: WatchControl, input: string): WatchControl | "exit" {
   if (input === "q") return "exit"
   if (input === "p") return { paused: !control.paused }
@@ -47,15 +71,15 @@ export function LineWatchPane({ initial, load, intervalMs }: LineWatchPaneProps)
   useScopeEffect(
     (scope) => {
       if (control.paused) return
-      void (async () => {
-        while (!scope.signal.aborted) {
-          await scope.sleep(intervalMs)
-          if (scope.signal.aborted) return
-          const next = await load()
-          if (scope.signal.aborted) return
-          setSnapshot(next)
-        }
-      })().catch((error: unknown) => {
+      void tailJournal({
+        initial,
+        load,
+        intervalMs,
+        scope,
+        done: () => false,
+        visitInitial: false,
+        visit: setSnapshot,
+      }).catch((error: unknown) => {
         if (scope.signal.aborted) return
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })

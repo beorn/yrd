@@ -16,6 +16,7 @@ import * as z from "zod"
 import {
   CommandEvidenceSchema,
   GitCheckEvidenceSchema,
+  GitCheckOutputSchema,
   configuredCommandStep,
   configuredMergeStep,
   gitCheckStep,
@@ -25,13 +26,14 @@ import {
   withStep,
   type AddStepResult,
   type GitCheckEvidence,
+  type GitCheckOutput,
   type PRShape,
   type StepExecution,
 } from "@yrd/line"
 
 const roots: string[] = []
 const runtime = { executor: "local", leaseMs: 60_000 }
-type Checked = AddStepResult<PRShape, "check", GitCheckEvidence>
+type Checked = AddStepResult<PRShape, "check", GitCheckOutput>
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -127,7 +129,12 @@ async function checkedLine(
   process: Pick<Process, "run">,
   repo: string,
   command: readonly string[],
-  options: Readonly<{ batch?: number; waiting?: boolean; checkoutParent?: string }> = {},
+  options: Readonly<{
+    batch?: number
+    waiting?: boolean
+    checkoutParent?: string
+    classification?: "base" | "carrier"
+  }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
   const check = withStep(
@@ -136,10 +143,15 @@ async function checkedLine(
       inject: { process },
       repo,
       command,
+      ...(options.classification === undefined ? {} : { classification: options.classification }),
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
     }),
-    { revision: `check:${JSON.stringify(command)}:${options.waiting === true}`, output: GitCheckEvidenceSchema },
+    {
+      revision: `check:${JSON.stringify(command)}:${options.waiting === true}`,
+      output: GitCheckOutputSchema,
+      ...(options.classification === undefined ? {} : { classification: options.classification }),
+    },
   )
   const merge = withMerge(gitMergeStep<Checked>({ inject: { process }, repo }), { revision: "git-merge-v1" })
   const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? 1 })
@@ -216,8 +228,8 @@ describe("Line command adapters", () => {
       process: {
         exitCode: 17,
         signal: null,
-        stdout: `diagnostic header\n${"x".repeat(2_100)}`,
-        stderr: "stderr evidence\n",
+        stdout: "[yrd-base-health] base aaaaaaaaaaaa green\n",
+        stderr: `src/index.ts(12,4): error TS2322: Type 'string' is not assignable\n M src/formatted.ts\n${"x".repeat(2_100)}`,
         durationMs: 321,
         timedOut: false,
       } satisfies ProcessResult,
@@ -268,11 +280,19 @@ describe("Line command adapters", () => {
       if (outcome.status !== "failed") throw new Error(`configured command was ${outcome.status}`)
       const evidence = CommandEvidenceSchema.parse(outcome.output)
       expect(evidence).toMatchObject({
+        command: ["false"],
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         artifacts: [{ name: "stdout" }, { name: "stderr" }],
         ...(verdict === undefined ? {} : { stageVerdict: verdict }),
       })
+      if (verdict === undefined) {
+        expect(evidence.detail).toContain("[yrd-base-health]")
+        expect(evidence.diagnostics).toEqual([
+          { file: "src/index.ts", line: 12, column: 4, message: "error TS2322: Type 'string' is not assignable" },
+          { file: "src/formatted.ts", line: 1, message: "working tree changed during check" },
+        ])
+      }
       expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
       expect(outcome.error.message).not.toContain(evidence.detail ?? "")
       expect(outcome.error.message).not.toContain(cwd)
@@ -300,6 +320,38 @@ describe("Line command adapters", () => {
     await expectLanded(repo, evidence)
     expect(evidence.exitCode).toBe(0)
     expect(await readFile(evidence.artifacts[0]!.path, "utf8")).toBe("checked\n")
+  })
+
+  it("retains configured-command evidence when the Git check wrapper fails", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedLine(
+      process,
+      repo,
+      shellCommand(
+        'printf "[yrd-base-health] base aaaaaaaaaaaa is red: test:fast failed\\n"; ' +
+          'printf "src/model.ts:12:4 - error TS2322: type mismatch\\n" >&2; exit 17',
+      ),
+      { classification: "base" },
+    )
+    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
+    expect(run.status).toBe("failed")
+    const job = run.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("check did not fail")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      command: ["sh", "-c", expect.stringContaining("test:fast failed")],
+      exitCode: 17,
+      classification: "base",
+      diagnostics: [{ file: "src/model.ts", line: 12, column: 4, message: "error TS2322: type mismatch" }],
+      baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      candidateRef: expect.stringContaining("refs/yrd/candidates/"),
+    })
+    expect(evidence.detail).toContain("[yrd-base-health]")
+    expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
   })
 
   it("lands from origin when the base has no local branch without moving detached HEAD", async () => {
@@ -336,6 +388,16 @@ describe("Line command adapters", () => {
     const run = (await app.line.integrate({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({ status: "failed", error: { code: "line-target-diverged" } })
+    const job = run.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("divergence did not fail its check Job")
+    const evidence = CommandEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      classification: "base",
+      command: expect.arrayContaining(["git"]),
+      detail: expect.stringContaining("differs from authoritative"),
+      artifacts: [{ name: "stderr", path: expect.any(String) }],
+    })
+    expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
@@ -624,7 +686,7 @@ describe("Line command adapters", () => {
       gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
       {
         revision: "check-v1",
-        output: GitCheckEvidenceSchema,
+        output: GitCheckOutputSchema,
       },
     )
     const MovedSchema = z.object({ moved: z.literal(true) }).strict()
@@ -663,7 +725,7 @@ describe("Line command adapters", () => {
     const check = withStep(
       "check",
       gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
-      { revision: "check-v1", output: GitCheckEvidenceSchema },
+      { revision: "check-v1", output: GitCheckOutputSchema },
     )
     const merge = withMerge(
       configuredMergeStep<Checked>({
@@ -707,7 +769,7 @@ describe("Line command adapters", () => {
     const check = withStep(
       "check",
       gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] }),
-      { revision: "check-v1", output: GitCheckEvidenceSchema },
+      { revision: "check-v1", output: GitCheckOutputSchema },
     )
     const merge = withMerge(configuredMergeStep<Checked>({ inject: { process }, repo, command: ["true"] }), {
       revision: "delegated-merge-v1",

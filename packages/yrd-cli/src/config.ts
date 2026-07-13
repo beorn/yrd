@@ -8,11 +8,17 @@ const StepNameSchema = TextSchema.regex(/^[a-z][a-z0-9_-]*$/iu)
 const StepNamesSchema = z.array(StepNameSchema).superRefine((names, context) => {
   if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate steps" })
 })
+const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements, context) => {
+  if (new Set(requirements).size !== requirements.length) {
+    context.addIssue({ code: "custom", message: "contains duplicate requirements" })
+  }
+})
 const RunnerSchema = z.enum(["local", "waiting"])
 const StepObjectSchema = z
   .object({
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
+    classification: z.enum(["base", "carrier"]).optional(),
     environment: TextSchema.optional(),
     /** Declarative per-step wall-clock bound; absent = the host default applies (21012 S1 — never silently unbounded). */
     timeoutMs: z.number().int().min(1).optional(),
@@ -30,6 +36,7 @@ const ProjectSchema = z
       })
       .strict()
       .default({}),
+    requires: RequirementsSchema.optional(),
     steps: z.record(StepNameSchema, StepSchema).default({}),
     contest: z
       .object({
@@ -46,7 +53,12 @@ export type YrdStepConfig = Readonly<z.infer<typeof StepObjectSchema>>
 export type YrdProjectConfig = Readonly<z.infer<typeof ProjectSchema>>
 
 export type ResolvedYrdProjectConfig = Readonly<{
-  line: Readonly<{ base: string; batch: false | number; steps: readonly string[] }>
+  line: Readonly<{
+    base: string
+    batch: false | number
+    steps: readonly string[]
+    requires: readonly "review"[]
+  }>
   steps: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
 }>
@@ -70,7 +82,13 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["contest.concurrency", "must be an integer >= 1"],
     ["contest.timeoutMs", "must be an integer >= 1"],
   ])
-  const message = known.get(path) ?? (path.endsWith(".runner") ? "must be local or waiting" : issue.message)
+  const message =
+    known.get(path) ??
+    (path.endsWith(".runner")
+      ? "must be local or waiting"
+      : path.endsWith(".classification")
+        ? "must be base or carrier"
+        : issue.message)
   return new Error(`yrd: config${path === "" ? "" : ` ${path}`} ${message}`)
 }
 
@@ -107,6 +125,7 @@ export async function loadYrdConfig(options: {
         base: parsed.line.base ?? options.defaultBase,
         batch: parsed.line.batch ?? 1,
         steps: parsed.line.steps ?? defaultSteps,
+        requires: parsed.requires ?? [],
       },
       steps,
       contest: {

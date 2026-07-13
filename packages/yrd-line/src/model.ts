@@ -1,11 +1,12 @@
-import { GitRefSchema, GitShaSchema, PRIdSchema, type PR } from "@yrd/bay"
-import type { JsonValue } from "@yrd/core"
+import { GitRefSchema, GitShaSchema, PRIdSchema, checkRequest, type PR } from "@yrd/bay"
+import { JsonSchema, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 
 export type LineRunId = string
 export type StepName = string
 export type BatchConfig = false | number
+export type LineRequirement = "review"
 
 export const PRSnapshotSchema = z
   .object({
@@ -49,6 +50,7 @@ export type InstalledStep = Readonly<{
   revision: string
   integrates: boolean
   needsIntegration: boolean
+  classification?: "base" | "carrier"
 }>
 
 export type LineFailure = Readonly<{
@@ -62,6 +64,8 @@ export type LineRecord = Readonly<{
   base: string
   steps: readonly InstalledStep[]
   initialIntegration?: IntegrationProof
+  initialResults?: Readonly<Record<string, JsonValue>>
+  reusedFrom?: LineRunId
   startedAt: string
   parent?: LineRunId
   isolationPart?: 0 | 1
@@ -70,7 +74,7 @@ export type LineRecord = Readonly<{
 
 export type LineStep = InstalledStep & Readonly<{ job?: Job }>
 
-export type LineRun = Omit<LineRecord, "initialIntegration" | "steps" | "failure"> &
+export type LineRun = Omit<LineRecord, "initialIntegration" | "initialResults" | "steps" | "failure"> &
   Readonly<{
     cursor: number
     integration?: IntegrationProof
@@ -99,8 +103,60 @@ export const LineHoldSchema = z
 export type LinesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
+  requires: readonly LineRequirement[]
   holds: Readonly<Record<string, LineHold>>
   records: Readonly<Record<LineRunId, LineRecord>>
+}>
+
+export type PREligibilityReason = Readonly<{
+  code:
+    | "draft"
+    | "checks-pending"
+    | "checks-failed"
+    | "review-required"
+    | "review-rejected"
+    | "line-held"
+    | "claimed"
+    | "checking"
+    | "rejected"
+    | "terminal"
+  message: string
+}>
+
+export type PREligibility = Readonly<{
+  pr: string
+  revision: number
+  runnable: boolean
+  reason?: PREligibilityReason
+  review: Readonly<{
+    required: boolean
+    approved: boolean
+    stale: boolean
+    decision?: "approve" | "reject"
+    actor?: string
+    ref?: string
+  }>
+  checks: Readonly<{
+    status: "not-requested" | "queued" | "checking" | "passed" | "failed"
+    queuedAt?: string
+    position?: number
+    run?: LineRunId
+  }>
+}>
+
+export type PRCheckRecord = Readonly<{
+  pr: string
+  revision: number
+  status: PREligibility["checks"]["status"]
+  run?: LineRunId
+  step?: StepName
+  classification?: "base" | "carrier"
+  queuedAt?: string
+  position?: number
+  command?: readonly string[]
+  diagnostics?: JsonValue
+  artifact?: string
+  error?: JobError
 }>
 
 export type LineSummary = Readonly<{
@@ -135,11 +191,14 @@ export const LineRecordSchema = z
             revision: z.string().trim().min(1),
             integrates: z.boolean(),
             needsIntegration: z.boolean(),
+            classification: z.enum(["base", "carrier"]).optional(),
           })
           .strict(),
       )
       .min(1),
     initialIntegration: IntegrationProofSchema.optional(),
+    initialResults: z.record(z.string(), JsonSchema).optional(),
+    reusedFrom: z.string().trim().min(1).optional(),
     startedAt: z.iso.datetime({ offset: true }),
     parent: z.string().trim().min(1).optional(),
     isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
@@ -151,10 +210,17 @@ export const LineRecordSchema = z
   .strict()
 
 export const Lines = Object.freeze({
-  empty(options: Readonly<{ batchSize: number; defaultSteps?: readonly StepName[] }>): LinesState {
+  empty(
+    options: Readonly<{
+      batchSize: number
+      defaultSteps?: readonly StepName[]
+      requires?: readonly LineRequirement[]
+    }>,
+  ): LinesState {
     return {
       batchSize: options.batchSize,
       ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
+      requires: options.requires ?? [],
       holds: {},
       records: {},
     }
@@ -174,6 +240,7 @@ export const Lines = Object.freeze({
   },
 
   snapshot(pr: PR): PRSnapshot {
+    const baseSha = checkRequest(pr)?.baseSha ?? pr.baseSha
     return PRSnapshotSchema.parse({
       id: pr.id,
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -182,7 +249,7 @@ export const Lines = Object.freeze({
       base: pr.base,
       revision: pr.revision,
       headSha: pr.headSha,
-      ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
+      ...(baseSha === undefined ? {} : { baseSha }),
     })
   },
 

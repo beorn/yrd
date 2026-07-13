@@ -13,13 +13,26 @@ import type { StepExecution, StepRunner } from "./line.ts"
 export const StepArtifactSchema = z.object({ name: z.string().min(1), path: z.string().min(1) }).strict()
 export type StepArtifact = Readonly<z.infer<typeof StepArtifactSchema>>
 
+export const CommandDiagnosticSchema = z
+  .object({
+    file: z.string().min(1),
+    line: z.number().int().positive(),
+    column: z.number().int().positive().optional(),
+    message: z.string().min(1),
+  })
+  .strict()
+export type CommandDiagnostic = Readonly<z.infer<typeof CommandDiagnosticSchema>>
+
 export const CommandEvidenceSchema = z
   .object({
+    command: z.array(z.string().min(1)).min(1),
     exitCode: z.number().int(),
     durationMs: z.number().nonnegative(),
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
     artifacts: z.array(StepArtifactSchema),
+    classification: z.enum(["base", "carrier"]).optional(),
     detail: z.string().optional(),
+    diagnostics: z.array(CommandDiagnosticSchema).optional(),
     /** True when the command was settled by its wall-clock bound (21012 S1). */
     timedOut: z.boolean().optional(),
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
@@ -36,6 +49,8 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   candidateRef: z.string().min(1),
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
+export const GitCheckOutputSchema = z.union([GitCheckEvidenceSchema, CommandEvidenceSchema])
+export type GitCheckOutput = Readonly<z.infer<typeof GitCheckOutputSchema>>
 
 type ProcessDependency = Readonly<{ inject: Readonly<{ process: Pick<Process, "run"> }> }>
 type ProgressResult = Readonly<{
@@ -54,6 +69,7 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
     noProgressTimeoutMs?: number
+    classification?: "base" | "carrier"
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
   }>
 
@@ -123,15 +139,19 @@ function configuredCommand<Shape extends PRShape>(
       result.stdout,
       result.stderr,
     )
-    const message = (result.stdout || result.stderr).trimEnd()
-    const detail = message.length <= 2_000 ? message : message.slice(-2_000)
+    const message = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter((part) => part !== "").join("\n")
+    const detail = commandDetail(message)
+    const diagnostics = commandDiagnostics(message)
     const progress = result as typeof result & ProgressResult
     const evidence = CommandEvidenceSchema.parse({
+      command: argv,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
       configHash,
       artifacts,
+      classification: options.classification ?? "carrier",
       ...(detail === "" ? {} : { detail }),
+      ...(diagnostics.length === 0 ? {} : { diagnostics }),
       ...(result.timedOut ? { timedOut: true } : {}),
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
@@ -182,6 +202,38 @@ function configuredCommand<Shape extends PRShape>(
       return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
     }
   }
+}
+
+function commandDetail(output: string): string {
+  const limit = 2_000
+  if (output.length <= limit) return output
+  const marker = "\n… output truncated …\n"
+  const headLength = 500
+  return `${output.slice(0, headLength)}${marker}${output.slice(-(limit - headLength - marker.length))}`
+}
+
+function commandDiagnostics(output: string): CommandDiagnostic[] {
+  const diagnostics: CommandDiagnostic[] = []
+  for (const line of output.split(/\r?\n/u)) {
+    const text = line.trim()
+    const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(line)
+    if (changed?.[1] !== undefined) {
+      diagnostics.push({ file: changed[1], line: 1, message: "working tree changed during check" })
+      if (diagnostics.length >= 20) break
+      continue
+    }
+    const match =
+      /^(.*?)\((\d+),(\d+)\):\s*(.+)$/u.exec(text) ?? /^(.*?):(\d+)(?::(\d+))?\s*(?:-|:)\s*(.+)$/u.exec(text)
+    if (match?.[1] === undefined || match[2] === undefined || match[4] === undefined) continue
+    diagnostics.push({
+      file: match[1],
+      line: Number(match[2]),
+      ...(match[3] === undefined ? {} : { column: Number(match[3]) }),
+      message: match[4],
+    })
+    if (diagnostics.length >= 20) break
+  }
+  return diagnostics
 }
 
 function commandEnvironment(
@@ -240,6 +292,36 @@ async function writeArtifacts(
     artifacts.push({ name, path })
   }
   return artifacts
+}
+
+async function failureEvidence(
+  options: Readonly<{
+    command: readonly string[]
+    detail: string
+    classification: "base" | "carrier"
+    artifactRoot: string
+    input: StepExecution
+    attempt: number
+  }>,
+): Promise<CommandEvidence> {
+  const artifacts = await writeArtifacts(
+    options.artifactRoot,
+    options.input,
+    options.attempt,
+    "",
+    `${options.detail}\n`,
+  )
+  const diagnostics = commandDiagnostics(options.detail)
+  return CommandEvidenceSchema.parse({
+    command: options.command,
+    exitCode: 1,
+    durationMs: 0,
+    configHash: createHash("sha256").update(JSON.stringify(options.command)).digest("hex"),
+    artifacts,
+    classification: options.classification,
+    detail: options.detail,
+    ...(diagnostics.length === 0 ? {} : { diagnostics }),
+  })
 }
 
 type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
@@ -396,6 +478,7 @@ export type GitCheckOptions = ProcessDependency &
     artifactRoot?: string
     purpose?: string
     runner?: "local" | "waiting"
+    classification?: "base" | "carrier"
     environment?: string
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
@@ -408,19 +491,36 @@ async function pinCandidate(git: Git, repo: string, ref: string, sha: string): P
   throw new Error(created.stderr || created.stdout || `candidate ref '${ref}' has a different commit`)
 }
 
-export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckEvidence> {
+export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckOutput> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return async (input, context): Promise<JobResult<GitCheckEvidence>> => {
+  return async (input, context): Promise<JobResult<GitCheckOutput>> => {
     try {
       const purpose = options.purpose ?? "check"
       const branch = primaryPR(input).base
       const target = await authoritativeLineBase(git, repo, branch)
       if (target.diverged) {
+        const detail =
+          `line '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
+          `${target.remote}/${branch} ${target.remoteSha?.slice(0, 12)}; align the local branch before integration`
         return failed(
           "line-target-diverged",
-          `line '${branch}' local ${target.localSha?.slice(0, 12)} differs from authoritative ` +
-            `${target.remote}/${branch} ${target.remoteSha?.slice(0, 12)}; align the local branch before integration`,
+          detail,
+          await failureEvidence({
+            command: [
+              "git",
+              "-C",
+              repo,
+              "rev-parse",
+              `refs/heads/${branch}`,
+              `refs/remotes/${target.remote ?? "origin"}/${branch}`,
+            ],
+            detail,
+            classification: "base",
+            artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+            input,
+            attempt: context.attempt,
+          }),
         )
       }
       const baseSha = target.sha
@@ -429,9 +529,31 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         repo,
         baseSha,
         options.checkoutParent ?? tmpdir(),
-        async (path): Promise<JobResult<GitCheckEvidence>> => {
+        async (path): Promise<JobResult<GitCheckOutput>> => {
           const candidate = await prepareCandidate(git, path, input)
-          if (candidate.status === "failed") return { status: "failed", error: candidate.error }
+          if (candidate.status === "failed") {
+            const failedPR = input.prs.find((pr) => candidate.error.message.includes(`'${pr.id}'`)) ?? input.prs[0]
+            return failed(
+              candidate.error.code,
+              candidate.error.message,
+              await failureEvidence({
+                command: [
+                  "git",
+                  "-C",
+                  path,
+                  "merge",
+                  "--no-ff",
+                  "--no-edit",
+                  failedPR?.headSha ?? primaryPR(input).headSha,
+                ],
+                detail: candidate.error.message,
+                classification: "carrier",
+                artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+                input,
+                attempt: context.attempt,
+              }),
+            )
+          }
           if (candidate.status === "waiting") throw new Error("candidate preparation cannot wait")
           const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
           await pinCandidate(git, repo, candidateRef, candidate.output)
@@ -444,6 +566,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...(options.env === undefined ? {} : { env: options.env }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
+            classification: options.classification ?? "carrier",
             variables: () => ({
               YRD_BASE_SHA: baseSha,
               YRD_CANDIDATE_SHA: candidate.output,
@@ -453,7 +576,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           const runner =
             options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
           const outcome = await runner({ ...input, targetSha: candidate.output }, context)
-          const evidence = { baseSha, candidateSha: candidate.output, candidateRef }
+          const evidence = {
+            baseSha,
+            candidateSha: candidate.output,
+            candidateRef,
+            classification: options.classification ?? ("carrier" as const),
+          }
           if (outcome.status === "passed") {
             return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
           }
@@ -463,11 +591,33 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               checkpoint: GitCheckEvidenceSchema.parse({ ...(outcome.checkpoint as CommandEvidence), ...evidence }),
             }
           }
-          return { status: "failed", error: outcome.error }
+          return {
+            status: "failed",
+            error: outcome.error,
+            ...(outcome.output === undefined
+              ? {}
+              : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }),
+          }
         },
       )
     } catch (cause) {
-      return failed("check-failed", messageOf(cause))
+      const detail = messageOf(cause)
+      try {
+        return failed(
+          "check-failed",
+          detail,
+          await failureEvidence({
+            command: ["git", "-C", repo, "fetch", "--quiet", "origin"],
+            detail,
+            classification: "base",
+            artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+            input,
+            attempt: context.attempt,
+          }),
+        )
+      } catch {
+        return failed("check-failed", detail)
+      }
     }
   }
 }

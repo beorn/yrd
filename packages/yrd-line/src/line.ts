@@ -1,4 +1,14 @@
-import { GitRefSchema, PRIdSchema, resolvePR, type BaysState, type HasBays, type PR } from "@yrd/bay"
+import {
+  GitRefSchema,
+  PRIdSchema,
+  checkRequest,
+  checksRequested,
+  resolvePR,
+  reviewState,
+  type BaysState,
+  type HasBays,
+  type PR,
+} from "@yrd/bay"
 import {
   command,
   event,
@@ -44,16 +54,20 @@ import {
   type LineAuditResult,
   type LineHold,
   type LineRecord,
+  type LineRequirement,
   type LineRun,
   type LineRunId,
   type LineSummary,
   type LinesState,
+  type PREligibility,
+  type PRCheckRecord,
   type LineStep,
   type PRShape,
   type PRSnapshot,
 } from "./model.ts"
 
 const StepNameSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/iu)
+const LineRequirementSchema = z.enum(["review"])
 const LineRunIdSchema = z.string().trim().min(1)
 const StepExecutionSchema = z
   .object({
@@ -77,6 +91,10 @@ const IntegrateArgsSchema = z
   })
   .strict()
 export type IntegrateArgs = Readonly<z.infer<typeof IntegrateArgsSchema>>
+
+const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1), retry: z.boolean().optional() }).strict()
+export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
+export type AdmitSelection = Readonly<{ prs?: readonly string[]; retry?: boolean }>
 
 const AdvanceArgsSchema = z.object({ run: LineRunIdSchema }).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
@@ -119,6 +137,7 @@ export type StepDef<Input extends PRShape, Output extends PRShape> = Readonly<{
   revision: string
   integrates: boolean
   needsIntegration: boolean
+  classification?: "base" | "carrier"
   job: JobDef<StepExecution, JsonValue>
   readonly [inputShape]?: Input
   readonly [outputShape]?: Output
@@ -146,6 +165,7 @@ export type StepOptions<Output extends JsonValue> = Readonly<{
   revision: string
   title?: string
   needsIntegration?: boolean
+  classification?: "base" | "carrier"
   output?: z.ZodType<Output>
 }>
 
@@ -170,6 +190,7 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
     revision: job.revision,
     integrates: false,
     needsIntegration: options.needsIntegration ?? false,
+    ...(options.classification === undefined ? {} : { classification: options.classification }),
     job,
   }) as StepDef<Shape, AddStepResult<Shape, Name, Output>>
 }
@@ -200,6 +221,8 @@ export type LineOptions<Steps extends readonly AnyStepDef[]> = Readonly<{
   steps: Steps
   batch?: BatchConfig
   defaultSteps?: readonly string[]
+  requires?: readonly LineRequirement[]
+  resolveBaseSha?(base: string): string | Promise<string>
 }>
 
 type LineState = Readonly<{ lines: LinesState }>
@@ -209,6 +232,7 @@ type LineStart = Omit<LineRecord, "startedAt" | "failure">
 
 export type LineCommands = Readonly<{
   line: Readonly<{
+    admit: CommandHandler<AdmitArgs, RuntimeState>
     integrate: CommandHandler<IntegrateArgs, RuntimeState>
     hold: CommandHandler<HoldLineArgs, RuntimeState>
     release: CommandHandler<Readonly<{ base: string }>, RuntimeState>
@@ -221,6 +245,7 @@ export type Line<Shape extends PRShape = PRShape> = Readonly<{
   readonly shape?: Shape
   state: ReadSignal<DeepReadonly<LinesState>>
   steps(): readonly InstalledStep[]
+  admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly LineRun[]>
   hold(args: HoldLineArgs): Promise<LineHold>
   release(base: string): Promise<void>
   integrate(args: IntegrateArgs, options: RunJobOptions): Promise<readonly LineRun[]>
@@ -229,6 +254,9 @@ export type Line<Shape extends PRShape = PRShape> = Readonly<{
   finish(selector: string, completion: FinishLineArgs, options: RunJobOptions): Promise<LineRun>
   recover(options: RunJobOptions & Readonly<{ recoveryTime: string; reason?: string }>): Promise<readonly LineRun[]>
   audit(): LineAuditResult
+  eligibility(selector: string): PREligibility
+  eligibilities(): readonly PREligibility[]
+  checks(selectors?: readonly string[]): readonly PRCheckRecord[]
   get(run: LineRunId): LineRun | undefined
   status(base: string): LineSummary
 }>
@@ -266,6 +294,7 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
   const initial = Lines.empty({
     batchSize,
     ...(defaults === undefined ? {} : { defaultSteps: defaults.map((step) => step.name) }),
+    ...(options.requires === undefined ? {} : { requires: z.array(LineRequirementSchema).parse(options.requires) }),
   })
   const jobDefs = Object.freeze(Object.fromEntries(steps.map((step) => [step.job.name, step.job])))
   const commands = createLineCommands(steps, byName)
@@ -300,13 +329,17 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
             yrd.jobs,
             {
               refresh: () => yrd.refresh(),
+              admit: (args) => yrd.dispatch(commands.line.admit, args),
               integrate: (args) => yrd.dispatch(commands.line.integrate, args),
               hold: (args) => yrd.dispatch(commands.line.hold, args),
               release: (base) => yrd.dispatch(commands.line.release, { base }),
               advance: (run) => yrd.dispatch(commands.line.advance, { run }),
               isolate: (run, part) => yrd.dispatch(commands.line.isolate, { run, part }),
+              requestChecks: (pr, baseSha) =>
+                yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
             },
             steps,
+            options.resolveBaseSha,
             yrd.log.child("line"),
           ),
         }
@@ -320,11 +353,13 @@ export function withLine<const Steps extends readonly AnyStepDef[]>(
 type RuntimeStep = AnyStepDef
 type LineActions = Readonly<{
   refresh(): Promise<unknown>
+  admit(args: AdmitArgs): Promise<CommandResult>
   integrate(args: IntegrateArgs): Promise<CommandResult>
   hold(args: HoldLineArgs): Promise<CommandResult>
   release(base: string): Promise<CommandResult>
   advance(run: LineRunId): Promise<CommandResult>
   isolate(run: LineRunId, part: 0 | 1): Promise<CommandResult>
+  requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
 
 function createLine<Shape extends PRShape>(
@@ -333,6 +368,7 @@ function createLine<Shape extends PRShape>(
   jobs: HasJobs["jobs"],
   actions: LineActions,
   steps: readonly RuntimeStep[],
+  resolveBaseSha: LineOptions<readonly AnyStepDef[]>["resolveBaseSha"],
   log: ConditionalLogger,
 ): Line<Shape> {
   const current = (id: LineRunId): LineRun => materializeRun(Lines.record(state(), id), runtime().jobs)
@@ -425,9 +461,111 @@ function createLine<Shape extends PRShape>(
     return current(id)
   }
 
+  const startedRun = (result: CommandResult): LineRun | undefined => {
+    const started = result.events.find((applied) => applied.name === "line/run/started")
+    if (started === undefined) return undefined
+    return current(LineStartSchema.parse((started.data as { run?: unknown }).run).id)
+  }
+
+  const refreshCheckIdentities = async (prs: readonly DeepReadonly<PR>[]): Promise<void> => {
+    if (resolveBaseSha === undefined) return
+    for (const pr of prs) {
+      if (!checksRequested(pr)) continue
+      await actions.requestChecks(pr.id, await resolveBaseSha(pr.base))
+    }
+  }
+
+  const dispatchAdmissions = async (selectors: readonly string[], retry: boolean): Promise<LineRun[]> => {
+    const admitted: LineRun[] = []
+    for (const selector of selectors) {
+      const started = startedRun(await actions.admit({ pr: selector, ...(retry ? { retry: true } : {}) }))
+      if (started !== undefined) admitted.push(started)
+    }
+    return admitted
+  }
+
+  const drainAdmissions = async (
+    selectors: readonly string[],
+    retry: boolean,
+    options: RunJobOptions,
+  ): Promise<LineRun[]> => {
+    const targets = new Set(selectors)
+    const outcomes = new Map<LineRunId, LineRun>()
+    const remember = (candidate: LineRun): void => {
+      if (candidate.prs.some((pr) => targets.has(pr.id))) outcomes.set(candidate.id, candidate)
+    }
+
+    while (targets.size > 0) {
+      await actions.refresh()
+      let snapshot = runtime()
+      const active = orderedLines(snapshot.lines, snapshot.jobs).find(
+        (candidate) =>
+          candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.lines, steps)),
+      )
+      if (active !== undefined) {
+        const settled = await run(active.id, options)
+        remember(settled)
+        if (settled.status === "running") break
+        continue
+      }
+
+      const retryable = [...targets]
+        .map((selector) => resolvePR(snapshot.bays, selector))
+        .find((pr) => pr !== undefined && checkEligibility(snapshot, pr, steps).status === "failed")
+      if (retry && retryable !== undefined) {
+        const admitted = await dispatchAdmissions([retryable.id], true)
+        if (admitted.length > 0) continue
+      }
+
+      snapshot = runtime()
+      const queued = admissionQueue(snapshot, steps)
+      const admitted = await dispatchAdmissions(
+        queued.map((pr) => pr.id),
+        false,
+      )
+      if (admitted.length > 0) continue
+
+      for (const selector of targets) {
+        const pr = resolvePR(snapshot.bays, selector)
+        if (pr === undefined) continue
+        const runId = checkEligibility(snapshot, pr, steps).run
+        if (runId !== undefined) {
+          const candidate = materializeRun(Lines.record(snapshot.lines, runId), snapshot.jobs)
+          remember(candidate)
+        }
+      }
+      break
+    }
+    return [...outcomes.values()].toSorted((left, right) =>
+      left.id.localeCompare(right.id, undefined, { numeric: true }),
+    )
+  }
+
   return Object.freeze({
     state,
     steps: () => steps.map(descriptor),
+    async admit(args, runOptions) {
+      using _span = log.span?.("admit", { prs: args.prs, retry: args.retry === true })
+      await actions.refresh()
+      let snapshot = runtime()
+      const selected =
+        args.prs === undefined || args.prs.length === 0
+          ? admissionQueue(snapshot, steps)
+          : args.prs.map((selector) => {
+              const pr = resolvePR(snapshot.bays, selector)
+              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+              return pr
+            })
+      await refreshCheckIdentities(selected)
+      snapshot = runtime()
+      const selectors =
+        args.prs === undefined || args.prs.length === 0
+          ? admissionQueue(snapshot, steps).map((pr) => pr.id)
+          : [...args.prs]
+      return runOptions === undefined
+        ? dispatchAdmissions(selectors, args.retry === true)
+        : drainAdmissions(selectors, args.retry === true, runOptions)
+    },
     async hold(args) {
       await actions.hold(args)
       const held = state().holds[args.base]
@@ -441,8 +579,28 @@ function createLine<Shape extends PRShape>(
       using _span = log.span?.("integrate", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
       await actions.refresh()
-      const snapshot = runtime()
-      const prs = runnablePRs(snapshot, args)
+      let snapshot = runtime()
+      const requested = requestedPRs(snapshot.bays, args)
+      const checked = requested.filter((pr) => checksRequested(pr))
+      const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
+      await refreshCheckIdentities(checked)
+      const admissions = await drainAdmissions(
+        checked.map((pr) => pr.id),
+        args.retry === true,
+        runOptions,
+      )
+      snapshot = runtime()
+      const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
+      if (unsettled.length > 0) {
+        if (args.retry === true) return admissions
+        const newlyFailed = unsettled.some(
+          (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
+        )
+        if (newlyFailed || unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")) {
+          return admissions
+        }
+      }
+      const prs = runnablePRs(snapshot, args, steps)
       if (prs.length === 0) return []
       const roots: LineRunId[] = []
       for (const candidate of partitionCandidates(prs, snapshot.lines.batchSize)) {
@@ -495,6 +653,28 @@ function createLine<Shape extends PRShape>(
       return recovered
     },
     audit: () => auditLines(runtime(), steps),
+    eligibility(selector) {
+      const snapshot = runtime()
+      const pr = resolvePR(snapshot.bays, selector)
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+      return prEligibility(snapshot, pr, steps)
+    },
+    eligibilities() {
+      const snapshot = runtime()
+      return Object.values(snapshot.bays.prs).map((pr) => prEligibility(snapshot, pr, steps))
+    },
+    checks(selectors) {
+      const snapshot = runtime()
+      const prs =
+        selectors === undefined
+          ? Object.values(snapshot.bays.prs)
+          : selectors.map((selector) => {
+              const pr = resolvePR(snapshot.bays, selector)
+              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+              return pr
+            })
+      return prs.flatMap((pr) => projectPRChecks(snapshot, pr, steps))
+    },
     get(id) {
       const record = state().records[id]
       return record === undefined ? undefined : materializeRun(record, runtime().jobs)
@@ -504,6 +684,38 @@ function createLine<Shape extends PRShape>(
 }
 
 function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): LineCommands {
+  const admit = command({
+    title: "Admit PR checks",
+    params: AdmitArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: AdmitArgs) {
+      const pr = resolvePR(state.bays, args.pr)
+      if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
+      if (pr.status !== "pushed" && pr.status !== "submitted" && !(args.retry === true && pr.status === "rejected")) {
+        raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${pr.status}, not admissible`)
+      }
+      const selected = admissionSteps(state.lines, steps)
+      if (selected.length === 0) return { events: [] }
+      const snapshot = Lines.snapshot(pr)
+      const existing = admissionRun(state, snapshot, selected)
+      if (existing?.status === "passed" || existing?.status === "running" || existing?.status === "waiting") {
+        return { events: [] }
+      }
+      if (existing?.status === "failed" && args.retry !== true) {
+        raiseFailure(
+          "refusal",
+          "checks-failed",
+          `yrd: PR '${pr.id}' checks failed in ${existing.id}; retry=true is required`,
+        )
+      }
+      if (runningLine(state.lines, state.jobs, pr.base) !== undefined) return { events: [] }
+      if (pr.status !== "rejected" && checksRequested(pr)) {
+        const first = admissionQueue(state, steps)[0]
+        if (first !== undefined && first.id !== pr.id) return { events: [] }
+      }
+      return startRun(Lines.nextId(state.lines), [snapshot], selected, prShape([snapshot]))
+    },
+  })
+
   const hold = command({
     title: "Hold line",
     visibility: "public",
@@ -542,7 +754,7 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
     params: IntegrateArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: IntegrateArgs) {
       if (args.steps?.length === 0) return { events: [] }
-      const prs = runnablePRs(state, args)
+      const prs = runnablePRs(state, args, steps)
       if (prs.length === 0) return { events: [] }
       const base = prs[0]?.base
       if (base === undefined) throw new Error("yrd: a line run requires at least one PR")
@@ -557,12 +769,17 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
       const integrated = integratedPRShape(prs)
       validateSequence(selected, integrated !== undefined)
       const snapshots = prs.map(Lines.snapshot)
+      const reuse = integrated === undefined ? reusablePrefix(state, snapshots, selected) : undefined
+      const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
+      if (remaining.length === 0) return { events: [] }
       return startRun(
         Lines.nextId(state.lines),
         snapshots,
-        selected,
-        integrated ?? prShape(snapshots),
+        remaining,
+        reuse?.shape ?? integrated ?? prShape(snapshots),
         integrated?.integration,
+        {},
+        reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
       )
     },
   })
@@ -605,7 +822,7 @@ function createLineCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<s
     },
   })
 
-  return { line: { integrate, hold, release, advance, isolate } }
+  return { line: { admit, integrate, hold, release, advance, isolate } }
 }
 
 function projectLines(state: DeepReadonly<LineState>, applied: Event): LineState {
@@ -661,6 +878,7 @@ function descriptor(step: RuntimeStep | LineStep): InstalledStep {
     revision: step.revision,
     integrates: step.integrates,
     needsIntegration: step.needsIntegration,
+    ...(step.classification === undefined ? {} : { classification: step.classification }),
   }
 }
 
@@ -693,6 +911,7 @@ function startRun(
   shape: PRShape,
   integration?: IntegrationProof,
   lineage: Readonly<{ parent?: LineRunId; isolationPart?: 0 | 1 }> = {},
+  reuse?: Readonly<{ run: LineRunId; results: Readonly<Record<string, JsonValue>> }>,
 ): Readonly<{ run: LineStart; events: readonly EventDraft[] }> {
   const pr = prs[0]
   if (pr === undefined) throw new Error("yrd: a line run requires at least one PR")
@@ -702,6 +921,7 @@ function startRun(
     base: pr.base,
     steps: selected.map(descriptor),
     ...(integration === undefined ? {} : { initialIntegration: integration }),
+    ...(reuse === undefined ? {} : { initialResults: reuse.results, reusedFrom: reuse.run }),
     ...lineage,
   }
   return {
@@ -819,7 +1039,13 @@ function materializeRun(record: DeepReadonly<LineRecord>, jobs: DeepReadonly<Job
           : record.startedAt
         : undefined)
   const shape = shapeThrough(record, jobs)
-  const { initialIntegration: _initialIntegration, failure: _failure, steps: _steps, ...facts } = record
+  const {
+    initialIntegration: _initialIntegration,
+    initialResults: _initialResults,
+    failure: _failure,
+    steps: _steps,
+    ...facts
+  } = record
   return {
     ...facts,
     cursor: cursor < 0 ? steps.length : cursor,
@@ -874,7 +1100,7 @@ function shapeThrough(
 ): PRShape {
   const hasMerge = record.steps.some((step) => step.integrates)
   let shape: PRShape | IntegratedShape = {
-    ...prShape(record.prs),
+    results: { ...record.initialResults },
     ...(record.initialIntegration === undefined || hasMerge ? {} : { integration: record.initialIntegration }),
   }
   const jobList = lineJobs(record, jobs)
@@ -993,7 +1219,8 @@ function requirePlannedStep(steps: ReadonlyMap<string, RuntimeStep>, planned: In
   if (
     current.revision !== planned.revision ||
     current.integrates !== planned.integrates ||
-    current.needsIntegration !== planned.needsIntegration
+    current.needsIntegration !== planned.needsIntegration ||
+    current.classification !== planned.classification
   ) {
     throw new Error(
       `yrd: line step '${planned.name}' revision '${planned.revision}' does not match installed revision '${current.revision}'`,
@@ -1037,25 +1264,331 @@ function requestedPRs(state: DeepReadonly<BaysState>, args: IntegrateArgs): PR[]
   return prs
 }
 
-function runnablePRs(state: DeepReadonly<RuntimeState>, args: IntegrateArgs): PR[] {
+function admissionSteps(lines: DeepReadonly<LinesState>, steps: readonly RuntimeStep[]): RuntimeStep[] {
+  const selected = selectSteps(steps, lines.defaultSteps)
+  const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
+  return boundary < 0 ? selected : selected.slice(0, boundary)
+}
+
+function sameSnapshot(left: DeepReadonly<PRSnapshot>, right: DeepReadonly<PRSnapshot>): boolean {
+  return (
+    left.id === right.id &&
+    left.revision === right.revision &&
+    left.headSha === right.headSha &&
+    left.base === right.base &&
+    left.baseSha === right.baseSha
+  )
+}
+
+function samePlan(actual: readonly DeepReadonly<InstalledStep>[], expected: readonly RuntimeStep[]): boolean {
+  return (
+    actual.length === expected.length &&
+    actual.every((step, index) => {
+      const candidate = expected[index]
+      return (
+        candidate !== undefined &&
+        step.name === candidate.name &&
+        step.revision === candidate.revision &&
+        step.integrates === candidate.integrates &&
+        step.needsIntegration === candidate.needsIntegration &&
+        step.classification === candidate.classification
+      )
+    })
+  )
+}
+
+function admissionRun(
+  state: DeepReadonly<RuntimeState>,
+  snapshot: DeepReadonly<PRSnapshot>,
+  selected: readonly RuntimeStep[],
+): LineRun | undefined {
+  return orderedLines(state.lines, state.jobs)
+    .filter(
+      (run) =>
+        run.prs.length === 1 &&
+        run.prs[0] !== undefined &&
+        sameSnapshot(run.prs[0], snapshot) &&
+        samePlan(run.steps, selected),
+    )
+    .at(-1)
+}
+
+function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
+  const selected = admissionSteps(state.lines, steps)
+  if (selected.length === 0) return []
+  return Object.values(state.bays.prs)
+    .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
+    .filter((pr) => checksRequested(pr))
+    .filter((pr) => {
+      const run = admissionRun(state, Lines.snapshot(pr), selected)
+      return run === undefined
+    })
+    .toSorted((left, right) => {
+      const leftAt = checkQueueTime(left)
+      const rightAt = checkQueueTime(right)
+      return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id, undefined, { numeric: true })
+    })
+}
+
+function checkQueueTime(pr: DeepReadonly<PR>): string {
+  const request = checkRequest(pr)
+  if (request === undefined) throw new Error(`yrd: queued PR '${pr.id}' has no current check request`)
+  return request.at
+}
+
+function checkEligibility(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+  steps: readonly RuntimeStep[],
+): PREligibility["checks"] {
+  const request = checkRequest(pr)
+  const timing = request === undefined ? {} : { queuedAt: request.at }
+  const selected = admissionSteps(state.lines, steps)
+  if (selected.length === 0) return { status: "passed", ...timing }
+  const run = admissionRun(state, Lines.snapshot(pr), selected)
+  if (run?.status === "running" || run?.status === "waiting") {
+    return { status: "checking", ...timing, run: run.id }
+  }
+  if (run?.status === "passed") return { status: "passed", ...timing, run: run.id }
+  if (run?.status === "failed") return { status: "failed", ...timing, run: run.id }
+  if (request === undefined) return { status: "not-requested" }
+  const queued = admissionQueue(state, steps)
+  const position = queued.findIndex((candidate) => candidate.id === pr.id)
+  return { status: "queued", ...timing, ...(position < 0 ? {} : { position: position + 1 }) }
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function firstArtifact(value: unknown, preferredName?: string): string | undefined {
+  const artifacts = objectValue(value)?.artifacts
+  if (!Array.isArray(artifacts)) return undefined
+  const ordered =
+    preferredName === undefined
+      ? artifacts
+      : artifacts.toSorted((left, right) => {
+          const leftPreferred = objectValue(left)?.name === preferredName
+          const rightPreferred = objectValue(right)?.name === preferredName
+          return Number(rightPreferred) - Number(leftPreferred)
+        })
+  for (const artifact of ordered) {
+    const item = objectValue(artifact)
+    const location = item?.path ?? item?.uri
+    if (typeof location === "string" && location !== "") return location
+  }
+  return undefined
+}
+
+function checkEvidence(job: Job): Record<string, unknown> | undefined {
+  if (job.status === "passed" || job.status === "failed") return objectValue(job.output)
+  if (job.status === "waiting") return objectValue(job.checkpoint)
+  return undefined
+}
+
+function checkError(job: Job | undefined, run: LineRun): JobError | undefined {
+  if (job?.status === "failed") return job.error
+  if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
+  return run.error
+}
+
+function checkStatus(job: Job | undefined, run: LineRun): PRCheckRecord["status"] {
+  if (run.status === "failed" && (job === undefined || !Job.terminal(job))) return "failed"
+  if (job?.status === "passed") return "passed"
+  if (job?.status === "failed" || job?.status === "lost") return "failed"
+  return "checking"
+}
+
+function projectCheckStep(
+  pr: DeepReadonly<PR>,
+  run: LineRun,
+  step: LineStep,
+  queuedAt: string | undefined,
+): PRCheckRecord | undefined {
+  const job = step.job
+  if (job === undefined && run.status !== "failed") return undefined
+  const evidence = job === undefined ? undefined : checkEvidence(job)
+  const error = checkError(job, run)
+  const diagnostics =
+    Array.isArray(evidence?.diagnostics) || typeof evidence?.detail === "string"
+      ? ((evidence?.diagnostics ?? evidence?.detail) as JsonValue)
+      : job?.status === "waiting" && job.detail !== undefined
+        ? job.detail
+        : error?.message
+  const artifact =
+    firstArtifact(evidence, error === undefined ? undefined : "stderr") ??
+    (job !== undefined && "artifacts" in job
+      ? firstArtifact({ artifacts: job.artifacts }, error === undefined ? undefined : "stderr")
+      : undefined)
+  const command = Array.isArray(evidence?.command)
+    ? evidence.command.filter((part): part is string => typeof part === "string")
+    : job === undefined
+      ? [`line.step.${step.name}`]
+      : [job.definition]
+  return {
+    pr: pr.id,
+    revision: pr.revision,
+    run: run.id,
+    step: step.name,
+    status: checkStatus(job, run),
+    classification: step.classification ?? "carrier",
+    command,
+    ...(queuedAt === undefined ? {} : { queuedAt }),
+    ...(diagnostics === undefined ? {} : { diagnostics }),
+    ...(artifact === undefined ? {} : { artifact }),
+    ...(error === undefined ? {} : { error }),
+  }
+}
+
+function projectPRChecks(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+  steps: readonly RuntimeStep[],
+): PRCheckRecord[] {
+  const checks = checkEligibility(state, pr, steps)
+  const run = checks.run === undefined ? undefined : materializeRun(Lines.record(state.lines, checks.run), state.jobs)
+  if (run === undefined) {
+    return [
+      {
+        pr: pr.id,
+        revision: pr.revision,
+        status: checks.status,
+        ...(checks.position === undefined ? {} : { position: checks.position }),
+        ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
+      },
+    ]
+  }
+  const records = run.steps
+    .filter((step) => !step.integrates && !step.needsIntegration)
+    .flatMap((step, index) => {
+      if (step.job === undefined && index !== run.cursor) return []
+      const record = projectCheckStep(pr, run, step, checks.queuedAt)
+      return record === undefined ? [] : [record]
+    })
+  return records.length === 0
+    ? [
+        {
+          pr: pr.id,
+          revision: pr.revision,
+          run: run.id,
+          status: checks.status,
+          ...(checks.queuedAt === undefined ? {} : { queuedAt: checks.queuedAt }),
+          ...(run.error === undefined ? {} : { error: run.error }),
+        },
+      ]
+    : records
+}
+
+function reusablePrefix(
+  state: DeepReadonly<RuntimeState>,
+  snapshots: readonly DeepReadonly<PRSnapshot>[],
+  selected: readonly RuntimeStep[],
+): Readonly<{ run: LineRunId; count: number; shape: PRShape }> | undefined {
+  const snapshot = snapshots.length === 1 ? snapshots[0] : undefined
+  if (snapshot?.baseSha === undefined) return undefined
+  const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
+  const prefix = boundary < 0 ? selected : selected.slice(0, boundary)
+  if (prefix.length === 0) return undefined
+  const cached = admissionRun(state, snapshot, prefix)
+  if (cached?.status !== "passed") return undefined
+  const record = Lines.record(state.lines, cached.id)
+  return { run: cached.id, count: prefix.length, shape: shapeThrough(record, state.jobs) }
+}
+
+function runnablePRs(state: DeepReadonly<RuntimeState>, args: IntegrateArgs, steps: readonly RuntimeStep[]): PR[] {
   const requested = requestedPRs(state.bays, args)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
-  const eligible = requested.filter((pr) => {
-    const hold = state.lines.holds[pr.base]
-    if (hold === undefined || hold.allowedPRs.includes(pr.id)) return true
-    if (implicitQueue) return false
-    raiseFailure(
-      "refusal",
-      "line-held",
-      `yrd: line '${pr.base}' is held: ${hold.reason}; PR '${pr.id}' is not in the allowed set`,
-    )
+  return requested.filter((pr) => {
+    const eligibility = prEligibility(state, pr, steps, {
+      retry: args.retry === true,
+      resumeIntegrated: true,
+    })
+    if (eligibility.runnable) return true
+    if (implicitQueue || eligibility.reason?.code === "claimed") return false
+    const reason = eligibility.reason
+    raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `PR '${pr.id}' is not ready`}`)
   })
-  const claimed = new Set(
-    orderedLines(state.lines, state.jobs)
-      .filter((run) => !Lines.terminal(run))
-      .flatMap((run) => run.prs.map((pr) => pr.id)),
+}
+
+function prEligibility(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+  steps: readonly RuntimeStep[],
+  options: Readonly<{ retry?: boolean; resumeIntegrated?: boolean }> = {},
+): PREligibility {
+  const reviewed = reviewState(pr)
+  const required = state.lines.requires.includes("review")
+  const review = {
+    required,
+    approved: reviewed.approved,
+    stale: reviewed.stale.length > 0 && reviewed.current === undefined,
+    ...(reviewed.current?.decision === undefined ? {} : { decision: reviewed.current.decision }),
+    ...(reviewed.current?.actor === undefined ? {} : { actor: reviewed.current.actor }),
+    ...(reviewed.current?.ref === undefined ? {} : { ref: reviewed.current.ref }),
+  }
+  const checks = checkEligibility(state, pr, steps)
+  const result = (reason?: PREligibility["reason"]): PREligibility => ({
+    pr: pr.id,
+    revision: pr.revision,
+    runnable: reason === undefined,
+    ...(reason === undefined ? {} : { reason }),
+    review,
+    checks,
+  })
+  const resumingIntegration = options.resumeIntegrated === true && pr.status === "integrated"
+  if (!resumingIntegration) {
+    if (pr.status === "pushed") {
+      return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
+    }
+    if (pr.status === "rejected" && options.retry !== true) {
+      return result({ code: "rejected", message: `PR '${pr.id}' is rejected; retry=true is required` })
+    }
+    if (pr.status !== "submitted" && !(options.retry === true && pr.status === "rejected")) {
+      return result({ code: "terminal", message: `PR '${pr.id}' is ${pr.status}, not queueable` })
+    }
+    if (checks.status === "queued") {
+      const position = checks.position === undefined ? "" : ` at position ${checks.position}`
+      return result({ code: "checks-pending", message: `PR '${pr.id}' checks are queued${position}` })
+    }
+    if (checks.status === "checking") {
+      const run = checks.run === undefined ? "" : ` in ${checks.run}`
+      return result({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
+    }
+    if (checks.status === "failed" && options.retry !== true) {
+      const run = checks.run === undefined ? "" : ` in ${checks.run}`
+      return result({ code: "checks-failed", message: `PR '${pr.id}' checks failed${run}; retry=true is required` })
+    }
+    if (required && !reviewed.approved) {
+      if (reviewed.current?.decision === "reject") {
+        return result({
+          code: "review-rejected",
+          message: `PR '${pr.id}' was rejected by ${reviewed.current.actor} for revision ${pr.revision}`,
+        })
+      }
+      return result({
+        code: "review-required",
+        message: `PR '${pr.id}' needs approval for revision ${pr.revision}`,
+      })
+    }
+  }
+  const hold = state.lines.holds[pr.base]
+  if (hold !== undefined && !hold.allowedPRs.includes(pr.id)) {
+    return result({
+      code: "line-held",
+      message: `line '${pr.base}' is held: ${hold.reason}; PR '${pr.id}' is not in the allowed set`,
+    })
+  }
+  const claimed = orderedLines(state.lines, state.jobs).some(
+    (run) => !Lines.terminal(run) && run.prs.some((candidate) => candidate.id === pr.id),
   )
-  return eligible.filter((pr) => !claimed.has(pr.id))
+  return claimed
+    ? result({
+        code: "claimed",
+        message: `PR '${pr.id}' is already in an active line run`,
+      })
+    : result()
 }
 
 function partitionCandidates(prs: readonly PR[], batchSize: number): PR[][] {

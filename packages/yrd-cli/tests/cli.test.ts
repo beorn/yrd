@@ -47,7 +47,13 @@ import {
   type LineStatusResult,
 } from "../src/line-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
-import { LineWatchFrame, LineWatchPane, reduceWatchControl, type LineWatchPaneProps } from "../src/watch-pane.tsx"
+import {
+  LineWatchFrame,
+  LineWatchPane,
+  reduceWatchControl,
+  tailJournal,
+  type LineWatchPaneProps,
+} from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -190,6 +196,9 @@ async function createApp(
     waitingEvaluator?: string
     mergeRuns?: string[]
     failingCheck?: boolean
+    requires?: readonly ["review"]
+    checkRuns?: string[]
+    baseFailure?: boolean
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -198,18 +207,41 @@ async function createApp(
   )
   const check = withStep(
     "check",
-    (_input: StepExecution<PRShape>): JobResult<JsonValue> =>
-      options.waitingCheck
+    (_input: StepExecution<PRShape>): JobResult<JsonValue> => {
+      options.checkRuns?.push("check")
+      return options.waitingCheck
         ? {
             status: "waiting",
             token: "remote-check",
             url: "https://ci.invalid/run/1",
             checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
           }
-        : options.failingCheck
-          ? { status: "failed", error: { code: "check-failed", message: "check failed" } }
-          : { status: "passed", output: { checked: true } },
-    { revision: "check-v1", output: JsonSchema },
+        : options.baseFailure
+          ? {
+              status: "failed",
+              error: { code: "base-red", message: "resolved base is red" },
+              output: { detail: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} is red: test:fast failed` },
+            }
+          : options.failingCheck
+            ? {
+                status: "failed",
+                error: { code: "check-failed", message: "check failed" },
+                output: {
+                  detail: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} green\nsrc/model.ts:12 - type mismatch`,
+                  diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+                  artifacts: [
+                    { name: "stdout", path: "/tmp/base-green.log" },
+                    { name: "stderr", path: "/tmp/yrd-check.log" },
+                  ],
+                },
+              }
+            : { status: "passed", output: { checked: true } }
+    },
+    {
+      revision: "check-v1",
+      output: JsonSchema,
+      classification: options.baseFailure === true ? "base" : "carrier",
+    },
   )
   const merge = withMerge(
     (_input: StepExecution<CheckedShape>): JobResult<{ commit: string; baseSha: string }> => {
@@ -221,13 +253,21 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const line = withLine({ steps: [check, merge] as const, batch: options.batch ?? false })
+  const line = withLine({
+    steps: [check, merge] as const,
+    batch: options.batch ?? false,
+    ...(options.requires === undefined ? {} : { requires: options.requires }),
+  })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, line.jobDefs, contests.jobDefs] }),
     withTasks({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Task one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main" }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (base) => ({ base, baseSha: BASE_SHA }),
+    }),
   )
   return createYrd(contests(line(base)), {
     inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
@@ -493,6 +533,11 @@ describe("runYrd", () => {
     expect(line.stdout()).toContain("Examples:")
     expect(line.stdout()).toContain("$ yrd line status release/2.0")
     expect(line.stdout()).toContain("$ yrd line integrate PR7 --steps check,merge")
+
+    const prSubmit = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("pr", "submit", "--help"), prSubmit.io)).toBe(0)
+    expect(prSubmit.stdout()).toContain("--base <branch>")
+    expect(prSubmit.stdout()).not.toContain("--line <branch>")
   })
 
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
@@ -567,9 +612,10 @@ describe("runYrd", () => {
       command: "line.integrate",
       results: [
         {
-          id: "R1",
+          id: "R2",
           status: "passed",
-          steps: [{ name: "check" }, { name: "merge" }],
+          steps: [{ name: "merge" }],
+          reusedFrom: "R1",
           prs: [{ id: "PR1", headSha: HEAD_SHA }],
         },
       ],
@@ -616,7 +662,7 @@ describe("runYrd", () => {
     )
     expect(resolved).toEqual(["topic/direct"])
     expect(JSON.parse(submit.stdout())).toMatchObject({
-      prs: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA, status: "submitted" }],
+      prs: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA }],
     })
 
     resolvedHead = MERGED_SHA
@@ -632,11 +678,6 @@ describe("runYrd", () => {
           branch: "topic/direct",
           revision: 2,
           headSha: MERGED_SHA,
-          status: "submitted",
-          revisions: [
-            { revision: 1, headSha: HEAD_SHA },
-            { revision: 2, headSha: MERGED_SHA },
-          ],
         },
       ],
     })
@@ -650,20 +691,344 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("release/2.0")
   })
 
+  it("drives draft, review, ready, needs-review, and cached checks through the PR surface", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ requires: ["review"], checkRuns })
+    const resolveRevision = () => Promise.resolve(HEAD_SHA)
+
+    const submit = outputIO({ resolveRevision })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/review-me", "--draft", "--json"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+    const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
+    expect(submitted).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", branch: "topic/review-me", revision: 1, headSha: HEAD_SHA }],
+      checks: [{ pr: "PR1", status: "checking", run: "R1" }],
+    })
+    expect(submitted.prs[0]).not.toHaveProperty("status")
+    expect(app.state().bays.prs.PR1?.status).toBe("pushed")
+    expect(app.line.get("R1")).toMatchObject({ status: "running", steps: [{ name: "check" }] })
+    expect(checkRuns).toEqual([])
+
+    const inbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
+    expect(JSON.parse(inbox.stdout())).toMatchObject({
+      command: "pr.list",
+      prs: [{ id: "PR1", revision: 1, eligibility: { review: { required: true, approved: false } } }],
+    })
+    const humanInbox = outputIO({ columns: 160 })
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review"), humanInbox.io), humanInbox.stderr()).toBe(0)
+    expect(humanInbox.stdout()).toContain("WHY")
+    expect(humanInbox.stdout()).toContain("pushed, not ready")
+    expect(humanInbox.stdout()).toContain("required")
+    expect(humanInbox.stdout()).toContain("checking")
+
+    const comment = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-1", "--note", "Why?", "--json"),
+        comment.io,
+      ),
+      comment.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(comment.stdout())).toMatchObject({
+      command: "pr.comment",
+      comment: { actor: "@cto", ref: "question-1", note: "Why?", revision: 1 },
+    })
+    const secondComment = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-2", "--note", "Thanks.", "--json"),
+        secondComment.io,
+      ),
+      secondComment.stderr(),
+    ).toBe(0)
+    const replayedComment = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-1", "--note", "Why?", "--json"),
+        replayedComment.io,
+      ),
+      replayedComment.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replayedComment.stdout())).toMatchObject({
+      comment: { ref: "question-1", note: "Why?" },
+    })
+
+    const review = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
+        review.io,
+      ),
+      review.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(review.stdout())).toMatchObject({
+      command: "pr.review",
+      review: { actor: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
+    })
+    const replay = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
+        replay.io,
+      ),
+      replay.stderr(),
+    ).toBe(0)
+    expect(app.state().bays.prs.PR1?.reviews).toHaveLength(1)
+    const secondApproval = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-2", "--json"),
+        secondApproval.io,
+      ),
+      secondApproval.stderr(),
+    ).toBe(0)
+    const replayedApproval = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
+        replayedApproval.io,
+      ),
+      replayedApproval.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replayedApproval.stdout())).toMatchObject({
+      review: { ref: "verdict-1", decision: "approve" },
+    })
+
+    const ready = outputIO()
+    expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(0)
+    expect(JSON.parse(ready.stdout())).toMatchObject({
+      command: "pr.ready",
+      pr: { id: "PR1", revision: 1 },
+      eligibility: { review: { approved: true } },
+    })
+    expect(app.state().bays.prs.PR1?.status).toBe("submitted")
+
+    let followSleeps = 0
+    const checks = outputIO({
+      scope: {
+        signal: new AbortController().signal,
+        sleep: async () => {
+          followSleeps++
+          await app.line.run("R1", { executor: "external-check-runner", leaseMs: 60_000 })
+        },
+      },
+    })
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io), checks.stderr()).toBe(0)
+    expect(JSON.parse(checks.stdout())).toMatchObject({
+      kind: "pr.check",
+      command: ["line.step.check"],
+      pr: "PR1",
+      revision: 1,
+      run: "R1",
+      step: "check",
+      status: "passed",
+      queuedAt: expect.any(String),
+    })
+    expect(followSleeps).toBe(1)
+    expect(checkRuns).toEqual(["check"])
+
+    const integrate = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--json"), integrate.io), integrate.stderr()).toBe(0)
+    expect(JSON.parse(integrate.stdout())).toMatchObject({
+      results: [{ id: "R2", status: "passed", steps: [{ name: "merge" }], reusedFrom: "R1" }],
+    })
+    expect(checkRuns).toEqual(["check"])
+
+    await app.bays.submit({ branch: "topic/withdrawn", headSha: MERGED_SHA, base: "main", draft: true })
+    await app.bays.closePr({ pr: "PR2" })
+    const terminalInbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), terminalInbox.io)).toBe(0)
+    expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+  })
+
+  it("keeps pr checks --follow read-only when no check fact was requested", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
+    const before = await Array.fromAsync(app.events())
+    const checks = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io)).toBe(1)
+
+    expect(checks.stderr()).toContain("has no requested checks")
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(app.line.eligibility("PR1")).toMatchObject({ checks: { status: "not-requested" } })
+  })
+
+  it("returns an admitted check failure to a following submitter as one typed record", async () => {
+    const behavior = { failingCheck: true }
+    const app = await createApp(behavior)
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/red", "--follow", "--json"), submit.io), submit.stderr()).toBe(
+      1,
+    )
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      checks: [
+        {
+          pr: "PR1",
+          revision: 1,
+          run: "R1",
+          step: "check",
+          status: "failed",
+          command: ["line.step.check"],
+          classification: "carrier",
+          diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+          artifact: "/tmp/yrd-check.log",
+          error: { code: "check-failed", message: "check failed" },
+        },
+      ],
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", detail: "check failed" })
+
+    const human = outputIO({ color: true, columns: 160 })
+    expect(await runYrd(app, yrd("pr", "checks", "PR1"), human.io), human.stderr()).toBe(1)
+    expect(human.stdout()).toContain("COMMAND")
+    expect(human.stdout()).toContain("AGE")
+    expect(human.stdout()).toContain("line.step.check")
+    expect(human.stdout()).toContain("carrier")
+    expect(human.stdout()).toContain("src/model.ts")
+    expect(human.stdout()).toContain("/tmp/yrd-check.log")
+    expect(human.stdout()).toContain("\u001b]8;;file:///tmp/yrd-check.log")
+
+    const plain = outputIO({ color: false, columns: 160 })
+    expect(await runYrd(app, yrd("pr", "checks", "PR1"), plain.io), plain.stderr()).toBe(1)
+    expect(plain.stdout()).toContain("src/model.ts:12")
+    expect(plain.stdout()).toContain("/tmp/yrd-check.log")
+    expect(plain.stdout()).not.toContain("\u001b]")
+
+    behavior.failingCheck = false
+    const retry = (await app.line.admit({ prs: ["PR1"], retry: true }))[0]
+    if (retry === undefined) throw new Error("expected an explicit retry run")
+    await app.line.run(retry.id, { executor: "cli-test", leaseMs: 60_000 })
+    const recovered = outputIO()
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), recovered.io), recovered.stderr()).toBe(0)
+    const currentChecks = recovered
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(currentChecks).toHaveLength(1)
+    expect(currentChecks[0]).toMatchObject({ kind: "pr.check", run: retry.id, status: "passed" })
+  })
+
+  it("lets the existing Line drain finish a plain submit admission before integrating its cached proof", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns })
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/plain", "--json"), submit.io), submit.stderr()).toBe(0)
+    expect(checkRuns).toEqual([])
+    expect(app.line.get("R1")).toMatchObject({ status: "running", steps: [{ name: "check" }] })
+
+    const drain = outputIO()
+    expect(await runYrd(app, yrd("line", "integrate", "PR1", "--json"), drain.io), drain.stderr()).toBe(0)
+    expect(JSON.parse(drain.stdout())).toMatchObject({
+      results: [{ id: "R2", status: "passed", steps: [{ name: "merge" }], reusedFrom: "R1" }],
+    })
+    expect(checkRuns).toEqual(["check"])
+  })
+
+  it("follows an admitted PR through older work already occupying the shared Line capacity", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns })
+    const resolveRevision = (ref: string) => Promise.resolve(ref.endsWith("first") ? HEAD_SHA : MERGED_SHA)
+
+    const first = outputIO({ resolveRevision })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/first", "--json"), first.io), first.stderr()).toBe(0)
+    expect(app.line.get("R1")).toMatchObject({ status: "running", prs: [{ id: "PR1" }] })
+
+    const second = outputIO({ resolveRevision })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/second", "--follow", "--json"), second.io),
+      second.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(second.stdout())).toMatchObject({
+      checks: [{ pr: "PR2", status: "passed" }],
+    })
+    expect(checkRuns).toEqual(["check", "check"])
+  })
+
+  it("keeps --follow on the journal-tail path until an externally waiting check settles", async () => {
+    const app = await createApp({ waitingCheck: true })
+    let sleeps = 0
+    const controller = new AbortController()
+    const submit = outputIO({
+      resolveRevision: () => Promise.resolve(HEAD_SHA),
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          sleeps++
+          await app.line.finish(
+            "PR1",
+            {
+              step: "check",
+              token: "remote-check",
+              result: { status: "passed", output: { baseSha: BASE_SHA, candidateSha: HEAD_SHA } },
+            },
+            { executor: "remote-check", leaseMs: 60_000 },
+          )
+        },
+      },
+    })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/wait", "--follow", "--json"), submit.io), submit.stderr()).toBe(
+      0,
+    )
+    expect(sleeps).toBe(1)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      checks: [{ pr: "PR1", step: "check", status: "passed" }],
+    })
+  })
+
+  it("classifies the read-only main-health evidence as a base failure", async () => {
+    const app = await createApp({ baseFailure: true })
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/base-red", "--follow", "--json"), submit.io)).toBe(1)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      checks: [
+        {
+          pr: "PR1",
+          status: "failed",
+          classification: "base",
+          diagnostics: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} is red: test:fast failed`,
+          error: { code: "base-red" },
+        },
+      ],
+    })
+  })
+
   it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
 
     const submit = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("bay", "submit", "topic/superseded", "--json"), submit.io), submit.stderr()).toBe(0)
-    expect(JSON.parse(submit.stdout())).toMatchObject({ prs: [{ id: "PR1", status: "submitted" }] })
+    const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
+    expect(submitted).toMatchObject({ prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }] })
+    expect(submitted.prs[0]).not.toHaveProperty("status")
+    expect(submitted.prs[0]).not.toHaveProperty("reviews")
+    expect(submitted.prs[0]).not.toHaveProperty("comments")
+    expect(submitted.prs[0]).not.toHaveProperty("checkRequests")
 
     const close = outputIO()
     expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
-    expect(JSON.parse(close.stdout())).toMatchObject({
+    const closed = JSON.parse(close.stdout()) as { prs: Record<string, unknown>[] }
+    expect(closed).toMatchObject({
       command: "pr.close",
-      prs: [{ id: "PR1", status: "withdrawn" }],
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
     })
+    expect(closed.prs[0]).not.toHaveProperty("status")
 
     // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
     const again = outputIO()
@@ -689,7 +1054,10 @@ describe("runYrd", () => {
     expect(app.line.get("R1")?.shape).toMatchObject({
       results: { check: { baseSha: BASE_SHA, candidateSha: HEAD_SHA } },
     })
-    expect(app.line.get("R1")?.steps.map((step) => step.job?.status)).toEqual(["passed", "passed"])
+    expect(app.line.get("R1")?.steps.map((step) => step.job?.status)).toEqual(["passed"])
+    expect(await app.line.integrate({ prs: ["PR1"] }, { executor: "cli-test", leaseMs: 60_000 })).toMatchObject([
+      { id: "R2", status: "passed", reusedFrom: "R1", steps: [{ name: "merge" }] },
+    ])
   })
 
   it("recovers an expired interrupted line lease without advancing to merge", async () => {
@@ -782,7 +1150,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("line", "integrate", "--json"), idle.io)).toBe(0)
     expect(JSON.parse(idle.stdout())).toMatchObject({
       command: "line.integrate",
-      results: [{ id: "R1", prs: [{ id: "PR1" }], steps: [{ name: "check" }, { name: "merge" }], status: "passed" }],
+      results: [{ id: "R2", prs: [{ id: "PR1" }], steps: [{ name: "merge" }], reusedFrom: "R1", status: "passed" }],
     })
 
     const drained = outputIO()
@@ -848,7 +1216,7 @@ describe("runYrd", () => {
     expect(JSON.parse(integrated.stdout())).toMatchObject({
       results: [
         {
-          id: "R1",
+          id: "R3",
           status: "passed",
           prs: [{ id: "PR1" }, { id: "PR2" }],
         },
@@ -1142,6 +1510,33 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([1_000])
   })
 
+  it("uses one bounded journal-tail primitive for watch and follow consumers", async () => {
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    const snapshots: number[] = []
+    let latest = 0
+
+    const result = await tailJournal({
+      initial: latest,
+      intervalMs: 25,
+      scope: {
+        signal: controller.signal,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds)
+        },
+      },
+      load: async () => ++latest,
+      done: (snapshot) => snapshot === 2,
+      visit: (snapshot) => {
+        snapshots.push(snapshot)
+      },
+    })
+
+    expect(result).toBe(2)
+    expect(sleeps).toEqual([25, 25])
+    expect(snapshots).toEqual([0, 1, 2])
+  })
+
   it("keeps the line summary readable at 40 columns and bounded at 120 and 240 columns", async () => {
     const app = await createApp()
 
@@ -1196,13 +1591,16 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
 
     const scoped = outputIO()
-    expect(await runYrd(app, yrd("line", "log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)
+    expect(
+      await runYrd(app, yrd("line", "log", "--base", "main", "--pr", "PR1", "--json"), scoped.io),
+      scoped.stderr(),
+    ).toBe(0)
     const parsed = JSON.parse(scoped.stdout()) as {
       command: string
       rows: ReturnType<typeof lineLogRows>
     }
     expect(parsed.command).toBe("line.log")
-    expect(parsed.rows).toHaveLength(1)
+    expect(parsed.rows).toHaveLength(2)
     expect(parsed.rows[0]).toMatchObject({
       run: "R1",
       pr: "PR1",
@@ -1210,9 +1608,18 @@ describe("runYrd", () => {
       revision: "1",
       headSha: HEAD_SHA,
       baseSha: BASE_SHA,
-      outcome: "integrated",
+      outcome: "passed",
     })
     expect(parsed.rows[0]).not.toHaveProperty("location")
+    expect(parsed.rows[1]).toMatchObject({
+      run: "R2",
+      pr: "PR1",
+      base: "main",
+      revision: "1",
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      outcome: "integrated",
+    })
 
     const human = outputIO({ color: true, columns: 120 })
     expect(await runYrd(app, yrd("line", "log", "--base", "main"), human.io)).toBe(0)
@@ -1228,7 +1635,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("line", "integrate", "PR1"), outputIO().io)).toBe(0)
 
     const human = outputIO({ color: true, columns: 200 })
-    expect(await runYrd(app, yrd("line", "show", "R1"), human.io)).toBe(0)
+    expect(await runYrd(app, yrd("line", "show", "R1"), human.io), human.stderr()).toBe(0)
     expect(human.stdout()).toContain("RUN")
     expect(human.stdout()).toContain("STEP")
     expect(human.stdout()).toContain("REV")
@@ -1239,14 +1646,15 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("check")
 
     const json = outputIO()
-    expect(await runYrd(app, yrd("line", "show", "R1", "--json"), json.io)).toBe(0)
+    expect(await runYrd(app, yrd("line", "show", "R1", "--json"), json.io), json.stderr()).toBe(0)
     const parsed = JSON.parse(json.stdout()) as {
       command: string
       run: ReturnType<typeof lineShowData>
     }
     expect(parsed.command).toBe("line.show")
     expect(parsed.run.run).toBe("R1")
-    expect(parsed.run.steps).toHaveLength(2)
+    expect(parsed.run.outcome).toBe("passed")
+    expect(parsed.run.steps).toHaveLength(1)
     expect(parsed.run.steps[0]).toMatchObject({
       step: "check",
       revision: "check-v1",
@@ -1255,6 +1663,18 @@ describe("runYrd", () => {
     expect(parsed.run.steps[0]).toHaveProperty("detail")
     expect(parsed.run.steps[0]).toHaveProperty("output")
     expect(parsed.run.steps[0]).toHaveProperty("landing")
+
+    const integration = outputIO()
+    expect(await runYrd(app, yrd("line", "show", "R2", "--json"), integration.io), integration.stderr()).toBe(0)
+    expect(JSON.parse(integration.stdout())).toMatchObject({
+      command: "line.show",
+      run: {
+        run: "R2",
+        outcome: "integrated",
+        integration: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+        steps: [{ step: "merge", status: "passed" }],
+      },
+    })
   })
 
   it("maps the 10-row line log/show contract matrix directly from canonical fields", async () => {
@@ -1403,6 +1823,9 @@ describe("runYrd", () => {
           pushedAt: "2026-07-10T10:59:00.000Z",
         },
       ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
       submittedAt: "2026-07-10T10:59:00.000Z",
     }
     const statusRows = lineStatusRows(
