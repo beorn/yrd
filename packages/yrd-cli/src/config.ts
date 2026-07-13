@@ -8,11 +8,17 @@ const StepNameSchema = TextSchema.regex(/^[a-z][a-z0-9_-]*$/iu)
 const StepNamesSchema = z.array(StepNameSchema).superRefine((names, context) => {
   if (new Set(names).size !== names.length) context.addIssue({ code: "custom", message: "contains duplicate steps" })
 })
+const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements, context) => {
+  if (new Set(requirements).size !== requirements.length) {
+    context.addIssue({ code: "custom", message: "contains duplicate requirements" })
+  }
+})
 const RunnerSchema = z.enum(["local", "waiting"])
 const StepObjectSchema = z
   .object({
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
+    classification: z.enum(["base", "carrier"]).optional(),
     environment: TextSchema.optional(),
     /** Declarative per-step wall-clock bound; absent = the host default applies (21012 S1 — never silently unbounded). */
     timeoutMs: z.number().int().min(1).optional(),
@@ -34,6 +40,7 @@ const ProjectSchema = z
     base: TextSchema.optional(),
     batch: z.union([z.literal(false), z.number().int().min(0)]).optional(),
     steps: StepNamesSchema.optional(),
+    requires: RequirementsSchema.optional(),
     contest: ContestSchema,
   })
   .catchall(StepSchema)
@@ -43,6 +50,7 @@ export type YrdProjectConfig = Readonly<{
   base?: string
   batch?: false | number
   steps?: readonly string[]
+  requires?: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<z.infer<typeof ContestSchema>>
 }>
@@ -51,6 +59,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   base: string
   batch: false | number
   steps: readonly string[]
+  requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
 }>
@@ -66,11 +75,12 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, steps, contest, ...definitions } = parsed.data
+    const { base, batch, steps, requires, contest, ...definitions } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
       ...(steps === undefined ? {} : { steps }),
+      ...(requires === undefined ? {} : { requires }),
       definitions,
       contest,
     }
@@ -85,7 +95,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "contest"].includes(path)
+    !["base", "batch", "steps", "requires", "contest"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -98,7 +108,13 @@ function configError(issue: z.core.$ZodIssue): Error {
     ["contest.concurrency", "must be an integer >= 1"],
     ["contest.timeoutMs", "must be an integer >= 1"],
   ])
-  const message = known.get(path) ?? (path.endsWith(".runner") ? "must be local or waiting" : issue.message)
+  const message =
+    known.get(path) ??
+    (path.endsWith(".runner")
+      ? "must be local or waiting"
+      : path.endsWith(".classification")
+        ? "must be base or carrier"
+        : issue.message)
   return new Error(`yrd: config${path === "" ? "" : ` ${path}`} ${message}`)
 }
 
@@ -139,6 +155,7 @@ export async function loadYrdConfig(options: {
       base: parsed.base ?? options.defaultBase,
       batch: parsed.batch ?? 1,
       steps: parsed.steps ?? defaultSteps,
+      requires: parsed.requires ?? [],
       definitions,
       contest: {
         concurrency: parsed.contest.concurrency ?? 2,

@@ -1,11 +1,12 @@
-import { GitRefSchema, GitShaSchema, PRIdSchema, baseIdentity, type PR } from "@yrd/bay"
-import type { JsonValue } from "@yrd/core"
+import { GitRefSchema, GitShaSchema, PRIdSchema, baseIdentity, checkRequest, type PR } from "@yrd/bay"
+import { JsonSchema, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 
 export type QueueRunId = string
 export type StepName = string
 export type BatchConfig = false | number
+export type QueueRequirement = "review"
 
 export const PRSnapshotSchema = z
   .object({
@@ -49,6 +50,7 @@ export type InstalledStep = Readonly<{
   revision: string
   integrates: boolean
   needsIntegration: boolean
+  classification?: "base" | "carrier"
 }>
 
 export type QueueFailure = Readonly<{
@@ -62,6 +64,8 @@ export type QueueRecord = Readonly<{
   base: string
   steps: readonly InstalledStep[]
   initialIntegration?: IntegrationProof
+  initialResults?: Readonly<Record<string, JsonValue>>
+  reusedFrom?: QueueRunId
   startedAt: string
   parent?: QueueRunId
   isolationPart?: 0 | 1
@@ -70,7 +74,7 @@ export type QueueRecord = Readonly<{
 
 export type QueueStep = InstalledStep & Readonly<{ job?: Job }>
 
-export type QueueRun = Omit<QueueRecord, "initialIntegration" | "steps" | "failure"> &
+export type QueueRun = Omit<QueueRecord, "initialIntegration" | "initialResults" | "steps" | "failure"> &
   Readonly<{
     cursor: number
     integration?: IntegrationProof
@@ -99,8 +103,60 @@ export const QueuePauseSchema = z
 export type QueuesState = Readonly<{
   batchSize: number
   defaultSteps?: readonly StepName[]
+  requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
   records: Readonly<Record<QueueRunId, QueueRecord>>
+}>
+
+export type PREligibilityReason = Readonly<{
+  code:
+    | "draft"
+    | "checks-pending"
+    | "checks-failed"
+    | "review-required"
+    | "review-rejected"
+    | "queue-paused"
+    | "claimed"
+    | "checking"
+    | "rejected"
+    | "terminal"
+  message: string
+}>
+
+export type PREligibility = Readonly<{
+  pr: string
+  revision: number
+  runnable: boolean
+  reason?: PREligibilityReason
+  review: Readonly<{
+    required: boolean
+    approved: boolean
+    stale: boolean
+    decision?: "approve" | "reject"
+    actor?: string
+    ref?: string
+  }>
+  checks: Readonly<{
+    status: "not-requested" | "queued" | "checking" | "passed" | "failed"
+    queuedAt?: string
+    position?: number
+    run?: QueueRunId
+  }>
+}>
+
+export type PRCheckRecord = Readonly<{
+  pr: string
+  revision: number
+  status: PREligibility["checks"]["status"]
+  run?: QueueRunId
+  step?: StepName
+  classification?: "base" | "carrier"
+  queuedAt?: string
+  position?: number
+  command?: readonly string[]
+  diagnostics?: JsonValue
+  artifact?: string
+  error?: JobError
 }>
 
 export type QueueSummary = Readonly<{
@@ -135,11 +191,14 @@ export const QueueRecordSchema = z
             revision: z.string().trim().min(1),
             integrates: z.boolean(),
             needsIntegration: z.boolean(),
+            classification: z.enum(["base", "carrier"]).optional(),
           })
           .strict(),
       )
       .min(1),
     initialIntegration: IntegrationProofSchema.optional(),
+    initialResults: z.record(z.string(), JsonSchema).optional(),
+    reusedFrom: z.string().trim().min(1).optional(),
     startedAt: z.iso.datetime({ offset: true }),
     parent: z.string().trim().min(1).optional(),
     isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
@@ -151,10 +210,17 @@ export const QueueRecordSchema = z
   .strict()
 
 export const Queues = Object.freeze({
-  empty(options: Readonly<{ batchSize: number; defaultSteps?: readonly StepName[] }>): QueuesState {
+  empty(
+    options: Readonly<{
+      batchSize: number
+      defaultSteps?: readonly StepName[]
+      requires?: readonly QueueRequirement[]
+    }>,
+  ): QueuesState {
     return {
       batchSize: options.batchSize,
       ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
+      requires: options.requires ?? [],
       pauses: {},
       records: {},
     }
@@ -174,6 +240,7 @@ export const Queues = Object.freeze({
   },
 
   snapshot(pr: PR): PRSnapshot {
+    const baseSha = checkRequest(pr)?.baseSha ?? pr.baseSha
     return PRSnapshotSchema.parse({
       id: pr.id,
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -182,7 +249,7 @@ export const Queues = Object.freeze({
       base: baseIdentity(pr.base),
       revision: pr.revision,
       headSha: pr.headSha,
-      ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
+      ...(baseSha === undefined ? {} : { baseSha }),
     })
   },
 

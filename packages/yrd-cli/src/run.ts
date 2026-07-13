@@ -5,6 +5,7 @@ import { Command as CliCommand, CommanderError, Help, int } from "@silvery/comma
 import { createElement } from "react"
 import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
+import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { QueueRun, QueueSummary } from "@yrd/queue"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
@@ -12,10 +13,13 @@ import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
   QueueListView,
+  PRChecksView,
+  PREligibilityView,
   PRRunsView,
   QueueRunsView,
   QueueWatchView,
   QueueStatusView,
+  type PRCheckViewRecord,
   type QueueLogCoverage,
   PRResultView,
   queueLogAttempts,
@@ -319,6 +323,116 @@ async function closePrs(
   )
 }
 
+async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+  await app.bays.ready({ pr: selector })
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.ready", pr: prFact(pr), eligibility: app.queue.eligibility(pr.id) },
+    createElement(PRResultView, { prs: [pr], runs: [] }),
+  )
+}
+
+async function reviewPr(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ approve?: boolean; reject?: boolean; by?: string; ref?: string; note?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.approve === options.reject) usage("pr review requires exactly one of --approve or --reject")
+  await app.bays.review({
+    pr: selector,
+    actor: options.by ?? io.runner ?? "operator",
+    decision: options.approve === true ? "approve" : "reject",
+    ...(options.ref === undefined ? {} : { ref: options.ref }),
+    ...(options.note === undefined ? {} : { note: options.note }),
+  })
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after review`)
+  const review =
+    options.ref === undefined
+      ? app.bays.reviewState(pr.id).current
+      : pr.reviews.findLast((candidate) => candidate.ref === options.ref)
+  if (review === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain its current review`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.review", pr: prFact(pr), review, eligibility: app.queue.eligibility(pr.id) },
+    `${pr.id} revision ${pr.revision} ${review.decision} by ${review.actor}`,
+  )
+}
+
+async function commentPr(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ by?: string; ref?: string; note?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.note === undefined || options.note.trim() === "") usage("pr comment requires --note <text>")
+  await app.bays.comment({
+    pr: selector,
+    actor: options.by ?? io.runner ?? "operator",
+    note: options.note,
+    ...(options.ref === undefined ? {} : { ref: options.ref }),
+  })
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after comment`)
+  const comment =
+    options.ref === undefined ? pr.comments.at(-1) : pr.comments.findLast((candidate) => candidate.ref === options.ref)
+  if (comment === undefined) throw new Error(`yrd: PR '${pr.id}' did not retain its comment`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.comment", pr: prFact(pr), comment },
+    `${pr.id} revision ${pr.revision} commented by ${comment.actor}`,
+  )
+}
+
+async function prChecks(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  options: JsonOption & Readonly<{ follow?: boolean }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  if (selectors.length === 0) usage("pr checks requires at least one PR selector")
+  let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selectors)
+  if (options.follow === true) {
+    const missing = checks.find((check) => check.status === "not-requested")
+    if (missing !== undefined) refusal(`PR '${missing.pr}' has no requested checks; submit it before following`)
+    checks = await followCheckRecords(app, selectors, checks, io)
+  }
+  if (jsonEnabled(options)) {
+    for (const check of checks) io.stdout(stableJson({ kind: "pr.check", ...check }))
+  } else {
+    await printHuman(io, createElement(PRChecksView, { records: checks, now: io.now?.() ?? Date.now() }))
+  }
+  return checks.some((check) => check.status === "failed") ? 1 : 0
+}
+
+function checksTerminal(records: readonly PRCheckViewRecord[]): boolean {
+  return records.every((record) => record.status !== "queued" && record.status !== "checking")
+}
+
+async function followCheckRecords(
+  app: YrdCliApp,
+  selectors: readonly string[],
+  initial: readonly PRCheckViewRecord[],
+  io: YrdCliIO,
+): Promise<readonly PRCheckViewRecord[]> {
+  const scope = io.scope ?? app.scope
+  let records = [...initial]
+  while (!checksTerminal(records) && !scope.signal.aborted) {
+    await scope.sleep(1_000)
+    if (scope.signal.aborted) return records
+    await app.refresh()
+    if (scope.signal.aborted) return records
+    records = [...prCheckRecords(app, selectors)]
+  }
+  return records
+}
+
 async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | undefined> {
   const cwd = io.cwd ?? process.cwd()
   return io.resolveRevision?.(ref, cwd)
@@ -353,7 +467,14 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
 async function submitBays(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { base?: string; queue?: string; issue?: string; json?: boolean },
+  options: {
+    follow?: boolean
+    draft?: boolean
+    base?: string
+    queue?: string
+    issue?: string
+    json?: boolean
+  },
   io: YrdCliIO,
   command: "bay.submit" | "pr.submit",
 ): Promise<YrdCliExitCode> {
@@ -368,13 +489,36 @@ async function submitBays(
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
+      ...(options.draft === true ? { draft: true } : {}),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
     prs.push(pr)
   }
-  await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
-  return 0
+  if (command === "bay.submit") {
+    await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
+    return 0
+  }
+  for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
+  const admissions = await app.queue.admit({})
+  const followed =
+    options.follow === true ? await app.queue.admit({ prs: prs.map((pr) => pr.id) }, runtimeOptions(io)) : admissions
+  const selected = prs.map((pr) => pr.id)
+  let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
+  if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
+  const currentPrs = selected.map((selector) => requiredPr(app, selector))
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command, prs: currentPrs, checks },
+    createElement(PRResultView, {
+      prs: currentPrs,
+      runs: followed,
+      checks,
+      now: io.now?.() ?? Date.now(),
+    }),
+  )
+  return checks.some((check) => check.status === "failed") || followed.some((run) => run.status === "failed") ? 1 : 0
 }
 
 function requiredPr(app: YrdCliApp, selector: string): PR {
@@ -401,21 +545,29 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
 
 async function listPrs(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ base?: string; state?: string; issue?: string }>,
+  options: JsonOption & Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
-  const prs = app.bays
+  const rows = app.bays
     .prs()
     .filter((pr) => options.base === undefined || baseIdentity(pr.base) === baseIdentity(options.base))
     .filter((pr) => options.state === undefined || pr.status === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
-  const selected = new Set(prs.map((pr) => pr.id))
+    .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
+    .filter(({ pr, eligibility }) =>
+      options.needsReview === true
+        ? (pr.status === "pushed" || pr.status === "submitted") &&
+          eligibility.review.required &&
+          !eligibility.review.approved
+        : true,
+    )
+  const selected = new Set(rows.map(({ pr }) => pr.id))
   const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.list", prs, runs },
-    createElement(PRResultView, { prs, runs }),
+    { command: "pr.list", prs: rows.map(({ pr, eligibility }) => ({ ...pr, eligibility })), runs },
+    createElement(PREligibilityView, { rows }),
   )
 }
 
@@ -577,6 +729,37 @@ async function retryPr(app: YrdCliApp, selector: string, options: JsonOption, io
     createElement(QueueRunsView, { runs }),
   )
   return runs.some((run) => run.status === "failed") ? 1 : 0
+}
+
+function prFact(pr: DeepReadonly<PR>): Readonly<{
+  id: string
+  branch: string
+  base: string
+  revision: number
+  headSha: string
+  baseSha?: string
+}> {
+  return {
+    id: pr.id,
+    branch: pr.branch,
+    base: pr.base,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
+  }
+}
+
+function selectedCheckPRs(app: YrdCliApp, selectors: readonly string[]): PR[] {
+  return selectors.map((selector) => {
+    const pr = app.bays.pr(selector)
+    if (pr === undefined) refusal(`no PR '${selector}'`)
+    return pr
+  })
+}
+
+function prCheckRecords(app: YrdCliApp, selectors: readonly string[]): PRCheckViewRecord[] {
+  selectedCheckPRs(app, selectors)
+  return [...app.queue.checks(selectors)]
 }
 
 function issueRows(app: YrdCliApp, selected?: string): IssueLensRow[] {
@@ -1658,10 +1841,21 @@ function buildProgram(
     .option("--base <branch>", "scope PRs to one base")
     .option("--state <state>", "scope PRs to one native state")
     .option("--issue <ref>", "scope PRs to one issue reference")
+    .option("--needs-review", "show revisions needing approval")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listPrs(installed(), options, io))
+  pr.command("list")
+    .description("list pull requests")
+    .option("--base <branch>", "scope PRs to one base")
+    .option("--state <state>", "scope PRs to one native state")
+    .option("--issue <ref>", "scope PRs to one issue reference")
+    .option("--needs-review", "show revisions needing approval")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
   pr.command("submit [selector...]")
-    .description("submit bays or branches without running the queue")
+    .description("submit PR revisions and admit configured checks")
+    .option("--draft", "leave the PR pushed until pr ready")
+    .option("--follow", "follow admitted checks to a terminal result")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -1699,6 +1893,31 @@ function buildProgram(
     .description("retry a rejected PR or run")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await retryPr(installed(), selector, options, io)))
+  pr.command("ready <selector>")
+    .description("move a pushed PR revision into the queue")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => readyPr(installed(), selector, options, io))
+  pr.command("review <selector>")
+    .description("record a revision-bound review verdict")
+    .option("--approve", "approve the current revision")
+    .option("--reject", "reject the current revision")
+    .option("--by <actor>", "reviewer identity")
+    .option("--ref <id>", "idempotency reference")
+    .option("--note <text>", "review note")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => reviewPr(installed(), selector, options, io))
+  pr.command("comment <selector>")
+    .description("record a non-gating revision comment")
+    .option("--by <actor>", "commenter identity")
+    .option("--ref <id>", "idempotency reference")
+    .requiredOption("--note <text>", "comment text")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => commentPr(installed(), selector, options, io))
+  pr.command("checks <selector...>")
+    .description("show admitted checks for current PR revisions")
+    .option("--follow", "follow active checks to a terminal result")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => setExit(await prChecks(installed(), selectors, options, io)))
   pr.command("close [selector...]")
     .description("close a live PR without merging (leaves it out of the queue)")
     .option("--json", "emit stable JSON")

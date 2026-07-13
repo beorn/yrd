@@ -35,9 +35,12 @@ import {
   RefreshedBaySchema,
   baseIdentity,
   defaultBayBranch,
+  checkRequest,
+  checksRequested,
   emptyBaysState,
   isLivePR,
   prForBay,
+  reviewState,
   resolveBay,
   resolvePR,
   type Bay,
@@ -45,6 +48,9 @@ import {
   type DeprovisionBayInput,
   type DeprovisionedBay,
   type PR,
+  type PRComment,
+  type PRReview,
+  type PRReviewState,
   type PRRevision,
   type ProvisionBayInput,
   type ProvisionedBay,
@@ -100,6 +106,7 @@ const SubmitArgsSchema = z.union([
       baseSha: GitShaSchema.optional(),
       name: TextSchema.optional(),
       issue: TextSchema.optional(),
+      draft: z.boolean().optional(),
     })
     .strict(),
 ])
@@ -108,6 +115,7 @@ export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
 export type SubmitSelectionOptions = Readonly<{
   base?: string
   issue?: string
+  draft?: boolean
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
 }>
@@ -122,6 +130,28 @@ const PrEditArgsSchema = z
   .strict()
   .refine(({ issue, note }) => issue !== undefined || note !== undefined, { message: "'issue' or 'note' is required" })
 export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
+
+const PrReadyArgsSchema = z.object({ pr: TextSchema }).strict()
+export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
+const PrRequestChecksArgsSchema = z.object({ pr: TextSchema, baseSha: GitShaSchema.optional() }).strict()
+export type PrRequestChecksArgs = z.infer<typeof PrRequestChecksArgsSchema>
+
+const PRReviewDecisionSchema = z.enum(["approve", "reject"])
+const PrReviewArgsSchema = z
+  .object({
+    pr: TextSchema,
+    actor: TextSchema,
+    decision: PRReviewDecisionSchema,
+    ref: TextSchema.optional(),
+    note: TextSchema.optional(),
+  })
+  .strict()
+export type PrReviewArgs = z.infer<typeof PrReviewArgsSchema>
+
+const PrCommentArgsSchema = z
+  .object({ pr: TextSchema, actor: TextSchema, note: TextSchema, ref: TextSchema.optional() })
+  .strict()
+export type PrCommentArgs = z.infer<typeof PrCommentArgsSchema>
 
 const BayOpenedSchema = z
   .object({
@@ -164,6 +194,28 @@ const PRIntegratedSchema = z
     baseSha: GitShaSchema,
   })
   .strict()
+const PRReviewFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    actor: TextSchema,
+    decision: PRReviewDecisionSchema,
+    ref: TextSchema.optional(),
+    note: TextSchema.optional(),
+  })
+  .strict()
+const PRCommentFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    actor: TextSchema,
+    note: TextSchema,
+    ref: TextSchema.optional(),
+  })
+  .strict()
+const PRCheckRequestFactSchema = PRRevisionSchema.extend({ baseSha: GitShaSchema.optional() }).strict()
 
 export type BayWorkspace = Readonly<{
   revision: string
@@ -226,6 +278,10 @@ export type BayCommands = Readonly<{
   pr: Readonly<{
     close: CommandHandler<PrCloseArgs, BayState>
     edit: CommandHandler<PrEditArgs, BayState>
+    ready: CommandHandler<PrReadyArgs, BayState>
+    review: CommandHandler<PrReviewArgs, BayState>
+    comment: CommandHandler<PrCommentArgs, BayState>
+    requestChecks: CommandHandler<PrRequestChecksArgs, BayState>
   }>
 }>
 
@@ -235,6 +291,8 @@ export type Bays = Readonly<{
   list(): readonly DeepReadonly<Bay>[]
   pr(selector: string): DeepReadonly<PR> | undefined
   prs(): readonly DeepReadonly<PR>[]
+  reviewState(selector: string): DeepReadonly<PRReviewState>
+  checksRequested(selector: string): boolean
   open(args: OpenBayArgs): Promise<CommandResult>
   refresh(args: RefreshBayArgs): Promise<CommandResult>
   intake(args: IntakePRArgs): Promise<CommandResult>
@@ -243,11 +301,28 @@ export type Bays = Readonly<{
   close(args: CloseBayArgs): Promise<CommandResult>
   closePr(args: PrCloseArgs): Promise<CommandResult>
   editPr(args: PrEditArgs): Promise<CommandResult>
+  ready(args: PrReadyArgs): Promise<CommandResult>
+  review(args: PrReviewArgs): Promise<CommandResult>
+  comment(args: PrCommentArgs): Promise<CommandResult>
+  requestChecks(args: PrRequestChecksArgs): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
 
-type BayActions = Pick<Bays, "open" | "refresh" | "intake" | "submit" | "close" | "closePr" | "editPr">
+type BayActions = Pick<
+  Bays,
+  | "open"
+  | "refresh"
+  | "intake"
+  | "submit"
+  | "close"
+  | "closePr"
+  | "editPr"
+  | "ready"
+  | "review"
+  | "comment"
+  | "requestChecks"
+>
 
 export type BayBaseTarget = Readonly<{ base: string; baseSha?: string }>
 export type ResolveBayBase = (base: string) => BayBaseTarget | Promise<BayBaseTarget>
@@ -355,6 +430,7 @@ export function createBays(
 
     if (pr?.status === "submitted") return pr
     if (pr?.status === "pushed") {
+      if (options.draft === true) return pr
       await submit({ pr: pr.id })
       const submitted = resolvePR(state(), pr.id)
       if (submitted === undefined) {
@@ -377,6 +453,7 @@ export function createBays(
       )
       if (live !== undefined) {
         if (live.status === "submitted") return live
+        if (options.draft === true) return live
         await actions.submit({ pr: live.id })
         const submitted = resolvePR(state(), live.id)
         if (submitted === undefined) {
@@ -389,6 +466,7 @@ export function createBays(
         headSha,
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
+        ...(options.draft === true ? { draft: true } : {}),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -416,6 +494,8 @@ export function createBays(
     list: () => Object.freeze(Object.values(state().byId)),
     pr: (selector) => resolvePR(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
+    reviewState: (selector) => reviewState(required(resolvePR(state(), selector), "PR", selector)),
+    checksRequested: (selector) => checksRequested(required(resolvePR(state(), selector), "PR", selector)),
     submitSelection,
     open,
     refresh: actions.refresh,
@@ -424,6 +504,10 @@ export function createBays(
     close: actions.close,
     closePr: actions.closePr,
     editPr: actions.editPr,
+    ready: actions.ready,
+    review: actions.review,
+    comment: actions.comment,
+    requestChecks: actions.requestChecks,
   })
 }
 
@@ -452,6 +536,9 @@ export function withBays(options: WithBaysOptions) {
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/edited": PrEditArgsSchema,
+        "pr/reviewed": PRReviewFactSchema,
+        "pr/commented": PRCommentFactSchema,
+        "pr/checks-requested": PRCheckRequestFactSchema,
       },
       project: projectBays,
       create(yrd) {
@@ -469,6 +556,10 @@ export function withBays(options: WithBaysOptions) {
               close: (args) => yrd.dispatch(commands.bay.close, args),
               closePr: (args) => yrd.dispatch(commands.pr.close, args),
               editPr: (args) => yrd.dispatch(commands.pr.edit, args),
+              ready: (args) => yrd.dispatch(commands.pr.ready, args),
+              review: (args) => yrd.dispatch(commands.pr.review, args),
+              comment: (args) => yrd.dispatch(commands.pr.comment, args),
+              requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
             },
             { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
           ),
@@ -529,6 +620,29 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         visibility: "public",
         params: PrEditArgsSchema,
         apply: (state: BayState, args: PrEditArgs) => editPr(state, args),
+      }),
+      ready: command({
+        title: "Mark a PR ready",
+        visibility: "public",
+        params: PrReadyArgsSchema,
+        apply: (state: BayState, args: PrReadyArgs) => readyPr(state, args),
+      }),
+      review: command({
+        title: "Review a PR revision",
+        visibility: "public",
+        params: PrReviewArgsSchema,
+        apply: (state: BayState, args: PrReviewArgs) => reviewPr(state, args),
+      }),
+      comment: command({
+        title: "Comment on a PR revision",
+        visibility: "public",
+        params: PrCommentArgsSchema,
+        apply: (state: BayState, args: PrCommentArgs) => commentPr(state, args),
+      }),
+      requestChecks: command({
+        title: "Request checks for a PR revision",
+        params: PrRequestChecksArgsSchema,
+        apply: (state: BayState, args: PrRequestChecksArgs) => requestPrChecks(state, args),
       }),
     },
   }
@@ -663,8 +777,87 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     revision,
   }
   return {
-    events: [event("pr/pushed", pushed), event("pr/submitted", { pr: id, revision, headSha: args.headSha })],
+    events: [
+      event("pr/pushed", pushed),
+      ...(args.draft === true ? [] : [event("pr/submitted", { pr: id, revision, headSha: args.headSha })]),
+    ],
   }
+}
+
+function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  if (pr.status === "submitted") return { events: [] }
+  return submitWork(state, args, "main")
+}
+
+function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const fact = PRReviewFactSchema.parse({
+    pr: pr.id,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    actor: args.actor,
+    decision: args.decision,
+    ...(args.ref === undefined ? {} : { ref: args.ref }),
+    ...(args.note === undefined ? {} : { note: args.note }),
+  })
+  return reviewFact(pr, fact, "review")
+}
+
+function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const fact = PRCommentFactSchema.parse({
+    pr: pr.id,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    actor: args.actor,
+    note: args.note,
+    ...(args.ref === undefined ? {} : { ref: args.ref }),
+  })
+  return reviewFact(pr, fact, "comment")
+}
+
+function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "rejected") {
+    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not checkable`)
+  }
+  const baseSha = args.baseSha ?? pr.baseSha
+  const current = checkRequest(pr)
+  if (current !== undefined && current.baseSha === baseSha) return { events: [] }
+  return {
+    events: [
+      event("pr/checks-requested", {
+        pr: pr.id,
+        revision: pr.revision,
+        headSha: pr.headSha,
+        ...(baseSha === undefined ? {} : { baseSha }),
+      }),
+    ],
+  }
+}
+
+function reviewFact(
+  pr: DeepReadonly<PR>,
+  fact: z.infer<typeof PRReviewFactSchema> | z.infer<typeof PRCommentFactSchema>,
+  kind: "review" | "comment",
+) {
+  if (fact.ref !== undefined) {
+    const prior = [...pr.reviews, ...pr.comments].find((candidate) => candidate.ref === fact.ref)
+    if (prior !== undefined) {
+      const same =
+        prior.revision === fact.revision &&
+        prior.headSha === fact.headSha &&
+        prior.actor === fact.actor &&
+        prior.ref === fact.ref &&
+        (kind === "review"
+          ? "decision" in prior && "decision" in fact && prior.decision === fact.decision && prior.note === fact.note
+          : !("decision" in prior) && !("decision" in fact) && prior.note === fact.note)
+      if (same) return { events: [] }
+      throw new Error(`yrd: review ref '${fact.ref}' already records a different fact`)
+    }
+  }
+  return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
 }
 
 function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string, base: string, except?: string): void {
@@ -775,6 +968,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               headSha: pushed.headSha,
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
               revisions: [record],
+              reviews: [],
+              comments: [],
+              checkRequests: [],
             }
           : {
               ...existing,
@@ -850,6 +1046,37 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             ...(changed.issue === undefined ? {} : { issue: changed.issue }),
             ...(changed.note === undefined ? {} : { note: changed.note }),
           })
+    }
+    case "pr/reviewed": {
+      const reviewed = PRReviewFactSchema.parse(data)
+      const pr = current.prs[reviewed.pr]
+      if (pr === undefined) return state
+      const review: PRReview = { ...reviewed, at: applied.ts }
+      return patchPR(pr, { reviews: [...pr.reviews, review] })
+    }
+    case "pr/commented": {
+      const commented = PRCommentFactSchema.parse(data)
+      const pr = current.prs[commented.pr]
+      if (pr === undefined) return state
+      const comment: PRComment = { ...commented, at: applied.ts }
+      return patchPR(pr, { comments: [...pr.comments, comment] })
+    }
+    case "pr/checks-requested": {
+      const requested = PRCheckRequestFactSchema.parse(data)
+      const pr = current.prs[requested.pr]
+      if (pr === undefined) return state
+      if (pr.revision !== requested.revision || pr.headSha !== requested.headSha) return state
+      return patchPR(pr, {
+        checkRequests: [
+          ...pr.checkRequests,
+          {
+            revision: requested.revision,
+            headSha: requested.headSha,
+            ...(requested.baseSha === undefined ? {} : { baseSha: requested.baseSha }),
+            at: applied.ts,
+          },
+        ],
+      })
     }
     case "job/requested": {
       if (typeof data.definition !== "string" || !isBayJob(data.definition)) return state

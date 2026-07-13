@@ -62,6 +62,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       base: "main",
       batch: 1,
       steps: ["security", "merge", "publish"],
+      requires: [],
       definitions: {
         security: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
@@ -84,10 +85,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       defaultSteps: ["security", "merge", "publish"],
     })
     expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
-    expect(Object.keys(app.commands.pr)).toEqual(["close", "edit"])
+    expect(Object.keys(app.commands.pr)).toEqual(["close", "edit", "ready", "review", "comment", "requestChecks"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
     expect(app.commands.pr.close.metadata?.visibility).toBe("public")
+    expect(app.commands.pr.review.metadata?.visibility).toBe("public")
+    expect(app.commands.queue.admit.metadata?.visibility).toBe("internal")
     expect(app.commands.queue.run.metadata?.visibility).toBe("public")
 
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -96,6 +99,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     const evaluatorRevision = app.jobs.definition("contest.evaluator.security").revision
+    const queueRevision = app.jobs.definition("queue.step.security").revision
     await app.close()
 
     const changedTimeout = await createDefaultYrdApp({
@@ -108,6 +112,23 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
     expect(changedTimeout.jobs.definition("contest.evaluator.security").revision).not.toBe(evaluatorRevision)
     await changedTimeout.close()
+
+    const changedLineTimeout = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config: {
+        ...config,
+        definitions: {
+          ...config.definitions,
+          security: { ...config.definitions.security!, timeoutMs: 30_000 },
+        },
+      },
+    })
+    expect(changedLineTimeout.jobs.definition("queue.step.security").revision).not.toBe(queueRevision)
+    await changedLineTimeout.close()
   })
 
   it("normalizes remote aliases of the configured queue and refuses duplicate payload admission", async () => {
@@ -118,6 +139,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       base: "main",
       batch: 1,
       steps: ["check", "merge"],
+      requires: [],
       definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
     }
@@ -159,6 +181,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       base: "main",
       batch: 1,
       steps: ["check", "merge"],
+      requires: [],
       definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
     }
@@ -188,6 +211,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       base: "main",
       batch: 1,
       steps: ["check", "merge"],
+      requires: [],
       definitions: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
@@ -221,6 +245,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       base: "main",
       batch: 1,
       steps: ["check", "merge"],
+      requires: [],
       definitions: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: {
@@ -254,6 +279,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       base: "main",
       batch: 1,
       steps: ["check", "merge", "deploy"],
+      requires: [],
       definitions: {
         check: { run: "true", runner: "local" },
         merge: { runner: "local" },
@@ -418,6 +444,135 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     ).toBe(0)
     expect(JSON.parse(json)).toMatchObject({ command: "dashboard", results: [{ base: "main" }] })
     expect(jsonError).toBe("")
+  })
+
+  it("preserves a literal shipping-config main-health failure through submit --follow and pr checks", async () => {
+    const { repo } = await repository()
+    const tentScript = join(repo, ".claude", "skills", "tent", "scripts", "tent.ts")
+    await mkdir(join(repo, ".claude", "skills", "tent", "scripts"), { recursive: true })
+    await writeFile(
+      tentScript,
+      [
+        'const index = process.argv.indexOf("--base-sha")',
+        'const baseSha = index < 0 ? "unknown" : (process.argv[index + 1] ?? "unknown")',
+        "console.log(`[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`)",
+        "process.exitCode = 1",
+        "",
+      ].join("\n"),
+    )
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      [
+        "base: main",
+        "batch: 1",
+        "steps: [main-health, check, merge]",
+        "requires: [review]",
+        "",
+        "main-health:",
+        "  classification: base",
+        "  run: |",
+        '    bun .claude/skills/tent/scripts/tent.ts main-health-read --base-sha "$YRD_BASE_SHA"',
+        "check: |",
+        "  git submodule update --init --recursive --jobs 20 &&",
+        "  bun install --frozen-lockfile --ignore-scripts &&",
+        "  bun run build:info &&",
+        "  bun fix:all &&",
+        '  status="$(git status --porcelain)" &&',
+        '  if test -n "$status"; then printf \'%s\\n\' "$status" >&2; exit 1; fi &&',
+        "  bun run typecheck &&",
+        '  bun run test:affected "$YRD_BASE_SHA"',
+        "merge: {}",
+        "",
+        "contest:",
+        "  concurrency: 2",
+        "  timeoutMs: 1800000",
+        "  evaluators: [check]",
+        "",
+      ].join("\n"),
+    )
+    await git(repo, "add", ".yrd.yml", ".claude/skills/tent/scripts/tent.ts")
+    await git(repo, "commit", "-qm", "shipping config")
+    const baseSha = await git(repo, "rev-parse", "main")
+
+    let submitStdout = ""
+    let submitStderr = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--follow", "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            submitStdout += text
+          },
+          stderr: (text) => {
+            submitStderr += text
+          },
+        },
+      ),
+      submitStderr,
+    ).toBe(1)
+    expect(submitStderr).toBe("")
+    const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
+    expect(submitted).toMatchObject({
+      command: "pr.submit",
+      checks: [
+        {
+          pr: "PR1",
+          revision: 1,
+          run: "R1",
+          step: "main-health",
+          status: "failed",
+          classification: "base",
+          command: ["sh", "-c", expect.stringContaining("main-health-read")],
+          diagnostics: expect.stringContaining(
+            `[yrd-base-health] base ${baseSha.slice(0, 12)} is red: test:fast failed`,
+          ),
+        },
+      ],
+    })
+
+    let checksStdout = ""
+    let checksStderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "checks", "PR1", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          checksStdout += text
+        },
+        stderr: (text) => {
+          checksStderr += text
+        },
+      }),
+      checksStderr,
+    ).toBe(1)
+    expect(checksStderr).toBe("")
+    expect(JSON.parse(checksStdout)).toEqual({ kind: "pr.check", ...submitted.checks[0] })
+
+    for (const color of [false, true]) {
+      let stdout = ""
+      let stderr = ""
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "checks", "PR1"], {
+          cwd: repo,
+          columns: 180,
+          color,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        }),
+        stderr,
+      ).toBe(1)
+      expect(stderr).toBe("")
+      expect(stdout).toContain("main-health")
+      expect(stdout).toContain("base")
+      expect(stdout).toContain("test:fast failed")
+      expect(stdout).toContain("main-health-read")
+      if (color) expect(stdout).toContain("\u001b[")
+      else expect(stdout).not.toContain("\u001b[")
+    }
   })
 
   it("refuses the retired config wrapper before plain or JSON startup mutates state", async () => {

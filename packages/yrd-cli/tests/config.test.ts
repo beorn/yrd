@@ -14,7 +14,8 @@ describe("Yrd config", () => {
 base: main
 batch: 4
 steps: [check, review, merge, deploy]
-check: bun run check
+requires: [review]
+check: { run: bun run check, classification: base }
 review: { run: bun run review, runner: waiting }
 merge: { run: git merge --no-ff "$YRD_TARGET" }
 deploy: bun run deploy
@@ -25,8 +26,9 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
       base: "main",
       batch: 4,
       steps: ["check", "review", "merge", "deploy"],
+      requires: ["review"],
       definitions: {
-        check: { run: "bun run check", runner: "local" },
+        check: { run: "bun run check", runner: "local", classification: "base" },
         review: { run: "bun run review", runner: "waiting" },
         merge: { run: 'git merge --no-ff "$YRD_TARGET"', runner: "local" },
         deploy: { run: "bun run deploy", runner: "local" },
@@ -54,6 +56,7 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
         base: "trunk",
         batch: 3,
         steps: ["check", "merge"],
+        requires: [],
         definitions: { check: { runner: "local" }, merge: { runner: "local" } },
         contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
       },
@@ -64,6 +67,9 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
     [{ legacy: true }, "legacy is not supported"],
     [{ batch: 1.5 }, "batch must be an integer >= 0"],
     [{ steps: ["check", "check"] }, "steps contains duplicate steps"],
+    [{ requires: ["approval"] }, "requires"],
+    [{ requires: ["review", "review"] }, "requires contains duplicate requirements"],
+    [{ check: { run: "bun run check", classification: "branch" } }, "check.classification"],
     [{ check: { runner: "remote" } }, "check.runner must be local or waiting"],
     [{ contest: { concurrency: 0 } }, "contest.concurrency must be an integer >= 1"],
   ])("rejects invalid policy %#", (value, message) => {
