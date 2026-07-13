@@ -3,6 +3,7 @@
  * @level l3
  * @consumer @yrd/cli host
  */
+import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
@@ -393,10 +394,14 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const { repo, featureSha } = await repository()
     const baseSha = await git(repo, "rev-parse", "main")
     const childPidPath = join(repo, "active-check.pid")
+    const grandchildPidPath = join(repo, "active-check-grandchild.pid")
     const progressPath = join(repo, "active-check.progress")
     const finishedPath = join(repo, "active-check.finished")
+    const scratchPath = join(repo, "active-check.scratch")
     const command = [
       `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
+      `pwd > ${JSON.stringify(scratchPath)}`,
+      `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
       "i=0",
       `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
       `touch ${JSON.stringify(finishedPath)}`,
@@ -415,15 +420,20 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     let childPid: number | undefined
+    let grandchildPid: number | undefined
     try {
       await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true))
       childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
       expect(Number.isSafeInteger(childPid)).toBe(true)
+      await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true))
+      grandchildPid = Number.parseInt((await readFile(grandchildPidPath, "utf8")).trim(), 10)
+      expect(Number.isSafeInteger(grandchildPid)).toBe(true)
       await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""))
 
       cli.kill("SIGINT")
       await expect(cli.exited).resolves.toBe(130)
       await vi.waitFor(() => expect(processExists(childPid!)).toBe(false))
+      await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false))
 
       await using recovery = await createYrdHost({ cwd: repo })
       const recovered = await recovery.app.line.recover({
@@ -440,10 +450,18 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       ])
       expect(await git(repo, "rev-parse", "main")).toBe(baseSha)
       expect(await Bun.file(finishedPath).exists()).toBe(false)
+      expect(existsSync((await readFile(scratchPath, "utf8")).trim())).toBe(false)
     } finally {
       if (childPid !== undefined && processExists(childPid)) {
         try {
           process.kill(-childPid, "SIGKILL")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+      if (grandchildPid !== undefined && processExists(grandchildPid)) {
+        try {
+          process.kill(grandchildPid, "SIGKILL")
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
         }

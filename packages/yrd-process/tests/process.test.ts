@@ -48,6 +48,41 @@ describe("Process", () => {
     expect(result.signal).not.toBeNull()
   })
 
+  it("settles active runs, including SIGKILL escalation, before close resolves", async () => {
+    const kills: NodeJS.Signals[] = []
+    const exited = Promise.withResolvers<number>()
+    const spawn: Spawn = () => ({
+      pid: 4242,
+      stdout: bytes(""),
+      stderr: bytes(""),
+      exited: exited.promise,
+      signalCode: "SIGKILL",
+      kill(signal = "SIGTERM") {
+        kills.push(signal as NodeJS.Signals)
+        if (signal === "SIGKILL") exited.resolve(137)
+      },
+    })
+    const process = createProcess({ killGraceMs: 1, inject: { spawn } })
+    const running = process.run({ argv: ["stubborn"] })
+    const hung = Symbol("hung")
+    let closed: typeof hung | "closed" | unknown
+    try {
+      closed = await Promise.race([
+        process.close().then(
+          () => "closed" as const,
+          (error: unknown) => error,
+        ),
+        Bun.sleep(100).then(() => hung),
+      ])
+    } finally {
+      exited.resolve(137)
+    }
+
+    expect(closed).toBe("closed")
+    await expect(running).resolves.toMatchObject({ exitCode: 137 })
+    expect(kills).toEqual(["SIGTERM", "SIGKILL"])
+  })
+
   it("bounds captured stdout and terminates a process that exceeds it", async () => {
     const killed: NodeJS.Signals[] = []
     const spawn: Spawn = () => ({
