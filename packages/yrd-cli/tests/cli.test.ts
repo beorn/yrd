@@ -8,7 +8,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  createCorrelationSettlementJobDef,
+  withBays,
+  type BayWorkspace,
+  type CorrelationSettlementJobDef,
+  type PR,
+} from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { createMemoryJournal, createYrd, createYrdDef, EventSchema, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -194,6 +201,7 @@ async function createApp(
     mergeRuns?: string[]
     failingCheck?: boolean
     checkFailure?: Readonly<{ code: string; message: string; artifact?: string }>
+    terminal?: CorrelationSettlementJobDef
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -236,13 +244,22 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? false })
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: options.batch ?? false,
+    ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+  })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
+  const terminalDefs = options.terminal === undefined ? {} : { [options.terminal.name]: options.terminal }
   const base = pipe(
     createYrdDef(),
-    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs, terminalDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main" }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: "main",
+      ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
@@ -461,6 +478,48 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
 }
 
 describe("runYrd", () => {
+  it("carries an opaque CLI correlation through PR, Run, log, and terminal settlement JSON", async () => {
+    const calls: Array<{ namespace: string; id: string; outcome: string }> = []
+    const terminal = createCorrelationSettlementJobDef({
+      revision: "test-correlation-v1",
+      settle(input) {
+        calls.push({ ...input.correlation, outcome: input.outcome })
+        return { status: "passed", output: { correlation: input.correlation, disposition: "settled" } }
+      },
+    })
+    const app = await createApp({ terminal })
+    const correlation = { namespace: "tribe-request", id: "pr 61's docs" }
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/direct", "--correlation", `${correlation.namespace}:${correlation.id}`, "--json"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", correlation, revisions: [{ revision: 1, correlation }] }],
+    })
+
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
+    expect(JSON.parse(run.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ prs: [{ id: "PR1", correlation }] }],
+    })
+    expect(calls).toEqual([{ ...correlation, outcome: "integrated" }])
+
+    const log = outputIO()
+    expect(await runYrd(app, yrd("log", "--all", "--json"), log.io), log.stderr()).toBe(0)
+    expect(JSON.parse(log.stdout())).toMatchObject({
+      command: "log",
+      results: [{ finished: [{ prs: [{ id: "PR1", correlation }] }] }],
+    })
+  })
+
   it("projects git bay onto the public bay subtree and exposes no internal operations", async () => {
     const app = await createApp()
     const gitHelp = outputIO()
@@ -1081,6 +1140,27 @@ describe("runYrd", () => {
     // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
     const again = outputIO()
     expect(await runYrd(app, yrd("pr", "close", "PR1"), again.io)).not.toBe(0)
+  })
+
+  it("settles a correlated withdrawal before `pr close` reports success", async () => {
+    const calls: Array<{ id: string; outcome: string }> = []
+    const terminal = createCorrelationSettlementJobDef({
+      revision: "test-correlation-v1",
+      settle(input) {
+        calls.push({ id: input.correlation.id, outcome: input.outcome })
+        return { status: "passed", output: { correlation: input.correlation, disposition: "settled" } }
+      },
+    })
+    const app = await createApp({ terminal })
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/withdraw", "--correlation", "tribe-request:req-1"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+
+    const close = outputIO()
+    expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
+    expect(calls).toEqual([{ id: "req-1", outcome: "withdrawn" }])
   })
 
   it("requires the exact waiting Job owner to finish and resume the same durable run", async () => {

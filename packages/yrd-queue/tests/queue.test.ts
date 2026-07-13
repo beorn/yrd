@@ -4,7 +4,15 @@
  * @consumer @yrd/queue
  */
 import { describe, expect, expectTypeOf, it } from "vitest"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import {
+  createBayJobDefs,
+  createCorrelationSettlementJobDef,
+  withBays,
+  type BayWorkspace,
+  type Correlation,
+  type CorrelationSettlement,
+  type CorrelationSettlementJobDef,
+} from "@yrd/bay"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
@@ -63,6 +71,7 @@ function queuePlugin(
     merge?: (input: StepExecution<ReviewedShape>) => JobResult<{ commit: string; baseSha: string }>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
+    terminal?: CorrelationSettlementJobDef
   }> = {},
 ) {
   const check = withStep(
@@ -94,6 +103,7 @@ function queuePlugin(
     steps: [check, review, merge, deploy] as const,
     batch: options.batch ?? false,
     defaultSteps: ["check", "review", "merge", "deploy"],
+    ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
   })
 }
 
@@ -105,22 +115,134 @@ async function createQueueApp(
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = queuePlugin(options)
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const terminalDefs = options.terminal === undefined ? {} : { [options.terminal.name]: options.terminal }
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs, terminalDefs] }),
+    withBays({
+      jobs: bayJobs,
+      ...(options.terminal === undefined ? {} : { terminal: options.terminal }),
+    }),
+  )
   const definition = queue(base)
   return createYrd(definition, {
     inject: { journal, id, clock },
   })
 }
 
-async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, branch: string, base = "main") {
+async function submitBranch(
+  app: Awaited<ReturnType<typeof createQueueApp>>,
+  branch: string,
+  base = "main",
+  correlation?: Correlation,
+) {
   const digit = (Object.keys(app.state().bays.prs).length + 1).toString(16)
-  await app.bays.submit({ branch, headSha: digit.repeat(40), base })
+  await app.bays.submit({
+    branch,
+    headSha: digit.repeat(40),
+    base,
+    ...(correlation === undefined ? {} : { correlation }),
+  })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
   return pr
 }
 
 describe("Queue", () => {
+  it("settles integrated and rejected correlations once, no-ops a resubmission, and ignores uncorrelated PRs", async () => {
+    const integratedCorrelation = { namespace: "tribe-request", id: "integrate custom/61" }
+    const retriedCorrelation = { namespace: "tribe-request", id: "reject custom/62" }
+    const pending = new Set([integratedCorrelation.id, retriedCorrelation.id, "unrelated-request"])
+    const calls: Array<{
+      correlation: Correlation
+      outcome: string
+      eventId: string
+      disposition: "settled" | "already-settled"
+    }> = []
+    const settlement: CorrelationSettlement = {
+      revision: "test-correlation-v1",
+      settle(input, context) {
+        const disposition = pending.delete(input.correlation.id) ? "settled" : "already-settled"
+        calls.push({ correlation: input.correlation, outcome: input.outcome, eventId: context.id, disposition })
+        return { status: "passed", output: { correlation: input.correlation, disposition } }
+      },
+    }
+    const terminal = createCorrelationSettlementJobDef(settlement)
+    const journal = createMemoryJournal()
+    let rejectFirstRevision = true
+    const options = {
+      terminal,
+      check: (input: StepExecution<PRShape>): JobResult<CheckResult> =>
+        input.prs[0]?.branch === "issue/retried-request" && rejectFirstRevision
+          ? { status: "failed", error: { code: "check-failed", message: "tests failed" } }
+          : { status: "passed", output: { checked: true } },
+    }
+    const app = await createQueueApp(options, journal)
+    const integrated = await submitBranch(app, "issue/integrated-request", "main", integratedCorrelation)
+    const retried = await submitBranch(app, "issue/retried-request", "main", retriedCorrelation)
+    const uncorrelated = await submitBranch(app, "issue/uncorrelated-request")
+
+    const integratedRuns = await app.queue.run({ prs: [integrated.id] }, runtime)
+    await app.queue.run({ prs: [retried.id] }, runtime)
+    await app.queue.run({ prs: [uncorrelated.id] }, runtime)
+    expect(integratedRuns[0]?.prs[0]).toMatchObject({ correlation: integratedCorrelation })
+
+    rejectFirstRevision = false
+    await app.bays.submit({
+      branch: retried.branch,
+      headSha: "4".repeat(40),
+      base: retried.base,
+      correlation: retriedCorrelation,
+    })
+    await app.queue.run({ prs: [retried.id] }, runtime)
+
+    expect(app.bays.pr(integrated.id)).toMatchObject({ status: "integrated", correlation: integratedCorrelation })
+    expect(app.bays.pr(retried.id)).toMatchObject({
+      status: "integrated",
+      revision: 2,
+      correlation: retriedCorrelation,
+    })
+    expect(calls).toEqual([
+      expect.objectContaining({ correlation: integratedCorrelation, outcome: "integrated", disposition: "settled" }),
+      expect.objectContaining({ correlation: retriedCorrelation, outcome: "rejected", disposition: "settled" }),
+      expect.objectContaining({
+        correlation: retriedCorrelation,
+        outcome: "integrated",
+        disposition: "already-settled",
+      }),
+    ])
+    expect(new Set(calls.map((call) => call.eventId)).size).toBe(3)
+    expect([...pending]).toEqual(["unrelated-request"])
+
+    const terminalEvents = []
+    for await (const event of app.events()) {
+      if (event.name === "pr/integrated" || event.name === "pr/rejected") terminalEvents.push(event)
+    }
+    expect(terminalEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "pr/integrated",
+          data: expect.objectContaining({ pr: integrated.id, correlation: integratedCorrelation }),
+        }),
+        expect.objectContaining({
+          name: "pr/rejected",
+          data: expect.objectContaining({ pr: retried.id, correlation: retriedCorrelation }),
+        }),
+        expect.objectContaining({
+          name: "pr/integrated",
+          data: expect.objectContaining({ pr: retried.id, revision: 2, correlation: retriedCorrelation }),
+        }),
+      ]),
+    )
+    await app.close()
+
+    await using replayed = await createQueueApp(options, journal)
+    expect(replayed.bays.pr(integrated.id)).toMatchObject({ status: "integrated", correlation: integratedCorrelation })
+    expect(replayed.bays.pr(retried.id)).toMatchObject({ status: "integrated", correlation: retriedCorrelation })
+    expect(calls).toHaveLength(3)
+    expect([...pending]).toEqual(["unrelated-request"])
+  })
+
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()

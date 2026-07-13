@@ -7,6 +7,7 @@ import {
   type CommandTree,
   type DeepReadonly,
   type Event,
+  type EventDraft,
   type YrdDef,
 } from "@yrd/core"
 import {
@@ -15,6 +16,7 @@ import {
   type Job,
   type JobContext,
   type JobDef,
+  type JobRequest,
   type JobResult,
   type Jobs,
   type JobTransition,
@@ -24,6 +26,7 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import * as z from "zod"
 import {
   BayIdSchema,
+  CorrelationSchema,
   DeprovisionBayInputSchema,
   DeprovisionedBaySchema,
   GitRefSchema,
@@ -42,6 +45,7 @@ import {
   resolvePR,
   type Bay,
   type BaysState,
+  type Correlation,
   type DeprovisionBayInput,
   type DeprovisionedBay,
   type PR,
@@ -91,7 +95,7 @@ const IntakePRArgsSchema = z
 export type IntakePRArgs = z.infer<typeof IntakePRArgsSchema>
 
 const SubmitArgsSchema = z.union([
-  z.object({ pr: TextSchema }).strict(),
+  z.object({ pr: TextSchema, correlation: CorrelationSchema.optional() }).strict(),
   z
     .object({
       branch: GitRefSchema,
@@ -100,6 +104,7 @@ const SubmitArgsSchema = z.union([
       baseSha: GitShaSchema.optional(),
       name: TextSchema.optional(),
       issue: TextSchema.optional(),
+      correlation: CorrelationSchema.optional(),
     })
     .strict(),
 ])
@@ -108,6 +113,7 @@ export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
 export type SubmitSelectionOptions = Readonly<{
   base?: string
   issue?: string
+  correlation?: Correlation
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
 }>
@@ -153,17 +159,146 @@ const PRPushedSchema = z
     revision: RevisionSchema,
   })
   .strict()
-const PRRevisionSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const PRRejectedSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, detail: z.string().optional() }).strict()
+const PRRevisionSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    correlation: CorrelationSchema.optional(),
+  })
+  .strict()
+const PRCorrelationBoundSchema = z
+  .object({ pr: PRIdSchema, revision: RevisionSchema, correlation: CorrelationSchema })
+  .strict()
+const PRWithdrawnSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema.optional(),
+    headSha: GitShaSchema.optional(),
+    correlation: CorrelationSchema.optional(),
+  })
+  .strict()
+const PRRejectedSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema.optional(),
+    correlation: CorrelationSchema.optional(),
+    detail: z.string().optional(),
+  })
+  .strict()
 const PRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema,
+    correlation: CorrelationSchema.optional(),
     commit: GitShaSchema,
     baseSha: GitShaSchema,
   })
   .strict()
+
+export const TerminalCorrelationOutcomeSchema = z.enum(["integrated", "rejected", "withdrawn"])
+export type TerminalCorrelationOutcome = z.infer<typeof TerminalCorrelationOutcomeSchema>
+export const TerminalCorrelationInputSchema = z
+  .object({
+    correlation: CorrelationSchema,
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    branch: GitRefSchema,
+    base: GitRefSchema,
+    headSha: GitShaSchema,
+    outcome: TerminalCorrelationOutcomeSchema,
+    detail: z.string().min(1).optional(),
+  })
+  .strict()
+export type TerminalCorrelationInput = z.infer<typeof TerminalCorrelationInputSchema>
+export const CorrelationSettlementProofSchema = z
+  .object({
+    correlation: CorrelationSchema,
+    disposition: z.enum(["settled", "already-settled"]),
+  })
+  .strict()
+export type CorrelationSettlementProof = z.infer<typeof CorrelationSettlementProofSchema>
+
+export type CorrelationSettlement = Readonly<{
+  revision: string
+  settle(
+    input: TerminalCorrelationInput,
+    context: JobContext,
+  ): JobResult<CorrelationSettlementProof> | Promise<JobResult<CorrelationSettlementProof>>
+}>
+export type CorrelationSettlementJobDef = JobDef<TerminalCorrelationInput, CorrelationSettlementProof>
+
+export function createCorrelationSettlementJobDef(settlement: CorrelationSettlement): CorrelationSettlementJobDef {
+  return createJobDef({
+    name: "correlation.settle",
+    title: "Settle terminal correlation",
+    revision: settlement.revision,
+    input: TerminalCorrelationInputSchema,
+    output: CorrelationSettlementProofSchema,
+    async execute(input, context) {
+      const result = await settlement.settle(input, context)
+      if (
+        result.status === "passed" &&
+        (result.output.correlation.namespace !== input.correlation.namespace ||
+          result.output.correlation.id !== input.correlation.id)
+      ) {
+        throw new Error(
+          `yrd: correlation settlement returned '${result.output.correlation.namespace}:${result.output.correlation.id}', expected '${input.correlation.namespace}:${input.correlation.id}'`,
+        )
+      }
+      return result
+    },
+  })
+}
+
+export function requestCorrelationSettlement(
+  terminal: CorrelationSettlementJobDef | undefined,
+  pr: DeepReadonly<PR>,
+  outcome: TerminalCorrelationOutcome,
+  detail?: string,
+): EventDraft<"job/requested", JobRequest<TerminalCorrelationInput>> | undefined {
+  if (pr.correlation === undefined) return undefined
+  if (terminal === undefined) {
+    raiseFailure(
+      "configuration",
+      "correlation-settlement-unavailable",
+      `yrd: PR '${pr.id}' correlation '${pr.correlation.namespace}:${pr.correlation.id}' cannot advance because no correlation settlement is configured`,
+    )
+  }
+  const correlation = pr.correlation
+  return terminal.request(
+    {
+      correlation,
+      pr: pr.id,
+      revision: pr.revision,
+      branch: pr.branch,
+      base: pr.base,
+      headSha: pr.headSha,
+      outcome,
+      ...(detail === undefined || detail.length === 0 ? {} : { detail }),
+    },
+    {
+      key: [
+        "correlation-settlement",
+        encodeURIComponent(correlation.namespace),
+        encodeURIComponent(correlation.id),
+        pr.id,
+        String(pr.revision),
+        outcome,
+      ].join(":"),
+    },
+  )
+}
+
+function terminalCorrelation(pr: DeepReadonly<PR>) {
+  return {
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
+  }
+}
 
 export type BayWorkspace = Readonly<{
   revision: string
@@ -299,10 +434,37 @@ export function createBays(
   }
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+    const sameCorrelation = (left: DeepReadonly<Correlation>, right: DeepReadonly<Correlation>): boolean =>
+      left.namespace === right.namespace && left.id === right.id
+    const bindCorrelation = async (pr: DeepReadonly<PR>): Promise<DeepReadonly<PR>> => {
+      if (options.correlation === undefined) return pr
+      if (pr.correlation !== undefined && sameCorrelation(pr.correlation, options.correlation)) return pr
+      if (pr.correlation !== undefined) {
+        raiseFailure(
+          "refusal",
+          "correlation-conflict",
+          `yrd: PR '${pr.id}' revision ${pr.revision} is already bound to correlation '${pr.correlation.namespace}:${pr.correlation.id}'`,
+        )
+      }
+      if (pr.status !== "submitted") {
+        raiseFailure(
+          "refusal",
+          "correlation-too-late",
+          `yrd: PR '${pr.id}' is ${pr.status}; correlation cannot be bound after submission`,
+        )
+      }
+      await submit({ pr: pr.id, correlation: options.correlation })
+      const bound = resolvePR(state(), pr.id)
+      if (bound === undefined) {
+        raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after correlation binding`)
+      }
+      return bound
+    }
+
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
-    if (pr?.status === "integrated") return pr
+    if (pr?.status === "integrated") return bindCorrelation(pr)
 
     if (bay?.status === "active") {
       const refreshed = await actions.refresh({ bay: bay.id })
@@ -353,14 +515,14 @@ export function createBays(
       }
     }
 
-    if (pr?.status === "submitted") return pr
+    if (pr?.status === "submitted") return bindCorrelation(pr)
     if (pr?.status === "pushed") {
-      await submit({ pr: pr.id })
+      await submit({ pr: pr.id, ...(options.correlation === undefined ? {} : { correlation: options.correlation }) })
       const submitted = resolvePR(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
       }
-      return submitted
+      return bindCorrelation(submitted)
     }
 
     if (bay === undefined) {
@@ -376,19 +538,23 @@ export function createBays(
           candidate.base === resolved.base,
       )
       if (live !== undefined) {
-        if (live.status === "submitted") return live
-        await actions.submit({ pr: live.id })
+        if (live.status === "submitted") return bindCorrelation(live)
+        await actions.submit({
+          pr: live.id,
+          ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
+        })
         const submitted = resolvePR(state(), live.id)
         if (submitted === undefined) {
           raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${live.id}' disappeared after submit`)
         }
-        return submitted
+        return bindCorrelation(submitted)
       }
       await actions.submit({
         branch: selector,
         headSha,
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
+        ...(options.correlation === undefined ? {} : { correlation: options.correlation }),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -398,7 +564,7 @@ export function createBays(
           `yrd: direct branch submit '${selector}' did not create a PR`,
         )
       }
-      return submitted
+      return bindCorrelation(submitted)
     }
 
     if (bay.status !== "active") {
@@ -429,13 +595,14 @@ export function createBays(
 
 export type WithBaysOptions = Readonly<{
   jobs: BayJobDefs
+  terminal?: CorrelationSettlementJobDef
   defaultBase?: string
   resolveBase?: ResolveBayBase
 }>
 
 export function withBays(options: WithBaysOptions) {
   const defaultBase = baseIdentity(options.defaultBase ?? "main")
-  const commands = createBayCommands(options.jobs, defaultBase)
+  const commands = createBayCommands(options.jobs, defaultBase, options.terminal)
 
   return <State extends object, Commands extends CommandTree, Features extends HasJobs>(
     definition: YrdDef<State, Commands, Features>,
@@ -448,7 +615,8 @@ export function withBays(options: WithBaysOptions) {
         "bay/closing": BayClosingSchema,
         "pr/pushed": PRPushedSchema,
         "pr/submitted": PRRevisionSchema,
-        "pr/withdrawn": z.object({ pr: PRIdSchema }).strict(),
+        "pr/correlation-bound": PRCorrelationBoundSchema,
+        "pr/withdrawn": PRWithdrawnSchema,
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/edited": PrEditArgsSchema,
@@ -456,6 +624,7 @@ export function withBays(options: WithBaysOptions) {
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
+        if (options.terminal !== undefined) yrd.jobs.requireDefinitions({ [options.terminal.name]: options.terminal })
         const state = computed(() => yrd.state().bays)
         return {
           bays: createBays(
@@ -484,7 +653,7 @@ function jobDetail(job: DeepReadonly<Job>): string {
   return job.status
 }
 
-function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
+function createBayCommands(jobs: BayJobDefs, defaultBase: string, terminal?: CorrelationSettlementJobDef): BayCommands {
   return {
     bay: {
       open: command({
@@ -508,13 +677,13 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         title: "Submit work",
         visibility: "public",
         params: SubmitArgsSchema,
-        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase),
+        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase, terminal),
       }),
       close: command({
         title: "Close bay",
         visibility: "public",
         params: CloseBayArgsSchema,
-        apply: (state: BayState, args: CloseBayArgs) => closeBay(state, args, jobs["bay.deprovision"]),
+        apply: (state: BayState, args: CloseBayArgs) => closeBay(state, args, jobs["bay.deprovision"], terminal),
       }),
     },
     pr: {
@@ -522,7 +691,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         title: "Close a PR",
         visibility: "public",
         params: PrCloseArgsSchema,
-        apply: (state: BayState, args: PrCloseArgs) => closePr(state, args),
+        apply: (state: BayState, args: PrCloseArgs) => closePr(state, args, terminal),
       }),
       edit: command({
         title: "Edit a PR",
@@ -635,12 +804,48 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   }
 }
 
-function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string) {
+function submitWork(
+  state: DeepReadonly<BayState>,
+  args: SubmitArgs,
+  defaultBase: string,
+  terminal?: CorrelationSettlementJobDef,
+) {
   const current = state.bays
+  if (args.correlation !== undefined && terminal === undefined) {
+    raiseFailure(
+      "configuration",
+      "correlation-settlement-unavailable",
+      `yrd: correlation '${args.correlation.namespace}:${args.correlation.id}' cannot be bound because no correlation settlement is configured`,
+    )
+  }
   if ("pr" in args) {
     const pr = required(resolvePR(current, args.pr), "PR", args.pr)
+    if (pr.status === "submitted" && args.correlation !== undefined) {
+      if (pr.correlation?.namespace === args.correlation.namespace && pr.correlation.id === args.correlation.id) {
+        return { events: [] }
+      }
+      if (pr.correlation !== undefined) {
+        raiseFailure(
+          "refusal",
+          "correlation-conflict",
+          `yrd: PR '${pr.id}' revision ${pr.revision} is already bound to correlation '${pr.correlation.namespace}:${pr.correlation.id}'`,
+        )
+      }
+      return {
+        events: [event("pr/correlation-bound", { pr: pr.id, revision: pr.revision, correlation: args.correlation })],
+      }
+    }
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
-    return { events: [event("pr/submitted", { pr: pr.id, revision: pr.revision, headSha: pr.headSha })] }
+    return {
+      events: [
+        event("pr/submitted", {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
+        }),
+      ],
+    }
   }
 
   const base = baseIdentity(args.base ?? defaultBase)
@@ -663,7 +868,15 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     revision,
   }
   return {
-    events: [event("pr/pushed", pushed), event("pr/submitted", { pr: id, revision, headSha: args.headSha })],
+    events: [
+      event("pr/pushed", pushed),
+      event("pr/submitted", {
+        pr: id,
+        revision,
+        headSha: args.headSha,
+        ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
+      }),
+    ],
   }
 }
 
@@ -677,7 +890,12 @@ function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string,
   }
 }
 
-function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision: BayJobDefs["bay.deprovision"]) {
+function closeBay(
+  state: DeepReadonly<BayState>,
+  args: CloseBayArgs,
+  deprovision: BayJobDefs["bay.deprovision"],
+  terminal?: CorrelationSettlementJobDef,
+) {
   const current = state.bays
   const bay = required(resolveBay(current, args.bay), "bay", args.bay)
   if (bay.status === "opening" || bay.status === "closing") {
@@ -690,7 +908,12 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
   return {
     events: [
-      ...(pr !== undefined && isLivePR(pr.status) ? [event("pr/withdrawn", { pr: pr.id })] : []),
+      ...(pr !== undefined && isLivePR(pr.status)
+        ? [
+            event("pr/withdrawn", { pr: pr.id, ...terminalCorrelation(pr) }),
+            requestCorrelationSettlement(terminal, pr, "withdrawn"),
+          ].filter((draft) => draft !== undefined)
+        : []),
       event("bay/closing", { bay: bay.id }),
       deprovision.request({
         bay: bay.id,
@@ -702,12 +925,17 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
 }
 
-function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
+function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs, terminal?: CorrelationSettlementJobDef) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
-  return { events: [event("pr/withdrawn", { pr: pr.id })] }
+  return {
+    events: [
+      event("pr/withdrawn", { pr: pr.id, ...terminalCorrelation(pr) }),
+      requestCorrelationSettlement(terminal, pr, "withdrawn"),
+    ].filter((draft) => draft !== undefined),
+  }
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
@@ -784,6 +1012,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revision: pushed.revision,
               headSha: pushed.headSha,
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+              correlation: undefined,
               revisions: [...existing.revisions, record],
               submittedAt: undefined,
               rejectedAt: undefined,
@@ -815,16 +1044,64 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
         throw new Error(`yrd: stale PR event for '${pr.id}'`)
       }
-      return patchPR(pr, { status: "submitted", submittedAt: applied.ts })
+      return patchPR(pr, {
+        status: "submitted",
+        submittedAt: applied.ts,
+        correlation: changed.correlation,
+        revisions: pr.revisions.map((revision) =>
+          revision.revision === changed.revision
+            ? { ...revision, ...(changed.correlation === undefined ? {} : { correlation: changed.correlation }) }
+            : revision,
+        ),
+      })
+    }
+    case "pr/correlation-bound": {
+      const changed = PRCorrelationBoundSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined || pr.revision !== changed.revision || pr.status !== "submitted") {
+        throw new Error(`yrd: stale PR correlation binding for '${changed.pr}' revision ${changed.revision}`)
+      }
+      if (
+        pr.correlation !== undefined &&
+        (pr.correlation.namespace !== changed.correlation.namespace || pr.correlation.id !== changed.correlation.id)
+      ) {
+        throw new Error(`yrd: conflicting PR correlation binding for '${pr.id}' revision ${pr.revision}`)
+      }
+      return patchPR(pr, {
+        correlation: changed.correlation,
+        revisions: pr.revisions.map((revision) =>
+          revision.revision === changed.revision ? { ...revision, correlation: changed.correlation } : revision,
+        ),
+      })
     }
     case "pr/withdrawn": {
-      const pr = current.prs[data.pr as string]
+      const changed = PRWithdrawnSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (
+        pr !== undefined &&
+        ((changed.revision !== undefined && changed.revision !== pr.revision) ||
+          (changed.headSha !== undefined && changed.headSha !== pr.headSha) ||
+          (changed.correlation !== undefined &&
+            (changed.correlation.namespace !== pr.correlation?.namespace ||
+              changed.correlation.id !== pr.correlation?.id)))
+      ) {
+        throw new Error(`yrd: stale PR withdrawal for '${changed.pr}'`)
+      }
       return pr === undefined ? state : patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
     }
     case "pr/rejected": {
       const changed = PRRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision) return state
+      if (
+        pr === undefined ||
+        pr.revision !== changed.revision ||
+        (changed.headSha !== undefined && changed.headSha !== pr.headSha) ||
+        (changed.correlation !== undefined &&
+          (changed.correlation.namespace !== pr.correlation?.namespace ||
+            changed.correlation.id !== pr.correlation?.id))
+      ) {
+        return state
+      }
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
@@ -834,7 +1111,16 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/integrated": {
       const changed = PRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision || pr.headSha !== changed.headSha) return state
+      if (
+        pr === undefined ||
+        pr.revision !== changed.revision ||
+        pr.headSha !== changed.headSha ||
+        (changed.correlation !== undefined &&
+          (changed.correlation.namespace !== pr.correlation?.namespace ||
+            changed.correlation.id !== pr.correlation?.id))
+      ) {
+        return state
+      }
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,

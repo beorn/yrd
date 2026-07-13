@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { CorrelationSettlement } from "@yrd/bay"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { GitCheckEvidenceSchema } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
@@ -56,6 +57,114 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
+  it("catches up requested and transiently failed terminal settlements from the journal", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const calls: Array<{ pr: string; id: string; status: "failed" | "passed" }> = []
+    let failFirst = true
+    const correlationSettlement: CorrelationSettlement = {
+      revision: "host-correlation-v1",
+      settle(input) {
+        const status = failFirst && input.pr === "PR1" ? "failed" : "passed"
+        calls.push({ pr: input.pr, id: input.correlation.id, status })
+        return status === "failed"
+          ? { status, error: { code: "tribe-unavailable", message: "temporary Tribe outage" } }
+          : { status, output: { correlation: input.correlation, disposition: "settled" } }
+      },
+    }
+    const journal = createMemoryJournal()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+      correlationSettlement,
+    }
+    const app = await createDefaultYrdApp(options)
+    await app.bays.submit({
+      branch: "issue/failed-settlement",
+      headSha: featureSha,
+      correlation: { namespace: "tribe-request", id: "req-failed" },
+    })
+    await app.bays.submit({
+      branch: "issue/requested-settlement",
+      headSha: "b".repeat(40),
+      correlation: { namespace: "tribe-request", id: "req-requested" },
+    })
+    const failed = await app.bays.closePr({ pr: "PR1" })
+    await app.bays.closePr({ pr: "PR2" })
+    const failedId = app.jobs.requested(failed)[0]
+    if (failedId === undefined) throw new Error("expected failed settlement Job")
+    await app.jobs.run(failedId, { runner: "test", leaseMs: 60_000 })
+    expect(Object.values(app.state().jobs.byId).map((job) => job.status)).toEqual(["failed", "requested"])
+    await app.close()
+
+    failFirst = false
+    await using replayed = await createDefaultYrdApp(options)
+    expect(Object.values(replayed.state().jobs.byId).map((job) => job.status)).toEqual(["passed", "passed"])
+    expect(calls).toEqual([
+      { pr: "PR1", id: "req-failed", status: "failed" },
+      { pr: "PR1", id: "req-failed", status: "passed" },
+      { pr: "PR2", id: "req-requested", status: "passed" },
+    ])
+  })
+
+  it("composes one injected correlation settlement and preserves its replay proof", async () => {
+    const { repo, featureSha } = await repository()
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const correlation = { namespace: "tribe-request", id: "pr 61's docs" }
+    const pending = new Set([correlation.id, "unrelated-request"])
+    const calls: Array<{ id: string; outcome: string; disposition: string }> = []
+    const correlationSettlement: CorrelationSettlement = {
+      revision: "host-correlation-v1",
+      settle(input) {
+        const disposition = pending.delete(input.correlation.id) ? "settled" : "already-settled"
+        calls.push({ id: input.correlation.id, outcome: input.outcome, disposition })
+        return { status: "passed", output: { correlation: input.correlation, disposition } }
+      },
+    }
+    const journal = createMemoryJournal()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+      correlationSettlement,
+    }
+    const app = await createDefaultYrdApp(options)
+
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", correlation })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    expect(calls).toEqual([{ id: correlation.id, outcome: "integrated", disposition: "settled" }])
+    expect([...pending]).toEqual(["unrelated-request"])
+    await app.close()
+
+    await using replayed = await createDefaultYrdApp(options)
+    expect(replayed.state().bays.prs.PR1).toMatchObject({ status: "integrated", correlation })
+    expect(Object.values(replayed.state().jobs.byId)).toContainEqual(
+      expect.objectContaining({ definition: "correlation.settle", status: "passed", attempt: 1 }),
+    )
+    expect(calls).toHaveLength(1)
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

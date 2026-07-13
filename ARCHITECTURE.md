@@ -32,6 +32,11 @@ function per implementation detail.
 loggers, and scopes are injected capabilities. A capability may be one
 function or a small plain object; it is not a global singleton.
 
+Terminal correlation settlement is also an injected capability. Yrd persists
+the opaque `{ namespace, id }` on the submitted PR revision and requests a
+versioned Job beside the committed terminal fact. The composing host assigns
+meaning to the namespace; Yrd does not import the external transport.
+
 ## Domain Data
 
 The objects above operate on plain records:
@@ -110,6 +115,11 @@ Commands are synchronous state decisions. External work is requested as a Job
 event and executed after the transaction commits. This keeps cursor-conflict retries
 safe: Yrd can refresh state and run the decision again without repeating an
 external side effect.
+
+The default host catches up requested, failed, or lost terminal-settlement Jobs
+from the journal before accepting a new command. The external close operation
+must be idempotent, so a crash after the side effect but before Job completion
+replays as an evidenced no-op rather than a duplicated mutation.
 
 Silvery's command-tree contracts supply command metadata, lookup, and argument
 schemas. Yrd adds durable command identity and event projection; it does not
