@@ -57,7 +57,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["security", "merge", "publish"] },
+      line: { base: "main", batch: 1, steps: ["security", "merge", "publish"], requires: [] },
       steps: {
         security: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
@@ -80,10 +80,12 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       defaultSteps: ["security", "merge", "publish"],
     })
     expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
-    expect(Object.keys(app.commands.pr)).toEqual(["close"])
+    expect(Object.keys(app.commands.pr)).toEqual(["close", "ready", "review", "comment", "requestChecks"])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
     expect(app.commands.pr.close.metadata?.visibility).toBe("public")
+    expect(app.commands.pr.review.metadata?.visibility).toBe("public")
+    expect(app.commands.line.admit.metadata?.visibility).toBe("internal")
     expect(app.commands.line.integrate.metadata?.visibility).toBe("public")
 
     await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
@@ -92,6 +94,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     const evaluatorRevision = app.jobs.definition("contest.evaluator.security").revision
+    const lineRevision = app.jobs.definition("line.step.security").revision
     await app.close()
 
     const changedTimeout = await createDefaultYrdApp({
@@ -104,6 +107,20 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     })
     expect(changedTimeout.jobs.definition("contest.evaluator.security").revision).not.toBe(evaluatorRevision)
     await changedTimeout.close()
+
+    const changedLineTimeout = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: runtimeProcess,
+      config: {
+        ...config,
+        steps: { ...config.steps, security: { ...config.steps.security!, timeoutMs: 30_000 } },
+      },
+    })
+    expect(changedLineTimeout.jobs.definition("line.step.security").revision).not.toBe(lineRevision)
+    await changedLineTimeout.close()
   })
 
   it("normalizes remote aliases of the configured line and refuses duplicate payload admission", async () => {
@@ -111,7 +128,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const baseSha = await git(repo, "rev-parse", "main")
     await git(repo, "update-ref", "refs/remotes/origin/main", baseSha)
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      line: { base: "main", batch: 1, steps: ["check", "merge"], requires: [] },
       steps: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
     }
@@ -148,7 +165,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     await git(repo, "switch", "-q", "main")
 
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      line: { base: "main", batch: 1, steps: ["check", "merge"], requires: [] },
       steps: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
       contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
     }
@@ -174,7 +191,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("refreshes a shared journal before the host selects queued PRs", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      line: { base: "main", batch: 1, steps: ["check", "merge"], requires: [] },
       steps: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: { runner: "local" },
@@ -205,7 +222,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("uses steps.merge.run as the configured merge step", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge"] },
+      line: { base: "main", batch: 1, steps: ["check", "merge"], requires: [] },
       steps: {
         check: { run: "test -f feature.txt", runner: "local" },
         merge: {
@@ -236,7 +253,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("refuses a post-merge raw push when native merge owns the base ref", async () => {
     const { repo } = await repository()
     const config: ResolvedYrdProjectConfig = {
-      line: { base: "main", batch: 1, steps: ["check", "merge", "deploy"] },
+      line: { base: "main", batch: 1, steps: ["check", "merge", "deploy"], requires: [] },
       steps: {
         check: { run: "true", runner: "local" },
         merge: { runner: "local" },
@@ -421,7 +438,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       stderr,
     ).toBe(0)
     expect(JSON.parse(stdout)).toMatchObject({
-      prs: [{ branch: "task/feature", headSha: featureSha, base: "main", status: "submitted" }],
+      prs: [{ branch: "task/feature", headSha: featureSha, base: "main" }],
     })
 
     await git(linked, "switch", "-q", "--detach")
