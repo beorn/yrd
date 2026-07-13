@@ -160,6 +160,7 @@ describe("Yrd domain objects", () => {
     expect(reader.state().counter.value).toBe(4)
     expect((await reader.refresh()).counter.value).toBe(6)
     expect(reader.state().counter.value).toBe(6)
+    await expect(reader.journalStamp()).resolves.toEqual({ cursor: 2, at: "2026-07-09T12:00:00.000Z" })
 
     await Promise.all([writer.close(), reader.close()])
   })

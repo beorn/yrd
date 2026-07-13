@@ -70,6 +70,25 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("journals an exact tracker issue on retirement without parsing branch prose", async () => {
+    await using app = (await createHarness()).app
+    const issueRef = "@km/all/21063-steering-laser"
+    await app.bays.submit({
+      branch: "topic/mentions-2106-but-not-the-issue",
+      headSha: HEAD_1,
+      issue: issueRef,
+    })
+
+    const retired = await app.bays.closePr({ pr: "PR1" })
+
+    expect(retired.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/withdrawn",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef },
+      }),
+    )
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 

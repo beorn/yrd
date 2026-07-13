@@ -130,6 +130,47 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
 }
 
 describe("Queue", () => {
+  it("journals exact typed issue joins for integrated and rejected PRs", async () => {
+    const issueRef = "@km/all/21063-steering-laser"
+    await using integratedApp = await createQueueApp()
+    await integratedApp.bays.submit({
+      branch: "topic/partial-2106-token",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      issue: issueRef,
+    })
+
+    const integrated = await integratedApp.queue.run({ prs: ["PR1"] }, runtime)
+    const integratedEvents = await Array.fromAsync(integratedApp.events())
+    expect(integrated).toMatchObject([{ integration: { commit: MERGED } }])
+    expect(integratedEvents).toContainEqual(
+      expect.objectContaining({
+        name: "pr/integrated",
+        data: expect.objectContaining({ pr: "PR1", issueRef, landingSha: MERGED }),
+      }),
+    )
+
+    await using rejectedApp = await createQueueApp({
+      check: () => ({ status: "failed", error: { code: "check-failed", message: "typed bounce" } }),
+    })
+    await rejectedApp.bays.submit({
+      branch: "topic/unrelated-20685-prose",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      issue: issueRef,
+    })
+
+    await rejectedApp.queue.run({ prs: ["PR1"] }, runtime)
+    expect(await Array.fromAsync(rejectedApp.events())).toContainEqual(
+      expect.objectContaining({
+        name: "pr/rejected",
+        data: expect.objectContaining({ pr: "PR1", issueRef, detail: "typed bounce" }),
+      }),
+    )
+  })
+
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()
