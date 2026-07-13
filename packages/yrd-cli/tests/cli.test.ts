@@ -194,6 +194,9 @@ async function createApp(
     mergeRuns?: string[]
     failingCheck?: boolean
     checkFailure?: Readonly<{ code: string; message: string; artifact?: string }>
+    requires?: readonly ["review"]
+    checkRuns?: string[]
+    baseFailure?: boolean
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -202,29 +205,52 @@ async function createApp(
   )
   const check = withStep(
     "check",
-    (_input: StepExecution<PRShape>): JobResult<JsonValue> =>
-      options.waitingCheck
+    (_input: StepExecution<PRShape>): JobResult<JsonValue> => {
+      options.checkRuns?.push("check")
+      return options.waitingCheck
         ? {
             status: "waiting",
             token: "remote-check",
             url: "https://ci.invalid/run/1",
             checkpoint: { baseSha: BASE_SHA, candidateSha: HEAD_SHA },
           }
-        : options.checkFailure !== undefined
+        : options.baseFailure
           ? {
               status: "failed",
-              error: { code: options.checkFailure.code, message: options.checkFailure.message },
-              output: {
-                artifacts:
-                  options.checkFailure.artifact === undefined
-                    ? []
-                    : [{ name: "failure", path: options.checkFailure.artifact }],
-              },
+              error: { code: "base-red", message: "resolved base is red" },
+              output: { detail: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} is red: test:fast failed` },
             }
-          : options.failingCheck
-            ? { status: "failed", error: { code: "check-failed", message: "check failed" } }
-            : { status: "passed", output: { checked: true } },
-    { revision: "check-v1", output: JsonSchema },
+          : options.checkFailure !== undefined
+            ? {
+                status: "failed",
+                error: { code: options.checkFailure.code, message: options.checkFailure.message },
+                output: {
+                  artifacts:
+                    options.checkFailure.artifact === undefined
+                      ? []
+                      : [{ name: "failure", path: options.checkFailure.artifact }],
+                },
+              }
+            : options.failingCheck
+              ? {
+                  status: "failed",
+                  error: { code: "check-failed", message: "check failed" },
+                  output: {
+                    detail: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} green\nsrc/model.ts:12 - type mismatch`,
+                    diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+                    artifacts: [
+                      { name: "stdout", path: "/tmp/base-green.log" },
+                      { name: "stderr", path: "/tmp/yrd-check.log" },
+                    ],
+                  },
+                }
+              : { status: "passed", output: { checked: true } }
+    },
+    {
+      revision: "check-v1",
+      output: JsonSchema,
+      classification: options.baseFailure === true ? "base" : "carrier",
+    },
   )
   const merge = withMerge(
     (_input: StepExecution<CheckedShape>): JobResult<{ commit: string; baseSha: string }> => {
@@ -236,13 +262,21 @@ async function createApp(
     },
     { revision: "merge-v1" },
   )
-  const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? false })
+  const queue = withQueue({
+    steps: [check, merge] as const,
+    batch: options.batch ?? false,
+    ...(options.requires === undefined ? {} : { requires: options.requires }),
+  })
   const contests = withContests({ runners: [contest.runner], evaluators: [contest.evaluator], git: contest.git })
   const base = pipe(
     createYrdDef(),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({ sources: [{ id: "km", resolve: (ref) => ({ ref, title: "Issue one" }) }] }),
-    withBays({ jobs: bayJobs, defaultBase: "main" }),
+    withBays({
+      jobs: bayJobs,
+      defaultBase: "main",
+      resolveBase: (base) => ({ base, baseSha: BASE_SHA }),
+    }),
   )
   return createYrd(contests(queue(base)), {
     inject: { journal: createMemoryJournal(), clock: () => "2026-07-09T12:00:00.000Z", id: ids() },
@@ -833,7 +867,7 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("keeps submission observational and gives queue run sole ownership of execution", async () => {
+  it("keeps an unfollowed PR submission execution-free and gives queue run sole ownership of execution", async () => {
     const mergeRuns: string[] = []
     const app = await createApp({ mergeRuns })
     const open = outputIO()
@@ -842,7 +876,7 @@ describe("runYrd", () => {
     const submit = outputIO({ cwd: "/repo/.bays/B1" })
     expect(await runYrd(app, yrd("pr", "submit"), submit.io), submit.stderr()).toBe(0)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
-    expect(Object.values(app.state().queues.records)).toHaveLength(0)
+    expect(Object.values(app.state().queues.records)).toMatchObject([{ id: "R1", steps: [{ name: "check" }] }])
     expect(mergeRuns).toEqual([])
 
     const beforeRejectedWait = await Array.fromAsync(app.events()).then((events) => events.length)
@@ -855,7 +889,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
     expect(mergeRuns).toEqual(["merge"])
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
-    expect(Object.values(app.state().queues.records)).toHaveLength(1)
+    expect(Object.values(app.state().queues.records)).toHaveLength(2)
   })
 
   it("rejects every retired route without journaling an event", async () => {
@@ -906,6 +940,11 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd(noun, "--help"), alias.io), noun).toBe(0)
       expect(alias.stdout(), noun).not.toMatch(new RegExp(`^\\s+${noun}\\b`, "mu"))
     }
+
+    const prSubmit = outputIO({ columns: 100 })
+    expect(await runYrd(app, yrd("pr", "submit", "--help"), prSubmit.io)).toBe(0)
+    expect(prSubmit.stdout()).toContain("--base <branch>")
+    expect(prSubmit.stdout()).not.toContain("--line <branch>")
   })
 
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
@@ -1029,7 +1068,7 @@ describe("runYrd", () => {
     )
     expect(resolved).toEqual(["topic/direct"])
     expect(JSON.parse(submit.stdout())).toMatchObject({
-      prs: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA, status: "submitted" }],
+      prs: [{ id: "PR1", branch: "topic/direct", base: "release/2.0", headSha: HEAD_SHA }],
     })
 
     resolvedHead = MERGED_SHA
@@ -1045,11 +1084,6 @@ describe("runYrd", () => {
           branch: "topic/direct",
           revision: 2,
           headSha: MERGED_SHA,
-          status: "submitted",
-          revisions: [
-            { revision: 1, headSha: HEAD_SHA },
-            { revision: 2, headSha: MERGED_SHA },
-          ],
         },
       ],
     })
@@ -1063,20 +1097,345 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("release/2.0")
   })
 
+  it("drives draft, review, ready, needs-review, and cached checks through the PR surface", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ requires: ["review"], checkRuns })
+    const resolveRevision = () => Promise.resolve(HEAD_SHA)
+
+    const submit = outputIO({ resolveRevision })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/review-me", "--draft", "--json"), submit.io),
+      submit.stderr(),
+    ).toBe(0)
+    const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
+    expect(submitted).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", branch: "topic/review-me", revision: 1, headSha: HEAD_SHA }],
+      checks: [{ pr: "PR1", status: "checking", run: "R1" }],
+    })
+    expect(submitted.prs[0]).toMatchObject({ status: "pushed" })
+    expect(app.state().bays.prs.PR1?.status).toBe("pushed")
+    expect(app.queue.get("R1")).toMatchObject({ status: "running", steps: [{ name: "check" }] })
+    expect(checkRuns).toEqual([])
+
+    const inbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
+    expect(JSON.parse(inbox.stdout())).toMatchObject({
+      command: "pr.list",
+      prs: [{ id: "PR1", revision: 1, eligibility: { review: { required: true, approved: false } } }],
+    })
+    const humanInbox = outputIO({ columns: 160 })
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review"), humanInbox.io), humanInbox.stderr()).toBe(0)
+    expect(humanInbox.stdout()).toContain("WHY")
+    expect(humanInbox.stdout()).toContain("pushed, not ready")
+    expect(humanInbox.stdout()).toContain("required")
+    expect(humanInbox.stdout()).toContain("checking")
+
+    const comment = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-1", "--note", "Why?", "--json"),
+        comment.io,
+      ),
+      comment.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(comment.stdout())).toMatchObject({
+      command: "pr.comment",
+      comment: { actor: "@cto", ref: "question-1", note: "Why?", revision: 1 },
+    })
+    const secondComment = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-2", "--note", "Thanks.", "--json"),
+        secondComment.io,
+      ),
+      secondComment.stderr(),
+    ).toBe(0)
+    const replayedComment = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "comment", "PR1", "--by", "@cto", "--ref", "question-1", "--note", "Why?", "--json"),
+        replayedComment.io,
+      ),
+      replayedComment.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replayedComment.stdout())).toMatchObject({
+      comment: { ref: "question-1", note: "Why?" },
+    })
+
+    const review = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
+        review.io,
+      ),
+      review.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(review.stdout())).toMatchObject({
+      command: "pr.review",
+      review: { actor: "@cto", decision: "approve", ref: "verdict-1", revision: 1, headSha: HEAD_SHA },
+    })
+    const replay = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
+        replay.io,
+      ),
+      replay.stderr(),
+    ).toBe(0)
+    expect(app.state().bays.prs.PR1?.reviews).toHaveLength(1)
+    const secondApproval = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-2", "--json"),
+        secondApproval.io,
+      ),
+      secondApproval.stderr(),
+    ).toBe(0)
+    const replayedApproval = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-1", "--json"),
+        replayedApproval.io,
+      ),
+      replayedApproval.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replayedApproval.stdout())).toMatchObject({
+      review: { ref: "verdict-1", decision: "approve" },
+    })
+
+    const ready = outputIO()
+    expect(await runYrd(app, yrd("pr", "ready", "PR1", "--json"), ready.io), ready.stderr()).toBe(0)
+    expect(JSON.parse(ready.stdout())).toMatchObject({
+      command: "pr.ready",
+      pr: { id: "PR1", revision: 1 },
+      eligibility: { review: { approved: true } },
+    })
+    expect(app.state().bays.prs.PR1?.status).toBe("submitted")
+
+    let followSleeps = 0
+    const checks = outputIO({
+      scope: {
+        signal: new AbortController().signal,
+        sleep: async () => {
+          followSleeps++
+          await app.queue.admit({ prs: ["PR1"] }, { runner: "external-check-runner", leaseMs: 60_000 })
+        },
+      },
+    })
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io), checks.stderr()).toBe(0)
+    expect(JSON.parse(checks.stdout())).toMatchObject({
+      kind: "pr.check",
+      command: ["queue.step.check"],
+      pr: "PR1",
+      revision: 1,
+      run: "R1",
+      step: "check",
+      status: "passed",
+      queuedAt: expect.any(String),
+    })
+    expect(followSleeps).toBe(1)
+    expect(checkRuns).toEqual(["check"])
+
+    const integrate = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), integrate.io), integrate.stderr()).toBe(0)
+    expect(JSON.parse(integrate.stdout())).toMatchObject({
+      results: [{ id: "R2", status: "passed", steps: [{ name: "merge" }], reusedFrom: "R1" }],
+    })
+    expect(checkRuns).toEqual(["check"])
+
+    await app.bays.submit({ branch: "topic/withdrawn", headSha: MERGED_SHA, base: "main", draft: true })
+    await app.bays.closePr({ pr: "PR2" })
+    const terminalInbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), terminalInbox.io)).toBe(0)
+    expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+  })
+
+  it("keeps pr checks --follow read-only when no check fact was requested", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })
+    const before = await Array.fromAsync(app.events())
+    const checks = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--follow", "--json"), checks.io)).toBe(1)
+
+    expect(checks.stderr()).toContain("has no requested checks")
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(app.queue.eligibility("PR1")).toMatchObject({ checks: { status: "not-requested" } })
+  })
+
+  it("returns an admitted check failure to a following submitter as one typed record", async () => {
+    const behavior = { failingCheck: true }
+    const app = await createApp(behavior)
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/red", "--follow", "--json"), submit.io), submit.stderr()).toBe(
+      1,
+    )
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      checks: [
+        {
+          pr: "PR1",
+          revision: 1,
+          run: "R1",
+          step: "check",
+          status: "failed",
+          command: ["queue.step.check"],
+          classification: "carrier",
+          diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+          artifact: "/tmp/yrd-check.log",
+          error: { code: "check-failed", message: "check failed" },
+        },
+      ],
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", detail: "check failed" })
+
+    const human = outputIO({ color: true, columns: 160 })
+    expect(await runYrd(app, yrd("pr", "checks", "PR1"), human.io), human.stderr()).toBe(1)
+    expect(human.stdout()).toContain("COMMAND")
+    expect(human.stdout()).toContain("AGE")
+    expect(human.stdout()).toContain("queue.step.check")
+    expect(human.stdout()).toContain("carrier")
+    expect(human.stdout()).toContain("src/model.ts")
+    expect(human.stdout()).toContain("/tmp/yrd-check.log")
+    expect(human.stdout()).toContain("\u001b]8;;file:///tmp/yrd-check.log")
+
+    const plain = outputIO({ color: false, columns: 160 })
+    expect(await runYrd(app, yrd("pr", "checks", "PR1"), plain.io), plain.stderr()).toBe(1)
+    expect(plain.stdout()).toContain("src/model.ts:12")
+    expect(plain.stdout()).toContain("/tmp/yrd-check.log")
+    expect(plain.stdout()).not.toContain("\u001b]")
+
+    behavior.failingCheck = false
+    const retry = (await app.queue.admit({ prs: ["PR1"], retry: true }))[0]
+    if (retry === undefined) throw new Error("expected an explicit retry run")
+    await app.queue.run({ prs: ["PR1"], retry: true }, { runner: "cli-test", leaseMs: 60_000 })
+    const recovered = outputIO()
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), recovered.io), recovered.stderr()).toBe(0)
+    const currentChecks = recovered
+      .stdout()
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+    expect(currentChecks).toHaveLength(1)
+    expect(currentChecks[0]).toMatchObject({ kind: "pr.check", run: retry.id, status: "passed" })
+  })
+
+  it("lets the existing Queue drain finish a plain submit admission before integrating its cached proof", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns })
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/plain", "--json"), submit.io), submit.stderr()).toBe(0)
+    expect(checkRuns).toEqual([])
+    expect(app.queue.get("R1")).toMatchObject({ status: "running", steps: [{ name: "check" }] })
+
+    const drain = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), drain.io), drain.stderr()).toBe(0)
+    expect(JSON.parse(drain.stdout())).toMatchObject({
+      results: [{ id: "R2", status: "passed", steps: [{ name: "merge" }], reusedFrom: "R1" }],
+    })
+    expect(checkRuns).toEqual(["check"])
+  })
+
+  it("follows an admitted PR through older work already occupying the shared Queue capacity", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns })
+    const resolveRevision = (ref: string) => Promise.resolve(ref.endsWith("first") ? HEAD_SHA : MERGED_SHA)
+
+    const first = outputIO({ resolveRevision })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/first", "--json"), first.io), first.stderr()).toBe(0)
+    expect(app.queue.get("R1")).toMatchObject({ status: "running", prs: [{ id: "PR1" }] })
+
+    const second = outputIO({ resolveRevision })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/second", "--follow", "--json"), second.io),
+      second.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(second.stdout())).toMatchObject({
+      checks: [{ pr: "PR2", status: "passed" }],
+    })
+    expect(checkRuns).toEqual(["check", "check"])
+  })
+
+  it("keeps --follow on the journal-tail path until an externally waiting check settles", async () => {
+    const app = await createApp({ waitingCheck: true })
+    let sleeps = 0
+    const controller = new AbortController()
+    const submit = outputIO({
+      resolveRevision: () => Promise.resolve(HEAD_SHA),
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          sleeps++
+          const waiting = app.queue.waiting("PR1", "check").step.job
+          await app.queue.finish(
+            "PR1",
+            {
+              job: waiting.id,
+              step: "check",
+              attempt: waiting.attempt,
+              runner: waiting.runner,
+              token: waiting.token,
+              result: { status: "passed", output: { baseSha: BASE_SHA, candidateSha: HEAD_SHA } },
+            },
+            { runner: "remote-check", leaseMs: 60_000 },
+          )
+        },
+      },
+    })
+
+    expect(await runYrd(app, yrd("pr", "submit", "topic/wait", "--follow", "--json"), submit.io), submit.stderr()).toBe(
+      0,
+    )
+    expect(sleeps).toBe(1)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      checks: [{ pr: "PR1", step: "check", status: "passed" }],
+    })
+  })
+
+  it("classifies the read-only main-health evidence as a base failure", async () => {
+    const app = await createApp({ baseFailure: true })
+    const submit = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/base-red", "--follow", "--json"), submit.io)).toBe(1)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      checks: [
+        {
+          pr: "PR1",
+          status: "failed",
+          classification: "base",
+          diagnostics: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} is red: test:fast failed`,
+          error: { code: "base-red" },
+        },
+      ],
+    })
+  })
+
   it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
 
     const submit = outputIO({ resolveRevision })
     expect(await runYrd(app, yrd("bay", "submit", "topic/superseded", "--json"), submit.io), submit.stderr()).toBe(0)
-    expect(JSON.parse(submit.stdout())).toMatchObject({ prs: [{ id: "PR1", status: "submitted" }] })
+    const submitted = JSON.parse(submit.stdout()) as { prs: Record<string, unknown>[] }
+    expect(submitted).toMatchObject({ prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }] })
+    expect(submitted.prs[0]).toMatchObject({ status: "submitted" })
 
     const close = outputIO()
     expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
-    expect(JSON.parse(close.stdout())).toMatchObject({
+    const closed = JSON.parse(close.stdout()) as { prs: Record<string, unknown>[] }
+    expect(closed).toMatchObject({
       command: "pr.close",
-      prs: [{ id: "PR1", status: "withdrawn" }],
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
     })
+    expect(closed.prs[0]).toMatchObject({ status: "withdrawn" })
 
     // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
     const again = outputIO()
@@ -1847,6 +2206,9 @@ describe("runYrd", () => {
         revision: item.revision,
         headSha: item.headSha,
         revisions: [],
+        reviews: [],
+        comments: [],
+        checkRequests: [],
       } as PR
       const selected = item.status === "rejected" ? new Set<string>() : new Set([pr.id])
       const projection = humanQueueProjection(
@@ -1875,6 +2237,9 @@ describe("runYrd", () => {
       revision: 1,
       headSha: HEAD_SHA,
       revisions: [],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
       submittedAt: "2026-07-09T12:00:00.000Z",
       rejectedAt: terminalAt,
     } as PR
@@ -1917,6 +2282,9 @@ describe("runYrd", () => {
       headSha: HEAD_SHA,
       baseSha: BASE_SHA,
       revisions: [],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
     } as PR
     const run = fakeRun({
       id: "R1",
@@ -1992,6 +2360,9 @@ describe("runYrd", () => {
         revision: 1,
         headSha: HEAD_SHA,
         revisions: [],
+        reviews: [],
+        comments: [],
+        checkRequests: [],
         submittedAt: "2026-07-09T12:00:00.000Z",
       },
       {
@@ -2003,6 +2374,9 @@ describe("runYrd", () => {
         revision: 1,
         headSha: "2".repeat(40),
         revisions: [],
+        reviews: [],
+        comments: [],
+        checkRequests: [],
         submittedAt: "2026-07-09T12:01:00.000Z",
       },
     ] as PR[]
@@ -2383,6 +2757,9 @@ describe("runYrd", () => {
           pushedAt: "2026-07-10T10:59:00.000Z",
         },
       ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
       submittedAt: "2026-07-10T10:59:00.000Z",
     }
     const statusRows = queueStatusRows(
@@ -3091,6 +3468,9 @@ describe("runYrd", () => {
       revision: 1,
       headSha: HEAD_SHA,
       revisions: [],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
       submittedAt: "2026-07-12T12:05:00.000Z",
     } as PR
     const futureResult = {

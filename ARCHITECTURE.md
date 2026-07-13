@@ -24,8 +24,8 @@ function per implementation detail.
 | `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                |
 | `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
 | `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                   |
-| `Bays`     | `withBays()`                                 | Query and operate on isolated work bays and local PRs                                      | `state`, `get()`, `list()`, `pr()`, `prs()`, `open()`, `refresh()`, `intake()`, `submit()`, `submitSelection()`, `close()`        |
-| `Queue`    | `withQueue()`                                | Verify and merge PRs through configured steps and expose evidence                          | `state`, `steps()`, `pause()`, `resume()`, `run()`, `waiting()`, `finish()`, `recover()`, `audit()`, `get()`, `status()`          |
+| `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, check requests, lifecycle mutations              |
+| `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`   |
 | `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
@@ -43,9 +43,9 @@ The objects above operate on plain records:
 | `CommandResult`        | Dispatched command, committed events, and optional JSON result value      |
 | `Issue`                | Versioned unit of intent from a configured issue source                   |
 | `Bay`                  | Isolated worktree and its current Git facts                               |
-| `PR`                   | Immutable submitted revision offered to a base branch                     |
+| `PR`                   | Revision history plus pushed/submitted readiness, reviews, comments, and check requests |
 | `Job`                  | Durable executable lifecycle and evidence                                 |
-| `QueueRun`             | Pinned PR set, base, step plan, and integration facts                     |
+| `QueueRun`             | Pinned PR set, base, installed-step plan, reusable results, and integration facts |
 | `Step`                 | Configured typed transition in a Queue                                    |
 | `Contest`              | Issue, competitors, attempts, selection, and promotion facts              |
 | `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |

@@ -13,13 +13,26 @@ import type { StepExecution, StepRunner } from "./queue.ts"
 export const StepArtifactSchema = z.object({ name: z.string().min(1), path: z.string().min(1) }).strict()
 export type StepArtifact = Readonly<z.infer<typeof StepArtifactSchema>>
 
+export const CommandDiagnosticSchema = z
+  .object({
+    file: z.string().min(1),
+    line: z.number().int().positive(),
+    column: z.number().int().positive().optional(),
+    message: z.string().min(1),
+  })
+  .strict()
+export type CommandDiagnostic = Readonly<z.infer<typeof CommandDiagnosticSchema>>
+
 export const CommandEvidenceSchema = z
   .object({
+    command: z.array(z.string().min(1)).min(1),
     exitCode: z.number().int(),
     durationMs: z.number().nonnegative(),
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
     artifacts: z.array(StepArtifactSchema),
+    classification: z.enum(["base", "carrier"]).optional(),
     detail: z.string().optional(),
+    diagnostics: z.array(CommandDiagnosticSchema).optional(),
     /** True when the command was settled by its wall-clock bound (21012 S1). */
     timedOut: z.boolean().optional(),
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
@@ -52,6 +65,7 @@ export type QueueAuthorityRefusalEvidence = Readonly<z.infer<typeof QueueAuthori
 
 export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
+  CommandEvidenceSchema,
   GitCheckFailureEvidenceSchema,
   QueueAuthorityRefusalEvidenceSchema,
 ])
@@ -74,6 +88,7 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
     noProgressTimeoutMs?: number
+    classification?: "base" | "carrier"
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
   }>
 
@@ -146,15 +161,19 @@ function configuredCommand<Shape extends PRShape>(
       result.stdout,
       result.stderr,
     )
-    const message = (result.stdout || result.stderr).trimEnd()
-    const detail = message.length <= 2_000 ? message : message.slice(-2_000)
+    const message = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter((part) => part !== "").join("\n")
+    const detail = commandDetail(message)
+    const diagnostics = commandDiagnostics(message)
     const progress = result as typeof result & ProgressResult
     const evidence = CommandEvidenceSchema.parse({
+      command: argv,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
       configHash,
       artifacts,
+      classification: options.classification ?? "carrier",
       ...(detail === "" ? {} : { detail }),
+      ...(diagnostics.length === 0 ? {} : { diagnostics }),
       ...(result.timedOut ? { timedOut: true } : {}),
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
@@ -205,6 +224,41 @@ function configuredCommand<Shape extends PRShape>(
       return failed(`${options.purpose}-launcher-invalid`, messageOf(cause), evidence)
     }
   }
+}
+
+function commandDetail(output: string): string {
+  const limit = 2_000
+  if (output.length <= limit) return output
+  const marker = "\n… output truncated …\n"
+  const headLength = 500
+  return `${output.slice(0, headLength)}${marker}${output.slice(-(limit - headLength - marker.length))}`
+}
+
+function commandDiagnostics(output: string): CommandDiagnostic[] {
+  const diagnostics: CommandDiagnostic[] = []
+  for (const line of output.split(/\r?\n/u)) {
+    const text = line.trim()
+    const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(line)
+    if (changed?.[1] !== undefined) {
+      diagnostics.push({ file: changed[1], line: 1, message: "working tree changed during check" })
+      if (diagnostics.length >= 20) break
+      continue
+    }
+    const match =
+      /^(.*?)\((\d+),(\d+)\):\s*(.+)$/u.exec(text) ?? /^(.*?):(\d+)(?::(\d+))?\s*(?:-|:)\s*(.+)$/u.exec(text)
+    if (match?.[1] === undefined || match[2] === undefined || match[4] === undefined) continue
+    const lineNumber = Number(match[2])
+    const column = match[3] === undefined ? undefined : Number(match[3])
+    if (lineNumber < 1 || (column !== undefined && column < 1)) continue
+    diagnostics.push({
+      file: match[1],
+      line: lineNumber,
+      ...(column === undefined ? {} : { column }),
+      message: match[4],
+    })
+    if (diagnostics.length >= 20) break
+  }
+  return diagnostics
 }
 
 function commandEnvironment(
@@ -263,6 +317,34 @@ async function writeArtifacts(
     artifacts.push({ name, path })
   }
   return artifacts
+}
+
+async function failureEvidence(
+  options: Readonly<{
+    command: readonly string[]
+    detail: string
+    classification: "base" | "carrier"
+    artifactRoot: string
+    input: StepExecution
+    attempt: number
+    artifacts?: readonly StepArtifact[]
+    exitCode?: number
+  }>,
+): Promise<CommandEvidence> {
+  const artifacts =
+    options.artifacts ??
+    (await writeArtifacts(options.artifactRoot, options.input, options.attempt, "", `${options.detail}\n`))
+  const diagnostics = commandDiagnostics(options.detail)
+  return CommandEvidenceSchema.parse({
+    command: options.command,
+    exitCode: options.exitCode ?? 1,
+    durationMs: 0,
+    configHash: createHash("sha256").update(JSON.stringify(options.command)).digest("hex"),
+    artifacts,
+    classification: options.classification,
+    detail: options.detail,
+    ...(diagnostics.length === 0 ? {} : { diagnostics }),
+  })
 }
 
 type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
@@ -408,20 +490,30 @@ async function prepareCandidate(
   artifactRoot: string,
 ): Promise<
   | Readonly<{ status: "passed"; output: string }>
-  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: GitCheckFailureEvidence }>
+  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: CommandEvidence }>
 > {
   for (const pr of input.prs) {
     const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
     if (merged.code !== 0) {
       const artifacts = await writeArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
       await git.run(path, ["merge", "--abort"], true)
+      const detail = `PR '${pr.id}' could not be applied: ${merged.stderr || merged.stdout}`
       return {
         status: "failed",
         error: {
           code: "candidate-conflict",
-          message: `PR '${pr.id}' could not be applied: ${merged.stderr || merged.stdout}`,
+          message: detail,
         },
-        output: GitCheckFailureEvidenceSchema.parse({ artifacts }),
+        output: await failureEvidence({
+          command: ["git", "-C", path, "merge", "--no-ff", "--no-edit", pr.headSha],
+          detail,
+          classification: "carrier",
+          artifactRoot,
+          input,
+          attempt,
+          artifacts,
+          exitCode: merged.code,
+        }),
       }
     }
   }
@@ -436,6 +528,7 @@ export type GitCheckOptions = ProcessDependency &
     artifactRoot?: string
     purpose?: string
     runner?: "local" | "waiting"
+    classification?: "base" | "carrier"
     environment?: string
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
@@ -516,6 +609,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...(options.env === undefined ? {} : { env: options.env }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
+            classification: options.classification ?? "carrier",
             variables: () => ({
               YRD_BASE_SHA: baseSha,
               YRD_CANDIDATE_SHA: candidate.output,
@@ -525,7 +619,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           const runner =
             options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
           const outcome = await runner({ ...input, targetSha: candidate.output }, context)
-          const evidence = { baseSha, candidateSha: candidate.output, candidateRef: ref }
+          const evidence = {
+            baseSha,
+            candidateSha: candidate.output,
+            candidateRef: ref,
+            classification: options.classification ?? ("carrier" as const),
+          }
           if (outcome.status === "passed") {
             return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
           }
@@ -547,9 +646,25 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     } catch (cause) {
       const refusal = queueAuthorityRefusal(cause)
       if (refusal !== undefined) {
-        return failed(failureFact(cause)?.code ?? "queue-environment-refused", cause.message, refusal)
+        return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
-      return failed("check-failed", messageOf(cause))
+      const detail = messageOf(cause)
+      try {
+        return failed(
+          "check-failed",
+          detail,
+          await failureEvidence({
+            command: ["git", "-C", repo, "fetch", "--quiet", "origin"],
+            detail,
+            classification: "base",
+            artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+            input,
+            attempt: context.attempt,
+          }),
+        )
+      } catch {
+        return failed("check-failed", detail)
+      }
     }
   }
 }

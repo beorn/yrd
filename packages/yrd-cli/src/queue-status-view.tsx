@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
-import type { QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
+import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Link, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
@@ -572,7 +572,7 @@ function stepOutput(step: QueueStep): string {
 }
 
 function queueOutcome(run: QueueRun): string {
-  if (run.status === "passed") return "integrated"
+  if (run.status === "passed") return queueIntegration(run) === undefined ? "passed" : "integrated"
   if (run.status === "failed") return "rejected"
   return run.status
 }
@@ -950,13 +950,137 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
   )
 }
 
-export function PRResultView({ prs, runs }: { prs: readonly PR[]; runs: readonly QueueRun[] }) {
+export function PREligibilityView({ rows }: { rows: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[] }) {
+  const data = rows.map(({ pr, eligibility }) => ({
+    pr: pr.id,
+    branch: pr.branch,
+    revision: pr.revision,
+    ready: eligibility.runnable ? "yes" : "no",
+    why: eligibility.reason?.message ?? "ready",
+    review: eligibility.review.required
+      ? eligibility.review.approved
+        ? `approved${eligibility.review.actor === undefined ? "" : ` by ${eligibility.review.actor}`}`
+        : eligibility.review.decision === "reject"
+          ? `rejected${eligibility.review.actor === undefined ? "" : ` by ${eligibility.review.actor}`}`
+          : "required"
+      : "not required",
+    checks: `${eligibility.checks.status}${
+      eligibility.checks.position === undefined ? "" : ` #${eligibility.checks.position}`
+    }`,
+  }))
+  return (
+    <Table
+      data={data}
+      columns={[
+        { header: "PR", key: "pr" },
+        { header: "BRANCH", key: "branch" },
+        { header: "REV", key: "revision" },
+        { header: "READY", key: "ready" },
+        { header: "WHY", key: "why", grow: true },
+        { header: "REVIEW", key: "review" },
+        { header: "CHECKS", key: "checks" },
+      ]}
+    />
+  )
+}
+
+export type PRCheckViewRecord = PRCheckRecord
+
+function explicitArtifactHref(artifact: string): string {
+  return /^[a-z][a-z0-9+.-]*:\/\//iu.test(artifact) ? artifact : pathToFileURL(resolve(artifact)).href
+}
+
+function checkDiagnosticText(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) return singleQueue(safeText(value))
+  const first = isObjectValue(value[0]) ? value[0] : undefined
+  const location =
+    typeof first?.file === "string" && typeof first.line === "number"
+      ? `${first.file}:${first.line}${typeof first.column === "number" ? `:${first.column}` : ""}`
+      : undefined
+  const detail = typeof first?.message === "string" ? first.message : safeText(value[0])
+  return singleQueue(
+    `${location === undefined ? "" : `${location} `}${detail}${value.length > 1 ? ` (+${value.length - 1})` : ""}`,
+  )
+}
+
+export function PRChecksView({ records, now = Date.now() }: { records: readonly PRCheckViewRecord[]; now?: number }) {
+  const data = records.map((record) => ({
+    pr: record.pr,
+    revision: record.revision,
+    check: record.step ?? (record.position === undefined ? "-" : `queue #${record.position}`),
+    state: record.status,
+    classification: record.classification ?? "-",
+    age:
+      record.queuedAt === undefined || !Number.isFinite(Date.parse(record.queuedAt))
+        ? "-"
+        : formatDuration(Math.max(0, now - Date.parse(record.queuedAt))),
+    command: singleQueue(record.command?.join(" ") ?? "-"),
+    diagnostic: checkDiagnosticText(record.diagnostics ?? record.error?.message),
+    artifact: record.artifact,
+  }))
+  return (
+    <Box flexDirection="column">
+      <Table
+        data={data}
+        columns={[
+          { header: "PR", key: "pr" },
+          { header: "REV", key: "revision" },
+          { header: "CHECK", key: "check" },
+          {
+            header: "STATE",
+            key: "state",
+            render: (row) => <StatusValue value={row.state} />,
+          },
+          { header: "CLASS", key: "classification" },
+          { header: "AGE", key: "age" },
+          { header: "COMMAND", key: "command", maxWidth: 40 },
+          { header: "DIAGNOSTIC", key: "diagnostic", minWidth: 24, grow: true },
+          {
+            header: "ARTIFACT",
+            key: "artifact",
+            maxWidth: 40,
+            render: (row) =>
+              row.artifact === undefined ? (
+                <Text>-</Text>
+              ) : (
+                <CellLink href={explicitArtifactHref(row.artifact)}>{row.artifact}</CellLink>
+              ),
+          },
+        ]}
+      />
+      {data
+        .filter((row) => row.state === "failed")
+        .map((row) => (
+          <Text key={`${row.pr}:${row.revision}:${row.check}`}>
+            {`FAIL ${row.pr}@${row.revision} ${row.check} COMMAND ${row.command} DIAGNOSTIC ${row.diagnostic}${row.artifact === undefined ? "" : ` ARTIFACT ${row.artifact}`}`}
+          </Text>
+        ))}
+    </Box>
+  )
+}
+
+export function PRResultView({
+  prs,
+  runs,
+  checks,
+  now,
+}: {
+  prs: readonly PR[]
+  runs: readonly QueueRun[]
+  checks?: readonly PRCheckViewRecord[]
+  now?: number
+}) {
   return (
     <Box flexDirection="column">
       <PRStatusView prs={prs} />
-      {runs.length > 0 && (
+      {checks === undefined && runs.length > 0 && (
         <Box marginTop={1}>
           <QueueRunsView runs={runs} />
+        </Box>
+      )}
+      {checks !== undefined && (
+        <Box marginTop={1}>
+          <PRChecksView records={checks} now={now} />
         </Box>
       )}
     </Box>
@@ -1489,7 +1613,7 @@ export function queueShowData(
     ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
     retries: queueShowRetries(finished, run),
     landing: queueLanding(run),
-    integration: run.status === "passed" ? queueOutcomeIntegration(run) : undefined,
+    integration: run.status === "passed" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     prs: run.prs,

@@ -138,6 +138,14 @@ function queueStepRevision(
         resolvedCommand,
         runner: config.runner,
         environment: config.environment,
+        classification: config.classification ?? "carrier",
+        timeoutMs: stepTimeoutMs(config),
+        toolchain: {
+          bun: Bun.version,
+          node: process.versions.node,
+          platform: process.platform,
+          arch: process.arch,
+        },
       }),
     )
     .digest("hex")
@@ -212,10 +220,14 @@ function candidateStep(
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
         runner: config.runner,
+        classification: config.classification ?? "carrier",
         timeoutMs: stepTimeoutMs(config),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
-      { revision: queueStepRevision(repo, stateDir, name, config, checkoutParent) },
+      {
+        revision: queueStepRevision(repo, stateDir, name, config, checkoutParent),
+        classification: config.classification ?? "carrier",
+      },
     ),
   )
 }
@@ -403,6 +415,15 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     steps: configuredQueueSteps(options, mergeCommand),
     batch: options.config.batch,
     defaultSteps: options.config.steps,
+    requires: options.config.requires,
+    resolveBaseSha: async (base) =>
+      (
+        await resolveGitQueueTarget({
+          inject: { process: options.process },
+          repo: options.repo,
+          branch: baseIdentity(base),
+        })
+      ).sha,
   })
   const contestAdapters = defaultContestAdapters(options)
   const contests = withContests({

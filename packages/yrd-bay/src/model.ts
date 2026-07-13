@@ -55,6 +55,40 @@ export type PRRevision = Readonly<{
   pushedAt: string
 }>
 
+export type PRReviewDecision = "approve" | "reject"
+
+export type PRReview = Readonly<{
+  revision: number
+  headSha: string
+  actor: string
+  decision: PRReviewDecision
+  at: string
+  ref?: string
+  note?: string
+}>
+
+export type PRComment = Readonly<{
+  revision: number
+  headSha: string
+  actor: string
+  note: string
+  at: string
+  ref?: string
+}>
+
+export type PRReviewState = Readonly<{
+  approved: boolean
+  current?: PRReview
+  stale: readonly PRReview[]
+}>
+
+export type PRCheckRequest = Readonly<{
+  revision: number
+  headSha: string
+  baseSha?: string
+  at: string
+}>
+
 export type PR = Readonly<{
   id: PRId
   bay?: BayId
@@ -68,6 +102,9 @@ export type PR = Readonly<{
   headSha: string
   baseSha?: string
   revisions: readonly PRRevision[]
+  reviews: readonly PRReview[]
+  comments: readonly PRComment[]
+  checkRequests: readonly PRCheckRequest[]
   submittedAt?: string
   rejectedAt?: string
   integratedAt?: string
@@ -75,6 +112,23 @@ export type PR = Readonly<{
   withdrawnAt?: string
   detail?: string
 }>
+
+export function reviewState(pr: PR): PRReviewState {
+  const current = pr.reviews.findLast((review) => review.revision === pr.revision && review.headSha === pr.headSha)
+  return {
+    approved: current?.decision === "approve",
+    ...(current === undefined ? {} : { current }),
+    stale: pr.reviews.filter((review) => review.revision !== pr.revision || review.headSha !== pr.headSha),
+  }
+}
+
+export function checksRequested(pr: PR): boolean {
+  return checkRequest(pr) !== undefined
+}
+
+export function checkRequest(pr: PR): PRCheckRequest | undefined {
+  return pr.checkRequests.findLast((request) => request.revision === pr.revision && request.headSha === pr.headSha)
+}
 
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
