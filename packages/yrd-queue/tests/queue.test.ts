@@ -101,13 +101,14 @@ async function createQueueApp(
   options: Parameters<typeof queuePlugin>[0] = {},
   journal = createMemoryJournal(),
   clock: () => string = () => "2026-01-01T00:00:00.000Z",
+  id: () => string = ids(),
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = queuePlugin(options)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   const definition = queue(base)
   return createYrd(definition, {
-    inject: { journal, id: ids(), clock },
+    inject: { journal, id, clock },
   })
 }
 
@@ -123,6 +124,7 @@ describe("Queue", () => {
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()
+    expectTypeOf(app.queue.recover).parameter(0).toEqualTypeOf<Readonly<{ recoveryTime: string; reason?: string }>>()
     expect(app.queue.steps().map((step) => step.name)).toEqual(["check", "review", "merge", "deploy"])
 
     const check = withStep(
@@ -151,6 +153,121 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
     expect(app.state().queues.records).toEqual({})
     expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+  })
+
+  it("keeps recovery execution-free for requested merge work", async () => {
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/requested-merge")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
+    const before = await Array.fromAsync(app.events())
+
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([])
+
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
+    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(mergeCalls).toBe(0)
+  })
+
+  it("recovers an expired batch without executing, bisecting, or landing", async () => {
+    let checkCalls = 0
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      batch: 2,
+      check: () => {
+        checkCalls += 1
+        return { status: "passed", output: { checked: true } }
+      },
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const first = await submitBranch(app, "issue/batch-one")
+    const second = await submitBranch(app, "issue/batch-two")
+    await app.dispatch(app.commands.queue.run, { prs: [first.id, second.id], steps: ["check", "merge"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected requested batch check")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "expired-runner",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z", reason: "runner disappeared" }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "failed",
+        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+      }),
+    ])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(app.state().bays.prs[first.id]?.status).toBe("submitted")
+    expect(app.state().bays.prs[second.id]?.status).toBe("submitted")
+    expect(checkCalls).toBe(0)
+    expect(mergeCalls).toBe(0)
+
+    const settled = await Array.fromAsync(app.events())
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([])
+    expect(await Array.fromAsync(app.events())).toEqual(settled)
+  })
+
+  it("reconciles a replayed lost job without granting recovery execution authority", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let checkCalls = 0
+    let mergeCalls = 0
+    const options = {
+      check: () => {
+        checkCalls += 1
+        return { status: "passed" as const, output: { checked: true } }
+      },
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/crash-gap")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+      const job = app.queue.get("R1")?.steps[0]?.job
+      if (job === undefined) throw new Error("expected requested crash-gap check")
+      await app.dispatch(app.commands.job.transition, {
+        type: "start",
+        id: job.id,
+        attempt: 1,
+        runner: "expired-runner",
+        leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+      })
+      await expect(app.jobs.recover({ now: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([job.id])
+      expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    const before = await Array.fromAsync(replayed.events())
+    await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([
+      expect.objectContaining({ id: "R1", status: "failed" }),
+    ])
+    expect(replayed.state().bays.prs.PR1?.status).toBe("rejected")
+    expect(checkCalls).toBe(0)
+    expect(mergeCalls).toBe(0)
+    expect((await Array.fromAsync(replayed.events())).slice(before.length)).toMatchObject([{ name: "pr/rejected" }])
+
+    const reconciled = await Array.fromAsync(replayed.events())
+    await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:03:00.000Z" })).resolves.toEqual([])
+    expect(await Array.fromAsync(replayed.events())).toEqual(reconciled)
   })
 
   it("keys a selected step suffix by run order rather than installed order", async () => {

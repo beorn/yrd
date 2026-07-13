@@ -627,6 +627,25 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
+  it("uses one canonical submitted-at and PR-id ordering for status, prime, and merge refusal", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/first", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "topic/second", headSha: "2".repeat(40), base: "main" })
+    expect(app.state().bays.prs.PR1?.submittedAt).toBe(app.state().bays.prs.PR2?.submittedAt)
+
+    const status = outputIO({ currentBranch: () => "topic/second" })
+    expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
+    expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { id: "PR2" }, position: 2 })
+
+    const prime = outputIO({ currentBranch: () => "topic/second" })
+    expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
+    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR2", position: 2 } })
+
+    const refusal = outputIO()
+    expect(await runYrd(app, yrd("pr", "merge", "PR2", "--json"), refusal.io)).toBe(1)
+    expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR2", position: 2 })
+  })
+
   it("executes bare projections with their canonical JSON discriminators", async () => {
     const app = await createApp()
     const surfaces = [
@@ -646,7 +665,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("emits lossless queue runs only when log --all is requested", async () => {
+  it("emits lossless queue runs and attempt history only when log --all is requested", async () => {
     const app = await createApp()
     await openAndSubmit(app)
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
@@ -654,6 +673,7 @@ describe("runYrd", () => {
     const ordinary = outputIO()
     expect(await runYrd(app, yrd("log", "--json"), ordinary.io), ordinary.stderr()).toBe(0)
     expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("results")
+    expect(JSON.parse(ordinary.stdout())).not.toHaveProperty("attempts")
 
     const lossless = outputIO()
     expect(await runYrd(app, yrd("log", "--all", "--json"), lossless.io), lossless.stderr()).toBe(0)
@@ -671,6 +691,91 @@ describe("runYrd", () => {
               integration: expect.any(Object),
             },
           ],
+        },
+      ],
+      attempts: [
+        expect.objectContaining({
+          run: "R1",
+          step: "check",
+          attempt: 1,
+          revision: "check-v1",
+          result: { status: "passed", output: { checked: true } },
+        }),
+        expect.objectContaining({
+          run: "R1",
+          step: "merge",
+          attempt: 1,
+          revision: "merge-v1",
+          result: { status: "passed", output: expect.any(Object) },
+        }),
+      ],
+    })
+  })
+
+  it("preserves failed output and lost retry evidence in lossless log JSON", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check", "merge"] })
+    const check = app.queue.get("R1")?.steps[0]?.job
+    if (check === undefined) throw new Error("expected requested check")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: check.id,
+      attempt: 1,
+      runner: "first-runner",
+      leaseExpiresAt: "2026-07-09T12:00:01.000Z",
+    })
+    await app.jobs.finish(check.id, {
+      attempt: 1,
+      runner: "first-runner",
+      result: {
+        status: "failed",
+        error: { code: "check-failed", message: "candidate failed" },
+        output: { exitCode: 17, artifacts: [{ name: "stderr", path: "/tmp/check.stderr" }] },
+      },
+    })
+    await app.jobs.retry(check.id)
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: check.id,
+      attempt: 2,
+      runner: "second-runner",
+      leaseExpiresAt: "2026-07-09T12:00:01.000Z",
+    })
+    await app.jobs.recover({ now: "2026-07-09T12:00:02.000Z", reason: "runner disappeared" })
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("log", "--all", "--json"), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "log",
+      attempts: [
+        {
+          job: check.id,
+          run: "R1",
+          step: "check",
+          index: 0,
+          requestedAt: "2026-07-09T12:00:00.000Z",
+          revision: "check-v1",
+          attempt: 1,
+          runner: "first-runner",
+          outcome: "failed",
+          result: {
+            status: "failed",
+            error: { code: "check-failed", message: "candidate failed" },
+            output: { exitCode: 17, artifacts: [{ name: "stderr", path: "/tmp/check.stderr" }] },
+          },
+        },
+        {
+          job: check.id,
+          run: "R1",
+          step: "check",
+          index: 0,
+          requestedAt: "2026-07-09T12:00:00.000Z",
+          revision: "check-v1",
+          attempt: 2,
+          runner: "second-runner",
+          outcome: "lost",
+          result: { status: "lost", reason: "runner disappeared" },
         },
       ],
     })
@@ -2750,6 +2855,95 @@ describe("runYrd", () => {
     expect(first).toMatchObject({ subject, ageMs: 20 * 60_000, age: "20m00s" })
     expect(later).toMatchObject({ subject, ageMs: 20 * 60_000, age: "20m00s" })
     expect(first?.subject.length).toBeGreaterThan(80)
+  })
+
+  it("fails loud when attempt, run, step, or submission chronology goes backwards", async () => {
+    const job = "00000000-0000-7000-8000-000000000901"
+    await expect(
+      queueLogAttempts([
+        EventSchema.parse({
+          id: job,
+          name: "job/requested",
+          ts: "2026-07-12T12:00:00.000Z",
+          data: {
+            definition: "queue.step.check",
+            revision: "check-v1",
+            input: { run: "R90", step: "check", index: 0 },
+            key: "queue:R90:0",
+          },
+        }),
+        EventSchema.parse({
+          id: "00000000-0000-7000-8000-000000000902",
+          name: "job/transitioned",
+          ts: "2026-07-12T12:02:00.000Z",
+          data: {
+            type: "start",
+            id: job,
+            attempt: 1,
+            runner: "clock-skewed",
+            leaseExpiresAt: "2026-07-12T12:03:00.000Z",
+          },
+        }),
+        EventSchema.parse({
+          id: "00000000-0000-7000-8000-000000000903",
+          name: "job/transitioned",
+          ts: "2026-07-12T12:01:00.000Z",
+          data: {
+            type: "finish",
+            id: job,
+            attempt: 1,
+            runner: "clock-skewed",
+            result: { status: "passed", output: {} },
+          },
+        }),
+      ]),
+    ).rejects.toThrow(/precedes/u)
+
+    const failedStep = (startedAt: string, finishedAt: string) =>
+      fakeStep("check", "failed", fakeJob({ id: job, status: "failed", startedAt, finishedAt }))
+    const project = (run: QueueRun, submittedAt = "2026-07-12T11:59:00.000Z") =>
+      queueLogRows(
+        [fakeSummary([run])],
+        new Set<string>(),
+        undefined,
+        new Map([["PR1", "rejected"]]),
+        [],
+        new Map(),
+        new Map([[queueRevisionKey(run.prs[0]!), submittedAt]]),
+      )
+
+    expect(() =>
+      project(
+        fakeRun({
+          id: "R91",
+          status: "failed",
+          startedAt: "2026-07-12T12:02:00.000Z",
+          finishedAt: "2026-07-12T12:01:00.000Z",
+          steps: [failedStep("2026-07-12T12:00:00.000Z", "2026-07-12T12:01:00.000Z")],
+        }),
+      ),
+    ).toThrow(/precedes/u)
+
+    expect(() =>
+      project(
+        fakeRun({
+          id: "R92",
+          status: "failed",
+          startedAt: "2026-07-12T12:00:00.000Z",
+          finishedAt: "2026-07-12T12:03:00.000Z",
+          steps: [failedStep("2026-07-12T12:02:00.000Z", "2026-07-12T12:01:00.000Z")],
+        }),
+      ),
+    ).toThrow(/precedes/u)
+
+    const valid = fakeRun({
+      id: "R93",
+      status: "failed",
+      startedAt: "2026-07-12T12:00:00.000Z",
+      finishedAt: "2026-07-12T12:01:00.000Z",
+      steps: [failedStep("2026-07-12T12:00:00.000Z", "2026-07-12T12:01:00.000Z")],
+    })
+    expect(() => project(valid, "2026-07-12T12:02:00.000Z")).toThrow(/precedes/u)
   })
 
   it("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {
