@@ -428,10 +428,36 @@ export type GitCheckOptions = ProcessDependency &
     noProgressTimeoutMs?: number
   }>
 
-async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<void> {
-  const created = await git.run(repo, ["update-ref", "--create-reflog", ref, sha, "0".repeat(sha.length)], true)
-  if (created.code === 0 || (await git.commit(repo, ref)) === sha) return
-  throw new Error(created.stderr || created.stdout || `candidate ref '${ref}' has a different commit`)
+type CandidatePin =
+  | Readonly<{ status: "pinned"; ref: string }>
+  | Readonly<{ status: "refused"; token: string; detail: string }>
+
+async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<CandidatePin> {
+  const collisionLimit = 32
+  for (let collision = 0; collision <= collisionLimit; collision += 1) {
+    const candidate = collision === 0 ? ref : `${ref}-collision-${collision}`
+    const created = await git.run(repo, ["update-ref", "--create-reflog", candidate, sha, "0".repeat(sha.length)], true)
+    if (created.code === 0 || (await git.optionalCommit(repo, candidate)) === sha) {
+      return { status: "pinned", ref: candidate }
+    }
+  }
+  const token = createHash("sha256").update(ref).update("\0").update(sha).digest("hex")
+  return {
+    status: "refused",
+    token: `candidate-ref-refused:${token}`,
+    detail: `candidate ref '${ref}' exhausted ${collisionLimit} collision identities`,
+  }
+}
+
+function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, attempt: number, sha: string): string {
+  const identity = createHash("sha256")
+    .update(job)
+    .update("\0")
+    .update(String(attempt))
+    .update("\0")
+    .update(sha)
+    .digest("hex")
+  return `refs/yrd/candidates/${input.run}/${input.step}/attempt-${attempt}-${identity}`
 }
 
 export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
@@ -464,8 +490,16 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
           )
           if (candidate.status === "failed") return candidate
-          const candidateRef = `refs/yrd/candidates/${input.run}/${input.step}/attempt-${context.attempt}`
-          await pinCandidate(git, repo, candidateRef, candidate.output)
+          const pinned = await pinCandidate(
+            git,
+            repo,
+            candidateRef(input, context.id, context.attempt, candidate.output),
+            candidate.output,
+          )
+          if (pinned.status === "refused") {
+            return { status: "waiting", token: pinned.token, detail: pinned.detail }
+          }
+          const ref = pinned.ref
           const configured: ConfiguredCommandOptions<PRShape> = {
             inject: options.inject,
             command: options.command,
@@ -484,7 +518,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           const runner =
             options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
           const outcome = await runner({ ...input, targetSha: candidate.output }, context)
-          const evidence = { baseSha, candidateSha: candidate.output, candidateRef }
+          const evidence = { baseSha, candidateSha: candidate.output, candidateRef: ref }
           if (outcome.status === "passed") {
             return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
           }

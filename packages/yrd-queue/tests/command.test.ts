@@ -3,6 +3,7 @@
  * @level l2
  * @consumer @yrd/queue Git step adapters
  */
+import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -152,6 +153,17 @@ async function checkedQueue(
 async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<void> {
   expect(await git(repo, ["rev-parse", "main"])).toBe(evidence.candidateSha)
   expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
+}
+
+function expectedCandidateRef(run: string, step: string, job: string, attempt: number, sha: string): string {
+  const identity = createHash("sha256")
+    .update(job)
+    .update("\0")
+    .update(String(attempt))
+    .update("\0")
+    .update(sha)
+    .digest("hex")
+  return `refs/yrd/candidates/${run}/${step}/attempt-${attempt}-${identity}`
 }
 
 describe("Queue command adapters", () => {
@@ -453,7 +465,7 @@ describe("Queue command adapters", () => {
     expect(evidence).toMatchObject({
       exitCode: 17,
       baseSha,
-      candidateRef: "refs/yrd/candidates/R1/check/attempt-1",
+      candidateRef: expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha),
       artifacts: [{ name: "stdout" }, { name: "stderr" }],
     })
     expect(evidence.candidateSha).toHaveLength(40)
@@ -463,6 +475,99 @@ describe("Queue command adapters", () => {
     if (stdoutArtifact === undefined || stderrArtifact === undefined) throw new Error("missing command artifacts")
     expect(await readFile(stdoutArtifact, "utf8")).toBe("check stdout\n")
     expect(await readFile(stderrArtifact, "utf8")).toBe("check stderr\n")
+  })
+
+  it("preserves a legacy R1 attempt ref when an empty journal reuses the display run id", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    const legacyRef = "refs/yrd/candidates/R1/check/attempt-1"
+    await git(repo, ["update-ref", legacyRef, baseSha])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ id: "R1", status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+
+    expect(evidence.candidateRef).toBe(expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha))
+    expect(await git(repo, ["rev-parse", legacyRef])).toBe(baseSha)
+    expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
+  })
+
+  it("preserves an occupied derived candidate ref and publishes the candidate under a fresh identity", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const occupiedSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    let occupiedRef: string | undefined
+    const racingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (
+          occupiedRef === undefined &&
+          request.argv[0] === "git" &&
+          request.argv[3] === "update-ref" &&
+          request.argv[4] === "--create-reflog" &&
+          request.argv[5]?.startsWith("refs/yrd/candidates/")
+        ) {
+          occupiedRef = request.argv[5]
+          await git(repo, ["update-ref", occupiedRef, occupiedSha])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(racingProcess, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ id: "R1", status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    if (occupiedRef === undefined) throw new Error("candidate publication was not intercepted")
+
+    expect(evidence.candidateRef).not.toBe(occupiedRef)
+    expect(await git(repo, ["rev-parse", occupiedRef])).toBe(occupiedSha)
+    expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
+  })
+
+  it("refuses bounded candidate ref exhaustion without rejecting or moving the submitted payload", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const occupiedSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const occupiedRefs: string[] = []
+    const hostileProcess: Pick<Process, "run"> = {
+      async run(request) {
+        const ref = request.argv[5]
+        if (
+          request.argv[0] === "git" &&
+          request.argv[3] === "update-ref" &&
+          request.argv[4] === "--create-reflog" &&
+          ref?.startsWith("refs/yrd/candidates/")
+        ) {
+          occupiedRefs.push(ref)
+          await git(repo, ["update-ref", ref, occupiedSha])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(hostileProcess, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ id: "R1", status: "waiting" })
+    const job = run?.steps[0]?.job
+    expect(job).toMatchObject({
+      status: "waiting",
+      token: expect.stringMatching(/^candidate-ref-refused:/u),
+      detail: expect.stringContaining("collision identities"),
+    })
+    expect(occupiedRefs).toHaveLength(33)
+    for (const ref of occupiedRefs) expect(await git(repo, ["rev-parse", ref])).toBe(occupiedSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("lands the exact audited candidate and its durable artifacts", async () => {
