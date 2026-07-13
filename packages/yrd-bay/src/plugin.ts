@@ -184,16 +184,24 @@ const PRPushedSchema = z
   })
   .strict()
 const PRRevisionSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const PRRejectedSchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, detail: z.string().optional() }).strict()
+const PRTypedRevisionSchema = PRRevisionSchema.extend({ issueRef: TextSchema.optional() }).strict()
+const PRWithdrawnSchema = PRTypedRevisionSchema
+const PRRejectedSchema = PRTypedRevisionSchema.extend({ detail: z.string().optional() }).strict()
 const PRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
     headSha: GitShaSchema,
+    issueRef: TextSchema.optional(),
     commit: GitShaSchema,
+    landingSha: GitShaSchema,
     baseSha: GitShaSchema,
   })
   .strict()
+  .refine(({ commit, landingSha }) => commit === landingSha, {
+    message: "landingSha must match the integration commit",
+    path: ["landingSha"],
+  })
 const PRReviewFactSchema = z
   .object({
     pr: PRIdSchema,
@@ -531,8 +539,8 @@ export function withBays(options: WithBaysOptions) {
         "bay/opened": BayOpenedSchema,
         "bay/closing": BayClosingSchema,
         "pr/pushed": PRPushedSchema,
-        "pr/submitted": PRRevisionSchema,
-        "pr/withdrawn": z.object({ pr: PRIdSchema }).strict(),
+        "pr/submitted": PRTypedRevisionSchema,
+        "pr/withdrawn": PRWithdrawnSchema,
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/edited": PrEditArgsSchema,
@@ -754,7 +762,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   if ("pr" in args) {
     const pr = required(resolvePR(current, args.pr), "PR", args.pr)
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
-    return { events: [event("pr/submitted", { pr: pr.id, revision: pr.revision, headSha: pr.headSha })] }
+    return { events: [event("pr/submitted", prRevisionJoin(pr))] }
   }
 
   const base = baseIdentity(args.base ?? defaultBase)
@@ -766,10 +774,11 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   const resubmitted = existing?.status === "rejected" ? existing : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
+  const issue = args.issue ?? resubmitted?.issue
   const pushed = {
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
-    ...(args.issue === undefined ? {} : { issue: args.issue }),
+    ...(issue === undefined ? {} : { issue }),
     branch: args.branch,
     base,
     headSha: args.headSha,
@@ -779,7 +788,16 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   return {
     events: [
       event("pr/pushed", pushed),
-      ...(args.draft === true ? [] : [event("pr/submitted", { pr: id, revision, headSha: args.headSha })]),
+      ...(args.draft === true
+        ? []
+        : [
+            event("pr/submitted", {
+              pr: id,
+              revision,
+              headSha: args.headSha,
+              ...(issue === undefined ? {} : { issueRef: issue }),
+            }),
+          ]),
     ],
   }
 }
@@ -883,7 +901,7 @@ function closeBay(state: DeepReadonly<BayState>, args: CloseBayArgs, deprovision
   }
   return {
     events: [
-      ...(pr !== undefined && isLivePR(pr.status) ? [event("pr/withdrawn", { pr: pr.id })] : []),
+      ...(pr !== undefined && isLivePR(pr.status) ? [event("pr/withdrawn", prRevisionJoin(pr))] : []),
       event("bay/closing", { bay: bay.id }),
       deprovision.request({
         bay: bay.id,
@@ -900,7 +918,25 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
-  return { events: [event("pr/withdrawn", { pr: pr.id })] }
+  return { events: [event("pr/withdrawn", prRevisionJoin(pr))] }
+}
+
+function prRevisionJoin(pr: DeepReadonly<PR>) {
+  return {
+    pr: pr.id,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+  }
+}
+
+function assertPRRevisionJoin(pr: DeepReadonly<PR>, changed: z.infer<typeof PRTypedRevisionSchema>): void {
+  if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
+    throw new Error(`yrd: stale PR event for '${pr.id}'`)
+  }
+  if (pr.issue !== changed.issueRef) {
+    throw new Error(`yrd: PR event issue reference does not match '${pr.id}' revision ${pr.revision}`)
+  }
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
@@ -1005,22 +1041,24 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
     }
     case "pr/submitted": {
-      const changed = PRRevisionSchema.parse(data)
+      const changed = PRTypedRevisionSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
-      if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
-        throw new Error(`yrd: stale PR event for '${pr.id}'`)
-      }
+      assertPRRevisionJoin(pr, changed)
       return patchPR(pr, { status: "submitted", submittedAt: applied.ts })
     }
     case "pr/withdrawn": {
-      const pr = current.prs[data.pr as string]
-      return pr === undefined ? state : patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
+      const changed = PRWithdrawnSchema.parse(data)
+      const pr = current.prs[changed.pr]
+      if (pr === undefined) return state
+      assertPRRevisionJoin(pr, changed)
+      return patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
     }
     case "pr/rejected": {
       const changed = PRRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision) return state
+      if (pr === undefined) return state
+      assertPRRevisionJoin(pr, changed)
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
@@ -1030,7 +1068,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
     case "pr/integrated": {
       const changed = PRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || pr.revision !== changed.revision || pr.headSha !== changed.headSha) return state
+      if (pr === undefined) return state
+      assertPRRevisionJoin(pr, changed)
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,

@@ -29,7 +29,7 @@ import {
 import { asFailure, raiseFailure } from "./failure.ts"
 import { parseJournalFrame, type JournalFrame } from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
-import type { Cursor, Journal } from "./journal.ts"
+import type { Cursor, Journal, JournalStamp } from "./journal.ts"
 
 export type { DeepReadonly } from "./immutable.ts"
 
@@ -87,6 +87,8 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   scope: Scope
   log: ConditionalLogger
   refresh(): Promise<DeepReadonly<State>>
+  /** Refresh and return the exact journal position backing the projected state. */
+  journalStamp(): Promise<JournalStamp>
   dispatch: Dispatch
   events(): AsyncIterable<Event>
   close(): Promise<void>
@@ -198,6 +200,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 
   type Projection = Readonly<{
     cursor: Cursor
+    at?: string
     state: DeepReadonly<State>
     receiptsById: ReadonlyMap<string, JournalFrame>
     receiptsByKey: ReadonlyMap<string, JournalFrame>
@@ -260,7 +263,16 @@ export async function createYrd<State extends object, Commands extends CommandTr
     receiptsById.set(frame.command.id, frame)
     const receiptsByKey = new Map(base.receiptsByKey)
     if (frame.cause.key !== undefined) receiptsByKey.set(frame.cause.key, frame)
-    return { ...base, state: nextState, receiptsById, receiptsByKey, causeIds, eventIds }
+    const at = frame.events.at(-1)?.ts ?? base.at
+    return {
+      ...base,
+      ...(at === undefined ? {} : { at }),
+      state: nextState,
+      receiptsById,
+      receiptsByKey,
+      causeIds,
+      eventIds,
+    }
   }
 
   const publish = (next: Projection): void => {
@@ -408,6 +420,14 @@ export async function createYrd<State extends object, Commands extends CommandTr
     scope,
     log,
     refresh: () => track(refresh),
+    journalStamp: () =>
+      track(async () => {
+        await refresh()
+        return Object.freeze({
+          cursor: projection.cursor,
+          ...(projection.at === undefined ? {} : { at: projection.at }),
+        })
+      }),
     dispatch,
     async *events() {
       await refresh()

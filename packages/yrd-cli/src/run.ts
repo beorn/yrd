@@ -32,6 +32,7 @@ import {
 import { submittedPrPositions } from "./queue-position.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
+import { trackerBridgeSnapshot } from "./tracker-bridge.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { YRD_VERSION } from "./version.ts"
 import { QueueWatchPane, type QueueWatchSnapshot } from "./watch-pane.tsx"
@@ -1064,7 +1065,10 @@ async function logRuns(
   options: { all?: boolean; base?: string; pr?: string; json?: boolean },
   io: YrdCliIO,
 ): Promise<void> {
+  const bridgeStamp = options.all === true ? await app.journalStamp() : undefined
   const state = stateOf(app)
+  const trackerBridge =
+    bridgeStamp === undefined ? undefined : trackerBridgeSnapshot(Object.values(state.bays.prs), bridgeStamp)
   const target = queueLogTargets(state, selectors, options.base, options.pr)
   const summaries: QueueStatusResult[] = []
   for (const group of await queueTargetGroups(target.bases, io)) {
@@ -1119,7 +1123,7 @@ async function logRuns(
     {
       command: "log",
       rows,
-      ...(options.all === true ? { results: summaries, attempts } : {}),
+      ...(options.all === true ? { results: summaries, attempts, trackerBridge } : {}),
       ...(coverage === undefined ? {} : { coverage }),
     },
     createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),

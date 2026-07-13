@@ -19,13 +19,13 @@ function per implementation detail.
 | Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                      |
 | ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
 | `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                        |
-| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `dispatch()`, `events()`, `close()`                                                                         |
+| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalStamp()`, `dispatch()`, `events()`, `close()`                                                       |
 | `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                              |
 | `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                |
 | `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
 | `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                   |
-| `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, check requests, lifecycle mutations              |
-| `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`   |
+| `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, check requests, lifecycle mutations             |
+| `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`  |
 | `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
@@ -36,20 +36,20 @@ function or a small plain object; it is not a global singleton.
 
 The objects above operate on plain records:
 
-| Record                 | Meaning                                                                   |
-| ---------------------- | ------------------------------------------------------------------------- |
-| `Command`              | Serializable request naming one registered handler and its arguments      |
-| `Event`                | Validated fact emitted by a command                                       |
-| `CommandResult`        | Dispatched command, committed events, and optional JSON result value      |
-| `Issue`                | Versioned unit of intent from a configured issue source                   |
-| `Bay`                  | Isolated worktree and its current Git facts                               |
-| `PR`                   | Revision history plus pushed/submitted readiness, reviews, comments, and check requests |
-| `Job`                  | Durable executable lifecycle and evidence                                 |
-| `QueueRun`             | Pinned PR set, base, installed-step plan, reusable results, and integration facts |
-| `Step`                 | Configured typed transition in a Queue                                    |
-| `Contest`              | Issue, competitors, attempts, selection, and promotion facts              |
-| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |
-| `Artifact`             | Named evidence with a path or URL and media type                          |
+| Record                 | Meaning                                                                                            |
+| ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `Command`              | Serializable request naming one registered handler and its arguments                               |
+| `Event`                | Validated fact emitted by a command                                                                |
+| `CommandResult`        | Dispatched command, committed events, and optional JSON result value                               |
+| `Issue`                | Versioned unit of intent from a configured issue source                                            |
+| `Bay`                  | Isolated worktree and its current Git facts                                                        |
+| `PR`                   | Revision history plus tracker-neutral issue link, readiness, reviews, comments, and check requests |
+| `Job`                  | Durable executable lifecycle and evidence                                                          |
+| `QueueRun`             | Pinned PR set, base, installed-step plan, reusable results, and integration facts                  |
+| `Step`                 | Configured typed transition in a Queue                                                             |
+| `Contest`              | Issue, competitors, attempts, selection, and promotion facts                                       |
+| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin                          |
+| `Artifact`             | Named evidence with a path or URL and media type                                                   |
 
 Persisted records contain JSON data only. Zod schemas validate every untyped
 boundary: CLI/config input, commands, events, Job input/output, adapter output,
@@ -137,7 +137,14 @@ A malformed newline-terminated record is committed corruption and fails loud.
 `yrd.state` is the synchronous reactive signal for the latest state this
 runtime has observed. `await yrd.refresh()` incrementally catches up with Frames
 another process appended, then publishes the newer snapshot through that same
-signal. Commands refresh before deciding and publish after append.
+signal. `await yrd.journalStamp()` refreshes and returns the cursor plus last
+event timestamp backing that projection, so read-only adapters can publish an
+exact as-of boundary. Commands refresh before deciding and publish after append.
+
+The CLI's versioned tracker bridge is one such projection: it maps linked PRs
+and their native five-state lifecycle from the frozen journal snapshot. It does
+not discover tracker plugins, accept tracker writes, or maintain a second
+cursor/state store; an external consumer reconciles its own materialized view.
 
 The Journal warns at 10 MiB or 10,000 replayed frames. Compaction is explicit
 as-needed work; the warning tells operators to implement compaction and GC
