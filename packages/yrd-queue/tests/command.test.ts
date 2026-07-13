@@ -534,6 +534,42 @@ describe("Queue command adapters", () => {
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", headSha: featureSha })
   })
 
+  it("refuses bounded candidate ref exhaustion without rejecting or moving the submitted payload", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const occupiedSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const occupiedRefs: string[] = []
+    const hostileProcess: Pick<Process, "run"> = {
+      async run(request) {
+        const ref = request.argv[5]
+        if (
+          request.argv[0] === "git" &&
+          request.argv[3] === "update-ref" &&
+          request.argv[4] === "--create-reflog" &&
+          ref?.startsWith("refs/yrd/candidates/")
+        ) {
+          occupiedRefs.push(ref)
+          await git(repo, ["update-ref", ref, occupiedSha])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(hostileProcess, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ id: "R1", status: "waiting" })
+    const job = run?.steps[0]?.job
+    expect(job).toMatchObject({
+      status: "waiting",
+      token: expect.stringMatching(/^candidate-ref-refused:/u),
+      detail: expect.stringContaining("collision identities"),
+    })
+    expect(occupiedRefs).toHaveLength(33)
+    for (const ref of occupiedRefs) expect(await git(repo, ["rev-parse", ref])).toBe(occupiedSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
+  })
+
   it("lands the exact audited candidate and its durable artifacts", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
