@@ -513,8 +513,10 @@ Execution is **at least once** across crashes: an executor may perform an
 external side effect before its settlement frame is committed. Yrd accepts only
 one settlement for a Job attempt, but a backend must deduplicate effects by the
 stable Job id and fence stale attempts. Configured commands receive `YRD_JOB`,
-`YRD_ATTEMPT`, and `YRD_EXECUTOR` for that purpose. Yrd never guesses that a
-side effect did or did not happen.
+`YRD_ATTEMPT`, `YRD_EXECUTOR`, and a host-owned `YRD_JOB_ROOT`; their `TMPDIR`
+is contained by that root. Success, failure, interruption, and expired-lease
+recovery release only the exact durable attempt root before settlement can be
+considered clean. Yrd never guesses that a side effect did or did not happen.
 
 [`@yrd/core`](packages/yrd-core/README.md) documents Operations, transaction
 frames, projection, and the Journal contract. [`@yrd/job`](packages/yrd-job/README.md)

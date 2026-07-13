@@ -28,6 +28,11 @@ const deliver = createJobDef({
 const definition = pipe(createYrdDef(), withJobs({ definitions: { [deliver.name]: deliver } }), withMessages(deliver))
 ```
 
+Hosts that allocate filesystem/process resources per attempt inject
+`attemptResources: { prepare, release }` into `withJobs()`. `release` is
+idempotent and receives only the durable `{ id, attempt, executor }` identity;
+the domain package never discovers or deletes host resources itself.
+
 `deliver.request(input, {key})` is a serializable `job/requested` event draft.
 A domain command returns it beside its own events, so the request and domain
 decision commit in one journal transaction. The request pins the definition revision;
@@ -66,8 +71,11 @@ definition, and settles only while the same executor still owns that attempt.
 Losing ownership aborts the handler's `JobContext.signal` instead of allowing a
 stale external operation to keep running.
 `recover()` marks an expired running lease as lost only if a concurrent
-heartbeat has not changed it. `retry()` returns a failed or lost Job to
-`requested`; the same Job id is retained.
+heartbeat has not changed it. Attempt resources are released before normal
+settlement. Recovery first commits the exact-lease `lost` fence, then releases;
+a later recovery repeats release for an already-lost attempt if the recoverer
+crashed between those operations. `retry()` also releases idempotently before
+returning a failed or lost Job to `requested`; the same Job id is retained.
 
 A definition parks externally owned work by returning:
 

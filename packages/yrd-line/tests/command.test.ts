@@ -240,6 +240,14 @@ describe("Line command adapters", () => {
       command: ["printf", "%s", "literal;$(not-expanded)"],
       cwd,
       purpose: "check",
+      attemptEnvironment: (_input, receivedContext) => {
+        expect(receivedContext).toBe(context)
+        return {
+          YRD_JOB_ROOT: "/tmp/yrd-attempt",
+          TMPDIR: "/tmp/yrd-attempt/tmp",
+          HAB_STATE_ROOT: "/tmp/yrd-attempt/hab",
+        }
+      },
     })
     const explicitShell = configuredCommandStep<PRShape>({
       inject: { process },
@@ -255,6 +263,13 @@ describe("Line command adapters", () => {
       ["sh", "-c", "printf shell"],
     ])
     expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([undefined, undefined])
+    expect(requests.map((request) => request.signal)).toEqual([context.signal, context.signal])
+    expect(requests[0]?.env).toMatchObject({
+      YRD_JOB: "J1",
+      YRD_JOB_ROOT: "/tmp/yrd-attempt",
+      TMPDIR: "/tmp/yrd-attempt/tmp",
+      HAB_STATE_ROOT: "/tmp/yrd-attempt/hab",
+    })
   })
 
   it.each([

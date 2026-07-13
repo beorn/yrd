@@ -165,6 +165,12 @@ Every runtime owns a child `Scope`. Timers, subprocesses, subscriptions, and
 temporary resources belong to that scope or one of its children. Package code
 does not create unmanaged timers.
 
+Host-owned Job attempt resources use the injected `JobAttemptResources`
+lifecycle. Normal execution releases them before terminal settlement; lease
+recovery durably fences the expired owner before idempotent release. This keeps
+filesystem/process cleanup explicit without teaching `@yrd/job` about a host's
+state directory or resident-process implementation.
+
 Public `Yrd`, `Process`, and `YrdHost` objects implement `AsyncDisposable`, so
 callers can own them with `await using`. Their async-dispose hooks share the
 same idempotent lifecycle as `close()` and release owned scopes and resources

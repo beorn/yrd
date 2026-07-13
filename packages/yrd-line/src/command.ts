@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { JsonValue } from "@yrd/core"
-import { parseJobLaunch, type JobResult } from "@yrd/job"
+import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
@@ -61,6 +61,10 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     timeoutMs?: number
     noProgressTimeoutMs?: number
     variables?: (input: StepExecution<Shape>) => Readonly<Record<string, string | undefined>>
+    attemptEnvironment?: (
+      input: StepExecution<Shape>,
+      context: JobContext,
+    ) => NodeJS.ProcessEnv | Promise<NodeJS.ProcessEnv>
   }>
 
 export type ConfiguredWaitingCommandOptions<Shape extends PRShape> = ConfiguredCommandOptions<Shape>
@@ -115,10 +119,11 @@ function configuredCommand<Shape extends PRShape>(
       YRD_TARGET: input.targetSha ?? primary.headSha,
       ...options.variables?.(input),
     }
+    const attemptEnvironment = await options.attemptEnvironment?.(input, context)
     const result = await process.run({
       argv,
       cwd,
-      env: commandEnvironment(options.env ?? globalThis.process.env, variables),
+      env: commandEnvironment(options.env ?? globalThis.process.env, variables, attemptEnvironment),
       signal: context.signal,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
@@ -194,11 +199,15 @@ function configuredCommand<Shape extends PRShape>(
 function commandEnvironment(
   source: NodeJS.ProcessEnv,
   variables: Readonly<Record<string, string | undefined>>,
+  attemptEnvironment: NodeJS.ProcessEnv = {},
 ): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined || key.startsWith("YRD_") || key.startsWith("GIT_")) continue
     env[key] = value
+  }
+  for (const [key, value] of Object.entries(attemptEnvironment)) {
+    if (value !== undefined) env[key] = value
   }
   for (const [key, value] of Object.entries(variables)) {
     if (!key.startsWith("YRD_")) throw new Error(`yrd: configured command variable '${key}' must start with YRD_`)
@@ -424,6 +433,7 @@ export type GitCheckOptions = ProcessDependency &
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
     noProgressTimeoutMs?: number
+    attemptEnvironment?: ConfiguredCommandOptions<PRShape>["attemptEnvironment"]
   }>
 
 async function pinCandidate(git: Git, repo: string, ref: string, sha: string): Promise<void> {
@@ -473,6 +483,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...(options.env === undefined ? {} : { env: options.env }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
+            ...(options.attemptEnvironment === undefined ? {} : { attemptEnvironment: options.attemptEnvironment }),
             variables: () => ({
               YRD_BASE_SHA: baseSha,
               YRD_CANDIDATE_SHA: candidate.output,
@@ -511,6 +522,7 @@ export type ConfiguredMergeOptions = ProcessDependency &
     environment?: string
     env?: NodeJS.ProcessEnv
     timeoutMs?: number
+    attemptEnvironment?: ConfiguredCommandOptions<PRShape>["attemptEnvironment"]
   }>
 
 function checkedCandidate(shape: PRShape): GitCheckEvidence | undefined {
@@ -693,6 +705,7 @@ export function configuredMergeStep<Shape extends PRShape>(
     artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
     ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.attemptEnvironment === undefined ? {} : { attemptEnvironment: options.attemptEnvironment }),
     variables: (input) => {
       const checked = checkedCandidate(input.shape)
       return {

@@ -23,6 +23,8 @@ export type {
   HasJobs,
   JobCommands,
   JobCompletion,
+  JobAttempt,
+  JobAttemptResources,
   JobDefs,
   Jobs,
   JobsOptions,
