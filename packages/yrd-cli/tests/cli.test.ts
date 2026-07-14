@@ -36,7 +36,7 @@ import {
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
 import { renderString } from "silvery"
-import { createRenderer } from "@silvery/test"
+import { createRenderer } from "silvery/testing"
 import { run } from "silvery/runtime"
 import {
   withContests,

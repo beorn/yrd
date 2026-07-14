@@ -3,7 +3,7 @@
 // @consumer @yrd/cli
 
 import { act, createElement } from "react"
-import { createRenderer, createTermless, waitFor } from "@silvery/test"
+import { createRenderer, createTermless, waitFor } from "silvery/testing"
 import { renderString } from "silvery"
 import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"

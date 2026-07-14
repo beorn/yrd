@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@silvery/commander": "^0.21.0",
+    "@silvery/commander": "^0.21.2",
     "@silvery/scope": "^0.21.0",
     "@yrd/bay": "workspace:*",
     "@yrd/contest": "workspace:*",
@@ -19,7 +19,7 @@
     "@yrd/queue": "workspace:*",
     "loggily": "^0.10.2",
     "react": "^19.2.0",
-    "silvery": "^0.21.1",
+    "silvery": "^0.21.2",
     "zod": "^4.4.3"
   }
 }
