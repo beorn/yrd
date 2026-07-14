@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto"
 import { open, stat, type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
-import { CauseSchema, Command, CommandSchema, EventSchema, JsonSchema, type Journal } from "@yrd/core"
+import {
+  CauseSchema,
+  Command,
+  CommandSchema,
+  EventSchema,
+  JsonSchema,
+  observeYrdLifecycle,
+  type Journal,
+} from "@yrd/core"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -54,9 +62,9 @@ export function createJournal(
   }>,
 ): Journal<unknown> {
   const path = join(options.dir, "events-v3.jsonl")
-  const exclusive = options.inject?.exclusive ?? createExclusive(options.dir, options.lock)
+  const log = options.inject?.log?.child("journal") ?? createLogger("yrd:journal", [{ level: "warn" }])
+  const exclusive = options.inject?.exclusive ?? createExclusive(options.dir, options.lock, { log })
   const io: JournalIO = { ...defaultIO, ...options.inject?.io }
-  const log = options.inject?.log?.child("journal") ?? createLogger("yrd:journal")
 
   return {
     async *read(after = 0, before) {
@@ -97,28 +105,43 @@ export function createJournal(
     append(value, expectedCursor) {
       assertCursor(expectedCursor)
       const frame = parseFrame(value)
-      return exclusive.run(async () => {
-        const { file, created } = await openJournal(path)
-        let committed = 0
-        try {
-          committed = await repairTail(file, io)
-          if (committed !== expectedCursor) return { appended: false as const, cursor: committed }
+      return observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "append",
+          identity: {
+            command: frame.command.id,
+            cause: frame.cause.id,
+            op: frame.command.op,
+          },
+          attributes: { expectedCursor, events: frame.events.length },
+          outcome: (result) => (result.appended ? "succeeded" : "progress"),
+          resultAttributes: (result) => result,
+        },
+        () =>
+          exclusive.run(async () => {
+            const { file, created } = await openJournal(path)
+            let committed = 0
+            try {
+              committed = await repairTail(file, io)
+              if (committed !== expectedCursor) return { appended: false as const, cursor: committed }
 
-          const bytes = encode(frame)
-          try {
-            await writeAll(file, bytes, committed, io)
-            await io.datasync(file)
-          } catch (error) {
-            await file.truncate(committed)
-            await file.datasync()
-            throw error
-          }
-          if (created) await syncDirectory(options.dir)
-          return { appended: true as const, cursor: committed + bytes.length }
-        } finally {
-          await file.close()
-        }
-      })
+              const bytes = encode(frame)
+              try {
+                await writeAll(file, bytes, committed, io)
+                await io.datasync(file)
+              } catch (error) {
+                await file.truncate(committed)
+                await file.datasync()
+                throw error
+              }
+              if (created) await syncDirectory(options.dir)
+              return { appended: true as const, cursor: committed + bytes.length }
+            } finally {
+              await file.close()
+            }
+          }),
+      )
     },
   }
 }

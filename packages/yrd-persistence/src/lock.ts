@@ -2,6 +2,8 @@ import { closeSync, fsyncSync, ftruncateSync, openSync, readFileSync, writeSync 
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { dlopen, FFIType, suffix } from "bun:ffi"
+import { observeYrdLifecycle } from "@yrd/core"
+import { createLogger, type ConditionalLogger } from "loggily"
 
 export type Exclusive = Readonly<{
   run<Result>(operation: () => Promise<Result>): Promise<Result>
@@ -21,10 +23,23 @@ const LOCK_UN = 8
 const held = new Set<string>()
 let libc: Flock | undefined
 
-export function createExclusive(dir: string, options: ExclusiveOptions = {}): Exclusive {
+export function createExclusive(
+  dir: string,
+  options: ExclusiveOptions = {},
+  inject: Readonly<{ log?: ConditionalLogger; now?: () => number }> = {},
+): Exclusive {
+  const log = inject.log ?? createLogger("yrd", [{ level: "warn" }])
   return {
     async run(operation) {
-      const lock = await acquire(dir, options)
+      const lock = await observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "lock",
+          attributes: { path: join(dir, "writer.lock"), timeoutMs: options.timeoutMs ?? 30_000 },
+          now: inject.now,
+        },
+        () => acquire(dir, options),
+      )
       try {
         return await operation()
       } finally {

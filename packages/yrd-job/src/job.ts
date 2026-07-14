@@ -1,4 +1,4 @@
-import { event, JsonSchema, type EventDraft, type JsonValue } from "@yrd/core"
+import { event, JsonSchema, type EventDraft, type JsonValue, type YrdDeliveryIdentity } from "@yrd/core"
 import * as z from "zod"
 
 const NameSchema = z.string().trim().min(1)
@@ -68,6 +68,14 @@ export type JobRequest<Input extends JsonValue = JsonValue> = Readonly<{
   key?: string
 }>
 
+/** An installed Job definition may project its typed domain input into the
+ * shared lifecycle vocabulary. Generic Jobs never inspect opaque input. */
+export type JobObservation = Readonly<{
+  lifecycle?: string
+  identity?: YrdDeliveryIdentity
+  attributes?: Readonly<Record<string, unknown>>
+}>
+
 export const JobRequestSchema = z
   .object({
     definition: NameSchema,
@@ -83,6 +91,7 @@ export type JobDef<Input extends JsonValue = JsonValue, Output extends JsonValue
   revision: string
   input: z.ZodType<Input>
   output: z.ZodType<Output>
+  observe?(input: Input): JobObservation
   execute(input: Input, context: JobContext): Promise<JobResult<Output>>
   request(input: Input, options?: Readonly<{ key?: string }>): EventDraft<"job/requested", JobRequest<Input>>
 }>
@@ -93,6 +102,7 @@ export type CreateJobDefOptions<Input extends JsonValue, Output extends JsonValu
   revision: string
   input: z.ZodType<Input>
   output: z.ZodType<Output>
+  observe?(input: Input): JobObservation
   execute: JobHandler<Input, Output>
 }>
 
@@ -121,6 +131,11 @@ export function createJobDef<Input extends JsonValue, Output extends JsonValue>(
     title: metadata.title ?? metadata.name,
     input: options.input,
     output: options.output,
+
+    observe(input) {
+      const parsedInput = options.input.parse(input)
+      return Object.freeze(options.observe?.(parsedInput) ?? {})
+    },
 
     async execute(input, context) {
       const parsedInput = options.input.parse(input)

@@ -4,6 +4,7 @@
  * @consumer @yrd/process
  */
 import { describe, expect, it, vi } from "vitest"
+import { createLogger, type Event as LogEvent } from "loggily"
 import { createProcess, shellCommand, type Spawn } from "@yrd/process"
 
 function bytes(value: string): ReadableStream<Uint8Array> {
@@ -11,6 +12,26 @@ function bytes(value: string): ReadableStream<Uint8Array> {
 }
 
 describe("Process", () => {
+  it("closes each process span with terminal outcome and measured duration", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using process = createProcess({
+      env: { PATH: Bun.env.PATH },
+      inject: { log },
+    })
+
+    await expect(process.run({ argv: ["printf", "ok"] })).resolves.toMatchObject({ exitCode: 0 })
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "span",
+        namespace: "yrd:process:run",
+        props: expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }),
+      }),
+    )
+    log.end()
+  })
+
   it("runs argv directly and makes shell parsing explicit", async () => {
     await using process = createProcess({ env: { PATH: Bun.env.PATH, GIT_DIR: "leak", YRD_JOB: "leak" } })
     const direct = await process.run({ argv: ["printf", "%s", "$GIT_DIR;$(not-expanded)"] })

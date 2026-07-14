@@ -15,6 +15,7 @@ import {
   command,
   event,
   JsonSchema,
+  observeYrdLifecycle,
   raiseFailure,
   type CommandHandler,
   type CommandResult,
@@ -24,6 +25,8 @@ import {
   type EventDraft,
   type JsonValue,
   type YrdDef,
+  type YrdDeliveryIdentity,
+  type YrdLifecycleOutcome,
 } from "@yrd/core"
 import {
   createJobDef,
@@ -33,6 +36,7 @@ import {
   type JobDef,
   type JobDefs,
   type JobError,
+  type JobObservation,
   type JobCompletion,
   type JobHandler,
   type JobsState,
@@ -201,6 +205,7 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
     revision: options.revision,
     input: StepExecutionSchema,
     output,
+    observe: stepObservation,
     execute: (input, context) => runner(input as StepExecution<Shape>, context),
   }) as JobDef<StepExecution, JsonValue>
   return Object.freeze({
@@ -224,6 +229,7 @@ export function withMerge<Shape extends PRShape>(
     revision: options.revision,
     input: StepExecutionSchema,
     output: IntegrationProofSchema,
+    observe: stepObservation,
     execute: (input, context) => runner(input as StepExecution<Shape>, context),
   }) as JobDef<StepExecution, JsonValue>
   return Object.freeze({
@@ -464,21 +470,39 @@ function createQueue<Shape extends PRShape>(
   }
 
   const settle = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
-    using _span = log.span?.("run", { id })
-    const settled = await drive(id, options)
-    if (!bisectable(settled)) return settled
-    for (const part of [0, 1] as const) {
-      let snapshot = runtime()
-      let child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
-      if (child === undefined) {
-        await actions.isolate(settled.id, part)
-        snapshot = runtime()
-        child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
-      }
-      if (child === undefined) throw new Error(`yrd: queue run '${settled.id}' did not create isolation part ${part}`)
-      await settle(child.id, options)
-    }
-    return current(id)
+    const observed = current(id)
+    return observeYrdLifecycle(
+      log,
+      {
+        lifecycle: "run",
+        identity: { run: id },
+        attributes: {
+          base: observed.base,
+          prs: observed.prs.map(deliveryIdentity),
+          steps: observed.steps.map((step) => step.name),
+        },
+        outcome: queueRunOutcome,
+        resultAttributes: (result) => ({ status: result.status }),
+      },
+      async () => {
+        const settled = await drive(id, options)
+        if (!bisectable(settled)) return settled
+        for (const part of [0, 1] as const) {
+          let snapshot = runtime()
+          let child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
+          if (child === undefined) {
+            await actions.isolate(settled.id, part)
+            snapshot = runtime()
+            child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
+          }
+          if (child === undefined) {
+            throw new Error(`yrd: queue run '${settled.id}' did not create isolation part ${part}`)
+          }
+          await settle(child.id, options)
+        }
+        return current(id)
+      },
+    )
   }
 
   const startedRun = (result: CommandResult): QueueRun | undefined => {
@@ -552,26 +576,34 @@ function createQueue<Shape extends PRShape>(
     state,
     steps: () => steps.map(descriptor),
     async admit(args, runOptions) {
-      using _span = log.span?.("admit", { prs: args.prs })
-      await actions.refresh()
-      let snapshot = runtime()
-      const selected =
-        args.prs === undefined || args.prs.length === 0
-          ? admissionQueue(snapshot, steps)
-          : args.prs.map((selector) => {
-              const pr = resolvePR(snapshot.bays, selector)
-              if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
-              return pr
-            })
-      await refreshCheckIdentities(selected)
-      snapshot = runtime()
-      const selectors =
-        args.prs === undefined || args.prs.length === 0
-          ? admissionQueue(snapshot, steps).map((pr) => pr.id)
-          : [...args.prs]
-      return runOptions === undefined
-        ? await dispatchAdmissions(selectors)
-        : await drainAdmissions(selectors, runOptions)
+      return observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "admit",
+          attributes: { selectors: args.prs },
+          outcome: queueRunsOutcome,
+          resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
+        },
+        async () => {
+          await actions.refresh()
+          let snapshot = runtime()
+          const selected =
+            args.prs === undefined || args.prs.length === 0
+              ? admissionQueue(snapshot, steps)
+              : args.prs.map((selector) => {
+                  const pr = resolvePR(snapshot.bays, selector)
+                  if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+                  return pr
+                })
+          await refreshCheckIdentities(selected)
+          snapshot = runtime()
+          const selectors =
+            args.prs === undefined || args.prs.length === 0
+              ? admissionQueue(snapshot, steps).map((pr) => pr.id)
+              : [...args.prs]
+          return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
+        },
+      )
     },
     async pause(args) {
       const base = baseIdentity(args.base)
@@ -584,108 +616,142 @@ function createQueue<Shape extends PRShape>(
       await actions.resume(baseIdentity(base))
     },
     async run(args, runOptions) {
-      using _span = log.span?.("run", { prs: args.prs, steps: args.steps })
-      if (args.steps?.length === 0) return []
-      const explicitStepAuthority = args.steps !== undefined
-      await actions.refresh()
-      let snapshot = runtime()
-      const resumable = resumableQueueRoots(snapshot, args, steps)
-      const roots: QueueRunId[] = resumable.map((run) => run.id)
-      for (const run of resumable) await settle(run.id, runOptions)
+      return observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "compose",
+          attributes: { selectors: args.prs, steps: args.steps },
+          outcome: queueRunsOutcome,
+          resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
+        },
+        async () => {
+          if (args.steps?.length === 0) return []
+          const explicitStepAuthority = args.steps !== undefined
+          await actions.refresh()
+          let snapshot = runtime()
+          const resumable = resumableQueueRoots(snapshot, args, steps)
+          const roots: QueueRunId[] = resumable.map((run) => run.id)
+          for (const run of resumable) await settle(run.id, runOptions)
 
-      snapshot = runtime()
-      const activeBases = new Set(
-        resumable
-          .map((run) => materializeRun(Queues.record(snapshot.queues, run.id), snapshot.jobs))
-          .filter((run) => !Queues.terminal(run))
-          .map((run) => run.base),
+          snapshot = runtime()
+          const activeBases = new Set(
+            resumable
+              .map((run) => materializeRun(Queues.record(snapshot.queues, run.id), snapshot.jobs))
+              .filter((run) => !Queues.terminal(run))
+              .map((run) => run.base),
+          )
+          const consumed = new Set(
+            resumable.flatMap((run) =>
+              run.prs.filter((pr) => pinnedPRError(snapshot.bays, [pr]) === undefined).map((pr) => pr.id),
+            ),
+          )
+          const requested = requestedPRs(snapshot.bays, args, consumed)
+          const checked = explicitStepAuthority ? [] : requested.filter((pr) => checksRequested(pr))
+          const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
+          await refreshCheckIdentities(checked)
+          const admissions = await drainAdmissions(
+            checked.map((pr) => pr.id),
+            runOptions,
+          )
+          snapshot = runtime()
+          const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
+          if (unsettled.length > 0) {
+            const newlyFailed = unsettled.some(
+              (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
+            )
+            if (newlyFailed || unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")) {
+              return admissions
+            }
+          }
+          const prs = runnablePRs(snapshot, args, steps, consumed, { explicitStepAuthority }).filter(
+            (pr) => !activeBases.has(baseIdentity(pr.base)),
+          )
+          for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
+            if (runOptions.continueAdmissions?.() === false) break
+            const started = await actions.run({
+              prs: candidate.map((pr) => pr.id),
+              ...(args.steps === undefined ? {} : { steps: args.steps }),
+            })
+            const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
+            if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
+            const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
+            roots.push(id)
+            await settle(id, runOptions)
+          }
+          const final = runtime()
+          return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
+        },
       )
-      const consumed = new Set(
-        resumable.flatMap((run) =>
-          run.prs.filter((pr) => pinnedPRError(snapshot.bays, [pr]) === undefined).map((pr) => pr.id),
-        ),
-      )
-      const requested = requestedPRs(snapshot.bays, args, consumed)
-      const checked = explicitStepAuthority ? [] : requested.filter((pr) => checksRequested(pr))
-      const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
-      await refreshCheckIdentities(checked)
-      const admissions = await drainAdmissions(
-        checked.map((pr) => pr.id),
-        runOptions,
-      )
-      snapshot = runtime()
-      const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
-      if (unsettled.length > 0) {
-        const newlyFailed = unsettled.some(
-          (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
-        )
-        if (newlyFailed || unsettled.some((pr) => checkEligibility(snapshot, pr, steps).status !== "failed")) {
-          return admissions
-        }
-      }
-      const prs = runnablePRs(snapshot, args, steps, consumed, { explicitStepAuthority }).filter(
-        (pr) => !activeBases.has(baseIdentity(pr.base)),
-      )
-      for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
-        if (runOptions.continueAdmissions?.() === false) break
-        const started = await actions.run({
-          prs: candidate.map((pr) => pr.id),
-          ...(args.steps === undefined ? {} : { steps: args.steps }),
-        })
-        const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
-        if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
-        const id = QueueStartSchema.parse((startedEvent.data as { run?: unknown }).run).id
-        roots.push(id)
-        await settle(id, runOptions)
-      }
-      const final = runtime()
-      return roots.flatMap((root) => queueTree(final.queues, final.jobs, root))
     },
     waiting,
     async finish(selector, completion, runOptions) {
-      using _span = log.span?.("finish", { selector, step: completion.step, job: completion.job })
-      const selected = waiting(selector, completion.step)
-      if (selected.step.job.id !== completion.job) {
-        raiseFailure(
-          "refusal",
-          "queue-job-mismatch",
-          `yrd: Job '${completion.job}' is not the waiting '${selected.step.name}' Job '${selected.step.job.id}' for queue run '${selected.run.id}'`,
-        )
-      }
-      await jobs.finish(completion.job, {
-        attempt: completion.attempt,
-        runner: completion.runner,
-        token: completion.token,
-        result: completion.result,
-      })
-      return await settle(selected.run.id, runOptions)
+      return observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "finish",
+          identity: { job: completion.job, attempt: completion.attempt, runner: completion.runner },
+          attributes: { selector, step: completion.step },
+          outcome: queueRunOutcome,
+          resultAttributes: runEvidence,
+        },
+        async () => {
+          const selected = waiting(selector, completion.step)
+          if (selected.step.job.id !== completion.job) {
+            raiseFailure(
+              "refusal",
+              "queue-job-mismatch",
+              `yrd: Job '${completion.job}' is not the waiting '${selected.step.name}' Job '${selected.step.job.id}' for queue run '${selected.run.id}'`,
+            )
+          }
+          await jobs.finish(completion.job, {
+            attempt: completion.attempt,
+            runner: completion.runner,
+            token: completion.token,
+            result: completion.result,
+          })
+          return settle(selected.run.id, runOptions)
+        },
+      )
     },
     async recover(recoverOptions) {
-      using _span = log.span?.("recover", { at: recoverOptions.recoveryTime })
-      const recoveredJobs = new Set(
-        await jobs.recover({
-          now: recoverOptions.recoveryTime,
-          ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
-        }),
+      return observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "recover",
+          attributes: {
+            recoveryTime: recoverOptions.recoveryTime,
+            ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+          },
+          outcome: (runs) => (runs.length === 0 ? "succeeded" : "recovered"),
+          resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
+        },
+        async () => {
+          const recoveredJobs = new Set(
+            await jobs.recover({
+              now: recoverOptions.recoveryTime,
+              ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+            }),
+          )
+          const affected = new Set<QueueRunId>()
+          let snapshot = runtime()
+          for (const candidate of orderedQueues(snapshot.queues, snapshot.jobs)) {
+            const ownsRecoveredJob = candidate.steps.some(
+              (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
+            )
+            const hasTerminalFailure = candidate.steps.some(
+              (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+            )
+            if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
+              const reconciled = await actions.advance(candidate.id)
+              if (reconciled.events.length > 0) affected.add(candidate.id)
+              snapshot = runtime()
+            }
+            if (ownsRecoveredJob) affected.add(candidate.id)
+          }
+          const final = runtime()
+          return [...affected].map((id) => materializeRun(Queues.record(final.queues, id), final.jobs))
+        },
       )
-      const affected = new Set<QueueRunId>()
-      let snapshot = runtime()
-      for (const candidate of orderedQueues(snapshot.queues, snapshot.jobs)) {
-        const ownsRecoveredJob = candidate.steps.some(
-          (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
-        )
-        const hasTerminalFailure = candidate.steps.some(
-          (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
-        )
-        if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
-          const reconciled = await actions.advance(candidate.id)
-          if (reconciled.events.length > 0) affected.add(candidate.id)
-          snapshot = runtime()
-        }
-        if (ownsRecoveredJob) affected.add(candidate.id)
-      }
-      const final = runtime()
-      return [...affected].map((id) => materializeRun(Queues.record(final.queues, id), final.jobs))
     },
     audit: () => auditQueues(runtime(), steps),
     eligibility(selector) {
@@ -716,6 +782,49 @@ function createQueue<Shape extends PRShape>(
     },
     status: (base) => queueSummary(state(), runtime().jobs, baseIdentity(base)),
   }) as Queue<Shape>
+}
+
+function deliveryIdentity(pr: DeepReadonly<PRSnapshot>): YrdDeliveryIdentity {
+  return {
+    pr: pr.id,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
+  }
+}
+
+function stepObservation(input: StepExecution): JobObservation {
+  return {
+    lifecycle: input.step,
+    identity: { run: input.run, step: input.step },
+    attributes: {
+      index: input.index,
+      prs: input.prs.map(deliveryIdentity),
+      ...(input.targetSha === undefined ? {} : { targetSha: input.targetSha }),
+    },
+  }
+}
+
+function runEvidence(run: DeepReadonly<QueueRun>): Record<string, unknown> {
+  return {
+    run: run.id,
+    base: run.base,
+    status: run.status,
+    prs: run.prs.map(deliveryIdentity),
+    steps: run.steps.map((step) => step.name),
+  }
+}
+
+function queueRunOutcome(run: DeepReadonly<QueueRun>): YrdLifecycleOutcome {
+  if (run.status === "passed") return "succeeded"
+  if (run.status === "failed") return "failed"
+  return "progress"
+}
+
+function queueRunsOutcome(runs: readonly DeepReadonly<QueueRun>[]): YrdLifecycleOutcome {
+  if (runs.some((run) => run.status === "failed")) return "failed"
+  if (runs.some((run) => run.status === "running" || run.status === "waiting")) return "progress"
+  return "succeeded"
 }
 
 function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): QueueCommands {
@@ -2127,8 +2236,9 @@ function runnablePRs(
       ignoredClaims,
     })
     if (eligibility.runnable) return true
-    if (implicitQueue || (eligibility.reason?.code === "claimed" && options.explicitStepAuthority !== true))
+    if (implicitQueue || (eligibility.reason?.code === "claimed" && options.explicitStepAuthority !== true)) {
       return false
+    }
     const reason = eligibility.reason
     raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `PR '${pr.id}' is not ready`}`)
   })

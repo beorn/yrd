@@ -4,6 +4,7 @@
  * @consumer @yrd/job
  */
 import { describe, expect, it, vi } from "vitest"
+import { createLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
 import {
   command,
@@ -17,11 +18,22 @@ import {
 } from "@yrd/core"
 import { createJobDef, withJobs, type JobContext, type JobDef, type JobHandler } from "@yrd/job"
 
-type Delivery = { message: string }
+type Delivery = {
+  message: string
+  run?: string
+  step?: string
+  prs?: { id: string; revision: number; headSha: string }[]
+}
 type Receipt = { receipt: string }
 type SendArgs = Delivery & { key?: string }
 
-const SendArgsSchema = z.object({ message: z.string().min(1), key: z.string().min(1).optional() })
+const SendArgsSchema = z.object({
+  message: z.string().min(1),
+  run: z.string().optional(),
+  step: z.string().optional(),
+  prs: z.array(z.object({ id: z.string(), revision: z.number(), headSha: z.string() })).optional(),
+  key: z.string().min(1).optional(),
+})
 
 function testId(value: number): string {
   return `00000000-0000-7000-8000-${value.toString(16).padStart(12, "0")}`
@@ -49,7 +61,7 @@ function delivery(
     name: "message.deliver",
     title: "Deliver message",
     revision,
-    input: z.object({ message: z.string().min(1) }),
+    input: SendArgsSchema.omit({ key: true }),
     output: z.object({ receipt: z.string().min(1) }),
     execute,
   })
@@ -60,9 +72,10 @@ function withSender(job: JobDef<Delivery, Receipt>) {
     title: "Send message",
     visibility: "public",
     params: SendArgsSchema,
-    apply: (_state: { sender: Record<string, never> }, args: SendArgs) => ({
-      events: [job.request({ message: args.message }, args.key === undefined ? undefined : { key: args.key })],
-    }),
+    apply: (_state: { sender: Record<string, never> }, args: SendArgs) => {
+      const { key, ...input } = args
+      return { events: [job.request(input, key === undefined ? undefined : { key })] }
+    },
   })
 
   return <State extends object, Commands extends CommandTree, Features extends object>(
@@ -81,6 +94,7 @@ async function jobsApp(
     journal?: ReturnType<typeof createMemoryJournal>
     clock?: () => string
     id?: () => string
+    log?: ReturnType<typeof createLogger>
   } = {},
 ) {
   const definition = pipe(createYrdDef(), withJobs({ definitions: { [job.name]: job } }), withSender(job))
@@ -89,6 +103,7 @@ async function jobsApp(
       journal: options.journal ?? createMemoryJournal(),
       clock: options.clock,
       id: options.id,
+      log: options.log,
     },
   })
   return app
@@ -130,6 +145,30 @@ describe("JobDef", () => {
 })
 
 describe("Jobs", () => {
+  it("keeps generic Job input opaque when no lifecycle projection is declared", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID), log })
+    const requested = await app.dispatch(app.commands.sender.send, {
+      message: "ordinary domain payload",
+      run: "not-a-queue-run",
+      step: "not-a-queue-step",
+      prs: [{ id: "not-a-pr", revision: 7, headSha: "not-a-sha" }],
+    })
+
+    await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+    const terminal = events.find(
+      (event) =>
+        event.kind === "log" && event.props?.outcome === "succeeded" && event.namespace.startsWith("yrd:jobs:"),
+    )
+    expect(terminal).toMatchObject({ namespace: "yrd:jobs:run" })
+    expect(terminal?.props).not.toHaveProperty("run")
+    expect(terminal?.props).not.toHaveProperty("prs")
+    await app.close()
+    log.end()
+  })
+
   it("freezes definitions at composition and rejects duplicate paths", async () => {
     const first = delivery()
     const second = delivery(undefined, "transport-v2")
@@ -449,6 +488,41 @@ describe("Jobs", () => {
       }),
     ).rejects.toThrow("attempt 1 is stale")
     await app.close()
+  })
+
+  it("emits recovered lease identity at WARN without inventing a replacement runner", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID), log })
+    await app.dispatch(app.commands.sender.send, { message: "recover" })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: JOB_ID,
+      attempt: 1,
+      runner: "lost-worker",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).resolves.toEqual([JOB_ID])
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:jobs:recover",
+        level: "warn",
+        props: expect.objectContaining({
+          lifecycle: "recover",
+          outcome: "recovered",
+          job: JOB_ID,
+          attempt: 1,
+          runner: "lost-worker",
+          leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+          durationMs: expect.any(Number),
+        }),
+      }),
+    )
+    await app.close()
+    log.end()
   })
 
   it("renews a lease through the Job run scope", async () => {
