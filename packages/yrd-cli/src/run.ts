@@ -580,16 +580,26 @@ async function closePrs(
   )
 }
 
-async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
   await app.bays.ready({ pr: selector })
-  const pr = app.bays.pr(selector)
+  let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
+  if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
+  const admitted = await app.queue.admit({ prs: [pr.id] }, runtimeOptions(io))
+  pr = app.bays.pr(pr.id)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after check admission`)
   await printResult(
     io,
     jsonEnabled(options),
     { command: "pr.ready", pr: prFact(pr), eligibility: app.queue.eligibility(pr.id) },
     createElement(PRResultView, { prs: [pr], runs: [] }),
   )
+  return admitted.some(
+    (run) =>
+      run.status === "failed" && run.prs.some((member) => member.id === pr.id && member.revision === pr.revision),
+  )
+    ? 1
+    : 0
 }
 
 async function recutPr(
@@ -641,20 +651,17 @@ async function recutPr(
           },
         }),
   })
-  let unchanged = result.unchanged
-  if (!unchanged) {
-    const recorded = await app.bays.recut({
-      pr: pr.id,
-      fromRevision: source.revision,
-      headSha: result.headSha,
-      baseSha: result.baseSha,
-      treeSha: result.treeSha,
-      patchId: result.patchId,
-      reviewCarried: approval !== undefined,
-      ...(result.composition === undefined ? {} : { composition: result.composition }),
-    })
-    unchanged = recorded.events.length === 0
-  }
+  const recorded = await app.bays.recut({
+    pr: pr.id,
+    fromRevision: source.revision,
+    headSha: result.headSha,
+    baseSha: result.baseSha,
+    treeSha: result.treeSha,
+    patchId: result.patchId,
+    reviewCarried: approval !== undefined,
+    ...(result.composition === undefined ? {} : { composition: result.composition }),
+  })
+  const unchanged = recorded.events.length === 0
 
   let current = requiredPr(app, pr.id)
   let admitted: readonly QueueRun[] = []
@@ -870,7 +877,7 @@ async function submitBays(
     })
     prs.push(pr)
   }
-  if (command === "bay.submit") {
+  if (command === "bay.submit" || options.draft === true) {
     await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
     return 0
   }
@@ -2379,6 +2386,7 @@ function buildProgram(
   bay
     .command("submit [selector...]")
     .description("submit bays or branches")
+    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -2550,7 +2558,7 @@ function buildProgram(
   const submit = pr
     .command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
-    .option("--draft", "leave the PR pushed until pr ready")
+    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--follow", "follow admitted checks to a terminal result")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
@@ -2599,9 +2607,9 @@ function buildProgram(
     )
   addAuthoredCarrierWorkflow(recut, name)
   pr.command("ready <selector>")
-    .description("move a pushed PR revision into the queue")
+    .description("submit a pushed PR revision and admit configured checks")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => readyPr(installed(), selector, options, io))
+    .action(async (selector, options) => setExit(await readyPr(installed(), selector, options, io)))
   pr.command("review <selector>")
     .description("record a revision-bound review verdict")
     .option("--approve", "approve the current revision")

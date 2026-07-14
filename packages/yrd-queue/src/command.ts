@@ -945,7 +945,7 @@ async function prepareCandidate(
       if (gitlinks.length > 0) {
         return candidateFailure(
           "authored-gitlink",
-          `PR '${pr.id}' changes generated-only gitlinks [${gitlinks.join(", ")}]; authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr.id} --queue' on that same PR; no composition manifest or manual recut is needed`,
+          `PR '${pr.id}' changes generated-only gitlinks [${gitlinks.join(", ")}]; ${authoredRootWorkflow(pr.id)}`,
           ".",
           gitlinks,
         )
@@ -1054,6 +1054,18 @@ function candidateFailure(
   }
 }
 
+function authoredRootWorkflow(pr: string): string {
+  return `authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr} --queue' on that same PR; no composition manifest or manual recut is needed`
+}
+
+function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
+  if (failure.error.code !== "composition-invalid") return failure
+  return {
+    ...failure,
+    error: { ...failure.error, message: `${failure.error.message}; ${authoredRootWorkflow(pr)}` },
+  }
+}
+
 async function composePR(
   git: Git,
   repo: string,
@@ -1063,7 +1075,7 @@ async function composePR(
   if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
     return candidateFailure(
       "composition-invalid",
-      `PR '${pr.id}' composition head '${pr.headSha}' contains root changes; submit source declarations from a root-base-only branch`,
+      `PR '${pr.id}' composition head '${pr.headSha}' contains root changes; ${authoredRootWorkflow(pr.id)}`,
     )
   }
 
@@ -1074,13 +1086,13 @@ async function composePR(
     if (currentPin === undefined) {
       return candidateFailure(
         "composition-invalid",
-        `PR '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base`,
+        `PR '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base; ${authoredRootWorkflow(pr.id)}`,
         source.repo,
         [source.repo],
       )
     }
     const prepared = await prepareSource(git, repo, source, currentPin)
-    if (prepared.status === "failed") return prepared
+    if (prepared.status === "failed") return withAuthoredRootWorkflow(prepared, pr.id)
     rewrites.push(prepared.output)
     if (prepared.output.newTipSha === currentPin) continue
     expectedWrapperPaths.push(source.repo)
