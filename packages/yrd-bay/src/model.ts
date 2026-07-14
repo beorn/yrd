@@ -60,6 +60,7 @@ export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "wit
 export type PRRevisionTerminal = Readonly<{
   status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn" | "canceled">
   at: string
+  run?: string
 }>
 
 export type PRRevisionClock = Readonly<{
@@ -111,6 +112,29 @@ export type PRCheckRequest = Readonly<{
   at: string
 }>
 
+export type PRRegressionSeverity = "low" | "medium" | "high" | "critical"
+
+/** One completed escaped-regression outcome. Implementation and review
+ * provenance stay opaque; Yrd owns only their exact delivery join. */
+export type PRRegression = Readonly<{
+  pr: PRId
+  issueRef: string
+  revision: number
+  headSha: string
+  run: string
+  landingSha: string
+  detectedAt: string
+  severity: PRRegressionSeverity
+  evidence: string
+  implementationRunRef: string
+  reviewRef: string
+  repairIssueRef: string
+  repairPr: PRId
+  repairRun: string
+  repairLandingSha: string
+  recordedAt: string
+}>
+
 export type PR = Readonly<{
   id: PRId
   bay?: BayId
@@ -128,6 +152,8 @@ export type PR = Readonly<{
   reviews: readonly PRReview[]
   comments: readonly PRComment[]
   checkRequests: readonly PRCheckRequest[]
+  regressions?: readonly PRRegression[]
+  terminalRun?: string
   submittedAt?: string
   rejectedAt?: string
   integratedAt?: string

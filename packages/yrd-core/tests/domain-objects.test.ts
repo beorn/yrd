@@ -164,6 +164,95 @@ describe("Yrd domain objects", () => {
     await Promise.all([writer.close(), reader.close()])
   })
 
+  it("captures projected state and its journal cursor as one immutable snapshot", async () => {
+    await using app = await createYrd(withCounter()(createYrdDef()), {
+      inject: {
+        journal: createMemoryJournal(),
+        clock: () => "2026-07-09T12:00:00.000Z",
+        id: ids("snapshot-command-1", "snapshot-event-1", "snapshot-command-2", "snapshot-event-2"),
+      },
+    })
+
+    expect(await app.journalSnapshot()).toEqual({ state: { counter: { value: 0 } }, asOf: { cursor: 0 } })
+    await app.dispatch(app.commands.counter.add, { by: 1 })
+    const first = await app.journalSnapshot()
+    await app.dispatch(app.commands.counter.add, { by: 1 })
+    const second = await app.journalSnapshot()
+
+    expect(first).toEqual({
+      state: { counter: { value: 1 } },
+      asOf: { cursor: 1, at: "2026-07-09T12:00:00.000Z" },
+    })
+    expect(second).toEqual({
+      state: { counter: { value: 2 } },
+      asOf: { cursor: 2, at: "2026-07-09T12:00:00.000Z" },
+    })
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(Object.isFrozen(first.state)).toBe(true)
+    expect(Object.isFrozen(first.asOf)).toBe(true)
+  })
+
+  it("allows legacy payloads only while replaying and never widens current appends", async () => {
+    type FactState = { facts: { total: number } }
+    const journal = createMemoryJournal()
+    const record = command({
+      title: "Record fact",
+      visibility: "public",
+      params: z.object({ value: z.number().int(), identity: z.string().optional() }).strict(),
+      apply: (_state: FactState, args: { value: number; identity?: string }) => ({
+        events: [event("fact/recorded", args)],
+      }),
+    })
+    const projectFact = (state: FactState, applied: Core.Event) => ({
+      facts: {
+        total:
+          state.facts.total +
+          (applied.name === "fact/recorded" ? (applied.data as Readonly<{ value: number }>).value : 0),
+      },
+    })
+    const legacy = createYrdDef().extend({
+      initialState: { facts: { total: 0 } },
+      commands: { fact: { record } },
+      events: { "fact/recorded": z.object({ value: z.number().int() }).strict() },
+      project: projectFact,
+    })
+
+    await using writer = await createYrd(legacy, {
+      inject: { journal, id: ids("legacy-command", "legacy-event") },
+    })
+    await writer.dispatch(writer.commands.fact.record, { value: 2 })
+    await writer.close()
+
+    const current = createYrdDef().extend({
+      initialState: { facts: { total: 0 } },
+      commands: { fact: { record } },
+      events: {
+        "fact/recorded": z.object({ value: z.number().int(), identity: z.string().min(1) }).strict(),
+      },
+      replayEvents: { "fact/recorded": z.object({ value: z.number().int() }).strict() },
+      project: projectFact,
+    })
+
+    const strictOnly = createYrdDef().extend({
+      initialState: { facts: { total: 0 } },
+      commands: { fact: { record } },
+      events: {
+        "fact/recorded": z.object({ value: z.number().int(), identity: z.string().min(1) }).strict(),
+      },
+      project: projectFact,
+    })
+    await expect(createYrd(strictOnly, { inject: { journal } })).rejects.toThrow()
+
+    await using reader = await createYrd(current, {
+      inject: { journal, id: ids("current-command", "current-event") },
+    })
+    expect(reader.state().facts.total).toBe(2)
+    await expect(reader.dispatch(reader.commands.fact.record, { value: 3 })).rejects.toThrow()
+    expect(reader.state().facts.total).toBe(2)
+    await reader.dispatch(reader.commands.fact.record, { value: 3, identity: "current-v1" })
+    expect(reader.state().facts.total).toBe(5)
+  })
+
   it("retries cursor conflicts without losing concurrent commands", async () => {
     const journal = createMemoryJournal()
     const definition = withCounter()(createYrdDef())
