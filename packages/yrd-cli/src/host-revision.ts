@@ -28,8 +28,8 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
           input.name === "merge" && input.resolvedCommand === undefined
             ? "yrd-native-merge-v3"
             : input.checkoutParent === undefined
-              ? "yrd-queue-command-v2"
-              : "yrd-queue-command-v3",
+              ? "yrd-queue-command-v3"
+              : "yrd-queue-command-v4",
         repo: input.repo,
         stateDir: input.stateDir,
         ...(input.checkoutParent === undefined ? {} : { checkoutParent: input.checkoutParent }),
