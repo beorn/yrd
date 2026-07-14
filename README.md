@@ -265,6 +265,7 @@ rebinding a live PR to a different correlation is refused.
 yrd pr submit [selector...] [--draft] [--follow] [--base <branch>]
   [--correlation <namespace:id>] [--json]
 yrd pr list [--needs-review] [--json]
+yrd pr recut <selector> [--revision <number>] [--queue] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
   [--by <actor>] [--ref <id>] [--note <text>] [--json]
@@ -278,6 +279,10 @@ configured pre-merge Queue steps, and returns. `--follow` stays attached to that
 same journaled Run. `pr checks` renders the same typed evidence in human or
 newline-delimited JSON output, including command argv, concise diagnostics,
 base-versus-carrier classification, and artifact paths.
+
+`pr recut` fetches the authoritative base internally and records a mechanically
+equivalent successor on the same PR. `--revision` selects an older immutable
+revision; `--queue` readies and admits the fresh checks.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when

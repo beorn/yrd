@@ -377,7 +377,7 @@ describe("Queue command adapters", () => {
         sources: [
           {
             repo: "dep",
-            branch: "issue/source",
+            branch: expect.stringMatching(/^refs\/heads\/yrd\/candidates\/[0-9a-f]{40}$/u),
             baseSha: newPinSha,
             tipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
             payload: ["src/candidate.ts"],
@@ -411,6 +411,72 @@ describe("Queue command adapters", () => {
       composition: result.composition,
       unchanged: true,
     })
+  })
+
+  it.each([
+    { certificate: "exact", valid: true },
+    { certificate: "mismatched", valid: false },
+  ] as const)("admits a composed recut only when its $certificate tree certificate replays", async ({ valid }) => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const oldRootBaseSha = await git(repo, ["rev-parse", `${rootBaseSha}^`])
+    await using process = createProcess()
+    const composition = {
+      version: 1,
+      sources: [
+        {
+          repo: "dep",
+          branch: "issue/source",
+          baseSha: oldPinSha,
+          tipSha: sourceTipSha,
+          payload: ["src/candidate.ts"],
+        },
+      ],
+    } as const
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha: oldRootBaseSha,
+      baseSha: oldRootBaseSha,
+      composition,
+    })
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: oldRootBaseSha,
+      base: "main",
+      baseSha: oldRootBaseSha,
+      composition,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: valid ? recut.treeSha : "f".repeat(40),
+      patchId: recut.patchId,
+      reviewCarried: false,
+      composition: recut.composition,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    if (valid) {
+      expect(run.status, run.error?.message).toBe("passed")
+      expect(errors).not.toHaveBeenCalled()
+    } else {
+      expect(run.status).toBe("failed")
+      expect(run.error).toMatchObject({
+        code: "recut-certificate",
+        message: expect.stringContaining("tree certificate"),
+      })
+      expect(errors).toHaveBeenCalled()
+    }
+    errors.mockRestore()
   })
 
   it("auto-restacks a disjoint source payload and composes the exact wrapper", async () => {

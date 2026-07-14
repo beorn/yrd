@@ -578,7 +578,12 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
             message: `yrd: recut produced no source certificate for '${source.repo}'`,
           })
         }
-        return { ...source, baseSha: rewrite.newBaseSha, tipSha: rewrite.newTipSha }
+        return {
+          ...source,
+          branch: rewrite.candidateRef,
+          baseSha: rewrite.newBaseSha,
+          tipSha: rewrite.newTipSha,
+        }
       }),
     }
     const onlyRewrite = rewrites.length === 1 ? rewrites[0] : undefined
@@ -886,8 +891,12 @@ async function prepareCandidate(
   const sourceRewrites: SourceRewrite[] = []
   for (const pr of input.prs) {
     if (pr.composition !== undefined) {
+      const baseCertificate = await verifyComposedRecutBase(git, path, pr)
+      if (baseCertificate !== undefined) return baseCertificate
       const composed = await composePR(git, repo, path, pr)
       if (composed.status === "failed") return composed
+      const treeCertificate = await verifyComposedRecutTree(git, path, pr)
+      if (treeCertificate !== undefined) return treeCertificate
       sourceRewrites.push(...composed.output)
       continue
     }
@@ -940,14 +949,15 @@ async function verifyRecutCertificate(
   pr: StepExecution["prs"][number],
 ): Promise<CandidateFailure | undefined> {
   if (pr.recut === undefined) return undefined
-  if (pr.baseSha === undefined || (await git.commit(repo, "HEAD")) !== pr.baseSha) {
+  const baseSha = pr.baseSha
+  if (baseSha === undefined || (await git.commit(repo, "HEAD")) !== baseSha) {
     return candidateFailure(
       "recut-certificate",
       `PR '${pr.id}' recut base does not match the authoritative candidate base`,
     )
   }
   const treeSha = (await git.run(repo, ["rev-parse", `${pr.headSha}^{tree}`], true)).stdout
-  const patchId = await git.stablePatchId(repo, pr.baseSha, pr.headSha)
+  const patchId = await git.stablePatchId(repo, baseSha, pr.headSha)
   if (treeSha !== pr.recut.treeSha || patchId !== pr.recut.patchId) {
     return candidateFailure(
       "recut-certificate",
@@ -955,6 +965,36 @@ async function verifyRecutCertificate(
     )
   }
   return undefined
+}
+
+async function verifyComposedRecutBase(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  if (pr.recut === undefined) return undefined
+  if (pr.baseSha === undefined || (await git.commit(repo, "HEAD")) !== pr.baseSha) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut base does not match the authoritative candidate base`,
+    )
+  }
+  return undefined
+}
+
+async function verifyComposedRecutTree(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  if (pr.recut === undefined) return undefined
+  const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
+  return treeSha === pr.recut.treeSha
+    ? undefined
+    : candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recomposed tree certificate does not match revision ${pr.revision}`,
+      )
 }
 
 type CandidateFailure = Readonly<{
