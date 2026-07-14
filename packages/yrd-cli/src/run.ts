@@ -988,17 +988,20 @@ async function queueStatusSnapshots(
 
 async function listQueues(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ base?: string }>,
+  options: JsonOption & Readonly<{ base?: string; latest?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
   const state = stateOf(app)
   const target = resolveQueueTargets(state, [], options.base, undefined)
   const { results } = await queueStatusSnapshots(app, state, target, io)
+  const now = io.now?.() ?? Date.now()
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.list", results },
-    createElement(QueueListView, { results, now: io.now?.() ?? Date.now() }),
+    options.latest === true
+      ? createElement(QueueWatchView, { results, now })
+      : createElement(QueueListView, { results, now }),
   )
 }
 
@@ -1855,8 +1858,31 @@ function buildProgram(
   queue
     .command("_list", { isDefault: true, hidden: true })
     .option("--base <branch>", "scope queues to one base")
+    .option("--latest", "collapse queue rows to the latest per PR")
+    .option("--watch", "render the live queue timeline")
     .option("--json", "emit stable JSON")
-    .action(async (options) => listQueues(installed(), options, io))
+    .action(async (options) => {
+      if (options.watch === true) {
+        setExit(await watchQueue(installed(), options, io))
+        return
+      }
+      await listQueues(installed(), options, io)
+    })
+  const queueList = queue
+    .command("ls")
+    .description("list integration queues")
+    .option("--base <branch>", "scope queues to one base")
+    .option("--latest", "collapse queue rows to the latest per PR")
+    .option("--watch", "render the live queue timeline")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => {
+      if (options.watch === true) {
+        setExit(await watchQueue(installed(), options, io))
+        return
+      }
+      await listQueues(installed(), options, io)
+    })
+  queueList.alias("list")
   queue
     .command("audit")
     .description("check queue state")
