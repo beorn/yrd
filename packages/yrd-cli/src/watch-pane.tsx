@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Box, PaneDivider, Text, useInput, useScopeEffect, useWindowSize } from "silvery"
+import { Box, ListView, PaneDivider, Text, useInput, useScopeEffect, useWindowSize } from "silvery"
 import {
   QueueEvidenceView,
   QueueShowView,
@@ -78,28 +78,61 @@ export function reduceWatchControl(control: WatchControl, input: string): WatchC
   return control
 }
 
+type QueueArtifactOutputLine = Readonly<{
+  key: string
+  text: string
+  kind: "heading" | "muted" | "body"
+}>
+
 function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
-  if (outputs.length === 0) return null
+  const lines = useMemo<readonly QueueArtifactOutputLine[]>(
+    () =>
+      outputs.flatMap((output) => {
+        const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
+        const textLines = output.text.split("\n")
+        if (textLines.at(-1) === "") textLines.pop()
+        return [
+          { key: `${outputKey}:heading`, text: `OUTPUT ${output.step}#${output.attempt}`, kind: "heading" },
+          ...(output.truncatedBytes === undefined
+            ? []
+            : [
+                {
+                  key: `${outputKey}:truncated`,
+                  text: `... ${output.truncatedBytes} earlier bytes`,
+                  kind: "muted" as const,
+                },
+              ]),
+          ...(textLines.length === 0
+            ? [{ key: `${outputKey}:waiting`, text: "Waiting for output...", kind: "body" as const }]
+            : textLines.map((text, index) => ({
+                key: `${outputKey}:line:${index}`,
+                text,
+                kind: "body" as const,
+              }))),
+        ] satisfies readonly QueueArtifactOutputLine[]
+      }),
+    [outputs],
+  )
+  if (lines.length === 0) return null
   return (
-    <Box flexDirection="column" marginTop={1}>
-      {outputs.map((output) => {
-        const lines = output.text.split("\n")
-        if (lines.at(-1) === "") lines.pop()
-        const hidden = Math.max(0, lines.length - 12)
-        const visible = lines.slice(-12).join("\n")
-        return (
-          <Box key={`${output.run}:${output.step}:${output.attempt}:${output.path}`} flexDirection="column">
+    <Box flexDirection="column" flexGrow={1} minHeight={0} marginTop={1}>
+      <ListView
+        items={lines}
+        getKey={(line) => line.key}
+        follow="end"
+        scrollbarVisibility="always"
+        renderItem={(line) =>
+          line.kind === "heading" ? (
             <Text bold wrap="truncate">
-              OUTPUT {output.step}#{output.attempt}
+              {line.text}
             </Text>
-            {output.truncatedBytes === undefined ? null : (
-              <Text color="$fg-muted">... {output.truncatedBytes} earlier bytes</Text>
-            )}
-            {hidden === 0 ? null : <Text color="$fg-muted">... {hidden} earlier lines</Text>}
-            <Text>{visible === "" ? "Waiting for output..." : visible}</Text>
-          </Box>
-        )
-      })}
+          ) : line.kind === "muted" ? (
+            <Text color="$fg-muted">{line.text}</Text>
+          ) : (
+            <Text>{line.text}</Text>
+          )
+        }
+      />
     </Box>
   )
 }
@@ -252,9 +285,9 @@ export function QueueWatchFrame({
         <QueueWatchView results={snapshot.results} now={snapshot.now} pr={detailPr} />
       )
     ) : (
-      <Box flexDirection="column">
+      <Box flexDirection="column" flexGrow={1} minHeight={0}>
         <QueueShowView data={detailData} compact={tier === "full"} />
-        <QueueArtifactOutputView outputs={detailOutputs} />
+        <QueueArtifactOutputView key={selectedRow?.run} outputs={detailOutputs} />
       </Box>
     )
   if (snapshot.projection === undefined) {

@@ -122,6 +122,62 @@ describe("queue timeline storybook", () => {
     }
   })
 
+  it("scrolls detail output independently and resumes tail-follow only at the end", async () => {
+    const mixed = queueTimelineStories["mixed-completed"].snapshot
+    const outputTemplate = queueTimelineStories["live-output-growth"].snapshot.outputs?.[0]
+    if (outputTemplate === undefined) throw new Error("live-output-growth is missing its output fixture")
+
+    const snapshotWithLines = (count: number) => ({
+      ...mixed,
+      outputs: [
+        {
+          ...outputTemplate,
+          text: `${Array.from(
+            { length: count },
+            (_, index) => `detail-line-${String(index + 1).padStart(3, "0")}`,
+          ).join("\n")}\n`,
+        },
+      ],
+    })
+
+    const render = createRenderer({ cols: 200, rows: 50 })
+    const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80), paused: false }))
+    try {
+      await handle.waitForLayoutStable()
+      await handle.press("j")
+      await handle.press("j")
+      await handle.press("j")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("MEMBERS PR3")
+      expect(handle.text).toContain("detail-line-080")
+
+      // This long fixture makes the lossless follow contract observable: wheel
+      // input targets the detail pane, never the selected master-list row.
+      for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, -3)
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("detail-line-001")
+      expect(handle.text).toContain("MEMBERS PR3")
+
+      handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(81), paused: false }))
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("detail-line-001")
+      expect(handle.text).not.toContain("detail-line-081")
+      expect(handle.text).toContain("MEMBERS PR3")
+
+      for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, 3)
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("detail-line-081")
+      expect(handle.text).toContain("MEMBERS PR3")
+
+      handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(82), paused: false }))
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("detail-line-082")
+      expect(handle.text).toContain("MEMBERS PR3")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("opens the filter and selected-run evidence panes from the documented controls", async () => {
     const story = queueTimelineStories["detail-controls"]
     const viewport = story.viewport
