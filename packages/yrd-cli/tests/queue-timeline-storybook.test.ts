@@ -8,10 +8,12 @@ import { renderString } from "silvery"
 import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"
 import { QUEUE_TIMELINE_STORY_NAMES, queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
+import { QueueTimelineStorybook } from "../dev/queue-timeline-storybook.tsx"
 import { QueueTimelineView } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const STORY_NAMES = [
+  "production-overview",
   "idle",
   "pending-only",
   "running-spinner",
@@ -59,6 +61,133 @@ function findGlyphRow(term: ReturnType<typeof createTermless>, glyph: string, co
 }
 
 describe("queue timeline storybook", () => {
+  it("opens on meaningful production queue rows and selected run detail", async () => {
+    using term = createTermless({ cols: 200, rows: 50 })
+    const handle = await run(createElement(QueueTimelineStorybook), term, {
+      mouse: true,
+      selection: false,
+    })
+    try {
+      await waitFor(() => term.screen.getText().includes("production-overview"))
+      const frame = term.screen.getText()
+      expect(frame).toContain("QUEUE main")
+      expect(frame).toContain("running")
+      expect(frame).toContain("MEMBERS PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
+      expect(frame).toContain("R42 main running")
+      expect(frame).toContain("check     step-v2 running     2")
+      expect(frame).toContain("OUTPUT check#2")
+      expect(frame).toContain("p pause q quit · Esc close detail · f filters · o evidence")
+      expect(frame).not.toContain("No matching queue rows.")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  it("opens the default selected run detail from the narrow production tier", async () => {
+    using term = createTermless({ cols: 80, rows: 24 })
+    const handle = await run(createElement(QueueTimelineStorybook), term, {
+      mouse: true,
+      selection: false,
+    })
+    try {
+      await waitFor(() => term.screen.getText().includes("production-overview"))
+      expect(term.screen.getText()).toContain("R42·PR42,PR43")
+      expect(term.screen.getText()).toContain("Enter detail")
+
+      await act(async () => {
+        await handle.press("Enter")
+        await handle.waitForLayoutStable()
+      })
+      const detail = term.screen.getText()
+      expect(detail).toContain("RUN R42 STATUS running OUTCOME running")
+      expect(detail).toContain("JOB J42-check RUNNER runner-herdr-07")
+      expect(detail).toContain("LEASE 2026-07-13T12:05:30.000Z")
+      expect(detail).not.toContain("QUEUE main")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  it("shares realistic production contracts across lifecycle, batch, lineage, proof, and output stories", () => {
+    const overview = queueTimelineStories["production-overview"].snapshot
+    const overviewResult = overview.results[0]
+    if (overviewResult === undefined) throw new Error("production-overview is missing its queue result")
+
+    expect(overview.projection.rows.map((row) => row.status)).toEqual([
+      "running",
+      "canceled",
+      "environment-refused",
+      "rejected",
+      "integrated",
+    ])
+    const batch = overviewResult.running.find((run) => run.id === "R42")
+    if (batch === undefined) throw new Error("production-overview is missing batch run R42")
+    expect(batch.prs.map((pr) => pr.id)).toEqual(["PR42", "PR43"])
+    expect(batch.steps.map((step) => step.job?.status)).toEqual(["passed", "running", "requested"])
+    expect(batch.steps[1]?.job).toMatchObject({
+      id: "J42-check",
+      status: "running",
+      attempt: 2,
+      runner: "runner-herdr-07",
+      changedAt: "2026-07-13T11:58:30.000Z",
+      leaseExpiresAt: "2026-07-13T12:05:30.000Z",
+    })
+    expect(overview.outputs?.map((output) => output.path)).toEqual([
+      "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/stdout.log",
+      "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/stderr.log",
+    ])
+
+    const integrated = overviewResult.finished.find((run) => run.id === "R4")
+    expect(integrated?.integration).toEqual({ commit: "b".repeat(40), baseSha: "a".repeat(40) })
+    expect(integrated?.steps[0]?.job).toMatchObject({
+      status: "passed",
+      checkpoint: { tests: 125, failures: 0 },
+      artifacts: [
+        {
+          kind: "vitest-report",
+          uri: "file:///repo/.git/yrd/artifacts/R4/0-check/attempt-1/report.json",
+        },
+      ],
+    })
+    expect(overviewResult.finished.find((run) => run.id === "R5")?.error?.code).toBe("typecheck-failed")
+    expect(overviewResult.finished.find((run) => run.id === "R6")?.error?.code).toBe("queue-environment-refused")
+    expect(overviewResult.finished.find((run) => run.id === "R7")?.steps[0]?.job).toMatchObject({
+      status: "canceled",
+      canceledBy: "operator@example.test",
+    })
+
+    const pending = queueTimelineStories["pending-only"].snapshot
+    expect(pending.projection.rows.map((row) => row.position)).toEqual([1, 2])
+    expect(pending.results[0]?.prs[0]).toMatchObject({
+      issue: "@yrd/core/21120-pr-state-notifications",
+      reviews: [{ decision: "approve", ref: "review://PR1/1" }],
+      comments: [{ ref: "packages/yrd-cli/src/queue-status-view.tsx:1463" }],
+      checkRequests: [{ at: "2026-07-13T11:16:00.000Z" }],
+    })
+
+    const lineage = queueTimelineStories["latest-vs-all-lineage"]
+    expect(lineage.snapshot.results[0]?.prs[0]?.revisions.map((revision) => revision.revision)).toEqual([1, 2])
+    expect(
+      lineage.snapshot.results[0]?.finished.map((run) => ({
+        run: run.id,
+        revision: run.prs[0]?.revision,
+        status: run.status,
+      })),
+    ).toEqual([
+      { run: "R8", revision: 1, status: "failed" },
+      { run: "R9", revision: 2, status: "passed" },
+    ])
+
+    const rejected = queueTimelineStories["selected-rejected"].snapshot.projection.details[0]
+    expect(rejected?.attempts.map((attempt) => attempt.attempt)).toEqual([1, 2])
+    expect(rejected?.steps.map((step) => step.errorCode)).toEqual(["lint-failed", "typecheck-failed"])
+
+    const live = queueTimelineStories["live-output-growth"]
+    expect(live.snapshot.outputs?.map((output) => output.path.split("/").at(-1))).toEqual(["stdout.log", "stderr.log"])
+    expect(live.nextSnapshot?.outputs?.[0]?.text).toContain("checking two")
+    expect(live.nextSnapshot?.outputs?.[1]?.text).toContain("retry recovered")
+  })
+
   it("shares every deterministic named story with the acceptance surface", async () => {
     expect(QUEUE_TIMELINE_STORY_NAMES).toEqual(STORY_NAMES)
     expect(Object.keys(queueTimelineStories)).toEqual(QUEUE_TIMELINE_STORY_NAMES)
