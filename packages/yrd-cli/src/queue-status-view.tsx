@@ -352,7 +352,10 @@ export function queueTimelineRows(results: readonly QueueStatusResult[], now: nu
           pr: pr.id,
           base: result.base,
           status: pr.status,
-          subject: boundedQueue(state?.byId[pr.bay]?.path ?? pr.branch ?? pr.id, 80),
+          subject: boundedQueue(
+            (pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr.branch ?? pr.id,
+            80,
+          ),
           detail: queueTimelineDetail(result, pr, run),
           clock: age(timestamp, now, "queue timeline row"),
           timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
@@ -370,7 +373,10 @@ export function queueTimelineRows(results: readonly QueueStatusResult[], now: nu
           run: run.id,
           base: result.base,
           status: queueOutcome(run),
-          subject: boundedQueue(state?.byId[pr?.bay ?? ""]?.path ?? pr?.name ?? member.branch ?? member.id, 80),
+          subject: boundedQueue(
+            (pr?.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr?.name ?? member.branch ?? member.id,
+            80,
+          ),
           detail: queueTimelineDetail(result, pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR), run),
           clock: age(timestamp, now, "queue timeline row"),
           timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
