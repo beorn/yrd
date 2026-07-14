@@ -783,6 +783,7 @@ function defaultIO(): YrdCliIO {
     },
     color,
     columns: process.stdout.columns,
+    rows: process.stdout.rows,
     cwd: process.cwd(),
   }
   if (!interactive) return io
@@ -853,6 +854,7 @@ export async function runYrdProcess(
           services: activeHost.services,
           io: {
             cwd: activeHost.repository.worktree,
+            artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
             ...(resident === undefined ? {} : { runner: resident.id }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>

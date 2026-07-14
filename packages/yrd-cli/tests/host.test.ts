@@ -416,7 +416,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(
       commandBlock
         .split("\n")
-        .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[options\])?\s{2,}/u)?.groups?.command ?? []),
+        .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
     ).toEqual(["pr", "bay", "issue", "contest", "queue", "migrate", "log", "watch", "prime"])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
@@ -776,7 +776,11 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       ),
       submitStderr,
     ).toBe(1)
-    expect(submitStderr).toBe("")
+    expect(submitStderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
+      expect.stringMatching(/\bERROR yrd:queue:run run failed\b/u),
+      expect.stringMatching(/\bERROR yrd:queue:admit admit failed\b/u),
+    ])
     const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
     expect(submitted).toMatchObject({
       command: "pr.submit",

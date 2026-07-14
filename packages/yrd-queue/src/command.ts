@@ -343,18 +343,22 @@ type ArtifactStream = "stdout" | "stderr"
 type ArtifactStreamState = {
   readonly path: string
   readonly hash: ReturnType<typeof createHash>
+  readonly decoder: TextDecoder
   seen: boolean
 }
 
 async function createArtifactSink(root: string, input: StepExecution, attempt: number) {
   const dir = join(root, input.run, `${input.index}-${input.step}`, `attempt-${attempt}`)
   const streams: Record<ArtifactStream, ArtifactStreamState> = {
-    stdout: { path: join(dir, "stdout.log"), hash: createHash("sha256"), seen: false },
-    stderr: { path: join(dir, "stderr.log"), hash: createHash("sha256"), seen: false },
+    stdout: { path: join(dir, "stdout.log"), hash: createHash("sha256"), decoder: new TextDecoder(), seen: false },
+    stderr: { path: join(dir, "stderr.log"), hash: createHash("sha256"), decoder: new TextDecoder(), seen: false },
   }
+  const combined = { path: join(dir, "output.log"), seen: false }
   try {
     await mkdir(dir, { recursive: true })
-    await Promise.all(Object.values(streams).map(({ path }) => rm(path, { force: true })))
+    await Promise.all(
+      [...Object.values(streams).map(({ path }) => path), combined.path].map((path) => rm(path, { force: true })),
+    )
   } catch (cause) {
     throw new Error(
       `yrd: could not prepare step artifact directory ${dir}; inspect its permissions and free space, then retry the run`,
@@ -372,11 +376,19 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
     const first = !stream.seen
     stream.seen = true
     stream.hash.update(chunk)
+    const combinedText = stream.decoder.decode(chunk, { stream: true })
+    const firstCombined = combinedText !== "" && !combined.seen
+    if (combinedText !== "") combined.seen = true
     writes = writes
       .then(async () => {
-        if (writeFailure !== undefined) return
+        if (writeFailure !== undefined) return undefined
         if (first) await writeFile(stream.path, chunk)
         else await appendFile(stream.path, chunk)
+        if (combinedText !== "") {
+          if (firstCombined) await writeFile(combined.path, combinedText)
+          else await appendFile(combined.path, combinedText)
+        }
+        return undefined
       })
       .catch((cause: unknown) => {
         writeFailure ??= new Error(
@@ -391,7 +403,20 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
   }
   const finish = async (stdout: string, stderr: string): Promise<StepArtifact[]> => {
     await drain()
+    for (const stream of Object.values(streams)) {
+      const remainder = stream.decoder.decode()
+      if (remainder === "") continue
+      const firstCombined = !combined.seen
+      combined.seen = true
+      writes = writes.then(async () => {
+        if (firstCombined) await writeFile(combined.path, remainder)
+        else await appendFile(combined.path, remainder)
+        return undefined
+      })
+    }
+    await drain()
     const artifacts: StepArtifact[] = []
+    let streamsMatch = true
     for (const [name, content] of [
       ["stdout", stdout],
       ["stderr", stderr],
@@ -403,9 +428,15 @@ async function createArtifactSink(root: string, input: StepExecution, attempt: n
       }
       const finalHash = createHash("sha256").update(content).digest("hex")
       const streamedHash = stream.seen ? stream.hash.digest("hex") : undefined
-      if (streamedHash !== finalHash) await writeFile(stream.path, content)
+      if (streamedHash !== finalHash) {
+        streamsMatch = false
+        await writeFile(stream.path, content)
+      }
       artifacts.push({ name, path: stream.path })
     }
+    const fallback = [stdout, stderr].filter((content) => content !== "").join("")
+    if (fallback === "") await rm(combined.path, { force: true })
+    else if (!combined.seen || !streamsMatch) await writeFile(combined.path, fallback)
     return artifacts
   }
   return Object.freeze({ drain, finish, write })
@@ -864,7 +895,7 @@ async function mergeCandidate(
           context,
           { artifactRoot: options.artifactRoot },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
-          async (_path, candidate) => ({ status: "passed", output: candidate }),
+          (_path, candidate) => Promise.resolve({ status: "passed", output: candidate }),
         )
       : undefined
   if (prepared?.status === "failed") return prepared

@@ -44,7 +44,10 @@ export type YrdCliIO = {
    * process host supplies terminal capabilities. */
   color?: boolean
   columns?: number
+  rows?: number
   cwd?: string
+  /** Process-host-owned step artifact root used by the live read-only output projection. */
+  artifactRoot?: string
   runner?: string
   leaseMs?: number
   concurrency?: number

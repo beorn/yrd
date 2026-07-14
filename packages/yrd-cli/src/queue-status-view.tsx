@@ -353,8 +353,11 @@ type QueueShowRow = Readonly<{
   status: string
   attempt: string
   uuid: string
+  runner: string
+  lease: string
   requested: string
   started: string
+  changed: string
   finished: string
   duration: string
   durationMs?: number
@@ -428,7 +431,15 @@ export type QueueLogCoverage = Readonly<{
 }>
 
 type QueueLogLocation = Readonly<{ path: string }> | Readonly<{ url: string }>
-type QueueLogLocationEntry = Readonly<{ label: string; location: QueueLogLocation }>
+type QueueLogLocationEntry = Readonly<{ label: string; display?: string; location: QueueLogLocation }>
+
+function evidenceDisplay(label: string, location: QueueLogLocation): string {
+  if (!("path" in location)) return label
+  const normalized = location.path.replaceAll("\\", "/")
+  const git = normalized.indexOf("/.git/")
+  if (git >= 0) return normalized.slice(git + 1)
+  return label
+}
 
 function age(timestamp: string | undefined, now: number, subject: string): string {
   if (timestamp === undefined) return "-"
@@ -926,7 +937,7 @@ function stepLocations(step: QueueStep | undefined): QueueLogLocationEntry[] {
     const key = "path" in location ? `path:${location.path}` : `url:${location.url}`
     if (seen.has(key)) return
     seen.add(key)
-    locations.push({ label, location })
+    locations.push({ label, display: evidenceDisplay(label, location), location })
   }
   for (const artifact of stepArtifacts(step)) {
     const location = artifactPath(artifact)
@@ -947,7 +958,9 @@ function attemptArtifacts(attempt: QueueAttempt): readonly unknown[] {
 function attemptLocations(attempt: QueueAttempt): QueueLogLocationEntry[] {
   return attemptArtifacts(attempt).flatMap((artifact) => {
     const location = artifactPath(artifact)
-    return location === undefined ? [] : [{ label: artifactLabel(artifact), location }]
+    if (location === undefined) return []
+    const label = artifactLabel(artifact)
+    return [{ label, display: evidenceDisplay(label, location), location }]
   })
 }
 
@@ -1150,7 +1163,7 @@ function LocationLinks({ entries }: { entries: readonly QueueLogLocationEntry[] 
         const href = "path" in entry.location ? pathToFileURL(entry.location.path).href : entry.location.url
         return (
           <CellLink key={`${entry.label}:${target}`} href={href}>
-            {`${entry.label}=${target}`}
+            {`${entry.label}=${entry.display ?? target}`}
           </CellLink>
         )
       })}
@@ -1168,7 +1181,7 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
         return (
           <Text key={`${entry.label}:${href}`}>
             {compact || index === 0 ? null : "+"}
-            <Link href={href}>{compact ? String(index + 1) : entry.label}</Link>
+            <Link href={href}>{compact ? String(index + 1) : (entry.display ?? entry.label)}</Link>
           </Text>
         )
       })}
@@ -1877,6 +1890,19 @@ function latestPRRun(pr: PR, runs: readonly QueueRun[]): QueueRun | undefined {
     .at(-1)
 }
 
+export type PRDetailData = Readonly<{
+  pr: PR
+  runs: readonly QueueShowData[]
+  run?: QueueShowData
+}>
+
+export function prDetailData(pr: PR, runs: readonly QueueRun[], attempts: readonly QueueAttempt[] = []): PRDetailData {
+  const details = runs.map((run) => queueShowData(run, runs, attempts))
+  const latest = latestPRRun(pr, runs)
+  const run = latest === undefined ? undefined : details.find((detail) => detail.run === latest.id)
+  return { pr, runs: details, ...(run === undefined ? {} : { run }) }
+}
+
 function diagnosticBlocker(
   pr: PR,
   run: QueueRun | undefined,
@@ -1902,19 +1928,21 @@ function diagnosticBlocker(
 export function PRDetailView({
   pr,
   runs,
+  attempts = [],
   now,
   position,
 }: {
   pr: PR
   runs: readonly QueueRun[]
+  attempts?: readonly QueueAttempt[]
   now: number
   position?: number
 }) {
   const run = latestPRRun(pr, runs)
-  const member = run?.prs.find((candidate) => candidate.id === pr.id)
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
+  const detail = prDetailData(pr, runs, attempts)
 
   return (
     <Box flexDirection="column">
@@ -1929,51 +1957,24 @@ export function PRDetailView({
         <Text bold>BASE</Text> {pr.base}
         {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
       </Text>
-      {run === undefined ? (
+      <Text>
+        <Text bold>RELATED RUNS</Text> {detail.runs.length === 0 ? "-" : detail.runs.map((run) => run.run).join(",")}
+      </Text>
+      {detail.run === undefined ? (
         <Text color="$fg-muted">No run recorded.</Text>
       ) : (
-        <>
-          <Text>
-            <Text bold>RUN</Text> {run.id} <StatusValue value={run.status} /> <Text bold>REV</Text>{" "}
-            {member?.revision ?? "-"} <Text bold>HEAD</Text> {member?.headSha ?? "-"}
-          </Text>
-          <Text>
-            <Text bold>TIME</Text> START {toIso(run.startedAt)} END {toIso(run.finishedAt)} ELAPSED{" "}
-            {duration(run.startedAt, run.finishedAt ?? new Date(now).toISOString())}
-          </Text>
-          {run.steps.map((step) => {
-            const job = step.job
-            const runner = job !== undefined && "runner" in job ? job.runner : "-"
-            const finished = job !== undefined && "finishedAt" in job ? toIso(job.finishedAt) : "-"
-            const lease = job?.status === "running" ? job.leaseExpiresAt : "-"
-            return (
-              <Box key={`${run.id}:${step.name}`} flexDirection="column" marginTop={1}>
-                <Text>
-                  <Text bold>STEP</Text> {step.name} <StatusValue value={jobStatus(step)} /> <Text bold>REV</Text>{" "}
-                  {step.revision}
-                </Text>
-                <Text>
-                  <Text bold>JOB</Text> {job?.id ?? "-"} <Text bold>ATTEMPT</Text> {job?.attempt ?? "-"}{" "}
-                  <Text bold>RUNNER</Text> {runner} <Text bold>LEASE</Text> {lease}
-                </Text>
-                <Text>
-                  <Text bold>TIME</Text> REQUESTED {toIso(job?.requestedAt)} STARTED{" "}
-                  {job === undefined || job.status === "requested" ? "-" : toIso(job.startedAt)} CHANGED{" "}
-                  {toIso(job?.changedAt)} FINISHED {finished}
-                </Text>
-              </Box>
-            )
-          })}
-        </>
+        <QueueShowView data={detail.run} compact />
       )}
       {blocker === undefined ? null : (
         <Text color="$fg-warning">
           <Text bold>BLOCKER</Text> {blocker}
         </Text>
       )}
-      <Text>
-        <Text bold>LANDING</Text> {landing === undefined ? "-" : `${landing.commit}@${landing.baseSha}`}
-      </Text>
+      {detail.run === undefined ? (
+        <Text>
+          <Text bold>LANDING</Text> {landing === undefined ? "-" : `${landing.commit}@${landing.baseSha}`}
+        </Text>
+      ) : null}
     </Box>
   )
 }
@@ -2744,8 +2745,11 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     status: jobStatus(step),
     attempt: step.job === undefined ? "-" : String(step.job.attempt),
     uuid: step.job?.id ?? "-",
+    runner: step.job !== undefined && "runner" in step.job ? step.job.runner : "-",
+    lease: step.job?.status === "running" ? toIso(step.job.leaseExpiresAt) : "-",
     requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
     started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
+    changed: step.job === undefined ? "-" : toIso(step.job.changedAt),
     finished:
       step.job === undefined || step.job.status === "running" || step.job.status === "requested"
         ? "-"
@@ -2790,8 +2794,11 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
     status: attempt.outcome,
     attempt: String(attempt.attempt),
     uuid: attempt.job,
+    runner: attempt.runner,
+    lease: "-",
     requested: toIso(attempt.requestedAt),
     started: toIso(attempt.startedAt),
+    changed: toIso(attempt.finishedAt),
     finished: toIso(attempt.finishedAt),
     duration: preciseDuration(attempt.durationMs),
     durationMs: attempt.durationMs,
@@ -2925,9 +2932,113 @@ export function QueueLogView({
   )
 }
 
-export function QueueShowView({ data }: { data: QueueShowData }) {
+function queueShowNextAction(data: QueueShowData): string {
+  if (data.outcome === "integrated") return "none — landing proof is recorded"
+  if (data.status === "running" || data.status === "waiting") return "follow live output or wait for the current step"
+  const errorCode = data.steps.find((step) => step.errorCode !== "-")?.errorCode
+  if (["queue-environment-refused", "stale-pr", "stale-check", "job-lost"].includes(errorCode ?? "")) {
+    return "repair the queue environment, then rerun the PR"
+  }
+  if (["canceled", "cancelled", "queue-canceled", "queue-cancelled"].includes(errorCode ?? "")) {
+    return "inspect the newer PR revision; resubmit only if delivery is still required"
+  }
+  return "fix the branch, then run yrd pr submit again"
+}
+
+function queueShowMembers(data: QueueShowData): string {
+  return data.prs.map((pr) => `${pr.id}@r${pr.revision}:${pr.headSha.slice(0, 12)}`).join(",")
+}
+
+function QueueStepLifecycleView({ row }: { row: QueueShowRow }) {
   return (
     <Box flexDirection="column">
+      <Text wrap="truncate">
+        JOB {row.uuid} RUNNER {row.runner}
+      </Text>
+      <Text wrap="truncate">
+        LEASE {row.lease} CHANGED {row.changed}
+      </Text>
+      <Text wrap="truncate">
+        TIME REQUESTED {row.requested} STARTED {row.started} FINISHED {row.finished}
+      </Text>
+    </Box>
+  )
+}
+
+function QueueProofView({ data }: { data: QueueShowData }) {
+  return (
+    <Box flexDirection="column">
+      {data.steps.length === 0 ? (
+        <Text color="$fg-muted">No step evidence recorded.</Text>
+      ) : (
+        data.steps.map((row) => (
+          <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
+            <Text wrap="truncate">
+              {`PROOF ${row.step}#${row.attempt} ART `}
+              <QueueLogLocationLinks entries={row.locations} compact={false} />
+              {` EVIDENCE ${singleQueue(
+                typeof row.evidence === "string" ? row.evidence : safeText(row.evidence),
+              )} CHECKPOINT ${singleQueue(row.checkpoint)}`}
+            </Text>
+          </Box>
+        ))
+      )}
+      <Text>
+        LANDING <Text color="$fg-muted">{data.landing}</Text>
+      </Text>
+    </Box>
+  )
+}
+
+export function QueueEvidenceView({ data }: { data: QueueShowData }) {
+  return (
+    <Box flexDirection="column">
+      <Text bold>EVIDENCE {data.run}</Text>
+      <QueueProofView data={data} />
+    </Box>
+  )
+}
+
+function CompactQueueShowView({ data }: { data: QueueShowData }) {
+  return (
+    <Box flexDirection="column">
+      <Text bold wrap="truncate">
+        RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
+      </Text>
+      <Text wrap="truncate">
+        BASE {data.base} PRS {queueShowMembers(data)} RETRY {data.retries}
+      </Text>
+      <Text wrap="truncate">
+        START {data.started} END {data.finished}
+      </Text>
+      <Text wrap="truncate">
+        TOTAL {data.totalDuration} ACTIVE {data.activeDuration} WAIT {data.waitDuration}
+      </Text>
+      {data.steps.map((row) => (
+        <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
+          <Text wrap="truncate">
+            STEP {row.step}#{row.attempt} {row.status} DUR {row.duration} ERROR {row.errorCode}
+          </Text>
+          <QueueStepLifecycleView row={row} />
+          <Text wrap="truncate">
+            PROOF ART <QueueLogLocationLinks entries={row.locations} compact={false} /> EVIDENCE{" "}
+            {singleQueue(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))}
+          </Text>
+        </Box>
+      ))}
+      <Text wrap="truncate">
+        LANDING <Text color="$fg-muted">{data.landing}</Text>
+      </Text>
+      <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+    </Box>
+  )
+}
+
+export function QueueShowView({ data, compact = false }: { data: QueueShowData; compact?: boolean }) {
+  if (compact) return <CompactQueueShowView data={data} />
+  return (
+    <Box flexDirection="column">
+      <Text wrap="truncate">MEMBERS {queueShowMembers(data)}</Text>
       <Table
         data={[data]}
         columns={[
@@ -3041,25 +3152,9 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
         />
       </Box>
       <Box marginTop={1}>
-        <Box flexDirection="column">
-          {data.steps.map((row) => (
-            <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
-              <Text wrap="truncate">
-                {`PROOF ${row.step}#${row.attempt} ART `}
-                <QueueLogLocationLinks entries={row.locations} compact={false} />
-                {` EVIDENCE ${singleQueue(
-                  typeof row.evidence === "string" ? row.evidence : safeText(row.evidence),
-                )} CHECKPOINT ${singleQueue(row.checkpoint)}`}
-              </Text>
-            </Box>
-          ))}
-        </Box>
+        <QueueProofView data={data} />
       </Box>
-      <Box marginTop={1}>
-        <Text>
-          LANDING <Text color="$fg-muted">{data.landing}</Text>
-        </Text>
-      </Box>
+      <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
     </Box>
   )
 }
