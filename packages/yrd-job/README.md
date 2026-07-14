@@ -98,6 +98,15 @@ drift still blocks a not-yet-started Job, but it does not strand already waiting
 work: completion is validated against the stable output contract registered
 under the pinned definition name.
 
+`JobError` carries a machine `code`, presentation `message`, and optional
+JSON-safe `evidence`. The boundary that owns an evidence shape validates it
+before returning the failure; Jobs preserves it verbatim through settlement
+and replay. Consumers parse evidence by schema and never reconstruct it from
+message prose. A failed Job's optional `output` remains definition-shaped
+execution output such as command artifacts; `error.evidence` is the typed
+terminal refusal fact. Do not duplicate the same fact across both channels.
+Successful output contracts remain independent and unchanged.
+
 ## Delivery Semantics
 
 Execution is at least once across a crash before settlement. Definitions that

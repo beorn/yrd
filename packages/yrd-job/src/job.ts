@@ -7,6 +7,7 @@ export const JobErrorSchema = z
   .object({
     code: NameSchema,
     message: z.string().min(1),
+    evidence: JsonSchema.optional(),
   })
   .strict()
 export type JobError = z.infer<typeof JobErrorSchema>

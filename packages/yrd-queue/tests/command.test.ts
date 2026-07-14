@@ -815,11 +815,29 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(refreshAttempts).toBe(3)
-    expect(run).toMatchObject({ status: "failed", error: { code: "queue-environment-refused" } })
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
+    })
     expect(run.steps[0]?.job).toMatchObject({
       status: "failed",
-      output: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
     })
+    expect(run.steps[0]?.job).not.toHaveProperty("output")
+    expect(app.queue.checks(["PR1"])).toMatchObject([
+      {
+        error: {
+          code: "queue-environment-refused",
+          evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+        },
+      },
+    ])
     expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
@@ -865,13 +883,33 @@ describe("Queue command adapters", () => {
     expect(refusalAttempts).toBe(3)
     expect(run).toMatchObject({
       status: "failed",
-      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+      error: {
+        code: "queue-environment-refused",
+        message: expect.stringContaining("after 3 attempts"),
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
     expect(run.steps[1]?.job).toMatchObject({
       status: "failed",
-      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+      error: {
+        code: "queue-environment-refused",
+        message: expect.stringContaining("after 3 attempts"),
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
     })
+    expect(run.steps[1]?.job).not.toHaveProperty("output")
+    expect(app.queue.checks(["PR1"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          step: "merge",
+          error: expect.objectContaining({
+            code: "queue-environment-refused",
+            evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+          }),
+        }),
+      ]),
+    )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
   })
@@ -1300,13 +1338,33 @@ describe("Queue command adapters", () => {
     expect(refusalAttempts).toBe(3)
     expect(run).toMatchObject({
       status: "failed",
-      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+      error: {
+        code: "queue-environment-refused",
+        message: expect.stringContaining("after 3 attempts"),
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
       prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
     })
     expect(run.steps[1]?.job).toMatchObject({
       status: "failed",
-      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+      error: {
+        code: "queue-environment-refused",
+        message: expect.stringContaining("after 3 attempts"),
+        evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+      },
     })
+    expect(run.steps[1]?.job).not.toHaveProperty("output")
+    expect(app.queue.checks(["PR1"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          step: "merge",
+          error: expect.objectContaining({
+            code: "queue-environment-refused",
+            evidence: { kind: "queue-authority-refusal", base: "main", remote: "origin", attempts: 3 },
+          }),
+        }),
+      ]),
+    )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
   })

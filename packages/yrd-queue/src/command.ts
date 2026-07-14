@@ -67,7 +67,6 @@ export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
   CommandEvidenceSchema,
   GitCheckFailureEvidenceSchema,
-  QueueAuthorityRefusalEvidenceSchema,
 ])
 export type GitCheckResultEvidence = Readonly<z.infer<typeof GitCheckResultEvidenceSchema>>
 
@@ -646,7 +645,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
     } catch (cause) {
       const refusal = queueAuthorityRefusal(cause)
       if (refusal !== undefined) {
-        return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
+        return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
       const detail = messageOf(cause)
       try {
@@ -876,8 +875,9 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         output: IntegrationProofSchema.parse({ commit: checked.candidateSha, baseSha: checked.candidateSha }),
       }
     } catch (cause) {
-      if (queueAuthorityRefusal(cause) !== undefined) {
-        return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause))
+      const refusal = queueAuthorityRefusal(cause)
+      if (refusal !== undefined) {
+        return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
       return failed("merge-failed", messageOf(cause))
     }
@@ -918,8 +918,9 @@ export function configuredMergeStep<Shape extends PRShape>(
       try {
         landing = await authoritativeQueueBase(git, repo, branch)
       } catch (cause) {
-        if (queueAuthorityRefusal(cause) !== undefined) {
-          return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause))
+        const refusal = queueAuthorityRefusal(cause)
+        if (refusal !== undefined) {
+          return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
         }
         return outcome.status === "failed"
           ? failed(outcome.error.code, outcome.error.message)
@@ -941,8 +942,9 @@ export function configuredMergeStep<Shape extends PRShape>(
         `merge command exited successfully but '${branch}' does not contain '${missing}'`,
       )
     } catch (cause) {
-      if (queueAuthorityRefusal(cause) !== undefined) {
-        return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause))
+      const refusal = queueAuthorityRefusal(cause)
+      if (refusal !== undefined) {
+        return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
       return failed("merge-failed", messageOf(cause))
     }
@@ -976,6 +978,10 @@ function failed<Output extends JsonValue = JsonValue>(
   output?: Output,
 ): JobResult<Output> {
   return { status: "failed", error: { code, message }, ...(output === undefined ? {} : { output }) }
+}
+
+function failedWithEvidence(code: string, message: string, evidence: JsonValue): JobResult<never> {
+  return { status: "failed", error: { code, message, evidence } }
 }
 
 function messageOf(cause: unknown): string {
