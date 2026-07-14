@@ -376,7 +376,7 @@ describe("Queue", () => {
     expect(await Array.fromAsync(app.events())).toEqual(settled)
   })
 
-  it("reconciles a replayed lost job without granting recovery execution authority", async () => {
+  it("releases a replayed lost job before an explicit same-revision retry", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     let checkCalls = 0
@@ -414,14 +414,38 @@ describe("Queue", () => {
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([
       expect.objectContaining({ id: "R1", status: "failed" }),
     ])
-    expect(replayed.state().bays.prs.PR1?.status).toBe("rejected")
+    expect(replayed.state().bays.prs.PR1?.status).toBe("submitted")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
-    expect((await Array.fromAsync(replayed.events())).slice(before.length)).toMatchObject([{ name: "pr/rejected" }])
+    const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
+    expect(appended).toMatchObject([
+      { name: "queue/run/failed", data: { run: "R1", error: { code: "job-lost" } } },
+    ])
+    const failed = appended[0]
+    if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
+    const authority = replayed.state().queues.authority.runs.R1 as
+      | Readonly<{ released?: Readonly<{ reason: "queue-environment-refused" | "job-lost"; ref: string }> }>
+      | undefined
+    expect(authority?.released).toEqual({ reason: "job-lost", ref: failed.id })
+    expect(appended.map(({ name }) => name)).not.toContain("pr/rejected")
 
     const reconciled = await Array.fromAsync(replayed.events())
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:03:00.000Z" })).resolves.toEqual([])
     expect(await Array.fromAsync(replayed.events())).toEqual(reconciled)
+
+    const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)
+    expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
+    expect(retried).toMatchObject([
+      { id: "R2", status: "passed", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] },
+    ])
+    expect(replayed.state().bays.prs.PR1).toMatchObject({
+      status: "integrated",
+      revision: 1,
+      headSha: HEAD,
+    })
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(checkCalls).toBe(1)
+    expect(mergeCalls).toBe(1)
   })
 
   it("cancels a correlated PR when its active Queue Job is canceled", async () => {
@@ -1076,6 +1100,136 @@ describe("Queue", () => {
       steps: [{ name: "merge" }, { name: "deploy" }],
     })
     expect(changedChecks).toBe(1)
+  })
+
+  it("releases an environment-refused run and re-admits its unchanged revision after replay", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let mergeCalls = 0
+    const options = {
+      merge: () => {
+        mergeCalls++
+        return mergeCalls === 1
+          ? {
+              status: "failed" as const,
+              error: {
+                code: "queue-environment-refused",
+                message: "merge environment is temporarily unavailable",
+              },
+            }
+          : { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/environment-refused")
+
+      expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+        {
+          id: "R1",
+          status: "failed",
+          error: { code: "queue-environment-refused" },
+          prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
+        },
+      ])
+      expect(app.state().bays.prs[pr.id]).toMatchObject({
+        status: "submitted",
+        revision: pr.revision,
+        headSha: pr.headSha,
+      })
+
+      const events = await Array.fromAsync(app.events())
+      const failed = events.find(
+        (applied) =>
+          applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+      )
+      if (failed === undefined) throw new Error("expected the environment refusal to append queue/run/failed")
+      const authority = app.state().queues.authority.runs.R1 as
+        | Readonly<{
+            released?: Readonly<{ reason: "queue-environment-refused" | "job-lost"; ref: string }>
+          }>
+        | undefined
+      expect(authority?.released).toEqual({ reason: "queue-environment-refused", ref: failed.id })
+      expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    const replayedEvents = await Array.fromAsync(replayed.events())
+    const replayedFailure = replayedEvents.find(
+      (applied) =>
+        applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+    )
+    if (replayedFailure === undefined) throw new Error("expected replay to retain queue/run/failed")
+    const replayedAuthority = replayed.state().queues.authority.runs.R1 as
+      | Readonly<{
+          released?: Readonly<{ reason: "queue-environment-refused" | "job-lost"; ref: string }>
+        }>
+      | undefined
+    expect(replayedAuthority?.released).toEqual({
+      reason: "queue-environment-refused",
+      ref: replayedFailure.id,
+    })
+
+    const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["merge"] }, runtime)
+    expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
+    expect(retried).toMatchObject([
+      {
+        id: "R2",
+        status: "passed",
+        prs: [{ id: "PR1", revision: 1, headSha: HEAD }],
+      },
+    ])
+    expect(replayed.state().bays.prs.PR1).toMatchObject({
+      status: "integrated",
+      revision: 1,
+      headSha: HEAD,
+    })
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(mergeCalls).toBe(2)
+  })
+
+  it("keeps merit rejection consumed until a new revision supplies submit authority", async () => {
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      merge: () => {
+        mergeCalls++
+        return mergeCalls === 1
+          ? { status: "failed", error: { code: "merge-conflict", message: "payload does not merge" } }
+          : { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/merit-rejection")
+
+    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+      { id: "R1", status: "failed", error: { code: "merge-conflict" } },
+    ])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({
+      status: "rejected",
+      revision: pr.revision,
+      headSha: pr.headSha,
+    })
+    expect(app.state().queues.authority.runs.R1).not.toHaveProperty("released")
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toContain("pr/rejected")
+
+    const beforeRetry = await Array.fromAsync(app.events())
+    await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).rejects.toThrow(/rejected/iu)
+    expect(await Array.fromAsync(app.events())).toEqual(beforeRetry)
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(mergeCalls).toBe(1)
+
+    await app.bays.submit({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
+    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "submitted", revision: 2, headSha: UPDATED })
+
+    const revised = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    const newRuns = revised.filter(({ id: run }) => run === "R2")
+    expect(newRuns).toHaveLength(1)
+    expect(newRuns).toMatchObject([
+      { id: "R2", status: "passed", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] },
+    ])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "integrated", revision: 2, headSha: UPDATED })
+    expect(mergeCalls).toBe(2)
   })
 
   it("audits a rejected revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
