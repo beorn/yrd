@@ -375,6 +375,7 @@ public repair path for expired runner leases; it never retries or executes work.
 ```text
 yrd issue [--json]
 yrd issue view <issue> [--json]
+yrd migrate terminal-associations [--apply] [--json]
 yrd pr regression <pr> --run <run> --detected-at <timestamp>
   --severity <level> --evidence <ref> --implementation-run <ref>
   --review <ref> --repair-pr <pr> --repair-run <run> [--json]
@@ -403,6 +404,15 @@ delivery carries the exact opaque `issueRef`, PR revision/head, native status,
 terminal Queue run, and one journal `asOf` cursor; integrated deliveries alone
 carry `landingSha`. Rejected deliveries carry their typed bounce run. Canceled
 and withdrawn are distinct terminal outcomes.
+
+`yrd migrate terminal-associations` is the explicit compatibility cutover for
+legacy rejected-PR events that predate the typed Queue run field. Its default
+dry-run lists every unassociated terminal, either with one revision/head-bound
+failed-run proof or with a typed refusal such as missing, chronology-invalid,
+or ambiguous candidates. `--apply` appends one `pr/terminal-associated` event
+for each uniquely proven row and leaves every refused row untouched. It never
+rewrites JSONL, fabricates a run, or weakens new `pr/rejected` events; repeating
+`--apply` after the proven rows land appends nothing.
 
 `pr regression` records a completed repair without rewriting either integration.
 It accepts only the exact original and repair Queue runs named by their terminal

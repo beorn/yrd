@@ -34,6 +34,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
   ProvisionedBaySchema,
   RefreshBayInputSchema,
@@ -737,6 +738,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/correlation-bound": PRCorrelationBoundSchema,
         "pr/withdrawn": PRWithdrawnSchema,
         "pr/rejected": PRRejectedSchema,
+        "pr/terminal-associated": PRTerminalAssociationSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/canceled": PRCanceledSchema,
         "pr/regression-recorded": PRRegressionSchema,
@@ -1115,6 +1117,40 @@ function terminalApplies(
     throw new Error(`yrd: terminal correlation does not match PR '${pr.id}'`)
   }
   return true
+}
+
+function associateRejectedTerminalRun(
+  pr: DeepReadonly<PR>,
+  identity: Readonly<{ revision: number; headSha: string }>,
+  run: string,
+): PR {
+  let found = false
+  const revisions = pr.revisions.map((revision) => {
+    if (revision.revision !== identity.revision || revision.headSha !== identity.headSha) return revision
+    found = true
+    if (revision.terminal?.status !== "rejected") {
+      throw new Error(
+        `yrd: PR '${pr.id}' revision ${identity.revision}@${identity.headSha} has no rejected terminal to associate`,
+      )
+    }
+    if (revision.terminal.run !== undefined && revision.terminal.run !== run) {
+      throw new Error(
+        `yrd: PR '${pr.id}' revision ${identity.revision}@${identity.headSha} is already associated with '${revision.terminal.run}'`,
+      )
+    }
+    return { ...revision, terminal: { ...revision.terminal, run } }
+  })
+  if (!found) {
+    throw new Error(`yrd: PR '${pr.id}' has no revision ${identity.revision}@${identity.headSha} to associate`)
+  }
+  const current = pr.revision === identity.revision && pr.headSha === identity.headSha
+  if (current && pr.status !== "rejected") {
+    throw new Error(`yrd: current PR '${pr.id}' is ${pr.status}, not rejected`)
+  }
+  if (current && pr.terminalRun !== undefined && pr.terminalRun !== run) {
+    throw new Error(`yrd: current PR '${pr.id}' is already associated with '${pr.terminalRun}'`)
+  }
+  return { ...pr, revisions, ...(current ? { terminalRun: run } : {}) }
 }
 
 function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs) {
@@ -1529,16 +1565,26 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const changed = parsed.success ? parsed.data : LegacyPRRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined || !terminalApplies(pr, changed)) return state
-      const run = parsed.success ? parsed.data.run : undefined
-      return patchPR(pr, {
+      const rejected: PR = {
+        ...pr,
         status: "rejected",
         rejectedAt: applied.ts,
-        terminalRun: run,
+        terminalRun: undefined,
         revisions: patchRevisionClock(pr, {
-          terminal: { status: "rejected", at: applied.ts, ...(run === undefined ? {} : { run }) },
+          terminal: { status: "rejected", at: applied.ts },
         }),
         ...(changed.detail === undefined ? {} : { detail: changed.detail }),
-      })
+      }
+      return patchPR(
+        pr,
+        parsed.success ? associateRejectedTerminalRun(rejected, parsed.data, parsed.data.run) : rejected,
+      )
+    }
+    case "pr/terminal-associated": {
+      const associated = PRTerminalAssociationSchema.parse(data)
+      const pr = current.prs[associated.pr]
+      if (pr === undefined) throw new Error(`yrd: no PR '${associated.pr}' for terminal association`)
+      return patchPR(pr, associateRejectedTerminalRun(pr, associated, associated.run))
     }
     case "pr/integrated": {
       const parsed = PRIntegratedSchema.safeParse(data)

@@ -16,17 +16,17 @@ function per implementation detail.
 
 ## Domain Objects
 
-| Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                      |
-| ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                        |
-| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `dispatch()`, `events()`, `close()`                                                    |
-| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                              |
-| `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                |
-| `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()` |
-| `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                   |
+| Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                              |
+| ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                                |
+| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `dispatch()`, `events()`, `close()`                                                            |
+| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                                      |
+| `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                        |
+| `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
+| `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
 | `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
-| `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`   |
-| `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
+| `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`          |
+| `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -36,20 +36,20 @@ function or a small plain object; it is not a global singleton.
 
 The objects above operate on plain records:
 
-| Record                 | Meaning                                                                   |
-| ---------------------- | ------------------------------------------------------------------------- |
-| `Command`              | Serializable request naming one registered handler and its arguments      |
-| `Event`                | Validated fact emitted by a command                                       |
-| `CommandResult`        | Dispatched command, committed events, and optional JSON result value      |
-| `Issue`                | Versioned unit of intent from a configured issue source                   |
-| `Bay`                  | Isolated worktree and its current Git facts                               |
+| Record                 | Meaning                                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `Command`              | Serializable request naming one registered handler and its arguments                                                |
+| `Event`                | Validated fact emitted by a command                                                                                 |
+| `CommandResult`        | Dispatched command, committed events, and optional JSON result value                                                |
+| `Issue`                | Versioned unit of intent from a configured issue source                                                             |
+| `Bay`                  | Isolated worktree and its current Git facts                                                                         |
 | `PR`                   | Revision history plus readiness, terminal Queue run, issue join, reviews, regressions, comments, and check requests |
-| `Job`                  | Durable executable lifecycle and evidence                                 |
-| `QueueRun`             | Pinned PR set, base, installed-step plan, reusable results, and integration facts |
-| `Step`                 | Configured typed transition in a Queue                                    |
-| `Contest`              | Issue, competitors, attempts, selection, and promotion facts              |
-| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin |
-| `Artifact`             | Named evidence with a path or URL and media type                          |
+| `Job`                  | Durable executable lifecycle and evidence                                                                           |
+| `QueueRun`             | Pinned PR set, base, installed-step plan, reusable results, and integration facts                                   |
+| `Step`                 | Configured typed transition in a Queue                                                                              |
+| `Contest`              | Issue, competitors, attempts, selection, and promotion facts                                                        |
+| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin                                           |
+| `Artifact`             | Named evidence with a path or URL and media type                                                                    |
 
 Persisted records contain JSON data only. Zod schemas validate every untyped
 boundary: CLI/config input, commands, events, Job input/output, adapter output,
@@ -145,6 +145,11 @@ Current event schemas remain strict for every append. A plugin may additionally
 declare a replay-only schema for an older payload; Core tries it only while
 folding committed history. This lets a domain strengthen future facts without
 making weak legacy shapes valid commands again.
+
+When a strict consumer needs a typed fact that old replay-only history omitted,
+the repair is an explicit domain command that appends a validated compensating
+event. Its planner must prove the relation or return a typed refusal. Yrd never
+rewrites committed JSONL or infers the missing fact inside a read projection.
 
 The Journal warns at 10 MiB or 10,000 replayed frames. Compaction is explicit
 as-needed work; the warning tells operators to implement compaction and GC

@@ -4,6 +4,21 @@ export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
+export const PRTerminalAssociationSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    run: z.string().trim().min(1),
+    provenance: z.literal("migration/21091"),
+    evidence: z.object({ terminalEvent: z.uuidv7(), run: z.string().trim().min(1) }).strict(),
+  })
+  .strict()
+  .refine(({ run, evidence }) => run === evidence.run, {
+    message: "association run must equal the evidence run",
+    path: ["evidence", "run"],
+  })
+export type PRTerminalAssociation = Readonly<z.infer<typeof PRTerminalAssociationSchema>>
 export const CorrelationSchema = z
   .object({
     namespace: z.string().trim().min(1),

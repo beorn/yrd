@@ -417,7 +417,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       commandBlock
         .split("\n")
         .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[options\])?\s{2,}/u)?.groups?.command ?? []),
-    ).toEqual(["pr", "bay", "issue", "contest", "queue", "log", "watch", "prime"])
+    ).toEqual(["pr", "bay", "issue", "contest", "queue", "migrate", "log", "watch", "prime"])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)

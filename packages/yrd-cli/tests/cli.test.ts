@@ -114,8 +114,8 @@ type OverlapProbe = {
   max(kind: ProbeKind): number
 }
 
-function ids(): () => string {
-  let value = 0
+function ids(start = 0): () => string {
+  let value = start
   return () => `00000000-0000-7000-8000-${String(++value).padStart(12, "0")}`
 }
 
@@ -4810,8 +4810,8 @@ function trackerBridge(output: string): Readonly<{
   return bridge as ReturnType<typeof trackerBridge>
 }
 
-function legacyRejectedJournal(runIds: readonly string[] = ["R1"]) {
-  const nextId = ids()
+function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = "2026-07-09T12:00:30.000Z") {
+  const nextId = ids(9_000)
   const command = { id: nextId(), op: "fixture.legacy-rejected-run" }
   const cause = {
     id: nextId(),
@@ -4919,7 +4919,7 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"]) {
           {
             id: terminalEvent,
             name: "pr/rejected",
-            ts: "2026-07-09T12:00:30.000Z",
+            ts: terminalAt,
             data: { pr: pr.id, revision: 1, detail: "historical check failure" },
           },
         ],
@@ -5081,10 +5081,7 @@ describe("typed issue landing bridge", () => {
     const before = await Array.fromAsync(app.events())
     const output = outputIO()
 
-    expect(
-      await runYrd(app, yrd("migrate", "terminal-associations", "--json"), output.io),
-      output.stderr(),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("migrate", "terminal-associations", "--json"), output.io), output.stderr()).toBe(0)
     expect(await Array.fromAsync(app.events())).toEqual(before)
     expect(JSON.parse(output.stdout())).toMatchObject({
       command: "migrate.terminal-associations",
@@ -5112,6 +5109,129 @@ describe("typed issue landing bridge", () => {
         },
       ],
     })
+  })
+
+  it("appends one strict terminal association, replays its bounce, and applies idempotently", async () => {
+    const seeded = legacyRejectedJournal()
+    {
+      await using app = await createApp({ journal: seeded.journal })
+      const before = await Array.fromAsync(app.events())
+      const output = outputIO()
+
+      expect(
+        await runYrd(app, yrd("migrate", "terminal-associations", "--apply", "--json"), output.io),
+        output.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "migrate.terminal-associations",
+        mode: "apply",
+        summary: { unprojectable: 1, ready: 1, refused: 0, appended: 1 },
+      })
+      const appended = (await Array.fromAsync(app.events())).slice(before.length)
+      expect(appended).toEqual([
+        expect.objectContaining({
+          name: "pr/terminal-associated",
+          data: {
+            pr: "PR1",
+            revision: 1,
+            headSha: HEAD_SHA,
+            run: "R1",
+            provenance: "migration/21091",
+            evidence: { terminalEvent: seeded.terminalEvent, run: "R1" },
+          },
+        }),
+      ])
+    }
+
+    await using replayed = await createApp({ journal: seeded.journal })
+    const issue = outputIO()
+    expect(await runYrd(replayed, yrd("issue", "view", seeded.issueRef, "--json"), issue.io), issue.stderr()).toBe(0)
+    expect(trackerBridge(issue.stdout()).deliveries).toEqual([
+      expect.objectContaining({
+        issueRef: seeded.issueRef,
+        pr: "PR1",
+        revision: 1,
+        headSha: HEAD_SHA,
+        status: "rejected",
+        bounce: { run: "R1", detail: "historical check failure" },
+      }),
+    ])
+
+    const beforeSecondApply = await Array.fromAsync(replayed.events())
+    const second = outputIO()
+    expect(
+      await runYrd(replayed, yrd("migrate", "terminal-associations", "--apply", "--json"), second.io),
+      second.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(second.stdout())).toMatchObject({
+      mode: "apply",
+      rows: [],
+      summary: { unprojectable: 0, ready: 0, refused: 0, appended: 0 },
+    })
+    expect(await Array.fromAsync(replayed.events())).toEqual(beforeSecondApply)
+  })
+
+  it("reports two matching failed Queue runs as a typed ambiguity and never guesses on apply", async () => {
+    const seeded = legacyRejectedJournal(["R1", "R2"])
+    await using app = await createApp({ journal: seeded.journal })
+    const before = await Array.fromAsync(app.events())
+    const dryRun = outputIO()
+
+    expect(await runYrd(app, yrd("migrate", "terminal-associations", "--json"), dryRun.io)).toBe(1)
+    expect(JSON.parse(dryRun.stdout())).toMatchObject({
+      mode: "dry-run",
+      summary: { unprojectable: 1, ready: 0, refused: 1, appended: 0 },
+      rows: [
+        {
+          status: "refused",
+          terminal: { event: seeded.terminalEvent, pr: "PR1", revision: 1, headSha: HEAD_SHA },
+          refusal: { code: "terminal-run-ambiguous" },
+          candidates: [
+            { run: "R1", status: "failed", eligible: true },
+            { run: "R2", status: "failed", eligible: true },
+          ],
+        },
+      ],
+    })
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+
+    const apply = outputIO()
+    expect(await runYrd(app, yrd("migrate", "terminal-associations", "--apply", "--json"), apply.io)).toBe(1)
+    expect(JSON.parse(apply.stdout())).toMatchObject({
+      mode: "apply",
+      summary: { unprojectable: 1, ready: 0, refused: 1, appended: 0 },
+    })
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+  })
+
+  it("refuses a failed Queue run whose completion postdates the legacy rejection", async () => {
+    const terminalAt = "2026-07-09T12:00:03.500Z"
+    const seeded = legacyRejectedJournal(["R1"], terminalAt)
+    await using app = await createApp({ journal: seeded.journal })
+    const before = await Array.fromAsync(app.events())
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("migrate", "terminal-associations", "--apply", "--json"), output.io)).toBe(1)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      mode: "apply",
+      summary: { unprojectable: 1, ready: 0, refused: 1, appended: 0 },
+      rows: [
+        {
+          status: "refused",
+          terminal: { event: seeded.terminalEvent, at: terminalAt, pr: "PR1", revision: 1 },
+          refusal: { code: "terminal-run-chronology" },
+          candidates: [
+            {
+              run: "R1",
+              status: "failed",
+              finishedAt: "2026-07-09T12:00:04.000Z",
+              eligible: false,
+            },
+          ],
+        },
+      ],
+    })
+    expect(await Array.fromAsync(app.events())).toEqual(before)
   })
 
   it("records a completed escaped regression without rewriting either integration", async () => {

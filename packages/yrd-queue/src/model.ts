@@ -3,6 +3,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  type PRTerminalAssociation,
   baseIdentity,
   checkRequest,
   type PR,
@@ -90,6 +91,21 @@ export type QueueRunAuthority = Readonly<{
   }>
 }>
 
+export type QueueUnassociatedTerminal = Readonly<{
+  event: string
+  at: string
+  pr: string
+  revision: number
+  headSha?: string
+}>
+
+export type QueueTerminalAssociation = PRTerminalAssociation
+
+export type QueueTerminalAssociations = Readonly<{
+  pending: Readonly<Record<string, QueueUnassociatedTerminal>>
+  applied: Readonly<Record<string, QueueTerminalAssociation>>
+}>
+
 export type QueueAuthorityState = Readonly<{
   statuses: Readonly<Record<string, "pushed" | "submitted" | "rejected" | "withdrawn" | "integrated" | "canceled">>
   current: Readonly<Record<string, QueueAuthorityToken>>
@@ -148,6 +164,7 @@ export type QueuesState = Readonly<{
   pauses: Readonly<Record<string, QueuePause>>
   records: Readonly<Record<QueueRunId, QueueRecord>>
   authority: QueueAuthorityState
+  terminalAssociations: QueueTerminalAssociations
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -277,6 +294,7 @@ export const Queues = Object.freeze({
       pauses: {},
       records: {},
       authority: { statuses: {}, current: {}, submits: {}, checks: {}, runs: {} },
+      terminalAssociations: { pending: {}, applied: {} },
     }
   },
 

@@ -1089,6 +1089,34 @@ async function recoverQueue(
   )
 }
 
+async function migrateTerminalAssociations(
+  app: YrdCliApp,
+  options: JsonOption & Readonly<{ apply?: boolean }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  let plan
+  if (options.apply === true) {
+    plan = await app.queue.migrateTerminalAssociations()
+  } else {
+    await app.refresh()
+    plan = app.queue.terminalAssociationPlan()
+  }
+  const mode = options.apply === true ? "apply" : "dry-run"
+  const human =
+    plan.rows.length === 0
+      ? `No unprojectable legacy PR terminals; ${mode} appended ${plan.summary.appended}.`
+      : [
+          ...plan.rows.map((row) =>
+            row.status === "ready"
+              ? `READY ${row.terminal.pr} revision ${row.terminal.revision}@${row.terminal.headSha} -> ${row.association.run} (${row.terminal.event})`
+              : `REFUSED ${row.terminal.pr} revision ${row.terminal.revision}: ${row.refusal.code} — ${row.refusal.message}`,
+          ),
+          `${mode}: ${plan.summary.ready} ready, ${plan.summary.refused} refused, ${plan.summary.appended} appended`,
+        ].join("\n")
+  await printResult(io, jsonEnabled(options), { command: "migrate.terminal-associations", mode, ...plan }, human)
+  return plan.summary.refused === 0 ? 0 : 1
+}
+
 async function resumeQueue(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
   const target = await resolvedQueueTarget(base ?? "main", io)
   await app.queue.resume(target.base)
@@ -2237,6 +2265,15 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await refusePrMerge(installed(), selector, options, io)))
 
+  const migrate = program.command("migrate").description("run explicit journal compatibility migrations")
+  migrate.helpCommand(false)
+  migrate
+    .command("terminal-associations")
+    .description("prove and append legacy rejected-PR Queue run associations")
+    .option("--apply", "append every uniquely proven association")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await migrateTerminalAssociations(installed(), options, io)))
+
   const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)
   issue.alias("issues")
@@ -2306,7 +2343,10 @@ function buildProgram(
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
   const order = new Map(
-    ["pr", "bay", "issue", "contest", "queue", "log", "watch", "prime"].map((command, index) => [command, index]),
+    ["pr", "bay", "issue", "contest", "queue", "migrate", "log", "watch", "prime"].map((command, index) => [
+      command,
+      index,
+    ]),
   )
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))

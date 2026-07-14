@@ -256,8 +256,12 @@ reverts the merge: the base branch advance stands, the PR stays
 `closed+merged`, the Run records `completed+failure`, and the failed Job is
 retryable (`--retry`). Un-landing is a human/git decision outside Yrd.
 
-**C9. Journal migration stance (pre-1.0).** No event-migration machinery. The
-model upgrade ships as journal schema v2: a repository re-inits Yrd state,
+**C9. Journal migration stance (pre-1.0).** No general event-upcaster or
+history-rewrite machinery. A narrow compatibility cutover may append an
+explicit compensating event only when the owning domain can prove the missing
+relation and expose typed refusal rows for everything it cannot prove. The
+model upgrade otherwise ships as journal schema v2: a repository re-inits Yrd
+state,
 open PRs are re-submitted (a scripted `yrd migrate` walk of live PRs is
 acceptable if cheap), and the old journal is archived read-only next to the
 new one. Change-is-free applies to our own pre-1.0 surface; carrying
