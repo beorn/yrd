@@ -49,6 +49,7 @@ import {
   QueueWatchView,
   activeWatchRow,
   humanQueueProjection,
+  queueFlowMetrics,
   queueLogAttempts,
   queueLogRows,
   queueRevisionKey,
@@ -60,6 +61,7 @@ import {
   watchQueueRows,
   type QueueLogCoverage,
   type QueueStatusResult,
+  type QueueTerminalFact,
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
@@ -1894,6 +1896,75 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("contest", "view", "C1", "--json"), show.io)).toBe(0)
     expect(JSON.parse(show.stdout())).toMatchObject({ command: "contest.view", contest: { id: "C1" } })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+  })
+
+  it("projects FLOW from one terminal fact per Run while keeping per-PR queue waits", () => {
+    const minute = 60_000
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const fact = (
+      run: string,
+      outcome: QueueTerminalFact["outcome"],
+      activeMinutes: number,
+      waitMinutes: readonly number[],
+      terminalAtMs = now,
+    ): QueueTerminalFact => ({
+      run,
+      outcome,
+      terminalAtMs,
+      activeMs: activeMinutes * minute,
+      queueWaitMs: waitMinutes.map((value) => value * minute),
+    })
+    const facts = [
+      fact("R1", "integrated", 10, [5, 15], now - 6 * 60 * minute),
+      fact("R2", "rejected", 20, [25]),
+      fact("R3", "environment-refused", 30, [35]),
+      fact("R4", "integrated", 100, [95]),
+      fact("R-old", "rejected", 1_000, [1_000], now - 6 * 60 * minute - 1),
+      fact("R-future", "rejected", 1_000, [1_000], now + 1),
+    ]
+
+    expect(queueFlowMetrics(facts, { now, windowMs: 6 * 60 * minute })).toEqual({
+      windowMs: 6 * 60 * minute,
+      terminalAttempts: 4,
+      outcomes: { integrated: 2, rejected: 1, environmentRefused: 1, canceled: 0 },
+      decisionRejection: { rejected: 1, decisions: 3, rate: 1 / 3 },
+      activeRun: {
+        allTerminal: {
+          n: 4,
+          minMs: 10 * minute,
+          avgMs: 40 * minute,
+          p50Ms: 25 * minute,
+          p90Ms: 100 * minute,
+          maxMs: 100 * minute,
+        },
+        integratedOnly: {
+          n: 2,
+          minMs: 10 * minute,
+          avgMs: 55 * minute,
+          p50Ms: 55 * minute,
+          p90Ms: 100 * minute,
+          maxMs: 100 * minute,
+        },
+      },
+      queueWait: {
+        n: 5,
+        avgMs: 35 * minute,
+        p50Ms: 25 * minute,
+        p90Ms: 95 * minute,
+        maxMs: 95 * minute,
+      },
+    })
+    expect(queueFlowMetrics([], { now, windowMs: 6 * 60 * minute })).toEqual({
+      windowMs: 6 * 60 * minute,
+      terminalAttempts: 0,
+      outcomes: { integrated: 0, rejected: 0, environmentRefused: 0, canceled: 0 },
+      decisionRejection: { rejected: 0, decisions: 0, rate: null },
+      activeRun: {
+        allTerminal: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
+        integratedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
+      },
+      queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
+    })
   })
 
   it("mounts watch as one read-only queue-focused live pane", async () => {
