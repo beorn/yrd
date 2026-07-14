@@ -497,12 +497,20 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
 async function expectTrackerBridgeSnapshot(): Promise<void> {
   const app = await createApp()
   const issueRef = "@km/all/21063-steering-laser"
-  await app.bays.submit({
-    branch: "topic/partial-2106-token",
-    headSha: HEAD_SHA,
-    base: "main",
-    issue: issueRef,
+  const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+  expect(
+    await runYrd(
+      app,
+      yrd("pr", "submit", "topic/partial-2106-token", "--base", "main", "--issue", issueRef, "--json"),
+      submit.io,
+    ),
+    submit.stderr(),
+  ).toBe(0)
+  expect(JSON.parse(submit.stdout())).toMatchObject({
+    command: "pr.submit",
+    prs: [{ id: "PR1", issue: issueRef }],
   })
+  expect(app.bays.pr("PR1")).toMatchObject({ issue: issueRef })
   await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
   await app.bays.submit({
     branch: "topic/retired",

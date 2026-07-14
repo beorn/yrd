@@ -14,6 +14,7 @@ import { GitCheckEvidenceSchema } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
+import { queueStepRevision } from "../src/host-revision.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
@@ -56,6 +57,30 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
 }
 
 describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
+  it("binds installed-step revisions to every toolchain fingerprint component", () => {
+    const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
+    const input = {
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "check",
+      config: { run: "bun run check", runner: "local" as const },
+      timeoutMs: 60_000,
+      toolchain,
+    }
+    const baseline = queueStepRevision(input)
+
+    // The queue suite owns revision→cache-miss behavior; this host seam owns
+    // the preceding fingerprint→revision identity edge.
+    for (const changed of [
+      { ...toolchain, bun: "1.3.1" },
+      { ...toolchain, node: "24.1.0" },
+      { ...toolchain, platform: "linux" },
+      { ...toolchain, arch: "x64" },
+    ]) {
+      expect(queueStepRevision({ ...input, toolchain: changed })).not.toBe(baseline)
+    }
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

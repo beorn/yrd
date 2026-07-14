@@ -824,6 +824,58 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
   })
 
+  it("keeps the submitted payload when native merge cannot refresh post-push authority", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let successfulRefreshes = 0
+    let refusalAttempts = 0
+    const unavailableAfterPush: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("fetch")) {
+          if (successfulRefreshes < 2) {
+            successfulRefreshes += 1
+            return process.run(request)
+          }
+          refusalAttempts += 1
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "origin unavailable after native push",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailableAfterPush, repo, ["test", "-f", "feature.txt"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+
+    expect(successfulRefreshes).toBe(2)
+    expect(refusalAttempts).toBe(3)
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+      prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
+    })
+    expect(run.steps[1]?.job).toMatchObject({
+      status: "failed",
+      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+    })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
+  })
+
   it("materializes candidate checks under the injected trusted parent", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const parentRoot = await mkdtemp(join(tmpdir(), "yrd-queue-checkouts-"))
@@ -1189,6 +1241,74 @@ describe("Queue command adapters", () => {
       status: "integrated",
       integration: { commit: landing, baseSha: landing },
     })
+  })
+
+  it("keeps the submitted payload when configured merge cannot refresh post-command authority", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const remote = join(repo, "..", "origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+    await using process = createProcess()
+    let successfulRefreshes = 0
+    let refusalAttempts = 0
+    const unavailableAfterCommand: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && request.argv.includes("fetch")) {
+          if (successfulRefreshes < 2) {
+            successfulRefreshes += 1
+            return process.run(request)
+          }
+          refusalAttempts += 1
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "origin unavailable after configured command",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const check = withStep(
+      "check",
+      gitCheckStep({ inject: { process: unavailableAfterCommand }, repo, command: ["test", "-f", "feature.txt"] }),
+      { revision: "check-v1", output: GitCheckResultEvidenceSchema },
+    )
+    const merge = withMerge(
+      configuredMergeStep<Checked>({
+        inject: { process: unavailableAfterCommand },
+        repo,
+        command: shellCommand('git push origin "$YRD_CANDIDATE_SHA":refs/heads/main'),
+      }),
+      { revision: "delegated-merge-v1" },
+    )
+    const queue = withQueue({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const checkJob = run.steps[0]?.job
+    if (checkJob?.status !== "passed") throw new Error("check did not pass")
+    const checked = GitCheckEvidenceSchema.parse(checkJob.output)
+
+    expect(successfulRefreshes).toBe(2)
+    expect(refusalAttempts).toBe(3)
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+      prs: [{ id: "PR1", revision: 1, headSha: featureSha }],
+    })
+    expect(run.steps[1]?.job).toMatchObject({
+      status: "failed",
+      error: { code: "queue-environment-refused", message: expect.stringContaining("after 3 attempts") },
+    })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
   })
 
   it("fails a delegated merge command that exits zero without landing the PR", async () => {

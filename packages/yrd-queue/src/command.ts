@@ -876,6 +876,9 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         output: IntegrationProofSchema.parse({ commit: checked.candidateSha, baseSha: checked.candidateSha }),
       }
     } catch (cause) {
+      if (queueAuthorityRefusal(cause) !== undefined) {
+        return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause))
+      }
       return failed("merge-failed", messageOf(cause))
     }
   }
@@ -915,6 +918,9 @@ export function configuredMergeStep<Shape extends PRShape>(
       try {
         landing = await authoritativeQueueBase(git, repo, branch)
       } catch (cause) {
+        if (queueAuthorityRefusal(cause) !== undefined) {
+          return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause))
+        }
         return outcome.status === "failed"
           ? failed(outcome.error.code, outcome.error.message)
           : failed("merge-verification-failed", messageOf(cause))
@@ -935,6 +941,9 @@ export function configuredMergeStep<Shape extends PRShape>(
         `merge command exited successfully but '${branch}' does not contain '${missing}'`,
       )
     } catch (cause) {
+      if (queueAuthorityRefusal(cause) !== undefined) {
+        return failed(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause))
+      }
       return failed("merge-failed", messageOf(cause))
     }
   }
