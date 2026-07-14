@@ -1733,12 +1733,22 @@ function buildProgram(
   program.exitOverride()
   configureCanonicalHelp(program)
   if (app === undefined) {
-    program.option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
+    const increase = (_value: string, previous: number): number => previous + 1
+    program
+      .option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
+      .option("-v, --verbose", "increase diagnostics (-vv enables spans, -vvv traces)", increase, 0)
+      .option("-q, --quiet", "reduce diagnostics (-q errors only, -qq silent)", increase, 0)
+      .option("--log-level <level>", "set trace|debug|info|warn|error|silent (env: LOG_LEVEL)")
   }
   if (bootstrap !== undefined) {
     program.hook("preAction", async (_root, action) => {
       if (runtimeApp !== undefined) return
-      const globals = action.optsWithGlobals() as Readonly<{ repo?: string }>
+      const globals = action.optsWithGlobals() as Readonly<{
+        repo?: string
+        verbose?: number
+        quiet?: number
+        logLevel?: string
+      }>
       const selected = resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
       const resident =
         action.name() === "run" &&

@@ -46,12 +46,13 @@ import {
 import { createJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
-import { createLogger, type ConditionalLogger } from "loggily"
+import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
+import { createYrdLogger, resolveYrdObservability } from "./observability.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
@@ -578,7 +579,12 @@ export async function createYrdHost(
   options: { cwd?: string; env?: NodeJS.ProcessEnv; log?: ConditionalLogger } = {},
 ): Promise<YrdHost> {
   const scope = createScope("yrd-host")
-  const log = options.log ?? createLogger("yrd")
+  const ownsLog = options.log === undefined
+  const log =
+    options.log ??
+    createYrdLogger(resolveYrdObservability({}, options.env ?? globalThis.process.env), (text) =>
+      globalThis.process.stderr.write(text),
+    )
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
   const process = createProcess({ cwd: options.cwd, env, inject: { scope, log } })
   let app: YrdCliApp | undefined
@@ -620,7 +626,10 @@ export async function createYrdHost(
     await drain()
     const services = Object.freeze({ queue: queueAdministration(process, repository, loaded.config) })
     let closePromise: Promise<void> | undefined
-    const close = () => (closePromise ??= closeRuntime(app, process, scope))
+    const close = () =>
+      (closePromise ??= closeRuntime(app, process, scope).finally(() => {
+        if (ownsLog) log.end()
+      }))
     return Object.freeze({
       app,
       repository,
@@ -634,6 +643,7 @@ export async function createYrdHost(
     })
   } catch (error) {
     await closeRuntime(app, process, scope)
+    if (ownsLog) log.end()
     throw error
   }
 }
@@ -642,7 +652,8 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
   const gitDir = env.GIT_DIR
   if (gitDir === undefined || gitDir === "") throw new Error("yrd: receiver hook requires GIT_DIR")
   const scope = createScope("yrd-receiver-hook")
-  const log = createLogger("yrd").child({ host: "receiver-hook", mode })
+  const rootLog = createYrdLogger(resolveYrdObservability({}, env), (text) => globalThis.process.stderr.write(text))
+  const log = rootLog.child({ host: "receiver-hook", mode })
   const runtimeProcess = createProcess({ cwd: globalThis.process.cwd(), env, inject: { scope, log } })
   let app: YrdCliApp | undefined
   try {
@@ -669,6 +680,7 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
     })
   } finally {
     await closeRuntime(app, runtimeProcess, scope)
+    rootLog.end()
   }
 }
 
@@ -726,7 +738,7 @@ export async function runYrdProcess(
     return runYrdHelp(argv, io)
   }
 
-  const log = createLogger("yrd")
+  let log: ConditionalLogger | undefined
   let host: YrdHost | undefined
   let closePromise: Promise<void> | undefined
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
@@ -736,6 +748,7 @@ export async function runYrdProcess(
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
       async load(context, options) {
+        log = createYrdLogger(context.observability, io.stderr)
         const activeHost = await createYrdHost({ cwd: context.repo, env, log })
         host = activeHost
         const runnerLog = log.child("runner")
@@ -776,6 +789,7 @@ export async function runYrdProcess(
       await closeHost()
     } finally {
       removeShutdownSignals()
+      log?.end()
     }
   }
 }

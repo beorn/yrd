@@ -1,5 +1,6 @@
 import { basename, resolve } from "node:path"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
+import { resolveYrdObservability, type YrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import type { YrdCliExitCode } from "./types.ts"
 
 export type Invocation = Readonly<{
@@ -13,18 +14,21 @@ export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: Failu
 export type YrdContext = Readonly<{
   /** Git path used to discover the repository and its operation root. */
   repo: string
+  /** One host-owned logging policy shared by every command service. */
+  observability: YrdObservability
 }>
 
 /** Resolve the one repository selector against the captured invocation
  * directory. CLI overrides environment; ambient discovery is the fallback. */
 export function resolveYrdContext(
-  options: Readonly<{ repo?: string }>,
+  options: Readonly<{ repo?: string }> & YrdObservabilityFlags,
   env: Readonly<Record<string, string | undefined>>,
   ambientCwd: string,
 ): YrdContext {
   const ambient = resolve(ambientCwd)
   return Object.freeze({
     repo: resolve(ambient, options.repo ?? env.YRD_REPO ?? "."),
+    observability: resolveYrdObservability(options, env),
   })
 }
 
