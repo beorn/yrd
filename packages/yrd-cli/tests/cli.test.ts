@@ -1905,8 +1905,11 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
 
-    expect(latest.stdout()).toContain("submitted")
-    expect(plain.stdout()).not.toContain("submitted")
+    expect(plain.stdout()).toContain("QUEUE")
+    expect(plain.stdout()).toContain("OPEN")
+    expect(latest.stdout()).toContain("PR1")
+    expect(latest.stdout()).toContain("PR2")
+    expect(latest.stdout()).not.toContain("OPEN")
     expect(latest.stdout()).not.toBe(plain.stdout())
   })
 
@@ -2023,6 +2026,7 @@ describe("runYrd", () => {
           base: "main",
           status: "running",
           startedAt: "2026-07-09T12:00:00.000Z",
+          shape: {},
           prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
           steps: [],
         },
@@ -2035,6 +2039,7 @@ describe("runYrd", () => {
           status: "passed",
           startedAt: "2026-07-09T12:10:00.000Z",
           finishedAt: "2026-07-09T12:11:00.000Z",
+          shape: {},
           prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
           steps: [],
         },
