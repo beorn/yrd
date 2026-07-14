@@ -283,9 +283,11 @@ base-versus-carrier classification, and artifact paths.
 `pr recut` fetches the authoritative base internally and records a mechanically
 equivalent successor on the same PR. `--revision` selects an older immutable
 revision; its correlation and approved-review provenance follow that selected
-payload. `--queue` readies and admits the fresh checks. List, detail, and watch
-output retain the recut lineage and cumulative source-ready age while reporting
-the successor revision's queue wait separately.
+payload. When submission recorded authority newer than the source branch,
+recut derives exactly one source merge base and refuses ambiguous lineage.
+`--queue` readies and admits the fresh checks. List, detail, and watch output
+retain the recut lineage and cumulative source-ready age while reporting the
+successor revision's queue wait separately.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when

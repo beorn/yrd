@@ -298,6 +298,83 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it("recuts from the source merge base when submission recorded authoritative current base", async () => {
+    const { repo } = await repository()
+    const baseLines = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`)
+    await writeFile(join(repo, "README.md"), `${baseLines.join("\n")}\n`)
+    await git(repo, ["commit", "-qam", "expand fixture"])
+    await git(repo, ["switch", "-qc", "issue/candidate"])
+    const sourceLines = [...baseLines]
+    sourceLines[17] = "source change"
+    await writeFile(join(repo, "README.md"), `${sourceLines.join("\n")}\n`)
+    await git(repo, ["commit", "-qam", "candidate"])
+    const candidate = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    const authorityLines = [...baseLines]
+    authorityLines[1] = "authority change"
+    await writeFile(join(repo, "README.md"), `${authorityLines.join("\n")}\n`)
+    await git(repo, ["commit", "-qam", "advance authority"])
+    const currentBaseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/candidate",
+      base: "main",
+      revision: 1,
+      headSha: candidate,
+      baseSha: currentBaseSha,
+    })
+
+    expect(result).toMatchObject({
+      baseSha: currentBaseSha,
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+    expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(currentBaseSha)
+    expect(await git(repo, ["diff", "--name-only", currentBaseSha, result.headSha])).toBe("README.md")
+    expect(await git(repo, ["show", `${result.headSha}:README.md`])).toContain("authority change\n")
+    expect(await git(repo, ["show", `${result.headSha}:README.md`])).toContain("source change\n")
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
+  it("refuses a recorded base with ambiguous source merge bases", async () => {
+    const { repo } = await repository()
+    await git(repo, ["switch", "-qc", "issue/left"])
+    await writeFile(join(repo, "left.txt"), "left\n")
+    await git(repo, ["add", "left.txt"])
+    await git(repo, ["commit", "-qm", "left"])
+    const left = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-qc", "issue/right", "main"])
+    await writeFile(join(repo, "right.txt"), "right\n")
+    await git(repo, ["add", "right.txt"])
+    await git(repo, ["commit", "-qm", "right"])
+    await git(repo, ["switch", "-q", "issue/left"])
+    await git(repo, ["merge", "-q", "--no-ff", "issue/right", "-m", "left merge"])
+    const leftMerge = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "issue/right"])
+    await git(repo, ["merge", "-q", "--no-ff", left, "-m", "right merge"])
+    const rightMerge = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "-f", "main", leftMerge])
+    expect((await git(repo, ["merge-base", "--all", leftMerge, rightMerge])).split("\n")).toHaveLength(2)
+    await using process = createProcess()
+
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/right",
+        base: "main",
+        revision: 1,
+        headSha: rightMerge,
+        baseSha: leftMerge,
+      }),
+    ).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "recut-lineage", message: expect.stringContaining("one source merge base") },
+    })
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
   it("admits a mechanically certified recut that preserves an authored root gitlink", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",

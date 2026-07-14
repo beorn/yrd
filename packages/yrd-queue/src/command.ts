@@ -673,16 +673,26 @@ async function recutDirectPR(
       })
     }
   }
-  if (!(await isAncestor(git, repo, oldBase, input.headSha)) || !(await isAncestor(git, repo, oldBase, target.sha))) {
+  if (!(await isAncestor(git, repo, oldBase, target.sha))) {
     throw createFailure({
       kind: "refusal",
       code: "recut-lineage",
-      message: `yrd: PR '${input.id}' base '${oldBase}' is not an ancestor of both payload and '${target.sha}'`,
+      message: `yrd: PR '${input.id}' recorded base '${oldBase}' is not an ancestor of '${target.sha}'`,
     })
   }
-  const payload = await changedPaths(git, repo, oldBase, input.headSha)
-  const sourceIdentity = await changedPayloadIdentity(git, repo, oldBase, input.headSha)
-  const sourcePatchId = await git.stablePatchId(repo, oldBase, input.headSha)
+  const sourceBase = (await isAncestor(git, repo, oldBase, input.headSha))
+    ? oldBase
+    : await uniqueMergeBase(git, repo, oldBase, input.headSha)
+  if (sourceBase === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-lineage",
+      message: `yrd: PR '${input.id}' recorded base '${oldBase}' does not prove one source merge base for revision ${input.revision}`,
+    })
+  }
+  const payload = await changedPaths(git, repo, sourceBase, input.headSha)
+  const sourceIdentity = await changedPayloadIdentity(git, repo, sourceBase, input.headSha)
+  const sourcePatchId = await git.stablePatchId(repo, sourceBase, input.headSha)
   if (sourcePatchId === undefined) {
     throw createFailure({
       kind: "refusal",
@@ -690,7 +700,7 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' revision ${input.revision} has no stable patch identity`,
     })
   }
-  if (oldBase === target.sha) {
+  if (sourceBase === target.sha) {
     return {
       headSha: input.headSha,
       baseSha: target.sha,
@@ -699,15 +709,8 @@ async function recutDirectPR(
       unchanged: true,
     }
   }
-  const authority = await changedPaths(git, repo, oldBase, target.sha)
+  const authority = await changedPaths(git, repo, sourceBase, target.sha)
   const overlap = intersection(payload, authority)
-  if (overlap.length > 0) {
-    throw createFailure({
-      kind: "refusal",
-      code: "recut-conflict",
-      message: `yrd: PR '${input.id}' payload overlaps authoritative '${input.base}' at [${overlap.join(", ")}]`,
-    })
-  }
   const outcome = await withScratch<PRRecutResult>(git, repo, input.headSha, tmpdir(), async (path) => {
     const rebased = await git.run(
       path,
@@ -719,7 +722,7 @@ async function recutDirectPR(
         "rebase",
         "--onto",
         target.sha,
-        oldBase,
+        sourceBase,
         input.headSha,
       ],
       true,
@@ -745,7 +748,7 @@ async function recutDirectPR(
         message: `yrd: PR '${input.id}' recut paths differ: expected [${payload.join(", ")}], got [${materialized.join(", ")}]`,
       })
     }
-    if ((await changedPayloadIdentity(git, path, target.sha, headSha)) !== sourceIdentity) {
+    if (overlap.length === 0 && (await changedPayloadIdentity(git, path, target.sha, headSha)) !== sourceIdentity) {
       throw createFailure({
         kind: "refusal",
         code: "payload-identity",
@@ -760,7 +763,7 @@ async function recutDirectPR(
         message: `yrd: PR '${input.id}' recut changed stable patch identity`,
       })
     }
-    const rangeDiff = await git.rangeDiff(path, oldBase, input.headSha, target.sha, headSha)
+    const rangeDiff = await git.rangeDiff(path, sourceBase, input.headSha, target.sha, headSha)
     if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
       throw createFailure({
         kind: "refusal",
@@ -1403,6 +1406,13 @@ async function unmergedPaths(git: Git, repo: string): Promise<string[]> {
 
 async function isAncestor(git: Git, repo: string, ancestor: string, descendant: string): Promise<boolean> {
   return (await git.run(repo, ["merge-base", "--is-ancestor", ancestor, descendant], true)).code === 0
+}
+
+async function uniqueMergeBase(git: Git, repo: string, left: string, right: string): Promise<string | undefined> {
+  const result = await git.run(repo, ["merge-base", "--all", left, right], true)
+  if (result.code !== 0) return undefined
+  const bases = result.stdout.split(/\r?\n/u).filter((base) => base !== "")
+  return bases.length === 1 ? bases[0] : undefined
 }
 
 function nulPaths(value: string): string[] {
