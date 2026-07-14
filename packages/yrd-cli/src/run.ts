@@ -27,6 +27,7 @@ import { Queues, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
   classifyFailure,
+  configureYrdGlobalOptions,
   configuration,
   refusal,
   resolveInvocation,
@@ -1922,6 +1923,7 @@ async function watchQueue(
     queueListSnapshot(app, filters, options, io, !jsonEnabled(options))
 
   if (!jsonEnabled(options)) {
+    io.stderr(`yrd watch runtime: ${formatYrdRuntimeVersion()}\n`)
     const renderLive = getLiveRenderer(io)
     if (renderLive === undefined) {
       refusal("watch requires an interactive terminal; use --json for streaming output")
@@ -2284,12 +2286,7 @@ function buildProgram(
   program.exitOverride()
   program.configureHelp({ minWidthToWrap: 20 })
   if (app === undefined) {
-    const increase = (_value: string, previous: number): number => previous + 1
-    program
-      .option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
-      .option("-v, --verbose", "increase diagnostics (-vv enables spans, -vvv traces)", increase, 0)
-      .option("-q, --quiet", "reduce diagnostics (-q errors only, -qq silent)", increase, 0)
-      .option("--log-level <level>", "set trace|debug|info|warn|error|silent (env: LOG_LEVEL)")
+    configureYrdGlobalOptions(program)
   }
   if (bootstrap !== undefined) {
     program.hook("preAction", async (_root, action) => {

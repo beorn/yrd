@@ -2905,6 +2905,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("watch"), io)).toBe(0)
     expect(watch.stdout()).toBe("")
+    expect(watch.stderr()).toMatch(/^yrd watch runtime: yrd 0\.0\.1\+[0-9a-f]{10}(?:-dirty)?\n$/u)
     expect(mounted?.type).toBe(QueueWatchPane)
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)

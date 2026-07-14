@@ -1,4 +1,5 @@
 import { basename, resolve } from "node:path"
+import { Command as CliCommand } from "@silvery/commander"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
 import { resolveYrdObservability, type YrdObservability, type YrdObservabilityFlags } from "./observability.ts"
 import type { YrdCliExitCode } from "./types.ts"
@@ -17,6 +18,23 @@ export type YrdContext = Readonly<{
   /** One host-owned logging policy shared by every command service. */
   observability: YrdObservability
 }>
+
+const increaseDiagnostics = (_value: string, previous: number): number => previous + 1
+
+/** Install the one set of process-level options on a Commander root. */
+export function configureYrdGlobalOptions(program: CliCommand): CliCommand {
+  return program
+    .option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
+    .option("-v, --verbose", "increase diagnostics (-vv enables spans, -vvv traces)", increaseDiagnostics, 0)
+    .option("-q, --quiet", "reduce diagnostics (-q errors only, -qq silent)", increaseDiagnostics, 0)
+    .option("--log-level <level>", "set trace|debug|info|warn|error|silent (env: LOG_LEVEL)")
+}
+
+/** Resolve the command operand with Commander's canonical global-option rules. */
+export function yrdCommandOperand(args: readonly string[]): string | undefined {
+  const parser = configureYrdGlobalOptions(new CliCommand("yrd"))
+  return parser.parseOptions([...args]).operands[0]
+}
 
 /** Resolve the one repository selector against the captured invocation
  * directory. CLI overrides environment; ambient discovery is the fallback. */
