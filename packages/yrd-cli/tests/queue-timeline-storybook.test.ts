@@ -2,8 +2,8 @@
 // @level l2
 // @consumer @yrd/cli
 
-import { createElement } from "react"
-import { createRenderer } from "@silvery/test"
+import { act, createElement } from "react"
+import { createRenderer, createTermless, waitFor } from "@silvery/test"
 import { renderString } from "silvery"
 import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"
@@ -34,6 +34,30 @@ const STORY_NAMES = [
   "live-output-growth",
 ] as const
 
+const TERMLESS_DETAIL_TIERS = [
+  { name: "detail-right", divider: "vertical" },
+  { name: "detail-below", divider: "horizontal" },
+  { name: "detail-full", divider: "none" },
+] as const
+
+function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string, row = 1): number {
+  const columns = term.cols
+  if (columns === undefined) throw new Error("Termless terminal is missing its column count")
+  for (let column = 0; column < columns; column += 1) {
+    if (term.cell(row, column).char === glyph) return column
+  }
+  return -1
+}
+
+function findGlyphRow(term: ReturnType<typeof createTermless>, glyph: string, column = 1): number {
+  const rows = term.rows
+  if (rows === undefined) throw new Error("Termless terminal is missing its row count")
+  for (let row = 0; row < rows; row += 1) {
+    if (term.cell(row, column).char === glyph) return row
+  }
+  return -1
+}
+
 describe("queue timeline storybook", () => {
   it("shares every deterministic named story with the acceptance surface", async () => {
     expect(QUEUE_TIMELINE_STORY_NAMES).toEqual(STORY_NAMES)
@@ -62,6 +86,72 @@ describe("queue timeline storybook", () => {
       if (story.nextSnapshot !== undefined) {
         expect(story.nextSnapshot.projection?.now, name).toBe("2026-07-13T12:00:00.000Z")
       }
+    }
+  })
+
+  it.each(TERMLESS_DETAIL_TIERS)(
+    "renders the $name A15 tier through a real terminal buffer",
+    async ({ name, divider }) => {
+      const story = queueTimelineStories[name]
+      const viewport = story.viewport
+      if (viewport === undefined) throw new Error(`story '${name}' is missing its viewport`)
+
+      using term = createTermless({ cols: viewport.columns, rows: viewport.rows })
+      const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }), term, {
+        mouse: true,
+        selection: false,
+      })
+      try {
+        await waitFor(() => term.screen.getText().includes("QUEUE main"))
+        expect(term.screen.getText(), name).toContain("QUEUE main")
+
+        if (divider === "vertical") {
+          await waitFor(() => findGlyphColumn(term, "│") >= 0)
+          expect(findGlyphColumn(term, "│"), name).toBeGreaterThan(0)
+          expect(term.screen.getText(), name).toContain("MEMBERS PR4")
+        } else if (divider === "horizontal") {
+          await waitFor(() => findGlyphRow(term, "─") >= 0)
+          expect(findGlyphRow(term, "─"), name).toBeGreaterThan(0)
+          expect(term.screen.getText(), name).toContain("MEMBERS PR4")
+        } else {
+          expect(term.screen.getText(), name).not.toContain("MEMBERS PR4")
+          await act(async () => {
+            await handle.press("Enter")
+            await handle.waitForLayoutStable()
+          })
+          expect(term.screen.getText(), name).toContain("RUN R4 STATUS passed")
+          expect(term.screen.getText(), name).toContain("LANDING bbbbbbbbbbbb@aaaaaaaaaaaa")
+          expect(term.screen.getText(), name).not.toContain("QUEUE main")
+        }
+      } finally {
+        handle.unmount()
+      }
+    },
+  )
+
+  it("preserves the dragged split ratio when the queue cursor moves", async () => {
+    const story = queueTimelineStories["mixed-completed"]
+    using term = createTermless({ cols: 200, rows: 50 })
+    const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }), term, {
+      mouse: true,
+      selection: false,
+    })
+    try {
+      await waitFor(() => term.screen.getText().includes("PR PR6 STATUS"))
+      const initialDivider = findGlyphColumn(term, "│")
+      expect(initialDivider).toBeGreaterThan(0)
+      const draggedDivider = initialDivider + 12
+
+      await term.mouse.down(initialDivider, 1)
+      await term.mouse.move(draggedDivider, 1)
+      await waitFor(() => findGlyphColumn(term, "│") === draggedDivider)
+      await term.mouse.up(draggedDivider, 1)
+
+      await handle.press("j")
+      await waitFor(() => term.screen.getText().includes("PR PR1 STATUS"))
+      expect(findGlyphColumn(term, "│")).toBe(draggedDivider)
+    } finally {
+      handle.unmount()
     }
   })
 
