@@ -625,6 +625,75 @@ describe("Queue", () => {
     expect(app.state().bays.prs.PR2).toMatchObject({ status: "integrated", integration: run?.integration })
   })
 
+  it("does not integrate canceled historical PRs that share the current payload", async () => {
+    const journal = createMemoryJournal<unknown>()
+    const original = await createQueueApp({}, journal)
+    const current = await submitBranch(original, "issue/current-payload")
+    await original.close()
+
+    let cursor = 0
+    for await (const batch of journal.read()) cursor = batch.cursor
+    const command = { id: "00000000-0000-7000-8000-000000000111", op: "fixture.canceled-duplicate" }
+    expect(
+      await journal.append(
+        {
+          command,
+          cause: {
+            id: "00000000-0000-7000-8000-000000000112",
+            commandId: command.id,
+            op: command.op,
+            commandHash: Command.hash(command),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-8000-000000000113",
+              name: "pr/pushed",
+              ts: "2026-01-01T00:00:01.000Z",
+              data: {
+                pr: "PR2",
+                branch: "issue/canceled-history",
+                base: "main",
+                baseSha: BASE,
+                headSha: current.headSha,
+                revision: 1,
+              },
+            },
+            {
+              id: "00000000-0000-7000-8000-000000000114",
+              name: "pr/submitted",
+              ts: "2026-01-01T00:00:01.001Z",
+              data: { pr: "PR2", revision: 1, headSha: current.headSha },
+            },
+            {
+              id: "00000000-0000-7000-8000-000000000115",
+              name: "pr/canceled",
+              ts: "2026-01-01T00:00:01.002Z",
+              data: {
+                pr: "PR2",
+                revision: 1,
+                headSha: current.headSha,
+                by: "@chief",
+                reason: "superseded",
+              },
+            },
+          ],
+        },
+        cursor,
+      ),
+    ).toMatchObject({ appended: true })
+
+    await using app = await createQueueApp({}, journal, undefined, ids(500))
+    const before = (await Array.fromAsync(app.events())).length
+    await app.queue.run({ prs: [current.id], steps: ["check", "review", "merge"] }, runtime)
+    const integrated = (await Array.fromAsync(app.events()))
+      .slice(before)
+      .filter((applied) => applied.name === "pr/integrated")
+      .map((applied) => (applied.data as { pr: string }).pr)
+
+    expect(integrated).toEqual([current.id])
+    expect(app.state().bays.prs.PR2).toMatchObject({ status: "canceled", canceledBy: "@chief" })
+  })
+
   it("integrates the implicit queue in PR revision submission order", async () => {
     let tick = 0
     await using app = await createQueueApp({ batch: 1 }, createMemoryJournal(), () =>
@@ -1087,6 +1156,64 @@ describe("Queue", () => {
 
     expect(await Array.fromAsync(app.events())).toEqual(before)
   })
+
+  it.each(["pr/withdrawn", "pr/canceled"] as const)(
+    "does not let stale revision-one %s invalidate revision-two authority",
+    async (terminal) => {
+      const journal = createMemoryJournal<unknown>()
+      const original = await createQueueApp({}, journal)
+      const stale = await submitBranch(original, `issue/stale-${terminal}`)
+      await original.bays.intake({
+        branch: stale.branch,
+        headSha: UPDATED,
+        base: stale.base,
+        baseSha: BASE,
+      })
+      await original.bays.submit({ pr: stale.id })
+      await original.bays.requestChecks({ pr: stale.id, baseSha: BASE })
+      expect(original.state().bays.prs[stale.id]).toMatchObject({ revision: 2, headSha: UPDATED })
+      await original.close()
+
+      let cursor = 0
+      for await (const batch of journal.read()) cursor = batch.cursor
+      const command = { id: "00000000-0000-7000-9000-000000009211", op: "fixture.stale-terminal" }
+      expect(
+        await journal.append(
+          {
+            command,
+            cause: {
+              id: "00000000-0000-7000-9000-000000009212",
+              commandId: command.id,
+              op: command.op,
+              commandHash: Command.hash(command),
+            },
+            events: [
+              {
+                id: "00000000-0000-7000-9000-000000009213",
+                name: terminal,
+                ts: "2026-01-01T00:01:00.000Z",
+                data: {
+                  pr: stale.id,
+                  revision: stale.revision,
+                  headSha: stale.headSha,
+                  ...(terminal === "pr/canceled" ? { by: "@chief", reason: "stale cancellation" } : {}),
+                },
+              },
+            ],
+          },
+          cursor,
+        ),
+      ).toMatchObject({ appended: true })
+
+      await using app = await createQueueApp({}, journal, undefined, ids(500))
+      expect(app.state().bays.prs[stale.id]).toMatchObject({ status: "submitted", revision: 2, headSha: UPDATED })
+      expect(app.state().queues.authority).toMatchObject({
+        statuses: { [stale.id]: "submitted" },
+        submits: { [stale.id]: { revision: 2, headSha: UPDATED } },
+        checks: { [stale.id]: { revision: 2, headSha: UPDATED } },
+      })
+    },
+  )
 
   it("reauthorizes a failed draft admission through a fresh exact check request", async () => {
     let fail = true
