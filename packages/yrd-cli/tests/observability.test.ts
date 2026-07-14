@@ -179,13 +179,38 @@ describe("Yrd lifecycle records", () => {
     log.end()
   })
 
-  it("fails loudly when an injected clock moves backwards", async () => {
-    const log = createLogger("yrd", [{ level: "trace" }, { write: () => undefined }])
+  it("clamps a backwards clock and emits ERROR without failing successful work", async () => {
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
     const ticks = [20, 10]
 
     await expect(
       observeYrdLifecycle(log, { lifecycle: "check", now: () => ticks.shift() ?? 10 }, async () => "passed"),
-    ).rejects.toThrow("precedes start")
+    ).resolves.toBe("passed")
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:check",
+        level: "error",
+        message: "check duration invalid",
+        props: expect.objectContaining({
+          lifecycle: "check",
+          outcome: "succeeded",
+          diagnostic: "invalid-duration",
+          startedAt: 20,
+          finishedAt: 10,
+          durationMs: 0,
+        }),
+      }),
+    )
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:check",
+        level: "info",
+        props: expect.objectContaining({ outcome: "succeeded", durationMs: 0 }),
+      }),
+    )
     log.end()
   })
 })

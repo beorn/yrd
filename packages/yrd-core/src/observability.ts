@@ -59,17 +59,18 @@ export async function observeYrdLifecycle<Result>(
 
   const finish = (outcome: YrdLifecycleOutcome, error?: unknown, result?: Result): void => {
     const finishedAt = now()
-    const durationMs = finishedAt - startedAt
-    if (!Number.isFinite(durationMs) || durationMs < 0) {
-      throw new Error(`yrd: ${options.lifecycle} duration finish '${finishedAt}' precedes start '${startedAt}'`)
-    }
+    const measuredDurationMs = finishedAt - startedAt
+    const invalidDuration = !Number.isFinite(measuredDurationMs) || measuredDurationMs < 0
+    const durationMs = invalidDuration ? 0 : measuredDurationMs
     const failure = error === undefined ? undefined : failureFact(error)
     Object.assign(spanProps, result === undefined ? {} : options.resultAttributes?.(result), {
       outcome,
       durationMs,
+      ...(invalidDuration ? { diagnostic: "invalid-duration", startedAt, finishedAt } : {}),
       ...(failure === undefined ? {} : { failure }),
     })
     if (span !== undefined) Object.assign(span.spanData as Record<string, unknown>, spanProps)
+    if (invalidDuration) log.error?.(`${options.lifecycle} duration invalid`, { ...spanProps })
     emitLifecycle(log, options.lifecycle, outcome, { ...spanProps })
   }
 
