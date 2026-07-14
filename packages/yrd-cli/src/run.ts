@@ -659,6 +659,13 @@ async function recutPr(
   let current = requiredPr(app, pr.id)
   let admitted: readonly QueueRun[] = []
   if (options.queue === true) {
+    if (!unchanged) {
+      await app.queue.cancel({
+        prs: [current.id],
+        by: io.runner ?? "operator",
+        reason: `PR recut superseded revision ${source.revision}`,
+      })
+    }
     if (current.status === "pushed") await app.bays.ready({ pr: current.id })
     current = requiredPr(app, current.id)
     if (current.status !== "submitted") {
