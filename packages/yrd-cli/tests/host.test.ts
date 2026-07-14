@@ -10,9 +10,10 @@ import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
-import { GitCheckEvidenceSchema } from "@yrd/queue"
+import { GitCheckEvidenceSchema, IntegrationProofSchema } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
+import * as z from "zod"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
@@ -1136,7 +1137,10 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }),
       runStderr,
     ).toBe(0)
-    const result = JSON.parse(runStdout).results[0]
+    const result = z
+      .object({ results: z.array(z.object({ status: z.string(), integration: IntegrationProofSchema }).passthrough()) })
+      .parse(JSON.parse(runStdout)).results[0]
+    if (result === undefined) throw new Error("expected one composed Queue result")
     expect(result).toMatchObject({
       status: "passed",
       integration: {
@@ -1155,8 +1159,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
         ],
       },
     })
-    const candidateSha = result.integration.commit as string
-    const landedPinSha = result.integration.sourceRewrites[0].newTipSha as string
+    const candidateSha = result.integration.commit
+    const landedPinSha = result.integration.sourceRewrites?.[0]?.newTipSha
+    if (landedPinSha === undefined) throw new Error("expected one source rewrite receipt")
     expect(await git(repo, "rev-parse", "main")).toBe(candidateSha)
     expect(await git(repo, "rev-parse", "main^")).toBe(rootBaseSha)
     expect(await git(join(repo, "dep"), "rev-parse", "HEAD")).toBe(landedPinSha)
