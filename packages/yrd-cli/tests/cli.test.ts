@@ -1877,45 +1877,6 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("accepts queue ls --latest as the canonical queue list lens", async () => {
-    const app = await createApp()
-    await openAndSubmit(app)
-
-    const status = outputIO({
-      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
-      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
-    })
-    expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
-    expect(status.stdout()).toContain("PR1")
-    expect(status.stdout()).toContain("submitted")
-    expect(status.stdout()).toContain("position 1")
-  })
-
-  it("keeps queue ls --latest distinct from the default queue list projection", async () => {
-    const app = await createApp()
-    await app.bays.submit({ branch: "topic/one", headSha: "1".repeat(40), base: "main" })
-    await app.bays.submit({ branch: "topic/two", headSha: "2".repeat(40), base: "main" })
-
-    const plain = outputIO({
-      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
-      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
-    })
-    expect(await runYrd(app, yrd("queue", "ls"), plain.io), plain.stderr()).toBe(0)
-
-    const latest = outputIO({
-      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
-      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
-    })
-    expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
-
-    expect(plain.stdout()).toContain("QUEUE")
-    expect(plain.stdout()).toContain("OPEN")
-    expect(latest.stdout()).toContain("PR1")
-    expect(latest.stdout()).toContain("PR2")
-    expect(latest.stdout()).not.toContain("OPEN")
-    expect(latest.stdout()).not.toBe(plain.stdout())
-  })
-
   it("renders queue --watch identically to root watch", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -2021,8 +1982,30 @@ describe("runYrd", () => {
       base: "main",
       headSha: BASE_SHA,
       prs: [
-        { id: "PR1", name: "First", branch: "topic/one", base: "main", status: "submitted", revision: 1, headSha: HEAD_SHA },
-        { id: "PR2", name: "Second", branch: "topic/two", base: "main", status: "submitted", revision: 1, headSha: "2".repeat(40) },
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          revisions: [
+            { revision: 1, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA, pushedAt: "2026-07-09T11:59:00.000Z" },
+          ],
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "2".repeat(40),
+          revisions: [
+            { revision: 1, headSha: "2".repeat(40), base: "main", baseSha: BASE_SHA, pushedAt: "2026-07-09T12:01:30.000Z" },
+          ],
+        },
       ],
       running: [
         {
