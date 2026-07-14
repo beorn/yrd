@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { asFailure, createFailure } from "@yrd/core"
 import * as z from "zod"
+import type { SignalRoutes } from "./signals.ts"
 
 const TextSchema = z.string().trim().min(1)
 const StepNameSchema = TextSchema.regex(/^[a-z][a-z0-9_-]*$/iu)
@@ -14,6 +15,17 @@ const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements
   }
 })
 const RunnerSchema = z.enum(["local", "waiting"])
+const NotifyTargetSchema = z.union([z.literal("submitter"), TextSchema.regex(/^@[a-z0-9][a-z0-9/_-]*$/iu)])
+const NotifyTargetsSchema = z.array(NotifyTargetSchema).min(1).superRefine((targets, context) => {
+  if (new Set(targets).size !== targets.length) {
+    context.addIssue({ code: "custom", message: "contains duplicate notification targets" })
+  }
+})
+const NotifySchema = z
+  .object({
+    "pr/rejected": NotifyTargetsSchema.optional(),
+  })
+  .strict()
 const StepObjectSchema = z
   .object({
     run: TextSchema.optional(),
@@ -42,6 +54,7 @@ const ProjectSchema = z
     steps: StepNamesSchema.optional(),
     requires: RequirementsSchema.optional(),
     contest: ContestSchema,
+    notify: NotifySchema.optional(),
   })
   .catchall(StepSchema)
 
@@ -53,6 +66,7 @@ export type YrdProjectConfig = Readonly<{
   requires?: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<z.infer<typeof ContestSchema>>
+  notify?: SignalRoutes
 }>
 
 export type ResolvedYrdProjectConfig = Readonly<{
@@ -62,6 +76,7 @@ export type ResolvedYrdProjectConfig = Readonly<{
   requires: readonly "review"[]
   definitions: Readonly<Record<string, YrdStepConfig>>
   contest: Readonly<{ concurrency: number; timeoutMs: number; evaluators: readonly string[] }>
+  notify?: SignalRoutes
 }>
 
 export function parseYrdConfig(value: unknown): YrdProjectConfig {
@@ -75,7 +90,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
   }
   const parsed = ProjectSchema.safeParse(value ?? {})
   if (parsed.success) {
-    const { base, batch, steps, requires, contest, ...definitions } = parsed.data
+    const { base, batch, steps, requires, contest, notify, ...definitions } = parsed.data
     return {
       ...(base === undefined ? {} : { base }),
       ...(batch === undefined ? {} : { batch }),
@@ -83,6 +98,7 @@ export function parseYrdConfig(value: unknown): YrdProjectConfig {
       ...(requires === undefined ? {} : { requires }),
       definitions,
       contest,
+      ...(notify === undefined ? {} : { notify }),
     }
   }
   const issue = parsed.error.issues[0]
@@ -95,7 +111,7 @@ function configError(issue: z.core.$ZodIssue): Error {
   if (
     issue.code === "invalid_type" &&
     issue.path.length === 1 &&
-    !["base", "batch", "steps", "requires", "contest"].includes(path)
+    !["base", "batch", "steps", "requires", "contest", "notify"].includes(path)
   ) {
     return new Error(`yrd: config ${path} is not supported`)
   }
@@ -162,6 +178,7 @@ export async function loadYrdConfig(options: {
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
         evaluators: parsed.contest.evaluators ?? ["check"],
       },
+      notify: parsed.notify ?? {},
     },
   }
 }

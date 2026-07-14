@@ -316,15 +316,17 @@ describe("Queue", () => {
     expect(await Array.fromAsync(rejectedApp.events())).toContainEqual(
       expect.objectContaining({
         name: "pr/rejected",
-        data: {
+        data: expect.objectContaining({
           pr: "PR1",
           revision: 1,
           headSha: HEAD,
           issueRef,
           run: "R1",
           correlation,
+          actor: "operator",
+          step: "check",
           detail: "typed bounce",
-        },
+        }),
       }),
     )
   })

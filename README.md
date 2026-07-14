@@ -519,6 +519,9 @@ contest:
   concurrency: 2
   timeoutMs: 1800000
   evaluators: [check, sec-check]
+
+notify:
+  pr/rejected: [submitter]
 ```
 
 Names before `merge` run against the pinned Candidate. Names after `merge` run
@@ -531,6 +534,26 @@ identity and appears in typed check evidence.
 `requires: [review]` is the only built-in review policy: the latest verdict for
 the current revision must approve. Comments never gate, and omitting
 `requires` leaves reviews informational.
+
+### PR Signals
+
+`notify` routes an enumerated journal transition without turning delivery into
+a Queue step. The first supported route is `pr/rejected`: `submitter` resolves
+to the actor recorded on that exact PR revision, while an explicit `@name`
+routes to that Tribe member. Both become tracked Tribe request DMs containing
+the PR, revision, failed step, Run, and evidence path.
+
+Signal delivery begins only after the journal append has committed. It runs on
+the side of the Queue lane, so an unavailable adapter cannot fail or delay the
+Run. A small cursor under `.git/yrd/notifications/` records journal progress and
+recipient delivery by event id; startup replays anything appended before a
+crash. This cursor is recovery bookkeeping, not delivery authority or a second
+projection store. The journal remains the source of truth.
+
+Configuration is closed-world: an unknown event name, target, or unavailable
+Tribe executable refuses startup instead of becoming an inert label. Historical
+rejections written before the routable event shape existed remain replayable
+but are not retroactively delivered.
 
 An empty `merge: {}` uses Yrd's native Git merge. With `origin` configured,
 Yrd fast-forwards the remote base directly to the exact pinned Candidate; the
@@ -636,6 +659,8 @@ Yrd stores local authority under the primary worktree's common Git directory:
   prs.git/           bare PR ref/object receiver
   receiver-inbox/    crash-safe receive-hook handoff
   artifacts/         command, evaluator, and contest evidence
+  notifications/
+    cursor-v1.json    signal crash-recovery cursor + event-recipient dedup
 ```
 
 `events-v3.jsonl` is the source of truth. Each command appends one versioned,

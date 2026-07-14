@@ -18,6 +18,7 @@ import { queueStepRevision } from "../src/host-revision.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
+import type { SignalDelivery, SignalDeliveryAdapter } from "../src/signals.ts"
 
 const roots: string[] = []
 
@@ -340,6 +341,64 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("routes a rejected Run to its submitter without awaiting the delivery adapter", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "printf 'focused failure\\n' >&2; exit 1" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let delivery: SignalDelivery | undefined
+    const adapter: SignalDeliveryAdapter = {
+      async send(value) {
+        delivery = value
+        entered.resolve()
+        await release.promise
+      },
+    }
+    const host = await createYrdHost({
+      cwd: repo,
+      env: { ...process.env, TRIBE_NAME: "@agent/7" },
+      signalAdapter: adapter,
+    })
+    try {
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      expect(host.app.bays.pr("PR1")?.revisions).toEqual([
+        expect.objectContaining({ actor: "@agent/7" }),
+      ])
+
+      const settled = await Promise.race([
+        host.app.queue
+          .run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+          .then((runs) => ({ kind: "runs" as const, runs })),
+        Bun.sleep(1_000).then(() => ({ kind: "timeout" as const })),
+      ])
+
+      expect(settled).toMatchObject({ kind: "runs", runs: [expect.objectContaining({ status: "failed" })] })
+      await entered.promise
+      expect(delivery).toEqual({
+        recipient: "@agent/7",
+        event: expect.objectContaining({
+          kind: "pr/rejected",
+          pr: "PR1",
+          revision: 1,
+          step: "check",
+          evidence: expect.stringContaining("stderr"),
+        }),
+      })
+    } finally {
+      release.resolve()
+      await host.close()
+    }
+  })
+
   it("classifies typed failure facts without scraping their messages", () => {
     const failure = createFailure({
       kind: "configuration",

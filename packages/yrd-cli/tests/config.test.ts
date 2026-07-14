@@ -20,6 +20,8 @@ review: { run: bun run review, runner: waiting }
 merge: { run: git merge --no-ff "$YRD_TARGET" }
 deploy: bun run deploy
 contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
+notify:
+  pr/rejected: [submitter, "@ci"]
 `),
       ),
     ).toEqual({
@@ -34,6 +36,7 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
         deploy: { run: "bun run deploy", runner: "local" },
       },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
+      notify: { "pr/rejected": ["submitter", "@ci"] },
     })
   })
 
@@ -59,6 +62,7 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
         requires: [],
         definitions: { check: { runner: "local" }, merge: { runner: "local" } },
         contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
+        notify: {},
       },
     })
   })
@@ -72,6 +76,9 @@ contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
     [{ check: { run: "bun run check", classification: "branch" } }, "check.classification"],
     [{ check: { runner: "remote" } }, "check.runner must be local or waiting"],
     [{ contest: { concurrency: 0 } }, "contest.concurrency must be an integer >= 1"],
+    [{ notify: { "pr/typo": ["submitter"] } }, "notify.pr/typo"],
+    [{ notify: { "pr/rejected": ["reviewer"] } }, "notify.pr/rejected"],
+    [{ notify: { "pr/rejected": ["submitter", "submitter"] } }, "duplicate notification targets"],
   ])("rejects invalid policy %#", (value, message) => {
     expect(() => parseYrdConfig(value)).toThrow(message)
   })

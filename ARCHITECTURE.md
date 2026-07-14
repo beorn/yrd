@@ -27,6 +27,7 @@ function per implementation detail.
 | `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
 | `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`   |
 | `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`          |
+| Signal observer | `createSignalObserver()`                  | Route enumerated post-append events without entering the Queue lane                         | `start()`, `flush()`, `close()`                                                                                                  |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -145,6 +146,12 @@ Current event schemas remain strict for every append. A plugin may additionally
 declare a replay-only schema for an older payload; Core tries it only while
 folding committed history. This lets a domain strengthen future facts without
 making weak legacy shapes valid commands again.
+
+The CLI may wrap the Journal with a signal observer. A successful append only
+wakes the observer; it never awaits delivery. The observer reads the same
+committed frames, routes only its closed event subset, and atomically records a
+cursor plus event-id/recipient progress for crash replay. It does not own PR
+state, schedule work, or write journal facts.
 
 The Journal warns at 10 MiB or 10,000 replayed frames. Compaction is explicit
 as-needed work; the warning tells operators to implement compaction and GC

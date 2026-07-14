@@ -35,9 +35,13 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace, log?: ConditionalLogger) {
+async function createApp(workspace: BayWorkspace, log?: ConditionalLogger, defaultActor?: string) {
   const jobs = createBayJobDefs(workspace)
-  const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+  const definition = pipe(
+    createYrdDef(),
+    withJobs({ definitions: jobs }),
+    withBays({ jobs, defaultBase: "main", ...(defaultActor === undefined ? {} : { defaultActor }) }),
+  )
   return createYrd(definition, {
     inject: {
       journal: createMemoryJournal(),
@@ -97,6 +101,21 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("records the submitting actor on current revision events", async () => {
+    const workspace = createWorkspaceHarness().adapter
+    await using app = await createApp(workspace, undefined, "@agent/7")
+
+    const submitted = await app.bays.submit({ branch: "topic/owned", headSha: HEAD_1 })
+
+    expect(submitted.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ actor: "@agent/7" }) }),
+      expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ actor: "@agent/7" }) }),
+    ])
+    expect(app.bays.pr("PR1")?.revisions).toEqual([
+      expect.objectContaining({ revision: 1, actor: "@agent/7" }),
+    ])
+  })
+
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "Topic/One", headSha: HEAD_1 })
@@ -252,17 +271,42 @@ describe("withBays", () => {
         ],
       }),
     })
+    const legacyPush = command({
+      title: "Emit a legacy PR push",
+      apply: () => ({
+        events: [
+          event("pr/pushed", {
+            pr: "PR4",
+            branch: "topic/legacy-push-append",
+            base: "main",
+            headSha: HEAD_1,
+            revision: 1,
+          }),
+        ],
+      }),
+    })
+    const legacySubmit = command({
+      title: "Emit a legacy PR submit",
+      apply: () => ({
+        events: [event("pr/submitted", { pr: "PR1", revision: 1, headSha: HEAD_1 })],
+      }),
+    })
     const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
     const definition = pipe(
       createYrdDef(),
       withJobs({ definitions: jobs }),
       withBays({ jobs, defaultBase: "main" }),
-    ).extend({ commands: { fixture: { legacyWithdraw, legacyReject, legacyIntegrate } } })
+    ).extend({
+      commands: { fixture: { legacyWithdraw, legacyReject, legacyIntegrate, legacyPush, legacySubmit } },
+    })
     await using app = await createYrd(definition, {
       inject: { journal, clock: () => at, id: nextId },
     })
 
     expect(app.bays.pr("PR1")).toMatchObject({ status: "rejected", issue: issueRef })
+    expect(app.bays.pr("PR1")?.revisions).toEqual([
+      expect.not.objectContaining({ actor: expect.anything() }),
+    ])
     expect(app.bays.pr("PR2")).toMatchObject({
       status: "integrated",
       issue: issueRef,
@@ -272,6 +316,8 @@ describe("withBays", () => {
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyIntegrate, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.legacyPush, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.legacySubmit, undefined)).rejects.toThrow()
   })
 
   it("fails replay loudly when a regression event names a different integrated tuple", async () => {

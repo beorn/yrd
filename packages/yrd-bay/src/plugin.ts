@@ -93,6 +93,7 @@ const IntakePRArgsSchema = z
     base: GitRefSchema.optional(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    actor: TextSchema.optional(),
     receipt: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
@@ -105,7 +106,7 @@ const IntakePRArgsSchema = z
 export type IntakePRArgs = z.infer<typeof IntakePRArgsSchema>
 
 const SubmitArgsSchema = z.union([
-  z.object({ pr: TextSchema, correlation: CorrelationSchema.optional() }).strict(),
+  z.object({ pr: TextSchema, actor: TextSchema.optional(), correlation: CorrelationSchema.optional() }).strict(),
   z
     .object({
       branch: GitRefSchema,
@@ -115,6 +116,7 @@ const SubmitArgsSchema = z.union([
       name: TextSchema.optional(),
       issue: TextSchema.optional(),
       draft: z.boolean().optional(),
+      actor: TextSchema.optional(),
       correlation: CorrelationSchema.optional(),
     })
     .strict(),
@@ -192,7 +194,7 @@ const BayOpenedSchema = z
   })
   .strict()
 const BayClosingSchema = z.object({ bay: BayIdSchema }).strict()
-const PRPushedSchema = z
+const LegacyPRPushedSchema = z
   .object({
     pr: PRIdSchema,
     bay: BayIdSchema.optional(),
@@ -210,8 +212,10 @@ const PRPushedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
+const PRPushedSchema = LegacyPRPushedSchema.extend({ actor: TextSchema }).strict()
 const PRRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
-const PRRevisionSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
+const LegacyPRRevisionSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
+const PRRevisionSchema = LegacyPRRevisionSchema.extend({ actor: TextSchema }).strict()
 const PRCorrelationBoundSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema }).strict()
 const PRTerminalIdentitySchema = PRRevisionIdentitySchema.extend({
   issueRef: TextSchema.optional(),
@@ -227,7 +231,12 @@ const LegacyPRWithdrawnSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const PRRejectedSchema = PRQueueTerminalIdentitySchema.extend({ detail: z.string().optional() }).strict()
+const PRRejectedSchema = PRQueueTerminalIdentitySchema.extend({
+  actor: TextSchema.optional(),
+  step: TextSchema,
+  evidence: TextSchema.optional(),
+  detail: z.string().optional(),
+}).strict()
 const LegacyPRRejectedSchema = z
   .object({
     pr: PRIdSchema,
@@ -717,12 +726,14 @@ export function createBays(
 export type WithBaysOptions = Readonly<{
   jobs: BayJobDefs
   defaultBase?: string
+  defaultActor?: string
   resolveBase?: ResolveBayBase
 }>
 
 export function withBays(options: WithBaysOptions) {
   const defaultBase = baseIdentity(options.defaultBase ?? "main")
-  const commands = createBayCommands(options.jobs, defaultBase)
+  const defaultActor = TextSchema.parse(options.defaultActor ?? "operator")
+  const commands = createBayCommands(options.jobs, defaultBase, defaultActor)
 
   return <State extends object, Commands extends CommandTree, Features extends HasJobs>(
     definition: YrdDef<State, Commands, Features>,
@@ -747,6 +758,8 @@ export function withBays(options: WithBaysOptions) {
         "pr/checks-requested": PRCheckRequestFactSchema,
       },
       replayEvents: {
+        "pr/pushed": LegacyPRPushedSchema,
+        "pr/submitted": LegacyPRRevisionSchema,
         "pr/withdrawn": LegacyPRWithdrawnSchema,
         "pr/rejected": LegacyPRRejectedSchema,
         "pr/integrated": LegacyPRIntegratedSchema,
@@ -798,7 +811,7 @@ function jobDetail(job: DeepReadonly<Job>): string {
   return job.status
 }
 
-function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
+function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultActor: string): BayCommands {
   return {
     bay: {
       open: command({
@@ -816,13 +829,13 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
       intake: command({
         title: "Record pushed revision",
         params: IntakePRArgsSchema,
-        apply: (state: BayState, args: IntakePRArgs) => intakePR(state, args, defaultBase),
+        apply: (state: BayState, args: IntakePRArgs) => intakePR(state, args, defaultBase, defaultActor),
       }),
       submit: command({
         title: "Submit work",
         visibility: "public",
         params: SubmitArgsSchema,
-        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase),
+        apply: (state: BayState, args: SubmitArgs) => submitWork(state, args, defaultBase, defaultActor),
       }),
       close: command({
         title: "Close bay",
@@ -848,7 +861,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         title: "Mark a PR ready",
         visibility: "public",
         params: PrReadyArgsSchema,
-        apply: (state: BayState, args: PrReadyArgs) => readyPr(state, args),
+        apply: (state: BayState, args: PrReadyArgs) => readyPr(state, args, defaultActor),
       }),
       review: command({
         title: "Review a PR revision",
@@ -932,7 +945,7 @@ function refreshBay(state: DeepReadonly<BayState>, args: RefreshBayArgs, refresh
   }
 }
 
-function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase: string) {
+function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase: string, defaultActor: string) {
   const current = state.bays
   const bay = args.bay === undefined ? undefined : required(resolveBay(current, args.bay), "bay", args.bay)
   if (bay !== undefined && bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
@@ -958,6 +971,7 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
   }
   const id = existing?.id ?? nextId("PR", current.prs)
   const issue = attachedIssue(existing, args.issue, bay?.issue)
+  const actor = args.actor ?? bay?.actor ?? defaultActor
   return {
     events: [
       event("pr/pushed", {
@@ -971,18 +985,30 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
         ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
         ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
         revision: (existing?.revision ?? 0) + 1,
+        actor,
       }),
     ],
   }
 }
 
-function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string) {
+function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase: string, defaultActor: string) {
   const current = state.bays
   if ("pr" in args) {
     const pr = required(resolvePR(current, args.pr), "PR", args.pr)
     if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
-    return { events: [event("pr/submitted", { pr: pr.id, ...revisionIdentity(pr) })] }
+    const revision = pr.revisions.find(
+      (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+    )
+    return {
+      events: [
+        event("pr/submitted", {
+          pr: pr.id,
+          ...revisionIdentity(pr),
+          actor: args.actor ?? revision?.actor ?? defaultActor,
+        }),
+      ],
+    }
   }
 
   const base = baseIdentity(args.base ?? defaultBase)
@@ -995,6 +1021,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
   const issue = attachedIssue(resubmitted, args.issue)
+  const actor = args.actor ?? defaultActor
   const pushed = {
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
@@ -1005,6 +1032,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
     ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
     revision,
+    actor,
   }
   return {
     events: [
@@ -1016,6 +1044,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
               pr: id,
               revision,
               headSha: args.headSha,
+              actor,
               ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
             }),
           ]),
@@ -1118,10 +1147,10 @@ function terminalApplies(
   return true
 }
 
-function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs) {
+function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultActor: string) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
   if (pr.status === "submitted") return { events: [] }
-  return submitWork(state, args, "main")
+  return submitWork(state, args, "main", defaultActor)
 }
 
 function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
@@ -1403,7 +1432,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return bay === undefined ? state : patchBay(bay, { status: "closing", failure: undefined })
     }
     case "pr/pushed": {
-      const pushed = PRPushedSchema.parse(data)
+      const parsed = PRPushedSchema.safeParse(data)
+      const pushed = parsed.success ? parsed.data : LegacyPRPushedSchema.parse(data)
       const base = baseIdentity(pushed.base)
       const existing = current.prs[pushed.pr]
       const record: PRRevision = {
@@ -1411,6 +1441,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         headSha: pushed.headSha,
         base,
         ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+        ...(parsed.success ? { actor: parsed.data.actor } : {}),
         pushedAt: applied.ts,
         ...(pushed.correlation === undefined ? {} : { correlation: pushed.correlation }),
       }
@@ -1475,7 +1506,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       )
     }
     case "pr/submitted": {
-      const changed = PRRevisionSchema.parse(data)
+      const parsed = PRRevisionSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyPRRevisionSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
       if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
@@ -1489,11 +1521,14 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         throw new Error(`yrd: submitted correlation does not match PR '${pr.id}'`)
       }
       const correlation = changed.correlation ?? pr.correlation
-      const revisions = patchRevisionClock(pr, { submittedAt: applied.ts, terminal: undefined }).map((revision) =>
-        correlation !== undefined && revision.revision === pr.revision && revision.headSha === pr.headSha
-          ? { ...revision, correlation: { ...correlation } }
-          : revision,
-      )
+      const revisions = patchRevisionClock(pr, { submittedAt: applied.ts, terminal: undefined }).map((revision) => {
+        if (revision.revision !== pr.revision || revision.headSha !== pr.headSha) return revision
+        return {
+          ...revision,
+          ...(parsed.success ? { actor: parsed.data.actor } : {}),
+          ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
+        }
+      })
       return patchPR(pr, {
         status: "submitted",
         submittedAt: applied.ts,

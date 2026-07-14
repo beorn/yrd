@@ -1571,6 +1571,16 @@ function advanceQueue(
     }
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
+    const revision =
+      pr === undefined
+        ? undefined
+        : current?.revisions.find(
+            (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+          )
+    const evidence =
+      (job.status === "failed" ? firstArtifact(job.error.evidence, "stderr") : undefined) ??
+      firstArtifact(checkEvidence(job), "stderr") ??
+      ("artifacts" in job ? firstArtifact({ artifacts: job.artifacts }, "stderr") : undefined)
     return {
       events:
         !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
@@ -1582,6 +1592,9 @@ function advanceQueue(
                 run: record.id,
                 ...(current.issue === undefined ? {} : { issueRef: current.issue }),
                 ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
+                step: planned.name,
+                ...(evidence === undefined ? {} : { evidence }),
                 detail: failure.message,
               }),
             ]

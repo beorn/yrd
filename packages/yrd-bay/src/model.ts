@@ -90,6 +90,8 @@ export type PRRevision = Readonly<{
   headSha: string
   base: string
   baseSha?: string
+  /** Missing only while replaying journals written before submitter identity was recorded. */
+  actor?: string
   correlation?: Correlation
 }> &
   PRRevisionClock
