@@ -1,4 +1,5 @@
 import * as z from "zod"
+import { resolveSelector } from "@yrd/core"
 
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
@@ -25,6 +26,21 @@ export function baseIdentity(ref: string): string {
     if (parsed.startsWith(prefix)) return parsed.slice(prefix.length)
   }
   return parsed
+}
+
+export function resolveBase(bases: Iterable<string>, selector: string): string | undefined {
+  return resolveSelector(
+    selector,
+    [...bases].map((base) => {
+      const canonical = baseIdentity(base)
+      return {
+        canonical,
+        aliases: [base, `origin/${canonical}`, `refs/heads/${canonical}`, `refs/remotes/origin/${canonical}`],
+        value: canonical,
+      }
+    }),
+    { kind: "base" },
+  )
 }
 
 export type BayFailure = Readonly<{
@@ -261,16 +277,32 @@ export function prForBay(state: BaysState, bay: BayId): PR | undefined {
 }
 
 export function resolveBay(state: BaysState, selector: string): Bay | undefined {
-  return (
-    state.byId[selector] ?? Object.values(state.byId).find((bay) => bay.name === selector || bay.branch === selector)
+  return resolveSelector(
+    selector,
+    Object.values(state.byId).map((bay) => ({
+      canonical: bay.id,
+      aliases: [bay.name, bay.branch],
+      value: bay,
+    })),
+    { kind: "Bay" },
   )
 }
 
 export function resolvePR(state: BaysState, selector: string): PR | undefined {
-  const direct = state.prs[selector]
-  if (direct !== undefined) return direct
-  const bayId = resolveBay(state, selector)?.id
-  return Object.values(state.prs).find(
-    (pr) => (bayId !== undefined && pr.bay === bayId) || pr.branch === selector || pr.name === selector,
+  return resolveSelector(
+    selector,
+    Object.values(state.prs).map((pr) => {
+      const bay = pr.bay === undefined ? undefined : state.byId[pr.bay]
+      return {
+        canonical: pr.id,
+        aliases: [
+          pr.branch,
+          ...(pr.name === undefined ? [] : [pr.name]),
+          ...(bay === undefined ? [] : [bay.id, bay.name, bay.branch]),
+        ],
+        value: pr,
+      }
+    }),
+    { kind: "PR" },
   )
 }

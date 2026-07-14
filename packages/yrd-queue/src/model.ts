@@ -7,7 +7,7 @@ import {
   checkRequest,
   type PR,
 } from "@yrd/bay"
-import { JsonSchema, type JsonValue } from "@yrd/core"
+import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 
@@ -262,6 +262,14 @@ export const QueueRecordSchema = z
   })
   .strict()
 
+function resolveQueueRecord(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
+  return resolveSelector(
+    id,
+    Object.values(state.records).map((record) => ({ canonical: record.id, value: record })),
+    { kind: "queue run" },
+  )
+}
+
 export const Queues = Object.freeze({
   empty(
     options: Readonly<{
@@ -280,8 +288,12 @@ export const Queues = Object.freeze({
     }
   },
 
+  resolve(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
+    return resolveQueueRecord(state, id)
+  },
+
   record(state: QueuesState, id: QueueRunId): QueueRecord {
-    const record = state.records[id]
+    const record = resolveQueueRecord(state, id)
     if (record === undefined) throw new Error(`yrd: no queue run '${id}'`)
     return record
   },

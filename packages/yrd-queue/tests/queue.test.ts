@@ -133,6 +133,17 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
 }
 
 describe("Queue", () => {
+  it("resolves PR, Run, and base selectors while preserving canonical records", async () => {
+    await using app = await createQueueApp()
+    await submitBranch(app, "Topic/Selectors")
+
+    const runs = await app.queue.run({ prs: ["pr1"], steps: ["check"] }, runtime)
+    expect(runs).toMatchObject([{ id: "R1", prs: [{ id: "PR1", base: "main" }] }])
+    expect(app.queue.get("r1")).toMatchObject({ id: "R1", prs: [{ id: "PR1" }] })
+    expect(app.queue.status("MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
+    expect(app.queue.status("ORIGIN/MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
+  })
+
   it("emits one terminal run lifecycle with lossless PR revision and correlation identity", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
