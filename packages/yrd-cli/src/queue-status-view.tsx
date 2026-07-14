@@ -345,14 +345,19 @@ export function queueTimelineRows(
   state?: BaysState,
 ): QueueTimelineRow[] {
   const rows = results.flatMap((result) => {
-    const activePrs = new Set(
-      [...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs.map((member) => member.id)),
-    )
+    const runs = [...result.running, ...result.waiting, ...result.finished]
     const pending = result.prs
-      .filter((pr) => pr.status === "submitted" && !activePrs.has(pr.id))
+      .filter(
+        (pr) =>
+          pr.status === "submitted" &&
+          !runs.some((run) =>
+            run.prs.some(
+              (member) => member.id === pr.id && member.revision === pr.revision && member.headSha === pr.headSha,
+            ),
+          ),
+      )
       .map((pr) => {
-        const run = latestRun(pr, result)
-        const timestamp = queueTimelineTimestamp(run, pr)
+        const timestamp = pr.submittedAt
         const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
         return {
           key: `pending:${result.base}:${pr.id}`,
@@ -363,13 +368,12 @@ export function queueTimelineRows(
             (pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr.branch ?? pr.id,
             80,
           ),
-          detail: queueTimelineDetail(result, pr, run),
+          detail: queueTimelineDetail(result, pr, undefined),
           clock: age(timestamp, now, "queue timeline row"),
           timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
-          ...(run === undefined ? {} : { run: run.id }),
         }
       })
-    const runRows = [...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
+    const runRows = runs.flatMap((run) =>
       run.prs.map((member) => {
         const pr = result.prs.find((candidate) => candidate.id === member.id)
         const timestamp = queueTimelineTimestamp(
