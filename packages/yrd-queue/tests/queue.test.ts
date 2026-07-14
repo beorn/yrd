@@ -591,9 +591,14 @@ describe("Queue", () => {
       reason: { code: "draft", message: "PR 'PR1' is pushed, not ready" },
       review: { required: true, approved: false },
     })
-    await app.bays.comment({ pr: "PR1", actor: "@cto", ref: "question-1", note: "Why this shape?" })
-    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-red" })
     await app.bays.ready({ pr: "PR1" })
+    await app.bays.comment({ pr: "PR1", actor: "@cto", ref: "question-1", note: "Why this shape?" })
+    expect(app.queue.eligibility("PR1")).toMatchObject({
+      runnable: false,
+      reason: { code: "review-required", message: "PR 'PR1' needs approval for revision 1" },
+      review: { required: true, approved: false },
+    })
+    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-red" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
       reason: { code: "review-rejected", message: "PR 'PR1' was rejected by @cto for revision 1" },

@@ -3,7 +3,7 @@ import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type { BaysState, PR } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
-import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
+import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Link, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
@@ -67,7 +67,7 @@ export type QueueLogAttempt = Readonly<{
 
 type QueueAttemptResult =
   | Readonly<{ status: "passed"; output: JsonValue }>
-  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output?: JsonValue }>
+  | Readonly<{ status: "failed"; error: JobError; output?: JsonValue }>
   | Readonly<{ status: "lost"; reason: string }>
 
 export type QueueAttempt = QueueLogAttempt &

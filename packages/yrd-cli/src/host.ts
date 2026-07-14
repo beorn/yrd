@@ -54,6 +54,7 @@ import { withLiveRenderer } from "./live-renderer.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrd, runYrdHelp } from "./run.ts"
+import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
@@ -113,42 +114,13 @@ function validateConfig(config: ResolvedYrdProjectConfig): void {
   }
 }
 
-function queueStepRevision(
-  repo: string,
-  stateDir: string,
-  name: string,
-  config: YrdStepConfig,
-  checkoutParent?: string,
-  resolvedCommand?: readonly string[],
-): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        implementation:
-          name === "merge" && resolvedCommand === undefined
-            ? "yrd-native-merge-v3"
-            : checkoutParent === undefined
-              ? "yrd-queue-command-v2"
-              : "yrd-queue-command-v3",
-        repo,
-        stateDir,
-        ...(checkoutParent === undefined ? {} : { checkoutParent }),
-        name,
-        run: config.run,
-        resolvedCommand,
-        runner: config.runner,
-        environment: config.environment,
-        classification: config.classification ?? "carrier",
-        timeoutMs: stepTimeoutMs(config),
-        toolchain: {
-          bun: Bun.version,
-          node: process.versions.node,
-          platform: process.platform,
-          arch: process.arch,
-        },
-      }),
-    )
-    .digest("hex")
+function hostToolchainFingerprint(): ToolchainFingerprint {
+  return {
+    bun: Bun.version,
+    node: process.versions.node,
+    platform: process.platform,
+    arch: process.arch,
+  }
 }
 
 function contestEvaluatorRevision(
@@ -225,7 +197,15 @@ function candidateStep(
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
       {
-        revision: queueStepRevision(repo, stateDir, name, config, checkoutParent),
+        revision: queueStepRevision({
+          repo,
+          stateDir,
+          name,
+          config,
+          timeoutMs: stepTimeoutMs(config),
+          toolchain: hostToolchainFingerprint(),
+          checkoutParent,
+        }),
         classification: config.classification ?? "carrier",
       },
     ),
@@ -276,7 +256,15 @@ function configuredQueueSteps(
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
               }),
           {
-            revision: queueStepRevision(options.repo, options.stateDir, name, config, undefined, mergeCommand),
+            revision: queueStepRevision({
+              repo: options.repo,
+              stateDir: options.stateDir,
+              name,
+              config,
+              timeoutMs: stepTimeoutMs(config),
+              toolchain: hostToolchainFingerprint(),
+              resolvedCommand: mergeCommand,
+            }),
           },
         ),
       )
@@ -286,7 +274,14 @@ function configuredQueueSteps(
     }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
-        revision: queueStepRevision(options.repo, options.stateDir, name, config),
+        revision: queueStepRevision({
+          repo: options.repo,
+          stateDir: options.stateDir,
+          name,
+          config,
+          timeoutMs: stepTimeoutMs(config),
+          toolchain: hostToolchainFingerprint(),
+        }),
         needsIntegration: true,
       }),
     )
@@ -712,10 +707,12 @@ export async function runYrdProcess(
       {
         ...io,
         concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
-        resolveRevision: io.resolveRevision ?? ((ref, cwd) => resolveCommit(activeHost.process, cwd, ref)),
-        resolveQueueTarget:
-          io.resolveQueueTarget ??
-          ((ref) => resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)),
+        resolveRevision: (ref, cwd) =>
+          io.resolveRevision === undefined ? resolveCommit(activeHost.process, cwd, ref) : io.resolveRevision(ref, cwd),
+        resolveQueueTarget: (ref, cwd) =>
+          io.resolveQueueTarget === undefined
+            ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
+            : io.resolveQueueTarget(ref, cwd),
       },
       activeHost.services,
     )

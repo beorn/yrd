@@ -3050,7 +3050,14 @@ describe("runYrd", () => {
           id: JOB_PREPARE_PASS_ID,
           attempt: 1,
           runner: "yrd-cli",
-          result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
+          result: {
+            status: "failed",
+            error: {
+              code: "merge-stalled",
+              message: "merge stalled",
+              evidence: { kind: "queue-authority-refusal", attempts: 3 },
+            },
+          },
         },
       }),
       EventSchema.parse({
@@ -3113,7 +3120,14 @@ describe("runYrd", () => {
         startedAt: "2026-07-12T11:08:36.218Z",
         finishedAt: "2026-07-12T11:12:18.300Z",
         durationMs: 222_082,
-        result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
+        result: {
+          status: "failed",
+          error: {
+            code: "merge-stalled",
+            message: "merge stalled",
+            evidence: { kind: "queue-authority-refusal", attempts: 3 },
+          },
+        },
       },
       {
         job: JOB_PREPARE_PASS_ID,
@@ -3149,7 +3163,14 @@ describe("runYrd", () => {
       startedAt: "2026-07-12T11:08:36.218Z",
       finishedAt: "2026-07-12T11:12:18.300Z",
       durationMs: 222_082,
-      result: { status: "failed", error: { code: "merge-stalled", message: "merge stalled" } },
+      result: {
+        status: "failed",
+        error: {
+          code: "merge-stalled",
+          message: "merge stalled",
+          evidence: { kind: "queue-authority-refusal", attempts: 3 },
+        },
+      },
     })
     expect(show.steps).toHaveLength(3)
     expect(show.steps).toEqual(

@@ -27,6 +27,7 @@ import {
 import {
   createJobDef,
   Job,
+  JobErrorSchema,
   type HasJobs,
   type JobDef,
   type JobDefs,
@@ -114,9 +115,7 @@ const PauseQueueArgsSchema = z
   }) as z.ZodType<PauseQueueArgs>
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
-const QueueFailedSchema = z
-  .object({ run: QueueRunIdSchema, error: z.object({ code: z.string(), message: z.string() }) })
-  .strict()
+const QueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
 
 export type StepExecution<Shape extends PRShape = PRShape> = Readonly<{
   run: QueueRunId
@@ -1581,7 +1580,18 @@ function projectPRChecks(
       const record = projectCheckStep(pr, run, step, checks.queuedAt)
       return record === undefined ? [] : [record]
     })
-  return records.length === 0
+  const evidenceStep =
+    run.error?.evidence === undefined
+      ? undefined
+      : run.steps.find(
+          (step) =>
+            (step.integrates || step.needsIntegration) &&
+            (step.job?.status === "failed" || step.job?.status === "lost"),
+        )
+  const evidenceRecord =
+    evidenceStep === undefined ? undefined : projectCheckStep(pr, run, evidenceStep, checks.queuedAt)
+  const projected = evidenceRecord === undefined ? records : [...records, evidenceRecord]
+  return projected.length === 0
     ? [
         {
           pr: pr.id,
@@ -1592,7 +1602,7 @@ function projectPRChecks(
           ...(run.error === undefined ? {} : { error: run.error }),
         },
       ]
-    : records
+    : projected
 }
 
 function reusablePrefix(

@@ -286,6 +286,55 @@ describe("Jobs", () => {
     await app.close()
   })
 
+  it("validates and replays structured failure evidence", async () => {
+    const journal = createMemoryJournal()
+    const app = await jobsApp(delivery(), { journal, id: ids("send", "C-send", JOB_ID) })
+    await app.dispatch(app.commands.sender.send, { message: "manual failure" })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: JOB_ID,
+      attempt: 1,
+      runner: "manual-runner",
+      leaseExpiresAt: "2026-01-01T00:01:00.000Z",
+    })
+
+    await expect(
+      app.jobs.finish(JOB_ID, {
+        attempt: 1,
+        runner: "manual-runner",
+        result: {
+          status: "failed",
+          error: { code: "environment-refused", message: "typed refusal", evidence: new Date() as never },
+        },
+      }),
+    ).rejects.toThrow()
+    await app.jobs.finish(JOB_ID, {
+      attempt: 1,
+      runner: "manual-runner",
+      result: {
+        status: "failed",
+        error: {
+          code: "environment-refused",
+          message: "typed refusal",
+          evidence: { kind: "environment-refusal", attempts: 3 },
+        },
+      },
+    })
+
+    expect(app.jobs.get(JOB_ID)).toMatchObject({
+      status: "failed",
+      error: {
+        code: "environment-refused",
+        message: "typed refusal",
+        evidence: { kind: "environment-refusal", attempts: 3 },
+      },
+    })
+    const replayed = await jobsApp(delivery(), { journal })
+    expect(replayed.jobs.get(JOB_ID)).toEqual(app.jobs.get(JOB_ID))
+    await replayed.close()
+    await app.close()
+  })
+
   it("parks remote work and fences its terminal completion", async () => {
     const job = delivery(async () => ({
       status: "waiting",
