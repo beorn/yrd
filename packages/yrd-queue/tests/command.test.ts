@@ -784,7 +784,7 @@ describe("Queue command adapters", () => {
     expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
   })
 
-  it("rejects an author-authored gitlink wrapper unless the rollout kill switch is set", async () => {
+  it("rejects an uncertified authored gitlink wrapper with same-PR recut guidance", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -800,7 +800,9 @@ describe("Queue command adapters", () => {
       status: "failed",
       error: {
         code: "authored-gitlink",
-        message: expect.stringContaining("YRD_ALLOW_AUTHORED_GITLINKS=1"),
+        message: expect.stringMatching(
+          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest or manual recut/iu,
+        ),
       },
     })
     expect(run.steps[0]?.job).toMatchObject({

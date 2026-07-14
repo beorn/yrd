@@ -2271,6 +2271,20 @@ function addQueueExamples(queue: CliCommand, name: string): void {
   ])
 }
 
+function addAuthoredCarrierWorkflow<
+  Options extends Record<string, unknown>,
+  Arguments extends unknown[],
+  ArgumentRecord extends Record<string, unknown>,
+>(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
+  command.addHelpSection("Authored root carrier:", [
+    [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
+    [
+      `$ ${name} pr recut <PR> --queue`,
+      "recut and queue a new revision on that same PR; no composition manifest or manual recut",
+    ],
+  ])
+}
+
 function buildProgram(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
@@ -2533,7 +2547,8 @@ function buildProgram(
     .option("--needs-review", "show revisions needing approval")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
-  pr.command("submit [selector...]")
+  const submit = pr
+    .command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
     .option("--draft", "leave the PR pushed until pr ready")
     .option("--follow", "follow admitted checks to a terminal result")
@@ -2541,9 +2556,10 @@ function buildProgram(
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
-    .option("--composition <path>", "immutable version-1 source composition JSON")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
+  addAuthoredCarrierWorkflow(submit, name)
   pr.command("view <selector>")
     .description("show a PR and its runs")
     .option("--json", "emit stable JSON")
@@ -2572,7 +2588,8 @@ function buildProgram(
     .option("--note <text>", "set the delivery note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
-  pr.command("recut <selector>")
+  const recut = pr
+    .command("recut <selector>")
     .description("mechanically recut an immutable PR revision onto authoritative current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--queue", "ready the fresh revision and admit its configured checks")
@@ -2580,6 +2597,7 @@ function buildProgram(
     .action(async (selector, options) =>
       setExit(await recutPr(installed(), installedServices(), selector, options, io)),
     )
+  addAuthoredCarrierWorkflow(recut, name)
   pr.command("ready <selector>")
     .description("move a pushed PR revision into the queue")
     .option("--json", "emit stable JSON")
