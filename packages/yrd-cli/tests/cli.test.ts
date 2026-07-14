@@ -3858,3 +3858,61 @@ describe("runYrd", () => {
     expect(sleeps).toEqual([1_000])
   })
 })
+
+describe("submit correlation", () => {
+  it.each(["bay", "pr"] as const)("persists an opaque correlation through %s submit", async (surface) => {
+    const app = await createApp()
+    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
+    const correlation = {
+      namespace: "tribe-request",
+      id: "review-20925/custom 61's docs:retry 2",
+    }
+
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          surface,
+          "submit",
+          "topic/correlated",
+          "--base",
+          "main",
+          "--correlation",
+          `${correlation.namespace}:${correlation.id}`,
+          "--json",
+        ),
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: `${surface}.submit`,
+      prs: [{ correlation }],
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      correlation,
+      revisions: [{ correlation }],
+    })
+  })
+
+  it.each(["bay", "pr"] as const)("rejects malformed correlation before %s submit appends", async (surface) => {
+    for (const correlation of ["tribe-request", "tribe-request:   "]) {
+      const app = await createApp()
+      const before = await Array.fromAsync(app.events()).then((events) => events.length)
+      const output = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+      expect(
+        await runYrd(
+          app,
+          yrd(surface, "submit", "topic/correlated", "--correlation", correlation, "--json"),
+          output.io,
+        ),
+        output.stderr(),
+      ).toBe(2)
+      expect(output.stdout()).toBe("")
+      expect(output.stderr()).toContain("--correlation requires <namespace:id>")
+      expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+      expect(app.state().bays.prs).toEqual({})
+    }
+  })
+})

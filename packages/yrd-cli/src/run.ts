@@ -3,7 +3,16 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import {
+  baseIdentity,
+  CorrelationSchema,
+  resolveBay,
+  resolvePR,
+  type Bay,
+  type BaysState,
+  type Correlation,
+  type PR,
+} from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
@@ -205,6 +214,18 @@ function oneOfAliases(primary: unknown, alias: unknown, primaryName: string, ali
   if (value === undefined) return undefined
   if (typeof value !== "string" || value.trim() === "") usage(`--${primaryName} requires a non-empty value`)
   return value
+}
+
+function parseCorrelation(value: unknown): Correlation | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "string") usage("--correlation requires <namespace:id>")
+  const separator = value.indexOf(":")
+  if (separator === -1) usage("--correlation requires <namespace:id>")
+  try {
+    return CorrelationSchema.parse({ namespace: value.slice(0, separator), id: value.slice(separator + 1) })
+  } catch {
+    usage("--correlation requires <namespace:id>")
+  }
 }
 
 function jsonEnabled(options: JsonOption): boolean {
@@ -473,11 +494,13 @@ async function submitBays(
     base?: string
     queue?: string
     issue?: string
+    correlation?: string
     json?: boolean
   },
   io: YrdCliIO,
   command: "bay.submit" | "pr.submit",
 ): Promise<YrdCliExitCode> {
+  const correlation = parseCorrelation(options.correlation)
   const state = stateOf(app)
   const inferred =
     selectors.length > 0
@@ -490,6 +513,7 @@ async function submitBays(
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(options.draft === true ? { draft: true } : {}),
+      ...(correlation === undefined ? {} : { correlation }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
@@ -967,12 +991,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   const queue = pr === undefined ? undefined : app.queue.status(pr.base)
   const briefing = {
     model: "issue -> bay -> pr -> queue -> integrated or rejected",
-    loop: [
-      "yrd pr submit",
-      "yrd pr status",
-      "yrd pr runs <PR>",
-      "fix the branch and run yrd pr submit again",
-    ],
+    loop: ["yrd pr submit", "yrd pr status", "yrd pr runs <PR>", "fix the branch and run yrd pr submit again"],
     live: {
       bay: bay?.id,
       pr: pr?.id,
@@ -1698,6 +1717,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
@@ -1844,6 +1864,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   pr.command("view <selector>")
