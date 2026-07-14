@@ -66,7 +66,14 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
-import { QueueWatchFrame, QueueWatchPane, reduceWatchControl, type QueueWatchPaneProps } from "../src/watch-pane.tsx"
+import {
+  QueueWatchFrame,
+  QueueWatchPane,
+  queueDetailTier,
+  queueSplitRatioAfterDrag,
+  reduceWatchControl,
+  type QueueWatchPaneProps,
+} from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -2143,19 +2150,19 @@ describe("runYrd", () => {
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)
     const frame = stripOsc8Targets(
-      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false })),
+      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false }), {
+        width: 200,
+        height: 50,
+      }),
     )
     expect(frame).toContain("PR1")
-    expect(frame).toContain("STATUS")
-    expect(frame).toContain("SOURCE")
-    expect(frame).toContain("REV")
-    expect(frame).toContain("HEAD")
-    expect(frame).toContain("BASE")
-    expect(frame).toContain("LANDING")
+    expect(frame).toContain("QUEUE main")
+    expect(frame).toContain("pending")
     expect(frame).toContain("position 1")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
+    expect(frame).toContain("Enter detail")
     expect(frame).not.toContain("PATH")
     expect(frame).not.toContain("file:///repo/.bays/B1")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
@@ -2217,6 +2224,75 @@ describe("runYrd", () => {
       expect(handle.text).not.toContain("PR PR1 STATUS")
     } finally {
       handle.unmount()
+    }
+  })
+
+  it("uses the natural-size right, below, and full-area detail ladder", async () => {
+    expect(queueDetailTier(200, 50)).toBe("right")
+    expect(queueDetailTier(100, 40)).toBe("below")
+    expect(queueDetailTier(80, 24)).toBe("full")
+    expect(queueSplitRatioAfterDrag("right", 0.52, 100, 120, 200, 50)).toBeGreaterThan(0.52)
+    expect(queueSplitRatioAfterDrag("right", 0.52, 100, 999, 200, 50)).toBeCloseTo(1 - 72 / 199)
+    expect(queueSplitRatioAfterDrag("below", 0.52, 20, -999, 100, 40)).toBeCloseTo(12 / 38)
+
+    const app = await createApp()
+    await openAndSubmit(app)
+    let mounted: ReactElement | undefined
+    const output = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    const live = withLiveRenderer(output.io, async (element) => {
+      mounted = element
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--watch"), live), output.stderr()).toBe(0)
+    if (mounted === undefined) throw new Error("expected queue watch pane to mount")
+    const snapshot = (mounted.props as QueueWatchPaneProps).initial
+
+    const wide = await run(createElement(QueueWatchFrame, { snapshot, paused: false }), {
+      writable: { write: () => {} },
+      cols: 200,
+      rows: 50,
+    })
+    const below = await run(createElement(QueueWatchFrame, { snapshot, paused: false }), {
+      writable: { write: () => {} },
+      cols: 100,
+      rows: 40,
+    })
+    const compact = await run(createElement(QueueWatchFrame, { snapshot, paused: false }), {
+      writable: { write: () => {} },
+      cols: 80,
+      rows: 24,
+    })
+
+    try {
+      expect(wide.text).toContain("│")
+      expect(wide.text.split("\n")[0]).toContain("PR PR1 STATUS")
+      await wide.press("Escape")
+      await wide.waitForLayoutStable()
+      expect(wide.text).not.toContain("PR PR1 STATUS")
+      await wide.press("Enter")
+      await wide.waitForLayoutStable()
+      expect(wide.text).toContain("PR PR1 STATUS")
+
+      expect(below.text).toContain("─")
+      expect(below.text.split("\n")[0]).not.toContain("PR PR1 STATUS")
+      expect(below.text).toContain("PR PR1 STATUS")
+
+      expect(compact.text).toContain("QUEUE main")
+      expect(compact.text).not.toContain("PR PR1 STATUS")
+      await compact.press("Enter")
+      await compact.waitForLayoutStable()
+      expect(compact.text).toContain("PR PR1 STATUS")
+      expect(compact.text).not.toContain("QUEUE main")
+      await compact.press("Escape")
+      await compact.waitForLayoutStable()
+      expect(compact.text).toContain("QUEUE main")
+      expect(compact.text).not.toContain("PR PR1 STATUS")
+    } finally {
+      wide.unmount()
+      below.unmount()
+      compact.unmount()
     }
   })
 
