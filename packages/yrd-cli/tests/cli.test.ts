@@ -727,7 +727,9 @@ describe("runYrd", () => {
       now: () => Date.parse("2026-07-09T12:01:00.000Z"),
     })
     expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
-    expect(humanStatus.stdout()).toContain("6. [ ] PR6")
+    expect(humanStatus.stdout()).toContain("STATUS submitted")
+    expect(humanStatus.stdout()).toContain("POSITION 6")
+    expect(humanStatus.stdout()).toContain("PR6")
 
     const status = outputIO({ currentBranch: () => "topic/6" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
@@ -1865,11 +1867,12 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("PR1")
-    expect(human.stdout()).toContain("[x]")
+    expect(human.stdout()).toContain("STATUS")
+    expect(human.stdout()).toContain("integrated")
     expect(human.stdout()).toContain("one")
     expect(human.stdout()).toContain("integrated")
     expect(human.stdout()).toContain(MERGED_SHA.slice(0, 12))
-    expect(human.stdout()).toContain("file:///repo/.bays/B1")
+    expect(human.stdout()).not.toContain("file:///repo/.bays/B1")
 
     const show = outputIO()
     expect(await runYrd(app, yrd("contest", "view", "C1", "--json"), show.io)).toBe(0)
@@ -1969,6 +1972,7 @@ describe("runYrd", () => {
       rootMounted = element
     })
     expect(await runYrd(app, yrd("watch"), rootLive)).toBe(0)
+    if (rootMounted === undefined) throw new Error("expected root watch pane to mount")
 
     const rootFrame = stripOsc8Targets(
       await renderString(createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial, paused: false })),
@@ -2209,10 +2213,7 @@ describe("runYrd", () => {
       { writable: { write: () => {} }, cols: 40, rows: 8 },
     )
     try {
-      expect(handle.text).toContain("QUEUE")
-      expect(handle.text).toContain("main")
-      expect(handle.text).toContain("PAUSE")
-      expect(handle.text).toContain("DRAIN")
+      expect(handle.text).toContain("No matching queue rows.")
       expect(handle.text).toContain("LIVE")
       await handle.press("p")
       await handle.waitForLayoutStable()
@@ -2917,7 +2918,8 @@ describe("runYrd", () => {
 
     const status = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("pr", "status"), status.io), status.stderr()).toBe(0)
-    expect.soft(status.stdout()).toContain("2. [ ] PR2")
+    expect.soft(status.stdout()).toContain("STATUS submitted")
+    expect.soft(status.stdout()).toContain("POSITION 2")
 
     const prime = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
