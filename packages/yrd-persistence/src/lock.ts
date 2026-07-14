@@ -2,7 +2,7 @@ import { closeSync, fsyncSync, ftruncateSync, openSync, readFileSync, writeSync 
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { dlopen, FFIType, suffix } from "bun:ffi"
-import { observeYrdLifecycle } from "@yrd/core"
+import { createFailure, observeYrdLifecycle } from "@yrd/core"
 import { createLogger, type ConditionalLogger } from "loggily"
 
 export type Exclusive = Readonly<{
@@ -111,9 +111,13 @@ function busy(path: string): Error {
   let owner = "another process"
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown }
-    if (typeof value.pid === "number") owner = `pid ${value.pid}`
+    if (typeof value.pid === "number") owner = `yrd-cli:${value.pid}`
   } catch {
     // Diagnostic data never decides lock ownership.
   }
-  return new Error(`yrd: writer lock is busy (${owner}; ${path})`)
+  return createFailure({
+    kind: "infrastructure",
+    code: "exclusive-busy",
+    message: `yrd: writer lock is busy (${owner}; ${path})`,
+  })
 }

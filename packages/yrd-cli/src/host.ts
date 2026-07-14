@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
@@ -23,7 +24,7 @@ import {
   type ContestGit,
   type ContestRunnerDef,
 } from "@yrd/contest"
-import { createYrd, createYrdDef, pipe, raiseFailure, type Journal } from "@yrd/core"
+import { createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
@@ -43,7 +44,7 @@ import {
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
-import { createJournal } from "@yrd/persistence"
+import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
@@ -499,14 +500,87 @@ function queueAdministration(
   })
 }
 
-async function closeRuntime(app: YrdCliApp | undefined, process: Process, scope: Scope): Promise<void> {
+type ResidentRunnerIdentity = Readonly<{
+  id: string
+  host: string
+  pane?: string
+}>
+
+type ResidentRunnerLease = Readonly<{ close(): Promise<void> }>
+
+function residentRunnerIdentity(env: NodeJS.ProcessEnv): ResidentRunnerIdentity {
+  const pane = [env.HERDR_PANE_ID, env.CMUX_SURFACE_ID]
+    .map((value) => value?.trim())
+    .find((value): value is string => value !== undefined && value !== "")
+  return Object.freeze({
+    id: `yrd-cli:${globalThis.process.pid}`,
+    host: hostname(),
+    ...(pane === undefined ? {} : { pane }),
+  })
+}
+
+function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerIdentity): ConditionalLogger {
+  return log.child({
+    executor: identity.id,
+    host: identity.host,
+    ...(identity.pane === undefined ? {} : { pane: identity.pane }),
+  })
+}
+
+async function acquireResidentRunner(
+  stateDir: string,
+  identity: ResidentRunnerIdentity,
+  log: ConditionalLogger,
+): Promise<ResidentRunnerLease> {
+  const released = Promise.withResolvers<void>()
+  const acquired = Promise.withResolvers<void>()
+  const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
+    acquired.resolve()
+    await released.promise
+  })
+  try {
+    await Promise.race([acquired.promise, held])
+  } catch (error) {
+    if (failureFact(error)?.code === "exclusive-busy") {
+      const detail = error instanceof Error ? error.message.replace(/^yrd:\s*/u, "") : String(error)
+      raiseFailure(
+        "refusal",
+        "resident-runner-active",
+        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run --watch' before starting another.`,
+      )
+    }
+    throw error
+  }
+  log.info?.("Resident runner lease acquired", { executor: identity.id, stateDir })
+
+  let closePromise: Promise<void> | undefined
+  return Object.freeze({
+    close: () =>
+      (closePromise ??= (async () => {
+        released.resolve()
+        await held
+        log.info?.("Resident runner lease released", { executor: identity.id, stateDir })
+      })()),
+  })
+}
+
+async function closeRuntime(
+  app: YrdCliApp | undefined,
+  process: Process,
+  scope: Scope,
+  resident?: ResidentRunnerLease,
+): Promise<void> {
   try {
     await app?.close()
   } finally {
     try {
       await process.close()
     } finally {
-      await scope[Symbol.asyncDispose]()
+      try {
+        await scope[Symbol.asyncDispose]()
+      } finally {
+        await resident?.close()
+      }
     }
   }
 }
@@ -578,6 +652,13 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
 export async function createYrdHost(
   options: { cwd?: string; env?: NodeJS.ProcessEnv; log?: ConditionalLogger } = {},
 ): Promise<YrdHost> {
+  return createYrdRuntimeHost(options)
+}
+
+async function createYrdRuntimeHost(
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; log?: ConditionalLogger },
+  resident?: ResidentRunnerIdentity,
+): Promise<YrdHost> {
   const scope = createScope("yrd-host")
   const ownsLog = options.log === undefined
   const log =
@@ -588,8 +669,11 @@ export async function createYrdHost(
   const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
   const process = createProcess({ cwd: options.cwd, env, inject: { scope, log } })
   let app: YrdCliApp | undefined
+  let residentLease: ResidentRunnerLease | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
+    if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
+    using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
     const receiver = await createGitPushReceiver({
       mainRepo: repository.repo,
@@ -627,7 +711,7 @@ export async function createYrdHost(
     const services = Object.freeze({ queue: queueAdministration(process, repository, loaded.config) })
     let closePromise: Promise<void> | undefined
     const close = () =>
-      (closePromise ??= closeRuntime(app, process, scope).finally(() => {
+      (closePromise ??= closeRuntime(app, process, scope, residentLease).finally(() => {
         if (ownsLog) log.end()
       }))
     return Object.freeze({
@@ -642,7 +726,7 @@ export async function createYrdHost(
       [Symbol.asyncDispose]: close,
     })
   } catch (error) {
-    await closeRuntime(app, process, scope)
+    await closeRuntime(app, process, scope, residentLease)
     if (ownsLog) log.end()
     throw error
   }
@@ -748,10 +832,12 @@ export async function runYrdProcess(
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
       async load(context, options) {
-        log = createYrdLogger(context.observability, io.stderr)
-        const activeHost = await createYrdHost({ cwd: context.repo, env, log })
+        log = createYrdLogger(context.observability, (text) => io.stderr(text))
+        const resident = options.resident ? residentRunnerIdentity(env) : undefined
+        const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
+        const activeHost = await createYrdRuntimeHost({ cwd: context.repo, env, log: runtimeLog }, resident)
         host = activeHost
-        const runnerLog = log.child("runner")
+        const runnerLog = runtimeLog.child("runner")
         const drain = options.resident ? new AbortController() : undefined
         removeShutdownSignals = bindProcessShutdown(
           closeHost,
@@ -767,6 +853,7 @@ export async function runYrdProcess(
           services: activeHost.services,
           io: {
             cwd: activeHost.repository.worktree,
+            ...(resident === undefined ? {} : { runner: resident.id }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>
               io.resolveRevision === undefined

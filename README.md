@@ -351,6 +351,13 @@ The first signal stops new admission, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to
 force the existing hard shutdown and job-tree reap.
 
+A resident acquires one OS-held lease in the repository's common Yrd state
+before receiver intake or Queue admission. A second resident exits with the
+typed `resident-runner-active` refusal and identifies the active
+`yrd-cli:<pid>` executor. Job events retain that executor id; trace logs add
+host and available Herdr/cmux pane provenance. Normal exit and graceful
+shutdown release the lease, while the OS releases it if the owner dies.
+
 An explicit non-empty selection is durable Run authority, not a filter applied
 after configured admission. Yrd neither starts nor reuses omitted configured
 checks. In particular, `--steps merge` prepares and pins a fresh candidate with
@@ -602,6 +609,8 @@ Yrd stores local authority under the primary worktree's common Git directory:
 .git/yrd/
   events-v3.jsonl    append-only authority
   writer.lock        short cross-process append lock
+  resident-runner/
+    writer.lock      process-lifetime resident Queue lease
   prs.git/           bare PR ref/object receiver
   receiver-inbox/    crash-safe receive-hook handoff
   artifacts/         command, evaluator, and contest evidence
