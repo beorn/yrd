@@ -16,7 +16,7 @@ import {
 import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
-import type { QueueRun, QueueSummary } from "@yrd/queue"
+import { Queues, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
@@ -1291,7 +1291,6 @@ async function watchQueueRuns(
   const scope = io.scope ?? app.scope
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
-  const terminal = (run: QueueRun): boolean => run.status === "passed" || run.status === "failed"
   let exit: YrdCliExitCode = 0
   while (true) {
     const runs = await runQueues(app, selectors, options, io)
@@ -1302,13 +1301,13 @@ async function watchQueueRuns(
     }
     if (runs.some((run) => run.status === "failed")) exit = 1
     if (drainRequested()) {
-      if (runs.every(terminal)) return exit
+      if (runs.every(Queues.terminal)) return exit
       await scope.sleep(interval)
       continue
     }
     if (selectors.length > 0 || scope.signal.aborted) return exit
     await sleepUntilDrain(scope.sleep(interval), drainSignal)
-    if (scope.signal.aborted || drainRequested()) return exit
+    if (scope.signal.aborted) return exit
   }
 }
 
