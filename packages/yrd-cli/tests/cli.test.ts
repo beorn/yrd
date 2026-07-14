@@ -44,6 +44,7 @@ import {
   queueRevisionKey,
   queueShowData,
   queueStatusRows,
+  queueTimelineRows,
   watchQueueRows,
   type QueueLogCoverage,
   type QueueStatusResult,
@@ -1857,13 +1858,14 @@ describe("runYrd", () => {
     const frame = stripOsc8Targets(
       await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false })),
     )
-    expect(frame).toContain("QUEUE")
-    expect(frame).toContain("OPEN")
-    expect(frame).toContain("ACTIVE")
-    expect(frame).toContain("INTEGRATED")
-    expect(frame).toContain("REJECTED")
-    expect(frame).toContain("POS")
     expect(frame).toContain("PR1")
+    expect(frame).toContain("STATUS")
+    expect(frame).toContain("SOURCE")
+    expect(frame).toContain("REV")
+    expect(frame).toContain("HEAD")
+    expect(frame).toContain("BASE")
+    expect(frame).toContain("LANDING")
+    expect(frame).toContain("position 1")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
@@ -1881,9 +1883,31 @@ describe("runYrd", () => {
       resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
-    expect(status.stdout()).toContain("QUEUE POS")
     expect(status.stdout()).toContain("PR1")
-    expect(status.stdout()).not.toContain("LIVE")
+    expect(status.stdout()).toContain("submitted")
+    expect(status.stdout()).toContain("position 1")
+  })
+
+  it("keeps queue ls --latest distinct from the default queue list projection", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/one", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "topic/two", headSha: "2".repeat(40), base: "main" })
+
+    const plain = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls"), plain.io), plain.stderr()).toBe(0)
+
+    const latest = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
+
+    expect(latest.stdout()).toContain("submitted")
+    expect(plain.stdout()).not.toContain("submitted")
+    expect(latest.stdout()).not.toBe(plain.stdout())
   })
 
   it("renders queue --watch identically to root watch", async () => {
@@ -1983,6 +2007,46 @@ describe("runYrd", () => {
       step: "review",
       elapsed: "1m",
     })
+  })
+
+  it("collapses queue timeline rows to the latest row per PR when requested", () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        { id: "PR1", name: "First", branch: "topic/one", base: "main", status: "submitted", revision: 1, headSha: HEAD_SHA },
+        { id: "PR2", name: "Second", branch: "topic/two", base: "main", status: "submitted", revision: 1, headSha: "2".repeat(40) },
+      ],
+      running: [
+        {
+          id: "R1",
+          base: "main",
+          status: "running",
+          startedAt: "2026-07-09T12:00:00.000Z",
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+      ],
+      waiting: [],
+      finished: [
+        {
+          id: "R2",
+          base: "main",
+          status: "passed",
+          startedAt: "2026-07-09T12:10:00.000Z",
+          finishedAt: "2026-07-09T12:11:00.000Z",
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+      ],
+    } as unknown as QueueStatusResult
+
+    const allRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), false)
+    const latestRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)
+
+    expect(allRows.map((row) => row.pr)).toEqual(["PR1", "PR1", "PR2"])
+    expect(latestRows.map((row) => row.pr)).toEqual(["PR1", "PR2"])
+    expect(latestRows.find((row) => row.pr === "PR1")?.run).toBe("R2")
   })
 
   it("falls back to job status when a watch queue job carries no evidence detail", () => {

@@ -37,6 +37,7 @@ import {
   PREligibilityView,
   PRRunsView,
   QueueRunsView,
+  QueueTimelineView,
   QueueWatchView,
   QueueStatusView,
   type PRCheckViewRecord,
@@ -1000,7 +1001,7 @@ async function listQueues(
     jsonEnabled(options),
     { command: "queue.list", results },
     options.latest === true
-      ? createElement(QueueWatchView, { results, now })
+      ? createElement(QueueTimelineView, { results, now, latest: true, state: state.bays })
       : createElement(QueueListView, { results, now }),
   )
 }
