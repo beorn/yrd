@@ -3,7 +3,7 @@ import * as z from "zod"
 export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
 export const GitRefSchema = z.string().trim().min(1)
-export const GitShaSchema = z.string().regex(/^[0-9a-f]{40,64}$/iu)
+export const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
 export const CorrelationSchema = z
   .object({
     namespace: z.string().trim().min(1),

@@ -1181,6 +1181,9 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
   }
   if (original.issue === undefined) throw new Error(`yrd: original PR '${original.id}' has no issue reference`)
   if (repair.issue === undefined) throw new Error(`yrd: repair PR '${repair.id}' has no issue reference`)
+  if (original.integratedAt === undefined || repair.integratedAt === undefined) {
+    throw new Error("yrd: integrated regression tuple is missing its journal timestamp")
+  }
   if (original.terminalRun !== args.run) {
     raiseFailure(
       "refusal",
@@ -1196,6 +1199,19 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     )
   }
 
+  const detectedAt = new Date(args.detectedAt).toISOString()
+  if (
+    Date.parse(original.integratedAt) > Date.parse(detectedAt) ||
+    Date.parse(detectedAt) > Date.parse(repair.integratedAt)
+  ) {
+    raiseFailure(
+      "refusal",
+      "regression-chronology-invalid",
+      `yrd: regression chronology must satisfy original integration <= detection <= repair integration ` +
+        `(${original.integratedAt} <= ${detectedAt} <= ${repair.integratedAt})`,
+    )
+  }
+
   const fact = PRRegressionSchema.parse({
     pr: original.id,
     issueRef: original.issue,
@@ -1203,7 +1219,7 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     headSha: original.headSha,
     run: args.run,
     landingSha: original.integration.commit,
-    detectedAt: new Date(args.detectedAt).toISOString(),
+    detectedAt,
     severity: args.severity,
     evidence: args.evidence,
     implementationRunRef: args.implementationRunRef,
@@ -1576,7 +1592,21 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         repair.terminalRun !== fact.repairRun ||
         repair.integration?.commit !== fact.repairLandingSha
       ) {
-        return state
+        throw new Error(
+          `yrd: regression tuple does not match current integrated PR '${fact.pr}' and repair '${fact.repairPr}'`,
+        )
+      }
+      if (pr.integratedAt === undefined || repair.integratedAt === undefined) {
+        throw new Error("yrd: regression tuple is missing an integration timestamp")
+      }
+      if (
+        Date.parse(pr.integratedAt) > Date.parse(fact.detectedAt) ||
+        Date.parse(fact.detectedAt) > Date.parse(repair.integratedAt) ||
+        Date.parse(repair.integratedAt) > Date.parse(applied.ts)
+      ) {
+        throw new Error(
+          `yrd: regression chronology must satisfy original integration <= detection <= repair integration <= recorded time`,
+        )
       }
       if (pr.regressions?.some((existing) => regressionKey(existing) === regressionKey(fact)) === true) return state
       return patchPR(pr, { regressions: [...(pr.regressions ?? []), { ...fact, recordedAt: applied.ts }] })

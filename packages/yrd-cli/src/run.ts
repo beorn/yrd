@@ -140,7 +140,7 @@ type TrackerDeliveryIdentity = Readonly<{
 
 type TrackerDelivery =
   | (TrackerDeliveryIdentity & Readonly<{ status: "pushed" | "submitted" | "withdrawn" | "canceled" }>)
-  | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce?: Readonly<{ run: string; detail?: string }> }>)
+  | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; bounce: Readonly<{ run: string; detail?: string }> }>)
   | (TrackerDeliveryIdentity &
       Readonly<{ status: "integrated"; landingSha: string; regressions?: readonly PRRegression[] }>)
 
@@ -180,16 +180,16 @@ function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>)
     case "submitted":
       return pr.submittedAt === undefined ? undefined : { ...identity, status: "submitted", at: pr.submittedAt }
     case "rejected":
-      return pr.rejectedAt === undefined
-        ? undefined
-        : {
-            ...identity,
-            status: "rejected",
-            at: pr.rejectedAt,
-            ...(pr.terminalRun === undefined
-              ? {}
-              : { bounce: { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) } }),
-          }
+      if (pr.rejectedAt === undefined) return undefined
+      if (pr.terminalRun === undefined) {
+        refusal(`trackerBridge v1 cannot project rejected PR '${pr.id}' without a typed Queue bounce run`)
+      }
+      return {
+        ...identity,
+        status: "rejected",
+        at: pr.rejectedAt,
+        bounce: { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) },
+      }
     case "integrated":
       return pr.integratedAt === undefined || pr.integration === undefined
         ? undefined
