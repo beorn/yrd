@@ -1911,6 +1911,58 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("accepts queue ls --latest as the canonical queue list lens", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const status = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
+    expect(status.stdout()).toContain("QUEUE POS")
+    expect(status.stdout()).toContain("PR1")
+    expect(status.stdout()).not.toContain("LIVE")
+  })
+
+  it("renders queue --watch identically to root watch", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    let rootMounted: ReactElement | undefined
+    const watchVariants: Array<{ argv: readonly string[]; mounted?: ReactElement }> = [
+      { argv: yrd("queue", "--watch") },
+      { argv: yrd("queue", "ls", "--watch") },
+    ]
+
+    const rootWatch = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+    })
+    const rootLive = withLiveRenderer(rootWatch.io, async (element) => {
+      rootMounted = element
+    })
+    expect(await runYrd(app, yrd("watch"), rootLive)).toBe(0)
+
+    const rootFrame = stripOsc8Targets(
+      await renderString(createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial, paused: false })),
+    )
+    for (const variant of watchVariants) {
+      let mounted: ReactElement | undefined
+      const watch = outputIO({
+        now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      })
+      const live = withLiveRenderer(watch.io, async (element) => {
+        mounted = element
+      })
+      expect(await runYrd(app, variant.argv, live)).toBe(0)
+      if (mounted === undefined) throw new Error("expected watch panes to mount")
+      const frame = stripOsc8Targets(
+        await renderString(createElement(QueueWatchFrame, { snapshot: (mounted.props as QueueWatchPaneProps).initial, paused: false })),
+      )
+      expect(frame).toBe(rootFrame)
+    }
+  })
+
   it("renders pause and drain health in watch output", async () => {
     const app = await createApp()
     await openAndSubmit(app)
