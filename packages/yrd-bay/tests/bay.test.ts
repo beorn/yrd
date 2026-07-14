@@ -580,7 +580,14 @@ describe("withBays", () => {
     const treeSha = "c".repeat(40)
     const patchId = "d".repeat(40)
 
-    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_1, baseSha: BASE, draft: true })
+    const correlation = { namespace: "tribe-request", id: "recut-identity" }
+    await app.bays.submit({
+      branch: "issue/recut",
+      headSha: HEAD_1,
+      baseSha: BASE,
+      correlation,
+      draft: true,
+    })
     await app.bays.review({
       pr: "PR1",
       actor: "@cto",
@@ -622,13 +629,15 @@ describe("withBays", () => {
       revision: 2,
       headSha: HEAD_2,
       baseSha: nextBase,
+      correlation,
       recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
       revisions: [
-        { revision: 1, headSha: HEAD_1 },
+        { revision: 1, headSha: HEAD_1, correlation },
         {
           revision: 2,
           headSha: HEAD_2,
           baseSha: nextBase,
+          correlation,
           recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
         },
       ],
@@ -646,6 +655,55 @@ describe("withBays", () => {
     await expect(app.bays.recut(args)).rejects.toMatchObject({
       failure: { kind: "refusal", code: "terminal-target" },
     })
+  })
+
+  it("keeps the selected immutable revision correlation when recutting an older payload", async () => {
+    await using app = (await createHarness()).app
+    const sourceCorrelation = { namespace: "tribe-request", id: "source" }
+    const currentCorrelation = { namespace: "tribe-request", id: "current" }
+    await app.bays.submit({
+      branch: "issue/recut-source",
+      headSha: HEAD_1,
+      correlation: sourceCorrelation,
+      draft: true,
+    })
+    await app.bays.intake({ branch: "issue/recut-source", headSha: HEAD_2, base: "main" })
+    await app.bays.submit({ pr: "PR1", correlation: currentCorrelation })
+
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: "3".repeat(40),
+      baseSha: "b".repeat(40),
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+
+    expect(app.bays.pr("PR1")).toMatchObject({
+      revision: 3,
+      correlation: sourceCorrelation,
+      revisions: [
+        { revision: 1, correlation: sourceCorrelation },
+        { revision: 2, correlation: currentCorrelation },
+        { revision: 3, correlation: sourceCorrelation, recut: { fromRevision: 1 } },
+      ],
+    })
+
+    await app.bays.submit({ branch: "issue/recut-uncorrelated", headSha: "4".repeat(40), draft: true })
+    await app.bays.intake({ branch: "issue/recut-uncorrelated", headSha: "5".repeat(40), base: "main" })
+    await app.bays.submit({ pr: "PR2", correlation: currentCorrelation })
+    await app.bays.recut({
+      pr: "PR2",
+      fromRevision: 1,
+      headSha: "6".repeat(40),
+      baseSha: "b".repeat(40),
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    expect(app.bays.pr("PR2")?.correlation).toBeUndefined()
+    expect(app.bays.pr("PR2")?.revisions[2]?.correlation).toBeUndefined()
   })
 
   it("refuses to append check requests to terminal PR history", async () => {

@@ -1,7 +1,15 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import type { BaysState, Correlation, PR, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
+import {
+  prRevisionLineage,
+  prSourceReadyAt,
+  type BaysState,
+  type Correlation,
+  type PR,
+  type PRRevisionClock,
+  type PRRevisionTerminal,
+} from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
@@ -30,6 +38,12 @@ export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "in
 export type QueueTimelineStatus = "pending" | "running" | QueueTerminalOutcome
 export type QueueTimelineGroup = "pending" | "running" | "completed"
 
+export type QueueTimelineRevisionLineage = Readonly<{
+  pr: string
+  revisions: readonly number[]
+  sourceReadyAt?: string
+}>
+
 export type QueueTimelineProjectedRow = Readonly<{
   id: string
   base: string
@@ -44,6 +58,8 @@ export type QueueTimelineProjectedRow = Readonly<{
   subject: string
   detail: string
   position?: number
+  sourceReadyAt?: string
+  revisionLineage: readonly QueueTimelineRevisionLineage[]
   failure?: Readonly<{ code: string; message: string }>
   ageMs: number | null
   tookMs: number | null
@@ -326,6 +342,8 @@ export type HumanPRProjection = Row &
     glyph: string
     runId?: string
     submittedAt?: string
+    sourceReadyAt?: string
+    revisionLineage: readonly number[]
     touchedAt?: string
     failure?: HumanFailureProjection
   }>
@@ -1275,6 +1293,60 @@ function timelineSubject(result: QueueStatusResult, run: QueueRun, state: BaysSt
   )
 }
 
+function timelineRevisionLineage(pr: PR, revision = pr.revision): QueueTimelineRevisionLineage {
+  const retained = pr.revisions?.some((candidate) => candidate.revision === revision)
+  if (retained !== true) {
+    return {
+      pr: pr.id,
+      revisions: [revision],
+      ...(revision === pr.revision && pr.submittedAt !== undefined ? { sourceReadyAt: pr.submittedAt } : {}),
+    }
+  }
+  const revisions = prRevisionLineage(pr, revision)
+  const sourceReadyAt = prSourceReadyAt(pr, revision)
+  return {
+    pr: pr.id,
+    revisions: revisions.map((candidate) => candidate.revision),
+    ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
+  }
+}
+
+function timelineRunLineages(result: QueueStatusResult, run: QueueRun): QueueTimelineRevisionLineage[] {
+  return run.prs.map((member) => {
+    const pr = result.prs.find((candidate) => candidate.id === member.id)
+    if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+    return timelineRevisionLineage(pr, member.revision)
+  })
+}
+
+function timelineLineageLabel(lineages: readonly QueueTimelineRevisionLineage[]): string | undefined {
+  const recuts = lineages.filter(({ revisions }) => revisions.length > 1)
+  if (recuts.length === 0) return undefined
+  return recuts
+    .map(({ pr, revisions }) => {
+      const path = revisions.map((revision) => `rev${revision}`).join("→")
+      return recuts.length === 1 ? path : `${pr} ${path}`
+    })
+    .join(" · ")
+}
+
+function withTimelineLineage(detail: string, lineages: readonly QueueTimelineRevisionLineage[]): string {
+  const lineage = timelineLineageLabel(lineages)
+  return lineage === undefined ? detail : `${detail} · ${lineage}`
+}
+
+function retargetTimelineLineage(
+  detail: string,
+  current: readonly QueueTimelineRevisionLineage[],
+  selected: readonly QueueTimelineRevisionLineage[],
+): string {
+  const currentLabel = timelineLineageLabel(current)
+  if (currentLabel === undefined) return withTimelineLineage(detail, selected)
+  const suffix = ` · ${currentLabel}`
+  if (!detail.endsWith(suffix)) throw new Error("yrd: queue timeline row lost its revision-lineage suffix")
+  return withTimelineLineage(detail.slice(0, -suffix.length), selected)
+}
+
 function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
   return run.prs.map((member) => {
     const runKey = queueRunRevisionKey(run, member)
@@ -1301,7 +1373,7 @@ function timelineRunRow(
     : (elapsedMs(run.startedAt, run.finishedAt, `Run '${run.id}' active duration`) ?? null)
   const failure = status === "integrated" ? undefined : failureFact(run, relevantStep(run))
   const step = relevantStep(run)
-  const detail =
+  const baseDetail =
     failure === undefined
       ? status === "integrated"
         ? queueLanding(run)
@@ -1309,6 +1381,8 @@ function timelineRunRow(
           ? run.status
           : `${step.name}: ${jobStatus(step)}`
       : `${failure.code}: ${causalSummary(failure.message)}`
+  const revisionLineage = timelineRunLineages(result, run)
+  const detail = withTimelineLineage(baseDetail, revisionLineage)
   return {
     id: `${run.base}:run:${run.id}`,
     base: run.base,
@@ -1322,6 +1396,7 @@ function timelineRunRow(
     branches: run.prs.map((member) => member.branch),
     subject: timelineSubject(result, run, state),
     detail,
+    revisionLineage,
     ...(failure === undefined ? {} : { failure }),
     ageMs: timelineAge(timestamp ?? undefined, nowIso, `Run '${run.id}' recency`),
     tookMs: activeMs,
@@ -1346,6 +1421,9 @@ function timelinePendingRows(
     const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`)
     const position = positions.get(pr.id)
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
+    const revisionLineage = [timelineRevisionLineage(pr)]
+    const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
+    const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
     return [
       {
         id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1358,9 +1436,11 @@ function timelinePendingRows(
         prs: [pr.id],
         branches: [pr.branch],
         subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
-        detail: position === undefined ? "queued" : `position ${position}`,
+        detail,
         ...(position === undefined ? {} : { position }),
-        ageMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue age`),
+        ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
+        revisionLineage,
+        ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
         tookMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
         activeMs: null,
         queueWaitMs: [],
@@ -1416,7 +1496,9 @@ function latestTimelineRows(rows: readonly QueueTimelineProjectedRow[]): QueueTi
       return branch === undefined ? [] : [branch]
     })
     const queueWaitMs = memberIndexes.map((index) => row.queueWaitMs[index] ?? null)
-    return [{ ...row, prs, branches, subject: branches.join(" · "), queueWaitMs }]
+    const revisionLineage = row.revisionLineage.filter((entry) => prs.includes(entry.pr))
+    const detail = retargetTimelineLineage(row.detail, row.revisionLineage, revisionLineage)
+    return [{ ...row, prs, branches, subject: branches.join(" · "), detail, queueWaitMs, revisionLineage }]
   })
 }
 
@@ -1565,6 +1647,10 @@ function projectPR(
   const isCurrentRevision =
     revision === undefined || (revision.revision === pr.revision && revision.headSha === pr.headSha)
   const submittedAt = revision?.submittedAt ?? (run === undefined && isCurrentRevision ? pr.submittedAt : undefined)
+  const projectedRevision = revision?.revision ?? pr.revision
+  const lineage = timelineRevisionLineage(pr, projectedRevision)
+  const sourceReadyAt = lineage.sourceReadyAt
+  const revisionLineage = lineage.revisions
   const touchedAt = latest(
     ...(runOverride === undefined
       ? [revision?.pushedAt, submittedAt, revision?.terminal?.at, pr.rejectedAt, pr.integratedAt, pr.withdrawnAt]
@@ -1625,8 +1711,10 @@ function projectPR(
     glyph: statusGlyph(stateLabel),
     ...(run === undefined ? {} : { runId: run.id }),
     ...(submittedAt === undefined ? {} : { submittedAt }),
+    ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
+    revisionLineage,
     target: pr.base,
-    age: age(submittedAt ?? revision?.pushedAt, ageAt, `PR '${pr.id}' submitted age`),
+    age: age(sourceReadyAt ?? submittedAt ?? revision?.pushedAt, ageAt, `PR '${pr.id}' source-ready age`),
     touched: age(touchedAt, now, `PR '${pr.id}' touched age`),
     ...(touchedAt === undefined ? {} : { touchedAt }),
     run: runDuration,
@@ -1765,6 +1853,7 @@ export type PRListRow = Readonly<{
   stateLabel: string
   glyph: string
   revision: number
+  lineage: string
   subject: string
   target: string
   review: "n/a" | "need" | "ok" | "reject"
@@ -1815,6 +1904,7 @@ export function prListRows(
       stateLabel: `${projected.glyph} ${projected.state}`,
       glyph: projected.glyph,
       revision: pr.revision,
+      lineage: projected.revisionLineage.join("→"),
       subject: projected.subject,
       target: projected.target,
       review: reviewLabel(eligibility),
@@ -1849,6 +1939,7 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
       render: (row: PRListRow) => <PRStateValue row={row} />,
     },
     { header: "REV", key: "revision", minWidth: 5, maxWidth: 6 },
+    { header: "LINEAGE", key: "lineage", minWidth: 8, maxWidth: 10 },
     { header: "SUBJECT", key: "subject", minWidth: 9, maxWidth: 26, grow: true },
     ...(terminalColumns >= 100 ? [base] : []),
     { header: "REVIEW", key: "review", minWidth: 8, maxWidth: 8 },
@@ -2023,6 +2114,8 @@ export function PRDetailView({
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
   const detail = prDetailData(pr, runs, attempts)
+  const lineage = timelineRevisionLineage(pr)
+  const revisionLineage = lineage.revisions.map((revision) => `rev${revision}`).join("→")
 
   return (
     <Box flexDirection="column">
@@ -2036,6 +2129,9 @@ export function PRDetailView({
       <Text>
         <Text bold>BASE</Text> {pr.base}
         {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
+      </Text>
+      <Text>
+        <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>LINEAGE</Text> {revisionLineage}
       </Text>
       <Text>
         <Text bold>RELATED RUNS</Text> {detail.runs.length === 0 ? "-" : detail.runs.map((run) => run.run).join(",")}

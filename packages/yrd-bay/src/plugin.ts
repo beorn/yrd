@@ -1664,11 +1664,13 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         treeSha: recut.treeSha,
         reviewCarried: recut.reviewCarried,
       }
+      const correlation = predecessor.correlation
       const revision: PRRevision = {
         revision: recut.successor.revision,
         headSha: recut.successor.headSha,
         base: pr.base,
         baseSha: recut.successor.baseSha,
+        ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
         ...(recut.composition === undefined ? {} : { composition: recut.composition }),
         recut: proof,
         pushedAt: applied.ts,
@@ -1699,7 +1701,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         revision: revision.revision,
         headSha: revision.headSha,
         baseSha: revision.baseSha,
-        correlation: undefined,
+        ...(correlation === undefined ? { correlation: undefined } : { correlation: { ...correlation } }),
         ...(recut.composition === undefined ? { composition: undefined } : { composition: recut.composition }),
         recut: proof,
         revisions: [...pr.revisions, revision],

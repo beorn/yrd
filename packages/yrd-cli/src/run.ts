@@ -7,6 +7,8 @@ import {
   CompositionV1Schema,
   CorrelationSchema,
   baseIdentity,
+  prRevisionLineage,
+  prSourceReadyAt,
   resolveBay,
   resolveBase,
   resolvePR,
@@ -666,11 +668,15 @@ async function recutPr(
     current = requiredPr(app, current.id)
   }
   const output = {
+    pr: current.id,
     revision: current.revision,
     baseSha: result.baseSha,
     treeSha: result.treeSha,
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
+    ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+    sourceReadyAt: prSourceReadyAt(current),
+    lineage: prRevisionLineage(current).map((revision) => revision.revision),
     unchanged,
   }
   await printResult(

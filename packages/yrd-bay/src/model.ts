@@ -288,6 +288,41 @@ export function reviewState(pr: PR): PRReviewState {
   }
 }
 
+/** Mechanically certified revision ancestry for one logical PR payload.
+ * Ordinary authored revisions start a new lineage; recuts retain the source
+ * revision through their persisted `fromRevision` proof. */
+export function prRevisionLineage(pr: PR, revision = pr.revision): readonly PRRevision[] {
+  const byRevision = new Map(pr.revisions.map((candidate) => [candidate.revision, candidate]))
+  let current = byRevision.get(revision)
+  if (current === undefined || (revision === pr.revision && current.headSha !== pr.headSha)) {
+    throw new Error(`yrd: PR '${pr.id}' has no retained revision ${revision}`)
+  }
+  const lineage: PRRevision[] = []
+  const seen = new Set<number>()
+  while (current !== undefined) {
+    if (seen.has(current.revision)) throw new Error(`yrd: PR '${pr.id}' has cyclic recut lineage`)
+    seen.add(current.revision)
+    lineage.unshift(current)
+    const predecessor = current.recut?.fromRevision
+    if (predecessor === undefined) break
+    current = byRevision.get(predecessor)
+    if (current === undefined) {
+      throw new Error(
+        `yrd: PR '${pr.id}' recut revision ${lineage[0]?.revision ?? revision} lost predecessor ${predecessor}`,
+      )
+    }
+  }
+  return lineage
+}
+
+/** First submitted clock for a mechanically identical payload, falling back
+ * to its first immutable source-ready (`pushed`) clock before admission. */
+export function prSourceReadyAt(pr: PR, revision = pr.revision): string {
+  const source = prRevisionLineage(pr, revision)[0]
+  if (source === undefined) throw new Error(`yrd: PR '${pr.id}' has no source-ready revision`)
+  return source.submittedAt ?? source.pushedAt
+}
+
 export function checksRequested(pr: PR): boolean {
   return checkRequest(pr) !== undefined
 }

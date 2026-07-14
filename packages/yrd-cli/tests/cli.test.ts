@@ -967,11 +967,16 @@ describe("runYrd", () => {
   })
 
   it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {
-    const app = await createApp({ requires: ["review"] })
+    let clockTick = 0
+    const app = await createApp({
+      requires: ["review"],
+      clock: () => new Date(Date.parse("2026-07-09T10:00:00.000Z") + clockTick++ * 60_000).toISOString(),
+    })
     const nextHead = "2".repeat(40)
     const nextBase = "b".repeat(40)
     const treeSha = "c".repeat(40)
     const patchId = "d".repeat(40)
+    const correlation = { namespace: "tribe-request", id: "recut-identity" }
     const requests: unknown[] = []
     const services = {
       recut: {
@@ -987,7 +992,9 @@ describe("runYrd", () => {
         },
       },
     } as unknown as YrdCliServices
-    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, correlation })
+    const sourceReadyAt = app.bays.pr("PR1")?.revisions[0]?.submittedAt
+    if (sourceReadyAt === undefined) throw new Error("missing first revision submission clock")
     await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "review-r1" })
     const output = outputIO()
 
@@ -1003,14 +1010,19 @@ describe("runYrd", () => {
         revision: 1,
         headSha: HEAD_SHA,
         baseSha: BASE_SHA,
+        correlation,
       }),
     ])
     expect(JSON.parse(output.stdout())).toMatchObject({
+      pr: "PR1",
       revision: 2,
       baseSha: nextBase,
       treeSha,
       patchId,
       reviewCarried: true,
+      correlation,
+      sourceReadyAt,
+      lineage: [1, 2],
       unchanged: false,
     })
     expect(app.bays.pr("PR1")).toMatchObject({
@@ -1018,13 +1030,29 @@ describe("runYrd", () => {
       status: "submitted",
       revision: 2,
       headSha: nextHead,
+      correlation,
       recut: { fromRevision: 1, treeSha, patchId, reviewCarried: true },
+      revisions: [
+        { revision: 1, correlation, submittedAt: sourceReadyAt },
+        { revision: 2, correlation, submittedAt: expect.any(String) },
+      ],
     })
+    expect(app.bays.pr("PR1")?.revisions[1]?.submittedAt).not.toBe(sourceReadyAt)
     expect(app.bays.reviewState("PR1")).toMatchObject({
       approved: true,
       current: { carriedFrom: { revision: 1, headSha: HEAD_SHA } },
     })
     expect(app.bays.checksRequested("PR1")).toBe(true)
+
+    const status = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    expect(await runYrd(app, yrd("pr", "list"), status.io, services)).toBe(0)
+    expect(status.stdout()).toContain("LINEAGE")
+    expect(status.stdout()).toContain("1→2")
+
+    const detail = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
+    expect(await runYrd(app, yrd("pr", "view", "PR1"), detail.io, services)).toBe(0)
+    expect(detail.stdout()).toContain(`SOURCE READY ${sourceReadyAt}`)
+    expect(detail.stdout()).toContain("LINEAGE rev1→rev2")
 
     const repeated = outputIO()
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
@@ -1187,7 +1215,7 @@ describe("runYrd", () => {
       expect(human).toContain("[!] rejected")
       expect(human).toContain("[x] integrated")
       expect(human).not.toContain(entries[0]!.pr.branch)
-      expect(physical[0]?.includes("AGE")).toBe(columns === 120)
+      expect(physical[0]?.trim().split(/\s+/u).includes("AGE")).toBe(columns === 120)
       expect(physical[0]?.includes("BASE")).toBe(columns === 120)
       expect(physical[0]?.includes("CHANGED")).toBe(columns === 120)
       expect(human.includes("release/2.0")).toBe(columns === 120)
@@ -2480,6 +2508,108 @@ describe("runYrd", () => {
       },
       queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
     })
+  })
+
+  it("keeps one recut PR card with cumulative source-ready age and revision lineage", async () => {
+    const minute = 60_000
+    const firstSubmittedAt = "2026-07-13T10:00:00.000Z"
+    const currentSubmittedAt = "2026-07-13T11:55:00.000Z"
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const patchId = "d".repeat(40)
+    const treeSha = "e".repeat(40)
+    const pr: PR = {
+      id: "PR1",
+      branch: "topic/recut",
+      base: "main",
+      status: "submitted",
+      revision: 2,
+      headSha: "2".repeat(40),
+      baseSha: "b".repeat(40),
+      recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
+      revisions: [
+        {
+          revision: 1,
+          headSha: "1".repeat(40),
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-13T09:59:00.000Z",
+          submittedAt: firstSubmittedAt,
+        },
+        {
+          revision: 2,
+          headSha: "2".repeat(40),
+          base: "main",
+          baseSha: "b".repeat(40),
+          pushedAt: "2026-07-13T11:54:00.000Z",
+          submittedAt: currentSubmittedAt,
+          recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
+        },
+      ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+      submittedAt: currentSubmittedAt,
+    }
+    const result: QueueStatusResult = {
+      base: "main",
+      prs: [pr],
+      running: [],
+      waiting: [],
+      finished: [],
+    }
+    const projection = queueTimelineProjection([result], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: new Map([[queueRevisionKey(pr), currentSubmittedAt]]),
+    })
+
+    expect(projection.rows).toHaveLength(1)
+    expect(projection.rows[0]).toMatchObject({
+      prs: ["PR1"],
+      status: "pending",
+      timestamp: currentSubmittedAt,
+      sourceReadyAt: firstSubmittedAt,
+      revisionLineage: [{ pr: "PR1", revisions: [1, 2], sourceReadyAt: firstSubmittedAt }],
+      detail: "position 1 · rev1→rev2",
+      ageMs: 120 * minute,
+      tookMs: 5 * minute,
+    })
+    const rendered = await renderString(createElement(QueueTimelineView, { projection }), {
+      width: 200,
+      height: 20,
+      plain: true,
+    })
+    expect(rendered).toContain("rev1→rev2")
+
+    const running = fakeRun({
+      id: "R1",
+      status: "running",
+      pr: { id: pr.id, revision: pr.revision, headSha: pr.headSha, baseSha: pr.baseSha },
+      subject: pr.branch,
+      startedAt: "2026-07-13T11:57:00.000Z",
+      steps: [],
+    })
+    const runningProjection = queueTimelineProjection([{ ...result, running: [running] }], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: new Map([[queueRevisionKey(pr), currentSubmittedAt]]),
+    })
+    expect(runningProjection.rows).toMatchObject([
+      {
+        run: "R1",
+        status: "running",
+        revisionLineage: [{ pr: "PR1", revisions: [1, 2], sourceReadyAt: firstSubmittedAt }],
+        detail: "running · rev1→rev2",
+      },
+    ])
   })
 
   it("builds one filtered status-major timeline and FLOW projection from the same snapshot", async () => {
