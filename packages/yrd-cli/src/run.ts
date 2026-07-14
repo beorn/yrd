@@ -33,7 +33,6 @@ import {
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
-  QueueListView,
   PRChecksView,
   PRDetailView,
   PREligibilityView,
@@ -1192,9 +1191,7 @@ async function listQueues(
     io,
     jsonEnabled(options),
     { command: "queue.list", results },
-    options.latest === true
-      ? createElement(QueueTimelineView, { results, now, latest: true, state: state.bays })
-      : createElement(QueueListView, { results, now }),
+    createElement(QueueTimelineView, { results, now, latest: options.latest === true, state: state.bays }),
   )
 }
 

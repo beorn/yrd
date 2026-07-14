@@ -1945,6 +1945,7 @@ describe("runYrd", () => {
           status: "submitted",
           revision: 1,
           headSha: HEAD_SHA,
+          revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
           submittedAt: "2026-07-09T12:00:00.000Z",
         },
         {
@@ -1955,6 +1956,7 @@ describe("runYrd", () => {
           status: "submitted",
           revision: 1,
           headSha: "2".repeat(40),
+          revisions: [submittedRevision(1, "2".repeat(40), "2026-07-09T12:01:00.000Z")],
           submittedAt: "2026-07-09T12:01:00.000Z",
         },
       ],

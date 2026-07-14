@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import type { BaysState, Correlation, PR, PRRevision, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
+import type { BaysState, Correlation, PR, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
@@ -489,10 +489,6 @@ export function queueTimelineRows(
     }
   }
   return [...latestByPr.values()].toSorted(compareQueueTimelineRows)
-}
-
-function matchingRevision(pr: PR, pinned: PinnedPRRevision): PRRevision | undefined {
-  return pr.revisions?.find((revision) => revision.revision === pinned.revision && revision.headSha === pinned.headSha)
 }
 
 function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {
@@ -1843,27 +1839,35 @@ export function QueueTimelineView({
   onSelect?: (index: number) => void
 }) {
   const rows = queueTimelineRows(results, now, latest, state)
-  if (rows.length === 0) return <Text color="$fg-muted">No matching queue rows.</Text>
   return (
-    <ListView
-      items={rows}
-      nav={nav}
-      cursorKey={cursorKey}
-      onCursor={onCursor}
-      onSelect={onSelect}
-      active={true}
-      getKey={(row) => row.key}
-      estimateHeight={1}
-      renderItem={(row, _index, meta) => (
-        <Box height={1}>
-          <Text wrap="truncate">
-            {meta.isCursor ? "> " : "  "}
-            <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text> {row.pr} {row.run ?? "-"} {row.subject}{" "}
-            <Text color="$fg-muted">{row.detail}</Text>
-          </Text>
-        </Box>
+    <Box flexDirection="column">
+      {results.map((result) => (
+        <SummaryQueue key={result.base} projection={humanQueueProjection(result, now)} />
+      ))}
+      {rows.length === 0 ? (
+        <Text color="$fg-muted">No matching queue rows.</Text>
+      ) : (
+        <ListView
+          items={rows}
+          nav={nav}
+          cursorKey={cursorKey}
+          onCursor={onCursor}
+          onSelect={onSelect}
+          active={true}
+          getKey={(row) => row.key}
+          estimateHeight={1}
+          renderItem={(row, _index, meta) => (
+            <Box height={1}>
+              <Text wrap="truncate">
+                {meta.isCursor ? "> " : "  "}
+                <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text> {row.pr} {row.run ?? "-"} {row.subject}{" "}
+                <Text color="$fg-muted">{row.detail}</Text>
+              </Text>
+            </Box>
+          )}
+        />
       )}
-    />
+    </Box>
   )
 }
 
