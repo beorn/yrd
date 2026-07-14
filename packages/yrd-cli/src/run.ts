@@ -1306,7 +1306,6 @@ async function watchQueueRuns(
   const scope = io.scope ?? app.scope
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
-  let exit: YrdCliExitCode = 0
   while (true) {
     const runs = await runQueues(app, selectors, options, io)
     if (jsonEnabled(options)) {
@@ -1314,9 +1313,9 @@ async function watchQueueRuns(
     } else if (runs.length > 0) {
       await printHuman(io, createElement(QueueRunsView, { runs }))
     }
-    if (runs.some((run) => run.status === "failed")) exit = 1
+    const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
     if (drainRequested()) {
-      if (runs.every(Queues.terminal)) return exit
+      if (runs.every(Queues.terminal)) return runs.at(-1)?.status === "failed" ? 1 : 0
       await scope.sleep(interval)
       continue
     }
