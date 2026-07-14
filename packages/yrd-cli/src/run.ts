@@ -33,6 +33,7 @@ import {
   QueueLogView,
   QueueListView,
   PRChecksView,
+  PRDetailView,
   PREligibilityView,
   PRRunsView,
   QueueRunsView,
@@ -638,16 +639,16 @@ async function viewPr(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const positions = pr.status === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
+  const runs = prQueueRuns(app, pr)
   await printResult(
     io,
     jsonEnabled(options),
     { command, pr, ...(position === undefined ? {} : { position }), results },
-    createElement(QueueStatusView, {
-      state: state.bays,
-      results,
-      selected: target.selected,
-      ...(positions === undefined ? {} : { positions }),
+    createElement(PRDetailView, {
+      pr,
+      runs,
       now: io.now?.() ?? Date.now(),
+      ...(position === undefined ? {} : { position }),
     }),
   )
 }
@@ -1367,9 +1368,17 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
       refusal("watch requires an interactive terminal; use --json for streaming output")
     }
     const initial = await load()
-    await renderLive(createElement(QueueWatchPane, { initial, load, intervalMs: interval }), {
-      signal: scope.signal,
-    })
+    await renderLive(
+      createElement(QueueWatchPane, {
+        initial,
+        load,
+        intervalMs: interval,
+        ...(options.pr === undefined ? {} : { pr: options.pr }),
+      }),
+      {
+        signal: scope.signal,
+      },
+    )
     return 0
   }
 
@@ -1379,7 +1388,10 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
       io,
       true,
       { command: "watch", results: snapshot.results },
-      createElement(QueueWatchView, snapshot),
+      createElement(QueueWatchView, {
+        ...snapshot,
+        ...(options.pr === undefined ? {} : { pr: options.pr }),
+      }),
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
