@@ -997,26 +997,64 @@ describe("Queue", () => {
   })
 
   it("audits a rejected revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
-    let rejectFirstRun = true
-    await using app = await createQueueApp({
-      check: (input) => {
-        if (rejectFirstRun && input.prs.some((pr) => pr.id === "PR1")) {
-          rejectFirstRun = false
-          return { status: "failed", error: { code: "check-failed", message: "reject R1" } }
-        }
-        return { status: "passed", output: { checked: true } }
-      },
-    })
-
-    const retried = await submitBranch(app, "issue/retry-without-submit")
-    const first = (await app.queue.run({ prs: [retried.id] }, runtime))[0]
+    const journal = createMemoryJournal<unknown>()
+    const original = await createQueueApp(
+      { check: () => ({ status: "failed", error: { code: "check-failed", message: "reject R1" } }) },
+      journal,
+    )
+    const retried = await submitBranch(original, "issue/retry-without-submit")
+    const first = (await original.queue.run({ prs: [retried.id] }, runtime))[0]
     if (first === undefined) throw new Error("expected authorized R1")
     expect(first).toMatchObject({ id: "R1", status: "failed" })
-    expect(app.state().bays.prs[retried.id]?.status).toBe("rejected")
+    expect(original.state().bays.prs[retried.id]?.status).toBe("rejected")
+    const firstRecord = original.state().queues.records.R1
+    if (firstRecord === undefined) throw new Error("expected persisted R1")
+    await original.close()
 
-    const retry = (await app.queue.admit({ prs: [retried.id], retry: true }, runtime))[0]
-    if (retry === undefined) throw new Error("expected unauthorized R2")
-    expect(retry).toMatchObject({ id: "R2", status: "passed" })
+    let cursor = 0
+    for await (const batch of journal.read()) cursor = batch.cursor
+    const command = { id: "00000000-0000-7000-9000-000000009201", op: "fixture.r92-retry" }
+    expect(
+      await journal.append(
+        {
+          command,
+          cause: {
+            id: "00000000-0000-7000-9000-000000009202",
+            commandId: command.id,
+            op: command.op,
+            commandHash: Command.hash(command),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-9000-000000009203",
+              name: "queue/run/started",
+              ts: "2026-01-01T00:01:00.000Z",
+              data: {
+                run: {
+                  id: "R2",
+                  prs: firstRecord.prs,
+                  base: firstRecord.base,
+                  steps: firstRecord.steps,
+                },
+              },
+            },
+            {
+              id: "00000000-0000-7000-9000-000000009204",
+              name: "queue/run/failed",
+              ts: "2026-01-01T00:01:00.001Z",
+              data: {
+                run: "R2",
+                error: { code: "legacy-retry-terminal", message: "R2 ended without a fresh submit" },
+              },
+            },
+          ],
+        },
+        cursor,
+      ),
+    ).toMatchObject({ appended: true })
+
+    await using app = await createQueueApp({}, journal, undefined, ids(500))
+    expect(app.queue.get("R2")).toMatchObject({ status: "failed", prs: [{ id: retried.id }] })
 
     const submitted = await submitBranch(app, "issue/submitted-control")
     const submittedRun = (await app.queue.run({ prs: [submitted.id] }, runtime))[0]
@@ -1035,7 +1073,7 @@ describe("Queue", () => {
     expect(app.state().bays.prs.PR3?.status).toBe("pushed")
 
     expect(app.queue.audit().findings).toEqual([
-      expect.objectContaining({ code: "run-without-submit-ancestry", run: retry.id, pr: retried.id }),
+      expect.objectContaining({ code: "run-without-submit-ancestry", run: "R2", pr: retried.id }),
     ])
   })
 
@@ -1050,7 +1088,7 @@ describe("Queue", () => {
     expect(await Array.fromAsync(app.events())).toEqual(before)
   })
 
-  it("keeps a draft admission failure ineligible after ready until an explicit retry", async () => {
+  it("reauthorizes a failed draft admission through a fresh exact check request", async () => {
     let fail = true
     await using app = await createQueueApp({
       check: (input) =>
@@ -1065,13 +1103,6 @@ describe("Queue", () => {
     expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toMatchObject([{ status: "failed" }])
     expect(app.state().bays.prs.PR1?.status).toBe("pushed")
 
-    const healthy = await submitBranch(app, "issue/healthy-after-red")
-    await app.bays.requestChecks({ pr: healthy.id })
-    const healthyAdmission = (await app.queue.admit({}))[0]
-    if (healthyAdmission === undefined) throw new Error("expected unrelated checks to bypass failed history")
-    expect(healthyAdmission.prs).toMatchObject([{ id: healthy.id }])
-    await app.queue.admit({ prs: [healthy.id] }, runtime)
-
     await app.bays.ready({ pr: "PR1" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
@@ -1081,9 +1112,20 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("checks failed in R1")
 
     fail = false
-    const retry = (await app.queue.admit({ prs: ["PR1"], retry: true }, runtime))[0]
-    if (retry === undefined) throw new Error("expected a retry admission run")
-    expect(app.queue.eligibility("PR1")).toMatchObject({ runnable: true, checks: { status: "passed" } })
+    const reauthorization = await app.bays.requestChecks({ pr: "PR1" })
+    expect(reauthorization.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      {
+        name: "pr/checks-requested",
+        data: { pr: "PR1", revision: 1, headSha: HEAD, baseSha: BASE },
+      },
+    ])
+    const readmitted = (await app.queue.admit({ prs: ["PR1"] }, runtime))[0]
+    if (readmitted === undefined) throw new Error("expected an explicitly reauthorized admission run")
+    expect(readmitted).toMatchObject({ id: "R2", status: "passed", prs: [{ id: "PR1", headSha: HEAD }] })
+    expect(app.queue.eligibility("PR1")).toMatchObject({
+      runnable: true,
+      checks: { status: "passed", run: "R2" },
+    })
   })
 
   it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
