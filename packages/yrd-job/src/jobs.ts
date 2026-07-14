@@ -9,6 +9,7 @@ import {
   type JsonValue,
   type YrdDef,
   JsonSchema,
+  observeYrdLifecycle,
 } from "@yrd/core"
 import type { Scope } from "@silvery/scope"
 import { computed, type ReadSignal } from "@silvery/signals"
@@ -359,66 +360,83 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     const heartbeatMs = parsed.heartbeatMs ?? Math.max(1, Math.floor(parsed.leaseMs / 3))
     const requested = current(id)
     requireStatus(requested, "requested", "requested")
-    using _span = options.log.span?.("run", {
-      id,
-      definition: requested.definition,
-      attempt: requested.attempt + 1,
-    })
     const installed = definitionFor(requested)
     const attempt = requested.attempt + 1
     const now = runOptions.now ?? Date.now
-
-    await commit({
-      type: "start",
-      id,
-      attempt,
-      runner: parsed.runner,
-      leaseExpiresAt: lease(now, parsed.leaseMs),
-    })
-    const started = current(id)
-    if (!Job.owns(started, attempt, parsed.runner, "running")) return started
-
-    const scope = options.scope.child(`job:${id}:${attempt}`)
-    activeScopes.set(id, { attempt, scope })
-    let outcome: Awaited<ReturnType<typeof executeWithHeartbeat>>
-    try {
-      outcome = await executeWithHeartbeat(
-        scope,
-        (progress) =>
-          installed.execute(requested.input, {
-            id,
-            attempt,
-            runner: parsed.runner,
-            signal: progress.signal,
-            observeProgress: progress.observe,
-            reportProgress: progress.report,
-          }),
-        heartbeatMs,
-        async (renew) => {
-          const active = current(id)
-          if (!Job.owns(active, attempt, parsed.runner, "running")) {
-            throw new Error(`yrd: job '${id}' lost execution ownership`)
-          }
-          if (!renew) return
-          await commit({
-            type: "heartbeat",
-            id,
-            attempt,
-            runner: parsed.runner,
-            leaseExpiresAt: lease(now, parsed.leaseMs),
-          })
+    const observation = installed.observe?.(requested.input) ?? {}
+    return observeYrdLifecycle(
+      options.log,
+      {
+        lifecycle: observation.lifecycle ?? "run",
+        identity: { ...observation.identity, job: id, attempt, runner: parsed.runner },
+        attributes: {
+          ...observation.attributes,
+          definition: requested.definition,
+          revision: requested.revision,
+          leaseMs: parsed.leaseMs,
         },
-      )
-    } finally {
-      const active = activeScopes.get(id)
-      if (active?.attempt === attempt && active.scope === scope) activeScopes.delete(id)
-    }
+        outcome: (result) =>
+          result.status === "passed"
+            ? "succeeded"
+            : result.status === "running" || result.status === "waiting"
+              ? "progress"
+              : "failed",
+        resultAttributes: (result) => ({ status: result.status }),
+      },
+      async () => {
+        await commit({
+          type: "start",
+          id,
+          attempt,
+          runner: parsed.runner,
+          leaseExpiresAt: lease(now, parsed.leaseMs),
+        })
+        const started = current(id)
+        if (!Job.owns(started, attempt, parsed.runner, "running")) return started
 
-    const active = current(id)
-    if (!Job.owns(active, attempt, parsed.runner, "running")) return active
-    const result = outcome.heartbeatError ? failed("heartbeat-failed", outcome.heartbeatError) : outcome.result
-    await commit(settlement(id, attempt, parsed.runner, result))
-    return current(id)
+        const scope = options.scope.child(`job:${id}:${attempt}`)
+        activeScopes.set(id, { attempt, scope })
+        let outcome: Awaited<ReturnType<typeof executeWithHeartbeat>>
+        try {
+          outcome = await executeWithHeartbeat(
+            scope,
+            (progress) =>
+              installed.execute(requested.input, {
+                id,
+                attempt,
+                runner: parsed.runner,
+                signal: progress.signal,
+                observeProgress: progress.observe,
+                reportProgress: progress.report,
+              }),
+            heartbeatMs,
+            async (renew) => {
+              const active = current(id)
+              if (!Job.owns(active, attempt, parsed.runner, "running")) {
+                throw new Error(`yrd: job '${id}' lost execution ownership`)
+              }
+              if (!renew) return
+              await commit({
+                type: "heartbeat",
+                id,
+                attempt,
+                runner: parsed.runner,
+                leaseExpiresAt: lease(now, parsed.leaseMs),
+              })
+            },
+          )
+        } finally {
+          const active = activeScopes.get(id)
+          if (active?.attempt === attempt && active.scope === scope) activeScopes.delete(id)
+        }
+
+        const active = current(id)
+        if (!Job.owns(active, attempt, parsed.runner, "running")) return active
+        const result = outcome.heartbeatError ? failed("heartbeat-failed", outcome.heartbeatError) : outcome.result
+        await commit(settlement(id, attempt, parsed.runner, result))
+        return current(id)
+      },
+    )
   }
 
   return {
@@ -504,14 +522,27 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       for (const job of Object.values(state().byId)) {
         if (job.status !== "running" || Date.parse(job.leaseExpiresAt) > cutoff) continue
         try {
-          await commit({
-            type: "lose",
-            id: job.id,
-            attempt: job.attempt,
-            runner: job.runner,
-            leaseExpiresAt: job.leaseExpiresAt,
-            reason: parsed.reason ?? "runner lease expired",
-          })
+          await observeYrdLifecycle(
+            options.log,
+            {
+              lifecycle: "recover",
+              identity: { job: job.id, attempt: job.attempt, runner: job.runner },
+              attributes: {
+                leaseExpiresAt: job.leaseExpiresAt,
+                reason: parsed.reason ?? "runner lease expired",
+              },
+              outcome: "recovered",
+            },
+            () =>
+              commit({
+                type: "lose",
+                id: job.id,
+                attempt: job.attempt,
+                runner: job.runner,
+                leaseExpiresAt: job.leaseExpiresAt,
+                reason: parsed.reason ?? "runner lease expired",
+              }),
+          )
         } catch (error) {
           const latest = current(job.id)
           if (!sameLease(latest, job)) continue

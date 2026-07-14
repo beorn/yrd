@@ -9,6 +9,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import { createLogger, type Event as LogEvent } from "loggily"
 import * as z from "zod"
 import {
   CauseSchema,
@@ -104,6 +105,50 @@ function ids(prefix: string) {
 }
 
 describe("filesystem Journal", () => {
+  it("emits structured append and writer-lock lifecycle evidence", async () => {
+    const dir = await directory()
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const journal = await createJournal({ dir, inject: { log } })
+
+    await expect(journal.append(frame("observable"), 0)).resolves.toMatchObject({ appended: true })
+    await expect(journal.append(frame("stale-writer"), 0)).resolves.toMatchObject({ appended: false })
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "log",
+          namespace: "yrd:journal:lock",
+          level: "info",
+          props: expect.objectContaining({ lifecycle: "lock", outcome: "succeeded", durationMs: expect.any(Number) }),
+        }),
+        expect.objectContaining({
+          kind: "log",
+          namespace: "yrd:journal:append",
+          level: "info",
+          props: expect.objectContaining({
+            lifecycle: "append",
+            expectedCursor: 0,
+            outcome: "succeeded",
+            durationMs: expect.any(Number),
+          }),
+        }),
+        expect.objectContaining({
+          kind: "log",
+          namespace: "yrd:journal:append",
+          level: "trace",
+          props: expect.objectContaining({
+            lifecycle: "append",
+            expectedCursor: 0,
+            appended: false,
+            outcome: "progress",
+          }),
+        }),
+      ]),
+    )
+    log.end()
+  })
+
   it("generates UUIDv7 command, cause, and event ids uniquely across fresh processes", async () => {
     const dir = await directory()
     const results = await Promise.all([dispatchInFreshProcess(dir), dispatchInFreshProcess(dir)])

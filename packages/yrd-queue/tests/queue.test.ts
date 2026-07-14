@@ -4,6 +4,7 @@
  * @consumer @yrd/queue
  */
 import { describe, expect, expectTypeOf, it } from "vitest"
+import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
@@ -112,13 +113,14 @@ async function createQueueApp(
   journal = createMemoryJournal(),
   clock: () => string = () => "2026-01-01T00:00:00.000Z",
   id: () => string = ids(),
+  log?: ConditionalLogger,
 ) {
   const bayJobs = createBayJobDefs(workspace())
   const queue = queuePlugin(options)
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   const definition = queue(base)
   return createYrd(definition, {
-    inject: { journal, id, clock },
+    inject: { journal, id, clock, ...(log === undefined ? {} : { log }) },
   })
 }
 
@@ -131,6 +133,107 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
 }
 
 describe("Queue", () => {
+  it("emits one terminal run lifecycle with lossless PR revision and correlation identity", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createQueueApp({}, undefined, undefined, undefined, log)
+    await app.bays.submit({
+      branch: "issue/observable",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      correlation: { namespace: "review", id: "21125" },
+    })
+
+    await expect(app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime)).resolves.toMatchObject([
+      { id: "R1", status: "passed" },
+    ])
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:queue:run",
+        level: "info",
+        props: expect.objectContaining({
+          lifecycle: "run",
+          outcome: "succeeded",
+          run: "R1",
+          prs: [
+            expect.objectContaining({
+              pr: "PR1",
+              revision: 1,
+              headSha: HEAD,
+              correlation: { namespace: "review", id: "21125" },
+            }),
+          ],
+          durationMs: expect.any(Number),
+        }),
+      }),
+    )
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:jobs:check",
+        level: "info",
+        props: expect.objectContaining({
+          lifecycle: "check",
+          outcome: "succeeded",
+          run: "R1",
+          step: "check",
+          job: expect.any(String),
+          attempt: 1,
+          runner: "local",
+          prs: [expect.objectContaining({ pr: "PR1", revision: 1, headSha: HEAD })],
+          durationMs: expect.any(Number),
+        }),
+      }),
+    )
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:jobs:merge",
+        level: "info",
+        props: expect.objectContaining({
+          lifecycle: "merge",
+          outcome: "succeeded",
+          run: "R1",
+          step: "merge",
+          runner: "local",
+          prs: [expect.objectContaining({ pr: "PR1", revision: 1, headSha: HEAD })],
+          durationMs: expect.any(Number),
+        }),
+      }),
+    )
+    log.end()
+  })
+
+  it("classifies a waiting queue lifecycle as progress rather than failure", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createQueueApp(
+      { check: () => ({ status: "waiting", token: "remote-check" }) },
+      undefined,
+      undefined,
+      undefined,
+      log,
+    )
+    await submitBranch(app, "issue/waiting")
+
+    await expect(app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)).resolves.toMatchObject([
+      { id: "R1", status: "waiting" },
+    ])
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:queue:run",
+        level: "trace",
+        props: expect.objectContaining({ lifecycle: "run", outcome: "progress", run: "R1" }),
+      }),
+    )
+    log.end()
+  })
+
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()

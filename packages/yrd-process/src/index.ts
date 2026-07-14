@@ -160,7 +160,7 @@ export function createProcess(
       let cancelTimeout: (() => void) | undefined
       let cancelProgressLease: (() => void) | undefined
       let cancelKill: (() => void) | undefined
-      using _span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
+      using span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
         const child = spawn(argv, {
           cwd: request.cwd ?? cwd,
@@ -271,7 +271,29 @@ export function createProcess(
           durationMs: result.durationMs,
           timedOut,
         })
+        if (span !== undefined) {
+          Object.assign(span.spanData, {
+            // A non-zero exit is command evidence for the caller to classify
+            // (many Git probes intentionally use it); only abnormal process
+            // settlement is a process-lifecycle failure.
+            outcome: result.signal === null && !result.timedOut && !result.stalled ? "succeeded" : "failed",
+            durationMs: result.durationMs,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            timedOut: result.timedOut,
+            stalled: result.stalled,
+          })
+        }
         return result
+      } catch (error) {
+        if (span !== undefined) {
+          Object.assign(span.spanData, {
+            outcome: "failed",
+            error: error instanceof Error ? error.message : String(error),
+            durationMs: Math.max(0, now() - started),
+          })
+        }
+        throw error
       } finally {
         cancelTimeout?.()
         cancelProgressLease?.()

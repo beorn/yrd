@@ -107,7 +107,21 @@ describe("Yrd lifecycle records", () => {
       ),
     ).resolves.toBe("passed")
 
-    expect(events.find((event) => event.kind === "log")).toMatchObject({
+    expect(events.find((event) => event.kind === "log" && event.message === "check started")).toMatchObject({
+      kind: "log",
+      namespace: "yrd:check",
+      level: "debug",
+      props: {
+        lifecycle: "check",
+        outcome: "started",
+        correlation: { namespace: "review", id: "21125" },
+        pr: "PR7",
+        revision: 3,
+        run: "R2",
+        step: "check",
+      },
+    })
+    expect(events.find((event) => event.kind === "log" && event.message === "check succeeded")).toMatchObject({
       kind: "log",
       namespace: "yrd:check",
       level: "info",
@@ -156,6 +170,7 @@ describe("Yrd lifecycle records", () => {
     expect(
       events
         .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
+        .filter((event) => event.props?.outcome !== "started")
         .map((event) => [event.namespace, event.level, event.props?.outcome]),
     ).toEqual([
       ["yrd:admit", "warn", "refused"],
@@ -163,9 +178,87 @@ describe("Yrd lifecycle records", () => {
     ])
     log.end()
   })
+
+  it("fails loudly when an injected clock moves backwards", async () => {
+    const log = createLogger("yrd", [{ level: "trace" }, { write: () => undefined }])
+    const ticks = [20, 10]
+
+    await expect(
+      observeYrdLifecycle(log, { lifecycle: "check", now: () => ticks.shift() ?? 10 }, async () => "passed"),
+    ).rejects.toThrow("precedes start")
+    log.end()
+  })
 })
 
 describe("observable CLI exemplar", () => {
+  it("emits correlated submit, journal, lock, and remote lifecycle evidence from the shipping CLI", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-observable-submit-"))
+    roots.push(root)
+    const repo = await repository(root)
+    await git(repo, "switch", "-qc", "issue/observable")
+    await writeFile(join(repo, "README.md"), "observable\n")
+    await git(repo, "add", "README.md")
+    await git(repo, "commit", "-qm", "observable")
+    const headSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    const logFile = join(root, "yrd.jsonl")
+    const stdout: string[] = []
+    const stderr: string[] = []
+    const previous = { LOGGILY_FILE: process.env.LOGGILY_FILE, NO_COLOR: process.env.NO_COLOR }
+    process.env.LOGGILY_FILE = logFile
+    process.env.NO_COLOR = "1"
+    try {
+      expect(
+        await runYrdProcess(
+          ["yrd", "-vvv", "--repo", repo, "pr", "submit", "issue/observable", "--base", "main", "--json"],
+          {
+            cwd: root,
+            stdout: (text) => stdout.push(text),
+            stderr: (text) => stderr.push(text),
+            color: false,
+          },
+        ),
+        stderr.join(""),
+      ).toBe(0)
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
+
+    expect(() => JSON.parse(stdout.join(""))).not.toThrow()
+    const records = (await readFile(logFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const evidence = records.filter((record) =>
+      ["yrd:bay:submit", "yrd:journal:append", "yrd:journal:lock", "yrd:process:run"].includes(String(record.name)),
+    )
+    expect(evidence.find((record) => record.level === "info" && record.name === "yrd:bay:submit")).toEqual(
+      expect.objectContaining({
+        outcome: "succeeded",
+        pr: "PR1",
+        revision: 1,
+        headSha,
+        durationMs: expect.any(Number),
+      }),
+    )
+    expect(
+      evidence.find(
+        (record) => record.level === "info" && record.name === "yrd:journal:append" && record.op === "bay.submit",
+      ),
+    ).toEqual(expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }))
+    expect(evidence.find((record) => record.level === "info" && record.name === "yrd:journal:lock")).toEqual(
+      expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }),
+    )
+    expect(
+      evidence.find(
+        (record) => record.level === "span" && record.name === "yrd:process:run" && record.outcome === "succeeded",
+      ),
+    ).toEqual(expect.objectContaining({ durationMs: expect.any(Number) }))
+  })
+
   it("keeps the installed -vvv --json command machine-pure while one logger owns diagnostics", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-observable-command-"))
     roots.push(root)
@@ -264,5 +357,32 @@ describe("observable CLI exemplar", () => {
     expect(records).toEqual([
       expect.objectContaining({ level: "info", name: "yrd:queue", msg: "queue admitted", pr: "PR1", revision: 2 }),
     ])
+  })
+
+  it("parents nested remote spans to the existing delivery trace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-trace-context-"))
+    roots.push(root)
+    const logFile = join(root, "yrd.jsonl")
+    const log = createYrdLogger(resolveYrdObservability({ verbose: 3 }, { LOGGILY_FILE: logFile }), () => {})
+    const delivery = log.child("jobs").span?.("check", { pr: "PR1", revision: 2, run: "R3", step: "check" })
+    const remote = log.child("process").span?.("run", { argv: ["git", "fetch", "origin"] })
+    remote?.end()
+    delivery?.end()
+    log.end()
+
+    const records = (await readFile(logFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+    const check = records.find((record) => record.name === "yrd:jobs:check")
+    const process = records.find((record) => record.name === "yrd:process:run")
+    expect(check).toEqual(expect.objectContaining({ trace_id: expect.any(String), span_id: expect.any(String) }))
+    expect(process).toEqual(
+      expect.objectContaining({
+        trace_id: check?.trace_id,
+        parent_id: check?.span_id,
+        argv: ["git", "fetch", "origin"],
+      }),
+    )
   })
 })

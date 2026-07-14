@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
+import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -19,7 +20,7 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace) {
+async function createApp(workspace: BayWorkspace, log?: ConditionalLogger) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
   return createYrd(definition, {
@@ -27,6 +28,7 @@ async function createApp(workspace: BayWorkspace) {
       journal: createMemoryJournal(),
       clock: () => "2026-01-01T00:00:00.000Z",
       id: ids(),
+      ...(log === undefined ? {} : { log }),
     },
   })
 }
@@ -56,9 +58,9 @@ function createWorkspaceHarness() {
   return { adapter, workspace }
 }
 
-async function createHarness() {
+async function createHarness(log?: ConditionalLogger) {
   const harness = createWorkspaceHarness()
-  return { ...harness, app: await createApp(harness.adapter) }
+  return { ...harness, app: await createApp(harness.adapter, log) }
 }
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
@@ -367,7 +369,9 @@ describe("withBays", () => {
   })
 
   it("reuses one live PR when another branch spelling resolves to the same payload", async () => {
-    const { app } = await createHarness()
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const { app } = await createHarness(log)
     await app.bays.intake({ branch: "issue/feature", base: "main", headSha: HEAD_1, baseSha: BASE })
     expect(app.bays.pr("PR1")).toMatchObject({ branch: "issue/feature", status: "pushed" })
 
@@ -376,13 +380,19 @@ describe("withBays", () => {
       resolveRevision: async (ref: string) => (ref === "origin/issue/feature" ? HEAD_1 : undefined),
       run: runtime,
     }
-    const submitted = await app.bays.submitSelection("origin/issue/feature", options)
+    const submitted = await app.bays.submitSelection("PR1", options)
     const repeated = await app.bays.submitSelection("origin/issue/feature", options)
 
     expect(submitted).toMatchObject({ id: "PR1", branch: "issue/feature", status: "submitted" })
     expect(repeated).toMatchObject({ id: "PR1", status: "submitted" })
     expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
+    expect(
+      events.filter(
+        (event) => event.kind === "log" && event.namespace === "yrd:bay:submit" && event.props?.outcome === "succeeded",
+      ),
+    ).toHaveLength(2)
     await app.close()
+    log.end()
   })
 
   it("requires durable Jobs before Bay composition in TypeScript", () => {

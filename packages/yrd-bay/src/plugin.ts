@@ -1,6 +1,7 @@
 import {
   command,
   event,
+  observeYrdLifecycle,
   raiseFailure,
   type CommandHandler,
   type CommandResult,
@@ -8,6 +9,8 @@ import {
   type DeepReadonly,
   type Event,
   type YrdDef,
+  type YrdDeliveryIdentity,
+  type YrdLifecycleOptions,
 } from "@yrd/core"
 import {
   createJobDef,
@@ -21,6 +24,7 @@ import {
   type RunJobOptions,
 } from "@yrd/job"
 import { computed, type ReadSignal } from "@silvery/signals"
+import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
   BayIdSchema,
@@ -361,7 +365,12 @@ export function createBays(
   jobs: Jobs,
   actions: BayActions,
   options: Readonly<{ defaultBase: string; resolveBase?: ResolveBayBase }>,
+  log?: ConditionalLogger,
 ): Bays {
+  const observe = async <Result>(
+    lifecycle: YrdLifecycleOptions<Result>,
+    operation: () => Result | Promise<Result>,
+  ): Promise<Result> => (log === undefined ? operation() : observeYrdLifecycle(log, lifecycle, operation))
   const execute = async (result: CommandResult, options: RunJobOptions, action: string): Promise<void> => {
     const results = await jobs.runMany(jobs.requested(result), options)
     const failed = results.find((job) => job.status !== "passed")
@@ -392,21 +401,63 @@ export function createBays(
     return actions.open({ ...args, ...resolved })
   }
   const intake = async (args: IntakePRArgs): Promise<CommandResult> => {
-    const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
-    const resolved = await target(args.base ?? bay?.base, args.baseSha ?? bay?.baseSha)
-    return actions.intake({ ...args, ...resolved })
+    const selectedPR = (): DeepReadonly<PR> | undefined => {
+      const snapshot = state()
+      const bay = args.bay === undefined ? undefined : resolveBay(snapshot, args.bay)
+      return bay === undefined
+        ? args.branch === undefined
+          ? undefined
+          : resolvePR(snapshot, args.branch)
+        : prForBay(snapshot, bay.id)
+    }
+    const before = selectedPR()
+    return observe(
+      {
+        lifecycle: "intake",
+        identity: before === undefined ? undefined : prIdentity(before),
+        attributes: {
+          ...(args.bay === undefined ? {} : { bay: args.bay }),
+          ...(args.branch === undefined ? {} : { branch: args.branch }),
+        },
+        resultAttributes: () => {
+          const selected = selectedPR()
+          return selected === undefined ? {} : prIdentity(selected)
+        },
+      },
+      async () => {
+        const bay = args.bay === undefined ? undefined : resolveBay(state(), args.bay)
+        const resolved = await target(args.base ?? bay?.base, args.baseSha ?? bay?.baseSha)
+        return actions.intake({ ...args, ...resolved })
+      },
+    )
   }
-  const submit = async (args: SubmitArgs): Promise<CommandResult> => {
+  const submitOperation = async (args: SubmitArgs): Promise<CommandResult> => {
     if ("pr" in args) return actions.submit(args)
     const resolved = await target(args.base, args.baseSha)
     return actions.submit({ ...args, ...resolved })
+  }
+  const submit = (args: SubmitArgs): Promise<CommandResult> => {
+    const selector = "pr" in args ? args.pr : args.branch
+    const before = resolvePR(state(), selector)
+    return observe(
+      {
+        lifecycle: "submit",
+        identity: before === undefined ? undefined : prIdentity(before),
+        attributes: { selector },
+        resultAttributes: () => {
+          const selected = resolvePR(state(), selector)
+          return selected === undefined ? {} : prIdentity(selected)
+        },
+      },
+      () => submitOperation(args),
+    )
   }
   const bindCorrelation = async (
     pr: DeepReadonly<PR>,
     correlation: Correlation | undefined,
   ): Promise<DeepReadonly<PR>> => {
     if (correlation === undefined) return pr
-    await submit({ pr: pr.id, correlation })
+    await submitOperation({ pr: pr.id, correlation })
     const bound = resolvePR(state(), pr.id)
     if (bound === undefined) {
       raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after correlation bind`)
@@ -414,7 +465,10 @@ export function createBays(
     return bound
   }
 
-  const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+  const submitSelectionOperation = async (
+    selector: string,
+    options: SubmitSelectionOptions,
+  ): Promise<DeepReadonly<PR>> => {
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
@@ -473,7 +527,7 @@ export function createBays(
     if (pr?.status === "pushed") {
       pr = await bindCorrelation(pr, options.correlation)
       if (options.draft === true) return pr
-      await submit({ pr: pr.id })
+      await submitOperation({ pr: pr.id })
       const submitted = resolvePR(state(), pr.id)
       if (submitted === undefined) {
         raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after submit`)
@@ -530,6 +584,19 @@ export function createBays(
       raiseFailure("infrastructure", "pr-state-invalid", `yrd: bay '${bay.id}' intake did not create a PR`)
     }
     raiseFailure("refusal", "pr-not-pushed", `yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
+  }
+
+  const submitSelection = (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+    const before = resolvePR(state(), selector)
+    return observe(
+      {
+        lifecycle: "submit",
+        identity: before === undefined ? undefined : prIdentity(before),
+        attributes: { selector },
+        resultAttributes: prIdentity,
+      },
+      () => submitSelectionOperation(selector, options),
+    )
   }
 
   return Object.freeze({
@@ -608,10 +675,20 @@ export function withBays(options: WithBaysOptions) {
               requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
             },
             { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
+            yrd.log.child("bay"),
           ),
         }
       },
     })
+}
+
+function prIdentity(pr: DeepReadonly<PR>): YrdDeliveryIdentity {
+  return {
+    pr: pr.id,
+    revision: pr.revision,
+    headSha: pr.headSha,
+    ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
+  }
 }
 
 function jobDetail(job: DeepReadonly<Job>): string {

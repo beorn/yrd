@@ -13,6 +13,7 @@ export type {
   JobError,
   JobHandler,
   JobLaunch,
+  JobObservation,
   JobRequest,
   JobResult,
   JobWaiting,
