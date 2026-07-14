@@ -867,10 +867,10 @@ async function submitBays(
     return 0
   }
   for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
-  const admissions = await app.queue.admit({})
-  const followed =
-    options.follow === true ? await app.queue.admit({ prs: prs.map((pr) => pr.id) }, runtimeOptions(io)) : admissions
   const selected = prs.map((pr) => pr.id)
+  const followed = (await app.queue.admit({ prs: selected }, runtimeOptions(io))).filter((run) =>
+    run.prs.some((member) => prs.some((pr) => pr.id === member.id && pr.revision === member.revision)),
+  )
   let checks: readonly PRCheckViewRecord[] = prCheckRecords(app, selected)
   if (options.follow === true && !checksTerminal(checks)) checks = await followCheckRecords(app, selected, checks, io)
   const currentPrs = selected.map((selector) => requiredPr(app, selector))

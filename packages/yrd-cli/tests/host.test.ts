@@ -601,7 +601,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let submitError = ""
     expect(
       await runYrdProcess(
-        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--json"],
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "submit", "issue/feature", "--base", "main", "--json"],
         {
           cwd: repo,
           stdout: () => undefined,
@@ -685,7 +685,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       let stderr = ""
       expect(
         await runYrdProcess(
-          ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", branch, "--base", "main", "--json"],
+          ["/usr/bin/bun", "/usr/local/bin/yrd", "bay", "submit", branch, "--base", "main", "--json"],
           {
             cwd: repo,
             stdout: () => undefined,
@@ -1102,13 +1102,6 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await git(repo, "switch", "-q", "issue/feature")
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"], {
-        cwd: repo,
-        stdout: () => undefined,
-        stderr: () => undefined,
-      }),
-    ).toBe(0)
-    expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--json"], {
         cwd: repo,
         stdout: () => undefined,
         stderr: () => undefined,
