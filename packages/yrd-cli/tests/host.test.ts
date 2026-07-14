@@ -241,6 +241,90 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(queueHost.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
   })
 
+  it("rebinds one resident runner to every authoritative landing before selecting the next PR", async () => {
+    const { repo } = await repository()
+    const branches = ["pr4", "pr5", "pr6", "pr7"] as const
+    const heads = new Map<string, string>()
+    for (const branch of branches) {
+      await git(repo, "switch", "-qc", `issue/${branch}`, "main")
+      await writeFile(join(repo, `${branch}.txt`), `${branch}\n`)
+      await git(repo, "add", `${branch}.txt`)
+      await git(repo, "commit", "-qm", branch)
+      heads.set(branch, await git(repo, "rev-parse", "HEAD"))
+    }
+    await git(repo, "switch", "-q", "main")
+    const operatorMain = await git(repo, "rev-parse", "main")
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", ...branches.map((branch) => `issue/${branch}`))
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: {
+        check: {
+          run: [
+            'local="$(git rev-parse refs/heads/main)"',
+            'remote="$(git rev-parse refs/remotes/origin/main)"',
+            'test "$local" = "$remote" || { printf "queue-target-diverged: local %s differs from authoritative origin/main %s\\n" "$local" "$remote" >&2; exit 17; }',
+          ].join("; "),
+          runner: "local",
+        },
+        merge: { runner: "local" },
+      },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const journal = createMemoryJournal()
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const options = {
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal,
+      process: runtimeProcess,
+      config,
+    }
+    await using queueHost = await createDefaultYrdApp(options)
+    let expectedBase = operatorMain
+
+    for (const [index, branch] of branches.entries()) {
+      {
+        await using submitter = await createDefaultYrdApp(options)
+        await submitter.bays.submit({
+          branch: `issue/${branch}`,
+          headSha: heads.get(branch)!,
+          base: "main",
+        })
+        const submitted = submitter.state().bays.prs[`PR${index + 1}`]
+        expect(submitted).toMatchObject({ baseSha: expectedBase, status: "submitted" })
+      }
+
+      const runs = await queueHost.queue.run({}, { runner: "resident-runner", leaseMs: 60_000 })
+
+      expect(runs).toHaveLength(1)
+      const run = runs[0]!
+      const check = run.steps[0]?.job
+      const failureDetail = check !== undefined && "output" in check ? JSON.stringify(check.output) : run.error?.message
+      expect(run.status, failureDetail).toBe("passed")
+      expect(run).toMatchObject({
+        status: "passed",
+        prs: [{ id: `PR${index + 1}`, headSha: heads.get(branch) }],
+      })
+      expect(run.steps.map((step) => [step.job?.runner, step.job?.attempt])).toEqual([
+        ["resident-runner", 1],
+        ["resident-runner", 1],
+      ])
+      if (check?.status !== "passed") throw new Error(`resident check for ${branch} did not pass`)
+      expect(GitCheckEvidenceSchema.parse(check.output).baseSha).toBe(expectedBase)
+      expectedBase = run.integration!.commit
+      expect(await git(remote, "rev-parse", "main")).toBe(expectedBase)
+      expect(await git(repo, "rev-parse", "main")).toBe(operatorMain)
+    }
+  })
+
   it("uses steps.merge.run as the configured merge step", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
