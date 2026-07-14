@@ -109,8 +109,21 @@ describe("withBays", () => {
       revision: 2,
       headSha: HEAD_2,
       revisions: [
-        { revision: 1, headSha: HEAD_1, base: "main", baseSha: BASE },
-        { revision: 2, headSha: HEAD_2, base: "main", baseSha: BASE },
+        {
+          revision: 1,
+          headSha: HEAD_1,
+          base: "main",
+          baseSha: BASE,
+          pushedAt: "2026-01-01T00:00:00.000Z",
+          submittedAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          revision: 2,
+          headSha: HEAD_2,
+          base: "main",
+          baseSha: BASE,
+          pushedAt: "2026-01-01T00:00:00.000Z",
+        },
       ],
     })
 
@@ -121,7 +134,18 @@ describe("withBays", () => {
     const refused = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, refused)
     expect(app.bays.state()).toMatchObject({
-      prs: { PR1: { status: "withdrawn" } },
+      prs: {
+        PR1: {
+          status: "withdrawn",
+          revisions: [
+            { revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
+            {
+              revision: 2,
+              terminal: { status: "withdrawn", at: "2026-01-01T00:00:00.000Z" },
+            },
+          ],
+        },
+      },
       byId: { B1: { status: "active", failure: { code: "dirty-worktree" } } },
     })
 

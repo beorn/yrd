@@ -52,6 +52,7 @@ import {
   type PRReview,
   type PRReviewState,
   type PRRevision,
+  type PRRevisionClock,
   type ProvisionBayInput,
   type ProvisionedBay,
   type RefreshBayInput,
@@ -926,6 +927,18 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
   const patchBay = (bay: Bay, patch: Partial<Bay>): BayState => saveBay({ ...bay, ...patch })
   const patchPR = (pr: PR, patch: Partial<PR>): BayState =>
     bayState({ ...current, prs: { ...current.prs, [pr.id]: { ...pr, ...patch } } })
+  const patchRevisionClock = (pr: PR, patch: Partial<PRRevisionClock>): readonly PRRevision[] => {
+    let found = false
+    const revisions = pr.revisions.map((revision) => {
+      if (revision.revision !== pr.revision || revision.headSha !== pr.headSha) return revision
+      found = true
+      return { ...revision, ...patch }
+    })
+    if (!found) {
+      throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${pr.revision}@${pr.headSha}`)
+    }
+    return revisions
+  }
   const data = applied.data as Record<string, unknown>
 
   switch (applied.name) {
@@ -983,6 +996,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revisions: [...existing.revisions, record],
               submittedAt: undefined,
               rejectedAt: undefined,
+              integratedAt: undefined,
+              integration: undefined,
+              withdrawnAt: undefined,
               detail: undefined,
             }
       const next = { ...current, prs: { ...current.prs, [pr.id]: pr } }
@@ -1011,11 +1027,25 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) {
         throw new Error(`yrd: stale PR event for '${pr.id}'`)
       }
-      return patchPR(pr, { status: "submitted", submittedAt: applied.ts })
+      return patchPR(pr, {
+        status: "submitted",
+        submittedAt: applied.ts,
+        rejectedAt: undefined,
+        integratedAt: undefined,
+        integration: undefined,
+        withdrawnAt: undefined,
+        revisions: patchRevisionClock(pr, { submittedAt: applied.ts, terminal: undefined }),
+      })
     }
     case "pr/withdrawn": {
       const pr = current.prs[data.pr as string]
-      return pr === undefined ? state : patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
+      return pr === undefined
+        ? state
+        : patchPR(pr, {
+            status: "withdrawn",
+            withdrawnAt: applied.ts,
+            revisions: patchRevisionClock(pr, { terminal: { status: "withdrawn", at: applied.ts } }),
+          })
     }
     case "pr/rejected": {
       const changed = PRRejectedSchema.parse(data)
@@ -1024,6 +1054,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
+        revisions: patchRevisionClock(pr, { terminal: { status: "rejected", at: applied.ts } }),
         ...(changed.detail === undefined ? {} : { detail: changed.detail }),
       })
     }
@@ -1035,6 +1066,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         status: "integrated",
         integratedAt: applied.ts,
         integration: { commit: changed.commit, baseSha: changed.baseSha },
+        revisions: patchRevisionClock(pr, { terminal: { status: "integrated", at: applied.ts } }),
       })
     }
     case "pr/edited": {

@@ -25,6 +25,7 @@ import {
   queueLogAttempts,
   queueLogRows,
   queueRevisionKey,
+  runRevisionClock,
   queueShowData,
   queueSubmissionTimes,
   type QueueStatusResult,
@@ -602,7 +603,13 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
   const pr = requiredPr(app, selector)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
-  const data = runs.map((run) => queueShowData(run, runs, attempts))
+  const data = runs.map((run) => {
+    const revisionClock = runRevisionClock(pr, run)
+    if (revisionClock === undefined) {
+      throw new Error(`yrd: run '${run.id}' has no retained revision clock for PR '${pr.id}'`)
+    }
+    return queueShowData(run, runs, attempts, revisionClock)
+  })
   await printResult(
     io,
     jsonEnabled(options),
@@ -1102,7 +1109,7 @@ async function logRuns(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
   const attempts = (await queueLogAttempts(app.events())).filter((attempt) => runIds.has(attempt.run))
-  const submissionTimes = await queueSubmissionTimes(app.events())
+  const submissionTimes = queueSubmissionTimes(Object.values(state.bays.prs))
   const rows = queueLogRows(
     summaries,
     target.selected,

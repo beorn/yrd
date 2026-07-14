@@ -2227,6 +2227,75 @@ describe("runYrd", () => {
     }
   })
 
+  it("keeps a later revision clock out of prior run history", () => {
+    const pr = {
+      id: "PR1",
+      branch: "issue/failure",
+      base: "main",
+      baseSha: BASE_SHA,
+      status: "rejected",
+      revision: 2,
+      headSha: "2".repeat(40),
+      revisions: [
+        {
+          revision: 1,
+          headSha: HEAD_SHA,
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-09T12:00:00.000Z",
+          submittedAt: "2026-07-09T12:00:30.000Z",
+          terminal: { status: "rejected", at: "2026-07-09T12:05:00.000Z" },
+        },
+        {
+          revision: 2,
+          headSha: "2".repeat(40),
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-09T12:10:00.000Z",
+          submittedAt: "2026-07-09T12:10:01.000Z",
+          terminal: { status: "rejected", at: "2026-07-09T12:12:00.000Z" },
+        },
+      ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+      submittedAt: "2026-07-09T12:10:01.000Z",
+      rejectedAt: "2026-07-09T12:12:00.000Z",
+    } as PR
+    const prior = fakeRun({
+      id: "R1",
+      status: "failed",
+      pr: { id: pr.id, revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
+      startedAt: "2026-07-09T12:01:00.000Z",
+      finishedAt: "2026-07-09T12:05:00.000Z",
+      steps: [],
+      error: { code: "check-failed", message: "revision one failed" },
+    })
+    const current = fakeRun({
+      id: "R2",
+      status: "failed",
+      pr: { id: pr.id, revision: 2, headSha: pr.headSha, baseSha: BASE_SHA },
+      startedAt: "2026-07-09T12:10:30.000Z",
+      finishedAt: pr.rejectedAt!,
+      steps: [],
+      error: { code: "check-failed", message: "revision two failed" },
+    })
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [pr],
+      running: [],
+      waiting: [],
+      finished: [prior, current],
+    } as QueueStatusResult
+
+    const projection = humanQueueProjection(result, Date.parse("2026-07-09T12:13:00.000Z"))
+    expect(projection.recent.map(({ runId, submittedAt, age }) => ({ runId, submittedAt, age }))).toEqual([
+      { runId: "R2", submittedAt: "2026-07-09T12:10:01.000Z", age: "1m" },
+      { runId: "R1", submittedAt: "2026-07-09T12:00:30.000Z", age: "4m" },
+    ])
+  })
+
   it("freezes recent rejected age at the terminal timestamp", () => {
     const terminalAt = "2026-07-09T12:06:00.000Z"
     const pr = {
@@ -2610,6 +2679,47 @@ describe("runYrd", () => {
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("landing")
+  })
+
+  it("keeps every submitted revision clock lossless in pr runs", async () => {
+    const nextHead = "2".repeat(40)
+    const app = await createApp({ failingCheck: true })
+    await app.bays.submit({ branch: "topic/history", headSha: HEAD_SHA, base: "main" })
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(1)
+
+    await app.bays.intake({ branch: "topic/history", headSha: nextHead, base: "main" })
+    await app.bays.ready({ pr: "PR1" })
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(1)
+
+    const human = outputIO({ columns: 160 })
+    expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("REVISION CLOCK PR1 rev1")
+    expect(human.stdout()).toContain("REVISION CLOCK PR1 rev2")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), json.io), json.stderr()).toBe(0)
+    const parsed = JSON.parse(json.stdout()) as {
+      pr: PR
+      runs: (ReturnType<typeof queueShowData> & { revisionClock?: unknown })[]
+    }
+    expect(parsed.pr.revisions).toMatchObject([
+      {
+        revision: 1,
+        headSha: HEAD_SHA,
+        submittedAt: "2026-07-09T12:00:00.000Z",
+        terminal: { status: "rejected", at: "2026-07-09T12:00:00.000Z" },
+      },
+      {
+        revision: 2,
+        headSha: nextHead,
+        submittedAt: "2026-07-09T12:00:00.000Z",
+        terminal: { status: "rejected", at: "2026-07-09T12:00:00.000Z" },
+      },
+    ])
+    expect(parsed.runs.map((run) => run.revisionClock)).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: HEAD_SHA, submittedAt: "2026-07-09T12:00:00.000Z" },
+      { pr: "PR1", revision: 2, headSha: nextHead, submittedAt: "2026-07-09T12:00:00.000Z" },
+    ])
   })
 
   it("maps the 10-row log and PR-run contract matrix directly from canonical fields", async () => {

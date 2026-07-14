@@ -47,13 +47,24 @@ export type Bay = Readonly<{
 
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn"
 
+export type PRRevisionTerminal = Readonly<{
+  status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn">
+  at: string
+}>
+
+export type PRRevisionClock = Readonly<{
+  pushedAt: string
+  submittedAt?: string
+  terminal?: PRRevisionTerminal
+}>
+
 export type PRRevision = Readonly<{
   revision: number
   headSha: string
   base: string
   baseSha?: string
-  pushedAt: string
-}>
+}> &
+  PRRevisionClock
 
 export type PRReviewDecision = "approve" | "reject"
 
