@@ -1,5 +1,7 @@
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { resolveInvocation } from "../src/invocation.ts"
+import { resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
 
 describe("resolveInvocation", () => {
   it.each([
@@ -21,5 +23,32 @@ describe("resolveInvocation", () => {
     },
   ])("projects $argv", ({ argv, invocation }) => {
     expect(resolveInvocation(argv)).toEqual(invocation)
+  })
+})
+
+describe("resolveYrdContext", () => {
+  const ambient = join(tmpdir(), "yrd-context", "caller")
+
+  it.each([
+    {
+      name: "CLI selector over environment",
+      options: { repo: "../cli-repo" },
+      env: { YRD_REPO: "../env-repo" },
+      context: { repo: resolve(ambient, "../cli-repo") },
+    },
+    {
+      name: "environment selector over ambient discovery",
+      options: {},
+      env: { YRD_REPO: "../env-repo" },
+      context: { repo: resolve(ambient, "../env-repo") },
+    },
+    {
+      name: "ambient discovery when selectors are absent",
+      options: {},
+      env: {},
+      context: { repo: resolve(ambient) },
+    },
+  ])("resolves $name against one captured ambient cwd", ({ options, env, context }) => {
+    expect(resolveYrdContext(options, env, ambient)).toEqual(context)
   })
 })

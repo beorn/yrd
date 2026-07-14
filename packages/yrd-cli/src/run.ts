@@ -17,7 +17,17 @@ import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import { Queues, type QueueRun, type QueueSummary } from "@yrd/queue"
-import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
+import { cleanGitEnvironment } from "./git-environment.ts"
+import {
+  classifyFailure,
+  configuration,
+  refusal,
+  resolveInvocation,
+  resolveYrdContext,
+  stableJson,
+  usage,
+  type YrdContext,
+} from "./invocation.ts"
 import { getLiveRenderer } from "./live-renderer.ts"
 import {
   QueueLogView,
@@ -40,18 +50,24 @@ import {
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
+import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { QueueWatchPane, type QueueWatchSnapshot } from "./watch-pane.tsx"
 
+function gitSync(cwd: string, args: readonly string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], {
+    encoding: "utf8",
+    env: cleanGitEnvironment(process.env),
+    stdio: ["ignore", "pipe", "pipe"],
+  })
+}
+
 function queueGitDir(cwd: string): string | undefined {
   try {
-    const output = execFileSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    })
+    const output = gitSync(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
     const gitDir = output.trim()
     if (gitDir === "") return undefined
     return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
@@ -62,11 +78,7 @@ function queueGitDir(cwd: string): string | undefined {
 
 function commitSubject(cwd: string, headSha: string): string | undefined {
   try {
-    const subject = execFileSync(
-      "git",
-      ["-C", cwd, "show", "-s", "--format=%s", "--no-show-signature", headSha, "--"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    ).trimEnd()
+    const subject = gitSync(cwd, ["show", "-s", "--format=%s", "--no-show-signature", headSha, "--"]).trimEnd()
     return subject === "" ? undefined : subject
   } catch {
     return undefined
@@ -110,6 +122,21 @@ type RuntimeOptions = {
 type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
 
 type JsonOption = { json?: boolean }
+
+type RuntimeBootstrap = Readonly<{
+  ambientCwd: string
+  env: NodeJS.ProcessEnv
+  load(
+    context: YrdContext,
+    options: Readonly<{ resident: boolean }>,
+  ): Promise<
+    Readonly<{
+      app: YrdCliApp
+      services: YrdCliServices
+      io?: Partial<YrdCliIO>
+    }>
+  >
+}>
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   const drainSignal = io.drainSignal
@@ -506,10 +533,9 @@ async function submitBays(
 ): Promise<YrdCliExitCode> {
   const correlation = parseCorrelation(options.correlation)
   const state = stateOf(app)
-  const inferred =
-    selectors.length > 0
-      ? [...selectors]
-      : selectedBays(state.bays, [], io.cwd ?? process.cwd(), "submit").map((bay) => bay.id)
+  const cwd = io.cwd ?? process.cwd()
+  const local = currentBay(state.bays, cwd)
+  const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   const prs: PR[] = []
   const base = oneOfAliases(options.base, options.queue, "base", "queue")
   for (const selector of inferred) {
@@ -656,11 +682,7 @@ async function diffPr(
   const base = pr.baseSha ?? pr.base
   let diff: string
   try {
-    diff = execFileSync(
-      "git",
-      ["-C", cwd, "diff", ...(options.stat === true ? ["--stat"] : []), `${base}...${pr.headSha}`, "--"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    )
+    diff = gitSync(cwd, ["diff", ...(options.stat === true ? ["--stat"] : []), `${base}...${pr.headSha}`, "--"])
   } catch (error) {
     refusal(`cannot diff PR '${pr.id}': ${error instanceof Error ? error.message : String(error)}`)
   }
@@ -689,10 +711,7 @@ function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
   const injected = io.currentBranch?.(cwd)
   if (injected !== undefined) return injected
   try {
-    const branch = execFileSync("git", ["-C", cwd, "branch", "--show-current"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim()
+    const branch = gitSync(cwd, ["branch", "--show-current"]).trim()
     return branch === "" ? undefined : branch
   } catch {
     return undefined
@@ -1693,8 +1712,12 @@ function buildProgram(
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
   commanderOutput: { wroteError: boolean },
+  bootstrap?: RuntimeBootstrap,
 ): CliCommand {
-  const installed = (): YrdCliApp => app ?? configuration("command runtime is not initialized")
+  let runtimeApp = app
+  let runtimeServices = services
+  const installed = (): YrdCliApp => runtimeApp ?? configuration("command runtime is not initialized")
+  const installedServices = (): YrdCliServices => runtimeServices
   const program = new CliCommand(name)
     .description(projection === "bay" ? "manage isolated Git work bays" : "yrd (shipyard) — agentic software delivery")
     .showHelpAfterError()
@@ -1702,6 +1725,24 @@ function buildProgram(
   program.helpCommand(false)
   program.exitOverride()
   configureCanonicalHelp(program)
+  if (app === undefined) {
+    program.option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
+  }
+  if (bootstrap !== undefined) {
+    program.hook("preAction", async (_root, action) => {
+      if (runtimeApp !== undefined) return
+      const globals = action.optsWithGlobals() as Readonly<{ repo?: string }>
+      const selected = resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
+      const resident =
+        action.name() === "run" &&
+        action.parent?.name() === "queue" &&
+        (action.opts() as Readonly<{ watch?: boolean }>).watch === true
+      const loaded = await bootstrap.load(selected, { resident })
+      runtimeApp = loaded.app
+      runtimeServices = loaded.services
+      Object.assign(io, loaded.io)
+    })
+  }
   if (projection === "root") program.version(YRD_VERSION, "-V, --version")
   if (projection === "root") {
     program.addHelpSection(
@@ -1808,17 +1849,17 @@ function buildProgram(
     .command("audit")
     .description("check queue state")
     .option("--json", "emit stable JSON")
-    .action(async (options) => setExit(await queueAudit(installed(), services, options, io)))
+    .action(async (options) => setExit(await queueAudit(installed(), installedServices(), options, io)))
   queue
     .command("init [base]")
     .description("prepare queue resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(services, "init", base, options, io))
+    .action(async (base, options) => queueAdministration(installedServices(), "init", base, options, io))
   queue
     .command("deinit [base]")
     .description("release queue resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(services, "deinit", base, options, io))
+    .action(async (base, options) => queueAdministration(installedServices(), "deinit", base, options, io))
   queue
     .command("pause [base]")
     .description("pause new queue runs")
@@ -2052,6 +2093,7 @@ async function executeYrd(
   argv: readonly string[],
   io: YrdCliIO,
   services: YrdCliServices = {},
+  bootstrap?: RuntimeBootstrap,
 ): Promise<YrdCliExitCode> {
   const invocation = resolveInvocation(argv)
   if (invocation.args.length === 1 && (invocation.args[0] === "--version" || invocation.args[0] === "-V")) {
@@ -2062,8 +2104,18 @@ async function executeYrd(
   const setExit = (code: YrdCliExitCode) => {
     exit = maxExit(exit, code)
   }
+  const runtimeIO: YrdCliIO = { ...io }
   const commanderOutput = { wroteError: false }
-  const program = buildProgram(app, services, invocation.name, invocation.projection, io, setExit, commanderOutput)
+  const program = buildProgram(
+    app,
+    services,
+    invocation.name,
+    invocation.projection,
+    runtimeIO,
+    setExit,
+    commanderOutput,
+    bootstrap,
+  )
   const args = invocation.args
   try {
     await program.parseAsync(args, { from: "user" })
@@ -2071,11 +2123,11 @@ async function executeYrd(
   } catch (error) {
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
-      if (!commanderOutput.wroteError) await diagnostic(io, invocation.name, error)
+      if (!commanderOutput.wroteError) await diagnostic(runtimeIO, invocation.name, error)
       return 2
     }
     const { exitCode } = classifyFailure(error)
-    await diagnostic(io, invocation.name, error)
+    await diagnostic(runtimeIO, invocation.name, error)
     return exitCode
   }
 }
@@ -2083,6 +2135,15 @@ async function executeYrd(
 /** Render command metadata without creating a repository-backed runtime. */
 export function runYrdHelp(argv: readonly string[], io: YrdCliIO): Promise<YrdCliExitCode> {
   return executeYrd(undefined, argv, io, {})
+}
+
+/** Initialize the process-owned runtime from the one parsed global context. */
+export function runYrdProcessRuntime(
+  argv: readonly string[],
+  io: YrdCliIO,
+  bootstrap: RuntimeBootstrap,
+): Promise<YrdCliExitCode> {
+  return executeYrd(undefined, argv, io, {}, bootstrap)
 }
 
 /** Run the one Yrd command surface. git-bay projects its canonical bay subtree;

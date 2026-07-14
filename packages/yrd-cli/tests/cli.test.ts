@@ -505,6 +505,8 @@ describe("runYrd", () => {
     expect(gitHelp.stdout()).toContain("refresh")
     expect(gitHelp.stdout()).toContain("submit")
     expect(gitHelp.stdout()).toContain("close")
+    expect(gitHelp.stdout()).not.toContain("--repo")
+    expect(gitHelp.stdout()).not.toContain("--cwd")
     expect(gitHelp.stdout()).not.toMatch(/^\s+queue /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+issue /mu)
     expect(gitHelp.stdout()).not.toMatch(/^\s+contest /mu)

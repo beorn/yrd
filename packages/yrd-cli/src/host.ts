@@ -47,13 +47,13 @@ import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
-import { resolveSubmitArgv } from "./submit-selection.ts"
+import { cleanGitEnvironment } from "./git-environment.ts"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
-import { classifyFailure, resolveInvocation, type Invocation } from "./invocation.ts"
+import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
-import { runYrd, runYrdHelp } from "./run.ts"
+import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
 
@@ -288,19 +288,13 @@ function configuredQueueSteps(
   })
 }
 
-function cleanEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(source).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
-  )
-}
-
 async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: string): Promise<string | undefined> {
   const candidates = ref.startsWith("refs/") ? [ref] : [ref, `refs/remotes/origin/${ref}`]
   for (const candidate of candidates) {
     const result = await process.run({
       argv: ["git", "-C", repo, "rev-parse", "--verify", "--end-of-options", `${candidate}^{commit}`],
       cwd: repo,
-      env: cleanEnvironment(globalThis.process.env),
+      env: cleanGitEnvironment(globalThis.process.env),
     })
     if (result.exitCode === 0) return result.stdout.trim().toLowerCase()
   }
@@ -553,22 +547,14 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: () => void):
   return remove
 }
 
-function isResidentQueueRun(invocation: Invocation): boolean {
-  return (
-    invocation.projection === "root" &&
-    invocation.args[0] === "queue" &&
-    invocation.args[1] === "run" &&
-    invocation.args.includes("--watch")
-  )
-}
-
 export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
   const scope = createScope("yrd-host")
   const log = createLogger("yrd")
-  const process = createProcess({ cwd: options.cwd, env: options.env, inject: { scope, log } })
+  const env = cleanGitEnvironment(options.env ?? globalThis.process.env)
+  const process = createProcess({ cwd: options.cwd, env, inject: { scope, log } })
   let app: YrdCliApp | undefined
   try {
-    const repository = await discoverYrdRepository({ ...options, process })
+    const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
     const receiver = await createGitPushReceiver({
       mainRepo: repository.repo,
@@ -679,6 +665,7 @@ export async function runYrdProcess(
   argv: readonly string[] = process.argv,
   io: YrdCliIO = defaultIO(),
 ): Promise<YrdCliExitCode> {
+  const env = process.env
   const invocation = resolveInvocation(argv)
   if (invocation.projection === "root" && invocation.args[0] === "receiver-hook") {
     const mode = invocation.args[1]
@@ -687,7 +674,7 @@ export async function runYrdProcess(
       return 2
     }
     try {
-      await runReceiverHook(mode, process.env)
+      await runReceiverHook(mode, env)
       return 0
     } catch (error) {
       await diagnostic(io, invocation.name, error)
@@ -706,41 +693,43 @@ export async function runYrdProcess(
   let host: YrdHost | undefined
   let closePromise: Promise<void> | undefined
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
-  const drain = isResidentQueueRun(invocation) ? new AbortController() : undefined
   let removeShutdownSignals: () => void = () => undefined
   try {
-    const activeHost = await createYrdHost({ cwd: io.cwd })
-    host = activeHost
-    removeShutdownSignals = bindProcessShutdown(
-      closeHost,
-      drain === undefined
-        ? undefined
-        : () => {
-            io.stderr("drain latched; second signal forces shutdown\n")
-            drain.abort()
+    return await runYrdProcessRuntime(argv, io, {
+      ambientCwd: io.cwd ?? globalThis.process.cwd(),
+      env,
+      async load(context, options) {
+        const activeHost = await createYrdHost({ cwd: context.repo, env })
+        host = activeHost
+        const drain = options.resident ? new AbortController() : undefined
+        removeShutdownSignals = bindProcessShutdown(
+          closeHost,
+          drain === undefined
+            ? undefined
+            : () => {
+                io.stderr("drain latched; second signal forces shutdown\n")
+                drain.abort()
+              },
+        )
+        return {
+          app: activeHost.app,
+          services: activeHost.services,
+          io: {
+            cwd: activeHost.repository.worktree,
+            concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
+            resolveRevision: (ref, cwd) =>
+              io.resolveRevision === undefined
+                ? resolveCommit(activeHost.process, cwd, ref)
+                : io.resolveRevision(ref, cwd),
+            resolveQueueTarget: (ref, cwd) =>
+              io.resolveQueueTarget === undefined
+                ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
+                : io.resolveQueueTarget(ref, cwd),
+            ...(drain === undefined ? {} : { drainSignal: drain.signal }),
           },
-    )
-    const selectedArgv = await resolveSubmitArgv(invocation, {
-      worktree: activeHost.repository.worktree,
-      process: activeHost.process,
-      env: cleanEnvironment(globalThis.process.env),
-    })
-    return await runYrd(
-      activeHost.app,
-      selectedArgv ?? argv,
-      {
-        ...io,
-        concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
-        resolveRevision: (ref, cwd) =>
-          io.resolveRevision === undefined ? resolveCommit(activeHost.process, cwd, ref) : io.resolveRevision(ref, cwd),
-        resolveQueueTarget: (ref, cwd) =>
-          io.resolveQueueTarget === undefined
-            ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
-            : io.resolveQueueTarget(ref, cwd),
-        ...(drain === undefined ? {} : { drainSignal: drain.signal }),
+        }
       },
-      activeHost.services,
-    )
+    })
   } catch (error) {
     await diagnostic(io, invocation.name, error)
     return classifyFailure(error).exitCode

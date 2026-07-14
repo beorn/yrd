@@ -77,6 +77,22 @@ by making the normal workflow create named bays and durable PRs from the start.
 The CLI initializes `.git/yrd/` on the first repository-backed command. Help is
 repository-independent and never creates Yrd state.
 
+Every command accepts one global repository selector. `--repo <path>` (or
+`YRD_REPO`) selects the Git repository, its `.yrd.yml`, durable Yrd state, and
+operation root. Selecting a linked worktree preserves its current-bay and
+current-branch behavior while config and state still resolve through the shared
+repository authority. The CLI value overrides the environment value, which
+overrides discovery from the caller's directory. Relative values resolve
+against that one original caller directory.
+
+```console
+$ yrd --repo /work/my-repository/.bays/B1 pr status --json
+```
+
+The selector is global and may also follow a subcommand. `.yrd.yml` remains the
+only configuration path; there is no separate `--cwd`, `--config`, or `--root`
+surface.
+
 ```console
 $ cd my-repository
 $ yrd bay open fix-release

@@ -383,7 +383,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stderr = ""
 
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--help"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", root, "--help"], {
         cwd: root,
         stdout: (text) => {
           stdout += text
@@ -398,6 +398,12 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(stdout).toContain("Model:")
     expect(stdout).toContain("Objects:")
     expect(stdout).toContain("Boundaries:")
+    expect(stdout).toContain("--repo <path>")
+    expect(stdout).toContain("YRD_REPO")
+    expect(stdout).not.toContain("--cwd")
+    expect(stdout).not.toContain("YRD_CWD")
+    expect(stdout).not.toContain("--config")
+    expect(stdout).not.toContain("--root")
     const commandBlock = stdout.match(/Commands:\n(?<commands>[\s\S]*?)\n\nModel:/u)?.groups?.commands ?? ""
     expect(
       commandBlock
@@ -407,6 +413,23 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
+
+    stdout = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/git-bay", "--repo", root, "--help"], {
+        cwd: root,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+    ).toBe(0)
+    expect(stdout).toContain("Usage: git bay")
+    expect(stdout).toContain("--repo <path>")
+    expect(stdout).not.toContain("--cwd")
+    expect(stderr).toBe("")
   })
 
   it("prints namespace help without initializing a repository host", async () => {
@@ -1042,6 +1065,89 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     ).toBe(1)
     expect(stdout).toBe("")
     expect(stderr).toContain("no current Git branch; pass a bay or branch selector")
+  })
+
+  it("selects one repository authority and operation root outside Git", async () => {
+    const { repo } = await repository()
+    const linked = join(repo, "..", "selected-repo")
+    const ambient = join(repo, "..", "ambient")
+    await git(repo, "worktree", "add", "-q", linked, "issue/feature")
+    await writeFile(join(linked, "selected-only.txt"), "selected repository\n")
+    await git(linked, "add", "selected-only.txt")
+    await git(linked, "commit", "-qm", "make selected revision unique")
+    const featureSha = await git(linked, "rev-parse", "HEAD")
+    await mkdir(ambient)
+    const checkCwd = join(repo, "check-cwd.txt")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main\nsteps: [check]\ncheck: ${JSON.stringify(`pwd > ${JSON.stringify(checkCwd)}`)}\n`,
+    )
+
+    const wrong = await repository()
+    await writeFile(join(wrong.repo, ".yrd.yml"), "steps: definitely-not-an-array\n")
+    await git(wrong.repo, "switch", "-q", "issue/feature")
+    await writeFile(join(wrong.repo, "wrong-only.txt"), "wrong repository\n")
+    await git(wrong.repo, "add", "wrong-only.txt")
+    await git(wrong.repo, "commit", "-qm", "diverge wrong repository")
+    await git(wrong.repo, "switch", "-q", "main")
+    const relativeRepo = relative(ambient, linked)
+    const yrdBin = join(import.meta.dirname, "../../../bin/yrd.ts")
+    const gitBayBin = join(import.meta.dirname, "../../../bin/git-bay")
+    const run = async (args: readonly string[], env: NodeJS.ProcessEnv = process.env, executable = yrdBin) => {
+      const child = Bun.spawn([process.execPath, executable, ...args], {
+        cwd: ambient,
+        env: { ...env, NO_COLOR: "1" },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ])
+      return { stdout, stderr, exitCode }
+    }
+
+    const poisoned = {
+      ...process.env,
+      YRD_REPO: wrong.repo,
+      GIT_DIR: join(wrong.repo, ".git"),
+      GIT_WORK_TREE: wrong.repo,
+    }
+    const selected = await run(["submit", "--repo", relativeRepo, "--json"], poisoned, gitBayBin)
+    expect(selected.exitCode, selected.stderr).toBe(0)
+    expect(JSON.parse(selected.stdout)).toMatchObject({
+      command: "bay.submit",
+      prs: [{ id: "PR1", branch: "issue/feature", headSha: featureSha }],
+    })
+    expect(selected.stderr).toBe("")
+
+    const diff = await run(["pr", "diff", "PR1", "--repo", relativeRepo, "--json"], poisoned)
+    expect(diff.exitCode, diff.stderr).toBe(0)
+    expect(JSON.parse(diff.stdout)).toMatchObject({ command: "pr.diff", pr: "PR1" })
+    expect(JSON.parse(diff.stdout).diff).toContain("feature.txt")
+    expect(diff.stderr).toBe("")
+
+    const submitted = await run(["pr", "submit", "--follow", "--repo", relativeRepo, "--json"])
+    expect(submitted.exitCode, submitted.stderr).toBe(0)
+    expect(JSON.parse(submitted.stdout)).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", branch: "issue/feature", headSha: featureSha }],
+    })
+    expect(submitted.stderr).toBe("")
+
+    const status = await run(["pr", "status", "--json"], { ...process.env, YRD_REPO: relativeRepo })
+    expect(status.exitCode, status.stderr).toBe(0)
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      command: "pr.status",
+      pr: { id: "PR1", branch: "issue/feature" },
+    })
+    expect(status.stderr).toBe("")
+
+    const managedCwd = (await readFile(checkCwd, "utf8")).trim()
+    expect(managedCwd.startsWith(`${join(repo, ".bays")}/`)).toBe(true)
+    expect(managedCwd).not.toBe(ambient)
+    expect(managedCwd).not.toBe(linked)
   })
 
   it("reports a failed queue against origin when the operator HEAD is detached", async () => {

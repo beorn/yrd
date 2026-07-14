@@ -1,4 +1,4 @@
-import { basename } from "node:path"
+import { basename, resolve } from "node:path"
 import { failureFact, raiseFailure, type FailureFact } from "@yrd/core"
 import type { YrdCliExitCode } from "./types.ts"
 
@@ -9,6 +9,24 @@ export type Invocation = Readonly<{
 }>
 
 export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: FailureFact }>
+
+export type YrdContext = Readonly<{
+  /** Git path used to discover the repository and its operation root. */
+  repo: string
+}>
+
+/** Resolve the one repository selector against the captured invocation
+ * directory. CLI overrides environment; ambient discovery is the fallback. */
+export function resolveYrdContext(
+  options: Readonly<{ repo?: string }>,
+  env: Readonly<Record<string, string | undefined>>,
+  ambientCwd: string,
+): YrdContext {
+  const ambient = resolve(ambientCwd)
+  return Object.freeze({
+    repo: resolve(ambient, options.repo ?? env.YRD_REPO ?? "."),
+  })
+}
 
 function executableName(value: string | undefined): string {
   if (value === undefined) return ""

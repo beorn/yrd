@@ -1,5 +1,6 @@
 import { join, resolve } from "node:path"
 import { createProcess, type Process, type ProcessResult } from "@yrd/process"
+import { cleanGitEnvironment } from "./git-environment.ts"
 
 export type YrdRepository = Readonly<{
   repo: string
@@ -11,10 +12,6 @@ export type YrdRepository = Readonly<{
 }>
 
 type RepositoryProcess = Pick<Process, "run">
-
-function cleanEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(source).filter(([key]) => !key.startsWith("GIT_")))
-}
 
 async function git(
   process: RepositoryProcess,
@@ -101,7 +98,7 @@ export async function discoverYrdRepository(
   const owned = options.process === undefined ? createProcess({ cwd, env: options.env }) : undefined
   const runner = options.process ?? owned
   if (runner === undefined) throw new Error("yrd: repository discovery has no Process")
-  const env = cleanEnvironment(options.env ?? process.env)
+  const env = cleanGitEnvironment(options.env ?? process.env)
   try {
     const top = await git(runner, cwd, env, ["rev-parse", "--path-format=absolute", "--show-toplevel"], true)
     const worktree = value(top)
