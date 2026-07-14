@@ -125,7 +125,15 @@ const QueueAuthorityTokenFactSchema = z.object({
   headSha: GitShaSchema,
 })
 const QueueAuthorityRevisionFactSchema = z.object({ pr: PRIdSchema, revision: z.number().int().positive() })
-const QueueAuthorityPRFactSchema = z.object({ pr: PRIdSchema })
+const QueueAuthorityPRFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive().optional(),
+    headSha: GitShaSchema.optional(),
+  })
+  .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
+    message: "revision and headSha must be provided together",
+  })
 
 export type StepExecution<Shape extends PRShape = PRShape> = Readonly<{
   run: QueueRunId
@@ -1090,6 +1098,10 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/withdrawn" || applied.name === "pr/canceled") {
     const closed = QueueAuthorityPRFactSchema.parse(applied.data)
+    if (closed.revision !== undefined && closed.headSha !== undefined) {
+      const current = state.queues.authority.current[closed.pr]
+      if (current?.revision !== closed.revision || current.headSha !== closed.headSha) return state
+    }
     return {
       queues: {
         ...state.queues,
@@ -1332,7 +1344,10 @@ function samePayloadPRs(
 ): readonly DeepReadonly<PR>[] {
   const payloads = new Set(snapshots.map((pr) => `${baseIdentity(pr.base)}\0${pr.headSha}`))
   return Object.values(state.prs).filter(
-    (pr) => pr.status !== "withdrawn" && payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
+    (pr) =>
+      pr.status !== "withdrawn" &&
+      pr.status !== "canceled" &&
+      payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
   )
 }
 
