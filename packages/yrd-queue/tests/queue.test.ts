@@ -13,6 +13,8 @@ import {
   withQueue,
   withMerge,
   withStep,
+  QueueRecordSchema,
+  ReplayQueueRecordSchema,
   type AddStepResult,
   type IntegratedShape,
   type Queue,
@@ -379,6 +381,37 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
     expect(app.state().queues.records).toEqual({})
     expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+  })
+
+  it("persists configured omissions without mislabeling unconfigured steps", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    const expectedSelection = {
+      authority: "explicit",
+      steps: ["merge"],
+      omittedSteps: [
+        { name: "check", index: 0, revision: "check-v1", status: "skipped", reason: "not-selected" },
+        { name: "deploy", index: 2, revision: "deploy-v1", status: "skipped", reason: "not-selected" },
+      ],
+    }
+
+    {
+      await using app = await createQueueApp({ defaultSteps: ["check", "merge", "deploy"] }, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/auditable-merge-only")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
+      expect(JSON.parse(JSON.stringify(app.state().queues.records.R1?.stepSelection))).toMatchObject(expectedSelection)
+      const record = app.state().queues.records.R1
+      if (record === undefined) throw new Error("expected a durable merge-only Run")
+      const legacyRecord = {
+        ...record,
+        stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+      }
+      expect(() => QueueRecordSchema.parse(legacyRecord)).toThrow()
+      expect(ReplayQueueRecordSchema.parse(legacyRecord).stepSelection).toEqual(legacyRecord.stepSelection)
+    }
+
+    await using replayed = await createQueueApp({ defaultSteps: ["check", "merge", "deploy"] }, journal, undefined, id)
+    expect(JSON.parse(JSON.stringify(replayed.queue.get("R1")?.stepSelection))).toMatchObject(expectedSelection)
   })
 
   it("keeps recovery execution-free for requested merge work", async () => {
