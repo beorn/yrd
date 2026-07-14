@@ -736,7 +736,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
-  it("teaches runs, retry, and fix-resubmit for a rejected direct-branch PR without appending", async () => {
+  it("teaches exact inspect-and-resubmit guidance for a rejected direct-branch PR without appending", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
     await git(repo, "switch", "-q", "issue/feature")
@@ -767,15 +767,15 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
         },
       }),
     ).toBe(1)
-    expect(JSON.parse(refusal)).toMatchObject({
+    const rejected = JSON.parse(refusal)
+    expect(rejected).toMatchObject({
       command: "pr.merge",
       status: "rejected",
       next: "yrd pr runs PR1",
-      guidance: {
-        inspect: "yrd pr runs PR1",
-        retry: "yrd pr retry PR1",
-        resubmit: "fix the branch and run yrd pr submit again",
-      },
+    })
+    expect(rejected.guidance).toEqual({
+      inspect: "yrd pr runs PR1",
+      resubmit: "fix the branch and run yrd pr submit again",
     })
     expect(await readFile(journal, "utf8")).toBe(before)
   })

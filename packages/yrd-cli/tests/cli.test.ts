@@ -583,9 +583,17 @@ describe("runYrd", () => {
 
     const pr = outputIO()
     expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
-    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "retry", "close"]) {
+    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "close"]) {
       expect(pr.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
+    expect(pr.stdout()).not.toMatch(/^\s+retry\b/mu)
+
+    const beforeRetiredRetry = await Array.fromAsync(app.events()).then((events) => events.length)
+    const retiredRetry = outputIO()
+    expect(await runYrd(app, yrd("pr", "retry", "PR1"), retiredRetry.io)).toBe(2)
+    expect(retiredRetry.stdout()).toBe("")
+    expect(retiredRetry.stderr()).toContain("unknown command 'retry'")
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRetiredRetry)
 
     const contest = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), contest.io)).toBe(0)
@@ -646,7 +654,10 @@ describe("runYrd", () => {
 
     const prime = outputIO({ currentBranch: () => "topic/direct" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
+    const briefing = JSON.parse(prime.stdout())
+    expect(briefing).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
+    expect(briefing.loop).toContain("fix the branch and run yrd pr submit again")
+    expect(briefing.loop.join("\n")).not.toMatch(/\bretry\b/u)
 
     const checkout = outputIO()
     expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
@@ -847,22 +858,22 @@ describe("runYrd", () => {
     })
   })
 
-  it("teaches PR-owned retry when pr merge is invoked for rejected work", async () => {
+  it("teaches inspect-and-resubmit when pr merge is invoked for rejected work", async () => {
     const app = await createApp({ failingCheck: true })
     await openAndSubmit(app)
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     const output = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), output.io)).toBe(1)
-    expect(JSON.parse(output.stderr())).toMatchObject({
+    const refusal = JSON.parse(output.stderr())
+    expect(refusal).toMatchObject({
       command: "pr.merge",
       status: "rejected",
       next: "yrd pr runs PR1",
-      guidance: {
-        inspect: "yrd pr runs PR1",
-        retry: "yrd pr retry PR1",
-        resubmit: "fix the branch and run yrd pr submit again",
-      },
+    })
+    expect(refusal.guidance).toEqual({
+      inspect: "yrd pr runs PR1",
+      resubmit: "fix the branch and run yrd pr submit again",
     })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
@@ -1315,9 +1326,20 @@ describe("runYrd", () => {
     expect(plain.stdout()).not.toContain("\u001b]")
 
     behavior.failingCheck = false
-    const retry = (await app.queue.admit({ prs: ["PR1"], retry: true }))[0]
-    if (retry === undefined) throw new Error("expected an explicit retry run")
-    await app.queue.run({ prs: ["PR1"], retry: true }, { runner: "cli-test", leaseMs: 60_000 })
+    const rejected = app.state().bays.prs.PR1
+    if (rejected === undefined) throw new Error("expected rejected PR")
+    await app.bays.intake({
+      branch: rejected.branch,
+      headSha: MERGED_SHA,
+      base: rejected.base,
+      ...(rejected.baseSha === undefined ? {} : { baseSha: rejected.baseSha }),
+    })
+    await app.bays.submit({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+    const reauthorized = (await app.queue.admit({ prs: ["PR1"] }))[0]
+    if (reauthorized === undefined) throw new Error("expected a fresh-revision check run")
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 2, headSha: MERGED_SHA })
     const recovered = outputIO()
     expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), recovered.io), recovered.stderr()).toBe(0)
     const currentChecks = recovered
@@ -1326,7 +1348,12 @@ describe("runYrd", () => {
       .split("\n")
       .map((line) => JSON.parse(line))
     expect(currentChecks).toHaveLength(1)
-    expect(currentChecks[0]).toMatchObject({ kind: "pr.check", run: retry.id, status: "passed" })
+    expect(currentChecks[0]).toMatchObject({
+      kind: "pr.check",
+      revision: 2,
+      run: reauthorized.id,
+      status: "passed",
+    })
   })
 
   it("lets the existing Queue drain finish a plain submit admission before integrating its cached proof", async () => {
@@ -1554,7 +1581,19 @@ describe("runYrd", () => {
       "failed",
     )
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], retry: true })
+    const rejected = app.state().bays.prs.PR1
+    if (rejected === undefined) throw new Error("expected rejected PR")
+    await app.bays.intake({
+      branch: rejected.branch,
+      headSha: MERGED_SHA,
+      base: rejected.base,
+      ...(rejected.baseSha === undefined ? {} : { baseSha: rejected.baseSha }),
+    })
+    await app.bays.submit({ pr: "PR1" })
+    await app.dispatch(app.commands.queue.advance, { run: "R1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", revision: 2, headSha: MERGED_SHA })
+    expect((await app.queue.admit({ prs: ["PR1"] }))[0]?.id).toBe("R2")
 
     const checkJob = app.queue.get("R2")?.steps[0]?.job
     expect(checkJob?.status).toBe("requested")
@@ -1575,7 +1614,7 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(recovery.stdout())).toMatchObject({
       command: "queue.recover",
-      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }],
+      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }] }],
     })
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
     expect(app.queue.get("R2")?.steps[1]?.job).toBeUndefined()
