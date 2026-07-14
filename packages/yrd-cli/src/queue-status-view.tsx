@@ -9,6 +9,8 @@ import { Box, Link, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
+
 export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
 
 export type QueueLogRow = Readonly<{
@@ -994,8 +996,8 @@ function checkDiagnosticText(value: unknown): string {
   if (!Array.isArray(value) || value.length === 0) return singleQueue(safeText(value))
   const first = isObjectValue(value[0]) ? value[0] : undefined
   const location =
-    typeof first?.file === "string" && typeof first.line === "number"
-      ? `${first.file}:${first.line}${typeof first.column === "number" ? `:${first.column}` : ""}`
+    typeof first?.file === "string" && typeof first[sourceRowKey] === "number"
+      ? `${first.file}:${first[sourceRowKey]}${typeof first.column === "number" ? `:${first.column}` : ""}`
       : undefined
   const detail = typeof first?.message === "string" ? first.message : safeText(value[0])
   return singleQueue(

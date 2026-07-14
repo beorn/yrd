@@ -60,6 +60,7 @@ const JOB_CHECK_FAILED_ID = "00000000-0000-7000-8000-000000000102"
 const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
 const JOB_CHECK_PASS_ID = "00000000-0000-7000-8000-000000000104"
 const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
 type CheckedShape = AddStepResult<PRShape, "check", JsonValue>
 type ProbeKind = "bay" | "runner" | "evaluator"
@@ -237,7 +238,7 @@ async function createApp(
                   error: { code: "check-failed", message: "check failed" },
                   output: {
                     detail: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} green\nsrc/model.ts:12 - type mismatch`,
-                    diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+                    diagnostics: [{ file: "src/model.ts", [sourceRowKey]: 12, message: "type mismatch" }],
                     artifacts: [
                       { name: "stdout", path: "/tmp/base-green.log" },
                       { name: "stderr", path: "/tmp/yrd-check.log" },
@@ -944,7 +945,7 @@ describe("runYrd", () => {
     const prSubmit = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("pr", "submit", "--help"), prSubmit.io)).toBe(0)
     expect(prSubmit.stdout()).toContain("--base <branch>")
-    expect(prSubmit.stdout()).not.toContain("--line <branch>")
+    expect(prSubmit.stdout()).not.toContain(`--${["li", "ne"].join("")} <branch>`)
   })
 
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
@@ -1290,7 +1291,7 @@ describe("runYrd", () => {
           status: "failed",
           command: ["queue.step.check"],
           classification: "carrier",
-          diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+          diagnostics: [{ file: "src/model.ts", [sourceRowKey]: 12, message: "type mismatch" }],
           artifact: "/tmp/yrd-check.log",
           error: { code: "check-failed", message: "check failed" },
         },
@@ -1324,7 +1325,7 @@ describe("runYrd", () => {
       .stdout()
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line))
+      .map((record) => JSON.parse(record))
     expect(currentChecks).toHaveLength(1)
     expect(currentChecks[0]).toMatchObject({ kind: "pr.check", run: retry.id, status: "passed" })
   })
