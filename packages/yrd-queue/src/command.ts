@@ -945,7 +945,7 @@ async function prepareCandidate(
       if (gitlinks.length > 0) {
         return candidateFailure(
           "authored-gitlink",
-          `PR '${pr.id}' changes generated-only gitlinks [${gitlinks.join(", ")}]; submit a composition packet or temporarily set YRD_ALLOW_AUTHORED_GITLINKS=1`,
+          `PR '${pr.id}' changes generated-only gitlinks [${gitlinks.join(", ")}]; authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr.id} --queue' on that same PR; no composition manifest or manual recut is needed`,
           ".",
           gitlinks,
         )
