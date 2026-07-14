@@ -13,12 +13,14 @@ import { createFailure, createMemoryJournal } from "@yrd/core"
 import { GitCheckEvidenceSchema, IntegrationProofSchema } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
+import { createLogger } from "loggily"
 import * as z from "zod"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
+import type { SignalDelivery, SignalDeliveryAdapter } from "../src/signals.ts"
 
 const roots: string[] = []
 
@@ -389,6 +391,93 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("routes a rejected Run to its revision submitter without awaiting delivery", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "printf 'focused failure\\n' >&2; exit 1" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let delivery: SignalDelivery | undefined
+    const adapter: SignalDeliveryAdapter = {
+      async send(value) {
+        delivery = value
+        entered.resolve()
+        await release.promise
+      },
+    }
+    const host = await createYrdHost({
+      cwd: repo,
+      env: { ...process.env, TRIBE_NAME: "@agent/7" },
+      log: createLogger("test", [{ level: "silent" }]),
+      signalAdapter: adapter,
+    })
+    try {
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      expect(host.app.bays.pr("PR1")?.revisions).toEqual([expect.objectContaining({ actor: "@agent/7" })])
+
+      const settled = await Promise.race([
+        host.app.queue
+          .run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+          .then((runs) => ({ kind: "runs" as const, runs })),
+        Bun.sleep(1_000).then(() => ({ kind: "timeout" as const })),
+      ])
+
+      expect(settled).toMatchObject({ kind: "runs", runs: [expect.objectContaining({ status: "failed" })] })
+      await entered.promise
+      expect(delivery).toEqual({
+        recipient: "@agent/7",
+        event: expect.objectContaining({
+          kind: "pr/rejected",
+          pr: "PR1",
+          revision: 1,
+          step: "check",
+          evidence: expect.stringContaining("stderr"),
+        }),
+      })
+    } finally {
+      release.resolve()
+      await host.close()
+    }
+  })
+
+  it("refuses a submitter route at startup when no Tribe identity can resolve it", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    const env = { ...process.env }
+    delete env.TRIBE_NAME
+    let host: Awaited<ReturnType<typeof createYrdHost>> | undefined
+    let failure: unknown
+    try {
+      host = await createYrdHost({ cwd: repo, env, signalAdapter: { send() {} } })
+    } catch (error) {
+      failure = error
+    } finally {
+      await host?.close()
+    }
+
+    expect(failure).toMatchObject({
+      failure: { kind: "configuration", code: "signal-submitter-missing" },
+    })
+    expect((failure as Error).message).toContain("set TRIBE_NAME to the submitting Tribe handle")
+  })
+
   it("classifies typed failure facts without scraping their messages", () => {
     const failure = createFailure({
       kind: "configuration",
