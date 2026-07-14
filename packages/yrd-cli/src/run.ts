@@ -664,7 +664,7 @@ async function recutPr(
       raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${current.status}, not ready`)
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
-    admitted = await app.queue.admit({})
+    admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
     current = requiredPr(app, current.id)
   }
   const output = {
@@ -685,7 +685,13 @@ async function recutPr(
     output,
     `${current.id} revision ${current.revision} ${unchanged ? "already matches" : "recut onto"} ${result.baseSha}`,
   )
-  return admitted.some((run) => run.status === "failed") ? 1 : 0
+  return admitted.some(
+    (run) =>
+      run.status === "failed" &&
+      run.prs.some((member) => member.id === current.id && member.revision === current.revision),
+  )
+    ? 1
+    : 0
 }
 
 async function reviewPr(

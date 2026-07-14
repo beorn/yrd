@@ -968,8 +968,13 @@ describe("runYrd", () => {
 
   it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {
     let clockTick = 0
+    const checkRuns: string[] = []
+    const mergeRuns: string[] = []
     const app = await createApp({
       requires: ["review"],
+      waitingCheck: true,
+      checkRuns,
+      mergeRuns,
       clock: () => new Date(Date.parse("2026-07-09T10:00:00.000Z") + clockTick++ * 60_000).toISOString(),
     })
     const nextHead = "2".repeat(40)
@@ -996,11 +1001,20 @@ describe("runYrd", () => {
     const sourceReadyAt = app.bays.pr("PR1")?.revisions[0]?.submittedAt
     if (sourceReadyAt === undefined) throw new Error("missing first revision submission clock")
     await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "review-r1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+    expect(await app.queue.admit({ prs: ["PR1"] })).toMatchObject([
+      {
+        id: "R1",
+        status: "running",
+        prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, correlation }],
+        steps: [{ name: "check", job: { status: "requested" } }],
+      },
+    ])
+    expect(checkRuns).toEqual([])
+    expect(mergeRuns).toEqual([])
     const output = outputIO()
 
-    expect(
-      await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--queue", "--json"), output.io, services),
-    ).toBe(0)
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
 
     expect(requests).toEqual([
       expect.objectContaining({
@@ -1043,6 +1057,22 @@ describe("runYrd", () => {
       current: { carriedFrom: { revision: 1, headSha: HEAD_SHA } },
     })
     expect(app.bays.checksRequested("PR1")).toBe(true)
+    expect(app.queue.get("R1")).toMatchObject({
+      id: "R1",
+      status: "failed",
+      error: { code: "stale-pr" },
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, correlation }],
+    })
+    expect(app.queue.get("R2")).toMatchObject({
+      id: "R2",
+      status: "waiting",
+      prs: [{ id: "PR1", revision: 2, headSha: nextHead, baseSha: nextBase, correlation }],
+      steps: [{ name: "check", job: { status: "waiting" } }],
+    })
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+    expect(checkRuns).toEqual(["check"])
+    expect(mergeRuns).toEqual([])
 
     const status = outputIO({ now: () => Date.parse("2026-07-09T12:00:00.000Z") })
     expect(await runYrd(app, yrd("pr", "list"), status.io, services)).toBe(0)

@@ -161,6 +161,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.commands.pr)).toEqual([
       "close",
       "edit",
+      "recut",
       "ready",
       "review",
       "comment",
