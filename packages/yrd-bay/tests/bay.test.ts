@@ -16,7 +16,13 @@ import {
 } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
-import { GitShaSchema, type DeprovisionedBay, type ProvisionedBay, type RefreshedBay } from "../src/model.ts"
+import {
+  GitShaSchema,
+  resolveBase,
+  type DeprovisionedBay,
+  type ProvisionedBay,
+  type RefreshedBay,
+} from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
@@ -91,6 +97,24 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "Topic/One", headSha: HEAD_1 })
+
+    expect(app.bays.pr("pr1")).toMatchObject({ id: "PR1", branch: "Topic/One" })
+    expect(app.bays.pr("topic/one")).toMatchObject({ id: "PR1", branch: "Topic/One" })
+
+    const opened = await app.bays.open({ name: "Case-Bay" })
+    await finishJob(app, opened)
+    expect(app.bays.get("case-bay")).toMatchObject({ id: "B1", name: "Case-Bay" })
+
+    expect(app.bays.pr("PR1")).toMatchObject({ id: "PR1" })
+
+    expect(resolveBase(["main"], "ORIGIN/MAIN")).toBe("main")
+    expect(resolveBase(["Main", "main"], "Main")).toBe("Main")
+    expect(() => resolveBase(["Main", "main"], "MAIN")).toThrow("yrd: base selector 'MAIN' is ambiguous: Main, main")
+  })
+
   it("journals an exact revision-bound issue join when a PR is withdrawn", async () => {
     await using app = (await createHarness()).app
     const issueRef = "@km/all/21063-steering-laser"

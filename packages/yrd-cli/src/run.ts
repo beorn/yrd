@@ -7,6 +7,7 @@ import {
   baseIdentity,
   CorrelationSchema,
   resolveBay,
+  resolveBase,
   resolvePR,
   type Bay,
   type BaysState,
@@ -247,6 +248,20 @@ function stateOf(app: YrdCliApp): YrdCliState {
   return app.state()
 }
 
+function knownBases(state: YrdCliState): string[] {
+  return [
+    "main",
+    ...Object.values(state.bays.byId).map((bay) => bay.base),
+    ...Object.values(state.bays.prs).map((pr) => pr.base),
+    ...Object.values(state.queues.records).map((run) => run.base),
+    ...Object.values(state.queues.pauses).map((pause) => pause.base),
+  ]
+}
+
+function selectedBase(state: YrdCliState, selector: string): string {
+  return resolveBase(knownBases(state), selector) ?? baseIdentity(selector)
+}
+
 async function runJobs(app: YrdCliApp, ids: readonly string[], io: YrdCliIO): Promise<Job[]> {
   return [...(await app.jobs.runMany(ids, runtimeOptions(io)))]
 }
@@ -342,6 +357,23 @@ function oneOfAliases(primary: unknown, alias: unknown, primaryName: string, ali
   return value
 }
 
+function oneBaseOfAliases(
+  state: YrdCliState,
+  primary: unknown,
+  alias: unknown,
+  primaryName: string,
+  aliasName: string,
+): string | undefined {
+  const primaryValue = oneOfAliases(primary, undefined, primaryName, aliasName)
+  const aliasValue = oneOfAliases(alias, undefined, aliasName, primaryName)
+  if (primaryValue === undefined) return aliasValue === undefined ? undefined : selectedBase(state, aliasValue)
+  const selected = selectedBase(state, primaryValue)
+  if (aliasValue !== undefined && selectedBase(state, aliasValue) !== selected) {
+    usage(`--${primaryName} and --${aliasName} disagree`)
+  }
+  return selected
+}
+
 function parseCorrelation(value: unknown): Correlation | undefined {
   if (value === undefined) return undefined
   if (typeof value !== "string") usage("--correlation requires <namespace:id>")
@@ -375,7 +407,7 @@ async function openBay(
   pr?: string,
 ): Promise<void> {
   const from = oneOfAliases(options.from, options.head, "from", "head")
-  const base = oneOfAliases(options.base, options.queue, "base", "queue")
+  const base = oneBaseOfAliases(stateOf(app), options.base, options.queue, "base", "queue")
   const result = await app.bays.open({
     name,
     ...(options.issue === undefined ? {} : { issue: options.issue }),
@@ -632,7 +664,7 @@ async function submitBays(
   const local = currentBay(state.bays, cwd)
   const inferred = resolveSubmitSelectors(selectors, local?.id ?? currentGitBranch(cwd, io))
   const prs: PR[] = []
-  const base = oneOfAliases(options.base, options.queue, "base", "queue")
+  const base = oneBaseOfAliases(state, options.base, options.queue, "base", "queue")
   for (const selector of inferred) {
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
@@ -697,9 +729,11 @@ async function listPrs(
   options: JsonOption & Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean }>,
   io: YrdCliIO,
 ): Promise<void> {
+  const state = stateOf(app)
+  const base = options.base === undefined ? undefined : selectedBase(state, options.base)
   const rows = app.bays
     .prs()
-    .filter((pr) => options.base === undefined || baseIdentity(pr.base) === baseIdentity(options.base))
+    .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
     .filter((pr) => options.state === undefined || pr.status === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
     .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
@@ -1047,7 +1081,7 @@ async function pauseQueue(
     return
   }
   if (typeof options.reason !== "string" || options.reason.trim() === "") usage("--reason requires text")
-  const target = await resolvedQueueTarget(base ?? "main", io)
+  const target = await resolvedQueueTarget(selectedBase(stateOf(app), base ?? "main"), io)
   const pause = await app.queue.pause({
     base: target.base,
     reason: options.reason,
@@ -1066,7 +1100,7 @@ async function queuePauses(app: YrdCliApp, base: string | undefined, io: YrdCliI
   if (base === undefined) {
     return Object.values(stateOf(app).queues.pauses).toSorted((left, right) => left.base.localeCompare(right.base))
   }
-  const target = await resolvedQueueTarget(base, io)
+  const target = await resolvedQueueTarget(selectedBase(stateOf(app), base), io)
   const pause = stateOf(app).queues.pauses[target.base]
   return pause === undefined ? [] : [pause]
 }
@@ -1118,7 +1152,7 @@ async function migrateTerminalAssociations(
 }
 
 async function resumeQueue(app: YrdCliApp, base: string | undefined, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const target = await resolvedQueueTarget(base ?? "main", io)
+  const target = await resolvedQueueTarget(selectedBase(stateOf(app), base ?? "main"), io)
   await app.queue.resume(target.base)
   await printResult(
     io,
@@ -1256,22 +1290,24 @@ function resolveQueueTargets(
 ): { bases: Set<string>; selected: Set<string>; prFilter: string | undefined } {
   const bases = new Set<string>()
   const selected = new Set<string>()
-  if (base !== undefined) bases.add(base)
-  if (filterPr !== undefined) selected.add(filterPr)
+  if (base !== undefined) bases.add(selectedBase(state, base))
   for (const selector of selectors) {
     const pr = resolvePR(state.bays, selector)
-    if (pr === undefined) bases.add(selector)
+    if (pr === undefined) bases.add(selectedBase(state, selector))
     else {
       bases.add(pr.base)
       selected.add(pr.id)
     }
   }
+  let canonicalFilter: string | undefined
   if (filterPr !== undefined) {
-    const found = state.bays.prs[filterPr]
-    if (found !== undefined) selected.add(found.id)
-    if (found !== undefined) bases.add(found.base)
+    const found = resolvePR(state.bays, filterPr)
+    if (found === undefined) refusal(`no PR '${filterPr}'`)
+    canonicalFilter = found.id
+    selected.add(found.id)
+    bases.add(found.base)
   }
-  return { bases, selected, prFilter: filterPr }
+  return { bases, selected, prFilter: canonicalFilter }
 }
 
 function queueLogTargets(
@@ -1381,6 +1417,7 @@ async function queueAudit(
 }
 
 async function queueAdministration(
+  app: YrdCliApp,
   services: YrdCliServices,
   command: "init" | "deinit",
   base: string | undefined,
@@ -1391,12 +1428,13 @@ async function queueAdministration(
   const administration = services.queue
   const capability = administration?.[action]
   if (capability === undefined) configuration(`queue.${command} capability is not installed`)
-  const result = await capability(base)
+  const selected = selectedBase(stateOf(app), base ?? "main")
+  const result = await capability(selected)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: `queue.${command}`, base: base ?? "main", result },
-    `${base ?? "main"} ${command === "init" ? "initialized" : "deinitialized"}`,
+    { command: `queue.${command}`, base: selected, result },
+    `${selected} ${command === "init" ? "initialized" : "deinitialized"}`,
   )
 }
 
@@ -2097,12 +2135,12 @@ function buildProgram(
     .command("init [base]")
     .description("prepare queue resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(installedServices(), "init", base, options, io))
+    .action(async (base, options) => queueAdministration(installed(), installedServices(), "init", base, options, io))
   queue
     .command("deinit [base]")
     .description("release queue resources")
     .option("--json", "emit stable JSON")
-    .action(async (base, options) => queueAdministration(installedServices(), "deinit", base, options, io))
+    .action(async (base, options) => queueAdministration(installed(), installedServices(), "deinit", base, options, io))
   queue
     .command("pause [base]")
     .description("pause new queue runs")

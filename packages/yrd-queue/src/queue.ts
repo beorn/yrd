@@ -6,6 +6,7 @@ import {
   baseIdentity,
   checkRequest,
   checksRequested,
+  resolveBase,
   resolvePR,
   reviewState,
   type BaysState,
@@ -275,6 +276,17 @@ type QueueState = Readonly<{ queues: QueuesState }>
 type QueueHostState = Readonly<{ bays: BaysState; jobs: JobsState }>
 type RuntimeState = QueueHostState & QueueState
 type QueueStart = Omit<QueueRecord, "startedAt" | "failure">
+
+function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string {
+  const known = [
+    "main",
+    ...Object.values(state.bays.byId).map((bay) => bay.base),
+    ...Object.values(state.bays.prs).map((pr) => pr.base),
+    ...Object.values(state.queues.records).map((run) => run.base),
+    ...Object.values(state.queues.pauses).map((pause) => pause.base),
+  ]
+  return resolveBase(known, selector) ?? baseIdentity(selector)
+}
 
 export type QueueCommands = Readonly<{
   queue: Readonly<{
@@ -648,10 +660,22 @@ function createQueue<Shape extends PRShape>(
 
   const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
     const snapshot = runtime()
-    const direct = snapshot.queues.records[selector]
-    let selected = direct === undefined ? undefined : materializeRun(direct, snapshot.jobs)
+    let record = Queues.resolve(snapshot.queues, selector)
+    let pr = resolvePR(snapshot.bays, selector)
+    if (record !== undefined && pr !== undefined) {
+      if (record.id === selector) pr = undefined
+      else if (pr.id === selector) record = undefined
+      else {
+        const candidates = [record.id, pr.id].toSorted((left, right) => left.localeCompare(right))
+        raiseFailure(
+          "refusal",
+          "selector-ambiguous",
+          `yrd: queue run or PR selector '${selector}' is ambiguous: ${candidates.join(", ")}`,
+        )
+      }
+    }
+    let selected = record === undefined ? undefined : materializeRun(record, snapshot.jobs)
     if (selected === undefined) {
-      const pr = resolvePR(snapshot.bays, selector)
       if (pr === undefined) {
         raiseFailure("refusal", "queue-selection-missing", `yrd: no queue run or PR '${selector}'`)
       }
@@ -857,14 +881,20 @@ function createQueue<Shape extends PRShape>(
       )
     },
     async pause(args) {
-      const base = baseIdentity(args.base)
-      await actions.pause({ ...args, base })
+      const snapshot = runtime()
+      const base = queueBase(snapshot, args.base)
+      const allowedPRs = args.allowedPRs.map((selector) => {
+        const pr = resolvePR(snapshot.bays, selector)
+        if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
+        return pr.id
+      })
+      await actions.pause({ ...args, base, allowedPRs })
       const pause = state().pauses[base]
       if (pause === undefined) throw new Error(`yrd: queue '${base}' did not retain its pause`)
       return pause
     },
     async resume(base) {
-      await actions.resume(baseIdentity(base))
+      await actions.resume(queueBase(runtime(), base))
     },
     async run(args, runOptions) {
       return observeYrdLifecycle(
@@ -1038,10 +1068,10 @@ function createQueue<Shape extends PRShape>(
       return { ...plan, summary: { ...plan.summary, appended } }
     },
     get(id) {
-      const record = state().records[id]
+      const record = Queues.resolve(state(), id)
       return record === undefined ? undefined : materializeRun(record, runtime().jobs)
     },
-    status: (base) => queueSummary(state(), runtime().jobs, baseIdentity(base)),
+    status: (base) => queueSummary(state(), runtime().jobs, queueBase(runtime(), base)),
   }) as Queue<Shape>
 }
 

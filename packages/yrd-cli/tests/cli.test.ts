@@ -731,6 +731,147 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
+  it.each([
+    {
+      surface: "pr view",
+      args: ["pr", "view", "pr1", "--json"],
+      expected: { command: "pr.view", pr: { id: "PR1" } },
+    },
+    {
+      surface: "pr runs",
+      args: ["pr", "runs", "pr1", "--json"],
+      expected: { command: "pr.runs", pr: { id: "PR1" } },
+    },
+    {
+      surface: "pr review",
+      args: ["pr", "review", "pr1", "--approve", "--by", "@cto", "--json"],
+      expected: { command: "pr.review", pr: { id: "PR1" } },
+    },
+    {
+      surface: "PR resubmission",
+      args: ["pr", "submit", "pr1", "--json"],
+      expected: { command: "pr.submit", prs: [{ id: "PR1" }] },
+    },
+    {
+      surface: "pr checks",
+      args: ["pr", "checks", "pr1", "--json"],
+      expected: { kind: "pr.check", pr: "PR1" },
+    },
+    {
+      surface: "pr close",
+      args: ["pr", "close", "pr1", "--json"],
+      expected: { command: "pr.close", prs: [{ id: "PR1" }] },
+    },
+    {
+      surface: "queue run",
+      args: ["queue", "run", "pr1", "--json"],
+      expected: { command: "queue.run", results: [{ prs: [{ id: "PR1" }] }] },
+    },
+    {
+      surface: "pr list base filter",
+      args: ["pr", "list", "--base", "MAIN", "--json"],
+      expected: { command: "pr.list", prs: [{ id: "PR1", base: "main" }] },
+    },
+    {
+      surface: "queue list base filter",
+      args: ["queue", "--base", "MAIN", "--json"],
+      expected: { command: "queue.list", results: [{ base: "main", prs: [{ id: "PR1" }] }] },
+    },
+    {
+      surface: "dashboard base filter",
+      args: ["--base", "MAIN", "--json"],
+      expected: { command: "dashboard", results: [{ base: "main", prs: [{ id: "PR1" }] }] },
+    },
+    {
+      surface: "log PR filter",
+      args: ["log", "--pr", "pr1", "--json"],
+      expected: { command: "log", rows: [{ pr: "PR1", run: "R1" }] },
+    },
+  ])("resolves case-insensitive selectors on $surface and preserves canonical output", async ({ args, expected }) => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    if (args[0] === "log") await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject(expected)
+  })
+
+  it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "merge", "pr1", "--json"), output.io)).toBe(1)
+    expect(JSON.parse(output.stderr())).toMatchObject({ command: "pr.merge", pr: "PR1" })
+  })
+
+  it("applies canonical PR and base scopes to bounded watch projections", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    for (const scope of [
+      ["--pr", "pr1"],
+      ["--base", "MAIN"],
+    ] as const) {
+      const controller = new AbortController()
+      controller.abort()
+      const output = outputIO({ scope: { signal: controller.signal, sleep: async () => {} } })
+      expect(await runYrd(app, yrd("watch", ...scope, "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({
+        command: "watch",
+        results: [{ base: "main", prs: [{ id: "PR1" }] }],
+      })
+    }
+  })
+
+  it("canonicalizes pause allowlists and queue administration base selectors", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const pause = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("queue", "pause", "MAIN", "--reason", "selector proof", "--allow", "pr1", "--json"),
+        pause.io,
+      ),
+      pause.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(pause.stdout())).toMatchObject({
+      command: "queue.pause",
+      pause: { base: "main", allowedPRs: ["PR1"] },
+    })
+
+    const resume = outputIO()
+    expect(await runYrd(app, yrd("queue", "resume", "MAIN", "--json"), resume.io), resume.stderr()).toBe(0)
+    expect(JSON.parse(resume.stdout())).toMatchObject({ command: "queue.resume", base: "main" })
+
+    const bases: string[] = []
+    const services: YrdCliServices = {
+      queue: {
+        provision: async (base) => {
+          bases.push(base ?? "main")
+          return { ready: true }
+        },
+      },
+    }
+    const init = outputIO()
+    expect(await runYrd(app, yrd("queue", "init", "ORIGIN/MAIN", "--json"), init.io, services), init.stderr()).toBe(0)
+    expect(JSON.parse(init.stdout())).toMatchObject({ command: "queue.init", base: "main" })
+    expect(bases).toEqual(["main"])
+  })
+
+  it("reports folded selector collisions instead of choosing the first base", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "Topic/One", headSha: HEAD_SHA, base: "Main" })
+    await app.bays.submit({ branch: "Topic/Two", headSha: MERGED_SHA, base: "main" })
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("queue", "--base", "MAIN", "--json"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("base selector 'MAIN' is ambiguous: Main, main")
+  })
+
   it("keeps queue positions lossless beyond the rendered row budget", async () => {
     const app = await createApp()
     for (const index of Array.from({ length: 6 }, (_, offset) => offset + 1)) {
@@ -1539,6 +1680,7 @@ describe("runYrd", () => {
     const run = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1"), run.io)).toBe(0)
     expect(app.queue.get("R1")?.status).toBe("waiting")
+    expect(app.queue.get("r1")?.status).toBe("waiting")
     const waitingJob = app.queue.get("R1")?.steps[0]?.job
     if (waitingJob?.status !== "waiting") throw new Error("expected waiting check Job")
     const waiting = outputIO({ color: true })
@@ -1607,7 +1749,7 @@ describe("runYrd", () => {
         yrd(
           "queue",
           "finish",
-          "PR1",
+          "r1",
           "--ok",
           "--job",
           waitingJob.id,
@@ -1711,7 +1853,7 @@ describe("runYrd", () => {
         yrd(
           "queue",
           "finish",
-          "PR1",
+          "r1",
           "--step",
           "check",
           "--fail",
@@ -5249,11 +5391,11 @@ describe("typed issue landing bridge", () => {
     await app.queue.run({ prs: ["PR2"] }, { runner: "cli-test", leaseMs: 60_000 })
     now = "2026-07-09T15:00:00.000Z"
 
-    const command = (run = "R1", repairRun = "R2", detectedAt = "2026-07-09T13:00:00.000Z") =>
+    const command = (run = "r1", repairRun = "r2", detectedAt = "2026-07-09T13:00:00.000Z") =>
       yrd(
         "pr",
         "regression",
-        "PR1",
+        "pr1",
         "--run",
         run,
         "--detected-at",
@@ -5267,7 +5409,7 @@ describe("typed issue landing bridge", () => {
         "--review",
         "tribe:verdict/original-review",
         "--repair-pr",
-        "PR2",
+        "pr2",
         "--repair-run",
         repairRun,
         "--json",
