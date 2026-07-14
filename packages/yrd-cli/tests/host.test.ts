@@ -817,6 +817,61 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(releases).toBe(1)
   })
 
+  it("drains the active run on the first watch signal without admitting another", async () => {
+    const { repo, featureSha } = await repository()
+    const startedPath = join(repo, "drain-check.started")
+    const finishedPath = join(repo, "drain-check.finished")
+    const command = [`touch ${JSON.stringify(startedPath)}`, "sleep 0.2", `touch ${JSON.stringify(finishedPath)}`].join(
+      "; ",
+    )
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main\nbatch: 1\nsteps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
+    )
+    await git(repo, "switch", "-qc", "issue/second", "main")
+    await writeFile(join(repo, "second.txt"), "second\n")
+    await git(repo, "add", "second.txt")
+    await git(repo, "commit", "-qm", "second")
+    const secondSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+
+    await using submitter = await createYrdHost({ cwd: repo })
+    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+    await submitter.close()
+
+    const cli = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dirname, "../../../bin/yrd.ts"),
+        "queue",
+        "run",
+        "--watch",
+        "--interval",
+        "1",
+        "--json",
+      ],
+      { cwd: repo, stdout: "pipe", stderr: "pipe" },
+    )
+    const stdout = new Response(cli.stdout).text()
+    const stderr = new Response(cli.stderr).text()
+    try {
+      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true))
+      cli.kill("SIGTERM")
+      await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true))
+      expect(await cli.exited, await stderr).toBe(0)
+
+      await using settled = await createYrdHost({ cwd: repo })
+      expect(Object.keys(settled.app.state().queues.records)).toEqual(["R1"])
+      expect(settled.app.queue.get("R1")?.status).toBe("passed")
+    } finally {
+      cli.kill("SIGKILL")
+      await cli.exited
+      await stdout
+      await stderr
+    }
+  })
+
   it("reaps an active configured child before SIGINT releases its runner lease", async () => {
     const { repo, featureSha } = await repository()
     const baseSha = await git(repo, "rev-parse", "main")
