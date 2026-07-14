@@ -5114,11 +5114,11 @@ describe("typed issue landing bridge", () => {
     await app.queue.run({ prs: ["PR2"] }, { runner: "cli-test", leaseMs: 60_000 })
     now = "2026-07-09T15:00:00.000Z"
 
-    const command = (run = "R1", repairRun = "R2", detectedAt = "2026-07-09T13:00:00.000Z") =>
+    const command = (run = "r1", repairRun = "r2", detectedAt = "2026-07-09T13:00:00.000Z") =>
       yrd(
         "pr",
         "regression",
-        "PR1",
+        "pr1",
         "--run",
         run,
         "--detected-at",
@@ -5132,7 +5132,7 @@ describe("typed issue landing bridge", () => {
         "--review",
         "tribe:verdict/original-review",
         "--repair-pr",
-        "PR2",
+        "pr2",
         "--repair-run",
         repairRun,
         "--json",
