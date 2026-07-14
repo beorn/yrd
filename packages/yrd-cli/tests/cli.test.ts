@@ -1877,6 +1877,62 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
+  it("selects a timeline row before switching the existing PR detail pane", async () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "2".repeat(40),
+          submittedAt: "2026-07-09T12:01:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [],
+      finished: [],
+    } as unknown as QueueStatusResult
+    const handle = await run(
+      createElement(QueueWatchFrame, {
+        snapshot: { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") },
+        paused: false,
+      }),
+      { writable: { write: () => {} }, cols: 120, rows: 30 },
+    )
+
+    try {
+      expect(handle.text).toContain("> 1m submitted PR2")
+      expect(handle.text).toContain("PR PR2 STATUS")
+
+      await handle.press("j")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("> 2m submitted PR1")
+      expect(handle.text).toContain("PR PR2 STATUS")
+
+      await handle.press("Enter")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("PR PR1 STATUS")
+      expect(handle.text).not.toContain("PR PR2 STATUS")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("accepts queue ls --latest as the canonical queue list lens", async () => {
     const app = await createApp()
     await openAndSubmit(app)
