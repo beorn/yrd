@@ -1131,6 +1131,114 @@ export function PRResultView({
   )
 }
 
+function latestPRRun(pr: PR, runs: readonly QueueRun[]): QueueRun | undefined {
+  return runs
+    .filter((run) => run.prs.some((member) => member.id === pr.id))
+    .toSorted(byRunStarted)
+    .at(-1)
+}
+
+function diagnosticBlocker(
+  pr: PR,
+  run: QueueRun | undefined,
+  step: QueueStep | undefined,
+  now: number,
+): string | undefined {
+  const job = step?.job
+  if (job?.status === "failed") return `${job.error.code}: ${singleQueue(job.error.message)}`
+  if (job?.status === "lost") return `job-lost: ${singleQueue(job.lostReason)}`
+  if (job?.status === "canceled") return `job-canceled: ${singleQueue(job.cancelReason)}`
+  if (job?.status === "running") {
+    const leaseExpiresAt = Date.parse(job.leaseExpiresAt)
+    if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) {
+      return `job-lease-expired: ${job.leaseExpiresAt} (${formatDuration(now - leaseExpiresAt)} ago)`
+    }
+  }
+  if (job?.status === "waiting") return `waiting: ${singleQueue(job.detail ?? job.url ?? job.token)}`
+  if (run?.error !== undefined) return `${run.error.code}: ${singleQueue(run.error.message)}`
+  if (pr.detail !== undefined) return singleQueue(pr.detail)
+  return undefined
+}
+
+export function PRDetailView({
+  pr,
+  runs,
+  now,
+  position,
+}: {
+  pr: PR
+  runs: readonly QueueRun[]
+  now: number
+  position?: number
+}) {
+  const run = latestPRRun(pr, runs)
+  const member = run?.prs.find((candidate) => candidate.id === pr.id)
+  const activeStep = relevantStep(run)
+  const blocker = diagnosticBlocker(pr, run, activeStep, now)
+  const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
+
+  return (
+    <Box flexDirection="column">
+      <Text>
+        <Text bold>PR</Text> {pr.id} <Text bold>STATUS</Text> <StatusValue value={pr.status} />
+        {position === undefined ? null : ` POSITION ${position}`}
+      </Text>
+      <Text>
+        <Text bold>SOURCE</Text> {pr.branch} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text> {pr.headSha}
+      </Text>
+      <Text>
+        <Text bold>BASE</Text> {pr.base}
+        {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
+      </Text>
+      {run === undefined ? (
+        <Text color="$fg-muted">No run recorded.</Text>
+      ) : (
+        <>
+          <Text>
+            <Text bold>RUN</Text> {run.id} <StatusValue value={run.status} /> <Text bold>REV</Text>{" "}
+            {member?.revision ?? "-"} <Text bold>HEAD</Text> {member?.headSha ?? "-"}
+          </Text>
+          <Text>
+            <Text bold>TIME</Text> START {toIso(run.startedAt)} END {toIso(run.finishedAt)} ELAPSED{" "}
+            {age(run.startedAt, now, `run '${run.id}' elapsed`)}
+          </Text>
+          {run.steps.map((step) => {
+            const job = step.job
+            const runner = job !== undefined && "runner" in job ? job.runner : "-"
+            const finished = job !== undefined && "finishedAt" in job ? toIso(job.finishedAt) : "-"
+            const lease = job?.status === "running" ? job.leaseExpiresAt : "-"
+            return (
+              <Box key={`${run.id}:${step.name}`} flexDirection="column" marginTop={1}>
+                <Text>
+                  <Text bold>STEP</Text> {step.name} <StatusValue value={jobStatus(step)} /> <Text bold>REV</Text>{" "}
+                  {step.revision}
+                </Text>
+                <Text>
+                  <Text bold>JOB</Text> {job?.id ?? "-"} <Text bold>ATTEMPT</Text> {job?.attempt ?? "-"}{" "}
+                  <Text bold>RUNNER</Text> {runner} <Text bold>LEASE</Text> {lease}
+                </Text>
+                <Text>
+                  <Text bold>TIME</Text> REQUESTED {toIso(job?.requestedAt)} STARTED{" "}
+                  {job === undefined || job.status === "requested" ? "-" : toIso(job.startedAt)} CHANGED{" "}
+                  {toIso(job?.changedAt)} FINISHED {finished}
+                </Text>
+              </Box>
+            )
+          })}
+        </>
+      )}
+      {blocker === undefined ? null : (
+        <Text color="$fg-warning">
+          <Text bold>BLOCKER</Text> {blocker}
+        </Text>
+      )}
+      <Text>
+        <Text bold>LANDING</Text> {landing === undefined ? "-" : `${landing.commit}@${landing.baseSha}`}
+      </Text>
+    </Box>
+  )
+}
+
 export function queueStatusRows(
   state: BaysState,
   result: QueueStatusResult,
@@ -1357,7 +1465,28 @@ export function activeWatchRow(
   }
 }
 
-export function QueueWatchView({ results, now }: { results: readonly QueueStatusResult[]; now: number }) {
+export function QueueWatchView({
+  results,
+  now,
+  pr,
+}: {
+  results: readonly QueueStatusResult[]
+  now: number
+  pr?: string
+}) {
+  if (pr !== undefined) {
+    const selectedPr = results.flatMap((result) => result.prs).find((candidate) => candidate.id === pr)
+    if (selectedPr === undefined) return <Text color="$fg-muted">No PR '{pr}' recorded.</Text>
+    const runs = [
+      ...new Map(
+        results
+          .flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
+          .map((run) => [run.id, run] as const),
+      ).values(),
+    ]
+    return <PRDetailView pr={selectedPr} runs={runs} now={now} />
+  }
+
   return (
     <Box flexDirection="column">
       {results.map((result, index) => {

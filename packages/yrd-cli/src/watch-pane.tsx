@@ -13,6 +13,7 @@ export type QueueWatchPaneProps = Readonly<{
   initial: QueueWatchSnapshot
   load(): Promise<QueueWatchSnapshot>
   intervalMs: number
+  pr?: string
 }>
 
 export function reduceWatchControl(control: WatchControl, input: string): WatchControl | "exit" {
@@ -21,10 +22,18 @@ export function reduceWatchControl(control: WatchControl, input: string): WatchC
   return control
 }
 
-export function QueueWatchFrame({ snapshot, paused }: { snapshot: QueueWatchSnapshot; paused: boolean }) {
+export function QueueWatchFrame({
+  snapshot,
+  paused,
+  pr,
+}: {
+  snapshot: QueueWatchSnapshot
+  paused: boolean
+  pr?: string
+}) {
   return (
     <Box flexDirection="column">
-      <QueueWatchView results={snapshot.results} now={snapshot.now} />
+      <QueueWatchView results={snapshot.results} now={snapshot.now} {...(pr === undefined ? {} : { pr })} />
       <Box marginTop={1}>
         <Text bold>{paused ? "PAUSED" : "LIVE"}</Text>
         <Text color="$fg-muted"> {paused ? "p resume" : "p pause"} q quit</Text>
@@ -33,7 +42,7 @@ export function QueueWatchFrame({ snapshot, paused }: { snapshot: QueueWatchSnap
   )
 }
 
-export function QueueWatchPane({ initial, load, intervalMs }: QueueWatchPaneProps) {
+export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPaneProps) {
   const [snapshot, setSnapshot] = useState(initial)
   const [control, setControl] = useState<WatchControl>({ paused: false })
   const [failure, setFailure] = useState<Error | undefined>()
@@ -64,5 +73,5 @@ export function QueueWatchPane({ initial, load, intervalMs }: QueueWatchPaneProp
   )
 
   if (failure !== undefined) throw failure
-  return <QueueWatchFrame snapshot={snapshot} paused={control.paused} />
+  return <QueueWatchFrame snapshot={snapshot} paused={control.paused} {...(pr === undefined ? {} : { pr })} />
 }
