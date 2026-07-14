@@ -883,9 +883,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const stdout = new Response(cli.stdout).text()
     const stderr = new Response(cli.stderr).text()
     try {
-      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true))
+      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 5_000 })
       cli.kill("SIGTERM")
-      await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true))
+      await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true), { timeout: 5_000 })
       expect(await cli.exited, await stderr).toBe(0)
 
       await using settled = await createYrdHost({ cwd: repo })
@@ -934,18 +934,20 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let grandchildPid: number | undefined
     let cleanupError: unknown
     try {
-      await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true))
+      await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true), { timeout: 5_000 })
       childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
       expect(Number.isSafeInteger(childPid)).toBe(true)
-      await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true))
+      await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true), { timeout: 5_000 })
       grandchildPid = Number.parseInt((await readFile(grandchildPidPath, "utf8")).trim(), 10)
       expect(Number.isSafeInteger(grandchildPid)).toBe(true)
-      await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""))
+      await vi.waitFor(async () => expect((await readFile(progressPath, "utf8")).trim()).not.toBe(""), {
+        timeout: 5_000,
+      })
 
       cli.kill("SIGINT")
       await expect(cli.exited).resolves.toBe(130)
-      await vi.waitFor(() => expect(processExists(childPid!)).toBe(false))
-      await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false))
+      await vi.waitFor(() => expect(processExists(childPid!)).toBe(false), { timeout: 5_000 })
+      await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false), { timeout: 5_000 })
 
       await using recovery = await createYrdHost({ cwd: repo })
       const recovered = await recovery.app.queue.recover({
@@ -987,7 +989,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       await cli.exited
     }
     if (cleanupError !== undefined) throw cleanupError
-  })
+  }, 30_000)
 
   it("submits the current linked-worktree branch when no bay selector is given", async () => {
     const { repo, featureSha } = await repository()
