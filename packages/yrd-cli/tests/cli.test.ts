@@ -1346,7 +1346,7 @@ describe("runYrd", () => {
       .stdout()
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line))
+      .map((record) => JSON.parse(record))
     expect(currentChecks).toHaveLength(1)
     expect(currentChecks[0]).toMatchObject({
       kind: "pr.check",
