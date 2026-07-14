@@ -3916,3 +3916,95 @@ describe("submit correlation", () => {
     }
   })
 })
+
+const PROJECTION_CORRELATION = { namespace: "tribe-request", id: "request-20925" } as const
+
+async function correlatedTerminalRun(terminal: "integrated" | "rejected" | "canceled") {
+  const app = await createApp({ failingCheck: terminal === "rejected" })
+  await app.bays.submit({
+    branch: `topic/${terminal}`,
+    headSha: HEAD_SHA,
+    base: "main",
+    correlation: PROJECTION_CORRELATION,
+  })
+
+  if (terminal === "canceled") {
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected a requested Queue Job to cancel")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "cli-test",
+      leaseExpiresAt: "2026-07-09T12:02:00.000Z",
+    })
+    await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
+    await app.dispatch(app.commands.queue.advance, { run: "R1" })
+  } else {
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+  }
+
+  const pr = app.state().bays.prs.PR1
+  const run = app.queue.get("R1")
+  if (pr === undefined || run === undefined) throw new Error(`expected ${terminal} PR and Run fixtures`)
+  return { app, pr, run }
+}
+
+async function projectedLogRows(app: TestApp, pr = "PR1"): Promise<Record<string, unknown>[]> {
+  const output = outputIO()
+  expect(await runYrd(app, yrd("log", "--pr", pr, "--json"), output.io), output.stderr()).toBe(0)
+  return (JSON.parse(output.stdout()) as { rows: Record<string, unknown>[] }).rows
+}
+
+describe("correlation projections", () => {
+  it("keeps structured correlation in terminal Run, show, and log JSON", async () => {
+    for (const terminal of ["integrated", "rejected", "canceled"] as const) {
+      const { app, pr, run } = await correlatedTerminalRun(terminal)
+
+      expect.soft(pr.status).toBe(terminal)
+      expect
+        .soft(JSON.parse(JSON.stringify(run)).prs)
+        .toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
+      expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
+      expect
+        .soft(await projectedLogRows(app, pr.id))
+        .toEqual([expect.objectContaining({ pr: pr.id, correlation: PROJECTION_CORRELATION })])
+    }
+
+    const withdrawn = await createApp()
+    await withdrawn.bays.submit({
+      branch: "topic/withdrawn-no-run",
+      headSha: HEAD_SHA,
+      base: "main",
+      draft: true,
+      correlation: PROJECTION_CORRELATION,
+    })
+    await withdrawn.bays.closePr({ pr: "PR1" })
+    expect.soft(withdrawn.state().bays.prs.PR1).toMatchObject({
+      status: "withdrawn",
+      correlation: PROJECTION_CORRELATION,
+    })
+    expect.soft(withdrawn.queue.status("main").finished).toEqual([])
+    expect.soft(await projectedLogRows(withdrawn)).toEqual([
+      expect.objectContaining({
+        run: "-",
+        pr: "PR1",
+        outcome: "retired",
+        correlation: PROJECTION_CORRELATION,
+      }),
+    ])
+  })
+
+  it("omits correlation from uncorrelated Run, show, and log JSON", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/uncorrelated", headSha: HEAD_SHA, base: "main" })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    const run = app.queue.get("R1")
+    if (run === undefined) throw new Error("expected an uncorrelated Run fixture")
+
+    expect(JSON.parse(JSON.stringify(run)).prs[0]).not.toHaveProperty("correlation")
+    expect(queueShowData(run).prs[0]).not.toHaveProperty("correlation")
+    expect((await projectedLogRows(app))[0]).not.toHaveProperty("correlation")
+  })
+})

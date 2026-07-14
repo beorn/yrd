@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import type { BaysState, PR } from "@yrd/bay"
+import type { BaysState, Correlation, PR } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
@@ -10,6 +10,8 @@ import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
 export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
+
+type QueueLogResult = QueueSummary & { prs?: readonly PR[] }
 
 export type QueueLogRow = Readonly<{
   run: string
@@ -49,6 +51,7 @@ export type QueueLogRow = Readonly<{
     commit: string
     baseSha: string
   }
+  correlation?: Correlation
   landing: string
 }>
 
@@ -1337,7 +1340,7 @@ export function QueueWatchView({ results, now }: { results: readonly QueueStatus
 }
 
 export function queueLogRows(
-  results: readonly QueueSummary[],
+  results: readonly QueueLogResult[],
   selectedPrs: ReadonlySet<string>,
   prFilter: string | undefined,
   prStatus?: ReadonlyMap<string, PR["status"]>,
@@ -1431,6 +1434,7 @@ export function queueLogRows(
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
           error: safeText(runError),
+          ...correlationField(pr),
           locations,
           ...(showLocation === undefined
             ? {}
@@ -1447,10 +1451,13 @@ export function queueLogRows(
     const status = runPrs?.get(prFilter)
     const matching = rows.filter((row) => row.pr === prFilter)
     if (status === "withdrawn" && matching.length === 0) {
-      const exampleResult = Array.from(results)
-        .flatMap((result) => result.finished)
-        .flatMap((run) => run.prs)
-        .find((candidate) => candidate.id === prFilter)
+      const currentPr = results.flatMap((result) => result.prs ?? []).find((pr) => pr.id === prFilter)
+      const exampleResult =
+        currentPr ??
+        Array.from(results)
+          .flatMap((result) => result.finished)
+          .flatMap((run) => run.prs)
+          .find((candidate) => candidate.id === prFilter)
       const headSha = (exampleResult?.headSha ?? "-").slice(0, 40)
       const baseSha = (exampleResult?.baseSha ?? "-").slice(0, 40)
       rows.push({
@@ -1483,6 +1490,7 @@ export function queueLogRows(
         isolationPart: "-",
         result: "-",
         error: "-",
+        ...correlationField(exampleResult),
         locations: [],
       })
     }
@@ -1502,6 +1510,12 @@ export function queueLogRows(
     if (leftAt !== rightAt) return leftAt - rightAt
     return parseRunIdSuffix(left.run) - parseRunIdSuffix(right.run)
   })
+}
+
+function correlationField(pr: QueueRun["prs"][number] | PR | undefined): Readonly<{ correlation?: Correlation }> {
+  const correlation = pr?.correlation
+  if (correlation === undefined) return {}
+  return { correlation }
 }
 
 function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
