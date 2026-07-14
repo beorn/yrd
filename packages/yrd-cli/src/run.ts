@@ -33,7 +33,7 @@ import { submittedPrPositions } from "./queue-position.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
-import { YRD_VERSION } from "./version.ts"
+import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { QueueWatchPane, type QueueWatchSnapshot } from "./watch-pane.tsx"
 
 function queueGitDir(cwd: string): string | undefined {
@@ -1660,7 +1660,7 @@ function buildProgram(
   program.helpCommand(false)
   program.exitOverride()
   configureCanonicalHelp(program)
-  if (projection === "root") program.version(YRD_VERSION, "-V, --version")
+  program.version(YRD_VERSION, "-V, --version")
   if (projection === "root") {
     program.addHelpSection(
       "Model:",
@@ -2014,6 +2014,10 @@ async function executeYrd(
   services: YrdCliServices = {},
 ): Promise<YrdCliExitCode> {
   const invocation = resolveInvocation(argv)
+  if (invocation.args.length === 1 && (invocation.args[0] === "--version" || invocation.args[0] === "-V")) {
+    io.stdout(`${formatYrdRuntimeVersion()}\n`)
+    return 0
+  }
   let exit: YrdCliExitCode = 0
   const setExit = (code: YrdCliExitCode) => {
     exit = maxExit(exit, code)
