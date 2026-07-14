@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url"
 import type { BaysState, Correlation, PR, PRRevision, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
+import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Link, ListView, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
@@ -63,10 +63,7 @@ export type QueueLogRow = Readonly<{
   error: string
   location?: QueueLogLocation
   locations: readonly QueueLogLocationEntry[]
-  integration?: {
-    commit: string
-    baseSha: string
-  }
+  integration?: IntegrationProof
   correlation?: Correlation
   landing: string
 }>
@@ -276,10 +273,7 @@ export type QueueShowData = Readonly<{
   waitDurationMs?: number
   retries: number
   landing: string
-  integration?: {
-    commit: string
-    baseSha: string
-  }
+  integration?: IntegrationProof
   parent: string
   isolationPart: "0" | "1" | "-"
   prs: QueueRun["prs"]
@@ -906,7 +900,7 @@ function queueOutcome(run: QueueRun): string {
   return run.status
 }
 
-function queueIntegration(run: QueueRun): { commit: string; baseSha: string } | undefined {
+function queueIntegration(run: QueueRun): IntegrationProof | undefined {
   return run.integration ?? ("integration" in run.shape ? run.shape.integration : undefined)
 }
 
@@ -916,7 +910,7 @@ function queueLanding(run: QueueRun): string {
   return `${proof.commit.slice(0, 12)}@${proof.baseSha.slice(0, 12)}`
 }
 
-function queueOutcomeIntegration(run: QueueRun): { commit: string; baseSha: string } {
+function queueOutcomeIntegration(run: QueueRun): IntegrationProof {
   const proof = queueIntegration(run)
   if (proof === undefined) throw new Error(`yrd: passed run '${run.id}' is missing integration proof`)
   return proof

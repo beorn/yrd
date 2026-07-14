@@ -5,9 +5,9 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdtemp, readFile, readdir, realpath, rm, watch, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, watch, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
@@ -120,6 +120,72 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
+async function restackSubmoduleRepository(
+  options: Readonly<{
+    sourcePath?: string
+    sourceDelete?: boolean
+    sourceRenameTo?: string
+    upstreamPath?: string
+  }> = {},
+): Promise<{
+  repo: string
+  module: string
+  oldPinSha: string
+  newPinSha: string
+  sourceTipSha: string
+  rootBaseSha: string
+}> {
+  const { repo } = await repository()
+  const module = join(repo, "..", "module")
+  await Bun.$`git init -q -b main ${module}`
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  const sourcePath = options.sourcePath ?? "src/candidate.ts"
+  await writeFile(join(module, "README.md"), "base\n")
+  if (options.sourceDelete === true || options.sourceRenameTo !== undefined) {
+    await mkdir(dirname(join(module, sourcePath)), { recursive: true })
+    await writeFile(join(module, sourcePath), "export const original = true\n")
+  }
+  await git(module, ["add", "."])
+  await git(module, ["commit", "-qm", "base"])
+  const oldPinSha = await git(module, ["rev-parse", "HEAD"])
+
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["commit", "-qam", "add dependency"])
+
+  await git(module, ["switch", "-qc", "issue/source"])
+  if (options.sourceRenameTo !== undefined) {
+    await mkdir(dirname(join(module, options.sourceRenameTo)), { recursive: true })
+    await git(module, ["mv", sourcePath, options.sourceRenameTo])
+  } else if (options.sourceDelete === true) {
+    await rm(join(module, sourcePath))
+    await git(module, ["add", "-u", sourcePath])
+  } else {
+    await mkdir(dirname(join(module, sourcePath)), { recursive: true })
+    await writeFile(join(module, sourcePath), "export const candidate = true\n")
+    await git(module, ["add", sourcePath])
+  }
+  await git(module, ["commit", "-qm", "candidate payload"])
+  const sourceTipSha = await git(module, ["rev-parse", "HEAD"])
+
+  await git(module, ["switch", "-q", "main"])
+  const upstreamPath = options.upstreamPath ?? "src/upstream.ts"
+  await mkdir(dirname(join(module, upstreamPath)), { recursive: true })
+  await writeFile(join(module, upstreamPath), "export const upstream = true\n")
+  await git(module, ["add", upstreamPath])
+  await git(module, ["commit", "-qm", "upstream payload"])
+  const newPinSha = await git(module, ["rev-parse", "HEAD"])
+
+  await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+  await git(join(repo, "dep"), ["checkout", "-q", newPinSha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "-qm", "advance dependency"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["branch", "issue/source", rootBaseSha])
+  return { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha }
+}
+
 const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
   provision: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
@@ -136,6 +202,7 @@ async function checkedQueue(
     waiting?: boolean
     checkoutParent?: string
     classification?: "base" | "carrier"
+    env?: NodeJS.ProcessEnv
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -148,6 +215,7 @@ async function checkedQueue(
       ...(options.classification === undefined ? {} : { classification: options.classification }),
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
+      ...(options.env === undefined ? {} : { env: options.env }),
     }),
     {
       revision: `check:${JSON.stringify(command)}:${options.waiting === true}`,
@@ -155,7 +223,10 @@ async function checkedQueue(
       ...(options.classification === undefined ? {} : { classification: options.classification }),
     },
   )
-  const merge = withMerge(gitMergeStep<Checked>({ inject: { process }, repo }), { revision: "git-merge-v1" })
+  const merge = withMerge(
+    gitMergeStep<Checked>({ inject: { process }, repo, ...(options.env === undefined ? {} : { env: options.env }) }),
+    { revision: "git-merge-v1" },
+  )
   const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? 1 })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
   return createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
@@ -178,6 +249,479 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
 }
 
 describe("Queue command adapters", () => {
+  it("auto-restacks a disjoint source payload and composes the exact wrapper", async () => {
+    const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    await using process = createProcess()
+    const proofCommands: string[][] = []
+    const proofProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && (request.argv.includes("patch-id") || request.argv.includes("range-diff"))) {
+          proofCommands.push([...request.argv])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      proofProcess,
+      repo,
+      shellCommand(
+        "git -c protocol.file.allow=always submodule update --init --recursive && " +
+          "test -f dep/src/candidate.ts && test -f dep/src/upstream.ts",
+      ),
+    )
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+    await git(module, ["switch", "-q", "issue/source"])
+    await writeFile(join(module, "src/later.ts"), "export const later = true\n")
+    await git(module, ["add", "src/later.ts"])
+    await git(module, ["commit", "-qm", "later source work"])
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    const check = run.steps[0]?.job
+    if (check?.status !== "passed") throw new Error("check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(check.output)
+    expect(evidence.sourceRewrites).toEqual([
+      {
+        repo: "dep",
+        branch: "issue/source",
+        oldBaseSha: oldPinSha,
+        oldTipSha: sourceTipSha,
+        newBaseSha: newPinSha,
+        newTipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        candidateRef: expect.stringMatching(/^refs\/heads\/yrd\/candidates\/[0-9a-f]{40}$/u),
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        rangeDiff: "=",
+        payload: ["src/candidate.ts"],
+      },
+    ])
+    expect(proofCommands.filter((command) => command.includes("patch-id"))).toEqual([
+      expect.arrayContaining(["patch-id", "--stable"]),
+      expect.arrayContaining(["patch-id", "--stable"]),
+    ])
+    expect(proofCommands.filter((command) => command.includes("range-diff"))).toEqual([
+      expect.arrayContaining(["range-diff", "--no-color", "--no-dual-color", "--no-patch"]),
+    ])
+    const landedTree = await git(repo, ["ls-tree", "main", "dep"])
+    const landedPinSha = landedTree.split(/\s+/u)[2]
+    expect(landedPinSha).toBe(evidence.sourceRewrites?.[0]?.newTipSha)
+    expect(await git(join(repo, "dep"), ["diff", "--name-only", newPinSha, landedPinSha!])).toBe("src/candidate.ts")
+    expect(await git(repo, ["rev-parse", "main^"])).toBe(rootBaseSha)
+    expect(await git(repo, ["diff-tree", "--no-commit-id", "--name-only", "-r", "main"])).toBe("dep")
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+    expect(await git(join(repo, "dep"), ["rev-parse", "HEAD"])).toBe(landedPinSha)
+    expect(run.integration?.sourceRewrites).toEqual(evidence.sourceRewrites)
+  })
+
+  it.each([
+    { proof: "stable patch identity", command: "patch-id", detail: "stable patch identity" },
+    { proof: "range-diff equivalence", command: "range-diff", detail: "range-diff equivalent" },
+  ] as const)("rejects a rewritten source when its $proof certificate is not exact", async ({ command, detail }) => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    await using process = createProcess()
+    let patchIdCalls = 0
+    const divergentProof: Pick<Process, "run"> = {
+      async run(request) {
+        const result = await process.run(request)
+        if (request.argv[0] !== "git" || !request.argv.includes(command)) return result
+        if (command === "patch-id" && ++patchIdCalls < 2) return result
+        const stdout =
+          command === "patch-id"
+            ? `${result.stdout[0] === "0" ? "1" : "0"}${result.stdout.slice(1)}`
+            : result.stdout.replace(" = ", " ! ")
+        return { ...result, stdout }
+      },
+    }
+    await using app = await checkedQueue(divergentProof, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "payload-certificate", message: expect.stringContaining(detail) },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(rootBaseSha)
+    expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
+  })
+
+  it("pins distinct immutable source Candidates for a same-repository batch", async () => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    await git(module, ["switch", "-qc", "issue/source-two", oldPinSha])
+    await mkdir(join(module, "src"), { recursive: true })
+    await writeFile(join(module, "src/second.ts"), "export const second = true\n")
+    await git(module, ["add", "src/second.ts"])
+    await git(module, ["commit", "-qm", "second candidate payload"])
+    const secondTipSha = await git(module, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "issue/source-two", rootBaseSha])
+
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        "git -c protocol.file.allow=always submodule update --init --recursive && " +
+          "test -f dep/src/candidate.ts && test -f dep/src/second.ts",
+      ),
+      { batch: 2 },
+    )
+    for (const [branch, tipSha, payload] of [
+      ["issue/source", sourceTipSha, "src/candidate.ts"],
+      ["issue/source-two", secondTipSha, "src/second.ts"],
+    ] as const) {
+      await app.bays.submit({
+        branch,
+        headSha: rootBaseSha,
+        base: "main",
+        baseSha: rootBaseSha,
+        composition: {
+          version: 1,
+          sources: [{ repo: "dep", branch, baseSha: oldPinSha, tipSha, payload: [payload] }],
+        },
+      })
+    }
+
+    const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    const check = run.steps[0]?.job
+    if (check?.status !== "passed") throw new Error("check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(check.output)
+    const rewrites = evidence.sourceRewrites ?? []
+    expect(rewrites).toHaveLength(2)
+    expect(new Set(rewrites.map((rewrite) => rewrite.candidateRef)).size).toBe(2)
+    for (const rewrite of rewrites) {
+      expect(rewrite.candidateRef).toBe(`refs/heads/yrd/candidates/${rewrite.newTipSha}`)
+      expect(await git(join(repo, rewrite.repo), ["rev-parse", rewrite.candidateRef])).toBe(rewrite.newTipSha)
+    }
+  })
+
+  it("rolls back a remote root landing when an immutable source Candidate ref disappears", async () => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const remote = join(repo, "..", "root-origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/source"])
+
+    await using process = createProcess()
+    let raced = false
+    const racingProcess: Pick<Process, "run"> = {
+      async run(request) {
+        if (!raced && request.argv.some((argument) => argument.endsWith(":refs/heads/main"))) {
+          raced = true
+          const candidateRef = await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])
+          if (candidateRef === "") throw new Error("source Candidate was not published before the root push")
+          await git(module, ["update-ref", "-d", candidateRef])
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(racingProcess, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(raced).toBe(true)
+    expect(run).toMatchObject({ status: "failed", error: { code: "invalid-candidate" } })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
+  })
+
+  it("rejects an author-authored gitlink wrapper unless the rollout kill switch is set", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "authored-gitlink",
+        message: expect.stringContaining("YRD_ALLOW_AUTHORED_GITLINKS=1"),
+      },
+    })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { conflicts: [{ repo: ".", paths: ["dep"] }] },
+    })
+  })
+
+  it("bounces an overlapping source payload with the exact repository paths", async () => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
+      upstreamPath: "src/candidate.ts",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "payload-overlap", message: expect.stringContaining("[src/candidate.ts]") },
+    })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { conflicts: [{ repo: "dep", paths: ["src/candidate.ts"] }] },
+    })
+  })
+
+  it.each(["src/original.ts", "src/renamed.ts"])(
+    "treats the rename endpoint %s as an exact overlap",
+    async (upstreamPath) => {
+      const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
+        sourcePath: "src/original.ts",
+        sourceRenameTo: "src/renamed.ts",
+        upstreamPath,
+      })
+      await using process = createProcess()
+      await using app = await checkedQueue(process, repo, ["true"])
+      await app.bays.submit({
+        branch: "issue/source",
+        headSha: rootBaseSha,
+        base: "main",
+        baseSha: rootBaseSha,
+        composition: {
+          version: 1,
+          sources: [
+            {
+              repo: "dep",
+              branch: "issue/source",
+              baseSha: oldPinSha,
+              tipSha: sourceTipSha,
+              payload: ["src/original.ts", "src/renamed.ts"],
+            },
+          ],
+        },
+      })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({ status: "failed", error: { code: "payload-overlap" } })
+      expect(run.steps[0]?.job).toMatchObject({
+        status: "failed",
+        output: { conflicts: [{ repo: "dep", paths: [upstreamPath] }] },
+      })
+    },
+  )
+
+  it("treats a source delete and upstream modify as one exact overlap", async () => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
+      sourcePath: "src/delete.ts",
+      sourceDelete: true,
+      upstreamPath: "src/delete.ts",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/delete.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "payload-overlap" } })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { conflicts: [{ repo: "dep", paths: ["src/delete.ts"] }] },
+    })
+  })
+
+  it("lands a disjoint source delete with exact payload identity", async () => {
+    const { repo, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
+      sourcePath: "src/delete.ts",
+      sourceDelete: true,
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        "git -c protocol.file.allow=always submodule update --init --recursive && " +
+          "test ! -e dep/src/delete.ts && test -f dep/src/upstream.ts",
+      ),
+    )
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/delete.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    const landedPinSha = (await git(repo, ["ls-tree", "main", "dep"])).split(/\s+/u)[2]
+    expect(await git(join(repo, "dep"), ["diff", "--name-status", "--no-renames", newPinSha, landedPinSha!])).toBe(
+      "D\tsrc/delete.ts",
+    )
+  })
+
+  it("bounces a disjoint-path Git restack conflict with the exact unmerged path", async () => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
+      sourcePath: "src/node",
+      upstreamPath: "src/node/child.ts",
+    })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/node"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "restack-conflict" } })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { conflicts: [{ repo: "dep", paths: ["src/node"] }] },
+    })
+  })
+
+  it("fails closed when a source payload manifest differs from its materialized diff", async () => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/not-the-payload.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "payload-mismatch" } })
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      output: { conflicts: [{ repo: "dep", paths: ["src/candidate.ts", "src/not-the-payload.ts"] }] },
+    })
+  })
   it("renews one runner lease only on child progress and recovers a stalled child without merge", async () => {
     type CheckedCommand = AddStepResult<PRShape, "check", z.infer<typeof CommandEvidenceSchema>>
     const encoder = new TextEncoder()
@@ -1247,6 +1791,7 @@ describe("Queue command adapters", () => {
       process,
       repo,
       shellCommand('git submodule update --init --recursive && test "$(cat dep/version.txt)" = candidate'),
+      { env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" } },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
@@ -1263,7 +1808,9 @@ describe("Queue command adapters", () => {
       requiredVersion: "accepted",
     })
     await using process = createProcess()
-    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"))
+    await using app = await checkedQueue(process, repo, shellCommand("git submodule update --init --recursive"), {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
@@ -1543,6 +2090,61 @@ describe("Queue command adapters", () => {
     )
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "submitted" })
+  })
+
+  it("rolls back a configured root landing when its source Candidate ref disappears", async () => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const remote = join(repo, "..", "root-origin.git")
+    await Bun.$`git init -q --bare ${remote}`
+    await git(repo, ["remote", "add", "origin", remote])
+    await git(repo, ["push", "-q", "origin", "main", "issue/source"])
+
+    await using process = createProcess()
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const check = withStep("check", gitCheckStep({ inject: { process }, repo, command: ["true"] }), {
+      revision: "check-v1",
+      output: GitCheckResultEvidenceSchema,
+    })
+    const merge = withMerge(
+      configuredMergeStep<Checked>({
+        inject: { process },
+        repo,
+        command: shellCommand(
+          'git push origin "$YRD_CANDIDATE_SHA:refs/heads/main" && ' +
+            'source_ref=$(git -C dep for-each-ref --format="%(refname)" refs/heads/yrd/candidates) && ' +
+            'test -n "$source_ref" && git -C dep push origin ":$source_ref"',
+        ),
+      }),
+      { revision: "delegated-merge-v1" },
+    )
+    const queue = withQueue({ steps: [check, merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "invalid-candidate" } })
+    expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
+    expect(await git(repo, ["rev-parse", "refs/remotes/origin/main"])).toBe(rootBaseSha)
+    expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
   })
 
   it("fails a delegated merge command that exits zero without landing the PR", async () => {

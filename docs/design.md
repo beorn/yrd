@@ -50,8 +50,20 @@ type Submission = Readonly<{
   base: string // destination branch
   branch: string // source ref
   head: string // submitted head SHA
+  composition?: SourceComposition // immutable nested-repository source packet
   bay?: string // originating bay, when any
   issue?: IssueRef // resolved issue reference, when any
+}>
+
+type SourceComposition = Readonly<{
+  version: 1
+  sources: readonly Readonly<{
+    repo: string // root-relative gitlink path
+    branch: string
+    baseSha: string
+    tipSha: string
+    payload: readonly string[] // exact --no-renames path set
+  }>[]
 }>
 
 type FlowDef = Readonly<{
@@ -91,6 +103,7 @@ type PR = Readonly<{
 type PRRev = Readonly<{
   n: number // 1, 2, ... monotonic per PR
   head: string // immutable submitted head SHA
+  composition?: SourceComposition // canonicalized and immutable with this revision
   submittedAt: string
 }>
 ```
@@ -112,22 +125,45 @@ type Candidate = Readonly<{
   revs: readonly { pr: string; n: number; head: string }[] // ordered
   sha?: string // synthetic merge commit, once constructed
   ref?: string // refs/yrd/candidates/<id>
+  sourceRewrites?: readonly SourceRewrite[]
   mergeability: "unknown" | "mergeable" | "conflicting"
   createdAt: string
+}>
+
+type SourceRewrite = Readonly<{
+  repo: string
+  oldBaseSha: string
+  oldTipSha: string
+  newBaseSha: string
+  newTipSha: string
+  candidateRef: string // refs/heads/yrd/candidates/<newTipSha>
+  patchId: string // stable patch-id shared by predecessor and successor
+  rangeDiff: "=" // every commit in the two ranges is patch-equivalent
+  payload: readonly string[]
 }>
 ```
 
 - Immutable. The _attempt_ is the Run; re-checking the same combination is a
   new Run against the same Candidate, never a mutated Candidate.
-- **Derived content key** `(baseSha, revs[].head, in order)` deduplicates
-  reconstruction and makes check results reusable-iff-base-unchanged. The key
-  is an index, not a second identity; it is computed, not stored.
+- **Derived content key** `(baseSha, revs[].head + revs[].composition, in order)`
+  deduplicates reconstruction and makes check results
+  reusable-iff-base-and-source-packets-are-unchanged. The key is an index, not
+  a second identity; it is computed, not stored.
 - Mergeability is computed via `git merge-tree` — no checkout, no Context
   lease — before any expensive check is admitted.
-- The synthetic commit is published at `refs/yrd/candidates/<id>`. Local
-  runners read it in place; a future remote runner's adapter is
-  responsible for pushing that ref wherever its runners can fetch (the seam is
-  named now; no remote push machinery ships in v1).
+- The synthetic root commit is published at `refs/yrd/candidates/<id>`. Each
+  rewritten source tip is first published under the content-addressed
+  `refs/heads/yrd/candidates/<newTipSha>` namespace in that source repository.
+  The Queue verifies those immutable refs immediately before and after the root
+  compare-and-push; if one disappears during landing, it rolls the root branch
+  back and reports `invalid-candidate`. Production remotes protect this
+  namespace from deletion and non-fast-forward updates.
+- A composed Candidate's root tree must pin every repository's final
+  `SourceRewrite.newTipSha`. The receipt retains every sequential rewrite in a
+  same-repository batch, while the final rewrite is the root gitlink binding.
+- Every generated rewrite records its predecessor and successor SHAs, their
+  shared stable patch ID, and an all-`=` range-diff result before the existing
+  payload-manifest and root-tree certificates can pass.
 - Bisection on a failing multi-rev Candidate creates **new child Candidates**
   (subset revs) with provenance recorded on the child Runs (`parent` run id).
   Candidates never mutate; today's `isolationPart` refits into this shape.

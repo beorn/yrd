@@ -985,6 +985,41 @@ describe("Queue", () => {
     expect(app.state().bays.prs.PR2).toMatchObject({ status: "canceled", canceledBy: "@chief" })
   })
 
+  it("does not reconcile a same-root PR with a different source composition", async () => {
+    await using app = await createQueueApp()
+    const composition = (tip: string) => ({
+      version: 1 as const,
+      sources: [
+        {
+          repo: "vendor/example",
+          branch: `issue/source-${tip[0]}`,
+          baseSha: "2".repeat(40),
+          tipSha: tip,
+          payload: [`src/${tip[0]}.ts`],
+        },
+      ],
+    })
+    await app.bays.submit({
+      branch: "issue/root-a",
+      base: "main",
+      headSha: HEAD,
+      composition: composition("3".repeat(40)),
+    })
+    await app.bays.submit({
+      branch: "issue/root-b",
+      base: "main",
+      headSha: HEAD,
+      composition: composition("4".repeat(40)),
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime))[0]
+
+    expect(run).toMatchObject({ status: "passed", integration: { commit: MERGED } })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", integration: run?.integration })
+    expect(app.state().bays.prs.PR2).toMatchObject({ status: "submitted" })
+    expect(app.state().bays.prs.PR2?.integration).toBeUndefined()
+  })
+
   it("integrates the implicit queue in PR revision submission order", async () => {
     let tick = 0
     await using app = await createQueueApp({ batch: 1 }, createMemoryJournal(), () =>

@@ -6,8 +6,8 @@ import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yr
 import { parseJobLaunch, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
-import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
-import { IntegrationProofSchema } from "./model.ts"
+import type { IntegratedShape, IntegrationProof, PRShape, SourceRewrite } from "./model.ts"
+import { IntegrationProofSchema, SourceRewriteSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
@@ -49,6 +49,7 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateRef: z.string().min(1),
+  sourceRewrites: z.array(SourceRewriteSchema).optional(),
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
@@ -56,10 +57,18 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   baseSha: true,
   candidateSha: true,
   candidateRef: true,
+  sourceRewrites: true,
 }).strict()
 type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
 
-export const GitCheckFailureEvidenceSchema = z.object({ artifacts: z.array(StepArtifactSchema) }).strict()
+export const GitCheckFailureEvidenceSchema = z
+  .object({
+    artifacts: z.array(StepArtifactSchema),
+    conflicts: z
+      .array(z.object({ repo: z.string().min(1), paths: z.array(z.string().min(1)).min(1) }).strict())
+      .optional(),
+  })
+  .strict()
 export type GitCheckFailureEvidence = Readonly<z.infer<typeof GitCheckFailureEvidenceSchema>>
 
 export const QueueAuthorityRefusalEvidenceSchema = z
@@ -460,7 +469,25 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     const result = await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], true)
     return result.code === 0 ? result.stdout : undefined
   }
-  return Object.freeze({ run, commit, optionalCommit })
+  const stablePatchId = async (repo: string, from: string, to: string): Promise<string | undefined> => {
+    const diff = await run(repo, ["diff", "--full-index", "--binary", from, to, "--"], true)
+    if (diff.code !== 0) return undefined
+    const result = await process.run({
+      argv: ["git", "-C", repo, "patch-id", "--stable"],
+      cwd: repo,
+      env,
+      stdin: diff.stdout,
+    })
+    if (result.exitCode !== 0) return undefined
+    return /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(result.stdout.trim())?.[1]
+  }
+  const rangeDiff = (repo: string, oldBase: string, oldTip: string, newBase: string, newTip: string) =>
+    run(
+      repo,
+      ["range-diff", "--no-color", "--no-dual-color", "--no-patch", `${oldBase}..${oldTip}`, `${newBase}..${newTip}`],
+      true,
+    )
+  return Object.freeze({ run, commit, optionalCommit, stablePatchId, rangeDiff })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -576,15 +603,37 @@ async function withScratch<Output extends JsonValue>(
 
 async function prepareCandidate(
   git: Git,
+  repo: string,
   path: string,
   input: StepExecution,
   attempt: number,
   artifactRoot: string,
+  allowAuthoredGitlinks: boolean,
 ): Promise<
-  | Readonly<{ status: "passed"; output: string }>
-  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: CommandEvidence }>
+  | Readonly<{ status: "passed"; output: Readonly<{ sha: string; sourceRewrites: readonly SourceRewrite[] }> }>
+  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: GitCheckFailureEvidence }>
 > {
+  const sourceRewrites: SourceRewrite[] = []
   for (const pr of input.prs) {
+    if (pr.composition !== undefined) {
+      const composed = await composePR(git, repo, path, pr)
+      if (composed.status === "failed") return composed
+      sourceRewrites.push(...composed.output)
+      continue
+    }
+    if (!allowAuthoredGitlinks) {
+      const inspected = await authoredGitlinkPaths(git, path, pr.headSha)
+      if (inspected.status === "failed") return inspected
+      const gitlinks = inspected.output
+      if (gitlinks.length > 0) {
+        return candidateFailure(
+          "authored-gitlink",
+          `PR '${pr.id}' changes generated-only gitlinks [${gitlinks.join(", ")}]; submit a composition packet or temporarily set YRD_ALLOW_AUTHORED_GITLINKS=1`,
+          ".",
+          gitlinks,
+        )
+      }
+    }
     const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
     if (merged.code !== 0) {
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
@@ -609,7 +658,444 @@ async function prepareCandidate(
       }
     }
   }
-  return { status: "passed", output: await git.commit(path, "HEAD") }
+  return { status: "passed", output: { sha: await git.commit(path, "HEAD"), sourceRewrites } }
+}
+
+type CandidateFailure = Readonly<{
+  status: "failed"
+  error: Readonly<{ code: string; message: string }>
+  output: GitCheckFailureEvidence
+}>
+
+function candidateFailure(
+  code: string,
+  message: string,
+  repo?: string,
+  paths: readonly string[] = [],
+): CandidateFailure {
+  return {
+    status: "failed",
+    error: { code, message },
+    output: GitCheckFailureEvidenceSchema.parse({
+      artifacts: [],
+      ...(repo === undefined || paths.length === 0 ? {} : { conflicts: [{ repo, paths }] }),
+    }),
+  }
+}
+
+async function composePR(
+  git: Git,
+  repo: string,
+  path: string,
+  pr: StepExecution["prs"][number],
+): Promise<Readonly<{ status: "passed"; output: readonly SourceRewrite[] }> | CandidateFailure> {
+  if (!(await isAncestor(git, path, pr.headSha, "HEAD"))) {
+    return candidateFailure(
+      "composition-invalid",
+      `PR '${pr.id}' composition head '${pr.headSha}' contains root changes; submit source declarations from a root-base-only branch`,
+    )
+  }
+
+  const rewrites: SourceRewrite[] = []
+  const expectedWrapperPaths: string[] = []
+  for (const source of pr.composition?.sources ?? []) {
+    const currentPin = await readGitlink(git, path, "HEAD", source.repo)
+    if (currentPin === undefined) {
+      return candidateFailure(
+        "composition-invalid",
+        `PR '${pr.id}' source '${source.repo}' is not a gitlink in the authoritative root base`,
+        source.repo,
+        [source.repo],
+      )
+    }
+    const prepared = await prepareSource(git, repo, source, currentPin)
+    if (prepared.status === "failed") return prepared
+    rewrites.push(prepared.output)
+    if (prepared.output.newTipSha === currentPin) continue
+    expectedWrapperPaths.push(source.repo)
+    const staged = await git.run(
+      path,
+      ["update-index", "--cacheinfo", `160000,${prepared.output.newTipSha},${source.repo}`],
+      true,
+    )
+    if (staged.code !== 0) {
+      return candidateFailure(
+        "wrapper-mismatch",
+        `PR '${pr.id}' could not stage generated gitlink '${source.repo}': ${staged.stderr || staged.stdout}`,
+        source.repo,
+        [source.repo],
+      )
+    }
+  }
+
+  const materialized = await stagedPaths(git, path)
+  if (!samePaths(materialized, expectedWrapperPaths)) {
+    return candidateFailure(
+      "wrapper-mismatch",
+      `PR '${pr.id}' generated wrapper paths differ: expected [${expectedWrapperPaths.join(", ")}], got [${materialized.join(", ")}]`,
+      ".",
+      symmetricDifference(materialized, expectedWrapperPaths),
+    )
+  }
+  if (materialized.length > 0) {
+    const committed = await git.run(
+      path,
+      [
+        "-c",
+        "user.name=Yrd Queue",
+        "-c",
+        "user.email=yrd-queue@example.invalid",
+        "commit",
+        "-qm",
+        `yrd: compose ${pr.id}`,
+      ],
+      true,
+    )
+    if (committed.code !== 0) {
+      return candidateFailure(
+        "wrapper-mismatch",
+        `PR '${pr.id}' generated wrapper could not be committed: ${committed.stderr || committed.stdout}`,
+      )
+    }
+  }
+  for (const rewrite of rewrites) {
+    if ((await readGitlink(git, path, "HEAD", rewrite.repo)) !== rewrite.newTipSha) {
+      return candidateFailure(
+        "wrapper-mismatch",
+        `PR '${pr.id}' generated wrapper does not pin '${rewrite.repo}' to '${rewrite.newTipSha}'`,
+        rewrite.repo,
+        [rewrite.repo],
+      )
+    }
+  }
+  return { status: "passed", output: rewrites }
+}
+
+async function prepareSource(
+  git: Git,
+  repo: string,
+  source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
+  currentPin: string,
+): Promise<Readonly<{ status: "passed"; output: SourceRewrite }> | CandidateFailure> {
+  const sourceRepo = join(repo, source.repo)
+  try {
+    await realpath(sourceRepo)
+  } catch {
+    return candidateFailure(
+      "source-missing",
+      `source repository '${source.repo}' is not initialized; run git submodule update --init --recursive`,
+      source.repo,
+      [source.repo],
+    )
+  }
+  const validBranch = await git.run(sourceRepo, ["check-ref-format", "--branch", source.branch], true)
+  if (validBranch.code !== 0) {
+    return candidateFailure("composition-invalid", `source '${source.repo}' has invalid branch '${source.branch}'`)
+  }
+  const fetched = await git.run(
+    sourceRepo,
+    ["-c", "protocol.file.allow=always", "fetch", "--quiet", "origin", source.branch],
+    true,
+  )
+  if (fetched.code !== 0) {
+    return candidateFailure(
+      "source-missing",
+      `source '${source.repo}' branch '${source.branch}' could not be fetched: ${fetched.stderr || fetched.stdout}`,
+    )
+  }
+  const fetchedTip = await git.optionalCommit(sourceRepo, "FETCH_HEAD")
+  if (fetchedTip === undefined || !(await isAncestor(git, sourceRepo, source.tipSha, fetchedTip))) {
+    return candidateFailure(
+      "source-lineage",
+      `source '${source.repo}' branch '${source.branch}' no longer contains declared tip '${source.tipSha}' (resolved '${fetchedTip ?? "missing"}')`,
+    )
+  }
+  for (const sha of [source.baseSha, source.tipSha, currentPin]) {
+    if ((await git.optionalCommit(sourceRepo, sha)) !== sha) {
+      return candidateFailure("source-missing", `source '${source.repo}' is missing commit '${sha}'`)
+    }
+  }
+  if (!(await isAncestor(git, sourceRepo, source.baseSha, source.tipSha))) {
+    return candidateFailure(
+      "source-lineage",
+      `source '${source.repo}' declared base '${source.baseSha}' is not an ancestor of tip '${source.tipSha}'`,
+    )
+  }
+  if (!(await isAncestor(git, sourceRepo, source.baseSha, currentPin))) {
+    return candidateFailure(
+      "source-lineage",
+      `source '${source.repo}' current pin '${currentPin}' is not a descendant of declared base '${source.baseSha}'`,
+    )
+  }
+
+  const sourcePaths = await changedPaths(git, sourceRepo, source.baseSha, source.tipSha)
+  const sourceIdentity = await changedPayloadIdentity(git, sourceRepo, source.baseSha, source.tipSha)
+  const sourcePatchId = await git.stablePatchId(sourceRepo, source.baseSha, source.tipSha)
+  if (sourcePatchId === undefined) {
+    return candidateFailure(
+      "payload-certificate",
+      `source '${source.repo}' could not derive a stable patch identity`,
+      source.repo,
+      source.payload,
+    )
+  }
+  if (!samePaths(sourcePaths, source.payload)) {
+    return candidateFailure(
+      "payload-mismatch",
+      `source '${source.repo}' payload differs: declared [${source.payload.join(", ")}], materialized [${sourcePaths.join(", ")}]`,
+      source.repo,
+      symmetricDifference(sourcePaths, source.payload),
+    )
+  }
+
+  let newTipSha = source.tipSha
+  if (currentPin !== source.baseSha && !(await isAncestor(git, sourceRepo, currentPin, source.tipSha))) {
+    const upstreamPaths = await changedPaths(git, sourceRepo, source.baseSha, currentPin)
+    const overlap = intersection(sourcePaths, upstreamPaths)
+    if (overlap.length > 0) {
+      return candidateFailure(
+        "payload-overlap",
+        `source '${source.repo}' overlaps current pin '${currentPin}' at [${overlap.join(", ")}]`,
+        source.repo,
+        overlap,
+      )
+    }
+    const rebased = await rebaseSource(git, sourceRepo, source, currentPin)
+    if (rebased.status === "failed") return rebased
+    newTipSha = rebased.output
+  }
+
+  const materialized = await changedPaths(git, sourceRepo, currentPin, newTipSha)
+  if (!samePaths(materialized, source.payload)) {
+    return candidateFailure(
+      "wrapper-mismatch",
+      `source '${source.repo}' rewritten payload differs: declared [${source.payload.join(", ")}], materialized [${materialized.join(", ")}]`,
+      source.repo,
+      symmetricDifference(materialized, source.payload),
+    )
+  }
+  const materializedIdentity = await changedPayloadIdentity(git, sourceRepo, currentPin, newTipSha)
+  if (materializedIdentity !== sourceIdentity) {
+    return candidateFailure(
+      "payload-identity",
+      `source '${source.repo}' rewritten payload changed blob, mode, status, or path identity`,
+      source.repo,
+      source.payload,
+    )
+  }
+  const materializedPatchId = await git.stablePatchId(sourceRepo, currentPin, newTipSha)
+  if (materializedPatchId !== sourcePatchId) {
+    return candidateFailure(
+      "payload-certificate",
+      `source '${source.repo}' rewritten payload changed stable patch identity`,
+      source.repo,
+      source.payload,
+    )
+  }
+  const rangeDiff = await git.rangeDiff(sourceRepo, source.baseSha, source.tipSha, currentPin, newTipSha)
+  if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
+    return candidateFailure(
+      "payload-certificate",
+      `source '${source.repo}' rewritten commit range is not range-diff equivalent`,
+      source.repo,
+      source.payload,
+    )
+  }
+  const candidateRef = sourceCandidateRef(newTipSha)
+  const pinned = await git.run(
+    sourceRepo,
+    ["update-ref", "--create-reflog", candidateRef, newTipSha, "0".repeat(newTipSha.length)],
+    true,
+  )
+  if (pinned.code !== 0 && (await git.optionalCommit(sourceRepo, candidateRef)) !== newTipSha) {
+    return candidateFailure(
+      "source-publish",
+      `source '${source.repo}' candidate ref could not be pinned: ${pinned.stderr}`,
+    )
+  }
+  const published = await git.run(sourceRepo, ["push", "--porcelain", "origin", `${newTipSha}:${candidateRef}`], true)
+  if (published.code !== 0) {
+    return candidateFailure(
+      "source-publish",
+      `source '${source.repo}' candidate '${newTipSha}' could not be published: ${published.stderr || published.stdout}`,
+    )
+  }
+  return {
+    status: "passed",
+    output: SourceRewriteSchema.parse({
+      repo: source.repo,
+      branch: source.branch,
+      oldBaseSha: source.baseSha,
+      oldTipSha: source.tipSha,
+      newBaseSha: currentPin,
+      newTipSha,
+      payload: source.payload,
+      candidateRef,
+      patchId: sourcePatchId,
+      rangeDiff: "=",
+    }),
+  }
+}
+
+async function rebaseSource(
+  git: Git,
+  sourceRepo: string,
+  source: NonNullable<StepExecution["prs"][number]["composition"]>["sources"][number],
+  currentPin: string,
+): Promise<Readonly<{ status: "passed"; output: string }> | CandidateFailure> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-source-"))
+  const path = join(root, "worktree")
+  let added = false
+  let outcome: Readonly<{ status: "passed"; output: string }> | CandidateFailure | undefined
+  let operationFailure: unknown
+  try {
+    await git.run(sourceRepo, ["worktree", "add", "--detach", path, source.tipSha])
+    added = true
+    const result = await git.run(
+      path,
+      [
+        "-c",
+        "user.name=Yrd Queue",
+        "-c",
+        "user.email=yrd-queue@example.invalid",
+        "rebase",
+        "--onto",
+        currentPin,
+        source.baseSha,
+        source.tipSha,
+      ],
+      true,
+    )
+    if (result.code !== 0) {
+      const paths = await unmergedPaths(git, path)
+      await git.run(path, ["rebase", "--abort"], true)
+      outcome =
+        paths.length === 0
+          ? candidateFailure(
+              "restack-failed",
+              `source '${source.repo}' could not restack onto '${currentPin}': ${result.stderr || result.stdout}`,
+            )
+          : candidateFailure(
+              "restack-conflict",
+              `source '${source.repo}' could not restack onto '${currentPin}' at [${paths.join(", ")}]`,
+              source.repo,
+              paths,
+            )
+    } else {
+      outcome = { status: "passed", output: await git.commit(path, "HEAD") }
+    }
+  } catch (cause) {
+    operationFailure = cause
+  }
+
+  let cleanupFailure: string | undefined
+  if (added) {
+    const removed = await git.run(sourceRepo, ["worktree", "remove", "--force", path], true)
+    if (removed.code !== 0) cleanupFailure = removed.stderr || removed.stdout || "could not remove source worktree"
+  }
+  try {
+    await rm(root, { recursive: true, force: true })
+  } catch (cause) {
+    cleanupFailure ??= messageOf(cause)
+  }
+  if (operationFailure !== undefined) throw operationFailure
+  if (cleanupFailure !== undefined) return candidateFailure("scratch-cleanup-failed", cleanupFailure)
+  if (outcome === undefined) throw new Error("source restack produced no result")
+  return outcome
+}
+
+async function readGitlink(git: Git, repo: string, ref: string, path: string): Promise<string | undefined> {
+  const result = await git.run(repo, ["ls-tree", "-z", ref, "--", path], true)
+  if (result.code !== 0 || result.stdout === "") return undefined
+  const header = /^160000 commit ([0-9a-f]{40,64})\t/u.exec(result.stdout)
+  if (header === null) return undefined
+  const end = result.stdout.indexOf("\0", header[0].length)
+  const recordPath = result.stdout.slice(header[0].length, end === -1 ? undefined : end)
+  return recordPath === path ? header[1] : undefined
+}
+
+async function changedPaths(git: Git, repo: string, from: string, to: string): Promise<string[]> {
+  const result = await git.run(repo, ["diff", "--name-only", "--no-renames", "-z", from, to, "--"])
+  return nulPaths(result.stdout)
+}
+
+async function changedPayloadIdentity(git: Git, repo: string, from: string, to: string): Promise<string> {
+  return (await git.run(repo, ["diff", "--raw", "--no-abbrev", "--no-renames", "-z", from, to, "--"])).stdout
+}
+
+async function stagedPaths(git: Git, repo: string): Promise<string[]> {
+  const result = await git.run(repo, ["diff", "--cached", "--name-only", "--no-renames", "-z", "--"])
+  return nulPaths(result.stdout)
+}
+
+async function unmergedPaths(git: Git, repo: string): Promise<string[]> {
+  const result = await git.run(repo, ["diff", "--name-only", "--diff-filter=U", "-z", "--"], true)
+  return result.code === 0 ? [...new Set(nulPaths(result.stdout).map(normalizeConflictPath))].toSorted() : []
+}
+
+async function isAncestor(git: Git, repo: string, ancestor: string, descendant: string): Promise<boolean> {
+  return (await git.run(repo, ["merge-base", "--is-ancestor", ancestor, descendant], true)).code === 0
+}
+
+function nulPaths(value: string): string[] {
+  return value
+    .split("\0")
+    .filter((path) => path !== "")
+    .toSorted()
+}
+
+function normalizeConflictPath(path: string): string {
+  return path.replace(/~[0-9a-f]{7,64} \(.+\)$/u, "")
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  const sortedRight = right.toSorted()
+  return left.length === sortedRight.length && left.every((path, index) => path === sortedRight[index])
+}
+
+function isEqualRangeDiff(output: string): boolean {
+  const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== "")
+  return lines.length > 0 && lines.every((line) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(line))
+}
+
+function intersection(left: readonly string[], right: readonly string[]): string[] {
+  const rightSet = new Set(right)
+  return left.filter((path) => rightSet.has(path)).toSorted()
+}
+
+function symmetricDifference(left: readonly string[], right: readonly string[]): string[] {
+  const leftSet = new Set(left)
+  const rightSet = new Set(right)
+  return [...left.filter((path) => !rightSet.has(path)), ...right.filter((path) => !leftSet.has(path))].toSorted()
+}
+
+function sourceCandidateRef(newTipSha: string): string {
+  return `refs/heads/yrd/candidates/${newTipSha}`
+}
+
+async function authoredGitlinkPaths(
+  git: Git,
+  repo: string,
+  headSha: string,
+): Promise<Readonly<{ status: "passed"; output: readonly string[] }> | CandidateFailure> {
+  const base = await git.run(repo, ["merge-base", "HEAD", headSha], true)
+  if (base.code !== 0 || base.stdout === "") {
+    return candidateFailure(
+      "gitlink-inspection",
+      `could not inspect authored gitlinks for '${headSha}': ${base.stderr || base.stdout || "no merge base"}`,
+    )
+  }
+  const paths = await changedPaths(git, repo, base.stdout, headSha)
+  const gitlinks: string[] = []
+  for (const path of paths) {
+    if (
+      (await readGitlink(git, repo, base.stdout, path)) !== undefined ||
+      (await readGitlink(git, repo, headSha, path)) !== undefined
+    ) {
+      gitlinks.push(path)
+    }
+  }
+  return { status: "passed", output: gitlinks }
 }
 
 export type GitCheckOptions = ProcessDependency &
@@ -666,7 +1152,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ checkoutParent?: string; artifactRoot?: string }>,
+  options: Readonly<{ checkoutParent?: string; artifactRoot?: string; allowAuthoredGitlinks?: boolean }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
@@ -674,17 +1160,19 @@ async function withPinnedCandidate<Output extends JsonValue>(
   return withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), async (path) => {
     const candidate = await prepareCandidate(
       git,
+      repo,
       path,
       input,
       context.attempt,
       resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
+      options.allowAuthoredGitlinks === true,
     )
     if (candidate.status === "failed") return onFailure(candidate)
     const pinned = await pinCandidate(
       git,
       repo,
-      candidateRef(input, context.id, context.attempt, candidate.output),
-      candidate.output,
+      candidateRef(input, context.id, context.attempt, candidate.output.sha),
+      candidate.output.sha,
     )
     if (pinned.status === "refused") {
       return { status: "waiting", token: pinned.token, detail: pinned.detail }
@@ -693,8 +1181,9 @@ async function withPinnedCandidate<Output extends JsonValue>(
       path,
       PinnedCandidateSchema.parse({
         baseSha: target.sha,
-        candidateSha: candidate.output,
+        candidateSha: candidate.output.sha,
         candidateRef: pinned.ref,
+        ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
       }),
     )
   })
@@ -711,7 +1200,11 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         repo,
         input,
         context,
-        { checkoutParent: options.checkoutParent, artifactRoot: options.artifactRoot },
+        {
+          checkoutParent: options.checkoutParent,
+          artifactRoot: options.artifactRoot,
+          allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+        },
         (failure) => failure,
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
           const configured: ConfiguredCommandOptions<PRShape> = {
@@ -834,6 +1327,20 @@ async function validatePinnedCandidate(
   if ((await git.commit(repo, checked.candidateRef)) !== checked.candidateSha) {
     return { error: { code: "stale-check", message: "checked candidate ref moved" } }
   }
+  const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+  if (sourceRefError !== undefined) return { error: { code: "invalid-candidate", message: sourceRefError } }
+  const finalSources = new Map<string, SourceRewrite>()
+  for (const source of checked.sourceRewrites ?? []) finalSources.set(source.repo, source)
+  for (const source of finalSources.values()) {
+    if ((await readGitlink(git, repo, checked.candidateSha, source.repo)) !== source.newTipSha) {
+      return {
+        error: {
+          code: "invalid-candidate",
+          message: `checked candidate does not pin source '${source.repo}' to '${source.newTipSha}'`,
+        },
+      }
+    }
+  }
   for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
     if ((await git.run(repo, ["merge-base", "--is-ancestor", sha, checked.candidateSha], true)).code !== 0) {
       return { error: { code: "invalid-candidate", message: `checked candidate does not contain '${sha}'` } }
@@ -852,7 +1359,7 @@ async function mergeCandidate(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ artifactRoot?: string }>,
+  options: Readonly<{ artifactRoot?: string; allowAuthoredGitlinks?: boolean }>,
 ): Promise<MergeCandidateResult> {
   const prior = checkedCandidate(input.shape)
   const prepared =
@@ -862,7 +1369,10 @@ async function mergeCandidate(
           repo,
           input,
           context,
-          { artifactRoot: options.artifactRoot },
+          {
+            artifactRoot: options.artifactRoot,
+            allowAuthoredGitlinks: options.allowAuthoredGitlinks,
+          },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
           async (_path, candidate) => ({ status: "passed", output: candidate }),
         )
@@ -874,6 +1384,21 @@ async function mergeCandidate(
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
   const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
   return "error" in validated ? { status: "failed", error: validated.error } : { status: "passed", base, checked }
+}
+
+async function sourceCandidateRefError(
+  git: Git,
+  repo: string,
+  sources: readonly SourceRewrite[],
+): Promise<string | undefined> {
+  for (const source of sources) {
+    const sourceRepo = join(repo, source.repo)
+    const fetched = await git.run(sourceRepo, ["fetch", "--quiet", "origin", source.candidateRef], true)
+    if (fetched.code !== 0 || (await git.optionalCommit(sourceRepo, "FETCH_HEAD")) !== source.newTipSha) {
+      return `source '${source.repo}' candidate ref no longer resolves to '${source.newTipSha}'`
+    }
+  }
+  return undefined
 }
 
 async function authoritativeQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
@@ -942,13 +1467,66 @@ async function landingError(
   return undefined
 }
 
+async function rollbackQueueBase(
+  git: Git,
+  repo: string,
+  base: GitQueueTarget,
+  landing: GitQueueTarget,
+): Promise<string | undefined> {
+  try {
+    if (base.remote !== undefined) {
+      const rolledBack = await git.run(
+        repo,
+        [
+          "push",
+          "--porcelain",
+          `--force-with-lease=${base.branchRef}:${landing.sha}`,
+          base.remote,
+          `${base.sha}:${base.branchRef}`,
+        ],
+        true,
+      )
+      const restored = await authoritativeQueueBase(git, repo, base.branch)
+      return rolledBack.code === 0 && restored.sha === base.sha
+        ? undefined
+        : rolledBack.stderr || rolledBack.stdout || `could not restore '${base.branch}' after source ref loss`
+    }
+
+    const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
+    if (checkedOut !== undefined) {
+      if ((await git.commit(checkedOut, "HEAD")) !== landing.sha) return `'${base.branch}' moved during rollback`
+      const rolledBack = await git.run(checkedOut, ["reset", "--merge", base.sha], true)
+      const restored = await git.run(
+        checkedOut,
+        ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+        true,
+      )
+      if (rolledBack.code !== 0 || restored.code !== 0) {
+        const detail = [rolledBack.stderr, restored.stderr].filter((value) => value !== "").join("\n")
+        return detail || `could not restore '${base.branch}' after source ref loss`
+      }
+    } else {
+      const rolledBack = await git.run(repo, ["update-ref", base.branchRef, base.sha, landing.sha], true)
+      if (rolledBack.code !== 0) {
+        return rolledBack.stderr || rolledBack.stdout || `'${base.branch}' moved during rollback`
+      }
+    }
+    const restored = await authoritativeQueueBase(git, repo, base.branch)
+    return restored.sha === base.sha ? undefined : `could not restore '${base.branch}' after source ref loss`
+  } catch (cause) {
+    return messageOf(cause)
+  }
+}
+
 export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(git, repo, input, context, {})
+      const candidate = await mergeCandidate(git, repo, input, context, {
+        allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+      })
       if (candidate.status !== "passed") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
@@ -971,6 +1549,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             if ((await git.commit(path, "HEAD")) !== checked.candidateSha) {
               return failed("invalid-candidate", "candidate checkout does not match its pinned commit")
             }
+            const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+            if (sourceRefError !== undefined) return failed("invalid-candidate", sourceRefError)
             const pushed = await git.run(
               path,
               ["push", "--porcelain", remote, `${checked.candidateSha}:${branchRef}`],
@@ -981,16 +1561,22 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             }
             return {
               status: "passed",
-              output: IntegrationProofSchema.parse({ commit: checked.candidateSha, baseSha: checked.candidateSha }),
+              output: integrationProof(checked.candidateSha, checked),
             }
           },
         )
         const landing = await authoritativeQueueBase(git, repo, branch)
         const missing = await landingError(git, repo, input, checked, landing.sha)
         if (missing === undefined) {
+          const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+          if (sourceRefError !== undefined) {
+            const rollbackError = await rollbackQueueBase(git, repo, base, landing)
+            if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+            return failed("invalid-candidate", sourceRefError)
+          }
           return {
             status: "passed",
-            output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
+            output: integrationProof(landing.sha, checked),
           }
         }
         if (landing.sha !== baseSha) {
@@ -1010,6 +1596,45 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if ((await git.commit(checkedOut, "HEAD")) !== baseSha) return failed("stale-base", `${branch} moved`)
         const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
+        const aligned = await git.run(
+          checkedOut,
+          ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+          true,
+        )
+        if (aligned.code !== 0) {
+          const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
+          const restored = await git.run(
+            checkedOut,
+            ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+            true,
+          )
+          if (rolledBack.code !== 0 || restored.code !== 0) {
+            return failed(
+              "merge-rollback-failed",
+              [aligned.stderr, rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
+            )
+          }
+          return failed(
+            "candidate-submodules-failed",
+            aligned.stderr || aligned.stdout || "could not align landed candidate submodules",
+          )
+        }
+        const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+        if (sourceRefError !== undefined) {
+          const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
+          const restored = await git.run(
+            checkedOut,
+            ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+            true,
+          )
+          if (rolledBack.code !== 0 || restored.code !== 0) {
+            return failed(
+              "merge-rollback-failed",
+              [rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
+            )
+          }
+          return failed("invalid-candidate", sourceRefError)
+        }
       } else {
         const expected = base.local ? baseSha : "0".repeat(baseSha.length)
         const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
@@ -1017,7 +1642,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       }
       return {
         status: "passed",
-        output: IntegrationProofSchema.parse({ commit: checked.candidateSha, baseSha: checked.candidateSha }),
+        output: integrationProof(checked.candidateSha, checked),
       }
     } catch (cause) {
       const refusal = queueAuthorityRefusal(cause)
@@ -1037,7 +1662,10 @@ export function configuredMergeStep<Shape extends PRShape>(
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const candidate = await mergeCandidate(git, repo, input, context, { artifactRoot: options.artifactRoot })
+      const candidate = await mergeCandidate(git, repo, input, context, {
+        artifactRoot: options.artifactRoot,
+        allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+      })
       if (candidate.status !== "passed") return candidate
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
@@ -1069,9 +1697,15 @@ export function configuredMergeStep<Shape extends PRShape>(
       }
       const missing = await landingError(git, repo, input, candidate.checked, landing.sha)
       if (missing === undefined) {
+        const sourceRefError = await sourceCandidateRefError(git, repo, candidate.checked.sourceRewrites ?? [])
+        if (sourceRefError !== undefined) {
+          const rollbackError = await rollbackQueueBase(git, repo, candidate.base, landing)
+          if (rollbackError !== undefined) return failed("merge-rollback-failed", rollbackError)
+          return failed("invalid-candidate", sourceRefError)
+        }
         return {
           status: "passed",
-          output: IntegrationProofSchema.parse({ commit: landing.sha, baseSha: landing.sha }),
+          output: integrationProof(landing.sha, candidate.checked),
         }
       }
       if (outcome.status === "failed") return failed(outcome.error.code, outcome.error.message)
@@ -1111,6 +1745,14 @@ function primaryPR(input: StepExecution): StepExecution["prs"][number] {
   const primary = input.prs[0]
   if (primary === undefined) throw new Error(`yrd: queue run '${input.run}' has no PR`)
   return primary
+}
+
+function integrationProof(commit: string, checked: PinnedCandidate): IntegrationProof {
+  return IntegrationProofSchema.parse({
+    commit,
+    baseSha: commit,
+    ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
+  })
 }
 
 function failed<Output extends JsonValue = JsonValue>(

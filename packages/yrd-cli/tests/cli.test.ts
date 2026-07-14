@@ -1494,6 +1494,61 @@ describe("runYrd", () => {
     })
   })
 
+  it("submits an immutable source composition from a JSON manifest", async () => {
+    const app = await createApp()
+    const root = mkdtempSync(join(tmpdir(), "yrd-composition-"))
+    const manifest = join(root, "composition.json")
+    writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: "2".repeat(40),
+            tipSha: "3".repeat(40),
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      }),
+    )
+    const submit = outputIO({ cwd: root, resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    try {
+      expect(
+        await runYrd(
+          app,
+          yrd("bay", "submit", "issue/source", "--base", "main", "--composition", "composition.json", "--json"),
+          submit.io,
+        ),
+        submit.stderr(),
+      ).toBe(0)
+      expect(JSON.parse(submit.stdout())).toMatchObject({
+        prs: [
+          {
+            branch: "issue/source",
+            headSha: HEAD_SHA,
+            composition: {
+              version: 1,
+              sources: [
+                {
+                  repo: "dep",
+                  branch: "issue/source",
+                  baseSha: "2".repeat(40),
+                  tipSha: "3".repeat(40),
+                  payload: ["src/candidate.ts"],
+                },
+              ],
+            },
+          },
+        ],
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("closes a direct bayless PR through the `pr close` CLI without a bay", async () => {
     const app = await createApp()
     const resolveRevision = () => Promise.resolve(HEAD_SHA)
