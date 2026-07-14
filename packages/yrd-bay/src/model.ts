@@ -58,7 +58,7 @@ export type Bay = Readonly<{
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
 export type PRRevisionTerminal = Readonly<{
-  status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn">
+  status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn" | "canceled">
   at: string
 }>
 

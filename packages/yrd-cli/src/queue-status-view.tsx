@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import type { BaysState, Correlation, PR, PRRevision, PRRevisionClock } from "@yrd/bay"
+import type { BaysState, Correlation, PR, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
@@ -28,6 +28,7 @@ export type QueueLogRow = Readonly<{
   outcome: string
   startedAt: string
   finishedAt?: string
+  submittedAt?: string
   started: string
   finished: string
   age: string
@@ -91,18 +92,21 @@ export function queueRevisionKey(revision: PinnedPRRevision): string {
   return JSON.stringify([revision.id, revision.revision, revision.headSha])
 }
 
-export function queueSubmissionTimes(prs: Iterable<PR>): Map<string, string> {
-  const submissions = new Map<string, string>()
-  for (const pr of prs) {
-    for (const revision of pr.revisions) {
-      if (revision.submittedAt === undefined) continue
-      submissions.set(
-        queueRevisionKey({ id: pr.id, revision: revision.revision, headSha: revision.headSha }),
-        revision.submittedAt,
-      )
+export function queueRunRevisionKey(run: Pick<QueueRun, "id">, revision: PinnedPRRevision): string {
+  return JSON.stringify([run.id, revision.id, revision.revision, revision.headSha])
+}
+
+export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<QueueRun>): Map<string, PRRunRevisionClock> {
+  const byId = new Map([...prs].map((pr) => [pr.id, pr]))
+  const clocks = new Map<string, PRRunRevisionClock>()
+  for (const run of runs) {
+    for (const revision of run.prs) {
+      const pr = byId.get(revision.id)
+      if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${revision.id}'`)
+      clocks.set(queueRunRevisionKey(run, revision), runRevisionClock(pr, run))
     }
   }
-  return submissions
+  return clocks
 }
 
 export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<Event>): Promise<QueueAttempt[]> {
@@ -271,12 +275,21 @@ export type QueueShowData = Readonly<{
   steps: readonly QueueShowRow[]
 }>
 
-export type PRRunRevisionClock = Readonly<{
+export type PRRevisionHistoryClock = Readonly<{
   pr: string
   revision: number
   headSha: string
 }> &
   PRRevisionClock
+
+export type PRRunRevisionClock =
+  | (PRRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
+  | (PRRevisionHistoryClock & Readonly<{ admittedBy: "check-request"; checkRequestedAt: string }>)
+
+export type PRRunsData = Readonly<{
+  pr: PR
+  runs: readonly QueueShowData[]
+}>
 
 type LegacyQueueCoverage = Readonly<{
   path: string
@@ -306,30 +319,178 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
 }
 
 function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
+  const current = queueRevisionKey({ id: pr.id, revision: pr.revision, headSha: pr.headSha })
+  const currentSubmission =
+    pr.status === "submitted"
+      ? (pr.revisions.find((revision) => revision.revision === pr.revision && revision.headSha === pr.headSha)
+          ?.submittedAt ?? pr.submittedAt)
+      : undefined
   return [...summary.running, ...summary.waiting, ...summary.finished]
-    .filter((run) => run.prs.some((member) => member.id === pr.id))
+    .filter((run) => run.prs.some((member) => queueRevisionKey(member) === current))
+    .filter(
+      (run) =>
+        currentSubmission === undefined ||
+        timestamp(run.startedAt, `run '${run.id}' start`) >=
+          timestamp(currentSubmission, `PR '${pr.id}' current revision submission`),
+    )
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
 }
 
-function matchingRevision(pr: PR, pinned: PinnedPRRevision): PRRevision | undefined {
-  return pr.revisions?.find((revision) => revision.revision === pinned.revision && revision.headSha === pinned.headSha)
+function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
+  let at: string | undefined
+  switch (pr.status) {
+    case "rejected":
+      at = pr.rejectedAt
+      break
+    case "integrated":
+      at = pr.integratedAt
+      break
+    case "withdrawn":
+      at = pr.withdrawnAt
+      break
+    case "canceled":
+      at = pr.canceledAt
+      break
+    default:
+      return undefined
+  }
+  if (at === undefined) {
+    throw new Error(`yrd: PR '${pr.id}' current revision ${pr.revision}@${pr.headSha} has no ${pr.status} timestamp`)
+  }
+  return { status: pr.status, at }
 }
 
-export function runRevisionClock(pr: PR, run: QueueRun): PRRunRevisionClock | undefined {
-  const pinned = run.prs.find((member) => member.id === pr.id)
-  if (pinned === undefined) return undefined
-  const clock = matchingRevision(pr, pinned)
-  return clock === undefined
-    ? undefined
-    : {
-        pr: pr.id,
-        revision: pinned.revision,
-        headSha: pinned.headSha,
-        pushedAt: clock.pushedAt,
-        ...(clock.submittedAt === undefined ? {} : { submittedAt: clock.submittedAt }),
-        ...(clock.terminal === undefined ? {} : { terminal: clock.terminal }),
+function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {
+  const pushed = Date.parse(clock.pushedAt)
+  if (!Number.isFinite(pushed)) {
+    throw new Error(
+      `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid pushed clock '${clock.pushedAt}'`,
+    )
+  }
+  if (clock.submittedAt !== undefined) {
+    const submitted = elapsedMs(
+      clock.pushedAt,
+      clock.submittedAt,
+      `PR '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-submitted age`,
+    )
+    if (submitted === undefined) {
+      throw new Error(
+        `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid submitted clock '${clock.submittedAt}'`,
+      )
+    }
+  }
+  if (clock.terminal !== undefined) {
+    const terminal = elapsedMs(
+      clock.submittedAt ?? clock.pushedAt,
+      clock.terminal.at,
+      `PR '${pr.id}' revision ${clock.revision}@${clock.headSha} submitted-to-terminal age`,
+    )
+    if (terminal === undefined) {
+      throw new Error(
+        `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid terminal clock '${clock.terminal.at}'`,
+      )
+    }
+  }
+
+  if (clock.revision !== pr.revision || clock.headSha !== pr.headSha) return clock
+  const expected = currentTerminalFact(pr)
+  if (expected === undefined) {
+    if (clock.terminal !== undefined) {
+      throw new Error(
+        `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.status} terminal clock`,
+      )
+    }
+    return clock
+  }
+  if (clock.terminal === undefined) {
+    throw new Error(
+      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.status} terminal clock`,
+    )
+  }
+  if (clock.terminal.status !== expected.status || clock.terminal.at !== expected.at) {
+    throw new Error(
+      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.status} terminal clock contradicts current PR state`,
+    )
+  }
+  return clock
+}
+
+function revisionHistoryClock(pr: PR, revision: PR["revisions"][number]): PRRevisionHistoryClock {
+  return {
+    pr: pr.id,
+    revision: revision.revision,
+    headSha: revision.headSha,
+    pushedAt: revision.pushedAt,
+    ...(revision.submittedAt === undefined ? {} : { submittedAt: revision.submittedAt }),
+    ...(revision.terminal === undefined ? {} : { terminal: revision.terminal }),
+  }
+}
+
+export function prRevisionClocks(pr: PR): readonly PRRevisionHistoryClock[] {
+  const clocks = pr.revisions.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
+  if (!clocks.some((clock) => clock.revision === pr.revision && clock.headSha === pr.headSha)) {
+    throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${pr.revision}@${pr.headSha}`)
+  }
+  return clocks
+}
+
+function revisionCheckRequests(pr: PR, clock: PRRevisionHistoryClock): readonly PR["checkRequests"][number][] {
+  return pr.checkRequests
+    .filter((request) => request.revision === clock.revision && request.headSha === clock.headSha)
+    .map((request) => {
+      const elapsed = elapsedMs(
+        clock.pushedAt,
+        request.at,
+        `PR '${pr.id}' revision ${clock.revision}@${clock.headSha} pushed-to-check-request age`,
+      )
+      if (elapsed === undefined) {
+        throw new Error(
+          `yrd: PR '${pr.id}' revision ${clock.revision}@${clock.headSha} has an invalid check-request clock '${request.at}'`,
+        )
       }
+      return request
+    })
+}
+
+function timestamp(value: string, subject: string): number {
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) throw new Error(`yrd: ${subject} has invalid timestamp '${value}'`)
+  return parsed
+}
+
+export function runRevisionClock(pr: PR, run: QueueRun): PRRunRevisionClock {
+  const pinned = run.prs.find((member) => member.id === pr.id)
+  if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain PR '${pr.id}'`)
+  const revision = pr.revisions.find(
+    (revision) => revision.revision === pinned.revision && revision.headSha === pinned.headSha,
+  )
+  if (revision === undefined) {
+    throw new Error(
+      `yrd: run '${run.id}' has no retained revision clock for PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
+    )
+  }
+  const historyClock = revisionHistoryClock(pr, revision)
+  const startedAt = timestamp(run.startedAt, `run '${run.id}' start`)
+  if (
+    revision.submittedAt !== undefined &&
+    timestamp(revision.submittedAt, `PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha} submission`) <=
+      startedAt
+  ) {
+    const clock = validateRevisionClock(pr, historyClock)
+    return { ...clock, admittedBy: "submission", submittedAt: revision.submittedAt }
+  }
+  const checkRequest = revisionCheckRequests(pr, historyClock)
+    .filter((request) => timestamp(request.at, `PR '${pr.id}' check request`) <= startedAt)
+    .toSorted((left, right) => left.at.localeCompare(right.at))
+    .at(-1)
+  if (checkRequest === undefined) {
+    throw new Error(
+      `yrd: run '${run.id}' has no causal submit/check-request clock for PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
+    )
+  }
+  const clock = validateRevisionClock(pr, historyClock)
+  return { ...clock, admittedBy: "check-request", checkRequestedAt: checkRequest.at }
 }
 
 type JobByStatus<Status extends Job["status"]> = Extract<Job, { status: Status }>
@@ -815,14 +976,14 @@ function projectPR(
   const step = relevantStep(run)
   const job = step?.job
   const path = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
-  const pinnedRevision = runOverride?.prs.find((member) => member.id === pr.id)
-  const isCurrentRevision =
-    pinnedRevision === undefined || (pinnedRevision.revision === pr.revision && pinnedRevision.headSha === pr.headSha)
+  const revisionClocks = prRevisionClocks(pr)
   const revision =
-    pinnedRevision === undefined
-      ? pr.revisions?.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)
-      : matchingRevision(pr, pinnedRevision)
-  const submittedAt = revision?.submittedAt ?? (isCurrentRevision ? pr.submittedAt : undefined)
+    run === undefined
+      ? revisionClocks.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)
+      : runRevisionClock(pr, run)
+  const isCurrentRevision =
+    revision === undefined || (revision.revision === pr.revision && revision.headSha === pr.headSha)
+  const submittedAt = revision?.submittedAt ?? (run === undefined && isCurrentRevision ? pr.submittedAt : undefined)
   const touchedAt = latest(
     ...(runOverride === undefined
       ? [revision?.pushedAt, submittedAt, revision?.terminal?.at, pr.rejectedAt, pr.integratedAt, pr.withdrawnAt]
@@ -852,8 +1013,8 @@ function projectPR(
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
   const terminalAt =
-    runOverride?.finishedAt ??
     revision?.terminal?.at ??
+    runOverride?.finishedAt ??
     (isCurrentRevision
       ? pr.status === "rejected"
         ? pr.rejectedAt
@@ -1380,6 +1541,21 @@ export function QueueWatchView({ results, now }: { results: readonly QueueStatus
   )
 }
 
+function queueLogSubmissionTime(
+  revisionClocks: ReadonlyMap<string, PRRunRevisionClock> | undefined,
+  run: QueueRun,
+  pr: PinnedPRRevision,
+): string | undefined {
+  if (revisionClocks === undefined) return undefined
+  const clock = revisionClocks.get(queueRunRevisionKey(run, pr))
+  if (clock === undefined) {
+    throw new Error(
+      `yrd: run '${run.id}' has no causal submit/check-request clock for PR '${pr.id}' revision ${pr.revision}@${pr.headSha}`,
+    )
+  }
+  return clock.admittedBy === "submission" ? clock.submittedAt : undefined
+}
+
 export function queueLogRows(
   results: readonly QueueLogResult[],
   selectedPrs: ReadonlySet<string>,
@@ -1387,7 +1563,7 @@ export function queueLogRows(
   prStatus?: ReadonlyMap<string, PR["status"]>,
   attempts: readonly QueueLogAttempt[] = [],
   revisionSubjects: ReadonlyMap<string, string> = new Map(),
-  submissionTimes: ReadonlyMap<string, string> = new Map(),
+  revisionClocks?: ReadonlyMap<string, PRRunRevisionClock>,
 ): QueueLogRow[] {
   const rows: QueueLogRow[] = []
   const finished = results.flatMap((result) => result.finished)
@@ -1438,7 +1614,7 @@ export function queueLogRows(
         const durations = runDurations(run, runAttempts)
         const durationMs = durations.totalDurationMs
         const finishedAt = run.finishedAt === undefined ? undefined : toIso(run.finishedAt)
-        const submittedAt = submissionTimes.get(queueRevisionKey(pr))
+        const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr)
         const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
         rows.push({
@@ -1454,6 +1630,7 @@ export function queueLogRows(
           outcome,
           startedAt: toIso(run.startedAt),
           ...(finishedAt === undefined ? {} : { finishedAt }),
+          submittedAt,
           started: toIso(run.startedAt),
           finished: finishedAt ?? "-",
           age: ageMs === undefined ? "-" : preciseDuration(ageMs),
@@ -1784,17 +1961,6 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
         ]}
         padding={1}
       />
-      {data.revisionClock === undefined ? null : (
-        <Box height={1}>
-          <Text wrap="truncate">
-            REVISION CLOCK {data.revisionClock.pr} rev{data.revisionClock.revision} PUSHED {data.revisionClock.pushedAt}{" "}
-            SUBMITTED {data.revisionClock.submittedAt ?? "-"} TERMINAL{" "}
-            {data.revisionClock.terminal === undefined
-              ? "-"
-              : `${data.revisionClock.terminal.status}@${data.revisionClock.terminal.at}`}
-          </Text>
-        </Box>
-      )}
       <Box marginTop={1}>
         <Table
           data={data.steps}
@@ -1896,15 +2062,72 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
   )
 }
 
-export function PRRunsView({ runs }: { runs: readonly QueueShowData[] }) {
-  if (runs.length === 0) return <Text color="$fg-muted">No runs recorded.</Text>
+function RevisionClockView({
+  clock,
+  checkRequests,
+}: {
+  clock: PRRevisionHistoryClock
+  checkRequests: readonly string[]
+}) {
   return (
     <Box flexDirection="column">
-      {runs.map((run, index) => (
-        <Box key={run.run} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
-          <QueueShowView data={run} />
-        </Box>
-      ))}
+      <Text wrap="wrap">
+        REVISION CLOCK {clock.pr} rev{clock.revision} HEAD {clock.headSha}
+      </Text>
+      <Text wrap="wrap">PUSHED {clock.pushedAt}</Text>
+      <Text wrap="wrap">SUBMITTED {clock.submittedAt ?? "-"}</Text>
+      <Text wrap="wrap">CHECK REQUESTED {checkRequests.length === 0 ? "-" : checkRequests.join(", ")}</Text>
+      <Text wrap="wrap">
+        TERMINAL {clock.terminal?.status ?? "-"} AT {clock.terminal?.at ?? "-"}
+      </Text>
+    </Box>
+  )
+}
+
+function RunAdmissionClockView({ run }: { run: QueueShowData }) {
+  const clock = run.revisionClock
+  if (clock === undefined) throw new Error(`yrd: run '${run.run}' has no projected admission clock`)
+  const at = clock.admittedBy === "submission" ? clock.submittedAt : clock.checkRequestedAt
+  return (
+    <Text wrap="wrap">
+      RUN {run.run} ADMITTED {clock.admittedBy} AT {at}
+    </Text>
+  )
+}
+
+export function PRRunsView({ data }: { data: PRRunsData }) {
+  const clocks = prRevisionClocks(data.pr)
+  if (clocks.length === 0) return <Text color="$fg-muted">No revision history recorded.</Text>
+  return (
+    <Box flexDirection="column">
+      {clocks.map((clock, revisionIndex) => {
+        const checkRequests = revisionCheckRequests(data.pr, clock).map((request) => request.at)
+        const runs = data.runs.filter(
+          (run) =>
+            run.revisionClock?.pr === clock.pr &&
+            run.revisionClock.revision === clock.revision &&
+            run.revisionClock.headSha === clock.headSha,
+        )
+        return (
+          <Box
+            key={`${clock.revision}:${clock.headSha}`}
+            flexDirection="column"
+            marginTop={revisionIndex === 0 ? 0 : 1}
+          >
+            <RevisionClockView clock={clock} checkRequests={checkRequests} />
+            {runs.length === 0 ? (
+              <Text color="$fg-muted">No runs recorded for this revision.</Text>
+            ) : (
+              runs.map((run, runIndex) => (
+                <Box key={run.run} flexDirection="column" marginTop={runIndex === 0 ? 0 : 1}>
+                  <RunAdmissionClockView run={run} />
+                  <QueueShowView data={run} />
+                </Box>
+              ))
+            )}
+          </Box>
+        )
+      })}
     </Box>
   )
 }

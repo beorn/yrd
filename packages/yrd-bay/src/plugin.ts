@@ -1128,6 +1128,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               integratedAt: undefined,
               integration: undefined,
               withdrawnAt: undefined,
+              canceledAt: undefined,
+              canceledBy: undefined,
+              cancelReason: undefined,
               detail: undefined,
             }
       const next = { ...current, prs: { ...current.prs, [pr.id]: pr } }
@@ -1176,6 +1179,9 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         withdrawnAt: undefined,
+        canceledAt: undefined,
+        canceledBy: undefined,
+        cancelReason: undefined,
         ...(correlation === undefined ? {} : { correlation: { ...correlation } }),
         revisions,
       })
@@ -1238,6 +1244,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             canceledAt: applied.ts,
             canceledBy: changed.by,
             cancelReason: changed.reason,
+            revisions: patchRevisionClock(pr, { terminal: { status: "canceled", at: applied.ts } }),
           })
     }
     case "pr/edited": {
