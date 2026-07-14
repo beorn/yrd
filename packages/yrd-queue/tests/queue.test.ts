@@ -1552,6 +1552,27 @@ describe("Queue", () => {
     expect(checked).toEqual([first.id, second.id])
   })
 
+  it("stops a targeted admission drain before executing later unrelated checks", async () => {
+    const checked: string[] = []
+    await using app = await createQueueApp({
+      check: (input) => {
+        checked.push(input.prs[0]!.id)
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const target = await submitBranch(app, "issue/targeted-check")
+    const unrelated = await submitBranch(app, "issue/unrelated-check")
+    await app.bays.requestChecks({ pr: target.id })
+    await app.bays.requestChecks({ pr: unrelated.id })
+
+    expect(await app.queue.admit({ prs: [target.id] }, runtime)).toMatchObject([
+      { status: "passed", prs: [{ id: target.id }] },
+    ])
+    expect(checked).toEqual([target.id])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(app.queue.eligibility(unrelated.id)).toMatchObject({ checks: { status: "queued", position: 1 } })
+  })
+
   it("orders admission age and position from the check request fact, not the earlier push", async () => {
     let now = "2026-01-01T00:00:00.000Z"
     await using app = await createQueueApp({}, createMemoryJournal(), () => now)

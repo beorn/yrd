@@ -841,7 +841,7 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const queued = admissionQueue(snapshot, steps)
+      const queued = admissionQueue(snapshot, steps).filter((pr) => targets.has(pr.id))
       const admitted = await dispatchAdmissions(
         (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
       )
@@ -891,7 +891,7 @@ function createQueue<Shape extends PRShape>(
           const selectors =
             args.prs === undefined || args.prs.length === 0
               ? admissionQueue(snapshot, steps).map((pr) => pr.id)
-              : [...args.prs]
+              : selected.map((pr) => pr.id)
           return runOptions === undefined ? dispatchAdmissions(selectors) : drainAdmissions(selectors, runOptions)
         },
       )
@@ -2470,7 +2470,7 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
       const run = admissionRun(state, snapshot, selected)
-      if (run === undefined) return true
+      if (run === undefined) return queueAuthorityGaps(state.queues.authority, [snapshot], selected).length === 0
       return (
         checkRunStatus(run, selected.length) === "failed" &&
         availableAuthorityToken(state.queues.authority.checks[pr.id], snapshot)

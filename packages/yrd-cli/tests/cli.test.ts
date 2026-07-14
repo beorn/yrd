@@ -257,10 +257,12 @@ async function createApp(
     requires?: readonly ["review"]
     checkRuns?: string[]
     checkedRevisions?: string[]
+    checkRevision?: string
     baseFailure?: boolean
     clock?: () => string
     mergeCommits?: readonly string[]
     journal?: Journal<unknown>
+    id?: () => string
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -312,7 +314,7 @@ async function createApp(
               : { status: "passed", output: { checked: true } }
     },
     {
-      revision: "check-v1",
+      revision: options.checkRevision ?? "check-v1",
       output: JsonSchema,
       classification: options.baseFailure === true ? "base" : "carrier",
     },
@@ -349,7 +351,7 @@ async function createApp(
     inject: {
       journal: options.journal ?? createMemoryJournal(),
       clock: options.clock ?? (() => "2026-07-09T12:00:00.000Z"),
-      id: ids(),
+      id: options.id ?? ids(),
     },
   })
 }
@@ -1005,6 +1007,120 @@ describe("runYrd", () => {
       status: "waiting",
       prs: [{ id: "PR1", revision: 2 }],
     })
+  })
+
+  it("does not let another PR's terminal stale authority block a targeted recut admission", async () => {
+    const journal = createMemoryJournal<unknown>()
+    const id = ids()
+    const checkedRevisions: string[] = []
+
+    {
+      await using stale = await createApp({
+        journal,
+        id,
+        checkedRevisions,
+        checkRevision: "check-v1",
+      })
+      await stale.bays.submit({
+        branch: "issue/stale-authority",
+        headSha: HEAD_SHA,
+        baseSha: BASE_SHA,
+        draft: true,
+      })
+      await stale.bays.requestChecks({ pr: "PR1" })
+      const predecessor = (await stale.queue.admit({ prs: ["PR1"] }))[0]
+      const job = predecessor?.steps[0]?.job
+      if (job === undefined) throw new Error("expected the stale predecessor check Job")
+      await stale.dispatch(stale.commands.job.transition, {
+        type: "start",
+        id: job.id,
+        attempt: 1,
+        runner: "stale-runner",
+        leaseExpiresAt: "2026-07-09T12:05:00.000Z",
+      })
+      await stale.jobs.finish(job.id, {
+        attempt: 1,
+        runner: "stale-runner",
+        result: {
+          status: "failed",
+          error: {
+            code: "authored-gitlink",
+            message: "generated-only gitlink carrier requires a composition packet",
+          },
+        },
+      })
+
+      expect(stale.queue.get("R1")).toMatchObject({
+        status: "failed",
+        prs: [{ id: "PR1", revision: 1 }],
+        steps: [{ revision: "check-v1", job: { status: "failed", error: { code: "authored-gitlink" } } }],
+      })
+      expect(stale.state().bays.prs.PR1).toMatchObject({ status: "pushed", revision: 1 })
+      expect(stale.state().queues.authority.checks.PR1).toMatchObject({ consumedBy: "R1" })
+      expect(stale.state().queues.authority.runs.R1).not.toHaveProperty("released")
+    }
+
+    await using app = await createApp({ journal, id, checkedRevisions, checkRevision: "check-v2" })
+    await app.bays.submit({
+      branch: "issue/targeted-recut",
+      headSha: "2".repeat(40),
+      baseSha: BASE_SHA,
+      draft: true,
+    })
+    const staleBefore = {
+      pr: app.state().bays.prs.PR1,
+      run: app.queue.get("R1"),
+      authority: {
+        current: app.state().queues.authority.current.PR1,
+        status: app.state().queues.authority.statuses.PR1,
+        submit: app.state().queues.authority.submits.PR1,
+        checks: app.state().queues.authority.checks.PR1,
+        run: app.state().queues.authority.runs.R1,
+      },
+    }
+    const eventsBefore = await Array.fromAsync(app.events())
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: "3".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), output.io, services)).toBe(0)
+
+    expect(app.queue.get("R2")).toMatchObject({
+      status: "passed",
+      prs: [{ id: "PR2", revision: 2, headSha: "3".repeat(40) }],
+      steps: [{ revision: "check-v2", job: { status: "passed" } }],
+    })
+    expect({
+      pr: app.state().bays.prs.PR1,
+      run: app.queue.get("R1"),
+      authority: {
+        current: app.state().queues.authority.current.PR1,
+        status: app.state().queues.authority.statuses.PR1,
+        submit: app.state().queues.authority.submits.PR1,
+        checks: app.state().queues.authority.checks.PR1,
+        run: app.state().queues.authority.runs.R1,
+      },
+    }).toEqual(staleBefore)
+    const eventsAfter = await Array.fromAsync(app.events())
+    expect(eventsAfter.slice(0, eventsBefore.length)).toEqual(eventsBefore)
+    expect(
+      eventsAfter.slice(eventsBefore.length).filter((event) => {
+        const data = JSON.stringify(event.data)
+        return data.includes('"PR1"') || data.includes('"R1"')
+      }),
+    ).toEqual([])
+    expect(checkedRevisions).toEqual(["PR2@2"])
   })
 
   it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {
