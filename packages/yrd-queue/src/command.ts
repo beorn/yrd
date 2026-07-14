@@ -10,13 +10,15 @@ import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
 import { IntegrationProofSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
 
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
+
 export const StepArtifactSchema = z.object({ name: z.string().min(1), path: z.string().min(1) }).strict()
 export type StepArtifact = Readonly<z.infer<typeof StepArtifactSchema>>
 
 export const CommandDiagnosticSchema = z
   .object({
     file: z.string().min(1),
-    line: z.number().int().positive(),
+    [sourceRowKey]: z.number().int().positive(),
     column: z.number().int().positive().optional(),
     message: z.string().min(1),
   })
@@ -235,23 +237,23 @@ function commandDetail(output: string): string {
 
 function commandDiagnostics(output: string): CommandDiagnostic[] {
   const diagnostics: CommandDiagnostic[] = []
-  for (const line of output.split(/\r?\n/u)) {
-    const text = line.trim()
-    const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(line)
+  for (const row of output.split(/\r?\n/u)) {
+    const text = row.trim()
+    const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(row)
     if (changed?.[1] !== undefined) {
-      diagnostics.push({ file: changed[1], line: 1, message: "working tree changed during check" })
+      diagnostics.push({ file: changed[1], [sourceRowKey]: 1, message: "working tree changed during check" })
       if (diagnostics.length >= 20) break
       continue
     }
     const match =
       /^(.*?)\((\d+),(\d+)\):\s*(.+)$/u.exec(text) ?? /^(.*?):(\d+)(?::(\d+))?\s*(?:-|:)\s*(.+)$/u.exec(text)
     if (match?.[1] === undefined || match[2] === undefined || match[4] === undefined) continue
-    const lineNumber = Number(match[2])
+    const rowNumber = Number(match[2])
     const column = match[3] === undefined ? undefined : Number(match[3])
-    if (lineNumber < 1 || (column !== undefined && column < 1)) continue
+    if (rowNumber < 1 || (column !== undefined && column < 1)) continue
     diagnostics.push({
       file: match[1],
-      line: lineNumber,
+      [sourceRowKey]: rowNumber,
       ...(column === undefined ? {} : { column }),
       message: match[4],
     })

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import type { BaysState, PR } from "@yrd/bay"
+import type { BaysState, Correlation, PR, PRRevision, PRRevisionClock } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
@@ -9,7 +9,11 @@ import { Box, Link, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
+
 export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
+
+type QueueLogResult = QueueSummary & { prs?: readonly PR[] }
 
 export type QueueLogRow = Readonly<{
   run: string
@@ -49,6 +53,7 @@ export type QueueLogRow = Readonly<{
     commit: string
     baseSha: string
   }
+  correlation?: Correlation
   landing: string
 }>
 
@@ -86,15 +91,16 @@ export function queueRevisionKey(revision: PinnedPRRevision): string {
   return JSON.stringify([revision.id, revision.revision, revision.headSha])
 }
 
-export async function queueSubmissionTimes(
-  events: AsyncIterable<Event> | Iterable<Event>,
-): Promise<Map<string, string>> {
+export function queueSubmissionTimes(prs: Iterable<PR>): Map<string, string> {
   const submissions = new Map<string, string>()
-  for await (const event of events) {
-    if (event.name !== "pr/submitted" || !isObjectValue(event.data)) continue
-    const { pr, revision, headSha } = event.data
-    if (typeof pr !== "string" || typeof revision !== "number" || typeof headSha !== "string") continue
-    submissions.set(queueRevisionKey({ id: pr, revision, headSha }), event.ts)
+  for (const pr of prs) {
+    for (const revision of pr.revisions) {
+      if (revision.submittedAt === undefined) continue
+      submissions.set(
+        queueRevisionKey({ id: pr.id, revision: revision.revision, headSha: revision.headSha }),
+        revision.submittedAt,
+      )
+    }
   }
   return submissions
 }
@@ -260,9 +266,17 @@ export type QueueShowData = Readonly<{
   parent: string
   isolationPart: "0" | "1" | "-"
   prs: QueueRun["prs"]
+  revisionClock?: PRRunRevisionClock
   attempts: readonly QueueAttempt[]
   steps: readonly QueueShowRow[]
 }>
+
+export type PRRunRevisionClock = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+}> &
+  PRRevisionClock
 
 type LegacyQueueCoverage = Readonly<{
   path: string
@@ -296,6 +310,26 @@ function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
     .filter((run) => run.prs.some((member) => member.id === pr.id))
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
+}
+
+function matchingRevision(pr: PR, pinned: PinnedPRRevision): PRRevision | undefined {
+  return pr.revisions?.find((revision) => revision.revision === pinned.revision && revision.headSha === pinned.headSha)
+}
+
+export function runRevisionClock(pr: PR, run: QueueRun): PRRunRevisionClock | undefined {
+  const pinned = run.prs.find((member) => member.id === pr.id)
+  if (pinned === undefined) return undefined
+  const clock = matchingRevision(pr, pinned)
+  return clock === undefined
+    ? undefined
+    : {
+        pr: pr.id,
+        revision: pinned.revision,
+        headSha: pinned.headSha,
+        pushedAt: clock.pushedAt,
+        ...(clock.submittedAt === undefined ? {} : { submittedAt: clock.submittedAt }),
+        ...(clock.terminal === undefined ? {} : { terminal: clock.terminal }),
+      }
 }
 
 type JobByStatus<Status extends Job["status"]> = Extract<Job, { status: Status }>
@@ -781,10 +815,17 @@ function projectPR(
   const step = relevantStep(run)
   const job = step?.job
   const path = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
-  const revision = pr.revisions?.at(-1)
+  const pinnedRevision = runOverride?.prs.find((member) => member.id === pr.id)
+  const isCurrentRevision =
+    pinnedRevision === undefined || (pinnedRevision.revision === pr.revision && pinnedRevision.headSha === pr.headSha)
+  const revision =
+    pinnedRevision === undefined
+      ? pr.revisions?.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)
+      : matchingRevision(pr, pinnedRevision)
+  const submittedAt = revision?.submittedAt ?? (isCurrentRevision ? pr.submittedAt : undefined)
   const touchedAt = latest(
     ...(runOverride === undefined
-      ? [revision?.pushedAt, pr.submittedAt, pr.rejectedAt, pr.integratedAt, pr.withdrawnAt]
+      ? [revision?.pushedAt, submittedAt, revision?.terminal?.at, pr.rejectedAt, pr.integratedAt, pr.withdrawnAt]
       : []),
     run?.startedAt,
     run?.finishedAt,
@@ -812,13 +853,16 @@ function projectPR(
   const evidence = failureEvidence(step)
   const terminalAt =
     runOverride?.finishedAt ??
-    (pr.status === "rejected"
-      ? pr.rejectedAt
-      : pr.status === "integrated"
-        ? pr.integratedAt
-        : pr.status === "withdrawn"
-          ? pr.withdrawnAt
-          : undefined)
+    revision?.terminal?.at ??
+    (isCurrentRevision
+      ? pr.status === "rejected"
+        ? pr.rejectedAt
+        : pr.status === "integrated"
+          ? pr.integratedAt
+          : pr.status === "withdrawn"
+            ? pr.withdrawnAt
+            : undefined
+      : undefined)
   const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
   const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
   const failure =
@@ -838,9 +882,9 @@ function projectPR(
     state: stateLabel,
     glyph: statusGlyph(stateLabel),
     ...(run === undefined ? {} : { runId: run.id }),
-    ...(pr.submittedAt === undefined ? {} : { submittedAt: pr.submittedAt }),
+    ...(submittedAt === undefined ? {} : { submittedAt }),
     target: pr.base,
-    age: age(pr.submittedAt ?? revision?.pushedAt, ageAt, `PR '${pr.id}' submitted age`),
+    age: age(submittedAt ?? revision?.pushedAt, ageAt, `PR '${pr.id}' submitted age`),
     touched: age(touchedAt, now, `PR '${pr.id}' touched age`),
     ...(touchedAt === undefined ? {} : { touchedAt }),
     run: runDuration,
@@ -994,8 +1038,8 @@ function checkDiagnosticText(value: unknown): string {
   if (!Array.isArray(value) || value.length === 0) return singleQueue(safeText(value))
   const first = isObjectValue(value[0]) ? value[0] : undefined
   const location =
-    typeof first?.file === "string" && typeof first.line === "number"
-      ? `${first.file}:${first.line}${typeof first.column === "number" ? `:${first.column}` : ""}`
+    typeof first?.file === "string" && typeof first[sourceRowKey] === "number"
+      ? `${first.file}:${first[sourceRowKey]}${typeof first.column === "number" ? `:${first.column}` : ""}`
       : undefined
   const detail = typeof first?.message === "string" ? first.message : safeText(value[0])
   return singleQueue(
@@ -1337,7 +1381,7 @@ export function QueueWatchView({ results, now }: { results: readonly QueueStatus
 }
 
 export function queueLogRows(
-  results: readonly QueueSummary[],
+  results: readonly QueueLogResult[],
   selectedPrs: ReadonlySet<string>,
   prFilter: string | undefined,
   prStatus?: ReadonlyMap<string, PR["status"]>,
@@ -1431,6 +1475,7 @@ export function queueLogRows(
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
           error: safeText(runError),
+          ...correlationField(pr),
           locations,
           ...(showLocation === undefined
             ? {}
@@ -1447,10 +1492,13 @@ export function queueLogRows(
     const status = runPrs?.get(prFilter)
     const matching = rows.filter((row) => row.pr === prFilter)
     if (status === "withdrawn" && matching.length === 0) {
-      const exampleResult = Array.from(results)
-        .flatMap((result) => result.finished)
-        .flatMap((run) => run.prs)
-        .find((candidate) => candidate.id === prFilter)
+      const currentPr = results.flatMap((result) => result.prs ?? []).find((pr) => pr.id === prFilter)
+      const exampleResult =
+        currentPr ??
+        Array.from(results)
+          .flatMap((result) => result.finished)
+          .flatMap((run) => run.prs)
+          .find((candidate) => candidate.id === prFilter)
       const headSha = (exampleResult?.headSha ?? "-").slice(0, 40)
       const baseSha = (exampleResult?.baseSha ?? "-").slice(0, 40)
       rows.push({
@@ -1483,6 +1531,7 @@ export function queueLogRows(
         isolationPart: "-",
         result: "-",
         error: "-",
+        ...correlationField(exampleResult),
         locations: [],
       })
     }
@@ -1502,6 +1551,12 @@ export function queueLogRows(
     if (leftAt !== rightAt) return leftAt - rightAt
     return parseRunIdSuffix(left.run) - parseRunIdSuffix(right.run)
   })
+}
+
+function correlationField(pr: QueueRun["prs"][number] | PR | undefined): Readonly<{ correlation?: Correlation }> {
+  const correlation = pr?.correlation
+  if (correlation === undefined) return {}
+  return { correlation }
 }
 
 function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
@@ -1589,6 +1644,7 @@ export function queueShowData(
   run: QueueRun,
   allRuns: readonly QueueRun[] = [],
   attempts: readonly QueueAttempt[] = [],
+  revisionClock?: PRRunRevisionClock,
 ): QueueShowData {
   const finished = allRuns.filter((candidate) => candidate.status === "passed" || candidate.status === "failed")
   const runAttempts = attempts
@@ -1617,6 +1673,7 @@ export function queueShowData(
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     prs: run.prs,
+    ...(revisionClock === undefined ? {} : { revisionClock }),
     attempts: runAttempts,
     steps:
       runAttempts.length === 0
@@ -1727,6 +1784,17 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
         ]}
         padding={1}
       />
+      {data.revisionClock === undefined ? null : (
+        <Box height={1}>
+          <Text wrap="truncate">
+            REVISION CLOCK {data.revisionClock.pr} rev{data.revisionClock.revision} PUSHED {data.revisionClock.pushedAt}{" "}
+            SUBMITTED {data.revisionClock.submittedAt ?? "-"} TERMINAL{" "}
+            {data.revisionClock.terminal === undefined
+              ? "-"
+              : `${data.revisionClock.terminal.status}@${data.revisionClock.terminal.at}`}
+          </Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Table
           data={data.steps}

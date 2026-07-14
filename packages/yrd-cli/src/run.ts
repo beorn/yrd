@@ -3,7 +3,16 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import {
+  baseIdentity,
+  CorrelationSchema,
+  resolveBay,
+  resolvePR,
+  type Bay,
+  type BaysState,
+  type Correlation,
+  type PR,
+} from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
@@ -25,6 +34,7 @@ import {
   queueLogAttempts,
   queueLogRows,
   queueRevisionKey,
+  runRevisionClock,
   queueShowData,
   queueSubmissionTimes,
   type QueueStatusResult,
@@ -205,6 +215,18 @@ function oneOfAliases(primary: unknown, alias: unknown, primaryName: string, ali
   if (value === undefined) return undefined
   if (typeof value !== "string" || value.trim() === "") usage(`--${primaryName} requires a non-empty value`)
   return value
+}
+
+function parseCorrelation(value: unknown): Correlation | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== "string") usage("--correlation requires <namespace:id>")
+  const separator = value.indexOf(":")
+  if (separator === -1) usage("--correlation requires <namespace:id>")
+  try {
+    return CorrelationSchema.parse({ namespace: value.slice(0, separator), id: value.slice(separator + 1) })
+  } catch {
+    usage("--correlation requires <namespace:id>")
+  }
 }
 
 function jsonEnabled(options: JsonOption): boolean {
@@ -473,11 +495,13 @@ async function submitBays(
     base?: string
     queue?: string
     issue?: string
+    correlation?: string
     json?: boolean
   },
   io: YrdCliIO,
   command: "bay.submit" | "pr.submit",
 ): Promise<YrdCliExitCode> {
+  const correlation = parseCorrelation(options.correlation)
   const state = stateOf(app)
   const inferred =
     selectors.length > 0
@@ -490,6 +514,7 @@ async function submitBays(
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(options.draft === true ? { draft: true } : {}),
+      ...(correlation === undefined ? {} : { correlation }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
@@ -602,7 +627,13 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
   const pr = requiredPr(app, selector)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
-  const data = runs.map((run) => queueShowData(run, runs, attempts))
+  const data = runs.map((run) => {
+    const revisionClock = runRevisionClock(pr, run)
+    if (revisionClock === undefined) {
+      throw new Error(`yrd: run '${run.id}' has no retained revision clock for PR '${pr.id}'`)
+    }
+    return queueShowData(run, runs, attempts, revisionClock)
+  })
   await printResult(
     io,
     jsonEnabled(options),
@@ -716,19 +747,6 @@ async function editPr(
     { command: "pr.edit", pr: edited },
     createElement(PRResultView, { prs: [edited], runs: prQueueRuns(app, edited) }),
   )
-}
-
-async function retryPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const selectedRun = app.queue.get(selector)
-  const prs = selectedRun?.prs.map((pr) => pr.id) ?? [requiredPr(app, selector).id]
-  const runs = await app.queue.run({ prs, retry: true }, runtimeOptions(io))
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.retry", prs, runs },
-    createElement(QueueRunsView, { runs }),
-  )
-  return runs.some((run) => run.status === "failed") ? 1 : 0
 }
 
 function prFact(pr: DeepReadonly<PR>): Readonly<{
@@ -980,13 +998,7 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   const queue = pr === undefined ? undefined : app.queue.status(pr.base)
   const briefing = {
     model: "issue -> bay -> pr -> queue -> integrated or rejected",
-    loop: [
-      "yrd pr submit",
-      "yrd pr status",
-      "yrd pr runs <PR>",
-      "yrd pr retry <PR|R>",
-      "fix the branch and run yrd pr submit again",
-    ],
+    loop: ["yrd pr submit", "yrd pr status", "yrd pr runs <PR>", "fix the branch and run yrd pr submit again"],
     live: {
       bay: bay?.id,
       pr: pr?.id,
@@ -1102,7 +1114,7 @@ async function logRuns(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
   const attempts = (await queueLogAttempts(app.events())).filter((attempt) => runIds.has(attempt.run))
-  const submissionTimes = await queueSubmissionTimes(app.events())
+  const submissionTimes = queueSubmissionTimes(Object.values(state.bays.prs))
   const rows = queueLogRows(
     summaries,
     target.selected,
@@ -1569,12 +1581,11 @@ function prMergeRefusalDetail(
   }
   if (pr.status === "rejected") {
     const inspect = `yrd pr runs ${pr.id}`
-    const retry = `yrd pr retry ${pr.id}`
     const resubmit = "fix the branch and run yrd pr submit again"
     return {
       next: inspect,
-      guidance: { inspect, retry, resubmit },
-      message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${retry} or ${resubmit}`,
+      guidance: { inspect, resubmit },
+      message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${resubmit}`,
     }
   }
   if (pr.status === "pushed") {
@@ -1713,6 +1724,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
@@ -1859,6 +1871,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   pr.command("view <selector>")
@@ -1889,10 +1902,6 @@ function buildProgram(
     .option("--note <text>", "set the delivery note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
-  pr.command("retry <selector>")
-    .description("retry a rejected PR or run")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await retryPr(installed(), selector, options, io)))
   pr.command("ready <selector>")
     .description("move a pushed PR revision into the queue")
     .option("--json", "emit stable JSON")

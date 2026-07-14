@@ -519,6 +519,57 @@ describe("Jobs", () => {
     await expect(settled).resolves.toEqual({ error: expect.objectContaining({ message: "yrd: runtime is closed" }) })
   })
 
+  it("cancels an active Job immediately without projecting runner loss", async () => {
+    const started = Promise.withResolvers<void>()
+    const aborted = Promise.withResolvers<void>()
+    await using app = await jobsApp(
+      delivery(async (_input, context) => {
+        started.resolve()
+        await new Promise<void>((resolve) => {
+          const onAbort = () => {
+            aborted.resolve()
+            resolve()
+          }
+          if (context.signal.aborted) onAbort()
+          else context.signal.addEventListener("abort", onAbort, { once: true })
+        })
+        return { status: "passed", output: { receipt: "too-late" } }
+      }),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "slow" })
+    const running = app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 60_000 })
+    await started.promise
+
+    const canceled = await app.jobs.cancel({
+      id: JOB_ID,
+      attempt: 1,
+      by: "@chief",
+      reason: "authorization revoked",
+    })
+
+    await aborted.promise
+    expect(canceled).toMatchObject({
+      id: JOB_ID,
+      attempt: 1,
+      status: "canceled",
+      canceledBy: "@chief",
+      cancelReason: "authorization revoked",
+    })
+    expect(canceled).not.toHaveProperty("lostReason")
+    await expect(running).resolves.toMatchObject({ status: "canceled" })
+    const transition = (await recorded(app)).findLast(
+      ({ name, data }) => name === "job/transitioned" && (data as { type?: string }).type === "cancel",
+    )
+    expect(transition?.data).toEqual({
+      type: "cancel",
+      id: JOB_ID,
+      attempt: 1,
+      by: "@chief",
+      reason: "authorization revoked",
+    })
+  })
+
   it("aborts an runner after heartbeat observes lost ownership", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()

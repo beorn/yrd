@@ -70,6 +70,46 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("persists one opaque correlation on a draft revision and preserves it through ready", async () => {
+    await using app = (await createHarness()).app
+    const correlation = { namespace: "tribe-request", id: "review-20925/custom 61's docs" }
+
+    const drafted = await app.bays.submit({
+      branch: "issue/correlated-draft",
+      headSha: HEAD_1,
+      draft: true,
+      correlation,
+    })
+    expect(drafted.events).toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({ correlation }),
+      }),
+    )
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "pushed",
+      revision: 1,
+      correlation,
+      revisions: [{ revision: 1, correlation }],
+    })
+
+    expect((await app.bays.submit({ pr: "PR1", correlation })).events).toEqual([])
+    await expect(
+      app.bays.submit({
+        pr: "PR1",
+        correlation: { namespace: "tribe-request", id: "review-20925/conflicting" },
+      }),
+    ).rejects.toThrow("already bound to correlation 'tribe-request:review-20925/custom 61's docs'")
+
+    const ready = await app.bays.ready({ pr: "PR1" })
+    expect(ready.events).toHaveLength(1)
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      revision: 1,
+      correlation,
+      revisions: [{ revision: 1, correlation }],
+    })
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 
@@ -109,8 +149,21 @@ describe("withBays", () => {
       revision: 2,
       headSha: HEAD_2,
       revisions: [
-        { revision: 1, headSha: HEAD_1, base: "main", baseSha: BASE },
-        { revision: 2, headSha: HEAD_2, base: "main", baseSha: BASE },
+        {
+          revision: 1,
+          headSha: HEAD_1,
+          base: "main",
+          baseSha: BASE,
+          pushedAt: "2026-01-01T00:00:00.000Z",
+          submittedAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          revision: 2,
+          headSha: HEAD_2,
+          base: "main",
+          baseSha: BASE,
+          pushedAt: "2026-01-01T00:00:00.000Z",
+        },
       ],
     })
 
@@ -121,7 +174,18 @@ describe("withBays", () => {
     const refused = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, refused)
     expect(app.bays.state()).toMatchObject({
-      prs: { PR1: { status: "withdrawn" } },
+      prs: {
+        PR1: {
+          status: "withdrawn",
+          revisions: [
+            { revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
+            {
+              revision: 2,
+              terminal: { status: "withdrawn", at: "2026-01-01T00:00:00.000Z" },
+            },
+          ],
+        },
+      },
       byId: { B1: { status: "active", failure: { code: "dirty-worktree" } } },
     })
 
@@ -158,9 +222,17 @@ describe("withBays", () => {
 
     await app.bays.submit({ branch: "issue/review-me", headSha: HEAD_1, draft: true })
     expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 1, headSha: HEAD_1 })
-    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).events).toHaveLength(1)
-    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).events).toHaveLength(0)
-    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: HEAD_2 })).events).toHaveLength(1)
+    const requestChecks = async (baseSha: string) =>
+      (await app.bays.requestChecks({ pr: "PR1", baseSha })).events.map(({ name, data }) => ({ name, data }))
+    const fact = (baseSha: string) => [
+      {
+        name: "pr/checks-requested",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, baseSha },
+      },
+    ]
+    expect(await requestChecks(BASE)).toEqual(fact(BASE))
+    expect(await requestChecks(BASE)).toEqual(fact(BASE))
+    expect(await requestChecks(HEAD_2)).toEqual(fact(HEAD_2))
     expect(app.bays.checksRequested("PR1")).toBe(true)
     expect(app.bays.pr("PR1")?.checkRequests.at(-1)).toMatchObject({ baseSha: HEAD_2 })
 

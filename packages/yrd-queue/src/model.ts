@@ -1,4 +1,12 @@
-import { GitRefSchema, GitShaSchema, PRIdSchema, baseIdentity, checkRequest, type PR } from "@yrd/bay"
+import {
+  CorrelationSchema,
+  GitRefSchema,
+  GitShaSchema,
+  PRIdSchema,
+  baseIdentity,
+  checkRequest,
+  type PR,
+} from "@yrd/bay"
 import { JsonSchema, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
@@ -18,6 +26,7 @@ export const PRSnapshotSchema = z
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    correlation: CorrelationSchema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -56,6 +65,31 @@ export type InstalledStep = Readonly<{
 export type QueueFailure = Readonly<{
   at: string
   error: JobError
+}>
+
+export type QueueAuthorityToken = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  consumedBy?: QueueRunId
+}>
+
+export type QueueRunAuthority = Readonly<{
+  inheritedFrom?: QueueRunId
+  missingSubmits: readonly string[]
+  missingChecks: readonly string[]
+  released?: Readonly<{
+    reason: "queue-environment-refused" | "job-lost"
+    ref: string
+  }>
+}>
+
+export type QueueAuthorityState = Readonly<{
+  statuses: Readonly<Record<string, "pushed" | "submitted" | "rejected" | "withdrawn" | "integrated" | "canceled">>
+  current: Readonly<Record<string, QueueAuthorityToken>>
+  submits: Readonly<Record<string, QueueAuthorityToken>>
+  checks: Readonly<Record<string, QueueAuthorityToken>>
+  runs: Readonly<Record<QueueRunId, QueueRunAuthority>>
 }>
 
 export type QueueRecord = Readonly<{
@@ -106,6 +140,7 @@ export type QueuesState = Readonly<{
   requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
   records: Readonly<Record<QueueRunId, QueueRecord>>
+  authority: QueueAuthorityState
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -223,6 +258,7 @@ export const Queues = Object.freeze({
       requires: options.requires ?? [],
       pauses: {},
       records: {},
+      authority: { statuses: {}, current: {}, submits: {}, checks: {}, runs: {} },
     }
   },
 
@@ -250,6 +286,7 @@ export const Queues = Object.freeze({
       revision: pr.revision,
       headSha: pr.headSha,
       ...(baseSha === undefined ? {} : { baseSha }),
+      ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
     })
   },
 

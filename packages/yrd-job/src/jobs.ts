@@ -59,6 +59,9 @@ export type Job =
       JobExecution &
       JobEvidence & { status: "failed"; finishedAt: string; error: JobError; output?: JsonValue })
   | (JobBase & JobExecution & { status: "lost"; finishedAt: string; lostReason: string })
+  | (JobBase &
+      JobExecution &
+      JobEvidence & { status: "canceled"; finishedAt: string; canceledBy: string; cancelReason: string })
 
 export type JobsState = Readonly<{
   byId: Readonly<Record<string, Job>>
@@ -73,6 +76,16 @@ const TerminalResultSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("passed"), output: JsonSchema }).strict(),
   z.object({ status: z.literal("failed"), error: JobErrorSchema, output: JsonSchema.optional() }).strict(),
 ])
+
+const CancelJobInputSchema = z
+  .object({
+    id: IdSchema,
+    attempt: AttemptSchema,
+    by: IdSchema,
+    reason: z.string().trim().min(1),
+  })
+  .strict()
+export type CancelJobInput = Readonly<z.infer<typeof CancelJobInputSchema>>
 
 export const JobTransitionSchema = z.discriminatedUnion("type", [
   z
@@ -121,6 +134,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       reason: z.string().min(1),
     })
     .strict(),
+  CancelJobInputSchema.extend({ type: z.literal("cancel") }).strict(),
   z.object({ type: z.literal("retry"), id: IdSchema }).strict(),
 ])
 export type JobTransition = z.infer<typeof JobTransitionSchema>
@@ -211,6 +225,19 @@ export const Job = Object.freeze({
           lostReason: change.reason,
         }
 
+      case "cancel":
+        requireAttempt(current, change)
+        requireStatus(current, "running or waiting", "running", "waiting")
+        return {
+          ...execution(current),
+          ...(current.status === "waiting" ? evidence(current) : {}),
+          status: "canceled",
+          changedAt: at,
+          finishedAt: at,
+          canceledBy: change.by,
+          cancelReason: change.reason,
+        }
+
       case "retry":
         requireStatus(current, "lost or failed", "lost", "failed")
         return { ...jobBase(current), status: "requested", changedAt: at }
@@ -222,7 +249,7 @@ export const Job = Object.freeze({
   },
 
   terminal(job: DeepReadonly<Job>): boolean {
-    return job.status === "passed" || job.status === "failed" || job.status === "lost"
+    return job.status === "passed" || job.status === "failed" || job.status === "lost" || job.status === "canceled"
   },
 })
 
@@ -252,6 +279,7 @@ export type Jobs = Readonly<{
   run(id: string, options: RunJobOptions): Promise<Job>
   runMany(ids: readonly string[], options: RunManyJobOptions): Promise<readonly Job[]>
   finish(id: string, completion: JobCompletion): Promise<Job>
+  cancel(input: CancelJobInput): Promise<Job>
   retry(id: string): Promise<Job>
   recover(options: Readonly<{ now: string; reason?: string }>): Promise<readonly string[]>
   requested(source: CommandResult | readonly Event[]): readonly string[]
@@ -298,6 +326,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
   const definitions = new Map(Object.entries(options.definitions))
   const state = options.state
   const commit = options.transition
+  const activeScopes = new Map<string, Readonly<{ attempt: number; scope: JobScope }>>()
 
   const definition = (name: string): JobDef => {
     const found = definitions.get(name)
@@ -350,33 +379,40 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     if (!Job.owns(started, attempt, parsed.runner, "running")) return started
 
     const scope = options.scope.child(`job:${id}:${attempt}`)
-    const outcome = await executeWithHeartbeat(
-      scope,
-      (progress) =>
-        installed.execute(requested.input, {
-          id,
-          attempt,
-          runner: parsed.runner,
-          signal: progress.signal,
-          observeProgress: progress.observe,
-          reportProgress: progress.report,
-        }),
-      heartbeatMs,
-      async (renew) => {
-        const active = current(id)
-        if (!Job.owns(active, attempt, parsed.runner, "running")) {
-          throw new Error(`yrd: job '${id}' lost execution ownership`)
-        }
-        if (!renew) return
-        await commit({
-          type: "heartbeat",
-          id,
-          attempt,
-          runner: parsed.runner,
-          leaseExpiresAt: lease(now, parsed.leaseMs),
-        })
-      },
-    )
+    activeScopes.set(id, { attempt, scope })
+    let outcome: Awaited<ReturnType<typeof executeWithHeartbeat>>
+    try {
+      outcome = await executeWithHeartbeat(
+        scope,
+        (progress) =>
+          installed.execute(requested.input, {
+            id,
+            attempt,
+            runner: parsed.runner,
+            signal: progress.signal,
+            observeProgress: progress.observe,
+            reportProgress: progress.report,
+          }),
+        heartbeatMs,
+        async (renew) => {
+          const active = current(id)
+          if (!Job.owns(active, attempt, parsed.runner, "running")) {
+            throw new Error(`yrd: job '${id}' lost execution ownership`)
+          }
+          if (!renew) return
+          await commit({
+            type: "heartbeat",
+            id,
+            attempt,
+            runner: parsed.runner,
+            leaseExpiresAt: lease(now, parsed.leaseMs),
+          })
+        },
+      )
+    } finally {
+      const active = activeScopes.get(id)
+      if (active?.attempt === attempt && active.scope === scope) activeScopes.delete(id)
+    }
 
     const active = current(id)
     if (!Job.owns(active, attempt, parsed.runner, "running")) return active
@@ -446,6 +482,14 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const result = jobTerminalResultSchema(installedDef.output).parse(completion.result)
       await commit({ type: "finish", id, ...metadata, result })
       return current(id)
+    },
+
+    async cancel(input) {
+      const parsed = CancelJobInputSchema.parse(input)
+      await commit({ type: "cancel", ...parsed })
+      const active = activeScopes.get(parsed.id)
+      if (active?.attempt === parsed.attempt) await active.scope[Symbol.asyncDispose]()
+      return current(parsed.id)
     },
 
     async retry(id) {
@@ -672,11 +716,15 @@ function evidence(source: JobEvidence): JobEvidence {
 }
 
 function requireOwner(job: Job, change: { attempt: number; runner: string }): void {
-  if (job.attempt !== change.attempt) {
-    throw new Error(`yrd: job '${job.id}' attempt ${change.attempt} is stale; current attempt is ${job.attempt}`)
-  }
+  requireAttempt(job, change)
   if (!("runner" in job) || job.runner !== change.runner) {
     throw new Error(`yrd: job '${job.id}' runner mismatch`)
+  }
+}
+
+function requireAttempt(job: Job, change: { attempt: number }): void {
+  if (job.attempt !== change.attempt) {
+    throw new Error(`yrd: job '${job.id}' attempt ${change.attempt} is stale; current attempt is ${job.attempt}`)
   }
 }
 

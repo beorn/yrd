@@ -1,5 +1,6 @@
 import {
   GitRefSchema,
+  GitShaSchema,
   PRIdSchema,
   baseIdentity,
   checkRequest,
@@ -53,10 +54,13 @@ import {
   type IntegrationProof,
   type QueueAuditFinding,
   type QueueAuditResult,
+  type QueueAuthorityState,
+  type QueueAuthorityToken,
   type QueuePause,
   type QueueRecord,
   type QueueRequirement,
   type QueueRun,
+  type QueueRunAuthority,
   type QueueRunId,
   type QueueSummary,
   type QueuesState,
@@ -88,14 +92,13 @@ const QueueRunArgsSchema = z
   .object({
     prs: z.array(z.string().trim().min(1)).optional(),
     steps: z.array(StepNameSchema).optional(),
-    retry: z.boolean().optional(),
   })
   .strict()
 export type QueueRunArgs = Readonly<z.infer<typeof QueueRunArgsSchema>>
 
-const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1), retry: z.boolean().optional() }).strict()
+const AdmitArgsSchema = z.object({ pr: z.string().trim().min(1) }).strict()
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
-export type AdmitSelection = Readonly<{ prs?: readonly string[]; retry?: boolean }>
+export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
 const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
@@ -116,6 +119,21 @@ const PauseQueueArgsSchema = z
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const QueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
+const QueueAuthorityTokenFactSchema = z.object({
+  pr: PRIdSchema,
+  revision: z.number().int().positive(),
+  headSha: GitShaSchema,
+})
+const QueueAuthorityRevisionFactSchema = z.object({ pr: PRIdSchema, revision: z.number().int().positive() })
+const QueueAuthorityPRFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive().optional(),
+    headSha: GitShaSchema.optional(),
+  })
+  .refine((fact) => (fact.revision === undefined) === (fact.headSha === undefined), {
+    message: "revision and headSha must be provided together",
+  })
 
 export type StepExecution<Shape extends PRShape = PRShape> = Readonly<{
   run: QueueRunId
@@ -474,20 +492,16 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
-  const dispatchAdmissions = async (selectors: readonly string[], retry: boolean): Promise<QueueRun[]> => {
+  const dispatchAdmissions = async (selectors: readonly string[]): Promise<QueueRun[]> => {
     const admitted: QueueRun[] = []
     for (const selector of selectors) {
-      const started = startedRun(await actions.admit({ pr: selector, ...(retry ? { retry: true } : {}) }))
+      const started = startedRun(await actions.admit({ pr: selector }))
       if (started !== undefined) admitted.push(started)
     }
     return admitted
   }
 
-  const drainAdmissions = async (
-    selectors: readonly string[],
-    retry: boolean,
-    options: RunJobOptions,
-  ): Promise<QueueRun[]> => {
+  const drainAdmissions = async (selectors: readonly string[], options: RunJobOptions): Promise<QueueRun[]> => {
     const targets = new Set(selectors)
     const outcomes = new Map<QueueRunId, QueueRun>()
     const remember = (candidate: QueueRun): void => {
@@ -496,7 +510,7 @@ function createQueue<Shape extends PRShape>(
 
     while (targets.size > 0) {
       await actions.refresh()
-      let snapshot = runtime()
+      const snapshot = runtime()
       const active = orderedQueues(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
           candidate.status === "running" && samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
@@ -508,20 +522,8 @@ function createQueue<Shape extends PRShape>(
         continue
       }
 
-      const retryable = [...targets]
-        .map((selector) => resolvePR(snapshot.bays, selector))
-        .find((pr) => pr !== undefined && checkEligibility(snapshot, pr, steps).status === "failed")
-      if (retry && retryable !== undefined) {
-        const admitted = await dispatchAdmissions([retryable.id], true)
-        if (admitted.length > 0) continue
-      }
-
-      snapshot = runtime()
       const queued = admissionQueue(snapshot, steps)
-      const admitted = await dispatchAdmissions(
-        queued.map((pr) => pr.id),
-        false,
-      )
+      const admitted = await dispatchAdmissions(queued.map((pr) => pr.id))
       if (admitted.length > 0) continue
 
       for (const selector of targets) {
@@ -544,7 +546,7 @@ function createQueue<Shape extends PRShape>(
     state,
     steps: () => steps.map(descriptor),
     async admit(args, runOptions) {
-      using _span = log.span?.("admit", { prs: args.prs, retry: args.retry === true })
+      using _span = log.span?.("admit", { prs: args.prs })
       await actions.refresh()
       let snapshot = runtime()
       const selected =
@@ -561,9 +563,7 @@ function createQueue<Shape extends PRShape>(
         args.prs === undefined || args.prs.length === 0
           ? admissionQueue(snapshot, steps).map((pr) => pr.id)
           : [...args.prs]
-      return runOptions === undefined
-        ? dispatchAdmissions(selectors, args.retry === true)
-        : drainAdmissions(selectors, args.retry === true, runOptions)
+      return runOptions === undefined ? await dispatchAdmissions(selectors) : await drainAdmissions(selectors, runOptions)
     },
     async pause(args) {
       const base = baseIdentity(args.base)
@@ -576,7 +576,7 @@ function createQueue<Shape extends PRShape>(
       await actions.resume(baseIdentity(base))
     },
     async run(args, runOptions) {
-      using _span = log.span?.("run", { prs: args.prs, steps: args.steps, retry: args.retry === true })
+      using _span = log.span?.("run", { prs: args.prs, steps: args.steps })
       if (args.steps?.length === 0) return []
       await actions.refresh()
       let snapshot = runtime()
@@ -602,13 +602,11 @@ function createQueue<Shape extends PRShape>(
       await refreshCheckIdentities(checked)
       const admissions = await drainAdmissions(
         checked.map((pr) => pr.id),
-        args.retry === true,
         runOptions,
       )
       snapshot = runtime()
       const unsettled = checked.filter((pr) => checkEligibility(snapshot, pr, steps).status !== "passed")
       if (unsettled.length > 0) {
-        if (args.retry === true) return admissions
         const newlyFailed = unsettled.some(
           (pr) => before.get(pr.id) !== "failed" && checkEligibility(snapshot, pr, steps).status === "failed",
         )
@@ -621,7 +619,6 @@ function createQueue<Shape extends PRShape>(
         const started = await actions.run({
           prs: candidate.map((pr) => pr.id),
           ...(args.steps === undefined ? {} : { steps: args.steps }),
-          ...(args.retry === true ? { retry: true } : {}),
         })
         const startedEvent = started.events.find((applied) => applied.name === "queue/run/started")
         if (startedEvent === undefined) throw new Error("yrd: queue run did not start a run")
@@ -666,7 +663,7 @@ function createQueue<Shape extends PRShape>(
           (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
         )
         const hasTerminalFailure = candidate.steps.some(
-          (step) => step.job?.status === "failed" || step.job?.status === "lost",
+          (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
         )
         if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
           const reconciled = await actions.advance(candidate.id)
@@ -716,7 +713,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     apply(state: DeepReadonly<RuntimeState>, args: AdmitArgs) {
       const pr = resolvePR(state.bays, args.pr)
       if (pr === undefined) raiseFailure("refusal", "pr-not-found", `yrd: no PR '${args.pr}'`)
-      if (pr.status !== "pushed" && pr.status !== "submitted" && !(args.retry === true && pr.status === "rejected")) {
+      if (pr.status !== "pushed" && pr.status !== "submitted") {
         raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${pr.status}, not admissible`)
       }
       const selected = admissionSteps(state.queues, steps)
@@ -727,15 +724,17 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       if (status === "passed" || status === "checking") {
         return { events: [] }
       }
-      if (existing !== undefined && status === "failed" && args.retry !== true) {
-        raiseFailure(
-          "refusal",
-          "checks-failed",
-          `yrd: PR '${pr.id}' checks failed in ${existing.id}; retry=true is required`,
-        )
+      if (
+        existing !== undefined &&
+        status === "failed" &&
+        state.queues.authority.runs[existing.id]?.released === undefined
+      ) {
+        requireFreshCheckAuthority(state.queues.authority, snapshot, existing.id)
+      } else {
+        requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
       if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
-      if (pr.status !== "rejected" && checksRequested(pr)) {
+      if (checksRequested(pr)) {
         const first = admissionQueue(state, steps)[0]
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
@@ -806,6 +805,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const reuse = integrated === undefined ? reusablePrefix(state, snapshots, selected) : undefined
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
       if (remaining.length === 0) return { events: [] }
+      requireQueueAuthority(state.queues.authority, snapshots, remaining)
       return startRun(
         Queues.nextId(state.queues),
         snapshots,
@@ -860,7 +860,306 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
   return { queue: { admit, run, pause, resume, advance, isolate } }
 }
 
+type QueueAuthorityKind = "submit" | "checks"
+type QueueAuthorityRelease = NonNullable<QueueRunAuthority["released"]>
+type QueueAuthorityGap = Readonly<{
+  kind: QueueAuthorityKind
+  pr: string
+  revision: number
+  headSha: string
+  reason: "missing" | "consumed"
+  consumedBy?: QueueRunId
+}>
+
+function queueAuthorityReleaseReason(
+  error: DeepReadonly<JobError> | undefined,
+): QueueAuthorityRelease["reason"] | undefined {
+  if (error?.code === "queue-environment-refused" || error?.code === "job-lost") return error.code
+  return undefined
+}
+
+function authorityRequirement(
+  authority: DeepReadonly<QueueAuthorityState>,
+  pr: DeepReadonly<PRSnapshot>,
+  steps: readonly DeepReadonly<InstalledStep>[],
+): QueueAuthorityKind | undefined {
+  if (steps.some((step) => step.integrates)) return "submit"
+  if (steps.some((step) => step.needsIntegration)) return undefined
+  if (availableAuthorityToken(authority.checks[pr.id], pr)) return "checks"
+  if (availableAuthorityToken(authority.submits[pr.id], pr)) return "submit"
+  return authority.statuses[pr.id] === "pushed" ? "checks" : "submit"
+}
+
+function sameAuthorityToken(
+  token: DeepReadonly<QueueAuthorityToken> | undefined,
+  pr: DeepReadonly<PRSnapshot>,
+): boolean {
+  if (token === undefined) return false
+  return token.pr === pr.id && token.revision === pr.revision && token.headSha === pr.headSha
+}
+
+function availableAuthorityToken(
+  token: DeepReadonly<QueueAuthorityToken> | undefined,
+  pr: DeepReadonly<PRSnapshot>,
+): boolean {
+  return sameAuthorityToken(token, pr) && token?.consumedBy === undefined
+}
+
+function requireFreshCheckAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  pr: DeepReadonly<PRSnapshot>,
+  failedRun: QueueRunId,
+): void {
+  const token = authority.checks[pr.id]
+  if (availableAuthorityToken(token, pr)) return
+  const detail =
+    sameAuthorityToken(token, pr) && token?.consumedBy !== undefined
+      ? `the matching checks fact was consumed by queue run '${token.consumedBy}'`
+      : "no fresh matching checks fact exists"
+  raiseFailure("refusal", "checks-failed", `yrd: PR '${pr.id}' checks failed in ${failedRun}; ${detail}`)
+}
+
+function queueAuthorityGaps(
+  authority: DeepReadonly<QueueAuthorityState>,
+  prs: readonly DeepReadonly<PRSnapshot>[],
+  steps: readonly DeepReadonly<InstalledStep>[],
+): QueueAuthorityGap[] {
+  const gaps: QueueAuthorityGap[] = []
+  for (const pr of prs) {
+    const kind = authorityRequirement(authority, pr, steps)
+    if (kind === undefined) continue
+    const token = kind === "submit" ? authority.submits[pr.id] : authority.checks[pr.id]
+    if (token === undefined || !sameAuthorityToken(token, pr)) {
+      gaps.push({ kind, pr: pr.id, revision: pr.revision, headSha: pr.headSha, reason: "missing" })
+    } else {
+      const consumedBy = token.consumedBy
+      if (consumedBy === undefined) continue
+      gaps.push({
+        kind,
+        pr: pr.id,
+        revision: pr.revision,
+        headSha: pr.headSha,
+        reason: "consumed",
+        consumedBy,
+      })
+    }
+  }
+  return gaps
+}
+
+function requireQueueAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  prs: readonly DeepReadonly<PRSnapshot>[],
+  steps: readonly DeepReadonly<InstalledStep>[],
+): void {
+  const gap = queueAuthorityGaps(authority, prs, steps)[0]
+  if (gap === undefined) return
+  const detail =
+    gap.reason === "consumed"
+      ? `${gap.kind} authority was consumed by queue run '${gap.consumedBy}'`
+      : `no ${gap.kind} authority fact exists`
+  raiseFailure(
+    "refusal",
+    `queue-${gap.kind}-authority-${gap.reason}`,
+    `yrd: PR '${gap.pr}' revision ${gap.revision} (${gap.headSha}) cannot start a queue run: ${detail}`,
+  )
+}
+
+function projectRunAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  run: DeepReadonly<QueueStart>,
+): QueueAuthorityState {
+  if (run.parent !== undefined) {
+    const inherited = authority.runs[run.parent]
+    const members = new Set(run.prs.map((pr) => pr.id))
+    return {
+      ...authority,
+      runs: {
+        ...authority.runs,
+        [run.id]: {
+          inheritedFrom: run.parent,
+          missingSubmits:
+            inherited === undefined
+              ? run.prs.map((pr) => pr.id)
+              : inherited.missingSubmits.filter((pr) => members.has(pr)),
+          missingChecks: inherited === undefined ? [] : inherited.missingChecks.filter((pr) => members.has(pr)),
+        },
+      },
+    }
+  }
+
+  const gaps = queueAuthorityGaps(authority, run.prs, run.steps)
+  const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
+  const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
+  const consumesSubmit = run.steps.some((step) => step.integrates)
+  for (const pr of run.prs) {
+    const kind = authorityRequirement(authority, pr, run.steps)
+    if (kind === undefined) continue
+    const token = kind === "submit" ? authority.submits[pr.id] : authority.checks[pr.id]
+    if (token === undefined || !sameAuthorityToken(token, pr) || token.consumedBy !== undefined) continue
+    const consumed: QueueAuthorityToken = {
+      pr: token.pr,
+      revision: token.revision,
+      headSha: token.headSha,
+      consumedBy: run.id,
+    }
+    if (kind === "submit" && consumesSubmit) submits[pr.id] = consumed
+    if (kind === "checks") checks[pr.id] = consumed
+  }
+  return {
+    ...authority,
+    submits,
+    checks,
+    runs: {
+      ...authority.runs,
+      [run.id]: {
+        missingSubmits: gaps.filter((gap) => gap.kind === "submit").map((gap) => gap.pr),
+        missingChecks: gaps.filter((gap) => gap.kind === "checks").map((gap) => gap.pr),
+      },
+    },
+  }
+}
+
+function resolveQueueAuthorityRoot(authority: DeepReadonly<QueueAuthorityState>, run: QueueRunId): QueueRunId {
+  const seen = new Set<QueueRunId>()
+  let root = run
+  while (true) {
+    if (seen.has(root)) throw new Error(`yrd: queue authority ancestry for '${run}' is cyclic`)
+    seen.add(root)
+    const projected = authority.runs[root]
+    if (projected === undefined) throw new Error(`yrd: queue run '${root}' has no authority projection`)
+    if (projected.inheritedFrom === undefined) return root
+    root = projected.inheritedFrom
+  }
+}
+
+function releaseRunAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  run: DeepReadonly<QueueRecord>,
+  release: QueueAuthorityRelease,
+): QueueAuthorityState {
+  const root = resolveQueueAuthorityRoot(authority, run.id)
+  const projected = authority.runs[run.id]
+  if (projected === undefined) throw new Error(`yrd: queue run '${run.id}' has no authority projection`)
+  const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
+  const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
+  for (const pr of run.prs) {
+    const submit = authority.submits[pr.id]
+    if (submit !== undefined && sameAuthorityToken(submit, pr) && submit.consumedBy === root) {
+      submits[pr.id] = { pr: submit.pr, revision: submit.revision, headSha: submit.headSha }
+    }
+    const check = authority.checks[pr.id]
+    if (check !== undefined && sameAuthorityToken(check, pr) && check.consumedBy === root) {
+      checks[pr.id] = { pr: check.pr, revision: check.revision, headSha: check.headSha }
+    }
+  }
+  return {
+    ...authority,
+    submits,
+    checks,
+    runs: { ...authority.runs, [run.id]: { ...projected, released: release } },
+  }
+}
+
+function invalidatePRAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  pr: string,
+  status: DeepReadonly<QueueAuthorityState>["statuses"][string],
+): QueueAuthorityState {
+  const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
+  const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
+  delete submits[pr]
+  delete checks[pr]
+  return { ...authority, statuses: { ...authority.statuses, [pr]: status }, submits, checks }
+}
+
+function currentAuthorityMatches(
+  authority: DeepReadonly<QueueAuthorityState>,
+  token: DeepReadonly<QueueAuthorityToken>,
+): boolean {
+  const current = authority.current[token.pr]
+  return current?.revision === token.revision && current.headSha === token.headSha
+}
+
 function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
+  if (applied.name === "pr/pushed") {
+    const token = QueueAuthorityTokenFactSchema.parse(applied.data)
+    const invalidated = invalidatePRAuthority(state.queues.authority, token.pr, "pushed")
+    return {
+      queues: {
+        ...state.queues,
+        authority: { ...invalidated, current: { ...invalidated.current, [token.pr]: token } },
+      },
+    }
+  }
+  if (applied.name === "pr/submitted") {
+    const token = QueueAuthorityTokenFactSchema.parse(applied.data)
+    const current = state.queues.authority.current[token.pr]
+    if (current !== undefined && !currentAuthorityMatches(state.queues.authority, token)) return state
+    return {
+      queues: {
+        ...state.queues,
+        authority: {
+          ...state.queues.authority,
+          statuses: { ...state.queues.authority.statuses, [token.pr]: "submitted" },
+          current: { ...state.queues.authority.current, [token.pr]: token },
+          submits: { ...state.queues.authority.submits, [token.pr]: token },
+        },
+      },
+    }
+  }
+  if (applied.name === "pr/checks-requested") {
+    const token = QueueAuthorityTokenFactSchema.parse(applied.data)
+    const current = state.queues.authority.current[token.pr]
+    if (current !== undefined && !currentAuthorityMatches(state.queues.authority, token)) return state
+    return {
+      queues: {
+        ...state.queues,
+        authority: {
+          ...state.queues.authority,
+          current: { ...state.queues.authority.current, [token.pr]: token },
+          checks: { ...state.queues.authority.checks, [token.pr]: token },
+        },
+      },
+    }
+  }
+  if (applied.name === "pr/rejected") {
+    const rejected = QueueAuthorityRevisionFactSchema.parse(applied.data)
+    if (state.queues.authority.current[rejected.pr]?.revision !== rejected.revision) return state
+    return {
+      queues: {
+        ...state.queues,
+        authority: invalidatePRAuthority(state.queues.authority, rejected.pr, "rejected"),
+      },
+    }
+  }
+  if (applied.name === "pr/integrated") {
+    const integrated = QueueAuthorityTokenFactSchema.parse(applied.data)
+    if (!currentAuthorityMatches(state.queues.authority, integrated)) return state
+    return {
+      queues: {
+        ...state.queues,
+        authority: invalidatePRAuthority(state.queues.authority, integrated.pr, "integrated"),
+      },
+    }
+  }
+  if (applied.name === "pr/withdrawn" || applied.name === "pr/canceled") {
+    const closed = QueueAuthorityPRFactSchema.parse(applied.data)
+    if (closed.revision !== undefined && closed.headSha !== undefined) {
+      const current = state.queues.authority.current[closed.pr]
+      if (current?.revision !== closed.revision || current.headSha !== closed.headSha) return state
+    }
+    return {
+      queues: {
+        ...state.queues,
+        authority: invalidatePRAuthority(
+          state.queues.authority,
+          closed.pr,
+          applied.name === "pr/withdrawn" ? "withdrawn" : "canceled",
+        ),
+      },
+    }
+  }
   if (applied.name === "queue/paused") {
     const parsed = PauseQueueArgsSchema.parse(applied.data)
     const paused = QueuePauseSchema.parse({ ...parsed, base: baseIdentity(parsed.base), pausedAt: applied.ts })
@@ -884,15 +1183,29 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       prs: started.prs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
       startedAt: applied.ts,
     })
-    return { queues: { ...state.queues, records: { ...state.queues.records, [record.id]: record } } }
+    return {
+      queues: {
+        ...state.queues,
+        records: { ...state.queues.records, [record.id]: record },
+        authority: projectRunAuthority(state.queues.authority, started),
+      },
+    }
   }
   if (applied.name === "queue/run/failed") {
     const failed = QueueFailedSchema.parse(applied.data)
     const record = state.queues.records[failed.run]
     if (record === undefined) throw new Error(`yrd: no queue run '${failed.run}'`)
+    const releaseReason = queueAuthorityReleaseReason(failed.error)
     return {
       queues: {
         ...state.queues,
+        authority:
+          releaseReason === undefined
+            ? state.queues.authority
+            : releaseRunAuthority(state.queues.authority, record, {
+                reason: releaseReason,
+                ref: applied.id,
+              }),
         records: {
           ...state.queues.records,
           [record.id]: { ...record, failure: { at: applied.ts, error: failed.error } },
@@ -983,8 +1296,9 @@ function advanceQueue(
   record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
 ): Readonly<{ events: readonly EventDraft[] }> {
+  if (record.failure !== undefined) return { events: [] }
   const stale = pinnedPRError(state.bays, record.prs)
-  if (stale !== undefined && record.failure === undefined) {
+  if (stale !== undefined) {
     return { events: [event("queue/run/failed", { run: record.id, error: stale })] }
   }
 
@@ -1000,16 +1314,52 @@ function advanceQueue(
 
   if (job.status !== "passed") {
     const before = shapeThrough(record, state.jobs, index)
+    if (job.status === "canceled") {
+      return {
+        events: isIntegrated(before)
+          ? []
+          : record.prs.flatMap((pr) => {
+              const current = state.bays.prs[pr.id]
+              if (
+                current === undefined ||
+                current.revision !== pr.revision ||
+                current.headSha !== pr.headSha ||
+                (current.status !== "pushed" && current.status !== "submitted")
+              ) {
+                return []
+              }
+              return [
+                event("pr/canceled", {
+                  pr: pr.id,
+                  revision: pr.revision,
+                  headSha: pr.headSha,
+                  ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                  by: job.canceledBy,
+                  reason: job.cancelReason,
+                }),
+              ]
+            }),
+      }
+    }
+
+    const failure = jobFailure(job)
+    if (queueAuthorityReleaseReason(failure) !== undefined) {
+      return { events: [event("queue/run/failed", { run: record.id, error: failure })] }
+    }
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
-    const failure = jobFailure(job)
     return {
       events:
-        failure.code !== "queue-environment-refused" &&
-        !isIntegrated(before) &&
-        pr !== undefined &&
-        current?.status === "submitted"
-          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: failure.message })]
+        !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
+          ? [
+              event("pr/rejected", {
+                pr: pr.id,
+                revision: pr.revision,
+                headSha: pr.headSha,
+                ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                detail: failure.message,
+              }),
+            ]
           : [],
     }
   }
@@ -1033,6 +1383,7 @@ function advanceQueue(
           headSha: current.headSha,
           commit: shape.integration.commit,
           baseSha: shape.integration.baseSha,
+          ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
         }),
       )
     }
@@ -1049,7 +1400,8 @@ function samePayloadPRs(
 ): readonly DeepReadonly<PR>[] {
   const payloads = new Set(snapshots.map((pr) => `${baseIdentity(pr.base)}\0${pr.headSha}`))
   return Object.values(state.prs).filter(
-    (pr) => pr.status !== "withdrawn" && payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
+    (pr) =>
+      pr.status !== "withdrawn" && pr.status !== "canceled" && payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
   )
 }
 
@@ -1062,7 +1414,9 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
     }),
   )
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
-  const failed = steps.find((step) => step.job?.status === "failed" || step.job?.status === "lost")?.job
+  const failed = steps.find(
+    (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+  )?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
   const passed = steps.every((step) => step.job?.status === "passed")
   const status =
@@ -1078,7 +1432,7 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
   const last = steps.at(-1)?.job
   const finishedAt =
     record.failure?.at ??
-    (failed?.status === "failed" || failed?.status === "lost"
+    (failed?.status === "failed" || failed?.status === "lost" || failed?.status === "canceled"
       ? failed.finishedAt
       : status === "passed"
         ? last?.status === "passed"
@@ -1230,6 +1584,25 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
         pr: pr.id,
       })
     }
+    const authority = state.queues.authority.runs[record.id]
+    if (record.parent === undefined && authority !== undefined) {
+      for (const pr of authority.missingSubmits) {
+        findings.push({
+          code: "run-without-submit-ancestry",
+          message: `queue run '${record.id}' started PR '${pr}' without an unconsumed matching submit fact`,
+          run: record.id,
+          pr,
+        })
+      }
+      for (const pr of authority.missingChecks) {
+        findings.push({
+          code: "run-without-check-ancestry",
+          message: `queue run '${record.id}' started pushed PR '${pr}' without an unconsumed matching checks fact`,
+          run: record.id,
+          pr,
+        })
+      }
+    }
     let run: QueueRun
     try {
       run = materializeRun(record, state.jobs)
@@ -1307,7 +1680,7 @@ function requestedPRs(
   const prs = (
     explicit ??
     Object.values(state.prs)
-      .filter((pr) => pr.status === "submitted" || (args.retry === true && pr.status === "rejected"))
+      .filter((pr) => pr.status === "submitted")
       .toSorted((left, right) => {
         if (left.submittedAt === undefined) throw new Error(`yrd: queued PR '${left.id}' has no submission time`)
         if (right.submittedAt === undefined) throw new Error(`yrd: queued PR '${right.id}' has no submission time`)
@@ -1318,10 +1691,7 @@ function requestedPRs(
       })
   ).filter((pr) => !excluded.has(pr.id))
   for (const pr of prs) {
-    if (pr.status === "rejected" && args.retry !== true) {
-      raiseFailure("refusal", "retry-required", `yrd: PR '${pr.id}' is rejected; retry=true is required`)
-    }
-    if (pr.status !== "submitted" && pr.status !== "rejected" && pr.status !== "integrated") {
+    if (pr.status !== "submitted" && pr.status !== "integrated") {
       raiseFailure("refusal", "pr-not-ready", `yrd: PR '${pr.id}' is ${pr.status}, not ready for the queue`)
     }
   }
@@ -1337,7 +1707,10 @@ function resumableQueueRoots(
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(state.queues, steps)
   return pendingQueueRoots(state).filter(
-    (run) => !samePlan(run.steps, admissions) && (selected === undefined || run.prs.some((pr) => selected.has(pr.id))),
+    (run) =>
+      state.queues.authority.runs[run.id]?.released === undefined &&
+      !samePlan(run.steps, admissions) &&
+      (selected === undefined || run.prs.some((pr) => selected.has(pr.id))),
   )
 }
 
@@ -1425,7 +1798,13 @@ function checkFactRun(
 function checkRunStatus(run: QueueRun, selectedCount: number): PREligibility["checks"]["status"] {
   const selected = run.steps.slice(0, selectedCount)
   if (selected.every((step) => step.job?.status === "passed")) return "passed"
-  if (selected.some((step) => step.job?.status === "failed" || step.job?.status === "lost")) return "failed"
+  if (
+    selected.some(
+      (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+    )
+  ) {
+    return "failed"
+  }
   return run.status === "failed" ? "failed" : "checking"
 }
 
@@ -1436,8 +1815,13 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
     .filter((pr) => checksRequested(pr))
     .filter((pr) => {
-      const run = admissionRun(state, Queues.snapshot(pr), selected)
-      return run === undefined
+      const snapshot = Queues.snapshot(pr)
+      const run = admissionRun(state, snapshot, selected)
+      if (run === undefined) return true
+      return (
+        checkRunStatus(run, selected.length) === "failed" &&
+        availableAuthorityToken(state.queues.authority.checks[pr.id], snapshot)
+      )
     })
     .toSorted((left, right) => {
       const leftAt = checkQueueTime(left)
@@ -1503,13 +1887,14 @@ function checkEvidence(job: Job): Record<string, unknown> | undefined {
 function checkError(job: Job | undefined, run: QueueRun): JobError | undefined {
   if (job?.status === "failed") return job.error
   if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
+  if (job?.status === "canceled") return jobFailure(job)
   return run.error
 }
 
 function checkStatus(job: Job | undefined, run: QueueRun): PRCheckRecord["status"] {
   if (run.status === "failed" && (job === undefined || !Job.terminal(job))) return "failed"
   if (job?.status === "passed") return "passed"
-  if (job?.status === "failed" || job?.status === "lost") return "failed"
+  if (job?.status === "failed" || job?.status === "lost" || job?.status === "canceled") return "failed"
   return "checking"
 }
 
@@ -1630,10 +2015,7 @@ function runnablePRs(
   const requested = requestedPRs(state.bays, args, excluded)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   return requested.filter((pr) => {
-    const eligibility = prEligibility(state, pr, steps, {
-      retry: args.retry === true,
-      resumeIntegrated: true,
-    })
+    const eligibility = prEligibility(state, pr, steps, { resumeIntegrated: true })
     if (eligibility.runnable) return true
     if (implicitQueue || eligibility.reason?.code === "claimed") return false
     const reason = eligibility.reason
@@ -1645,7 +2027,7 @@ function prEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
-  options: Readonly<{ retry?: boolean; resumeIntegrated?: boolean }> = {},
+  options: Readonly<{ resumeIntegrated?: boolean }> = {},
 ): PREligibility {
   const reviewed = reviewState(pr)
   const required = state.queues.requires.includes("review")
@@ -1671,10 +2053,10 @@ function prEligibility(
     if (pr.status === "pushed") {
       return result({ code: "draft", message: `PR '${pr.id}' is pushed, not ready` })
     }
-    if (pr.status === "rejected" && options.retry !== true) {
-      return result({ code: "rejected", message: `PR '${pr.id}' is rejected; retry=true is required` })
+    if (pr.status === "rejected") {
+      return result({ code: "rejected", message: `PR '${pr.id}' is rejected; submit it again before queueing` })
     }
-    if (pr.status !== "submitted" && !(options.retry === true && pr.status === "rejected")) {
+    if (pr.status !== "submitted") {
       return result({ code: "terminal", message: `PR '${pr.id}' is ${pr.status}, not queueable` })
     }
     if (checks.status === "queued") {
@@ -1685,9 +2067,15 @@ function prEligibility(
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
     }
-    if (checks.status === "failed" && options.retry !== true) {
+    if (
+      checks.status === "failed" &&
+      (checks.run === undefined || state.queues.authority.runs[checks.run]?.released === undefined)
+    ) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
-      return result({ code: "checks-failed", message: `PR '${pr.id}' checks failed${run}; retry=true is required` })
+      return result({
+        code: "checks-failed",
+        message: `PR '${pr.id}' checks failed${run}; a new push or check request is required`,
+      })
     }
     if (required && !reviewed.approved) {
       if (reviewed.current?.decision === "reject") {
@@ -1788,11 +2176,17 @@ function normalizeBatch(config: BatchConfig): number {
 
 function bisectable(run: QueueRun): boolean {
   const failed = run.steps.some((step) => step.job?.status === "failed" || step.job?.status === "lost")
-  return run.status === "failed" && failed && !isIntegrated(run.shape) && run.prs.length > 1
+  return (
+    run.status === "failed" &&
+    failed &&
+    queueAuthorityReleaseReason(run.error) === undefined &&
+    !isIntegrated(run.shape) &&
+    run.prs.length > 1
+  )
 }
 
 function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean {
-  if (run.error?.code === "stale-pr") return false
+  if (Queues.record(state.queues, run.id).failure !== undefined) return false
   const index = run.steps.findLastIndex((step) => step.job !== undefined)
   const step = run.steps[index]
   if (step?.job === undefined || !Job.terminal(step.job)) return false
@@ -1808,6 +2202,7 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean
       )
     })
   }
+  if (queueAuthorityReleaseReason(jobFailure(step.job)) !== undefined) return true
   if (run.prs.length !== 1 || isIntegrated(run.shape)) return false
   const pr = run.prs[0]
   if (pr === undefined) return false
@@ -1822,5 +2217,8 @@ function isIntegrated(shape: PRShape): shape is IntegratedShape {
 function jobFailure(job: Job): JobError {
   if (job.status === "failed") return job.error
   if (job.status === "lost") return { code: "job-lost", message: job.lostReason }
+  if (job.status === "canceled") {
+    return { code: "run-canceled", message: `Queue run canceled by ${job.canceledBy}: ${job.cancelReason}` }
+  }
   throw new Error(`yrd: job '${job.id}' is ${job.status}, not failed`)
 }

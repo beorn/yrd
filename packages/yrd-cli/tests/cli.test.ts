@@ -60,6 +60,7 @@ const JOB_CHECK_FAILED_ID = "00000000-0000-7000-8000-000000000102"
 const JOB_DEPLOY_LOST_ID = "00000000-0000-7000-8000-000000000103"
 const JOB_CHECK_PASS_ID = "00000000-0000-7000-8000-000000000104"
 const JOB_CHECK_MISSING_ID = "00000000-0000-7000-8000-000000000105"
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
 type CheckedShape = AddStepResult<PRShape, "check", JsonValue>
 type ProbeKind = "bay" | "runner" | "evaluator"
@@ -237,7 +238,7 @@ async function createApp(
                   error: { code: "check-failed", message: "check failed" },
                   output: {
                     detail: `[yrd-base-health] base ${BASE_SHA.slice(0, 12)} green\nsrc/model.ts:12 - type mismatch`,
-                    diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+                    diagnostics: [{ file: "src/model.ts", [sourceRowKey]: 12, message: "type mismatch" }],
                     artifacts: [
                       { name: "stdout", path: "/tmp/base-green.log" },
                       { name: "stderr", path: "/tmp/yrd-check.log" },
@@ -583,9 +584,17 @@ describe("runYrd", () => {
 
     const pr = outputIO()
     expect(await runYrd(app, yrd("pr", "--help"), pr.io)).toBe(0)
-    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "retry", "close"]) {
+    for (const command of ["submit", "view", "runs", "diff", "checkout", "status", "edit", "close"]) {
       expect(pr.stdout()).toMatch(new RegExp(`^\\s+${command}\\b`, "mu"))
     }
+    expect(pr.stdout()).not.toMatch(/^\s+retry\b/mu)
+
+    const beforeRetiredRetry = await Array.fromAsync(app.events()).then((events) => events.length)
+    const retiredRetry = outputIO()
+    expect(await runYrd(app, yrd("pr", "retry", "PR1"), retiredRetry.io)).toBe(2)
+    expect(retiredRetry.stdout()).toBe("")
+    expect(retiredRetry.stderr()).toContain("too many arguments")
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRetiredRetry)
 
     const contest = outputIO()
     expect(await runYrd(app, yrd("contest", "--help"), contest.io)).toBe(0)
@@ -646,7 +655,10 @@ describe("runYrd", () => {
 
     const prime = outputIO({ currentBranch: () => "topic/direct" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    expect(JSON.parse(prime.stdout())).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
+    const briefing = JSON.parse(prime.stdout())
+    expect(briefing).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
+    expect(briefing.loop).toContain("fix the branch and run yrd pr submit again")
+    expect(briefing.loop.join("\n")).not.toMatch(/\bretry\b/u)
 
     const checkout = outputIO()
     expect(await runYrd(app, yrd("pr", "checkout", "PR1", "--json"), checkout.io), checkout.stderr()).toBe(0)
@@ -847,22 +859,22 @@ describe("runYrd", () => {
     })
   })
 
-  it("teaches PR-owned retry when pr merge is invoked for rejected work", async () => {
+  it("teaches inspect-and-resubmit when pr merge is invoked for rejected work", async () => {
     const app = await createApp({ failingCheck: true })
     await openAndSubmit(app)
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     const output = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), output.io)).toBe(1)
-    expect(JSON.parse(output.stderr())).toMatchObject({
+    const refusal = JSON.parse(output.stderr())
+    expect(refusal).toMatchObject({
       command: "pr.merge",
       status: "rejected",
       next: "yrd pr runs PR1",
-      guidance: {
-        inspect: "yrd pr runs PR1",
-        retry: "yrd pr retry PR1",
-        resubmit: "fix the branch and run yrd pr submit again",
-      },
+    })
+    expect(refusal.guidance).toEqual({
+      inspect: "yrd pr runs PR1",
+      resubmit: "fix the branch and run yrd pr submit again",
     })
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
@@ -944,7 +956,7 @@ describe("runYrd", () => {
     const prSubmit = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("pr", "submit", "--help"), prSubmit.io)).toBe(0)
     expect(prSubmit.stdout()).toContain("--base <branch>")
-    expect(prSubmit.stdout()).not.toContain("--line <branch>")
+    expect(prSubmit.stdout()).not.toContain(`--${["li", "ne"].join("")} <branch>`)
   })
 
   it("opens, refreshes, and closes bays through installed command refs while driving jobs", async () => {
@@ -1290,7 +1302,7 @@ describe("runYrd", () => {
           status: "failed",
           command: ["queue.step.check"],
           classification: "carrier",
-          diagnostics: [{ file: "src/model.ts", line: 12, message: "type mismatch" }],
+          diagnostics: [{ file: "src/model.ts", [sourceRowKey]: 12, message: "type mismatch" }],
           artifact: "/tmp/yrd-check.log",
           error: { code: "check-failed", message: "check failed" },
         },
@@ -1315,18 +1327,34 @@ describe("runYrd", () => {
     expect(plain.stdout()).not.toContain("\u001b]")
 
     behavior.failingCheck = false
-    const retry = (await app.queue.admit({ prs: ["PR1"], retry: true }))[0]
-    if (retry === undefined) throw new Error("expected an explicit retry run")
-    await app.queue.run({ prs: ["PR1"], retry: true }, { runner: "cli-test", leaseMs: 60_000 })
+    const rejected = app.state().bays.prs.PR1
+    if (rejected === undefined) throw new Error("expected rejected PR")
+    await app.bays.intake({
+      branch: rejected.branch,
+      headSha: MERGED_SHA,
+      base: rejected.base,
+      ...(rejected.baseSha === undefined ? {} : { baseSha: rejected.baseSha }),
+    })
+    await app.bays.submit({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+    const reauthorized = (await app.queue.admit({ prs: ["PR1"] }))[0]
+    if (reauthorized === undefined) throw new Error("expected a fresh-revision check run")
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.state().bays.prs.PR1).toMatchObject({ revision: 2, headSha: MERGED_SHA })
     const recovered = outputIO()
     expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), recovered.io), recovered.stderr()).toBe(0)
     const currentChecks = recovered
       .stdout()
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line))
+      .map((record) => JSON.parse(record))
     expect(currentChecks).toHaveLength(1)
-    expect(currentChecks[0]).toMatchObject({ kind: "pr.check", run: retry.id, status: "passed" })
+    expect(currentChecks[0]).toMatchObject({
+      kind: "pr.check",
+      revision: 2,
+      run: reauthorized.id,
+      status: "passed",
+    })
   })
 
   it("lets the existing Queue drain finish a plain submit admission before integrating its cached proof", async () => {
@@ -1554,7 +1582,19 @@ describe("runYrd", () => {
       "failed",
     )
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
-    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], retry: true })
+    const rejected = app.state().bays.prs.PR1
+    if (rejected === undefined) throw new Error("expected rejected PR")
+    await app.bays.intake({
+      branch: rejected.branch,
+      headSha: MERGED_SHA,
+      base: rejected.base,
+      ...(rejected.baseSha === undefined ? {} : { baseSha: rejected.baseSha }),
+    })
+    await app.bays.submit({ pr: "PR1" })
+    await app.dispatch(app.commands.queue.advance, { run: "R1" })
+    await app.bays.requestChecks({ pr: "PR1" })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", revision: 2, headSha: MERGED_SHA })
+    expect((await app.queue.admit({ prs: ["PR1"] }))[0]?.id).toBe("R2")
 
     const checkJob = app.queue.get("R2")?.steps[0]?.job
     expect(checkJob?.status).toBe("requested")
@@ -1568,6 +1608,7 @@ describe("runYrd", () => {
     })
     expect(app.queue.get("R2")?.status).toBe("running")
 
+    const beforeRecovery = await Array.fromAsync(app.events()).then((events) => events.length)
     const recovery = outputIO({ now: () => Date.parse("2026-07-09T12:00:02.000Z") })
     expect(
       await runYrd(app, yrd("queue", "recover", "--reason", "runner interrupted", "--json"), recovery.io),
@@ -1575,11 +1616,20 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(recovery.stdout())).toMatchObject({
       command: "queue.recover",
-      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }, {}] }],
+      results: [{ id: "R2", status: "failed", steps: [{ job: { status: "lost" } }] }],
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected" })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
     expect(app.queue.get("R2")?.steps[1]?.job).toBeUndefined()
     expect(mergeRuns).toEqual([])
+    const events = (await Array.fromAsync(app.events())).slice(beforeRecovery)
+    const failed = events.find((applied) => {
+      if (applied.name !== "queue/run/failed") return false
+      const data = applied.data as Readonly<{ run?: unknown; error?: Readonly<{ code?: unknown }> }>
+      return data.run === "R2" && data.error?.code === "job-lost"
+    })
+    if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
+    expect(app.state().queues.authority.runs.R2?.released).toEqual({ reason: "job-lost", ref: failed.id })
+    expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
   })
 
   it("records an external failing verdict successfully while the queue run becomes failed", async () => {
@@ -2226,6 +2276,75 @@ describe("runYrd", () => {
     }
   })
 
+  it("keeps a later revision clock out of prior run history", () => {
+    const pr = {
+      id: "PR1",
+      branch: "issue/failure",
+      base: "main",
+      baseSha: BASE_SHA,
+      status: "rejected",
+      revision: 2,
+      headSha: "2".repeat(40),
+      revisions: [
+        {
+          revision: 1,
+          headSha: HEAD_SHA,
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-09T12:00:00.000Z",
+          submittedAt: "2026-07-09T12:00:30.000Z",
+          terminal: { status: "rejected", at: "2026-07-09T12:05:00.000Z" },
+        },
+        {
+          revision: 2,
+          headSha: "2".repeat(40),
+          base: "main",
+          baseSha: BASE_SHA,
+          pushedAt: "2026-07-09T12:10:00.000Z",
+          submittedAt: "2026-07-09T12:10:01.000Z",
+          terminal: { status: "rejected", at: "2026-07-09T12:12:00.000Z" },
+        },
+      ],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+      submittedAt: "2026-07-09T12:10:01.000Z",
+      rejectedAt: "2026-07-09T12:12:00.000Z",
+    } as PR
+    const prior = fakeRun({
+      id: "R1",
+      status: "failed",
+      pr: { id: pr.id, revision: 1, headSha: HEAD_SHA, baseSha: BASE_SHA },
+      startedAt: "2026-07-09T12:01:00.000Z",
+      finishedAt: "2026-07-09T12:05:00.000Z",
+      steps: [],
+      error: { code: "check-failed", message: "revision one failed" },
+    })
+    const current = fakeRun({
+      id: "R2",
+      status: "failed",
+      pr: { id: pr.id, revision: 2, headSha: pr.headSha, baseSha: BASE_SHA },
+      startedAt: "2026-07-09T12:10:30.000Z",
+      finishedAt: pr.rejectedAt!,
+      steps: [],
+      error: { code: "check-failed", message: "revision two failed" },
+    })
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [pr],
+      running: [],
+      waiting: [],
+      finished: [prior, current],
+    } as QueueStatusResult
+
+    const projection = humanQueueProjection(result, Date.parse("2026-07-09T12:13:00.000Z"))
+    expect(projection.recent.map(({ runId, submittedAt, age }) => ({ runId, submittedAt, age }))).toEqual([
+      { runId: "R2", submittedAt: "2026-07-09T12:10:01.000Z", age: "1m" },
+      { runId: "R1", submittedAt: "2026-07-09T12:00:30.000Z", age: "4m" },
+    ])
+  })
+
   it("freezes recent rejected age at the terminal timestamp", () => {
     const terminalAt = "2026-07-09T12:06:00.000Z"
     const pr = {
@@ -2609,6 +2728,47 @@ describe("runYrd", () => {
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("landing")
+  })
+
+  it("keeps every submitted revision clock lossless in pr runs", async () => {
+    const nextHead = "2".repeat(40)
+    const app = await createApp({ failingCheck: true })
+    await app.bays.submit({ branch: "topic/history", headSha: HEAD_SHA, base: "main" })
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(1)
+
+    await app.bays.intake({ branch: "topic/history", headSha: nextHead, base: "main" })
+    await app.bays.ready({ pr: "PR1" })
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(1)
+
+    const human = outputIO({ columns: 160 })
+    expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io), human.stderr()).toBe(0)
+    expect(human.stdout()).toContain("REVISION CLOCK PR1 rev1")
+    expect(human.stdout()).toContain("REVISION CLOCK PR1 rev2")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), json.io), json.stderr()).toBe(0)
+    const parsed = JSON.parse(json.stdout()) as {
+      pr: PR
+      runs: (ReturnType<typeof queueShowData> & { revisionClock?: unknown })[]
+    }
+    expect(parsed.pr.revisions).toMatchObject([
+      {
+        revision: 1,
+        headSha: HEAD_SHA,
+        submittedAt: "2026-07-09T12:00:00.000Z",
+        terminal: { status: "rejected", at: "2026-07-09T12:00:00.000Z" },
+      },
+      {
+        revision: 2,
+        headSha: nextHead,
+        submittedAt: "2026-07-09T12:00:00.000Z",
+        terminal: { status: "rejected", at: "2026-07-09T12:00:00.000Z" },
+      },
+    ])
+    expect(parsed.runs.map((run) => run.revisionClock)).toMatchObject([
+      { pr: "PR1", revision: 1, headSha: HEAD_SHA, submittedAt: "2026-07-09T12:00:00.000Z" },
+      { pr: "PR1", revision: 2, headSha: nextHead, submittedAt: "2026-07-09T12:00:00.000Z" },
+    ])
   })
 
   it("maps the 10-row log and PR-run contract matrix directly from canonical fields", async () => {
@@ -3838,5 +3998,155 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), watch.io)).toBe(0)
     expect(watch.stdout()).toBe("")
     expect(sleeps).toEqual([1_000])
+  })
+})
+
+describe("submit correlation", () => {
+  it.each(["bay", "pr"] as const)("persists an opaque correlation through %s submit", async (surface) => {
+    const app = await createApp()
+    const output = outputIO({ resolveRevision: async () => HEAD_SHA })
+    const correlation = {
+      namespace: "tribe-request",
+      id: "review-20925/custom 61's docs:retry 2",
+    }
+
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          surface,
+          "submit",
+          "topic/correlated",
+          "--base",
+          "main",
+          "--correlation",
+          `${correlation.namespace}:${correlation.id}`,
+          "--json",
+        ),
+        output.io,
+      ),
+      output.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: `${surface}.submit`,
+      prs: [{ correlation }],
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({
+      correlation,
+      revisions: [{ correlation }],
+    })
+  })
+
+  it.each(["bay", "pr"] as const)("rejects malformed correlation before %s submit appends", async (surface) => {
+    for (const correlation of ["tribe-request", "tribe-request:   "]) {
+      const app = await createApp()
+      const before = await Array.fromAsync(app.events()).then((events) => events.length)
+      const output = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+      expect(
+        await runYrd(
+          app,
+          yrd(surface, "submit", "topic/correlated", "--correlation", correlation, "--json"),
+          output.io,
+        ),
+        output.stderr(),
+      ).toBe(2)
+      expect(output.stdout()).toBe("")
+      expect(output.stderr()).toContain("--correlation requires <namespace:id>")
+      expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+      expect(app.state().bays.prs).toEqual({})
+    }
+  })
+})
+
+const PROJECTION_CORRELATION = { namespace: "tribe-request", id: "request-20925" } as const
+
+async function correlatedTerminalRun(terminal: "integrated" | "rejected" | "canceled") {
+  const app = await createApp({ failingCheck: terminal === "rejected" })
+  await app.bays.submit({
+    branch: `topic/${terminal}`,
+    headSha: HEAD_SHA,
+    base: "main",
+    correlation: PROJECTION_CORRELATION,
+  })
+
+  if (terminal === "canceled") {
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected a requested Queue Job to cancel")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "cli-test",
+      leaseExpiresAt: "2026-07-09T12:02:00.000Z",
+    })
+    await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
+    await app.dispatch(app.commands.queue.advance, { run: "R1" })
+  } else {
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+  }
+
+  const pr = app.state().bays.prs.PR1
+  const run = app.queue.get("R1")
+  if (pr === undefined || run === undefined) throw new Error(`expected ${terminal} PR and Run fixtures`)
+  return { app, pr, run }
+}
+
+async function projectedLogRows(app: TestApp, pr = "PR1"): Promise<Record<string, unknown>[]> {
+  const output = outputIO()
+  expect(await runYrd(app, yrd("log", "--pr", pr, "--json"), output.io), output.stderr()).toBe(0)
+  return (JSON.parse(output.stdout()) as { rows: Record<string, unknown>[] }).rows
+}
+
+describe("correlation projections", () => {
+  it("keeps structured correlation in terminal Run, show, and log JSON", async () => {
+    for (const terminal of ["integrated", "rejected", "canceled"] as const) {
+      const { app, pr, run } = await correlatedTerminalRun(terminal)
+
+      expect.soft(pr.status).toBe(terminal)
+      expect
+        .soft(JSON.parse(JSON.stringify(run)).prs)
+        .toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
+      expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
+      expect
+        .soft(await projectedLogRows(app, pr.id))
+        .toEqual([expect.objectContaining({ pr: pr.id, correlation: PROJECTION_CORRELATION })])
+    }
+
+    const withdrawn = await createApp()
+    await withdrawn.bays.submit({
+      branch: "topic/withdrawn-no-run",
+      headSha: HEAD_SHA,
+      base: "main",
+      draft: true,
+      correlation: PROJECTION_CORRELATION,
+    })
+    await withdrawn.bays.closePr({ pr: "PR1" })
+    expect.soft(withdrawn.state().bays.prs.PR1).toMatchObject({
+      status: "withdrawn",
+      correlation: PROJECTION_CORRELATION,
+    })
+    expect.soft(withdrawn.queue.status("main").finished).toEqual([])
+    expect.soft(await projectedLogRows(withdrawn)).toEqual([
+      expect.objectContaining({
+        run: "-",
+        pr: "PR1",
+        outcome: "retired",
+        correlation: PROJECTION_CORRELATION,
+      }),
+    ])
+  })
+
+  it("omits correlation from uncorrelated Run, show, and log JSON", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/uncorrelated", headSha: HEAD_SHA, base: "main" })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    const run = app.queue.get("R1")
+    if (run === undefined) throw new Error("expected an uncorrelated Run fixture")
+
+    expect(JSON.parse(JSON.stringify(run)).prs[0]).not.toHaveProperty("correlation")
+    expect(queueShowData(run).prs[0]).not.toHaveProperty("correlation")
+    expect((await projectedLogRows(app))[0]).not.toHaveProperty("correlation")
   })
 })

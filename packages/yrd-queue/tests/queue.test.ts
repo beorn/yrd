@@ -376,7 +376,7 @@ describe("Queue", () => {
     expect(await Array.fromAsync(app.events())).toEqual(settled)
   })
 
-  it("reconciles a replayed lost job without granting recovery execution authority", async () => {
+  it("releases a replayed lost job before an explicit same-revision retry", async () => {
     const journal = createMemoryJournal()
     const id = ids()
     let checkCalls = 0
@@ -414,14 +414,104 @@ describe("Queue", () => {
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([
       expect.objectContaining({ id: "R1", status: "failed" }),
     ])
-    expect(replayed.state().bays.prs.PR1?.status).toBe("rejected")
+    expect(replayed.state().bays.prs.PR1?.status).toBe("submitted")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
-    expect((await Array.fromAsync(replayed.events())).slice(before.length)).toMatchObject([{ name: "pr/rejected" }])
+    const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
+    expect(appended).toMatchObject([{ name: "queue/run/failed", data: { run: "R1", error: { code: "job-lost" } } }])
+    const failed = appended[0]
+    if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
+    const authority = replayed.state().queues.authority.runs.R1
+    expect(authority?.released).toEqual({ reason: "job-lost", ref: failed.id })
+    expect(appended.map(({ name }) => name)).not.toContain("pr/rejected")
 
     const reconciled = await Array.fromAsync(replayed.events())
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:03:00.000Z" })).resolves.toEqual([])
     expect(await Array.fromAsync(replayed.events())).toEqual(reconciled)
+
+    const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)
+    expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
+    expect(retried).toMatchObject([{ id: "R2", status: "passed", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] }])
+    expect(replayed.state().bays.prs.PR1).toMatchObject({
+      status: "integrated",
+      revision: 1,
+      headSha: HEAD,
+    })
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(checkCalls).toBe(1)
+    expect(mergeCalls).toBe(1)
+  })
+
+  it("cancels a correlated PR when its active Queue Job is canceled", async () => {
+    const correlation = { namespace: "tribe-request", id: "request-20925" } as const
+    const journal = createMemoryJournal()
+    const id = ids()
+    await using app = await createQueueApp({}, journal, undefined, id)
+    await app.bays.submit({
+      branch: "issue/canceled",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      correlation,
+    })
+    const pr = app.state().bays.prs.PR1
+    if (pr === undefined) throw new Error("correlated PR was not recorded")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("Queue did not request a Job")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "worker-1",
+      leaseExpiresAt: "2026-01-01T00:01:00.000Z",
+    })
+    await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
+
+    const advanced = await app.dispatch(app.commands.queue.advance, { run: "R1" })
+
+    expect(advanced.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      {
+        name: "pr/canceled",
+        data: {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          correlation,
+          by: "@chief",
+          reason: "authorization revoked",
+        },
+      },
+    ])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({
+      status: "canceled",
+      revision: pr.revision,
+      headSha: pr.headSha,
+      correlation,
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: { code: "run-canceled" },
+      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
+      steps: [
+        expect.objectContaining({
+          job: expect.objectContaining({
+            status: "canceled",
+            canceledBy: "@chief",
+            cancelReason: "authorization revoked",
+          }),
+        }),
+      ],
+    })
+    const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(eventNames).not.toContain("pr/rejected")
+    expect(app.queue.get("R1")?.error?.code).not.toBe("job-lost")
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "failed",
+      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
+    })
   })
 
   it("keys a selected step suffix by run order rather than installed order", async () => {
@@ -564,6 +654,75 @@ describe("Queue", () => {
     ])
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", integration: run?.integration })
     expect(app.state().bays.prs.PR2).toMatchObject({ status: "integrated", integration: run?.integration })
+  })
+
+  it("does not integrate canceled historical PRs that share the current payload", async () => {
+    const journal = createMemoryJournal<unknown>()
+    const original = await createQueueApp({}, journal)
+    const current = await submitBranch(original, "issue/current-payload")
+    await original.close()
+
+    let cursor = 0
+    for await (const batch of journal.read()) cursor = batch.cursor
+    const command = { id: "00000000-0000-7000-8000-000000000111", op: "fixture.canceled-duplicate" }
+    expect(
+      await journal.append(
+        {
+          command,
+          cause: {
+            id: "00000000-0000-7000-8000-000000000112",
+            commandId: command.id,
+            op: command.op,
+            commandHash: Command.hash(command),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-8000-000000000113",
+              name: "pr/pushed",
+              ts: "2026-01-01T00:00:01.000Z",
+              data: {
+                pr: "PR2",
+                branch: "issue/canceled-history",
+                base: "main",
+                baseSha: BASE,
+                headSha: current.headSha,
+                revision: 1,
+              },
+            },
+            {
+              id: "00000000-0000-7000-8000-000000000114",
+              name: "pr/submitted",
+              ts: "2026-01-01T00:00:01.001Z",
+              data: { pr: "PR2", revision: 1, headSha: current.headSha },
+            },
+            {
+              id: "00000000-0000-7000-8000-000000000115",
+              name: "pr/canceled",
+              ts: "2026-01-01T00:00:01.002Z",
+              data: {
+                pr: "PR2",
+                revision: 1,
+                headSha: current.headSha,
+                by: "@chief",
+                reason: "superseded",
+              },
+            },
+          ],
+        },
+        cursor,
+      ),
+    ).toMatchObject({ appended: true })
+
+    await using app = await createQueueApp({}, journal, undefined, ids(500))
+    const before = (await Array.fromAsync(app.events())).length
+    await app.queue.run({ prs: [current.id], steps: ["check", "review", "merge"] }, runtime)
+    const integrated = (await Array.fromAsync(app.events()))
+      .slice(before)
+      .filter((applied) => applied.name === "pr/integrated")
+      .map((applied) => (applied.data as { pr: string }).pr)
+
+    expect(integrated).toEqual([current.id])
+    expect(app.state().bays.prs.PR2).toMatchObject({ status: "canceled", canceledBy: "@chief" })
   })
 
   it("integrates the implicit queue in PR revision submission order", async () => {
@@ -942,7 +1101,282 @@ describe("Queue", () => {
     expect(changedChecks).toBe(1)
   })
 
-  it("keeps a draft admission failure ineligible after ready until an explicit retry", async () => {
+  it("releases an environment-refused run and re-admits its unchanged revision after replay", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let mergeCalls = 0
+    const options = {
+      merge: () => {
+        mergeCalls++
+        return mergeCalls === 1
+          ? {
+              status: "failed" as const,
+              error: {
+                code: "queue-environment-refused",
+                message: "merge environment is temporarily unavailable",
+              },
+            }
+          : { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/environment-refused")
+
+      expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+        {
+          id: "R1",
+          status: "failed",
+          error: { code: "queue-environment-refused" },
+          prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
+        },
+      ])
+      expect(app.state().bays.prs[pr.id]).toMatchObject({
+        status: "submitted",
+        revision: pr.revision,
+        headSha: pr.headSha,
+      })
+
+      const events = await Array.fromAsync(app.events())
+      const failed = events.find(
+        (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+      )
+      if (failed === undefined) throw new Error("expected the environment refusal to append queue/run/failed")
+      const authority = app.state().queues.authority.runs.R1
+      expect(authority?.released).toEqual({ reason: "queue-environment-refused", ref: failed.id })
+      expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    const replayedEvents = await Array.fromAsync(replayed.events())
+    const replayedFailure = replayedEvents.find(
+      (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+    )
+    if (replayedFailure === undefined) throw new Error("expected replay to retain queue/run/failed")
+    const replayedAuthority = replayed.state().queues.authority.runs.R1
+    expect(replayedAuthority?.released).toEqual({
+      reason: "queue-environment-refused",
+      ref: replayedFailure.id,
+    })
+
+    const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["merge"] }, runtime)
+    expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
+    expect(retried).toMatchObject([
+      {
+        id: "R2",
+        status: "passed",
+        prs: [{ id: "PR1", revision: 1, headSha: HEAD }],
+      },
+    ])
+    expect(replayed.state().bays.prs.PR1).toMatchObject({
+      status: "integrated",
+      revision: 1,
+      headSha: HEAD,
+    })
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(mergeCalls).toBe(2)
+  })
+
+  it("keeps merit rejection consumed until a new revision supplies submit authority", async () => {
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      merge: () => {
+        mergeCalls++
+        return mergeCalls === 1
+          ? { status: "failed", error: { code: "merge-conflict", message: "payload does not merge" } }
+          : { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/merit-rejection")
+
+    expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
+      { id: "R1", status: "failed", error: { code: "merge-conflict" } },
+    ])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({
+      status: "rejected",
+      revision: pr.revision,
+      headSha: pr.headSha,
+    })
+    expect(app.state().queues.authority.runs.R1).not.toHaveProperty("released")
+    expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toContain("pr/rejected")
+
+    const beforeRetry = await Array.fromAsync(app.events())
+    await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).rejects.toThrow(/rejected/iu)
+    expect(await Array.fromAsync(app.events())).toEqual(beforeRetry)
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(mergeCalls).toBe(1)
+
+    await app.bays.submit({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
+    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "submitted", revision: 2, headSha: UPDATED })
+
+    const revised = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
+    const newRuns = revised.filter(({ id: run }) => run === "R2")
+    expect(newRuns).toHaveLength(1)
+    expect(newRuns).toMatchObject([{ id: "R2", status: "passed", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] }])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "integrated", revision: 2, headSha: UPDATED })
+    expect(mergeCalls).toBe(2)
+  })
+
+  it("audits a rejected revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
+    const journal = createMemoryJournal<unknown>()
+    const original = await createQueueApp(
+      { check: () => ({ status: "failed", error: { code: "check-failed", message: "reject R1" } }) },
+      journal,
+    )
+    const retried = await submitBranch(original, "issue/retry-without-submit")
+    const first = (await original.queue.run({ prs: [retried.id] }, runtime))[0]
+    if (first === undefined) throw new Error("expected authorized R1")
+    expect(first).toMatchObject({ id: "R1", status: "failed" })
+    expect(original.state().bays.prs[retried.id]?.status).toBe("rejected")
+    const firstRecord = original.state().queues.records.R1
+    if (firstRecord === undefined) throw new Error("expected persisted R1")
+    const uncorrelatedSnapshot = firstRecord.prs[0]
+    if (uncorrelatedSnapshot === undefined) throw new Error("expected persisted uncorrelated PR snapshot")
+    expect(uncorrelatedSnapshot).not.toHaveProperty("correlation")
+    await original.close()
+
+    let cursor = 0
+    for await (const batch of journal.read()) cursor = batch.cursor
+    const command = { id: "00000000-0000-7000-9000-000000009201", op: "fixture.r92-retry" }
+    expect(
+      await journal.append(
+        {
+          command,
+          cause: {
+            id: "00000000-0000-7000-9000-000000009202",
+            commandId: command.id,
+            op: command.op,
+            commandHash: Command.hash(command),
+          },
+          events: [
+            {
+              id: "00000000-0000-7000-9000-000000009203",
+              name: "queue/run/started",
+              ts: "2026-01-01T00:01:00.000Z",
+              data: {
+                run: {
+                  id: "R2",
+                  prs: firstRecord.prs,
+                  base: firstRecord.base,
+                  steps: firstRecord.steps,
+                },
+              },
+            },
+            {
+              id: "00000000-0000-7000-9000-000000009204",
+              name: "queue/run/failed",
+              ts: "2026-01-01T00:01:00.001Z",
+              data: {
+                run: "R2",
+                error: { code: "legacy-retry-terminal", message: "R2 ended without a fresh submit" },
+              },
+            },
+          ],
+        },
+        cursor,
+      ),
+    ).toMatchObject({ appended: true })
+
+    await using app = await createQueueApp({}, journal, undefined, ids(500))
+    const legacyRetry = app.queue.get("R2")
+    expect(legacyRetry).toMatchObject({ status: "failed", prs: [{ id: retried.id }] })
+    const legacySnapshot = legacyRetry?.prs[0]
+    if (legacySnapshot === undefined) throw new Error("expected replayed legacy PR snapshot")
+    expect(legacySnapshot).not.toHaveProperty("correlation")
+
+    const submitted = await submitBranch(app, "issue/submitted-control")
+    const submittedRun = (await app.queue.run({ prs: [submitted.id] }, runtime))[0]
+    if (submittedRun === undefined) throw new Error("expected submitted control run")
+
+    await app.bays.submit({
+      branch: "issue/draft-check-control",
+      headSha: UPDATED,
+      base: "main",
+      baseSha: BASE,
+      draft: true,
+    })
+    await app.bays.requestChecks({ pr: "PR3" })
+    const draftCheck = (await app.queue.admit({ prs: ["PR3"] }, runtime))[0]
+    if (draftCheck === undefined) throw new Error("expected pushed draft-check control run")
+    expect(app.state().bays.prs.PR3?.status).toBe("pushed")
+
+    expect(app.queue.audit().findings).toEqual([
+      expect.objectContaining({ code: "run-without-submit-ancestry", run: "R2", pr: retried.id }),
+    ])
+  })
+
+  it("schema-refuses queue.run retry authority without appending events", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/retry-schema")
+    const before = await Array.fromAsync(app.events())
+    const untrusted = { prs: [pr.id], retry: true }
+
+    await expect(app.dispatch(app.commands.queue.run, untrusted)).rejects.toThrow(/retry/iu)
+
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+  })
+
+  it.each(["pr/withdrawn", "pr/canceled"] as const)(
+    "does not let stale revision-one %s invalidate revision-two authority",
+    async (terminal) => {
+      const journal = createMemoryJournal<unknown>()
+      const original = await createQueueApp({}, journal)
+      const stale = await submitBranch(original, `issue/stale-${terminal}`)
+      await original.bays.intake({
+        branch: stale.branch,
+        headSha: UPDATED,
+        base: stale.base,
+        baseSha: BASE,
+      })
+      await original.bays.submit({ pr: stale.id })
+      await original.bays.requestChecks({ pr: stale.id, baseSha: BASE })
+      expect(original.state().bays.prs[stale.id]).toMatchObject({ revision: 2, headSha: UPDATED })
+      await original.close()
+
+      let cursor = 0
+      for await (const batch of journal.read()) cursor = batch.cursor
+      const command = { id: "00000000-0000-7000-9000-000000009211", op: "fixture.stale-terminal" }
+      expect(
+        await journal.append(
+          {
+            command,
+            cause: {
+              id: "00000000-0000-7000-9000-000000009212",
+              commandId: command.id,
+              op: command.op,
+              commandHash: Command.hash(command),
+            },
+            events: [
+              {
+                id: "00000000-0000-7000-9000-000000009213",
+                name: terminal,
+                ts: "2026-01-01T00:01:00.000Z",
+                data: {
+                  pr: stale.id,
+                  revision: stale.revision,
+                  headSha: stale.headSha,
+                  ...(terminal === "pr/canceled" ? { by: "@chief", reason: "stale cancellation" } : {}),
+                },
+              },
+            ],
+          },
+          cursor,
+        ),
+      ).toMatchObject({ appended: true })
+
+      await using app = await createQueueApp({}, journal, undefined, ids(500))
+      expect(app.state().bays.prs[stale.id]).toMatchObject({ status: "submitted", revision: 2, headSha: UPDATED })
+      expect(app.state().queues.authority).toMatchObject({
+        statuses: { [stale.id]: "submitted" },
+        submits: { [stale.id]: { revision: 2, headSha: UPDATED } },
+        checks: { [stale.id]: { revision: 2, headSha: UPDATED } },
+      })
+    },
+  )
+
+  it("reauthorizes a failed draft admission through a fresh exact check request", async () => {
     let fail = true
     await using app = await createQueueApp({
       check: (input) =>
@@ -957,13 +1391,6 @@ describe("Queue", () => {
     expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toMatchObject([{ status: "failed" }])
     expect(app.state().bays.prs.PR1?.status).toBe("pushed")
 
-    const healthy = await submitBranch(app, "issue/healthy-after-red")
-    await app.bays.requestChecks({ pr: healthy.id })
-    const healthyAdmission = (await app.queue.admit({}))[0]
-    if (healthyAdmission === undefined) throw new Error("expected unrelated checks to bypass failed history")
-    expect(healthyAdmission.prs).toMatchObject([{ id: healthy.id }])
-    await app.queue.admit({ prs: [healthy.id] }, runtime)
-
     await app.bays.ready({ pr: "PR1" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
@@ -973,9 +1400,20 @@ describe("Queue", () => {
     await expect(app.queue.run({ prs: ["PR1"] }, runtime)).rejects.toThrow("checks failed in R1")
 
     fail = false
-    const retry = (await app.queue.admit({ prs: ["PR1"], retry: true }, runtime))[0]
-    if (retry === undefined) throw new Error("expected a retry admission run")
-    expect(app.queue.eligibility("PR1")).toMatchObject({ runnable: true, checks: { status: "passed" } })
+    const reauthorization = await app.bays.requestChecks({ pr: "PR1" })
+    expect(reauthorization.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      {
+        name: "pr/checks-requested",
+        data: { pr: "PR1", revision: 1, headSha: HEAD, baseSha: BASE },
+      },
+    ])
+    const readmitted = (await app.queue.admit({ prs: ["PR1"] }, runtime))[0]
+    if (readmitted === undefined) throw new Error("expected an explicitly reauthorized admission run")
+    expect(readmitted).toMatchObject({ id: "R2", status: "passed", prs: [{ id: "PR1", headSha: HEAD }] })
+    expect(app.queue.eligibility("PR1")).toMatchObject({
+      runnable: true,
+      checks: { status: "passed", run: "R2" },
+    })
   })
 
   it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
@@ -1439,6 +1877,80 @@ describe("Queue", () => {
       PR2: "integrated",
       PR3: "rejected",
       PR4: "integrated",
+    })
+  })
+
+  it("releases root-owned authority when an isolated child is environment-refused", async () => {
+    const checked: string[][] = []
+    let isolatedPR1Checks = 0
+    await using app = await createQueueApp({
+      batch: 2,
+      check: (input) => {
+        const prs = input.prs.map((pr) => pr.id)
+        checked.push(prs)
+        if (prs.length === 2) {
+          return { status: "failed", error: { code: "check-failed", message: "batch is merit-red" } }
+        }
+        if (prs[0] === "PR1" && ++isolatedPR1Checks === 1) {
+          return {
+            status: "failed",
+            error: { code: "queue-environment-refused", message: "isolated runner unavailable" },
+          }
+        }
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const first = await submitBranch(app, "issue/environment-child")
+    const second = await submitBranch(app, "issue/passing-child")
+
+    const runs = await app.queue.run({ prs: [first.id, second.id] }, runtime)
+
+    expect(runs).toMatchObject([
+      { id: "R1", status: "failed", error: { code: "check-failed" } },
+      { id: "R2", parent: "R1", status: "failed", error: { code: "queue-environment-refused" } },
+      { id: "R3", parent: "R1", status: "passed" },
+    ])
+    expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3"])
+    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, pr.status]))).toEqual({
+      PR1: "submitted",
+      PR2: "integrated",
+    })
+
+    const events = await Array.fromAsync(app.events())
+    const childFailure = events.find((applied) => {
+      if (applied.name !== "queue/run/failed") return false
+      const data = applied.data as Readonly<{ run?: unknown; error?: Readonly<{ code?: unknown }> }>
+      return data.run === "R2" && data.error?.code === "queue-environment-refused"
+    })
+    if (childFailure === undefined) throw new Error("expected isolated environment refusal to fail R2")
+    expect(app.state().queues.authority.runs.R1).not.toHaveProperty("released")
+    expect(app.state().queues.authority.runs.R2).toMatchObject({
+      inheritedFrom: "R1",
+      released: { reason: "queue-environment-refused", ref: childFailure.id },
+    })
+    expect(app.state().queues.authority.submits.PR1).toEqual({
+      pr: first.id,
+      revision: first.revision,
+      headSha: first.headSha,
+    })
+    expect(events.filter(({ name }) => name === "queue/batch/isolated")).toHaveLength(2)
+
+    const retried = await app.queue.run({ prs: [first.id] }, runtime)
+    const newRuns = retried.filter(({ id: run }) => run === "R4")
+    expect(newRuns).toHaveLength(1)
+    expect(newRuns).toMatchObject([
+      {
+        id: "R4",
+        status: "passed",
+        prs: [{ id: first.id, revision: first.revision, headSha: first.headSha }],
+      },
+    ])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3", "R4"])
+    expect(app.state().bays.prs[first.id]).toMatchObject({
+      status: "integrated",
+      revision: first.revision,
+      headSha: first.headSha,
     })
   })
 })
