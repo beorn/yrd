@@ -1157,6 +1157,58 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(await machineHistory("2026-07-14T12:00:00.000Z")).toMatchObject({ subject: "feature", ageMs: expectedAgeMs })
   })
 
+  it("replays the live PR25 finish-before-later-submit journal shape through bare yrd", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(join(repo, ".yrd.yml"), "steps: [check]\ncheck: exit 7\n")
+
+    const host = await createYrdHost({ cwd: repo })
+    try {
+      await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      const prior = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+      expect(prior.status).toBe("failed")
+      if (prior.finishedAt === undefined) throw new Error("missing prior revision finish time")
+
+      await git(repo, "switch", "-q", "issue/feature")
+      await writeFile(join(repo, "follow-up.txt"), "follow-up\n")
+      await git(repo, "add", "follow-up.txt")
+      await git(repo, "commit", "-qm", "follow-up")
+      const nextHead = await git(repo, "rev-parse", "HEAD")
+      await git(repo, "switch", "-q", "main")
+
+      await host.app.bays.intake({ branch: "issue/feature", headSha: nextHead, base: "main" })
+      await host.app.bays.ready({ pr: "PR1" })
+      const currentSubmittedAt = host.app.state().bays.prs.PR1?.submittedAt
+      if (currentSubmittedAt === undefined) throw new Error("missing current revision submission time")
+      expect(Date.parse(prior.finishedAt)).toBeLessThan(Date.parse(currentSubmittedAt))
+
+      const current = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+      expect(current.status).toBe("failed")
+    } finally {
+      await host.close()
+    }
+
+    const journalPath = join(repo, ".git", "yrd", "events-v3.jsonl")
+    const journalBefore = await readFile(journalPath)
+    const cli = Bun.spawn([process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts")], {
+      cwd: repo,
+      env: { ...process.env, NO_COLOR: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(cli.stdout).text(),
+      new Response(cli.stderr).text(),
+      cli.exited,
+    ])
+
+    expect(exitCode, stderr).toBe(0)
+    expect(stderr).toBe("")
+    expect(stdout).toContain("Recent failures")
+    expect(stdout.match(/PR1/gu)).toHaveLength(2)
+    expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
+    expect(await readFile(journalPath)).toEqual(journalBefore)
+  })
+
   it("renders clickable candidate-conflict evidence written by the real Git check adapter", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "conflict.txt"), "main\n")
