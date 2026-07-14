@@ -5195,7 +5195,11 @@ describe("explicit queue step authority", () => {
       results: [
         {
           status: "passed",
-          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          stepSelection: {
+            authority: "explicit",
+            steps: ["merge"],
+            omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+          },
           steps: [{ name: "merge" }],
           prs: [{ id: "PR1" }],
         },
@@ -5215,10 +5219,14 @@ describe("explicit queue step authority", () => {
     expect(await runYrd(app, yrd("queue", "run", "PR1", "PR2", "--steps", "merge"), output.io), output.stderr()).toBe(0)
     expect(checkRuns).toEqual([])
     expect(mergeRuns).toEqual(["merge"])
-    expect(output.stdout()).toContain("configured checks omitted: check")
+    expect(output.stdout()).toContain("check=skipped(not-selected) merge=passed")
     expect(app.queue.get("R1")).toMatchObject({
       status: "passed",
-      stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+      stepSelection: {
+        authority: "explicit",
+        steps: ["merge"],
+        omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+      },
       steps: [{ name: "merge" }],
       prs: [{ id: "PR1" }, { id: "PR2" }],
     })

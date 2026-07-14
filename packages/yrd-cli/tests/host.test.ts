@@ -634,7 +634,11 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       results: [
         {
           status: "passed",
-          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          stepSelection: {
+            authority: "explicit",
+            steps: ["merge"],
+            omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+          },
           steps: [{ name: "merge" }],
           prs: [{ id: "PR1", headSha: featureSha }],
         },
@@ -645,7 +649,11 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     if (runId === undefined) throw new Error("merge-only CLI produced no durable run")
     await using reopened = await createYrdHost({ cwd: repo })
     expect(reopened.app.queue.get(runId)).toMatchObject({
-      stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+      stepSelection: {
+        authority: "explicit",
+        steps: ["merge"],
+        omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+      },
     })
   })
 
@@ -711,7 +719,11 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       results: [
         {
           status: "passed",
-          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          stepSelection: {
+            authority: "explicit",
+            steps: ["merge"],
+            omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+          },
           steps: [{ name: "merge" }],
           prs: [
             { id: "PR1", headSha: featureSha },
@@ -778,7 +790,11 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       results: [
         {
           status: "passed",
-          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          stepSelection: {
+            authority: "explicit",
+            steps: ["merge"],
+            omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+          },
           shape: { results: {} },
           steps: [{ name: "merge" }],
         },

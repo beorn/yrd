@@ -1260,13 +1260,11 @@ export function humanQueueProjection(
 export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Queue idle.</Text>
   const data = runs.map((run) => {
-    const omitted = run.stepSelection?.omittedChecks
-    const steps = run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")
     return {
       run: run.id,
       prs: run.prs.map((pr) => pr.id).join(","),
       state: run.status,
-      steps: boundedQueue(omitted === undefined ? steps : `${steps} (configured checks omitted: ${omitted.join(",")})`),
+      steps: boundedQueue(queueRunSteps(run)),
     }
   })
   return (
@@ -1285,6 +1283,26 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
       ]}
     />
   )
+}
+
+function queueRunSteps(run: QueueRun): string {
+  const omitted = run.stepSelection?.omittedSteps
+  if (omitted === undefined) {
+    const steps = run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")
+    const legacyChecks = run.stepSelection?.omittedChecks
+    return legacyChecks === undefined ? steps : `${steps} (configured checks omitted: ${legacyChecks.join(",")})`
+  }
+
+  const omittedByIndex = new Map(omitted.map((step) => [step.index, step] as const))
+  let selectedIndex = 0
+  return Array.from({ length: run.steps.length + omitted.length }, (_, index) => {
+    const skipped = omittedByIndex.get(index)
+    if (skipped !== undefined) return `${skipped.name}=${skipped.status}(${skipped.reason})`
+    const selected = run.steps[selectedIndex]
+    if (selected === undefined) throw new Error(`yrd: Run '${run.id}' has invalid omitted-step positions`)
+    selectedIndex += 1
+    return `${selected.name}=${jobStatus(selected)}`
+  }).join(" ")
 }
 
 export type PRListRow = Readonly<{
