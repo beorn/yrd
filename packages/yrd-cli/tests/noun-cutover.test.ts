@@ -66,6 +66,40 @@ describe("noun cutover ratchet", () => {
       new RegExp(`\\bissue\\s+${competeVerb}\\b`, "iu"),
       new RegExp(`\\bqueue\\s+run[^\\n]{0,80}${["--re", "try"].join("")}`, "iu"),
     ]
+    // These files define, project, or assert the standard compiler diagnostic position record.
+    const diagnosticFieldFiles = new Set([
+      "packages/yrd-cli/src/queue-status-view.tsx",
+      "packages/yrd-cli/tests/cli.test.ts",
+      "packages/yrd-queue/src/command.ts",
+      "packages/yrd-queue/tests/command.test.ts",
+    ])
+    const diagnosticObjectField = new RegExp(`\\b${queueNoun}(?=\\s*:)`, "gu")
+    const diagnosticPropertyAccess = new RegExp(`\\.${queueNoun}\\b`, "gu")
+    const retiredBaseOptionAssertion = `.not.toContain("--${queueNoun} <branch>")`
+    const matches = (relative: string, text: string): string[] => {
+      let searchable = diagnosticFieldFiles.has(relative)
+        ? text.replaceAll(diagnosticObjectField, "").replaceAll(diagnosticPropertyAccess, "")
+        : text
+      if (relative === "packages/yrd-cli/tests/cli.test.ts" && searchable.includes(retiredBaseOptionAssertion)) {
+        searchable = searchable.replace(`--${queueNoun} <branch>`, "")
+      }
+      return forbidden.flatMap((expression) => {
+        const match = expression.exec(searchable)
+        return match === null ? [] : [match[0]]
+      })
+    }
+
+    // The standard compiler diagnostic position field is not the retired Yrd Queue noun.
+    expect(
+      matches(
+        "packages/yrd-queue/src/command.ts",
+        `{ file: "src/index.ts", ${queueNoun}: 12, message: "type mismatch" }`,
+      ),
+    ).toEqual([])
+    for (const retiredSense of [`$ yrd ${queueNoun}`, `$ yrd ${queueNoun} status`, `--${queueNoun} main`]) {
+      expect(matches("README.md", retiredSense), retiredSense).not.toEqual([])
+    }
+
     const failures: string[] = []
     const lintDirective = ["next", queueNoun].join("-")
     for (const file of [
@@ -82,10 +116,7 @@ describe("noun cutover ratchet", () => {
       const relative = file.slice(root.length + 1)
       for (const [index, text] of readFileSync(file, "utf8").split(/\r?\n/u).entries()) {
         const searchable = text.replaceAll(lintDirective, "")
-        for (const expression of forbidden) {
-          const match = expression.exec(searchable)
-          if (match !== null) failures.push(`${relative}:${index + 1}: ${match[0]}`)
-        }
+        for (const match of matches(relative, searchable)) failures.push(`${relative}:${index + 1}: ${match}`)
       }
     }
     expect(failures).toEqual([])

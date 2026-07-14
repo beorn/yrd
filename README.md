@@ -121,7 +121,7 @@ For a review-gated repository, the PR-native flow admits checks before the
 revision is queueable:
 
 ```console
-$ yrd pr submit task/another-fix --draft
+$ yrd pr submit issue/another-fix --draft
 $ yrd pr checks PR2 --follow
 $ yrd pr review PR2 --approve --by @cto --ref verdict-42
 $ yrd pr ready PR2
@@ -254,7 +254,7 @@ yrd pr close [selector...] [--json]
 Plain `pr submit` appends the revision, records a check request, schedules the
 configured pre-merge Queue steps, and returns. `--follow` stays attached to that
 same journaled Run. `pr checks` renders the same typed evidence in human or
-one-record-per-line JSON output, including command argv, concise diagnostics,
+newline-delimited JSON output, including command argv, concise diagnostics,
 base-versus-carrier classification, and artifact paths.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:

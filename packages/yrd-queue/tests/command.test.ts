@@ -453,7 +453,12 @@ describe("Queue command adapters", () => {
       if (verdict === undefined) {
         expect(evidence.detail).toContain("[yrd-base-health]")
         expect(evidence.diagnostics).toEqual([
-          { file: "src/index.ts", line: 12, column: 4, message: "error TS2322: Type 'string' is not assignable" },
+          {
+            file: "src/index.ts",
+            line: 12,
+            column: 4,
+            message: "error TS2322: Type 'string' is not assignable",
+          },
           { file: "src/formatted.ts", line: 1, message: "working tree changed during check" },
         ])
       }
@@ -623,7 +628,7 @@ describe("Queue command adapters", () => {
       ),
       { classification: "base" },
     )
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     expect(run.status).toBe("failed")
