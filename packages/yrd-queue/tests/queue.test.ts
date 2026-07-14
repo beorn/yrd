@@ -13,6 +13,8 @@ import {
   withQueue,
   withMerge,
   withStep,
+  QueueRecordSchema,
+  ReplayQueueRecordSchema,
   type AddStepResult,
   type IntegratedShape,
   type Queue,
@@ -398,6 +400,14 @@ describe("Queue", () => {
       const pr = await submitBranch(app, "issue/auditable-merge-only")
       await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
       expect(JSON.parse(JSON.stringify(app.state().queues.records.R1?.stepSelection))).toMatchObject(expectedSelection)
+      const record = app.state().queues.records.R1
+      if (record === undefined) throw new Error("expected a durable merge-only Run")
+      const legacyRecord = {
+        ...record,
+        stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+      }
+      expect(() => QueueRecordSchema.parse(legacyRecord)).toThrow()
+      expect(ReplayQueueRecordSchema.parse(legacyRecord).stepSelection).toEqual(legacyRecord.stepSelection)
     }
 
     await using replayed = await createQueueApp({ defaultSteps: ["check", "merge", "deploy"] }, journal, undefined, id)

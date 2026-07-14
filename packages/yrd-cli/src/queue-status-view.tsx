@@ -1286,10 +1286,11 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
 }
 
 function queueRunSteps(run: QueueRun): string {
-  const omitted = run.stepSelection?.omittedSteps
+  const selection = run.stepSelection
+  const omitted = selection !== undefined && "omittedSteps" in selection ? selection.omittedSteps : undefined
   if (omitted === undefined) {
     const steps = run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")
-    const legacyChecks = run.stepSelection?.omittedChecks
+    const legacyChecks = selection !== undefined && "omittedChecks" in selection ? selection.omittedChecks : undefined
     return legacyChecks === undefined ? steps : `${steps} (configured checks omitted: ${legacyChecks.join(",")})`
   }
 
