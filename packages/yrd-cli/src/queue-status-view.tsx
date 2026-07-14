@@ -1518,7 +1518,7 @@ export function PRDetailView({
                 </Text>
                 <Text>
                   <Text bold>TIME</Text> REQUESTED {toIso(job?.requestedAt)} STARTED{" "}
-                  {job === undefined || job.status === "requested" ? "-" : toIso(job.startedAt)} CHANGED{" "}
+                  {job === undefined || !("startedAt" in job) ? "-" : toIso(job.startedAt)} CHANGED{" "}
                   {toIso(job?.changedAt)} FINISHED {finished}
                 </Text>
               </Box>
@@ -2051,7 +2051,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const stepDurationMs =
-    step.job === undefined || !("finishedAt" in step.job)
+    step.job === undefined || !("startedAt" in step.job) || !("finishedAt" in step.job)
       ? undefined
       : elapsedMs(step.job.startedAt, step.job.finishedAt)
   return {
@@ -2061,7 +2061,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     attempt: step.job === undefined ? "-" : String(step.job.attempt),
     uuid: step.job?.id ?? "-",
     requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
-    started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
+    started: step.job === undefined || !("startedAt" in step.job) ? "-" : toIso(step.job.startedAt),
     finished:
       step.job === undefined || step.job.status === "running" || step.job.status === "requested"
         ? "-"

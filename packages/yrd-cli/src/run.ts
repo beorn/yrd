@@ -463,10 +463,20 @@ async function closeBays(
   const bays = selectedBays(stateOf(app).bays, selectors, io.cwd ?? process.cwd(), "close")
   const closed: Bay[] = []
   for (const bay of bays) {
+    const withdrawing = app.bays
+      .prs()
+      .find((pr) => pr.bay === bay.id && (pr.status === "pushed" || pr.status === "submitted"))
     const result = await app.bays.close({
       bay: bay.id,
       ...(options.withdraw === true ? { withdraw: true } : {}),
     })
+    if (withdrawing !== undefined) {
+      await app.queue.cancel({
+        prs: [withdrawing.id],
+        by: io.runner ?? "operator",
+        reason: "PR withdrawn",
+      })
+    }
     assertJobsPassed(await runJobs(app, app.jobs.requested(result), io), `bay '${bay.id}' close`)
     const current = app.bays.get(bay.id)
     if (current === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after close`)
@@ -492,6 +502,7 @@ async function closePrs(
     await app.bays.closePr({ pr: selector })
     const pr = app.bays.pr(selector)
     if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after close`)
+    await app.queue.cancel({ prs: [pr.id], by: io.runner ?? "operator", reason: "PR withdrawn" })
     prs.push(pr)
   }
   await printResult(
