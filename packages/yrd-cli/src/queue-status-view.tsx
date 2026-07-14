@@ -5,13 +5,25 @@ import type { BaysState, Correlation, PR, PRRevisionClock, PRRevisionTerminal } 
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, Table, Text } from "silvery"
+import { Box, Link, ListView, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
 export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
+
+export type QueueTimelineRow = Readonly<{
+  key: string
+  pr: string
+  run?: string
+  base: string
+  status: string
+  subject: string
+  detail: string
+  clock: string
+  timestampMs: number
+}>
 
 type QueueLogResult = QueueSummary & { prs?: readonly PR[] }
 
@@ -359,6 +371,102 @@ function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
     throw new Error(`yrd: PR '${pr.id}' current revision ${pr.revision}@${pr.headSha} has no ${pr.status} timestamp`)
   }
   return { status: pr.status, at }
+}
+
+function queueTimelineTimestamp(run: QueueRun | undefined, pr: PR): string | undefined {
+  return run?.finishedAt ?? run?.startedAt ?? pr.submittedAt
+}
+
+function queueTimelineDetail(result: QueueStatusResult, pr: PR, run: QueueRun | undefined): string {
+  if (run === undefined) {
+    const position = submittedPrPositions(result.prs).get(pr.id)
+    return position === undefined ? "queued" : `position ${position}`
+  }
+  const step = relevantStep(run)
+  if (step?.job?.status === "failed") return step.job.error.message
+  return queueLanding(run)
+}
+
+export function queueTimelineRows(
+  results: readonly QueueStatusResult[],
+  now: number,
+  latest: boolean,
+  state?: BaysState,
+): QueueTimelineRow[] {
+  const rows = results.flatMap((result) => {
+    const runs = [...result.running, ...result.waiting, ...result.finished]
+    const pending = result.prs
+      .filter(
+        (pr) =>
+          pr.status === "submitted" &&
+          !runs.some((run) =>
+            run.prs.some(
+              (member) => member.id === pr.id && member.revision === pr.revision && member.headSha === pr.headSha,
+            ),
+          ),
+      )
+      .map((pr) => {
+        const timestamp = pr.submittedAt
+        const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
+        return {
+          key: `pending:${result.base}:${pr.id}`,
+          pr: pr.id,
+          base: result.base,
+          status: pr.status,
+          subject: boundedQueue(
+            (pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr.branch ?? pr.id,
+            80,
+          ),
+          detail: queueTimelineDetail(result, pr, undefined),
+          clock: age(timestamp, now, "queue timeline row"),
+          timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
+        }
+      })
+    const runRows = runs.flatMap((run) =>
+      run.prs.map((member) => {
+        const pr = result.prs.find((candidate) => candidate.id === member.id)
+        const timestamp = queueTimelineTimestamp(
+          run,
+          pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR),
+        )
+        const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
+        return {
+          key: `run:${result.base}:${run.id}:${member.id}`,
+          pr: member.id,
+          run: run.id,
+          base: result.base,
+          status: queueOutcome(run),
+          subject: boundedQueue(
+            (pr?.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr?.name ?? member.branch ?? member.id,
+            80,
+          ),
+          detail: queueTimelineDetail(
+            result,
+            pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR),
+            run,
+          ),
+          clock: age(timestamp, now, "queue timeline row"),
+          timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
+        }
+      }),
+    )
+    return [...pending, ...runRows]
+  })
+
+  const sorted = rows.toSorted((left, right) => {
+    if (left.timestampMs !== right.timestampMs) return right.timestampMs - left.timestampMs
+    const prOrder = left.pr.localeCompare(right.pr, undefined, { numeric: true })
+    return prOrder === 0 ? left.key.localeCompare(right.key) : prOrder
+  })
+  if (!latest) return sorted
+  const seen = new Set<string>()
+  const collapsed: QueueTimelineRow[] = []
+  for (const row of sorted) {
+    if (seen.has(row.pr)) continue
+    seen.add(row.pr)
+    collapsed.push(row)
+  }
+  return collapsed
 }
 
 function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {
@@ -1687,6 +1795,50 @@ function queueLogSubmissionTime(
     )
   }
   return clock.admittedBy === "submission" ? clock.submittedAt : undefined
+}
+
+export function QueueTimelineView({
+  results,
+  now,
+  latest = false,
+  state,
+  nav = false,
+  cursorKey,
+  onCursor,
+  onSelect,
+}: {
+  results: readonly QueueStatusResult[]
+  now: number
+  latest?: boolean
+  state?: BaysState
+  nav?: boolean
+  cursorKey?: number
+  onCursor?: (index: number) => void
+  onSelect?: (index: number) => void
+}) {
+  const rows = queueTimelineRows(results, now, latest, state)
+  if (rows.length === 0) return <Text color="$fg-muted">No matching queue rows.</Text>
+  return (
+    <ListView
+      items={rows}
+      nav={nav}
+      cursorKey={cursorKey}
+      onCursor={onCursor}
+      onSelect={onSelect}
+      active={true}
+      getKey={(row) => row.key}
+      estimateHeight={1}
+      renderItem={(row, _index, meta) => (
+        <Box height={1}>
+          <Text wrap="truncate">
+            {meta.isCursor ? "> " : "  "}
+            <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text> {row.pr} {row.run ?? "-"} {row.subject}{" "}
+            <Text color="$fg-muted">{row.detail}</Text>
+          </Text>
+        </Box>
+      )}
+    />
+  )
 }
 
 export function queueLogRows(
