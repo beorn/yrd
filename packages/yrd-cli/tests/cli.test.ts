@@ -601,6 +601,22 @@ describe("runYrd", () => {
     expect(yrdHelp.stdout()).not.toMatch(/^\s+help /mu)
   })
 
+  it.each([
+    { name: "yrd bay", argv: yrd("bay", "submit", "topic/draft", "--draft", "--json") },
+    { name: "git bay", argv: gitBay("submit", "topic/draft", "--draft", "--json") },
+  ])("draft-registers a pushed PR through $name without admission", async ({ argv }) => {
+    const app = await createApp()
+    const output = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(await runYrd(app, argv, output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "bay.submit",
+      prs: [{ id: "PR1", branch: "topic/draft", status: "pushed", revision: 1 }],
+    })
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+    expect(Object.keys(app.state().queues.records)).toEqual([])
+  })
+
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
     const app = await createApp()
     const root = outputIO({ columns: 100 })
@@ -978,7 +994,7 @@ describe("runYrd", () => {
     expect(help.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
   })
 
-  it("draft-submits an authored carrier and queues a recut revision on the same PR", async () => {
+  it("draft-registers an authored carrier and queues a recut revision on the same PR", async () => {
     const checkedRevisions: string[] = []
     const app = await createApp({ waitingCheck: true, checkedRevisions })
     const nextHead = "2".repeat(40)
@@ -1008,10 +1024,9 @@ describe("runYrd", () => {
       command: "pr.submit",
       prs: [{ id: "PR1", branch: "topic/root-carrier", status: "pushed", revision: 1 }],
     })
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "waiting",
-      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
-    })
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(checkedRevisions).toEqual([])
 
     const recut = outputIO()
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
@@ -1036,16 +1051,69 @@ describe("runYrd", () => {
       ],
     })
     expect(app.queue.get("R1")).toMatchObject({
-      status: "failed",
-      error: { code: "stale-pr" },
-    })
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "canceled" })
-    expect(app.queue.get("R2")).toMatchObject({
       status: "waiting",
       prs: [{ id: "PR1", revision: 2, headSha: nextHead }],
     })
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
-    expect(checkedRevisions).toEqual(["PR1@1", "PR1@2"])
+    expect(checkedRevisions).toEqual(["PR1@2"])
+  })
+
+  it("certifies and queues a pin-only authored carrier after draft registration", async () => {
+    const checkedRevisions: string[] = []
+    const app = await createApp({ waitingCheck: true, checkedRevisions })
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: HEAD_SHA,
+            baseSha: BASE_SHA,
+            treeSha,
+            patchId,
+            unchanged: true,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/pin-only", "--draft", "--json"), submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(checkedRevisions).toEqual([])
+
+    const recut = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(JSON.parse(recut.stdout())).toMatchObject({
+      pr: "PR1",
+      revision: 2,
+      baseSha: BASE_SHA,
+      treeSha,
+      patchId,
+      lineage: [1, 2],
+      unchanged: false,
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      revision: 2,
+      headSha: HEAD_SHA,
+      recut: { fromRevision: 1, treeSha, patchId },
+      revisions: [
+        { revision: 1, headSha: HEAD_SHA },
+        { revision: 2, headSha: HEAD_SHA, recut: { fromRevision: 1, treeSha, patchId } },
+      ],
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "waiting",
+      prs: [{ id: "PR1", revision: 2, headSha: HEAD_SHA, baseSha: BASE_SHA }],
+    })
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(checkedRevisions).toEqual(["PR1@2"])
   })
 
   it("keeps unrelated members runnable when a recut supersedes their shared predecessor batch", async () => {
@@ -1910,12 +1978,13 @@ describe("runYrd", () => {
     expect(submitted).toMatchObject({
       command: "pr.submit",
       prs: [{ id: "PR1", branch: "topic/review-me", revision: 1, headSha: HEAD_SHA }],
-      checks: [{ pr: "PR1", status: "passed", run: "R1" }],
     })
+    expect(submitted).not.toHaveProperty("checks")
     expect(submitted.prs[0]).toMatchObject({ status: "pushed" })
     expect(app.state().bays.prs.PR1?.status).toBe("pushed")
-    expect(app.queue.get("R1")).toMatchObject({ status: "passed", steps: [{ name: "check" }] })
-    expect(checkRuns).toEqual(["check"])
+    expect(app.bays.checksRequested("PR1")).toBe(false)
+    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(checkRuns).toEqual([])
 
     const inbox = outputIO()
     expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
@@ -2018,6 +2087,8 @@ describe("runYrd", () => {
       eligibility: { review: { approved: true } },
     })
     expect(app.state().bays.prs.PR1?.status).toBe("submitted")
+    expect(app.queue.get("R1")).toMatchObject({ status: "passed", steps: [{ name: "check" }] })
+    expect(checkRuns).toEqual(["check"])
 
     let followSleeps = 0
     const checks = outputIO({
