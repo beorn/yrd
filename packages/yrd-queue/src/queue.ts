@@ -276,6 +276,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly QueueRun[]>
   waiting(selector: string, step?: string): WaitingQueueStep
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<QueueRun>
+  cancel(args: CancelQueueArgs): Promise<readonly QueueRun[]>
   recover(options: RecoverQueueOptions): Promise<readonly QueueRun[]>
   audit(): QueueAuditResult
   eligibility(selector: string): PREligibility
@@ -293,6 +294,12 @@ export type WaitingQueueStep = Readonly<{
 }>
 
 export type FinishQueueArgs = Omit<JobCompletion, "token"> & Readonly<{ job: Job["id"]; step?: string; token: string }>
+
+export type CancelQueueArgs = Readonly<{
+  prs: readonly string[]
+  by: string
+  reason: string
+}>
 
 export type HasQueue<Shape extends PRShape = PRShape> = Readonly<{ queue: Queue<Shape> }>
 
@@ -712,6 +719,23 @@ function createQueue<Shape extends PRShape>(
           return settle(selected.run.id, runOptions)
         },
       )
+    },
+    async cancel(args) {
+      const selected = new Set(args.prs)
+      const affected: QueueRunId[] = []
+      for (const candidate of orderedQueues(runtime().queues, runtime().jobs)) {
+        if (!candidate.prs.some((pr) => selected.has(pr.id))) continue
+        const active = candidate.steps[candidate.cursor]?.job
+        const cancelable =
+          active?.status === "requested" || active?.status === "running" || active?.status === "waiting"
+        if (!cancelable && Queues.terminal(candidate)) continue
+        if (cancelable) {
+          await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+        }
+        await actions.advance(candidate.id)
+        affected.push(candidate.id)
+      }
+      return affected.map(current)
     },
     async recover(recoverOptions) {
       return observeYrdLifecycle(

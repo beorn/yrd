@@ -18,6 +18,7 @@ import {
   type Queue,
   type PRShape,
   type StepExecution,
+  type StepRunner,
 } from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
@@ -60,7 +61,7 @@ function workspace(): BayWorkspace {
 function queuePlugin(
   options: Readonly<{
     batch?: false | number
-    check?: (input: StepExecution<PRShape>) => JobResult<CheckResult> | Promise<JobResult<CheckResult>>
+    check?: StepRunner<PRShape, CheckResult>
     merge?: (input: StepExecution<ReviewedShape>) => JobResult<{ commit: string; baseSha: string }>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
@@ -72,8 +73,8 @@ function queuePlugin(
 ) {
   const check = withStep(
     "check",
-    (input: StepExecution<PRShape>): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
-      options.check?.(input) ?? { status: "passed", output: { checked: true } },
+    (input, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
+      options.check?.(input, context) ?? { status: "passed", output: { checked: true } },
     {
       revision: options.checkRevision ?? "check-v1",
       output: CheckResultSchema,
@@ -790,6 +791,46 @@ describe("Queue", () => {
     expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
     expect(checkCalls).toBe(1)
     expect(mergeCalls).toBe(1)
+  })
+
+  it("cooperatively aborts a claimed Job when a closed PR terminalizes its Queue Run", async () => {
+    const started = Promise.withResolvers<void>()
+    const aborted = Promise.withResolvers<void>()
+    const log = createLogger("yrd", [{ level: "trace" }, { write: () => {} }])
+    await using app = await createQueueApp(
+      {
+        check: async (_input, context) => {
+          started.resolve()
+          await new Promise<void>((resolve) => {
+            const onAbort = () => {
+              aborted.resolve()
+              resolve()
+            }
+            if (context.signal.aborted) onAbort()
+            else context.signal.addEventListener("abort", onAbort, { once: true })
+          })
+          return { status: "passed", output: { checked: true } }
+        },
+      },
+      undefined,
+      undefined,
+      undefined,
+      log,
+    )
+    const pr = await submitBranch(app, "issue/claimed-cancel")
+    const running = app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    await started.promise
+
+    await app.bays.closePr({ pr: pr.id })
+    await expect(app.queue.cancel({ prs: [pr.id], by: "@chief", reason: "PR withdrawn" })).resolves.toMatchObject([
+      {
+        status: "failed",
+        steps: [{ job: { status: "canceled", attempt: 1, runner: "local" } }],
+      },
+    ])
+
+    await aborted.promise
+    await expect(running).resolves.toMatchObject([{ status: "failed" }])
   })
 
   it("cancels a correlated PR when its active Queue Job is canceled", async () => {

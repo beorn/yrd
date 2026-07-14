@@ -51,6 +51,13 @@ type JobEvidence = Readonly<{
   checkpoint?: JsonValue
 }>
 
+type JobCancellation = Readonly<{
+  status: "canceled"
+  finishedAt: string
+  canceledBy: string
+  cancelReason: string
+}>
+
 export type Job =
   | (JobBase & { status: "requested" })
   | (JobBase & JobExecution & { status: "running"; leaseExpiresAt: string })
@@ -60,9 +67,8 @@ export type Job =
       JobExecution &
       JobEvidence & { status: "failed"; finishedAt: string; error: JobError; output?: JsonValue })
   | (JobBase & JobExecution & { status: "lost"; finishedAt: string; lostReason: string })
-  | (JobBase &
-      JobExecution &
-      JobEvidence & { status: "canceled"; finishedAt: string; canceledBy: string; cancelReason: string })
+  | (JobBase & JobCancellation)
+  | (JobBase & JobExecution & JobEvidence & JobCancellation)
 
 export type JobsState = Readonly<{
   byId: Readonly<Record<string, Job>>
@@ -81,7 +87,7 @@ const TerminalResultSchema = z.discriminatedUnion("status", [
 const CancelJobInputSchema = z
   .object({
     id: IdSchema,
-    attempt: AttemptSchema,
+    attempt: z.number().int().nonnegative(),
     by: IdSchema,
     reason: z.string().trim().min(1),
   })
@@ -228,9 +234,9 @@ export const Job = Object.freeze({
 
       case "cancel":
         requireAttempt(current, change)
-        requireStatus(current, "running or waiting", "running", "waiting")
+        requireStatus(current, "requested, running or waiting", "requested", "running", "waiting")
         return {
-          ...execution(current),
+          ...(current.status === "requested" ? jobBase(current) : execution(current)),
           ...(current.status === "waiting" ? evidence(current) : {}),
           status: "canceled",
           changedAt: at,
@@ -732,7 +738,7 @@ function jobBase(job: Job): JobBase {
   return { id, definition, revision, input, ...(key === undefined ? {} : { key }), attempt, requestedAt, changedAt }
 }
 
-function execution(job: Exclude<Job, { status: "requested" }>): JobBase & JobExecution {
+function execution(job: Job & JobExecution): JobBase & JobExecution {
   return { ...jobBase(job), startedAt: job.startedAt, runner: job.runner }
 }
 
