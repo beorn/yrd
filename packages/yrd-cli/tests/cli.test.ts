@@ -655,7 +655,7 @@ describe("runYrd", () => {
 
     const prime = outputIO({ currentBranch: () => "topic/direct" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
-    const briefing = JSON.parse(prime.stdout())
+    const briefing = JSON.parse(prime.stdout()) as Readonly<{ loop: readonly string[] }>
     expect(briefing).toMatchObject({ command: "prime", live: { pr: "PR1", base: "main" } })
     expect(briefing.loop).toContain("fix the branch and run yrd pr submit again")
     expect(briefing.loop.join("\n")).not.toMatch(/\bretry\b/u)
@@ -866,7 +866,9 @@ describe("runYrd", () => {
     const before = await Array.fromAsync(app.events()).then((events) => events.length)
     const output = outputIO()
     expect(await runYrd(app, yrd("pr", "merge", "PR1", "--json"), output.io)).toBe(1)
-    const refusal = JSON.parse(output.stderr())
+    const refusal = JSON.parse(output.stderr()) as Readonly<{
+      guidance: Readonly<{ inspect: string; resubmit: string }>
+    }>
     expect(refusal).toMatchObject({
       command: "pr.merge",
       status: "rejected",
@@ -4103,11 +4105,12 @@ describe("correlation projections", () => {
   it("keeps structured correlation in terminal Run, show, and log JSON", async () => {
     for (const terminal of ["integrated", "rejected", "canceled"] as const) {
       const { app, pr, run } = await correlatedTerminalRun(terminal)
+      const persisted = JSON.parse(JSON.stringify(run)) as Readonly<{
+        prs: readonly Readonly<Record<string, unknown>>[]
+      }>
 
       expect.soft(pr.status).toBe(terminal)
-      expect
-        .soft(JSON.parse(JSON.stringify(run)).prs)
-        .toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
+      expect.soft(persisted.prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect
         .soft(await projectedLogRows(app, pr.id))
@@ -4144,8 +4147,11 @@ describe("correlation projections", () => {
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
     const run = app.queue.get("R1")
     if (run === undefined) throw new Error("expected an uncorrelated Run fixture")
+    const persisted = JSON.parse(JSON.stringify(run)) as Readonly<{
+      prs: readonly Readonly<Record<string, unknown>>[]
+    }>
 
-    expect(JSON.parse(JSON.stringify(run)).prs[0]).not.toHaveProperty("correlation")
+    expect(persisted.prs[0]).not.toHaveProperty("correlation")
     expect(queueShowData(run).prs[0]).not.toHaveProperty("correlation")
     expect((await projectedLogRows(app))[0]).not.toHaveProperty("correlation")
   })

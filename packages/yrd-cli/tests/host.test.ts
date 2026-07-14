@@ -792,7 +792,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
         },
       }),
     ).toBe(1)
-    const rejected = JSON.parse(refusal)
+    const rejected = JSON.parse(refusal) as Readonly<{
+      guidance: Readonly<{ inspect: string; resubmit: string }>
+    }>
     expect(rejected).toMatchObject({
       command: "pr.merge",
       status: "rejected",
