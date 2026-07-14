@@ -5,7 +5,7 @@ import type { BaysState, Correlation, PR, PRRevisionClock, PRRevisionTerminal } 
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, ListView, Table, Text } from "silvery"
+import { Box, Link, ListView, Spinner, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
 
@@ -2296,6 +2296,121 @@ function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
   )
 }
 
+function TimelineStatusBand({ row }: { row: QueueTimelineProjectedRow }) {
+  const colors: Record<QueueTimelineStatus, Readonly<{ backgroundColor: string; color: string }>> = {
+    pending: { backgroundColor: "$bg-accent", color: "$fg-on-accent" },
+    running: { backgroundColor: "$bg-info", color: "$fg-on-info" },
+    integrated: { backgroundColor: "$bg-success", color: "$fg-on-success" },
+    rejected: { backgroundColor: "$bg-error", color: "$fg-on-error" },
+    "environment-refused": { backgroundColor: "$bg-warning", color: "$fg-on-warning" },
+    canceled: { backgroundColor: "$bg-inverse", color: "$fg-on-inverse" },
+  }
+  const label = row.status === "environment-refused" ? "env-refused" : row.status
+  return (
+    <Box
+      width={17}
+      height={1}
+      flexShrink={0}
+      minWidth={0}
+      gap={1}
+      paddingX={1}
+      overflow="hidden"
+      backgroundColor={colors[row.status].backgroundColor}
+      color={colors[row.status].color}
+    >
+      {row.status === "running" ? <Spinner type="line" /> : <Text>{row.glyph}</Text>}
+      <Text bold wrap="truncate">
+        {label}
+      </Text>
+    </Box>
+  )
+}
+
+function TimelineHeader({ includeDate }: { includeDate: boolean }) {
+  return (
+    <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+      <Box width={includeDate ? 21 : 10} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted" wrap="truncate">
+          {"  TIME"}
+        </Text>
+      </Box>
+      <Box width={17} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted">STATUS</Text>
+      </Box>
+      <Box width={16} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted" wrap="truncate">
+          RUN·PR
+        </Text>
+      </Box>
+      <Box flexGrow={1} flexBasis={0} minWidth={6}>
+        <Text color="$fg-muted" wrap="truncate">
+          SUBJECT
+        </Text>
+      </Box>
+      <Box flexGrow={1} flexBasis={0} minWidth={10}>
+        <Text color="$fg-muted" wrap="truncate">
+          DETAIL
+        </Text>
+      </Box>
+      <Box width={14} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">AGE/TOOK</Text>
+      </Box>
+    </Box>
+  )
+}
+
+function TimelineProjectedRow({
+  row,
+  cursor,
+  includeDate,
+}: {
+  row: QueueTimelineProjectedRow
+  cursor: boolean
+  includeDate: boolean
+}) {
+  const color = row.status === "integrated" ? "$fg-muted" : undefined
+  const clock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
+  const identity = `${row.run === undefined ? "" : `${row.run}·`}${row.prs.join(",")}`
+  const transit = `${timelineMetric(row.ageMs)}/${timelineMetric(row.tookMs)}`
+  return (
+    <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+      <Box width={includeDate ? 21 : 10} flexShrink={0} minWidth={0}>
+        <Text color={color} wrap="truncate">
+          {cursor ? "> " : "  "}
+          {clock}
+        </Text>
+      </Box>
+      <TimelineStatusBand row={row} />
+      <Box width={16} flexShrink={0} minWidth={0}>
+        <Text color={color} wrap="truncate">
+          {identity}
+        </Text>
+      </Box>
+      <Box flexGrow={1} flexBasis={0} minWidth={6}>
+        <Text color={color} wrap="truncate">
+          {row.subject}
+        </Text>
+      </Box>
+      <Box flexGrow={1} flexBasis={0} minWidth={10}>
+        {row.failure === undefined ? (
+          <Text color={color} wrap="truncate">
+            {row.detail}
+          </Text>
+        ) : (
+          <Text wrap="truncate">
+            {row.failure.code}: <Text color="$fg-muted">{causalSummary(row.failure.message)}</Text>
+          </Text>
+        )}
+      </Box>
+      <Box width={14} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color={color} wrap="truncate">
+          {transit}
+        </Text>
+      </Box>
+    </Box>
+  )
+}
+
 function ProjectedQueueTimeline({
   projection,
   nav,
@@ -2343,26 +2458,22 @@ function ProjectedQueueTimeline({
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (
-        <ListView
-          items={rows}
-          nav={nav}
-          cursorKey={cursorKey}
-          onCursor={onCursor}
-          onSelect={onSelect}
-          active={true}
-          getKey={(row) => row.id}
-          estimateHeight={1}
-          renderItem={(row, _index, meta) => (
-            <Box height={1}>
-              <Text wrap="truncate">
-                {meta.isCursor ? "> " : "  "}
-                <Text bold>{row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)}</Text>{" "}
-                <StatusValue value={row.status} /> {row.run ?? "-"}·{row.prs.join(",")} {row.subject}{" "}
-                <Text color="$fg-muted">{row.detail}</Text>
-              </Text>
-            </Box>
-          )}
-        />
+        <Box flexDirection="column">
+          <TimelineHeader includeDate={includeDate} />
+          <ListView
+            items={rows}
+            nav={nav}
+            cursorKey={cursorKey}
+            onCursor={onCursor}
+            onSelect={onSelect}
+            active={true}
+            getKey={(row) => row.id}
+            estimateHeight={1}
+            renderItem={(row, _index, meta) => (
+              <TimelineProjectedRow row={row} cursor={meta.isCursor} includeDate={includeDate} />
+            )}
+          />
+        </Box>
       )}
       {projection.display.hidden === 0 ? null : <Text color="$fg-muted">... {projection.display.hidden} more</Text>}
       {projection.coverage.complete ? null : (
@@ -2404,8 +2515,9 @@ export function QueueTimelineView({
       />
     )
   }
-  if (results === undefined || now === undefined)
-    {throw new Error("yrd: queue timeline requires results and snapshot time")}
+  if (results === undefined || now === undefined) {
+    throw new Error("yrd: queue timeline requires results and snapshot time")
+  }
   const rows = queueTimelineRows(results, now, latest, state)
   return (
     <Box flexDirection="column">
@@ -2760,48 +2872,55 @@ export function QueueLogView({
     }),
   )
   const includeDate = visibleDates.size > 1
+  const tableRows = visibleRows.map((row) => ({
+    ...row,
+    clock: queueLogClock(row.startedAt, false, includeDate),
+    level: queueLogLevel(row.outcome),
+    baseLabel: `[${row.base}]`,
+    runIdentity: compact ? `r${row.revision}/${row.run}` : `(rev${row.revision}, run${row.run.replace(/^R/u, "")})`,
+    ageValue: `age=${row.ageMs === undefined ? "-" : relativeAge(row.ageMs)}`,
+    totalValue: `total=${row.totalDurationMs === undefined ? "-" : mediaDuration(row.totalDurationMs)}`,
+    activeValue: `active=${row.activeDurationMs === undefined ? "-" : mediaDuration(row.activeDurationMs)}`,
+    waitValue: `wait=${row.waitDurationMs === undefined ? "-" : mediaDuration(row.waitDurationMs)}`,
+  }))
+  const identityColumns = compact
+    ? []
+    : [
+        { header: "LEVEL", key: "level" as const, width: 5 },
+        { header: "BASE", key: "baseLabel" as const, width: 12 },
+      ]
+  const logColumns = [
+    { header: "TIME", key: "clock" as const, width: includeDate ? 21 : 9 },
+    ...identityColumns,
+    { header: "PR", key: "pr" as const, maxWidth: compact ? 5 : 8 },
+    { header: "REV·RUN", key: "runIdentity" as const, maxWidth: compact ? 8 : 18 },
+    { header: "OUTCOME", key: "outcome" as const, maxWidth: 13 },
+    ...(compact
+      ? []
+      : [
+          {
+            header: "ART",
+            key: "locations" as const,
+            width: 9,
+            render: (row: (typeof tableRows)[number]) => <QueueLogLocationLinks entries={row.locations} compact />,
+          },
+        ]),
+    { header: "SUBJECT", key: "subject" as const, minWidth: 0, grow: true },
+    { header: "AGE", key: "ageValue" as const, align: "right" as const },
+    { header: "TOTAL", key: "totalValue" as const, align: "right" as const },
+    { header: "ACTIVE", key: "activeValue" as const, align: "right" as const },
+    { header: "WAIT", key: "waitValue" as const, align: "right" as const },
+  ]
+  const hidden = Math.max(0, rows.length - visibleRows.length)
   void coverage
   return (
     <Box flexDirection="column">
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching terminal log rows.</Text>
       ) : (
-        <Box flexDirection="column">
-          <Box height={1}>
-            <Text color="$fg-muted" wrap="truncate">
-              {compact
-                ? "GLYPH TIME PR REV RUN OUTCOME ART SUBJECT AGE TOTAL"
-                : "GLYPH TIME LEVEL [BASE] PR (REV,RUN) OUTCOME ART SUBJECT AGE TOTAL ACTIVE WAIT"}
-            </Text>
-          </Box>
-          {visibleRows.map((row) => {
-            const identity = compact
-              ? `${row.glyph} ${queueLogClock(row.startedAt, true, includeDate)} ${row.pr} r${row.revision} ${row.run} ${row.outcome}`
-              : `${row.glyph} ${queueLogClock(row.startedAt, false, includeDate)} ${queueLogLevel(row.outcome)} [${row.base}] ${row.pr} (rev${row.revision}, run${row.run.replace(/^R/u, "")}) ${row.outcome}`
-            const hasWait = Math.round((row.waitDurationMs ?? 0) / 1_000) > 0
-            return (
-              <Box key={`${row.run}:${row.pr}:${row.revision}`} height={1}>
-                <Text wrap="truncate">
-                  {identity}
-                  {row.locations.length === 0 ? null : (
-                    <>
-                      {" "}
-                      <QueueLogLocationLinks entries={row.locations} compact />
-                    </>
-                  )}{" "}
-                  {row.subject}
-                  {row.ageMs === undefined ? null : ` age=${relativeAge(row.ageMs)}`}
-                  {row.totalDurationMs === undefined ? null : ` total=${mediaDuration(row.totalDurationMs)}`}
-                  {!hasWait || row.activeDurationMs === undefined
-                    ? null
-                    : ` active=${mediaDuration(row.activeDurationMs)}`}
-                  {!hasWait || row.waitDurationMs === undefined ? null : ` wait=${mediaDuration(row.waitDurationMs)}`}
-                </Text>
-              </Box>
-            )
-          })}
-        </Box>
+        <Table data={tableRows} columns={logColumns} padding={1} showHeader={false} />
       )}
+      {hidden === 0 ? null : <Text color="$fg-muted">... {hidden} more</Text>}
     </Box>
   )
 }

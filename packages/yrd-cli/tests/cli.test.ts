@@ -35,6 +35,7 @@ import {
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
 import { renderString } from "silvery"
+import { createRenderer } from "@silvery/test"
 import { run } from "silvery/runtime"
 import {
   withContests,
@@ -46,6 +47,7 @@ import {
 import {
   QueueShowView,
   QueueLogView,
+  QueueTimelineView,
   QueueWatchView,
   activeWatchRow,
   humanQueueProjection,
@@ -1975,7 +1977,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("builds one filtered status-major timeline and FLOW projection from the same snapshot", () => {
+  it("builds one filtered status-major timeline and FLOW projection from the same snapshot", async () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const member = (id: string, revision: number, headSha: string) => ({
@@ -2015,6 +2017,15 @@ describe("runYrd", () => {
       steps: [],
       error: { code: "queue-environment-refused", message: "origin was unavailable" },
     })
+    const canceled = fakeRun({
+      id: "R6",
+      status: "failed",
+      pr: { id: "PR7", revision: 1, headSha: "7".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-13T11:27:00.000Z",
+      finishedAt: "2026-07-13T11:47:00.000Z",
+      steps: [],
+      error: { code: "canceled", message: "operator canceled the run" },
+    })
     const running = fakeRun({
       id: "R4",
       status: "running",
@@ -2029,6 +2040,7 @@ describe("runYrd", () => {
       { id: "PR4", status: "submitted", name: "four", submittedAt: "2026-07-13T10:40:00.000Z" },
       { id: "PR5", status: "submitted", name: "five", submittedAt: "2026-07-13T11:40:00.000Z" },
       { id: "PR6", status: "submitted", name: "six", submittedAt: "2026-07-13T11:55:00.000Z" },
+      { id: "PR7", status: "withdrawn", name: "seven", submittedAt: "2026-07-13T11:20:00.000Z" },
     ].map((pr, index) => ({
       ...pr,
       branch: `topic/${pr.id}`,
@@ -2041,7 +2053,7 @@ describe("runYrd", () => {
       prs,
       running: [running],
       waiting: [],
-      finished: [integrated, rejected, environment],
+      finished: [integrated, rejected, environment, canceled],
       pause: {
         base: "main",
         reason: "operator freeze",
@@ -2071,27 +2083,71 @@ describe("runYrd", () => {
       ["pending", "pending", "PR4"],
       ["pending", "pending", "PR6"],
       ["running", "running", "R4"],
+      ["completed", "canceled", "R6"],
       ["completed", "environment-refused", "R3"],
       ["completed", "rejected", "R2"],
       ["completed", "integrated", "R1"],
     ])
     expect(projection.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR1", "PR2"])
-    expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 2 })
+    expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 3 })
     expect(projection.coverage).toEqual({
       requestedSince: "2026-07-13T06:00:00.000Z",
       retainedSince: "2026-07-13T07:00:00.000Z",
       complete: false,
     })
     expect(projection.metrics).toMatchObject({
-      terminalAttempts: 3,
-      outcomes: { integrated: 1, rejected: 1, environmentRefused: 1, canceled: 0 },
+      terminalAttempts: 4,
+      outcomes: { integrated: 1, rejected: 1, environmentRefused: 1, canceled: 1 },
       decisionRejection: { rejected: 1, decisions: 2, rate: 0.5 },
       activeRun: {
-        allTerminal: { n: 3, minMs: 10 * minute, avgMs: 20 * minute, p50Ms: 20 * minute },
+        allTerminal: { n: 4, minMs: 10 * minute, avgMs: 20 * minute, p50Ms: 20 * minute },
         integratedOnly: { n: 1, minMs: 10 * minute, avgMs: 10 * minute },
       },
-      queueWait: { n: 4, avgMs: 20 * minute, p50Ms: 20 * minute, p90Ms: 35 * minute },
+      queueWait: { n: 5, avgMs: 1_044_000, p50Ms: 15 * minute, p90Ms: 35 * minute },
     })
+    const rendered = await renderString(
+      createElement(QueueTimelineView, {
+        projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+      }),
+      { width: 200, height: 20, plain: true },
+    )
+    expect(rendered).toContain("TIME")
+    expect(rendered).toContain("STATUS")
+    expect(rendered).toContain("RUN·PR")
+    expect(rendered).toContain("SUBJECT")
+    expect(rendered).toContain("DETAIL")
+    expect(rendered).toContain("AGE/TOOK")
+    expect(rendered).toContain("R4·PR5")
+    expect(rendered).toContain("R1·PR1,PR2")
+    expect(rendered).toContain("typecheck-failed")
+    const renderStyledTimeline = createRenderer({ cols: 200, rows: 20 })
+    const styled = renderStyledTimeline(
+      createElement(QueueTimelineView, {
+        projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+      }),
+    )
+    await styled.waitForLayoutStable()
+    try {
+      for (const [status, identity] of [
+        ["pending", "PR4"],
+        ["running", "R4·PR5"],
+        ["canceled", "R6·PR7"],
+        ["env-refused", "R3·PR4"],
+        ["rejected", "R2·PR3"],
+        ["integrated", "R1·PR1,PR2"],
+      ] as const) {
+        const row = styled.lines.findIndex((line) => line.includes(status) && line.includes(identity))
+        expect(row, status).toBeGreaterThan(0)
+        expect(
+          Array.from({ length: 17 }, (_value, offset) => styled.cell(11 + offset, row).bg).some(
+            (background) => background !== null,
+          ),
+          `${status} STATUS band`,
+        ).toBe(true)
+      }
+    } finally {
+      styled.unmount()
+    }
 
     const integratedOnly = queueTimelineProjection([result], {
       now,
@@ -3572,8 +3628,9 @@ describe("runYrd", () => {
 
     const human = outputIO({ color: true, columns: 120 })
     expect(await runYrd(app, yrd("log", "--base", "main"), human.io)).toBe(0)
-    expect(human.stdout()).toContain("RUN")
-    expect(human.stdout()).toContain("OUTCOME")
+    expect(human.stdout()).not.toMatch(/^\s*(?:TIME|RUN|OUTCOME)\b/mu)
+    expect(human.stdout()).not.toContain("[x]")
+    expect(human.stdout()).toContain("(rev1, run1)")
     expect(human.stdout()).toContain("PR1")
     expect(human.stdout()).toContain("integrated")
   })
@@ -4405,22 +4462,6 @@ describe("runYrd", () => {
     })
     expect(JSON.parse(JSON.stringify(row))).toMatchObject({ submittedAt: "2026-07-12T10:49:24.335Z" })
 
-    const expectedHistory = new Map([
-      [
-        80,
-        [
-          "GLYPH TIME PR REV RUN OUTCOME ART SUBJECT AGE TOTAL",
-          "[x] 11:01 PR23 r4 R4 integrated art:12 topic/R4 age=1h total=48:07 active=11:26…",
-        ].join("\n"),
-      ],
-      [
-        120,
-        [
-          "GLYPH TIME LEVEL [BASE] PR (REV,RUN) OUTCOME ART SUBJECT AGE TOTAL ACTIVE WAIT",
-          "[x] 11:01:16 INFO [main] PR23 (rev4, run4) integrated art:12 topic/R4 age=1h total=48:07 active=11:26 wait=36:42",
-        ].join("\n"),
-      ],
-    ])
     for (const width of [80, 120]) {
       const human = await renderString(createElement(QueueLogView, { rows, columns: width }), {
         width,
@@ -4428,14 +4469,19 @@ describe("runYrd", () => {
         plain: true,
       })
       const physicalRows = human.split("\n").filter((row) => row.includes("R4"))
-      expect(human).toBe(expectedHistory.get(width))
+      expect(human).not.toMatch(/^\s*(?:TIME|LEVEL|BASE|PR|REV·RUN|OUTCOME|SUBJECT|AGE|TOTAL|ACTIVE|WAIT)\b/mu)
+      expect(human).not.toContain("GLYPH")
+      expect(human).not.toContain("[x]")
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
-      expect(physicalRows[0]).toContain(width === 80 ? "PR23 r4 R4 integrated" : "PR23 (rev4, run4) integrated")
-      expect(physicalRows[0]).toContain("48:07")
-      expect(physicalRows[0]).toContain("11:26")
-      if (width === 120) expect(physicalRows[0]).toContain("36:42")
-      expect(physicalRows[0]).toContain("art:12")
+      expect(physicalRows[0]).toContain("PR23")
+      expect(physicalRows[0]).toContain(width === 80 ? "r4/R4" : "(rev4, run4)")
+      expect(physicalRows[0]).toContain("integrated")
+      expect(physicalRows[0]).toContain("age=1h")
+      expect(physicalRows[0]).toContain("total=48:07")
+      expect(physicalRows[0]).toContain("active=11:26")
+      expect(physicalRows[0]).toContain("wait=36:42")
+      if (width === 120) expect(physicalRows[0]).toContain("art:12")
       expect(human).not.toMatch(/\n\s*\n\s*\n/u)
       expect(human).not.toContain("stdout=/")
     }
@@ -4473,15 +4519,15 @@ describe("runYrd", () => {
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((row) => row.startsWith("[x]"))
+      const physicalRows = human.split("\n").filter((line) => /\bPR2[23]\b/u.test(line))
       expect(physicalRows).toHaveLength(2)
       expect(physicalRows[0]).toContain("2026-07-12T11:01:16Z")
       expect(physicalRows[1]).toContain("2026-07-11T23:59:58Z")
       expect(Math.max(...physicalRows.map((row) => row.length))).toBeLessThanOrEqual(width)
     }
 
-    const tty = await renderString(createElement(QueueLogView, { rows, columns: 80 }), {
-      width: 80,
+    const tty = await renderString(createElement(QueueLogView, { rows, columns: 120 }), {
+      width: 120,
       height: 8,
       plain: false,
     })
@@ -4684,7 +4730,7 @@ describe("runYrd", () => {
       .toThrow(/precedes/u)
   })
 
-  it("renders the newest twenty history records with subject, glyph, and bounded physical rows", async () => {
+  it("renders the newest twenty history records as honest columnar rows without list glyphs", async () => {
     const runs = Array.from({ length: 22 }, (_, index) => {
       const minute = String(index).padStart(2, "0")
       return fakeRun({
@@ -4722,13 +4768,14 @@ describe("runYrd", () => {
       })
       const physicalRows = human.split("\n").filter((row) => /\bPR1\b/u.test(row))
       expect(physicalRows).toHaveLength(20)
-      expect(physicalRows[0]).toContain(width === 80 ? "PR1 r1 R22 rejected" : "PR1 (rev1, run22) rejected")
-      expect(physicalRows.at(-1)).toContain(width === 80 ? "PR1 r1 R3 rejected" : "PR1 (rev1, run3) rejected")
-      expect(physicalRows[0]).toContain("[!]")
-      expect(physicalRows[0]).toContain("fix(cli): bounded operator history")
+      expect(physicalRows[0]).toContain(width === 80 ? "r1/R22" : "(rev1, run22)")
+      expect(physicalRows.at(-1)).toContain(width === 80 ? "r1/R3" : "(rev1, run3)")
+      expect(physicalRows[0]).not.toContain("[!]")
+      expect(physicalRows[0]).toContain("fix(")
       expect(Math.max(...human.split("\n").map((row) => row.length))).toBeLessThanOrEqual(width)
-      expect(human).not.toContain(width === 80 ? "PR1 r1 R2 rejected" : "PR1 (rev1, run2) rejected")
-      expect(human).not.toContain(width === 80 ? "PR1 r1 R1 rejected" : "PR1 (rev1, run1) rejected")
+      expect(human).not.toMatch(width === 80 ? /r1\/R2\s/u : /\(rev1, run2\)\s/u)
+      expect(human).not.toMatch(width === 80 ? /r1\/R1\s/u : /\(rev1, run1\)\s/u)
+      expect(human).toContain("... 2 more")
     }
   })
 
