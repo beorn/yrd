@@ -1059,6 +1059,53 @@ describe("runYrd", () => {
     expect(runsJson).toMatchObject({ command: "pr.runs", trackerBridge: issueJson.trackerBridge })
   })
 
+  it("keeps pr runs JSON on one journal snapshot when a run lands during the read", async () => {
+    const issueRef = "@km/all/21091-snapshot-race"
+    await using app = await createApp()
+    await app.bays.submit({
+      branch: "topic/snapshot-race",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+      issue: issueRef,
+    })
+
+    let raced = false
+    const racingApp = {
+      ...app,
+      async journalSnapshot() {
+        const snapshot = await app.journalSnapshot()
+        if (!raced) {
+          raced = true
+          await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+        }
+        return snapshot
+      },
+    }
+
+    const output = outputIO()
+    expect(await runYrd(racingApp, yrd("pr", "runs", "PR1", "--json"), output.io), output.stderr()).toBe(0)
+    const parsed = parseTrackerBridgeEnvelope(output.stdout()) as TrackerBridgeEnvelope & {
+      runs: ReturnType<typeof queueShowData>[]
+    }
+    const latest = await app.journalSnapshot()
+
+    // A run appended between reads must not be paired with the older tracker cursor.
+    expect(parsed.runs).toMatchObject([
+      {
+        run: "R1",
+        attempts: [
+          { run: "R1", step: "check" },
+          { run: "R1", step: "merge" },
+        ],
+      },
+    ])
+    expect(parsed.trackerBridge).toMatchObject({
+      asOf: latest.asOf,
+      deliveries: [{ issueRef, pr: "PR1", revision: 1, status: "integrated", landingSha: MERGED_SHA }],
+    })
+  })
+
   it("emits lossless queue runs and attempt history only when log --all is requested", async () => {
     const app = await createApp()
     await openAndSubmit(app)

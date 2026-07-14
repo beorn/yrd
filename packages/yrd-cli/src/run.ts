@@ -678,18 +678,28 @@ async function viewPr(
 }
 
 async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const snapshot = await app.journalSnapshot()
-  const pr = resolvePR(snapshot.state.bays, selector)
-  if (pr === undefined) refusal(`no PR '${selector}'`)
-  const runs = prQueueRuns(app, pr)
-  const attempts = await queueLogAttempts(app.events())
-  const data = runs.map((run) => queueShowData(run, runs, attempts))
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.runs", pr, runs: data, trackerBridge: trackerBridge(snapshot, ({ pr: id }) => id === pr.id) },
-    createElement(PRRunsView, { runs: data }),
-  )
+  for (let read = 0; read < 3; read += 1) {
+    const snapshot = await app.journalSnapshot()
+    const pr = resolvePR(snapshot.state.bays, selector)
+    if (pr === undefined) {
+      const confirmed = await app.journalSnapshot()
+      if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
+      refusal(`no PR '${selector}'`)
+    }
+    const runs = prQueueRuns(app, pr)
+    const attempts = await queueLogAttempts(app.events())
+    const confirmed = await app.journalSnapshot()
+    if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
+    const data = runs.map((run) => queueShowData(run, runs, attempts))
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command: "pr.runs", pr, runs: data, trackerBridge: trackerBridge(snapshot, ({ pr: id }) => id === pr.id) },
+      createElement(PRRunsView, { runs: data }),
+    )
+    return
+  }
+  refusal(`journal changed while reading PR '${selector}' runs; retry`)
 }
 
 async function diffPr(
