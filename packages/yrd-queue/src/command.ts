@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
@@ -153,22 +153,34 @@ function configuredCommand<Shape extends PRShape>(
       YRD_TARGET: input.targetSha ?? primary.headSha,
       ...options.variables?.(input),
     }
-    const result = await process.run({
-      argv,
-      cwd,
-      env: commandEnvironment(options.env ?? globalThis.process.env, variables),
-      signal: context.signal,
-      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
-      onOutput: () => context.reportProgress?.(),
-    })
-    const artifacts = await writeArtifacts(
+    const artifactSink = await createArtifactSink(
       resolve(options.artifactRoot ?? join(cwd, ".yrd-artifacts")),
       input,
       context.attempt,
-      result.stdout,
-      result.stderr,
     )
+    let result: Awaited<ReturnType<Process["run"]>>
+    try {
+      result = await process.run({
+        argv,
+        cwd,
+        env: commandEnvironment(options.env ?? globalThis.process.env, variables),
+        signal: context.signal,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
+        onOutput: (output) => {
+          artifactSink.write(output)
+          context.reportProgress?.()
+        },
+      })
+    } catch (cause) {
+      try {
+        await artifactSink.drain()
+      } catch (artifactCause) {
+        throw new AggregateError([cause, artifactCause], "yrd: process and artifact stream both failed")
+      }
+      throw cause
+    }
+    const artifacts = await artifactSink.finish(result.stdout, result.stderr)
     const message = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter((part) => part !== "").join("\n")
     const detail = commandDetail(message)
     const diagnostics = commandDiagnostics(message)
@@ -305,7 +317,7 @@ function validateCommand(command: unknown, purpose: string): readonly string[] {
   return Object.freeze(argv)
 }
 
-async function writeArtifacts(
+async function writeTerminalArtifacts(
   root: string,
   input: StepExecution,
   attempt: number,
@@ -327,6 +339,78 @@ async function writeArtifacts(
   return artifacts
 }
 
+type ArtifactStream = "stdout" | "stderr"
+type ArtifactStreamState = {
+  readonly path: string
+  readonly hash: ReturnType<typeof createHash>
+  seen: boolean
+}
+
+async function createArtifactSink(root: string, input: StepExecution, attempt: number) {
+  const dir = join(root, input.run, `${input.index}-${input.step}`, `attempt-${attempt}`)
+  const streams: Record<ArtifactStream, ArtifactStreamState> = {
+    stdout: { path: join(dir, "stdout.log"), hash: createHash("sha256"), seen: false },
+    stderr: { path: join(dir, "stderr.log"), hash: createHash("sha256"), seen: false },
+  }
+  try {
+    await mkdir(dir, { recursive: true })
+    await Promise.all(Object.values(streams).map(({ path }) => rm(path, { force: true })))
+  } catch (cause) {
+    throw new Error(
+      `yrd: could not prepare step artifact directory ${dir}; inspect its permissions and free space, then retry the run`,
+      { cause },
+    )
+  }
+
+  let writes = Promise.resolve()
+  let writeFailure: unknown
+  const write = (output: Readonly<{ stream: ArtifactStream; chunk: Uint8Array }>): void => {
+    if (writeFailure !== undefined) throw writeFailure
+    const name = output.stream
+    const stream = streams[name]
+    const chunk = output.chunk.slice()
+    const first = !stream.seen
+    stream.seen = true
+    stream.hash.update(chunk)
+    writes = writes
+      .then(async () => {
+        if (writeFailure !== undefined) return
+        if (first) await writeFile(stream.path, chunk)
+        else await appendFile(stream.path, chunk)
+      })
+      .catch((cause: unknown) => {
+        writeFailure ??= new Error(
+          `yrd: could not stream ${name} artifact ${stream.path}; inspect its directory permissions and free space, then retry the run`,
+          { cause },
+        )
+      })
+  }
+  const drain = async (): Promise<void> => {
+    await writes
+    if (writeFailure !== undefined) throw writeFailure
+  }
+  const finish = async (stdout: string, stderr: string): Promise<StepArtifact[]> => {
+    await drain()
+    const artifacts: StepArtifact[] = []
+    for (const [name, content] of [
+      ["stdout", stdout],
+      ["stderr", stderr],
+    ] as const) {
+      const stream = streams[name]
+      if (content === "") {
+        if (stream.seen) await rm(stream.path, { force: true })
+        continue
+      }
+      const finalHash = createHash("sha256").update(content).digest("hex")
+      const streamedHash = stream.seen ? stream.hash.digest("hex") : undefined
+      if (streamedHash !== finalHash) await writeFile(stream.path, content)
+      artifacts.push({ name, path: stream.path })
+    }
+    return artifacts
+  }
+  return Object.freeze({ drain, finish, write })
+}
+
 async function failureEvidence(
   options: Readonly<{
     command: readonly string[]
@@ -341,7 +425,7 @@ async function failureEvidence(
 ): Promise<CommandEvidence> {
   const artifacts =
     options.artifacts ??
-    (await writeArtifacts(options.artifactRoot, options.input, options.attempt, "", `${options.detail}\n`))
+    (await writeTerminalArtifacts(options.artifactRoot, options.input, options.attempt, "", `${options.detail}\n`))
   const diagnostics = commandDiagnostics(options.detail)
   return CommandEvidenceSchema.parse({
     command: options.command,
@@ -503,7 +587,7 @@ async function prepareCandidate(
   for (const pr of input.prs) {
     const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
     if (merged.code !== 0) {
-      const artifacts = await writeArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
+      const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
       await git.run(path, ["merge", "--abort"], true)
       const detail = `PR '${pr.id}' could not be applied: ${merged.stderr || merged.stdout}`
       return {

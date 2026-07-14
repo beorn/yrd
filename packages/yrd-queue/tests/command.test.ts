@@ -5,10 +5,10 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, readdir, realpath, rm, watch, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
@@ -386,6 +386,176 @@ describe("Queue command adapters", () => {
     ])
     expect(requests.map((request) => request.noProgressTimeoutMs)).toEqual([undefined, undefined])
   })
+
+  it("streams exact stdout and stderr artifacts before a configured command settles", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-streaming-"))
+    roots.push(cwd)
+    const artifactRoot = join(cwd, "artifacts")
+    const started = Promise.withResolvers<ProcessRequest>()
+    const completed = Promise.withResolvers<ProcessResult>()
+    const process: Pick<Process, "run"> = {
+      run(request) {
+        started.resolve(request)
+        return completed.promise
+      },
+    }
+    const step = configuredCommandStep<PRShape>({
+      inject: { process },
+      command: ["streaming-check"],
+      cwd,
+      purpose: "check",
+      artifactRoot,
+    })
+    const input = {
+      run: "R-stream",
+      step: "check",
+      index: 0,
+      prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+      shape: { results: {} },
+    } as StepExecution<PRShape>
+    const context = { id: "J-stream", attempt: 2, runner: "test", signal: new AbortController().signal }
+    let settled = false
+    const running = Promise.resolve(step(input, context)).finally(() => {
+      settled = true
+    })
+    const request = await started.promise
+    const encoder = new TextEncoder()
+    const stdout = encoder.encode("first € last\n")
+    const stderr = encoder.encode("warning\n")
+    const splitInsideCodePoint = encoder.encode("first ").byteLength + 1
+    const dir = join(artifactRoot, "R-stream", "0-check", "attempt-2")
+    const stdoutPath = join(dir, "stdout.log")
+    const stderrPath = join(dir, "stderr.log")
+    const watcherAbort = new AbortController()
+    using _watcher = { [Symbol.dispose]: () => watcherAbort.abort() }
+    const events = watch(dir, { signal: watcherAbort.signal })[Symbol.asyncIterator]()
+    const offsets = new Map([
+      ["stdout.log", 0],
+      ["stderr.log", 0],
+    ])
+    const observedStreams: string[] = []
+    const nextGrowth = async (): Promise<string> => {
+      while (true) {
+        const event = await events.next()
+        if (event.done) throw new Error("artifact watcher ended before observing output growth")
+        const filename = event.value.filename?.toString()
+        const offset = filename === undefined ? undefined : offsets.get(filename)
+        if (filename === undefined || offset === undefined) continue
+        let bytes: Uint8Array
+        try {
+          bytes = await readFile(join(dir, filename))
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue
+          throw cause
+        }
+        if (bytes.byteLength <= offset) continue
+        offsets.set(filename, bytes.byteLength)
+        return filename.slice(0, -".log".length)
+      }
+    }
+
+    request.onOutput?.({ stream: "stdout", chunk: stdout.subarray(0, splitInsideCodePoint) })
+    observedStreams.push(await nextGrowth())
+    await vi.waitFor(
+      async () => {
+        expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
+      },
+      { timeout: 5_000, interval: 10 },
+    )
+    expect(settled).toBe(false)
+
+    request.onOutput?.({ stream: "stderr", chunk: stderr })
+    observedStreams.push(await nextGrowth())
+    await vi.waitFor(
+      async () => {
+        expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
+        expect(Array.from(await readFile(stderrPath))).toEqual(Array.from(stderr))
+      },
+      { timeout: 5_000, interval: 10 },
+    )
+    expect(settled).toBe(false)
+
+    request.onOutput?.({ stream: "stdout", chunk: stdout.subarray(splitInsideCodePoint) })
+    observedStreams.push(await nextGrowth())
+    await vi.waitFor(
+      async () => {
+        expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
+      },
+      { timeout: 5_000, interval: 10 },
+    )
+    expect(settled).toBe(false)
+    expect(observedStreams).toEqual(["stdout", "stderr", "stdout"])
+
+    completed.resolve({
+      exitCode: 0,
+      signal: null,
+      stdout: new TextDecoder().decode(stdout),
+      stderr: new TextDecoder().decode(stderr),
+      durationMs: 10,
+      timedOut: false,
+    })
+    await expect(running).resolves.toMatchObject({
+      status: "passed",
+      output: {
+        artifacts: [
+          { name: "stdout", path: stdoutPath },
+          { name: "stderr", path: stderrPath },
+        ],
+      },
+    })
+    expect((await readdir(dir)).sort()).toEqual(["stderr.log", "stdout.log"])
+    expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
+    expect(Array.from(await readFile(stderrPath))).toEqual(Array.from(stderr))
+  }, 10_000)
+
+  it("grows a real slow command artifact while the child is still running", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-slow-stream-"))
+    roots.push(cwd)
+    const release = join(cwd, "release")
+    const artifactRoot = join(cwd, "artifacts")
+    const stdoutPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "stdout.log")
+    await using process = createProcess()
+    const step = configuredCommandStep<PRShape>({
+      inject: { process },
+      command: shellCommand(
+        "printf 'first\\n'; while [ ! -f \"$YRD_RELEASE\" ]; do sleep 0.01; done; printf 'second\\n'",
+      ),
+      cwd,
+      purpose: "check",
+      artifactRoot,
+      variables: () => ({ YRD_RELEASE: release }),
+    })
+    let settled = false
+    const running = Promise.resolve(
+      step(
+        {
+          run: "R-slow",
+          step: "check",
+          index: 0,
+          prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+          shape: { results: {} },
+        },
+        { id: "J-slow", attempt: 1, runner: "test", signal: new AbortController().signal },
+      ),
+    ).finally(() => {
+      settled = true
+    })
+
+    await vi.waitFor(
+      async () => {
+        expect(await readFile(stdoutPath, "utf8")).toBe("first\n")
+      },
+      { timeout: 5_000, interval: 10 },
+    )
+    expect(settled).toBe(false)
+
+    await writeFile(release, "go\n")
+    await expect(running).resolves.toMatchObject({
+      status: "passed",
+      output: { artifacts: [{ name: "stdout", path: stdoutPath }] },
+    })
+    expect(await readFile(stdoutPath, "utf8")).toBe("first\nsecond\n")
+  }, 10_000)
 
   it.each([
     {
