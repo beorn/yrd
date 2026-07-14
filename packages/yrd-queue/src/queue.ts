@@ -1835,16 +1835,25 @@ function stepSelection(
 ): StepSelection {
   const names = selected.map((step) => step.name)
   const selectedNames = new Set(names)
-  const omittedChecks =
+  const omittedSteps =
     authority === "explicit"
-      ? admissionSteps(queues, installed)
-          .map((step) => step.name)
-          .filter((name) => !selectedNames.has(name))
+      ? installed.flatMap((step, index) =>
+          selectedNames.has(step.name)
+            ? []
+            : [
+                {
+                  ...descriptor(step),
+                  index,
+                  status: "skipped" as const,
+                  reason: "not-selected" as const,
+                },
+              ],
+        )
       : []
   return {
     authority,
     steps: names,
-    ...(omittedChecks.length === 0 ? {} : { omittedChecks }),
+    ...(omittedSteps.length === 0 ? {} : { omittedSteps }),
   }
 }
 

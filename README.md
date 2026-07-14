@@ -362,7 +362,9 @@ An explicit non-empty selection is durable Run authority, not a filter applied
 after configured admission. Yrd neither starts nor reuses omitted configured
 checks. In particular, `--steps merge` prepares and pins a fresh candidate with
 the built-in repository, ancestry, lease, and remote-update safeguards; human
-and JSON output record the explicit selection and any omitted checks.
+and JSON output record every configured omission as `skipped` with reason
+`not-selected`, distinct from an unconfigured or selected-but-not-yet-reached
+step.
 
 The bare dashboard shows active and recent work. `AGE` is immutable queue
 lifetime—submission to terminal outcome—while `TOUCHED` is the latest state or

@@ -381,6 +381,30 @@ describe("Queue", () => {
     expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
   })
 
+  it("persists configured omissions as skipped not-selected step evidence", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    const expectedSelection = {
+      authority: "explicit",
+      steps: ["merge"],
+      omittedSteps: [
+        { name: "check", index: 0, revision: "check-v1", status: "skipped", reason: "not-selected" },
+        { name: "review", index: 1, revision: "review-v1", status: "skipped", reason: "not-selected" },
+        { name: "deploy", index: 3, revision: "deploy-v1", status: "skipped", reason: "not-selected" },
+      ],
+    }
+
+    {
+      await using app = await createQueueApp({}, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/auditable-merge-only")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
+      expect(JSON.parse(JSON.stringify(app.state().queues.records.R1?.stepSelection))).toMatchObject(expectedSelection)
+    }
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(JSON.parse(JSON.stringify(replayed.queue.get("R1")?.stepSelection))).toMatchObject(expectedSelection)
+  })
+
   it("keeps recovery execution-free for requested merge work", async () => {
     let mergeCalls = 0
     await using app = await createQueueApp({
