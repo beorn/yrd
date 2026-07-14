@@ -699,7 +699,9 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
     )
     return
   }
-  refusal(`journal changed while reading PR '${selector}' runs; retry`)
+  refusal(
+    `journal changed while reading PR '${selector}' runs; retry with 'yrd pr runs ${selector}${jsonEnabled(options) ? " --json" : ""}'`,
+  )
 }
 
 async function diffPr(

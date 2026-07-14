@@ -1106,6 +1106,44 @@ describe("runYrd", () => {
     })
   })
 
+  it("refuses pr runs JSON when all three journal cuts race", async () => {
+    await using app = await createApp()
+    await app.bays.submit({
+      branch: "topic/snapshot-exhaustion",
+      headSha: HEAD_SHA,
+      base: "main",
+      baseSha: BASE_SHA,
+      issue: "@km/all/21091-snapshot-exhaustion",
+    })
+
+    let snapshots = 0
+    let advances = 0
+    const racingApp = {
+      ...app,
+      async journalSnapshot() {
+        const snapshot = await app.journalSnapshot()
+        const captured = snapshots++ % 2 === 0
+        if (captured) {
+          advances += 1
+          await app.bays.submit({
+            branch: `topic/concurrent-${advances}`,
+            headSha: String(advances + 1).repeat(40),
+            base: "main",
+          })
+        }
+        return snapshot
+      },
+    }
+
+    const output = outputIO()
+    expect(await runYrd(racingApp, yrd("pr", "runs", "PR1", "--json"), output.io)).toBe(1)
+    expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toBe(
+      "yrd: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'\n",
+    )
+  })
+
   it("emits lossless queue runs and attempt history only when log --all is requested", async () => {
     const app = await createApp()
     await openAndSubmit(app)
