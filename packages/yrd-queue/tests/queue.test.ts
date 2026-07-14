@@ -426,7 +426,9 @@ describe("Queue", () => {
 
   it("cancels a correlated PR when its active Queue Job is canceled", async () => {
     const correlation = { namespace: "tribe-request", id: "request-20925" } as const
-    await using app = await createQueueApp()
+    const journal = createMemoryJournal()
+    const id = ids()
+    await using app = await createQueueApp({}, journal, undefined, id)
     await app.bays.submit({
       branch: "issue/canceled",
       headSha: HEAD,
@@ -472,15 +474,26 @@ describe("Queue", () => {
     expect(app.queue.get("R1")).toMatchObject({
       status: "failed",
       error: { code: "run-canceled" },
+      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
       steps: [
         expect.objectContaining({
-          job: expect.objectContaining({ status: "canceled", canceledBy: "@chief", cancelReason: "authorization revoked" }),
+          job: expect.objectContaining({
+            status: "canceled",
+            canceledBy: "@chief",
+            cancelReason: "authorization revoked",
+          }),
         }),
       ],
     })
     const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
     expect(eventNames).not.toContain("pr/rejected")
     expect(app.queue.get("R1")?.error?.code).not.toBe("job-lost")
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "failed",
+      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
+    })
   })
 
   it("keys a selected step suffix by run order rather than installed order", async () => {
@@ -1078,6 +1091,9 @@ describe("Queue", () => {
     expect(original.state().bays.prs[retried.id]?.status).toBe("rejected")
     const firstRecord = original.state().queues.records.R1
     if (firstRecord === undefined) throw new Error("expected persisted R1")
+    const uncorrelatedSnapshot = firstRecord.prs[0]
+    if (uncorrelatedSnapshot === undefined) throw new Error("expected persisted uncorrelated PR snapshot")
+    expect(uncorrelatedSnapshot).not.toHaveProperty("correlation")
     await original.close()
 
     let cursor = 0
@@ -1123,7 +1139,11 @@ describe("Queue", () => {
     ).toMatchObject({ appended: true })
 
     await using app = await createQueueApp({}, journal, undefined, ids(500))
-    expect(app.queue.get("R2")).toMatchObject({ status: "failed", prs: [{ id: retried.id }] })
+    const legacyRetry = app.queue.get("R2")
+    expect(legacyRetry).toMatchObject({ status: "failed", prs: [{ id: retried.id }] })
+    const legacySnapshot = legacyRetry?.prs[0]
+    if (legacySnapshot === undefined) throw new Error("expected replayed legacy PR snapshot")
+    expect(legacySnapshot).not.toHaveProperty("correlation")
 
     const submitted = await submitBranch(app, "issue/submitted-control")
     const submittedRun = (await app.queue.run({ prs: [submitted.id] }, runtime))[0]
