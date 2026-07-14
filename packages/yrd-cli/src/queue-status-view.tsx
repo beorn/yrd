@@ -23,6 +23,7 @@ export type QueueTimelineRow = Readonly<{
   detail: string
   clock: string
   timestampMs: number
+  position?: number
 }>
 
 type QueueLogResult = QueueSummary & { prs?: readonly PR[] }
@@ -387,6 +388,25 @@ function queueTimelineDetail(result: QueueStatusResult, pr: PR, run: QueueRun | 
   return queueLanding(run)
 }
 
+function queueTimelineGroup(row: QueueTimelineRow): 0 | 1 | 2 {
+  if (row.run === undefined) return 0
+  return row.status === "running" || row.status === "waiting" ? 1 : 2
+}
+
+function compareQueueTimelineRows(left: QueueTimelineRow, right: QueueTimelineRow): number {
+  const group = queueTimelineGroup(left)
+  const groupOrder = group - queueTimelineGroup(right)
+  if (groupOrder !== 0) return groupOrder
+  if (group === 0) {
+    const positionOrder = (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER)
+    if (positionOrder !== 0) return positionOrder
+  } else if (left.timestampMs !== right.timestampMs) {
+    return group === 1 ? left.timestampMs - right.timestampMs : right.timestampMs - left.timestampMs
+  }
+  const prOrder = left.pr.localeCompare(right.pr, undefined, { numeric: true })
+  return prOrder === 0 ? left.key.localeCompare(right.key) : prOrder
+}
+
 export function queueTimelineRows(
   results: readonly QueueStatusResult[],
   now: number,
@@ -395,6 +415,7 @@ export function queueTimelineRows(
 ): QueueTimelineRow[] {
   const rows = results.flatMap((result) => {
     const runs = [...result.running, ...result.waiting, ...result.finished]
+    const positions = submittedPrPositions(result.prs)
     const pending = result.prs
       .filter(
         (pr) =>
@@ -406,6 +427,7 @@ export function queueTimelineRows(
           ),
       )
       .map((pr) => {
+        const position = positions.get(pr.id)
         const timestamp = pr.submittedAt
         const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
         return {
@@ -420,6 +442,7 @@ export function queueTimelineRows(
           detail: queueTimelineDetail(result, pr, undefined),
           clock: age(timestamp, now, "queue timeline row"),
           timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
+          ...(position === undefined ? {} : { position }),
         }
       })
     const runRows = runs.flatMap((run) =>
@@ -453,20 +476,19 @@ export function queueTimelineRows(
     return [...pending, ...runRows]
   })
 
-  const sorted = rows.toSorted((left, right) => {
-    if (left.timestampMs !== right.timestampMs) return right.timestampMs - left.timestampMs
-    const prOrder = left.pr.localeCompare(right.pr, undefined, { numeric: true })
-    return prOrder === 0 ? left.key.localeCompare(right.key) : prOrder
-  })
-  if (!latest) return sorted
-  const seen = new Set<string>()
-  const collapsed: QueueTimelineRow[] = []
-  for (const row of sorted) {
-    if (seen.has(row.pr)) continue
-    seen.add(row.pr)
-    collapsed.push(row)
+  if (!latest) return rows.toSorted(compareQueueTimelineRows)
+  const latestByPr = new Map<string, QueueTimelineRow>()
+  for (const row of rows) {
+    const previous = latestByPr.get(row.pr)
+    if (
+      previous === undefined ||
+      row.timestampMs > previous.timestampMs ||
+      (row.timestampMs === previous.timestampMs && compareQueueTimelineRows(row, previous) < 0)
+    ) {
+      latestByPr.set(row.pr, row)
+    }
   }
-  return collapsed
+  return [...latestByPr.values()].toSorted(compareQueueTimelineRows)
 }
 
 function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {

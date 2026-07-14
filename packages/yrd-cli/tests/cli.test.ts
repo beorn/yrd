@@ -588,6 +588,8 @@ describe("runYrd", () => {
     const queue = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
     expect(queue.stdout()).toContain("manage integration queues")
+    expect(queue.stdout()).toMatch(/^\s+list \[options\]\s+list integration queues$/mu)
+    expect(queue.stdout()).not.toMatch(/^\s+ls \[options\]/mu)
     expect(queue.stdout()).toMatch(/^\s+init \[options\] \[base\]\s+prepare queue resources$/mu)
     expect(queue.stdout()).toMatch(/^\s+deinit \[options\] \[base\]\s+release queue resources$/mu)
     expect(queue.stdout()).not.toMatch(/^\s+(?:provision|deprovision)\b/mu)
@@ -1955,18 +1957,18 @@ describe("runYrd", () => {
     )
 
     try {
-      expect(handle.text).toContain("> 1m submitted PR2")
-      expect(handle.text).toContain("PR PR2 STATUS")
+      expect(handle.text).toContain("> 2m submitted PR1")
+      expect(handle.text).toContain("PR PR1 STATUS")
 
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("> 2m submitted PR1")
-      expect(handle.text).toContain("PR PR2 STATUS")
+      expect(handle.text).toContain("> 1m submitted PR2")
+      expect(handle.text).toContain("PR PR1 STATUS")
 
       await handle.press("Enter")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR PR1 STATUS")
-      expect(handle.text).not.toContain("PR PR2 STATUS")
+      expect(handle.text).toContain("PR PR2 STATUS")
+      expect(handle.text).not.toContain("PR PR1 STATUS")
     } finally {
       handle.unmount()
     }
@@ -2118,7 +2120,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("collapses queue timeline rows to the latest row per PR when requested", () => {
+  it("orders queue timeline rows status-major and collapses to the latest row per PR", () => {
     const result = {
       base: "main",
       headSha: BASE_SHA,
@@ -2140,6 +2142,35 @@ describe("runYrd", () => {
           status: "submitted",
           revision: 1,
           headSha: "2".repeat(40),
+          submittedAt: "2026-07-09T12:01:00.000Z",
+        },
+        {
+          id: "PR3",
+          name: "Third",
+          branch: "topic/three",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "3".repeat(40),
+          submittedAt: "2026-07-09T12:19:00.000Z",
+        },
+        {
+          id: "PR4",
+          name: "Fourth",
+          branch: "topic/four",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "4".repeat(40),
+        },
+        {
+          id: "PR5",
+          name: "Fifth",
+          branch: "topic/five",
+          base: "main",
+          status: "integrated",
+          revision: 1,
+          headSha: "5".repeat(40),
         },
       ],
       running: [
@@ -2150,6 +2181,15 @@ describe("runYrd", () => {
           startedAt: "2026-07-09T12:00:00.000Z",
           shape: {},
           prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+        {
+          id: "R3",
+          base: "main",
+          status: "running",
+          startedAt: "2026-07-09T12:05:00.000Z",
+          shape: {},
+          prs: [{ id: "PR4", revision: 1, headSha: "4".repeat(40), branch: "topic/four" }],
           steps: [],
         },
       ],
@@ -2165,14 +2205,24 @@ describe("runYrd", () => {
           prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
           steps: [],
         },
+        {
+          id: "R4",
+          base: "main",
+          status: "passed",
+          startedAt: "2026-07-09T12:14:00.000Z",
+          finishedAt: "2026-07-09T12:15:00.000Z",
+          shape: {},
+          prs: [{ id: "PR5", revision: 1, headSha: "5".repeat(40), branch: "topic/five" }],
+          steps: [],
+        },
       ],
     } as unknown as QueueStatusResult
 
     const allRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), false)
     const latestRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)
 
-    expect(allRows.map((row) => row.pr)).toEqual(["PR1", "PR1", "PR2"])
-    expect(latestRows.map((row) => row.pr)).toEqual(["PR1", "PR2"])
+    expect(allRows.map((row) => row.run ?? row.pr)).toEqual(["PR2", "PR3", "R1", "R3", "R4", "R2"])
+    expect(latestRows.map((row) => row.run ?? row.pr)).toEqual(["PR2", "PR3", "R3", "R4", "R2"])
     expect(latestRows.find((row) => row.pr === "PR1")?.run).toBe("R2")
   })
 

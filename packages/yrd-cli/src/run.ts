@@ -1875,7 +1875,7 @@ function buildProgram(
       await listQueues(installed(), options, io)
     })
   const queueList = queue
-    .command("ls")
+    .command("list")
     .description("list integration queues")
     .option("--base <branch>", "scope queues to one base")
     .option("--latest", "collapse queue rows to the latest per PR")
@@ -1888,7 +1888,7 @@ function buildProgram(
       }
       await listQueues(installed(), options, io)
     })
-  queueList.alias("list")
+  queueList.alias("ls")
   queue
     .command("audit")
     .description("check queue state")
