@@ -2002,7 +2002,7 @@ describe("runYrd", () => {
     expect(status.stdout()).toContain("position 1")
   })
 
-  it("keeps queue ls --latest distinct from the default queue list projection", async () => {
+  it("uses the queue timeline by default while --latest only changes row projection", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/one", headSha: "1".repeat(40), base: "main" })
     await app.bays.submit({ branch: "topic/two", headSha: "2".repeat(40), base: "main" })
@@ -2019,12 +2019,12 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
 
-    expect(plain.stdout()).toContain("QUEUE")
-    expect(plain.stdout()).toContain("OPEN")
+    expect(plain.stdout()).toContain("PR1")
+    expect(plain.stdout()).toContain("PR2")
+    expect(plain.stdout()).toContain("submitted")
     expect(latest.stdout()).toContain("PR1")
     expect(latest.stdout()).toContain("PR2")
-    expect(latest.stdout()).not.toContain("OPEN")
-    expect(latest.stdout()).not.toBe(plain.stdout())
+    expect(plain.stdout()).toBe(latest.stdout())
   })
 
   it("renders queue --watch identically to root watch", async () => {
