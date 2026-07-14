@@ -1,8 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { superviseYrdWatch } from "../src/watch-hot-reload.ts"
+
+const yrdRoot = resolve(import.meta.dirname, "../../..")
 
 async function waitForLines(path: string, count: number): Promise<string[]> {
   const deadline = Date.now() + 5_000
@@ -71,6 +73,21 @@ describe("yrd watch hot reload", () => {
     ).toBeUndefined()
     expect(spawn).not.toHaveBeenCalled()
   })
+
+  it("terminates Bun's watch loop when the production QueueWatch command finishes", async () => {
+    const child = Bun.spawn([process.execPath, join(yrdRoot, "bin/yrd.ts"), "watch"], {
+      cwd: yrdRoot,
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    try {
+      const outcome = await Promise.race([child.exited, Bun.sleep(1_500).then(() => "timeout" as const)])
+      expect(outcome).not.toBe("timeout")
+    } finally {
+      child.kill("SIGKILL")
+      await child.exited
+    }
+  }, 5_000)
 
   it.each([
     ["SIGINT", 130],
