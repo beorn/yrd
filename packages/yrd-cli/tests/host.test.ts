@@ -462,7 +462,31 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
-  it("runs the bare plain and JSON dashboards from the flat project config", async () => {
+  it("preserves native Commander styling in a fresh color-forced process", async () => {
+    const yrdRoot = join(import.meta.dirname, "../../..")
+    const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "1", NODE_ENV: "production" }
+    delete env.NO_COLOR
+    const child = Bun.spawn([process.execPath, join(yrdRoot, "bin", "yrd.ts"), "--help"], {
+      cwd: yrdRoot,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+
+    expect(exitCode, stderr).toBe(0)
+    expect(stderr).toBe("")
+    const sgr = String.raw`\u001B\[[0-9;]*m`
+    for (const text of ["Usage:", "yrd", "-h, --help", "Examples:"]) {
+      expect(stdout).toMatch(new RegExp(`${sgr}${text}${sgr}`, "u"))
+    }
+  })
+
+  it("runs bare root as plain help while preserving the JSON dashboard", async () => {
     const { repo } = await repository()
     await writeFile(
       join(repo, ".yrd.yml"),
@@ -483,7 +507,9 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       }),
       plainError,
     ).toBe(0)
-    expect(plain).toContain("OPEN")
+    expect(plain).toContain("Usage: yrd [options] [command]")
+    expect(plain).not.toContain("OPEN")
+    expect(plain).not.toContain("\u001b[")
     expect(plainError).toBe("")
 
     let json = ""
@@ -845,7 +871,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const retiredWrapper = ["li", "ne"].join("")
     await writeFile(join(repo, ".yrd.yml"), `${retiredWrapper}:\n  base: main\n  steps: [check, merge]\n`)
 
-    for (const args of [[], ["--json"]]) {
+    for (const args of [["--json"]]) {
       let stdout = ""
       let stderr = ""
       expect(
@@ -969,7 +995,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     const surfaces = [
       { args: ["--json"], command: "dashboard" },
       { args: ["queue", "--json"], command: "queue.list" },
-      { args: ["pr", "--json"], command: "pr.list" },
+      { args: ["pr", "list", "--json"], command: "pr.list" },
       { args: ["issue", "--json"], command: "issue.list" },
       { args: ["log", "--all", "--json"], command: "log" },
       { args: ["prime", "--json"], command: "prime" },
@@ -1617,7 +1643,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stderr = ""
 
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "_dashboard"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -1638,7 +1664,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     stdout = ""
     stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "_dashboard"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
@@ -1778,7 +1804,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let stdout = ""
     let stderr = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "_dashboard"], {
         cwd: repo,
         stdout: (text) => {
           stdout += text
