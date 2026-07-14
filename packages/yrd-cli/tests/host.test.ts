@@ -110,7 +110,15 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       defaultSteps: ["security", "merge", "publish"],
     })
     expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
-    expect(Object.keys(app.commands.pr)).toEqual(["close", "edit", "ready", "review", "comment", "requestChecks"])
+    expect(Object.keys(app.commands.pr)).toEqual([
+      "close",
+      "edit",
+      "ready",
+      "review",
+      "comment",
+      "requestChecks",
+      "regression",
+    ])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
     expect(app.commands.bay.open.metadata?.visibility).toBe("public")
     expect(app.commands.pr.close.metadata?.visibility).toBe("public")
@@ -651,6 +659,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
   it("finds a direct-branch PR for status and refuses pr merge without appending", async () => {
     const { repo } = await repository()
     await git(repo, "switch", "-q", "issue/feature")
+    const issueRef = "km:@yrd/core/21091-installed-join"
     const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
     let missingJson = ""
     let missingStdout = ""
@@ -677,18 +686,40 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     let submitJson = ""
     let submitError = ""
     expect(
-      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"], {
-        cwd: repo,
-        stdout: (text) => {
-          submitJson += text
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--issue", issueRef, "--json"],
+        {
+          cwd: repo,
+          stdout: (text) => {
+            submitJson += text
+          },
+          stderr: (text) => {
+            submitError += text
+          },
         },
-        stderr: (text) => {
-          submitError += text
-        },
-      }),
+      ),
       submitError,
     ).toBe(0)
-    expect(JSON.parse(submitJson)).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1" }] })
+    expect(JSON.parse(submitJson)).toMatchObject({ command: "pr.submit", prs: [{ id: "PR1", issue: issueRef }] })
+
+    let issueJson = ""
+    let issueError = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "issue", "view", issueRef, "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          issueJson += text
+        },
+        stderr: (text) => {
+          issueError += text
+        },
+      }),
+      issueError,
+    ).toBe(0)
+    expect(JSON.parse(issueJson)).toMatchObject({
+      command: "issue.view",
+      trackerBridge: { deliveries: [{ issueRef, pr: "PR1", status: "submitted" }] },
+    })
 
     let statusJson = ""
     let statusError = ""

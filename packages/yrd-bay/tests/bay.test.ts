@@ -4,7 +4,16 @@
  * @consumer @yrd/bay
  */
 import { describe, expect, it } from "vitest"
-import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
+import {
+  Command,
+  command,
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  event,
+  pipe,
+  type CommandResult,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
@@ -70,6 +79,161 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("journals an exact revision-bound issue join when a PR is withdrawn", async () => {
+    await using app = (await createHarness()).app
+    const issueRef = "@km/all/21063-steering-laser"
+    await app.bays.submit({
+      branch: "topic/mentions-2106-but-not-the-issue",
+      headSha: HEAD_1,
+      issue: issueRef,
+    })
+
+    const retired = await app.bays.closePr({ pr: "PR1" })
+
+    expect(retired.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/withdrawn",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef },
+      }),
+    )
+  })
+
+  it("attaches one issue to a live PR and refuses to rehome its materialized join", async () => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "topic/attach-once", headSha: HEAD_1 })
+
+    await app.bays.editPr({ pr: "PR1", issue: "@km/all/21091-original" })
+    expect(app.bays.pr("PR1")).toMatchObject({ issue: "@km/all/21091-original", status: "submitted" })
+
+    await expect(app.bays.editPr({ pr: "PR1", issue: "@km/all/21091-rehome" })).rejects.toThrow(
+      /already linked|withdraw/i,
+    )
+    await expect(
+      app.bays.intake({
+        branch: "topic/attach-once",
+        headSha: HEAD_2,
+        issue: "@km/all/21091-rehome",
+      }),
+    ).rejects.toThrow(/already linked|withdraw/i)
+    expect(app.bays.pr("PR1")).toMatchObject({ issue: "@km/all/21091-original", status: "submitted" })
+    expect(app.bays.pr("PR1")).toMatchObject({ revision: 1, headSha: HEAD_1 })
+  })
+
+  it("preserves an explicit PR issue when a later Bay revision omits --issue", async () => {
+    const { app } = await createHarness()
+    const explicitIssue = "@km/all/21091-explicit-pr-issue"
+    const bayDefault = "@km/all/21091-bay-default"
+    await finishJob(app, await app.bays.open({ name: "issue-default", issue: bayDefault }))
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1, baseSha: BASE, issue: explicitIssue })
+    await app.bays.submit({ pr: "PR1" })
+
+    const revised = await app.bays.submitSelection("B1", {
+      resolveRevision: async () => undefined,
+      run: runtime,
+    })
+
+    expect(revised).toMatchObject({
+      id: "PR1",
+      issue: explicitIssue,
+      revision: 2,
+      headSha: HEAD_2,
+      status: "submitted",
+    })
+    await app.close()
+  })
+
+  it("replays historical terminal payloads without accepting them for new appends", async () => {
+    const nextId = ids()
+    const seededCommand = { id: nextId(), op: "fixture.legacy-pr-terminals" }
+    const issueRef = "@km/all/21063-steering-laser"
+    const at = "2026-01-01T00:00:00.000Z"
+    const pushed = (pr: string, branch: string, headSha: string) => ({
+      id: nextId(),
+      name: "pr/pushed",
+      ts: at,
+      data: { pr, branch, base: "main", headSha, issue: issueRef, revision: 1 },
+    })
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          pushed("PR1", "topic/legacy-rejected", HEAD_1),
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: { pr: "PR1", revision: 1, detail: "historical check failure" },
+          },
+          {
+            id: nextId(),
+            name: "pr/edited",
+            ts: at,
+            data: { pr: "PR1", issue: "@km/all/obsolete-post-terminal-rehome" },
+          },
+          pushed("PR2", "topic/legacy-integrated", HEAD_2),
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: { pr: "PR2", revision: 1, headSha: HEAD_2, commit: BASE, baseSha: BASE },
+          },
+          pushed("PR3", "topic/legacy-withdrawn", HEAD_1),
+          { id: nextId(), name: "pr/withdrawn", ts: at, data: { pr: "PR3" } },
+        ],
+      },
+    ])
+    const legacyWithdraw = command({
+      title: "Emit a legacy PR withdrawal",
+      apply: () => ({ events: [event("pr/withdrawn", { pr: "PR3" })] }),
+    })
+    const legacyReject = command({
+      title: "Emit a legacy PR rejection",
+      apply: () => ({
+        events: [event("pr/rejected", { pr: "PR1", revision: 1, detail: "legacy rejection" })],
+      }),
+    })
+    const legacyIntegrate = command({
+      title: "Emit a legacy PR integration",
+      apply: () => ({
+        events: [
+          event("pr/integrated", {
+            pr: "PR2",
+            revision: 1,
+            headSha: HEAD_2,
+            commit: BASE,
+            baseSha: BASE,
+          }),
+        ],
+      }),
+    })
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ jobs, defaultBase: "main" }),
+    ).extend({ commands: { fixture: { legacyWithdraw, legacyReject, legacyIntegrate } } })
+    await using app = await createYrd(definition, {
+      inject: { journal, clock: () => at, id: nextId },
+    })
+
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "rejected", issue: issueRef })
+    expect(app.bays.pr("PR2")).toMatchObject({
+      status: "integrated",
+      issue: issueRef,
+      integration: { commit: BASE, baseSha: BASE },
+    })
+    expect(app.bays.pr("PR3")).toMatchObject({ status: "withdrawn", issue: issueRef })
+    await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.legacyIntegrate, undefined)).rejects.toThrow()
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 
@@ -278,7 +442,13 @@ describe("withBays", () => {
 
     const bayPR = await app.bays.submitSelection("B1", { resolveRevision, run: runtime })
     expect(bayPR).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_2, base: "main" })
-    expect(workspace.calls).toEqual([`provision:B1:current`, "refresh:B1"])
+    const linkedBayPR = await app.bays.submitSelection("B1", {
+      issue: "@km/all/21091-existing-pr-join",
+      resolveRevision,
+      run: runtime,
+    })
+    expect(linkedBayPR).toMatchObject({ id: bayPR.id, issue: "@km/all/21091-existing-pr-join" })
+    expect(workspace.calls).toEqual([`provision:B1:current`, "refresh:B1", "refresh:B1"])
 
     const branchPR = await app.bays.submitSelection("release/fix", {
       base: "release/2.0",
@@ -301,14 +471,20 @@ describe("withBays", () => {
 
     const options = {
       base: "main",
+      issue: "@km/all/21091-alias-join",
       resolveRevision: async (ref: string) => (ref === "origin/issue/feature" ? HEAD_1 : undefined),
       run: runtime,
     }
     const submitted = await app.bays.submitSelection("origin/issue/feature", options)
     const repeated = await app.bays.submitSelection("origin/issue/feature", options)
 
-    expect(submitted).toMatchObject({ id: "PR1", branch: "issue/feature", status: "submitted" })
-    expect(repeated).toMatchObject({ id: "PR1", status: "submitted" })
+    expect(submitted).toMatchObject({
+      id: "PR1",
+      branch: "issue/feature",
+      issue: "@km/all/21091-alias-join",
+      status: "submitted",
+    })
+    expect(repeated).toMatchObject({ id: "PR1", issue: "@km/all/21091-alias-join", status: "submitted" })
     expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
     await app.close()
   })

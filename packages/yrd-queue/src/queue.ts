@@ -562,8 +562,8 @@ function createQueue<Shape extends PRShape>(
           ? admissionQueue(snapshot, steps).map((pr) => pr.id)
           : [...args.prs]
       return runOptions === undefined
-        ? dispatchAdmissions(selectors, args.retry === true)
-        : drainAdmissions(selectors, args.retry === true, runOptions)
+        ? await dispatchAdmissions(selectors, args.retry === true)
+        : await drainAdmissions(selectors, args.retry === true, runOptions)
     },
     async pause(args) {
       const base = baseIdentity(args.base)
@@ -1009,7 +1009,15 @@ function advanceQueue(
         !isIntegrated(before) &&
         pr !== undefined &&
         current?.status === "submitted"
-          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: failure.message })]
+          ? [
+              event("pr/rejected", {
+                pr: pr.id,
+                revision: pr.revision,
+                headSha: pr.headSha,
+                ...(current.issue === undefined ? {} : { issueRef: current.issue }),
+                detail: failure.message,
+              }),
+            ]
           : [],
     }
   }
@@ -1031,7 +1039,9 @@ function advanceQueue(
           pr: current.id,
           revision: current.revision,
           headSha: current.headSha,
+          ...(current.issue === undefined ? {} : { issueRef: current.issue }),
           commit: shape.integration.commit,
+          landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
         }),
       )

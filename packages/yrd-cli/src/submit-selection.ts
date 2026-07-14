@@ -22,13 +22,14 @@ function hasSelector(args: readonly string[]): boolean {
     const argument = args[index]
     if (argument === undefined) continue
     if (argument === "--") return index + 1 < args.length
-    if (argument === "--base" || argument === "--queue") {
+    if (argument === "--base" || argument === "--issue" || argument === "--queue") {
       index += 1
       continue
     }
     if (
       argument === "--json" ||
       argument.startsWith("--base=") ||
+      argument.startsWith("--issue=") ||
       argument.startsWith("--queue=") ||
       argument.startsWith("-")
     ) {

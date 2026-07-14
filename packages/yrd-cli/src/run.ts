@@ -3,9 +3,18 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import {
+  baseIdentity,
+  resolveBay,
+  resolvePR,
+  type Bay,
+  type BaysState,
+  type PR,
+  type PRRegression,
+  type PRRegressionSeverity,
+} from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
-import type { DeepReadonly } from "@yrd/core"
+import type { DeepReadonly, JournalAsOf, JournalSnapshot } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import type { QueueRun, QueueSummary } from "@yrd/queue"
 import { classifyFailure, configuration, refusal, resolveInvocation, stableJson, usage } from "./invocation.ts"
@@ -100,6 +109,27 @@ type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
 
 type JsonOption = { json?: boolean }
 
+type TrackerDeliveryIdentity = Readonly<{
+  issueRef: string
+  pr: string
+  revision: number
+  at: string
+}>
+
+type TrackerDelivery =
+  | (TrackerDeliveryIdentity & Readonly<{ status: "pushed" | "submitted" | "withdrawn" }>)
+  | (TrackerDeliveryIdentity & Readonly<{ status: "rejected"; detail?: string }>)
+  | (TrackerDeliveryIdentity &
+      Readonly<{ status: "integrated"; landingSha: string; regressions?: readonly PRRegression[] }>)
+
+type TrackerBridge = Readonly<{
+  version: 1
+  asOf: JournalAsOf
+  deliveries: readonly TrackerDelivery[]
+}>
+
+type PRRegressionFact = Omit<PRRegression, "recordedAt">
+
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
   return {
     runner: io.runner ?? "yrd-cli",
@@ -110,6 +140,55 @@ function runtimeOptions(io: YrdCliIO): RuntimeOptions {
 
 function stateOf(app: YrdCliApp): YrdCliState {
   return app.state()
+}
+
+function trackerDelivery(pr: DeepReadonly<PR>): TrackerDelivery | undefined {
+  if (pr.issue === undefined) return undefined
+  const identity = { issueRef: pr.issue, pr: pr.id, revision: pr.revision }
+  switch (pr.status) {
+    case "pushed": {
+      const revision = pr.revisions.findLast(
+        (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+      )
+      return revision === undefined ? undefined : { ...identity, status: "pushed", at: revision.pushedAt }
+    }
+    case "submitted":
+      return pr.submittedAt === undefined ? undefined : { ...identity, status: "submitted", at: pr.submittedAt }
+    case "rejected":
+      return pr.rejectedAt === undefined
+        ? undefined
+        : {
+            ...identity,
+            status: "rejected",
+            at: pr.rejectedAt,
+            ...(pr.detail === undefined ? {} : { detail: pr.detail }),
+          }
+    case "integrated":
+      return pr.integratedAt === undefined || pr.integration === undefined
+        ? undefined
+        : {
+            ...identity,
+            status: "integrated",
+            at: pr.integratedAt,
+            landingSha: pr.integration.commit,
+            ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
+          }
+    case "withdrawn":
+      return pr.withdrawnAt === undefined ? undefined : { ...identity, status: "withdrawn", at: pr.withdrawnAt }
+    default:
+      return undefined
+  }
+}
+
+function trackerBridge(
+  snapshot: JournalSnapshot<YrdCliState>,
+  include: (delivery: TrackerDelivery) => boolean,
+): TrackerBridge {
+  const deliveries = Object.values(snapshot.state.bays.prs)
+    .map(trackerDelivery)
+    .filter((delivery): delivery is TrackerDelivery => delivery !== undefined && include(delivery))
+    .toSorted((left, right) => left.pr.localeCompare(right.pr, undefined, { numeric: true }))
+  return { version: 1, asOf: snapshot.asOf, deliveries }
 }
 
 async function runJobs(app: YrdCliApp, ids: readonly string[], io: YrdCliIO): Promise<Job[]> {
@@ -599,14 +678,16 @@ async function viewPr(
 }
 
 async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
-  const pr = requiredPr(app, selector)
+  const snapshot = await app.journalSnapshot()
+  const pr = resolvePR(snapshot.state.bays, selector)
+  if (pr === undefined) refusal(`no PR '${selector}'`)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
   const data = runs.map((run) => queueShowData(run, runs, attempts))
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.runs", pr, runs: data },
+    { command: "pr.runs", pr, runs: data, trackerBridge: trackerBridge(snapshot, ({ pr: id }) => id === pr.id) },
     createElement(PRRunsView, { runs: data }),
   )
 }
@@ -718,6 +799,72 @@ async function editPr(
   )
 }
 
+type PrRegressionOptions = JsonOption &
+  Readonly<{
+    run: string
+    detectedAt: string
+    severity: PRRegressionSeverity
+    evidence: string
+    implementationRun: string
+    review: string
+    repairPr: string
+    repairRun: string
+  }>
+
+async function recordPrRegression(
+  app: YrdCliApp,
+  selector: string,
+  options: PrRegressionOptions,
+  io: YrdCliIO,
+): Promise<void> {
+  const original = requiredPr(app, selector)
+  const repair = requiredPr(app, options.repairPr)
+  requireRegressionRun(app, original, options.run)
+  requireRegressionRun(app, repair, options.repairRun)
+  const result = await app.bays.recordRegression({
+    pr: selector,
+    run: options.run,
+    detectedAt: options.detectedAt,
+    severity: options.severity,
+    evidence: options.evidence,
+    implementationRunRef: options.implementationRun,
+    reviewRef: options.review,
+    repairPr: options.repairPr,
+    repairRun: options.repairRun,
+  })
+  if (
+    result.value === undefined ||
+    result.value === null ||
+    typeof result.value !== "object" ||
+    Array.isArray(result.value)
+  ) {
+    throw new Error("yrd: regression command returned no completed outcome")
+  }
+  const regression = result.value as unknown as PRRegressionFact
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "pr.regression", regression },
+    `Recorded ${regression.severity} escaped regression for ${regression.pr}; repaired by ${regression.repairPr}.`,
+  )
+}
+
+function requireRegressionRun(app: YrdCliApp, pr: PR, runId: string): void {
+  const run = app.queue.get(runId)
+  const ownsRevision = run?.prs.some(
+    (snapshot) => snapshot.id === pr.id && snapshot.revision === pr.revision && snapshot.headSha === pr.headSha,
+  )
+  const provesIntegration = run?.steps.some((step) => step.integrates && step.job?.status === "passed")
+  if (
+    ownsRevision !== true ||
+    provesIntegration !== true ||
+    pr.integration === undefined ||
+    run?.integration?.commit !== pr.integration.commit
+  ) {
+    refusal(`queue run '${runId}' does not prove integrated revision ${pr.revision} of PR '${pr.id}'`)
+  }
+}
+
 async function retryPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
   const selectedRun = app.queue.get(selector)
   const prs = selectedRun?.prs.map((pr) => pr.id) ?? [requiredPr(app, selector).id]
@@ -762,8 +909,7 @@ function prCheckRecords(app: YrdCliApp, selectors: readonly string[]): PRCheckVi
   return [...app.queue.checks(selectors)]
 }
 
-function issueRows(app: YrdCliApp, selected?: string): IssueLensRow[] {
-  const state = stateOf(app)
+function issueRows(app: YrdCliApp, state: DeepReadonly<YrdCliState>, selected?: string): IssueLensRow[] {
   const contests = app.contests.list()
   const refs = new Set<string>()
   for (const bay of Object.values(state.bays.byId)) if (bay.issue !== undefined) refs.add(bay.issue)
@@ -777,7 +923,7 @@ function issueRows(app: YrdCliApp, selected?: string): IssueLensRow[] {
       const bays = Object.values(state.bays.byId).filter((bay) => bay.issue === issue)
       const bayIds = new Set(bays.map((bay) => bay.id))
       const prs = Object.values(state.bays.prs).filter(
-        (pr) => pr.issue === issue || (pr.bay !== undefined && bayIds.has(pr.bay)),
+        (pr) => pr.issue === issue || (pr.issue === undefined && pr.bay !== undefined && bayIds.has(pr.bay)),
       )
       const joinedContests = contests.filter(
         (contest) => `${contest.issue.ref.source}:${contest.issue.ref.id}` === issue,
@@ -794,11 +940,16 @@ function issueRows(app: YrdCliApp, selected?: string): IssueLensRow[] {
 }
 
 async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, selected?: string): Promise<void> {
-  const issues = issueRows(app, selected)
+  const snapshot = await app.journalSnapshot()
+  const issues = issueRows(app, snapshot.state, selected)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: selected === undefined ? "issue.list" : "issue.view", issues },
+    {
+      command: selected === undefined ? "issue.list" : "issue.view",
+      issues,
+      trackerBridge: trackerBridge(snapshot, ({ issueRef }) => selected === undefined || issueRef === selected),
+    },
     createElement(IssueLensView, { rows: issues }),
   )
 }
@@ -1884,8 +2035,8 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => statusPr(installed(), options, io))
   pr.command("edit <selector>")
-    .description("edit the issue link or note")
-    .option("--issue <ref>", "set the tracker-neutral issue reference")
+    .description("attach a missing issue link or edit the note")
+    .option("--issue <ref>", "attach the tracker-neutral issue reference once")
     .option("--note <text>", "set the delivery note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
@@ -1918,6 +2069,20 @@ function buildProgram(
     .option("--follow", "follow active checks to a terminal result")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await prChecks(installed(), selectors, options, io)))
+  pr.command("regression <selector>")
+    .description("record one completed escaped regression and its integrated repair")
+    .requiredOption("--run <run>", "original integration run")
+    .requiredOption("--detected-at <timestamp>", "ISO-8601 detection timestamp")
+    .requiredOption("--severity <severity>", "low, medium, high, or critical")
+    .requiredOption("--evidence <ref>", "opaque regression evidence reference")
+    .requiredOption("--implementation-run <ref>", "opaque original implementation run reference")
+    .requiredOption("--review <ref>", "opaque original review reference")
+    .requiredOption("--repair-pr <pr>", "integrated repair PR")
+    .requiredOption("--repair-run <run>", "repair integration run")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      recordPrRegression(installed(), selector, options as unknown as PrRegressionOptions, io),
+    )
   pr.command("close [selector...]")
     .description("close a live PR without merging (leaves it out of the queue)")
     .option("--json", "emit stable JSON")

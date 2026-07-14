@@ -188,7 +188,7 @@ The top-level surface is deliberately small:
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd pr                      list PRs; submit, view, runs, diff, checkout,
-                            status, edit, retry, close, and merge teaching
+                            status, edit, retry, regression, close, and merge teaching
 yrd bay                     list bays; open, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
@@ -241,13 +241,17 @@ yrd pr submit fix/release --base release/2.0
 ### PR Eligibility and Checks
 
 ```text
-yrd pr submit [selector...] [--draft] [--follow] [--base <branch>] [--json]
+yrd pr submit [selector...] [--draft] [--follow] [--base <branch>] [--issue <ref>] [--json]
 yrd pr list [--needs-review] [--json]
+yrd pr edit <selector> [--issue <ref>] [--note <text>] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
   [--by <actor>] [--ref <id>] [--note <text>] [--json]
 yrd pr comment <selector> --note <text> [--by <actor>] [--ref <id>] [--json]
 yrd pr checks <selector...> [--follow] [--json]
+yrd pr regression <original-pr> --run <run> --detected-at <timestamp>
+  --severity <level> --evidence <ref> --implementation-run <ref> --review <ref>
+  --repair-pr <pr> --repair-run <run> [--json]
 yrd pr close [selector...] [--json]
 ```
 
@@ -257,12 +261,27 @@ same journaled Run. `pr checks` renders the same typed evidence in human or
 one-record-per-line JSON output, including command argv, concise diagnostics,
 base-versus-carrier classification, and artifact paths.
 
+An issue reference may be attached to an unlinked live PR exactly once. Yrd
+refuses rehoming after attachment (or after a terminal delivery), so an external
+tracker projection cannot retain a stale second owner; withdraw and submit a new
+PR when the delivery belongs to another issue.
+
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
 resolved base SHA, head SHA, installed-step revision/config, and toolchain
 fingerprint all match. Base-classified admission steps always rerun before
 integration, so a later same-base red lock cannot reuse an earlier green fact.
 There is no TTL, invalidation database, or second workflow engine.
+
+`pr regression` records one completed escaped-regression outcome after both the
+original and repair PRs are integrated. Yrd derives their issue joins,
+revisions, heads, and landing SHAs from its PR projections. Implementation and
+review references remain opaque; the command does not add provider facts,
+rankings, telemetry storage, or another workflow phase. The command response
+is the completed fact; the projected PR record additionally carries the
+journal-owned `recordedAt` timestamp used by read-side bridges. The named
+original and repair Queue runs must prove those exact integrated revisions and
+landing commits; retrying the same completed fact is idempotent.
 
 #### Manning an Ordinary Bay
 
@@ -350,7 +369,11 @@ artifacts, the write-once attempt ref, and evaluator results. Missing provider
 metrics remain missing; Yrd does not guess cost.
 
 The issue surface is read-only and joins delivery facts to tracker references;
-issue creation and editing remain in the tracker. `contest eval` resumes
+issue creation and editing remain in the tracker. Issue JSON and `pr runs` JSON
+include a revision-stamped `trackerBridge` over the same captured journal
+projection. Its strict delivery rows preserve the opaque issue ref, PR,
+revision, current lifecycle state and lifecycle timestamp; integrated rows add
+the landing SHA and any completed regression outcomes. `contest eval` resumes
 missing competitor and evaluator work. It never
 reruns a competitor whose implementation is already pinned. `--retry` returns
 failed or lost infrastructure Jobs to `requested` and retains their Job ids. A

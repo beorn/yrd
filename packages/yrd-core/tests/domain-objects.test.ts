@@ -164,6 +164,32 @@ describe("Yrd domain objects", () => {
     await Promise.all([writer.close(), reader.close()])
   })
 
+  it("returns state and as-of stamp as one immutable journal projection snapshot", async () => {
+    await using app = await createYrd(withCounter()(createYrdDef()), {
+      inject: {
+        journal: createMemoryJournal(),
+        clock: () => "2026-07-09T12:00:00.000Z",
+        id: ids("snapshot-command-1", "snapshot-event-1", "snapshot-command-2", "snapshot-event-2"),
+      },
+    })
+
+    await app.dispatch(app.commands.counter.add, { by: 1 })
+    const first = await app.journalSnapshot()
+    await app.dispatch(app.commands.counter.add, { by: 1 })
+    const second = await app.journalSnapshot()
+
+    expect(first).toEqual({
+      state: { counter: { value: 1 } },
+      asOf: { cursor: 1, at: "2026-07-09T12:00:00.000Z" },
+    })
+    expect(second).toEqual({
+      state: { counter: { value: 2 } },
+      asOf: { cursor: 2, at: "2026-07-09T12:00:00.000Z" },
+    })
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(Object.isFrozen(first.state)).toBe(true)
+  })
+
   it("retries cursor conflicts without losing concurrent commands", async () => {
     const journal = createMemoryJournal()
     const definition = withCounter()(createYrdDef())
