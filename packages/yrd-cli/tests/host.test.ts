@@ -371,7 +371,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       expect((failure as Error).message).toContain("writer lock is busy")
       expect(classifyFailure(failure)).toMatchObject({
         exitCode: 3,
-        failure: { kind: "infrastructure", code: "unexpected" },
+        failure: { kind: "infrastructure", code: "exclusive-busy" },
       })
     })
   })
@@ -1126,6 +1126,161 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
       await cli.exited
       await stdout
       await stderr
+    }
+  })
+
+  it("refuses a second resident watch with the active executor identity", async () => {
+    const { repo, featureSha } = await repository()
+    const startedPath = join(repo, "resident-check.started")
+    const executionsPath = join(repo, "resident-check.executions")
+    const command = [
+      `printf 'run\\n' >> ${JSON.stringify(executionsPath)}`,
+      `touch ${JSON.stringify(startedPath)}`,
+      "sleep 2",
+    ].join("; ")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
+    )
+    await git(repo, "switch", "-qc", "issue/second", "main")
+    await writeFile(join(repo, "second.txt"), "second\n")
+    await git(repo, "add", "second.txt")
+    await git(repo, "commit", "-qm", "second")
+    const secondSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    await using submitter = await createYrdHost({ cwd: repo })
+    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+    await submitter.close()
+    const spawnWatch = (selector: string, pane: string) => {
+      const logPath = join(repo, `resident-${pane.replace(/[^a-z0-9]+/giu, "-")}.log`)
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          join(import.meta.dirname, "../../../bin/yrd.ts"),
+          "queue",
+          "run",
+          selector,
+          "--watch",
+          "--interval",
+          "1",
+          "--json",
+        ],
+        {
+          cwd: repo,
+          env: {
+            ...process.env,
+            HERDR_PANE_ID: pane,
+            LOGGILY_FILE: logPath,
+            LOG_LEVEL: "trace",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      )
+      return { child, logPath, stdout: new Response(child.stdout).text(), stderr: new Response(child.stderr).text() }
+    }
+    const first = spawnWatch("PR1", "w1:p1")
+    let second: ReturnType<typeof spawnWatch> | undefined
+    let replacement: ReturnType<typeof spawnWatch> | undefined
+    try {
+      await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), {
+        timeout: 5_000,
+      })
+      second = spawnWatch("PR2", "w1:p2")
+
+      const outcome = await Promise.race([
+        second.child.exited.then((exitCode) => ({ exitCode })),
+        Bun.sleep(1_000).then(() => ({ exitCode: "still-running" as const })),
+      ])
+      expect(outcome).toEqual({ exitCode: 1 })
+      expect(await second.stderr).toContain(`resident-runner-active: writer lock is busy (yrd-cli:${first.child.pid}`)
+      expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
+      await expect(first.child.exited).resolves.toBe(0)
+
+      replacement = spawnWatch("PR2", "w1:p3")
+      await expect(replacement.child.exited).resolves.toBe(0)
+      expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run", "run"])
+
+      await using settled = await createYrdHost({ cwd: repo })
+      const runIds = Object.keys(settled.app.state().queues.records)
+      expect(runIds).toEqual(["R1", "R2"])
+      expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["passed", "passed"])
+      expect(
+        runIds.map((id) => {
+          const job = settled.app.queue.get(id)?.steps[0]?.job
+          return job !== undefined && "runner" in job ? job.runner : undefined
+        }),
+      ).toEqual([`yrd-cli:${first.child.pid}`, `yrd-cli:${replacement.child.pid}`])
+
+      const firstLog = await readFile(first.logPath, "utf8")
+      expect(firstLog).toMatch(new RegExp(`yrd-cli:${first.child.pid}.*w1:p1|w1:p1.*yrd-cli:${first.child.pid}`, "u"))
+      expect(firstLog).toContain("pre-worktree")
+      expect(await readFile(replacement.logPath, "utf8")).toMatch(
+        new RegExp(`yrd-cli:${replacement.child.pid}.*w1:p3|w1:p3.*yrd-cli:${replacement.child.pid}`, "u"),
+      )
+    } finally {
+      replacement?.child.kill("SIGKILL")
+      second?.child.kill("SIGKILL")
+      first.child.kill("SIGKILL")
+      await replacement?.child.exited
+      await second?.child.exited
+      await first.child.exited
+      await replacement?.stdout
+      await replacement?.stderr
+      await second?.stdout
+      await second?.stderr
+      await first.stdout
+      await first.stderr
+    }
+  })
+
+  it("replaces a dead resident owner after the OS releases its lease", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, ".yrd.yml"), 'steps: [check]\ncheck:\n  run: "true"\n')
+    const argv = [
+      process.execPath,
+      join(import.meta.dirname, "../../../bin/yrd.ts"),
+      "queue",
+      "run",
+      "--watch",
+      "--interval",
+      "1",
+      "--json",
+    ]
+    const spawnWatch = () => Bun.spawn(argv, { cwd: repo, stdout: "pipe", stderr: "pipe" })
+    const lockPath = join(repo, ".git", "yrd", "resident-runner", "writer.lock")
+    const first = spawnWatch()
+    const firstStdout = new Response(first.stdout).text()
+    const firstStderr = new Response(first.stderr).text()
+    let replacement: ReturnType<typeof spawnWatch> | undefined
+    let replacementStdout: Promise<string> | undefined
+    let replacementStderr: Promise<string> | undefined
+    try {
+      await vi.waitFor(async () => {
+        expect(await Bun.file(lockPath).exists()).toBe(true)
+        expect(JSON.parse(await readFile(lockPath, "utf8"))).toMatchObject({ pid: first.pid })
+      })
+      first.kill("SIGKILL")
+      await first.exited
+
+      replacement = spawnWatch()
+      replacementStdout = new Response(replacement.stdout).text()
+      replacementStderr = new Response(replacement.stderr).text()
+      await vi.waitFor(async () => {
+        expect(JSON.parse(await readFile(lockPath, "utf8"))).toMatchObject({ pid: replacement?.pid })
+      })
+      replacement.kill("SIGKILL")
+      await replacement.exited
+    } finally {
+      replacement?.kill("SIGKILL")
+      first.kill("SIGKILL")
+      await replacement?.exited
+      await first.exited
+      await replacementStdout
+      await replacementStderr
+      await firstStdout
+      await firstStderr
     }
   })
 
