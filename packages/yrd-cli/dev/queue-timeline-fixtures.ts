@@ -1,8 +1,11 @@
 import type { PR, PRStatus } from "@yrd/bay"
+import type { JsonValue } from "@yrd/core"
+import type { Job } from "@yrd/job"
 import type { QueueRun } from "@yrd/queue"
 import {
-  queueRevisionKey,
+  queueTimelineAdmissionTimes,
   queueTimelineProjection,
+  type QueueAttempt,
   type QueueStatusResult,
   type QueueTimelineProjection,
   type QueueTimelineStatus,
@@ -15,21 +18,49 @@ const BASE_SHA = "a".repeat(40)
 const INTEGRATED_SHA = "b".repeat(40)
 const ALL_STATUSES: readonly QueueTimelineStatusFilter[] = ["pending", "running", "rejected", "integrated", "other"]
 
-function fixturePr(id: string, status: PRStatus, submittedAt: string, name = `Fixture ${id}`): PR {
+type FixturePrOptions = Readonly<{
+  revision?: number
+  headSha?: string
+  revisions?: PR["revisions"]
+  reviews?: PR["reviews"]
+  comments?: PR["comments"]
+  checkRequests?: PR["checkRequests"]
+  issue?: string
+  note?: string
+  detail?: string
+  terminalRun?: string
+  rejectedAt?: string
+  integratedAt?: string
+  canceledAt?: string
+  canceledBy?: string
+  cancelReason?: string
+  integration?: NonNullable<PR["integration"]>
+}>
+
+function fixturePr(
+  id: string,
+  status: PRStatus,
+  submittedAt: string,
+  name = `Fixture ${id}`,
+  options: FixturePrOptions = {},
+): PR {
   const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
-  const headSha = digit.repeat(40)
+  const revision = options.revision ?? 1
+  const headSha = options.headSha ?? digit.repeat(40)
   return {
     id,
     name,
+    ...(options.issue === undefined ? {} : { issue: options.issue }),
+    ...(options.note === undefined ? {} : { note: options.note }),
     branch: `topic/${id.toLocaleLowerCase()}`,
     base: "main",
     status,
-    revision: 1,
+    revision,
     headSha,
     baseSha: BASE_SHA,
-    revisions: [
+    revisions: options.revisions ?? [
       {
-        revision: 1,
+        revision,
         headSha,
         base: "main",
         baseSha: BASE_SHA,
@@ -38,9 +69,173 @@ function fixturePr(id: string, status: PRStatus, submittedAt: string, name = `Fi
       },
     ],
     submittedAt,
-    reviews: [],
-    comments: [],
-    checkRequests: [],
+    reviews: options.reviews ?? [],
+    comments: options.comments ?? [],
+    checkRequests: options.checkRequests ?? [],
+    ...(options.detail === undefined ? {} : { detail: options.detail }),
+    ...(options.terminalRun === undefined ? {} : { terminalRun: options.terminalRun }),
+    ...(options.rejectedAt === undefined ? {} : { rejectedAt: options.rejectedAt }),
+    ...(options.integratedAt === undefined ? {} : { integratedAt: options.integratedAt }),
+    ...(options.canceledAt === undefined ? {} : { canceledAt: options.canceledAt }),
+    ...(options.canceledBy === undefined ? {} : { canceledBy: options.canceledBy }),
+    ...(options.cancelReason === undefined ? {} : { cancelReason: options.cancelReason }),
+    ...(options.integration === undefined ? {} : { integration: options.integration }),
+  }
+}
+
+function terminalFixturePr(
+  id: string,
+  status: Extract<PRStatus, "rejected" | "integrated" | "canceled">,
+  submittedAt: string,
+  terminalAt: string,
+  run: string,
+  name: string,
+  options: Omit<FixturePrOptions, "headSha" | "revisions" | "terminalRun"> = {},
+): PR {
+  const digit = id.replace(/\D/gu, "").at(-1) ?? "1"
+  const headSha = digit.repeat(40)
+  return fixturePr(id, status, submittedAt, name, {
+    ...options,
+    headSha,
+    terminalRun: run,
+    revisions: [
+      {
+        revision: 1,
+        headSha,
+        base: "main",
+        baseSha: BASE_SHA,
+        pushedAt: submittedAt,
+        submittedAt,
+        terminal: { status, at: terminalAt, run },
+      },
+    ],
+    ...(status === "rejected" ? { rejectedAt: terminalAt } : {}),
+    ...(status === "integrated"
+      ? { integratedAt: terminalAt, integration: { commit: INTEGRATED_SHA, baseSha: BASE_SHA } }
+      : {}),
+    ...(status === "canceled"
+      ? {
+          canceledAt: terminalAt,
+          canceledBy: options.canceledBy ?? "operator@example.test",
+          cancelReason: options.cancelReason ?? "superseded by a newer revision",
+        }
+      : {}),
+  })
+}
+
+type FixtureJobOptions = Readonly<{
+  attempt?: number
+  requestedAt?: string
+  changedAt?: string
+  startedAt?: string
+  finishedAt?: string
+  runner?: string
+  leaseExpiresAt?: string
+  token?: string
+  url?: string
+  detail?: string
+  output?: JsonValue
+  artifacts?: readonly JsonValue[]
+  checkpoint?: JsonValue
+  error?: Readonly<{ code: string; message: string }>
+  canceledBy?: string
+  cancelReason?: string
+}>
+
+function fixtureJob(id: string, status: Job["status"], options: FixtureJobOptions = {}): Job {
+  const requestedAt = options.requestedAt ?? "2026-07-13T11:30:00.000Z"
+  const base = {
+    id,
+    definition: "queue.step",
+    revision: "fixture-v2",
+    input: { command: ["bun", "vitest", "run"] },
+    attempt: options.attempt ?? (status === "requested" ? 0 : 1),
+    requestedAt,
+    changedAt: options.changedAt ?? requestedAt,
+  } as const
+  if (status === "requested") return { ...base, status }
+  if (status === "canceled") {
+    return {
+      ...base,
+      status,
+      finishedAt: options.finishedAt ?? "2026-07-13T11:45:00.000Z",
+      canceledBy: options.canceledBy ?? "operator@example.test",
+      cancelReason: options.cancelReason ?? "superseded by a newer revision",
+    }
+  }
+
+  const execution = {
+    startedAt: options.startedAt ?? "2026-07-13T11:31:00.000Z",
+    runner: options.runner ?? "runner-herdr-03",
+  } as const
+  if (status === "running") {
+    return {
+      ...base,
+      ...execution,
+      status,
+      leaseExpiresAt: options.leaseExpiresAt ?? "2026-07-13T12:05:00.000Z",
+    }
+  }
+  if (status === "waiting") {
+    return {
+      ...base,
+      ...execution,
+      status,
+      token: options.token ?? "approval-token-42",
+      ...(options.url === undefined ? {} : { url: options.url }),
+      ...(options.detail === undefined ? {} : { detail: options.detail }),
+      ...(options.artifacts === undefined ? {} : { artifacts: options.artifacts }),
+      ...(options.checkpoint === undefined ? {} : { checkpoint: options.checkpoint }),
+    }
+  }
+  if (status === "lost") {
+    return {
+      ...base,
+      ...execution,
+      status,
+      finishedAt: options.finishedAt ?? "2026-07-13T11:45:00.000Z",
+      lostReason: options.detail ?? "runner lease expired",
+    }
+  }
+
+  const finished = {
+    ...base,
+    ...execution,
+    finishedAt: options.finishedAt ?? "2026-07-13T11:40:00.000Z",
+    ...(options.url === undefined ? {} : { url: options.url }),
+    ...(options.detail === undefined ? {} : { detail: options.detail }),
+    ...(options.artifacts === undefined ? {} : { artifacts: options.artifacts }),
+    ...(options.checkpoint === undefined ? {} : { checkpoint: options.checkpoint }),
+  } as const
+  return status === "passed"
+    ? { ...finished, status, output: options.output ?? {} }
+    : {
+        ...finished,
+        status,
+        error: options.error ?? { code: "check-failed", message: "focused verification failed" },
+        ...(options.output === undefined ? {} : { output: options.output }),
+      }
+}
+
+function fixtureStep(
+  name: string,
+  job: Job,
+  options: Readonly<{
+    title?: string
+    revision?: string
+    integrates?: boolean
+    needsIntegration?: boolean
+    classification?: "base" | "carrier"
+  }> = {},
+): QueueRun["steps"][number] {
+  return {
+    name,
+    title: options.title ?? `${name} production gate`,
+    revision: options.revision ?? "step-v2",
+    integrates: options.integrates ?? false,
+    needsIntegration: options.needsIntegration ?? false,
+    ...(options.classification === undefined ? {} : { classification: options.classification }),
+    job,
   }
 }
 
@@ -52,26 +247,36 @@ function fixtureRun(
   options: Readonly<{
     finishedAt?: string
     error?: Readonly<{ code: string; message: string }>
+    steps?: QueueRun["steps"]
+    cursor?: number
+    results?: Readonly<Record<string, JsonValue>>
+    memberRevisions?: Readonly<Record<string, number>>
   }> = {},
 ): QueueRun {
   const integration = status === "passed" ? { commit: INTEGRATED_SHA, baseSha: BASE_SHA } : undefined
   return {
     id,
-    prs: prs.map((pr) => ({
-      id: pr.id,
-      name: pr.name,
-      branch: pr.branch,
-      base: pr.base,
-      revision: pr.revision,
-      headSha: pr.headSha,
-      baseSha: pr.baseSha,
-    })),
+    prs: prs.map((pr) => {
+      const revision = options.memberRevisions?.[pr.id] ?? pr.revision
+      const clock = pr.revisions.find((candidate) => candidate.revision === revision)
+      if (clock === undefined) throw new Error(`fixture PR '${pr.id}' is missing revision ${revision}`)
+      return {
+        id: pr.id,
+        name: pr.name,
+        branch: pr.branch,
+        base: pr.base,
+        revision,
+        headSha: clock.headSha,
+        baseSha: clock.baseSha,
+      }
+    }),
     base: "main",
-    steps: [],
+    steps: options.steps ?? [],
     startedAt,
-    cursor: 0,
+    cursor: options.cursor ?? 0,
     ...(integration === undefined ? {} : { integration }),
-    shape: integration === undefined ? { results: {} } : { results: {}, integration },
+    shape:
+      integration === undefined ? { results: options.results ?? {} } : { results: options.results ?? {}, integration },
     status,
     ...(options.finishedAt === undefined ? {} : { finishedAt: options.finishedAt }),
     ...(options.error === undefined ? {} : { error: options.error }),
@@ -100,14 +305,11 @@ type ProjectionOptions = Readonly<{
   latest?: boolean
   rowLimit?: number
   retainedSinceMs?: number
+  attempts?: readonly QueueAttempt[]
 }>
 
 function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions = {}): QueueTimelineProjection {
-  const submissionTimes = new Map(
-    result.prs.flatMap((pr) =>
-      pr.submittedAt === undefined ? [] : ([[queueRevisionKey(pr), pr.submittedAt]] as const),
-    ),
-  )
+  const submissionTimes = queueTimelineAdmissionTimes([result])
   return queueTimelineProjection([result], {
     now: NOW,
     windowMs: 6 * 60 * 60_000,
@@ -116,6 +318,7 @@ function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions
     latest: options.latest ?? false,
     rowLimit: options.rowLimit ?? 20,
     submissionTimes,
+    ...(options.attempts === undefined ? {} : { attempts: options.attempts }),
     retainedSinceMs: options.retainedSinceMs ?? Date.parse("2026-07-13T05:00:00.000Z"),
     siblingBases: ["release/next"],
     base: "main",
@@ -135,29 +338,342 @@ function fixtureSnapshot(
   }
 }
 
-const pendingOne = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes")
+const pendingOneHead = "1".repeat(40)
+const pendingOne = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes", {
+  issue: "@yrd/core/21120-pr-state-notifications",
+  note: "Keep the operator-facing notification contract visible during review.",
+  reviews: [
+    {
+      revision: 1,
+      headSha: pendingOneHead,
+      actor: "reviewer@example.test",
+      decision: "approve",
+      at: "2026-07-13T11:14:00.000Z",
+      ref: "review://PR1/1",
+      note: "Queue presentation matches the accepted contract.",
+    },
+  ],
+  comments: [
+    {
+      revision: 1,
+      headSha: pendingOneHead,
+      actor: "author@example.test",
+      note: "The selected detail should retain this source position.",
+      at: "2026-07-13T11:15:00.000Z",
+      ref: "packages/yrd-cli/src/queue-status-view.tsx:1463",
+    },
+  ],
+  checkRequests: [
+    {
+      revision: 1,
+      headSha: pendingOneHead,
+      baseSha: BASE_SHA,
+      at: "2026-07-13T11:16:00.000Z",
+    },
+  ],
+})
 const pendingTwo = fixturePr("PR2", "submitted", "2026-07-13T11:20:00.000Z", "Repair queue view")
 const runningPr = fixturePr("PR3", "submitted", "2026-07-13T11:25:00.000Z", "Run focused checks")
-const integratedPr = fixturePr("PR4", "integrated", "2026-07-13T10:30:00.000Z", "Land the durable patch")
-const rejectedPr = fixturePr("PR5", "rejected", "2026-07-13T10:45:00.000Z", "Reject broken payload")
+const integratedPr = terminalFixturePr(
+  "PR4",
+  "integrated",
+  "2026-07-13T10:30:00.000Z",
+  "2026-07-13T10:55:00.000Z",
+  "R4",
+  "Land the durable patch",
+)
+const rejectedPr = terminalFixturePr(
+  "PR5",
+  "rejected",
+  "2026-07-13T10:45:00.000Z",
+  "2026-07-13T11:12:00.000Z",
+  "R5",
+  "Reject broken payload",
+  { detail: "typecheck-failed: packages/yrd-cli/src/run.ts:1428" },
+)
 const environmentPr = fixturePr("PR6", "submitted", "2026-07-13T10:50:00.000Z", "Retry stale environment")
-const canceledPr = fixturePr("PR7", "canceled", "2026-07-13T10:55:00.000Z", "Cancel superseded run")
+const canceledPr = terminalFixturePr(
+  "PR7",
+  "canceled",
+  "2026-07-13T10:55:00.000Z",
+  "2026-07-13T11:35:00.000Z",
+  "R7",
+  "Cancel superseded run",
+)
 
-const runningRun = fixtureRun("R3", [runningPr], "running", "2026-07-13T11:40:00.000Z")
+const batchLeadHead = "c".repeat(40)
+const batchPartnerHead = "d".repeat(40)
+const batchLeadPr = fixturePr(
+  "PR42",
+  "submitted",
+  "2026-07-13T11:24:00.000Z",
+  "Align host navigation keybindings without disturbing internal pane controls",
+  {
+    headSha: batchLeadHead,
+    issue: "@hab/super/21135-herdr-keybindings",
+    reviews: [
+      {
+        revision: 1,
+        headSha: batchLeadHead,
+        actor: "chief@example.test",
+        decision: "approve",
+        at: "2026-07-13T11:28:00.000Z",
+        ref: "request://9097d479",
+      },
+    ],
+    comments: [
+      {
+        revision: 1,
+        headSha: batchLeadHead,
+        actor: "operator@example.test",
+        note: "Preserve Option+1..9 and the accepted pane-focus precedent.",
+        at: "2026-07-13T11:29:00.000Z",
+        ref: "config/herdr.toml:18",
+      },
+    ],
+    checkRequests: [
+      {
+        revision: 1,
+        headSha: batchLeadHead,
+        baseSha: BASE_SHA,
+        at: "2026-07-13T11:30:00.000Z",
+      },
+    ],
+  },
+)
+const batchPartnerPr = fixturePr(
+  "PR43",
+  "submitted",
+  "2026-07-13T11:26:00.000Z",
+  "Carry the production split-pane contract into the queue detail surface",
+  {
+    headSha: batchPartnerHead,
+    issue: "@si/ui/21119-split-pane",
+    checkRequests: [
+      {
+        revision: 1,
+        headSha: batchPartnerHead,
+        baseSha: BASE_SHA,
+        at: "2026-07-13T11:31:00.000Z",
+      },
+    ],
+  },
+)
+
+const prepareManifest = {
+  kind: "checkout-manifest",
+  uri: "file:///repo/.git/yrd/artifacts/R42/0-prepare/attempt-1/manifest.json",
+} as const
+const checkReport = {
+  kind: "vitest-report",
+  uri: "file:///repo/.git/yrd/artifacts/R4/0-check/attempt-1/report.json",
+} as const
+const rejectionEvidence = {
+  kind: "diagnostics",
+  uri: "file:///repo/.git/yrd/artifacts/R5/0-check/attempt-2/diagnostics.json",
+} as const
+const environmentEvidence = {
+  kind: "environment",
+  uri: "file:///repo/.git/yrd/artifacts/R6/0-prepare/attempt-1/environment.json",
+} as const
+
+const runningSteps = [
+  fixtureStep(
+    "check",
+    fixtureJob("J3-check", "running", {
+      requestedAt: "2026-07-13T11:39:00.000Z",
+      startedAt: "2026-07-13T11:40:00.000Z",
+      changedAt: "2026-07-13T11:58:30.000Z",
+      leaseExpiresAt: "2026-07-13T12:04:30.000Z",
+      runner: "runner-herdr-03",
+    }),
+    { classification: "carrier" },
+  ),
+]
+const batchSteps = [
+  fixtureStep(
+    "prepare",
+    fixtureJob("J42-prepare", "passed", {
+      requestedAt: "2026-07-13T11:39:00.000Z",
+      startedAt: "2026-07-13T11:40:00.000Z",
+      changedAt: "2026-07-13T11:42:00.000Z",
+      finishedAt: "2026-07-13T11:42:00.000Z",
+      artifacts: [prepareManifest],
+      checkpoint: { baseSha: BASE_SHA, members: ["PR42", "PR43"] },
+      output: { prepared: true, artifacts: [prepareManifest] },
+    }),
+    { classification: "base" },
+  ),
+  fixtureStep(
+    "check",
+    fixtureJob("J42-check", "running", {
+      attempt: 2,
+      requestedAt: "2026-07-13T11:42:00.000Z",
+      startedAt: "2026-07-13T11:43:00.000Z",
+      changedAt: "2026-07-13T11:58:30.000Z",
+      leaseExpiresAt: "2026-07-13T12:05:30.000Z",
+      runner: "runner-herdr-07",
+    }),
+    { classification: "carrier" },
+  ),
+  fixtureStep("integrate", fixtureJob("J42-integrate", "requested", { requestedAt: "2026-07-13T11:43:00.000Z" }), {
+    integrates: true,
+    needsIntegration: true,
+  }),
+]
+const integratedSteps = [
+  fixtureStep(
+    "check",
+    fixtureJob("J4-check", "passed", {
+      requestedAt: "2026-07-13T10:39:00.000Z",
+      startedAt: "2026-07-13T10:40:00.000Z",
+      changedAt: "2026-07-13T10:47:00.000Z",
+      finishedAt: "2026-07-13T10:47:00.000Z",
+      artifacts: [checkReport],
+      checkpoint: { tests: 125, failures: 0 },
+      output: { tests: 125, failures: 0, artifacts: [checkReport] },
+    }),
+    { classification: "carrier" },
+  ),
+  fixtureStep(
+    "integrate",
+    fixtureJob("J4-integrate", "passed", {
+      requestedAt: "2026-07-13T10:47:00.000Z",
+      startedAt: "2026-07-13T10:48:00.000Z",
+      changedAt: "2026-07-13T10:55:00.000Z",
+      finishedAt: "2026-07-13T10:55:00.000Z",
+      output: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
+    }),
+    { integrates: true, needsIntegration: true },
+  ),
+]
+const rejectedSteps = [
+  fixtureStep(
+    "check",
+    fixtureJob("J5-check", "failed", {
+      attempt: 2,
+      requestedAt: "2026-07-13T10:59:00.000Z",
+      startedAt: "2026-07-13T11:00:00.000Z",
+      changedAt: "2026-07-13T11:12:00.000Z",
+      finishedAt: "2026-07-13T11:12:00.000Z",
+      artifacts: [rejectionEvidence],
+      checkpoint: { file: "packages/yrd-cli/src/run.ts", line: 1428 },
+      output: { diagnostics: [{ file: "packages/yrd-cli/src/run.ts", line: 1428 }], artifacts: [rejectionEvidence] },
+      error: { code: "typecheck-failed", message: "payload does not typecheck at run.ts:1428" },
+    }),
+    { classification: "carrier" },
+  ),
+]
+const rejectedAttempts: readonly QueueAttempt[] = [
+  {
+    job: "J5-check",
+    run: "R5",
+    step: "check",
+    index: 0,
+    attempt: 1,
+    runner: "runner-herdr-02",
+    outcome: "failed",
+    requestedAt: "2026-07-13T10:49:00.000Z",
+    startedAt: "2026-07-13T10:50:00.000Z",
+    finishedAt: "2026-07-13T10:55:00.000Z",
+    durationMs: 5 * 60_000,
+    revision: "step-v2",
+    result: {
+      status: "failed",
+      error: { code: "lint-failed", message: "first attempt exposed formatting drift" },
+      output: {
+        artifacts: [
+          {
+            kind: "diagnostics",
+            uri: "file:///repo/.git/yrd/artifacts/R5/0-check/attempt-1/diagnostics.json",
+          },
+        ],
+      },
+    },
+  },
+  {
+    job: "J5-check",
+    run: "R5",
+    step: "check",
+    index: 0,
+    attempt: 2,
+    runner: "runner-herdr-03",
+    outcome: "failed",
+    requestedAt: "2026-07-13T10:59:00.000Z",
+    startedAt: "2026-07-13T11:00:00.000Z",
+    finishedAt: "2026-07-13T11:12:00.000Z",
+    durationMs: 12 * 60_000,
+    revision: "step-v2",
+    result: {
+      status: "failed",
+      error: { code: "typecheck-failed", message: "payload does not typecheck at run.ts:1428" },
+      output: { diagnostics: [{ file: "packages/yrd-cli/src/run.ts", line: 1428 }], artifacts: [rejectionEvidence] },
+    },
+  },
+]
+const environmentSteps = [
+  fixtureStep(
+    "prepare",
+    fixtureJob("J6-prepare", "failed", {
+      requestedAt: "2026-07-13T11:14:00.000Z",
+      startedAt: "2026-07-13T11:15:00.000Z",
+      changedAt: "2026-07-13T11:28:00.000Z",
+      finishedAt: "2026-07-13T11:28:00.000Z",
+      artifacts: [environmentEvidence],
+      output: { remote: "origin", retryable: true, artifacts: [environmentEvidence] },
+      error: { code: "queue-environment-refused", message: "origin was unavailable after three attempts" },
+    }),
+    { classification: "base" },
+  ),
+]
+const canceledSteps = [
+  fixtureStep(
+    "check",
+    fixtureJob("J7-check", "canceled", {
+      attempt: 1,
+      requestedAt: "2026-07-13T11:29:00.000Z",
+      changedAt: "2026-07-13T11:35:00.000Z",
+      finishedAt: "2026-07-13T11:35:00.000Z",
+      canceledBy: "operator@example.test",
+      cancelReason: "superseded by PR8 revision 2",
+    }),
+  ),
+]
+
+const runningRun = fixtureRun("R3", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
+  steps: runningSteps,
+})
+const batchRun = fixtureRun("R42", [batchLeadPr, batchPartnerPr], "running", "2026-07-13T11:40:00.000Z", {
+  steps: batchSteps,
+  cursor: 1,
+  results: { prepare: { prepared: true, artifacts: [prepareManifest] } },
+})
 const integratedRun = fixtureRun("R4", [integratedPr], "passed", "2026-07-13T10:40:00.000Z", {
   finishedAt: "2026-07-13T10:55:00.000Z",
+  steps: integratedSteps,
+  cursor: integratedSteps.length,
+  results: {
+    check: { tests: 125, failures: 0, artifacts: [checkReport] },
+    integrate: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
+  },
 })
 const rejectedRun = fixtureRun("R5", [rejectedPr], "failed", "2026-07-13T11:00:00.000Z", {
   finishedAt: "2026-07-13T11:12:00.000Z",
   error: { code: "typecheck-failed", message: "payload does not typecheck" },
+  steps: rejectedSteps,
+  cursor: 0,
 })
 const environmentRun = fixtureRun("R6", [environmentPr], "failed", "2026-07-13T11:15:00.000Z", {
   finishedAt: "2026-07-13T11:28:00.000Z",
   error: { code: "queue-environment-refused", message: "origin was unavailable" },
+  steps: environmentSteps,
+  cursor: 0,
 })
 const canceledRun = fixtureRun("R7", [canceledPr], "failed", "2026-07-13T11:30:00.000Z", {
   finishedAt: "2026-07-13T11:35:00.000Z",
   error: { code: "queue-canceled", message: "superseded by a newer revision" },
+  steps: canceledSteps,
+  cursor: 0,
 })
 
 const mixedResult = fixtureResult(
@@ -171,20 +687,118 @@ const pausedResult = fixtureResult([pendingOne, pendingTwo], [], {
   pausedAt: "2026-07-13T11:30:00.000Z",
 })
 
-const lineagePr = fixturePr("PR8", "integrated", "2026-07-13T09:00:00.000Z", "Retry until green")
+const lineageRevisionOneHead = "7".repeat(40)
+const lineageRevisionTwoHead = "8".repeat(40)
+const lineagePr = fixturePr("PR8", "integrated", "2026-07-13T09:30:00.000Z", "Retry until green", {
+  revision: 2,
+  headSha: lineageRevisionTwoHead,
+  integratedAt: "2026-07-13T09:45:00.000Z",
+  terminalRun: "R9",
+  integration: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
+  revisions: [
+    {
+      revision: 1,
+      headSha: lineageRevisionOneHead,
+      base: "main",
+      baseSha: BASE_SHA,
+      pushedAt: "2026-07-13T08:55:00.000Z",
+      submittedAt: "2026-07-13T09:00:00.000Z",
+      terminal: { status: "rejected", at: "2026-07-13T09:25:00.000Z", run: "R8" },
+    },
+    {
+      revision: 2,
+      headSha: lineageRevisionTwoHead,
+      base: "main",
+      baseSha: BASE_SHA,
+      pushedAt: "2026-07-13T09:28:00.000Z",
+      submittedAt: "2026-07-13T09:30:00.000Z",
+      terminal: { status: "integrated", at: "2026-07-13T09:45:00.000Z", run: "R9" },
+    },
+  ],
+  reviews: [
+    {
+      revision: 1,
+      headSha: lineageRevisionOneHead,
+      actor: "reviewer@example.test",
+      decision: "reject",
+      at: "2026-07-13T09:05:00.000Z",
+      note: "Revision 1 retained a stale failure.",
+    },
+    {
+      revision: 2,
+      headSha: lineageRevisionTwoHead,
+      actor: "reviewer@example.test",
+      decision: "approve",
+      at: "2026-07-13T09:32:00.000Z",
+      ref: "review://PR8/2",
+    },
+  ],
+  comments: [
+    {
+      revision: 2,
+      headSha: lineageRevisionTwoHead,
+      actor: "author@example.test",
+      note: "Revision 2 addresses the exact failed assertion.",
+      at: "2026-07-13T09:31:00.000Z",
+      ref: "packages/yrd-cli/tests/queue-timeline-storybook.test.ts:1",
+    },
+  ],
+  checkRequests: [
+    {
+      revision: 2,
+      headSha: lineageRevisionTwoHead,
+      baseSha: BASE_SHA,
+      at: "2026-07-13T09:30:30.000Z",
+    },
+  ],
+})
 const lineageRuns = [
   fixtureRun("R8", [lineagePr], "failed", "2026-07-13T09:15:00.000Z", {
     finishedAt: "2026-07-13T09:25:00.000Z",
     error: { code: "check-failed", message: "first attempt failed" },
+    memberRevisions: { PR8: 1 },
+    steps: [
+      fixtureStep(
+        "check",
+        fixtureJob("J8-check", "failed", {
+          requestedAt: "2026-07-13T09:14:00.000Z",
+          startedAt: "2026-07-13T09:15:00.000Z",
+          changedAt: "2026-07-13T09:25:00.000Z",
+          finishedAt: "2026-07-13T09:25:00.000Z",
+          error: { code: "check-failed", message: "first attempt failed" },
+          output: { assertion: "expected true, received false" },
+        }),
+      ),
+    ],
   }),
   fixtureRun("R9", [lineagePr], "passed", "2026-07-13T09:30:00.000Z", {
     finishedAt: "2026-07-13T09:45:00.000Z",
+    memberRevisions: { PR8: 2 },
+    steps: [
+      fixtureStep(
+        "check",
+        fixtureJob("J9-check", "passed", {
+          requestedAt: "2026-07-13T09:29:00.000Z",
+          startedAt: "2026-07-13T09:30:00.000Z",
+          changedAt: "2026-07-13T09:45:00.000Z",
+          finishedAt: "2026-07-13T09:45:00.000Z",
+          output: { assertion: "passed" },
+        }),
+      ),
+    ],
   }),
 ]
 const lineageResult = fixtureResult([lineagePr], lineageRuns)
 
-const anchoredPrs = [10, 11, 12, 13].map((value) =>
-  fixturePr(`PR${value}`, "integrated", `2026-07-13T11:${value}:00.000Z`, `Anchored result ${value}`),
+const anchoredPrs = [10, 11, 12, 13].map((value, index) =>
+  terminalFixturePr(
+    `PR${value}`,
+    "integrated",
+    `2026-07-13T11:${value}:00.000Z`,
+    `2026-07-13T11:${30 + index}:00.000Z`,
+    `R${value}`,
+    `Anchored result ${value}`,
+  ),
 )
 const anchoredRuns = anchoredPrs.map((pr, index) =>
   fixtureRun(`R${10 + index}`, [pr], "passed", `2026-07-13T11:${20 + index}:00.000Z`, {
@@ -192,25 +806,54 @@ const anchoredRuns = anchoredPrs.map((pr, index) =>
   }),
 )
 
-const longSubjectPr = fixturePr(
+const longSubjectPr = terminalFixturePr(
   "PR20",
   "integrated",
   "2026-07-13T11:00:00.000Z",
+  "2026-07-13T11:15:00.000Z",
+  "R20",
   "Preserve every timing column while this deliberately long subject truncates only inside the flexible subject cell",
 )
 const longSubjectRun = fixtureRun("R20", [longSubjectPr], "passed", "2026-07-13T11:05:00.000Z", {
   finishedAt: "2026-07-13T11:15:00.000Z",
 })
 
+const batchStdout: QueueArtifactOutput = {
+  run: "R42",
+  step: "check",
+  attempt: 2,
+  path: "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/stdout.log",
+  text: "$ bun vitest run packages/yrd-cli/tests/queue-timeline-storybook.test.ts\n125 tests collected\n",
+}
+const batchStderr: QueueArtifactOutput = {
+  run: "R42",
+  step: "check",
+  attempt: 2,
+  path: "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/stderr.log",
+  text: "stderr: waiting for the final focused assertion\n",
+}
 const initialOutput: QueueArtifactOutput = {
   run: "R3",
   step: "check",
   attempt: 1,
-  path: "/repo/.git/yrd/artifacts/R3/0-check/attempt-1/output.log",
+  path: "/repo/.git/yrd/artifacts/R3/0-check/attempt-1/stdout.log",
   text: "checking one\n",
 }
+const initialStderr: QueueArtifactOutput = {
+  run: "R3",
+  step: "check",
+  attempt: 1,
+  path: "/repo/.git/yrd/artifacts/R3/0-check/attempt-1/stderr.log",
+  text: "stderr: retry warning retained\n",
+}
+
+const productionOverviewResult = fixtureResult(
+  [batchLeadPr, batchPartnerPr, integratedPr, rejectedPr, environmentPr, canceledPr],
+  [batchRun, integratedRun, rejectedRun, environmentRun, canceledRun],
+)
 
 export const QUEUE_TIMELINE_STORY_NAMES = [
+  "production-overview",
   "idle",
   "pending-only",
   "running-spinner",
@@ -245,6 +888,15 @@ export type QueueTimelineStory = Readonly<{
 const integratedSnapshot = fixtureSnapshot(fixtureResult([integratedPr], [integratedRun]))
 
 export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, QueueTimelineStory>> = {
+  "production-overview": {
+    snapshot: fixtureSnapshot(productionOverviewResult, { statuses: ["running", "rejected", "integrated", "other"] }, [
+      batchStdout,
+      batchStderr,
+    ]),
+    widths: [80, 140],
+    selectedStatus: "running",
+    viewport: { columns: 200, rows: 50 },
+  },
   idle: { snapshot: fixtureSnapshot(fixtureResult([], [])), widths: [100] },
   "pending-only": { snapshot: fixtureSnapshot(fixtureResult([pendingOne, pendingTwo], [])), widths: [100] },
   "running-spinner": {
@@ -282,7 +934,7 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     selectedStatus: "running",
   },
   "selected-rejected": {
-    snapshot: fixtureSnapshot(fixtureResult([rejectedPr], [rejectedRun])),
+    snapshot: fixtureSnapshot(fixtureResult([rejectedPr], [rejectedRun]), { attempts: rejectedAttempts }),
     widths: [100],
     selectedStatus: "rejected",
   },
@@ -297,9 +949,10 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     selectedStatus: "integrated",
   },
   "live-output-growth": {
-    snapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun]), {}, [initialOutput]),
+    snapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun]), {}, [initialOutput, initialStderr]),
     nextSnapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun]), {}, [
       { ...initialOutput, text: "checking one\nchecking two\n" },
+      { ...initialStderr, text: "stderr: retry warning retained\nstderr: retry recovered\n" },
     ]),
     widths: [120],
     selectedStatus: "running",
