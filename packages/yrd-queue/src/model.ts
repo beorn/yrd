@@ -58,6 +58,29 @@ export type QueueFailure = Readonly<{
   error: JobError
 }>
 
+export type QueueAuthorityToken = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  consumedBy?: QueueRunId
+}>
+
+export type QueueRunAuthority = Readonly<{
+  inheritedFrom?: QueueRunId
+  missingSubmits: readonly string[]
+  missingChecks: readonly string[]
+}>
+
+export type QueueAuthorityState = Readonly<{
+  statuses: Readonly<
+    Record<string, "pushed" | "submitted" | "rejected" | "withdrawn" | "integrated" | "canceled">
+  >
+  current: Readonly<Record<string, QueueAuthorityToken>>
+  submits: Readonly<Record<string, QueueAuthorityToken>>
+  checks: Readonly<Record<string, QueueAuthorityToken>>
+  runs: Readonly<Record<QueueRunId, QueueRunAuthority>>
+}>
+
 export type QueueRecord = Readonly<{
   id: QueueRunId
   prs: readonly PRSnapshot[]
@@ -106,6 +129,7 @@ export type QueuesState = Readonly<{
   requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
   records: Readonly<Record<QueueRunId, QueueRecord>>
+  authority: QueueAuthorityState
 }>
 
 export type PREligibilityReason = Readonly<{
@@ -223,6 +247,7 @@ export const Queues = Object.freeze({
       requires: options.requires ?? [],
       pauses: {},
       records: {},
+      authority: { statuses: {}, current: {}, submits: {}, checks: {}, runs: {} },
     }
   },
 
