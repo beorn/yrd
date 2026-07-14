@@ -329,18 +329,26 @@ describe("Queue command adapters", () => {
     expect(run.integration?.sourceRewrites).toEqual(evidence.sourceRewrites)
   })
 
-  it("rejects a rewritten source when its range-diff certificate is not exact", async () => {
+  it.each([
+    { proof: "stable patch identity", command: "patch-id", detail: "stable patch identity" },
+    { proof: "range-diff equivalence", command: "range-diff", detail: "range-diff equivalent" },
+  ] as const)("rejects a rewritten source when its $proof certificate is not exact", async ({ command, detail }) => {
     const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await using process = createProcess()
-    const divergentRangeDiff: Pick<Process, "run"> = {
+    let patchIdCalls = 0
+    const divergentProof: Pick<Process, "run"> = {
       async run(request) {
         const result = await process.run(request)
-        return request.argv[0] === "git" && request.argv.includes("range-diff")
-          ? { ...result, stdout: result.stdout.replace(" = ", " ! ") }
-          : result
+        if (request.argv[0] !== "git" || !request.argv.includes(command)) return result
+        if (command === "patch-id" && ++patchIdCalls < 2) return result
+        const stdout =
+          command === "patch-id"
+            ? `${result.stdout[0] === "0" ? "1" : "0"}${result.stdout.slice(1)}`
+            : result.stdout.replace(" = ", " ! ")
+        return { ...result, stdout }
       },
     }
-    await using app = await checkedQueue(divergentRangeDiff, repo, ["true"])
+    await using app = await checkedQueue(divergentProof, repo, ["true"])
     await app.bays.submit({
       branch: "issue/source",
       headSha: rootBaseSha,
@@ -364,7 +372,7 @@ describe("Queue command adapters", () => {
 
     expect(run).toMatchObject({
       status: "failed",
-      error: { code: "payload-certificate", message: expect.stringContaining("range-diff equivalent") },
+      error: { code: "payload-certificate", message: expect.stringContaining(detail) },
     })
     expect(await git(repo, ["rev-parse", "main"])).toBe(rootBaseSha)
     expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
