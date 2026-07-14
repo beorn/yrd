@@ -70,6 +70,46 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("persists one opaque correlation on a draft revision and preserves it through ready", async () => {
+    await using app = (await createHarness()).app
+    const correlation = { namespace: "tribe-request", id: "review-20925/custom 61's docs" }
+
+    const drafted = await app.bays.submit({
+      branch: "issue/correlated-draft",
+      headSha: HEAD_1,
+      draft: true,
+      correlation,
+    })
+    expect(drafted.events).toContainEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({ correlation }),
+      }),
+    )
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "pushed",
+      revision: 1,
+      correlation,
+      revisions: [{ revision: 1, correlation }],
+    })
+
+    expect((await app.bays.submit({ pr: "PR1", correlation })).events).toEqual([])
+    await expect(
+      app.bays.submit({
+        pr: "PR1",
+        correlation: { namespace: "tribe-request", id: "review-20925/conflicting" },
+      }),
+    ).rejects.toThrow("already bound to correlation 'tribe-request:review-20925/custom 61's docs'")
+
+    const ready = await app.bays.ready({ pr: "PR1" })
+    expect(ready.events).toHaveLength(1)
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      revision: 1,
+      correlation,
+      revisions: [{ revision: 1, correlation }],
+    })
+  })
+
   it("runs a pinned bay through refresh, PR revisions, withdrawal, and close", async () => {
     const { app, workspace } = await createHarness()
 
