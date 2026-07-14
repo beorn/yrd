@@ -36,6 +36,10 @@ export type YrdCliServices = Readonly<{
 export type YrdCliIO = {
   stdout(text: string): void
   stderr(text: string): void
+  /** Whether stderr is an interactive terminal suitable for human-only output. */
+  stderrIsTTY?: boolean
+  /** Clear the current stderr terminal line without exposing terminal escapes to the CLI. */
+  clearStderrLine?(): boolean
   /** Human output is rendered by Silvery. Tests and pipes omit color; the
    * process host supplies terminal capabilities. */
   color?: boolean

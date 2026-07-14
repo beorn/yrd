@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { join, relative, resolve, sep } from "node:path"
+import { clearLine, cursorTo } from "node:readline"
 import { createScope, type Scope } from "@silvery/scope"
 import {
   createBayJobDefs,
@@ -517,9 +518,35 @@ async function closeRuntime(app: YrdCliApp | undefined, process: Process, scope:
 
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 
+const GracefulShutdownMessage =
+  "Shutting down gracefully; please wait for the current job to\n" +
+  "finish. Press Ctrl-C again to force stop (the active run may\n" +
+  'require `yrd queue recover` and job will have status "job-lost").\n'
+
+function clearTerminalSignalEcho(io: YrdCliIO): boolean {
+  if (io.stderrIsTTY !== true) return false
+  try {
+    return io.clearStderrLine?.() === true
+  } catch {
+    return false
+  }
+}
+
+function reportGracefulShutdown(io: YrdCliIO, log: ConditionalLogger, signal: ShutdownSignal): void {
+  if (io.stderrIsTTY === true) {
+    io.stderr(`${clearTerminalSignalEcho(io) ? "" : "\n"}${GracefulShutdownMessage}`)
+  }
+  log.warn?.("Graceful drain requested", {
+    signal,
+    mode: "drain",
+    nextSignal: "force",
+    recovery: "yrd queue recover",
+  })
+}
+
 /** Own process signals at the run-to-exit CLI boundary, then restore native
  * signal exit semantics only after the host has drained its resources. */
-function bindProcessShutdown(shutdown: () => Promise<void>, drain?: () => void): () => void {
+function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: ShutdownSignal) => void): () => void {
   let draining = false
   let hardSignal: ShutdownSignal | undefined
   const remove = (): void => {
@@ -533,7 +560,7 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: () => void):
   const onSignal = (signal: ShutdownSignal): void => {
     if (drain !== undefined && !draining) {
       draining = true
-      drain()
+      drain(signal)
       return
     }
     if (hardSignal !== undefined) {
@@ -562,9 +589,11 @@ function isResidentQueueRun(invocation: Invocation): boolean {
   )
 }
 
-export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
+export async function createYrdHost(
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; log?: ConditionalLogger } = {},
+): Promise<YrdHost> {
   const scope = createScope("yrd-host")
-  const log = createLogger("yrd")
+  const log = options.log ?? createLogger("yrd")
   const process = createProcess({ cwd: options.cwd, env: options.env, inject: { scope, log } })
   let app: YrdCliApp | undefined
   try {
@@ -660,9 +689,16 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
 function defaultIO(): YrdCliIO {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   const interactive = process.stdin.isTTY && process.stdout.isTTY
+  const stderrIsTTY = process.stderr.isTTY === true
   const io: YrdCliIO = {
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
+    stderrIsTTY,
+    clearStderrLine: () => {
+      const positioned = cursorTo(process.stderr, 0)
+      const cleared = clearLine(process.stderr, 0)
+      return positioned && cleared
+    },
     color,
     columns: process.stdout.columns,
     cwd: process.cwd(),
@@ -703,21 +739,23 @@ export async function runYrdProcess(
     return runYrdHelp(argv, io)
   }
 
+  const log = createLogger("yrd")
   let host: YrdHost | undefined
   let closePromise: Promise<void> | undefined
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
   const drain = isResidentQueueRun(invocation) ? new AbortController() : undefined
   let removeShutdownSignals: () => void = () => undefined
   try {
-    const activeHost = await createYrdHost({ cwd: io.cwd })
+    const activeHost = await createYrdHost({ cwd: io.cwd, log })
     host = activeHost
+    const runnerLog = log.child("runner")
     removeShutdownSignals = bindProcessShutdown(
       closeHost,
       drain === undefined
         ? undefined
-        : () => {
-            io.stderr("drain latched; second signal forces shutdown\n")
+        : (signal) => {
             drain.abort()
+            reportGracefulShutdown(io, runnerLog, signal)
           },
     )
     const selectedArgv = await resolveSubmitArgv(invocation, {
