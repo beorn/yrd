@@ -335,6 +335,12 @@ The first signal stops new admission, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to
 force the existing hard shutdown and job-tree reap.
 
+An explicit non-empty selection is durable Run authority, not a filter applied
+after configured admission. Yrd neither starts nor reuses omitted configured
+checks. In particular, `--steps merge` prepares and pins a fresh candidate with
+the built-in repository, ancestry, lease, and remote-update safeguards; human
+and JSON output record the explicit selection and any omitted checks.
+
 The bare dashboard shows active and recent work. `AGE` is immutable queue
 lifetime—submission to terminal outcome—while `TOUCHED` is the latest state or
 step event and `RUN` is execution duration. `yrd pr runs <PR>` is the canonical
@@ -470,7 +476,7 @@ contest:
   evaluators: [check, sec-check]
 ```
 
-Names before `merge` run against the checked candidate. Names after `merge` run
+Names before `merge` run against the pinned Candidate. Names after `merge` run
 against the integrated commit. The TypeScript API enforces this statically; the
 YAML adapter validates the same ordering while composing plugins.
 Object-form steps may declare `classification: base` when their evidence is
@@ -482,22 +488,22 @@ the current revision must approve. Comments never gate, and omitting
 `requires` leaves reviews informational.
 
 An empty `merge: {}` uses Yrd's native Git merge. With `origin` configured,
-Yrd fast-forwards the remote base directly to the exact checked Candidate; the
+Yrd fast-forwards the remote base directly to the exact pinned Candidate; the
 remote ref update is the atomic landing decision, and no checked-out local base
 or operator WIP is touched. Repositories without a remote retain the local-ref
 adapter for embedded/test use. The existing Queue and Job records retain the
 attempt, timing, error, and landing proof for `yrd log` and `yrd pr runs`.
 
-Native merge never amends the Candidate after checks or asks a later step to
-push the base again. Its durable audit proof is the Run's integration record in
-the Yrd journal, including the exact landing SHA. A direct `git push` in a
-post-merge step is therefore a configuration error; ordinary publish and deploy
-steps remain valid.
+Native merge never amends the Candidate after preparation and any selected
+checks or asks a later step to push the base again. Its durable audit proof is
+the Run's integration record in the Yrd journal, including the exact landing
+SHA. A direct `git push` in a post-merge step is therefore a configuration
+error; ordinary publish and deploy steps remain valid.
 
 A configured `merge.run` delegates the landing to a repository command while
 Yrd keeps queue and Run authority. The command receives `$YRD_SHA`/`$YRD_SHAS`
 for submitted heads and `$YRD_CANDIDATE_SHA`/`$YRD_CANDIDATE_REF` for the exact
-checked candidate. After it returns, Yrd refreshes the base branch and records
+pinned Candidate. After it returns, Yrd refreshes the base branch and records
 the actual landing SHA; success without a landing fails closed. The base
 branch's tracked config is the single command authority; submitted revisions
 cannot replace it.

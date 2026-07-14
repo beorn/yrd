@@ -4156,3 +4156,52 @@ describe("correlation projections", () => {
     expect((await projectedLogRows(app))[0]).not.toHaveProperty("correlation")
   })
 })
+
+describe("explicit queue step authority", () => {
+  it("runs one PR with only the explicitly selected merge step", async () => {
+    const checkRuns: string[] = []
+    const mergeRuns: string[] = []
+    const app = await createApp({ checkRuns, mergeRuns })
+    await openAndSubmit(app)
+
+    const output = outputIO()
+    expect(
+      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "merge", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(checkRuns).toEqual([])
+    expect(mergeRuns).toEqual(["merge"])
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [
+        {
+          status: "passed",
+          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          steps: [{ name: "merge" }],
+          prs: [{ id: "PR1" }],
+        },
+      ],
+    })
+  })
+
+  it("runs a PR batch with only merge and makes the omitted checks explicit", async () => {
+    const checkRuns: string[] = []
+    const mergeRuns: string[] = []
+    const app = await createApp({ batch: 2, checkRuns, mergeRuns })
+    await openAndSubmit(app)
+    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "PR2", "--steps", "merge"), output.io), output.stderr()).toBe(0)
+    expect(checkRuns).toEqual([])
+    expect(mergeRuns).toEqual(["merge"])
+    expect(output.stdout()).toContain("configured checks omitted: check")
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "passed",
+      stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+      steps: [{ name: "merge" }],
+      prs: [{ id: "PR1" }, { id: "PR2" }],
+    })
+  })
+})
