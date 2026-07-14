@@ -50,6 +50,7 @@ import {
   type DeprovisionedBay,
   type PR,
   type PRComment,
+  type PRRegression,
   type PRReview,
   type PRReviewState,
   type PRRevision,
@@ -157,6 +158,22 @@ const PrCommentArgsSchema = z
   .strict()
 export type PrCommentArgs = z.infer<typeof PrCommentArgsSchema>
 
+const PRRegressionSeveritySchema = z.enum(["low", "medium", "high", "critical"])
+const PrRegressionArgsSchema = z
+  .object({
+    pr: TextSchema,
+    run: TextSchema,
+    detectedAt: z.iso.datetime({ offset: true }),
+    severity: PRRegressionSeveritySchema,
+    evidence: TextSchema,
+    implementationRunRef: TextSchema,
+    reviewRef: TextSchema,
+    repairPr: TextSchema,
+    repairRun: TextSchema,
+  })
+  .strict()
+export type PrRegressionArgs = z.infer<typeof PrRegressionArgsSchema>
+
 const BayOpenedSchema = z
   .object({
     id: BayIdSchema,
@@ -191,7 +208,13 @@ const PRPushedSchema = z
 const PRRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
 const PRRevisionSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
 const PRCorrelationBoundSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema }).strict()
-const PRWithdrawnSchema = z
+const PRTerminalIdentitySchema = PRRevisionIdentitySchema.extend({
+  issueRef: TextSchema.optional(),
+  correlation: CorrelationSchema.optional(),
+}).strict()
+const PRQueueTerminalIdentitySchema = PRTerminalIdentitySchema.extend({ run: TextSchema }).strict()
+const PRWithdrawnSchema = PRTerminalIdentitySchema
+const LegacyPRWithdrawnSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema.optional(),
@@ -199,7 +222,8 @@ const PRWithdrawnSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const PRRejectedSchema = z
+const PRRejectedSchema = PRQueueTerminalIdentitySchema.extend({ detail: z.string().optional() }).strict()
+const LegacyPRRejectedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
@@ -208,7 +232,17 @@ const PRRejectedSchema = z
     detail: z.string().optional(),
   })
   .strict()
-const PRIntegratedSchema = z
+const PRIntegratedSchema = PRQueueTerminalIdentitySchema.extend({
+  commit: GitShaSchema,
+  landingSha: GitShaSchema,
+  baseSha: GitShaSchema,
+})
+  .strict()
+  .refine(({ commit, landingSha }) => commit === landingSha, {
+    message: "landingSha must equal the integration proof commit",
+    path: ["landingSha"],
+  })
+const LegacyPRIntegratedSchema = z
   .object({
     pr: PRIdSchema,
     revision: RevisionSchema,
@@ -218,11 +252,35 @@ const PRIntegratedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const PRCanceledSchema = PRRevisionIdentitySchema.extend({
+const PRCanceledSchema = PRQueueTerminalIdentitySchema.extend({
+  by: TextSchema,
+  reason: TextSchema,
+}).strict()
+const LegacyPRCanceledSchema = PRRevisionIdentitySchema.extend({
   correlation: CorrelationSchema.optional(),
   by: TextSchema,
   reason: TextSchema,
 }).strict()
+type PRRegressionFact = Omit<PRRegression, "recordedAt">
+const PRRegressionSchema: z.ZodType<PRRegressionFact> = z
+  .object({
+    pr: PRIdSchema,
+    issueRef: TextSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    run: TextSchema,
+    landingSha: GitShaSchema,
+    detectedAt: z.iso.datetime({ offset: true }),
+    severity: PRRegressionSeveritySchema,
+    evidence: TextSchema,
+    implementationRunRef: TextSchema,
+    reviewRef: TextSchema,
+    repairIssueRef: TextSchema,
+    repairPr: PRIdSchema,
+    repairRun: TextSchema,
+    repairLandingSha: GitShaSchema,
+  })
+  .strict()
 const PRReviewFactSchema = z
   .object({
     pr: PRIdSchema,
@@ -311,6 +369,7 @@ export type BayCommands = Readonly<{
     review: CommandHandler<PrReviewArgs, BayState>
     comment: CommandHandler<PrCommentArgs, BayState>
     requestChecks: CommandHandler<PrRequestChecksArgs, BayState>
+    regression: CommandHandler<PrRegressionArgs, BayState>
   }>
 }>
 
@@ -334,6 +393,7 @@ export type Bays = Readonly<{
   review(args: PrReviewArgs): Promise<CommandResult>
   comment(args: PrCommentArgs): Promise<CommandResult>
   requestChecks(args: PrRequestChecksArgs): Promise<CommandResult>
+  recordRegression(args: PrRegressionArgs): Promise<CommandResult>
 }>
 
 export type HasBays = Readonly<{ bays: Bays }>
@@ -351,6 +411,7 @@ type BayActions = Pick<
   | "review"
   | "comment"
   | "requestChecks"
+  | "recordRegression"
 >
 
 export type BayBaseTarget = Readonly<{ base: string; baseSha?: string }>
@@ -413,12 +474,39 @@ export function createBays(
     }
     return bound
   }
+  const bindIssue = async (pr: DeepReadonly<PR>, issue: string | undefined): Promise<DeepReadonly<PR>> => {
+    if (issue === undefined || pr.issue === issue) return pr
+    if (pr.issue !== undefined) {
+      raiseFailure(
+        "refusal",
+        "issue-conflict",
+        `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; withdraw it before linking another issue`,
+      )
+    }
+    if (pr.status !== "pushed" && pr.status !== "submitted") {
+      raiseFailure(
+        "refusal",
+        "issue-too-late",
+        `yrd: PR '${pr.id}' is ${pr.status}; issue can only be linked while pushed or submitted`,
+      )
+    }
+    await actions.editPr({ pr: pr.id, issue })
+    const bound = resolvePR(state(), pr.id)
+    if (bound === undefined) {
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after issue bind`)
+    }
+    return bound
+  }
+  const bindSubmission = async (
+    pr: DeepReadonly<PR>,
+    submission: Pick<SubmitSelectionOptions, "issue" | "correlation">,
+  ): Promise<DeepReadonly<PR>> => bindCorrelation(await bindIssue(pr, submission.issue), submission.correlation)
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
-    if (pr?.status === "integrated") return bindCorrelation(pr, options.correlation)
+    if (pr?.status === "integrated") return bindSubmission(pr, options)
 
     if (bay?.status === "active") {
       const refreshed = await actions.refresh({ bay: bay.id })
@@ -444,6 +532,7 @@ export function createBays(
           bay: bay.id,
           headSha: bay.headSha,
           ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+          ...(options.issue === undefined ? {} : { issue: options.issue }),
         })
         pr = prForBay(state(), bay.id)
       }
@@ -469,6 +558,7 @@ export function createBays(
       }
     }
 
+    if (pr !== undefined) pr = await bindIssue(pr, options.issue)
     if (pr?.status === "submitted") return bindCorrelation(pr, options.correlation)
     if (pr?.status === "pushed") {
       pr = await bindCorrelation(pr, options.correlation)
@@ -494,7 +584,7 @@ export function createBays(
           candidate.base === resolved.base,
       )
       if (live !== undefined) {
-        const correlated = await bindCorrelation(live, options.correlation)
+        const correlated = await bindSubmission(live, options)
         if (correlated.status === "submitted") return correlated
         if (options.draft === true) return correlated
         await actions.submit({ pr: correlated.id })
@@ -552,6 +642,7 @@ export function createBays(
     review: actions.review,
     comment: actions.comment,
     requestChecks: actions.requestChecks,
+    recordRegression: actions.recordRegression,
   })
 }
 
@@ -581,10 +672,17 @@ export function withBays(options: WithBaysOptions) {
         "pr/rejected": PRRejectedSchema,
         "pr/integrated": PRIntegratedSchema,
         "pr/canceled": PRCanceledSchema,
+        "pr/regression-recorded": PRRegressionSchema,
         "pr/edited": PrEditArgsSchema,
         "pr/reviewed": PRReviewFactSchema,
         "pr/commented": PRCommentFactSchema,
         "pr/checks-requested": PRCheckRequestFactSchema,
+      },
+      replayEvents: {
+        "pr/withdrawn": LegacyPRWithdrawnSchema,
+        "pr/rejected": LegacyPRRejectedSchema,
+        "pr/integrated": LegacyPRIntegratedSchema,
+        "pr/canceled": LegacyPRCanceledSchema,
       },
       project: projectBays,
       create(yrd) {
@@ -606,6 +704,7 @@ export function withBays(options: WithBaysOptions) {
               review: (args) => yrd.dispatch(commands.pr.review, args),
               comment: (args) => yrd.dispatch(commands.pr.comment, args),
               requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
+              recordRegression: (args) => yrd.dispatch(commands.pr.regression, args),
             },
             { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
           ),
@@ -689,6 +788,11 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         title: "Request checks for a PR revision",
         params: PrRequestChecksArgsSchema,
         apply: (state: BayState, args: PrRequestChecksArgs) => requestPrChecks(state, args),
+      }),
+      regression: command({
+        title: "Record a completed escaped regression",
+        params: PrRegressionArgsSchema,
+        apply: (state: BayState, args: PrRegressionArgs) => recordPrRegression(state, args),
       }),
     },
   }
@@ -775,15 +879,14 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
     throw new Error(`yrd: PR '${existing.id}' is ${existing.status}; start a new bay`)
   }
   const id = existing?.id ?? nextId("PR", current.prs)
+  const issue = attachedIssue(existing, args.issue, bay?.issue)
   return {
     events: [
       event("pr/pushed", {
         pr: id,
         ...(bay === undefined ? {} : { bay: bay.id }),
         ...((args.name ?? bay?.name) ? { name: args.name ?? bay?.name } : {}),
-        ...((args.issue ?? bay?.issue ?? existing?.issue)
-          ? { issue: args.issue ?? bay?.issue ?? existing?.issue }
-          : {}),
+        ...(issue === undefined ? {} : { issue }),
         branch,
         base,
         headSha: args.headSha,
@@ -801,7 +904,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     const pr = required(resolvePR(current, args.pr), "PR", args.pr)
     if (args.correlation !== undefined) return bindPRCorrelation(pr, args.correlation)
     if (pr.status !== "pushed") throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not pushed`)
-    return { events: [event("pr/submitted", { pr: pr.id, ...terminalIdentity(pr) })] }
+    return { events: [event("pr/submitted", { pr: pr.id, ...revisionIdentity(pr) })] }
   }
 
   const base = baseIdentity(args.base ?? defaultBase)
@@ -813,10 +916,11 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   const resubmitted = existing?.status === "rejected" ? existing : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
+  const issue = attachedIssue(resubmitted, args.issue)
   const pushed = {
     pr: id,
     ...(args.name === undefined ? {} : { name: args.name }),
-    ...(args.issue === undefined ? {} : { issue: args.issue }),
+    ...(issue === undefined ? {} : { issue }),
     branch: args.branch,
     base,
     headSha: args.headSha,
@@ -877,12 +981,34 @@ function bindPRCorrelation(pr: DeepReadonly<PR>, correlation: Correlation) {
   }
 }
 
-function terminalIdentity(pr: DeepReadonly<PR>) {
+function revisionIdentity(pr: DeepReadonly<PR>) {
   return {
     revision: pr.revision,
     headSha: pr.headSha,
     ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
   }
+}
+
+function terminalIdentity(pr: DeepReadonly<PR>) {
+  return {
+    ...revisionIdentity(pr),
+    ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+  }
+}
+
+function attachedIssue(
+  existing: DeepReadonly<PR> | undefined,
+  requested: string | undefined,
+  fallback?: string,
+): string | undefined {
+  if (existing?.issue !== undefined && requested !== undefined && existing.issue !== requested) {
+    raiseFailure(
+      "refusal",
+      "issue-conflict",
+      `yrd: PR '${existing.id}' is already linked to issue '${existing.issue}'; withdraw it before linking another issue`,
+    )
+  }
+  return requested ?? existing?.issue ?? fallback
 }
 
 function correlationPatch(pr: DeepReadonly<PR>, correlation: DeepReadonly<Correlation>) {
@@ -898,10 +1024,13 @@ function correlationPatch(pr: DeepReadonly<PR>, correlation: DeepReadonly<Correl
 
 function terminalApplies(
   pr: DeepReadonly<PR>,
-  terminal: Readonly<{ revision?: number; headSha?: string; correlation?: Correlation }>,
+  terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; correlation?: Correlation }>,
 ): boolean {
   if (terminal.revision !== undefined && terminal.revision !== pr.revision) return false
   if (terminal.headSha !== undefined && terminal.headSha !== pr.headSha) return false
+  if (terminal.issueRef !== undefined && terminal.issueRef !== pr.issue) {
+    throw new Error(`yrd: terminal issue '${terminal.issueRef}' does not match PR '${pr.id}'`)
+  }
   if (
     terminal.correlation !== undefined &&
     (pr.correlation === undefined || !correlationsEqual(pr.correlation, terminal.correlation))
@@ -960,6 +1089,77 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
       }),
     ],
   }
+}
+
+function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArgs) {
+  const original = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const repair = resolvePR(state.bays, args.repairPr)
+  if (repair === undefined) throw new Error(`yrd: no repair PR '${args.repairPr}'`)
+  if (original.id === repair.id) throw new Error("yrd: an escaped regression requires a different repair PR")
+  if (original.status !== "integrated" || original.integration === undefined) {
+    throw new Error(`yrd: original PR '${original.id}' is ${original.status}, not integrated`)
+  }
+  if (repair.status !== "integrated" || repair.integration === undefined) {
+    throw new Error(`yrd: repair PR '${repair.id}' is ${repair.status}, not integrated`)
+  }
+  if (original.issue === undefined) throw new Error(`yrd: original PR '${original.id}' has no issue reference`)
+  if (repair.issue === undefined) throw new Error(`yrd: repair PR '${repair.id}' has no issue reference`)
+  if (original.terminalRun !== args.run) {
+    raiseFailure(
+      "refusal",
+      "regression-run-mismatch",
+      `yrd: queue run '${args.run}' does not prove integrated revision ${original.revision} of PR '${original.id}'`,
+    )
+  }
+  if (repair.terminalRun !== args.repairRun) {
+    raiseFailure(
+      "refusal",
+      "regression-repair-run-mismatch",
+      `yrd: queue run '${args.repairRun}' does not prove integrated revision ${repair.revision} of repair PR '${repair.id}'`,
+    )
+  }
+
+  const fact = PRRegressionSchema.parse({
+    pr: original.id,
+    issueRef: original.issue,
+    revision: original.revision,
+    headSha: original.headSha,
+    run: args.run,
+    landingSha: original.integration.commit,
+    detectedAt: new Date(args.detectedAt).toISOString(),
+    severity: args.severity,
+    evidence: args.evidence,
+    implementationRunRef: args.implementationRunRef,
+    reviewRef: args.reviewRef,
+    repairIssueRef: repair.issue,
+    repairPr: repair.id,
+    repairRun: args.repairRun,
+    repairLandingSha: repair.integration.commit,
+  })
+  if (original.regressions?.some((existing) => regressionKey(existing) === regressionKey(fact)) === true) {
+    return { events: [], value: fact }
+  }
+  return { events: [event("pr/regression-recorded", fact)], value: fact }
+}
+
+function regressionKey(fact: PRRegressionFact | PRRegression): string {
+  return JSON.stringify([
+    fact.pr,
+    fact.issueRef,
+    fact.revision,
+    fact.headSha,
+    fact.run,
+    fact.landingSha,
+    fact.detectedAt,
+    fact.severity,
+    fact.evidence,
+    fact.implementationRunRef,
+    fact.reviewRef,
+    fact.repairIssueRef,
+    fact.repairPr,
+    fact.repairRun,
+    fact.repairLandingSha,
+  ])
 }
 
 function reviewFact(
@@ -1032,11 +1232,27 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  const issueChanged = args.issue !== undefined && args.issue !== pr.issue
+  if (args.issue !== undefined && pr.issue !== undefined && issueChanged) {
+    raiseFailure(
+      "refusal",
+      "issue-conflict",
+      `yrd: PR '${pr.id}' is already linked to issue '${pr.issue}'; withdraw it before linking another issue`,
+    )
+  }
+  if (issueChanged && pr.status !== "pushed" && pr.status !== "submitted") {
+    raiseFailure(
+      "refusal",
+      "issue-too-late",
+      `yrd: PR '${pr.id}' is ${pr.status}; issue can only be linked while pushed or submitted`,
+    )
+  }
+  if (!issueChanged && args.note === undefined) return { events: [] }
   return {
     events: [
       event("pr/edited", {
         pr: pr.id,
-        ...(args.issue === undefined ? {} : { issue: args.issue }),
+        ...(issueChanged ? { issue: args.issue } : {}),
         ...(args.note === undefined ? {} : { note: args.note }),
       }),
     ],
@@ -1112,6 +1328,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               reviews: [],
               comments: [],
               checkRequests: [],
+              regressions: [],
             }
           : {
               ...existing,
@@ -1123,6 +1340,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
               correlation: pushed.correlation,
               revisions: [...existing.revisions, record],
+              terminalRun: undefined,
               submittedAt: undefined,
               rejectedAt: undefined,
               integratedAt: undefined,
@@ -1202,7 +1420,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, correlationPatch(pr, changed.correlation))
     }
     case "pr/withdrawn": {
-      const changed = PRWithdrawnSchema.parse(data)
+      const parsed = PRWithdrawnSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyPRWithdrawnSchema.parse(data)
       const pr = current.prs[changed.pr]
       return pr === undefined || !terminalApplies(pr, changed)
         ? state
@@ -1213,30 +1432,42 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           })
     }
     case "pr/rejected": {
-      const changed = PRRejectedSchema.parse(data)
+      const parsed = PRRejectedSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyPRRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined || !terminalApplies(pr, changed)) return state
+      const run = parsed.success ? parsed.data.run : undefined
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
-        revisions: patchRevisionClock(pr, { terminal: { status: "rejected", at: applied.ts } }),
+        terminalRun: run,
+        revisions: patchRevisionClock(pr, {
+          terminal: { status: "rejected", at: applied.ts, ...(run === undefined ? {} : { run }) },
+        }),
         ...(changed.detail === undefined ? {} : { detail: changed.detail }),
       })
     }
     case "pr/integrated": {
-      const changed = PRIntegratedSchema.parse(data)
+      const parsed = PRIntegratedSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyPRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined || !terminalApplies(pr, changed)) return state
+      const run = parsed.success ? parsed.data.run : undefined
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,
+        terminalRun: run,
         integration: { commit: changed.commit, baseSha: changed.baseSha },
-        revisions: patchRevisionClock(pr, { terminal: { status: "integrated", at: applied.ts } }),
+        revisions: patchRevisionClock(pr, {
+          terminal: { status: "integrated", at: applied.ts, ...(run === undefined ? {} : { run }) },
+        }),
       })
     }
     case "pr/canceled": {
-      const changed = PRCanceledSchema.parse(data)
+      const parsed = PRCanceledSchema.safeParse(data)
+      const changed = parsed.success ? parsed.data : LegacyPRCanceledSchema.parse(data)
       const pr = current.prs[changed.pr]
+      const run = parsed.success ? parsed.data.run : undefined
       return pr === undefined || !terminalApplies(pr, changed)
         ? state
         : patchPR(pr, {
@@ -1244,16 +1475,47 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
             canceledAt: applied.ts,
             canceledBy: changed.by,
             cancelReason: changed.reason,
-            revisions: patchRevisionClock(pr, { terminal: { status: "canceled", at: applied.ts } }),
+            terminalRun: run,
+            revisions: patchRevisionClock(pr, {
+              terminal: { status: "canceled", at: applied.ts, ...(run === undefined ? {} : { run }) },
+            }),
           })
+    }
+    case "pr/regression-recorded": {
+      const fact = PRRegressionSchema.parse(data)
+      const pr = current.prs[fact.pr]
+      const repair = current.prs[fact.repairPr]
+      if (
+        pr === undefined ||
+        repair === undefined ||
+        pr.status !== "integrated" ||
+        repair.status !== "integrated" ||
+        pr.issue !== fact.issueRef ||
+        pr.revision !== fact.revision ||
+        pr.headSha !== fact.headSha ||
+        pr.terminalRun !== fact.run ||
+        pr.integration?.commit !== fact.landingSha ||
+        repair.issue !== fact.repairIssueRef ||
+        repair.terminalRun !== fact.repairRun ||
+        repair.integration?.commit !== fact.repairLandingSha
+      ) {
+        return state
+      }
+      if (pr.regressions?.some((existing) => regressionKey(existing) === regressionKey(fact)) === true) return state
+      return patchPR(pr, { regressions: [...(pr.regressions ?? []), { ...fact, recordedAt: applied.ts }] })
     }
     case "pr/edited": {
       const changed = PrEditArgsSchema.parse(data)
       const pr = current.prs[changed.pr]
+      const attachIssue =
+        changed.issue !== undefined &&
+        pr !== undefined &&
+        pr.issue === undefined &&
+        (pr.status === "pushed" || pr.status === "submitted")
       return pr === undefined
         ? state
         : patchPR(pr, {
-            ...(changed.issue === undefined ? {} : { issue: changed.issue }),
+            ...(attachIssue ? { issue: changed.issue } : {}),
             ...(changed.note === undefined ? {} : { note: changed.note }),
           })
     }

@@ -233,6 +233,7 @@ async function createApp(
     checkRuns?: string[]
     baseFailure?: boolean
     clock?: () => string
+    mergeCommits?: readonly string[]
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -288,12 +289,14 @@ async function createApp(
       classification: options.baseFailure === true ? "base" : "carrier",
     },
   )
+  let mergeIndex = 0
   const merge = withMerge(
     (_input: StepExecution<CheckedShape>): JobResult<{ commit: string; baseSha: string }> => {
       options.mergeRuns?.push("merge")
+      const commit = options.mergeCommits?.[mergeIndex++] ?? MERGED_SHA
       return {
         status: "passed",
-        output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
+        output: { commit, baseSha: commit },
       }
     },
     { revision: "merge-v1" },
@@ -4445,5 +4448,259 @@ describe("correlation projections", () => {
     expect(persisted.prs[0]).not.toHaveProperty("correlation")
     expect(queueShowData(run).prs[0]).not.toHaveProperty("correlation")
     expect((await projectedLogRows(app))[0]).not.toHaveProperty("correlation")
+  })
+})
+
+function trackerBridge(output: string): Readonly<{
+  version: number
+  asOf: Readonly<{ cursor: number; at?: string }>
+  deliveries: readonly Readonly<Record<string, unknown>>[]
+}> {
+  const parsed = JSON.parse(output) as Readonly<Record<string, unknown>>
+  const bridge = parsed.trackerBridge
+  if (typeof bridge !== "object" || bridge === null || !("deliveries" in bridge)) {
+    throw new Error("expected a trackerBridge JSON envelope")
+  }
+  return bridge as ReturnType<typeof trackerBridge>
+}
+
+describe("typed issue landing bridge", () => {
+  it("projects every native PR state from exact issue ownership at one journal cursor", async () => {
+    for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
+      const issueRef = `@km/all/21091-${status}`
+      const app = await createApp({ failingCheck: status === "rejected" })
+      try {
+        await app.bays.submit({
+          branch: `topic/mentions-2109-${status}`,
+          headSha: HEAD_SHA,
+          base: "main",
+          issue: issueRef,
+          ...(status === "pushed" || status === "withdrawn" ? { draft: true } : {}),
+        })
+
+        if (status === "withdrawn") {
+          await app.bays.closePr({ pr: "PR1" })
+        } else if (status === "rejected" || status === "integrated") {
+          await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+        } else if (status === "canceled") {
+          await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+          const job = app.queue.get("R1")?.steps[0]?.job
+          if (job === undefined) throw new Error("expected a requested Queue Job to cancel")
+          await app.dispatch(app.commands.job.transition, {
+            type: "start",
+            id: job.id,
+            attempt: 1,
+            runner: "cli-test",
+            leaseExpiresAt: "2026-07-09T12:02:00.000Z",
+          })
+          await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
+          await app.dispatch(app.commands.queue.advance, { run: "R1" })
+        }
+
+        const output = outputIO()
+        expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
+        const bridge = trackerBridge(output.stdout())
+        expect(bridge).toMatchObject({
+          version: 1,
+          asOf: { cursor: expect.any(Number), at: "2026-07-09T12:00:00.000Z" },
+          deliveries: [
+            {
+              issueRef,
+              pr: "PR1",
+              revision: 1,
+              headSha: HEAD_SHA,
+              status,
+              at: "2026-07-09T12:00:00.000Z",
+              runs: status === "rejected" || status === "integrated" || status === "canceled" ? ["R1"] : [],
+            },
+          ],
+        })
+        const delivery = bridge.deliveries[0]
+        if (status === "integrated") expect(delivery).toMatchObject({ landingSha: MERGED_SHA })
+        else expect(delivery).not.toHaveProperty("landingSha")
+        if (status === "rejected") {
+          expect(delivery).toMatchObject({ bounce: { run: "R1", detail: "check failed" } })
+        }
+      } finally {
+        await app.close()
+      }
+    }
+  })
+
+  it("carries a literal --issue through pr submit --follow and the same shipping-config failure in pr checks", async () => {
+    const issueRef = "@yrd/core/21096-cli-ux/21091-shipping-config"
+    await using app = await createApp({
+      checkFailure: { code: "shipping-config-invalid", message: "shipping config rejects candidate" },
+    })
+    const submit = outputIO({ resolveRevision: async () => HEAD_SHA })
+
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/shipping-config", "--issue", issueRef, "--follow", "--json"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(1)
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", issue: issueRef, status: "rejected" }],
+      checks: [{ error: { code: "shipping-config-invalid", message: "shipping config rejects candidate" } }],
+    })
+
+    const checks = outputIO()
+    expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), checks.io), checks.stderr()).toBe(1)
+    expect(checks.stdout()).toContain("shipping-config-invalid")
+
+    const issue = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), issue.io), issue.stderr()).toBe(0)
+    expect(trackerBridge(issue.stdout()).deliveries).toEqual([
+      expect.objectContaining({
+        issueRef,
+        pr: "PR1",
+        revision: 1,
+        headSha: HEAD_SHA,
+        status: "rejected",
+        bounce: { run: "R1", detail: "shipping config rejects candidate" },
+      }),
+    ])
+  })
+
+  it("records a completed escaped regression without rewriting either integration", async () => {
+    const originalIssue = "@yrd/core/21090-original"
+    const repairIssue = "@yrd/core/21091-repair"
+    const originalLanding = "c".repeat(40)
+    const repairLanding = "d".repeat(40)
+    const repairHead = "2".repeat(40)
+    await using app = await createApp({ mergeCommits: [originalLanding, repairLanding] })
+    await app.bays.submit({ branch: "topic/original", headSha: HEAD_SHA, base: "main", issue: originalIssue })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    await app.bays.submit({ branch: "topic/repair", headSha: repairHead, base: "main", issue: repairIssue })
+    await app.queue.run({ prs: ["PR2"] }, { runner: "cli-test", leaseMs: 60_000 })
+
+    const command = (run = "R1", repairRun = "R2") =>
+      yrd(
+        "pr",
+        "regression",
+        "PR1",
+        "--run",
+        run,
+        "--detected-at",
+        "2026-07-13T14:18:00.000-07:00",
+        "--severity",
+        "high",
+        "--evidence",
+        "artifact://tty/21091-red",
+        "--implementation-run",
+        "hab:turn/original-implementation",
+        "--review",
+        "tribe:verdict/original-review",
+        "--repair-pr",
+        "PR2",
+        "--repair-run",
+        repairRun,
+        "--json",
+      )
+    const expected = {
+      pr: "PR1",
+      issueRef: originalIssue,
+      revision: 1,
+      headSha: HEAD_SHA,
+      run: "R1",
+      landingSha: originalLanding,
+      detectedAt: "2026-07-13T21:18:00.000Z",
+      severity: "high",
+      evidence: "artifact://tty/21091-red",
+      implementationRunRef: "hab:turn/original-implementation",
+      reviewRef: "tribe:verdict/original-review",
+      repairIssueRef: repairIssue,
+      repairPr: "PR2",
+      repairRun: "R2",
+      repairLandingSha: repairLanding,
+    }
+    const recorded = outputIO()
+    expect(await runYrd(app, command(), recorded.io), recorded.stderr()).toBe(0)
+    expect(JSON.parse(recorded.stdout())).toEqual({ command: "pr.regression", regression: expected })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "integrated",
+      integration: { commit: originalLanding },
+      regressions: [{ ...expected, recordedAt: "2026-07-09T12:00:00.000Z" }],
+    })
+    expect(app.bays.pr("PR2")).toMatchObject({ status: "integrated", integration: { commit: repairLanding } })
+
+    const repeated = outputIO()
+    expect(await runYrd(app, command(), repeated.io), repeated.stderr()).toBe(0)
+    expect((await Array.fromAsync(app.events())).filter(({ name }) => name === "pr/regression-recorded")).toHaveLength(
+      1,
+    )
+
+    const refused = outputIO()
+    expect(await runYrd(app, command("R2"), refused.io)).toBe(1)
+    expect(refused.stdout()).toBe("")
+
+    const issue = outputIO()
+    const runs = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", originalIssue, "--json"), issue.io), issue.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), runs.io), runs.stderr()).toBe(0)
+    expect(trackerBridge(issue.stdout())).toEqual(trackerBridge(runs.stdout()))
+    expect(trackerBridge(issue.stdout()).deliveries).toEqual([
+      expect.objectContaining({
+        issueRef: originalIssue,
+        pr: "PR1",
+        status: "integrated",
+        landingSha: originalLanding,
+        regressions: [{ ...expected, recordedAt: "2026-07-09T12:00:00.000Z" }],
+      }),
+    ])
+  })
+
+  it("retries a racing pr runs snapshot and refuses three exhausted cuts without partial JSON", async () => {
+    const issueRef = "@yrd/core/21091-snapshot-race"
+    await using app = await createApp()
+    await app.bays.submit({ branch: "topic/snapshot-race", headSha: HEAD_SHA, base: "main", issue: issueRef })
+
+    let raced = false
+    const racingApp = {
+      ...app,
+      async journalSnapshot() {
+        const snapshot = await app.journalSnapshot()
+        if (!raced) {
+          raced = true
+          await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+        }
+        return snapshot
+      },
+    }
+    const racedOutput = outputIO()
+    expect(await runYrd(racingApp, yrd("pr", "runs", "PR1", "--json"), racedOutput.io)).toBe(0)
+    expect(trackerBridge(racedOutput.stdout())).toMatchObject({
+      asOf: (await app.journalSnapshot()).asOf,
+      deliveries: [{ issueRef, pr: "PR1", status: "integrated", landingSha: MERGED_SHA, runs: ["R1"] }],
+    })
+
+    let snapshots = 0
+    let advances = 0
+    const exhaustingApp = {
+      ...app,
+      async journalSnapshot() {
+        const snapshot = await app.journalSnapshot()
+        if (snapshots++ % 2 === 0) {
+          advances += 1
+          await app.bays.submit({
+            branch: `topic/concurrent-${advances}`,
+            headSha: String(advances + 2).repeat(40),
+            base: "main",
+          })
+        }
+        return snapshot
+      },
+    }
+    const exhausted = outputIO()
+    expect(await runYrd(exhaustingApp, yrd("pr", "runs", "PR1", "--json"), exhausted.io)).toBe(1)
+    expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
+    expect(exhausted.stdout()).toBe("")
+    expect(exhausted.stderr()).toBe(
+      "yrd: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'\n",
+    )
   })
 })

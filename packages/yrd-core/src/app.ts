@@ -72,6 +72,12 @@ type EventSchemas = Readonly<Record<string, z.ZodType<JsonValue>>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
 
+export type JournalAsOf = Readonly<{ cursor: Cursor; at?: string }>
+export type JournalSnapshot<State extends object> = Readonly<{
+  state: DeepReadonly<State>
+  asOf: JournalAsOf
+}>
+
 export type Dispatch = {
   <Args extends JsonValue | undefined, CommandState extends object>(
     command: CommandHandler<Args, CommandState>,
@@ -87,6 +93,7 @@ export type Yrd<State extends object, Commands extends CommandTree> = Readonly<{
   scope: Scope
   log: ConditionalLogger
   refresh(): Promise<DeepReadonly<State>>
+  journalSnapshot(): Promise<JournalSnapshot<State>>
   dispatch: Dispatch
   events(): AsyncIterable<Event>
   close(): Promise<void>
@@ -104,6 +111,7 @@ type Contribution<
   initialState?: AddedState
   commands?: AddedCommands
   events?: EventSchemas
+  replayEvents?: EventSchemas
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
   create?(yrd: Yrd<State & AddedState, Commands & AddedCommands> & Features): AddedFeatures
 }>
@@ -116,6 +124,7 @@ export type YrdDef<
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
+  replayEvents: EventSchemas
   project: Project<State>
   create(yrd: Yrd<State, Commands>): Features
   extend<
@@ -167,6 +176,7 @@ export function createYrdDef(): YrdDef {
     initialState: {},
     commands: {},
     events: {},
+    replayEvents: {},
     project: (state) => state,
     create: () => ({}),
   })
@@ -198,6 +208,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 
   type Projection = Readonly<{
     cursor: Cursor
+    at?: string
     state: DeepReadonly<State>
     receiptsById: ReadonlyMap<string, JournalFrame>
     receiptsByKey: ReadonlyMap<string, JournalFrame>
@@ -228,7 +239,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
         const frame = parseJournalFrame(value)
         frames += 1
         events += frame.events.length
-        next = projectFrame(next, frame)
+        next = projectFrame(next, frame, "replay")
       }
       next = { ...next, cursor: batch.cursor }
     }
@@ -236,7 +247,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return next
   }
 
-  const projectFrame = (base: Projection, frame: JournalFrame): Projection => {
+  const projectFrame = (base: Projection, frame: JournalFrame, source: "append" | "replay"): Projection => {
     if (base.receiptsById.has(frame.command.id)) {
       throw new Error(`yrd: journal contains duplicate command id '${frame.cause.commandId}'`)
     }
@@ -251,16 +262,31 @@ export async function createYrd<State extends object, Commands extends CommandTr
     for (const applied of frame.events) {
       if (eventIds.has(applied.id)) throw new Error(`yrd: journal contains duplicate event id '${applied.id}'`)
       eventIds.add(applied.id)
-      const schema = definition.events[applied.name]
-      if (schema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
-      const validated = freeze(EventSchema.parse({ ...applied, data: schema.parse(applied.data) })) as Event
+      const currentSchema = definition.events[applied.name]
+      if (currentSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+      const current = currentSchema.safeParse(applied.data)
+      const data = current.success
+        ? current.data
+        : source === "append"
+          ? currentSchema.parse(applied.data)
+          : (definition.replayEvents[applied.name] ?? currentSchema).parse(applied.data)
+      const validated = freeze(EventSchema.parse({ ...applied, data })) as Event
       nextState = freeze(definition.project(nextState, validated, frame.cause)) as DeepReadonly<State>
     }
     const receiptsById = new Map(base.receiptsById)
     receiptsById.set(frame.command.id, frame)
     const receiptsByKey = new Map(base.receiptsByKey)
     if (frame.cause.key !== undefined) receiptsByKey.set(frame.cause.key, frame)
-    return { ...base, state: nextState, receiptsById, receiptsByKey, causeIds, eventIds }
+    const at = frame.events.at(-1)?.ts ?? base.at
+    return {
+      ...base,
+      state: nextState,
+      receiptsById,
+      receiptsByKey,
+      causeIds,
+      eventIds,
+      ...(at === undefined ? {} : { at }),
+    }
   }
 
   const publish = (next: Projection): void => {
@@ -278,6 +304,16 @@ export async function createYrd<State extends object, Commands extends CommandTr
     const next = await fold(projection)
     publish(next)
     return state()
+  }
+
+  const journalSnapshot = async (): Promise<JournalSnapshot<State>> => {
+    assertOpen()
+    const next = await fold(projection)
+    publish(next)
+    return freeze({
+      state: next.state,
+      asOf: { cursor: next.cursor, ...(next.at === undefined ? {} : { at: next.at }) },
+    }) as JournalSnapshot<State>
   }
 
   const dispatchCommand = async (
@@ -358,7 +394,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
       const frame = parseJournalFrame({ cause, command: canonical, events, ...(value === undefined ? {} : { value }) })
-      const candidate = projectFrame(current, frame)
+      const candidate = projectFrame(current, frame, "append")
       const appended = await journal.append(frame, current.cursor)
       if (!appended.appended) continue
       publish({ ...candidate, cursor: appended.cursor })
@@ -408,6 +444,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     scope,
     log,
     refresh: () => track(refresh),
+    journalSnapshot: () => track(journalSnapshot),
     dispatch,
     async *events() {
       await refresh()
@@ -436,6 +473,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
+  replayEvents: EventSchemas
   project: Project<State>
   create(yrd: Yrd<State, Commands>): Features
 }): YrdDef<State, Commands, Features> {
@@ -453,12 +491,17 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
       const initialState = mergeState(values.initialState, addedState)
       const commands = mergeCommands(values.commands, addedCommands)
       const events = mergeFields(values.events, contribution.events ?? {}, "event")
+      const replayEvents = mergeFields(values.replayEvents, contribution.replayEvents ?? {}, "replay event")
+      for (const name of Object.keys(replayEvents)) {
+        if (events[name] === undefined) throw new Error(`yrd: replay event '${name}' has no append event definition`)
+      }
       const previousFields = Object.keys(values.initialState)
       const owned = Object.keys(addedState)
       return buildDef<State & AddedState, Commands & AddedCommands, Features & AddedFeatures>({
         initialState,
         commands,
         events,
+        replayEvents,
         project(state, applied, cause) {
           const previousState = selectFields(state, previousFields) as DeepReadonly<State>
           const projected = {
