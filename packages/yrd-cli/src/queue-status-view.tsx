@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
-import type { BaysState, Correlation, PR, PRRevision, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
+import type { BaysState, Correlation, PR, PRRevisionClock, PRRevisionTerminal } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
@@ -489,10 +489,6 @@ export function queueTimelineRows(
     }
   }
   return [...latestByPr.values()].toSorted(compareQueueTimelineRows)
-}
-
-function matchingRevision(pr: PR, pinned: PinnedPRRevision): PRRevision | undefined {
-  return pr.revisions?.find((revision) => revision.revision === pinned.revision && revision.headSha === pinned.headSha)
 }
 
 function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {
