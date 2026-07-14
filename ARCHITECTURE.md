@@ -97,10 +97,11 @@ symbols, or discover dependencies through a registry after startup.
 External hosts may validate and hand off immutable source declarations and
 trusted base configuration. Yrd Queue alone restacks those source revisions,
 builds the generated root wrapper, verifies the resulting Candidate and its
-source receipts, and lands that Candidate. A host must not maintain a second
-restack scheduler, Candidate builder, integration queue, receipt store, or
-landing path. The generated root wrapper is the Queue Candidate; it has no
-parallel identity or composition lifecycle.
+source receipts, including stable patch identity and all-`=` range-diff
+lineage, and lands that Candidate. A host must not maintain a second restack
+scheduler, Candidate builder, integration queue, receipt store, or landing
+path. The generated root wrapper is the Queue Candidate; it has no parallel
+identity or composition lifecycle.
 
 ## Command Flow
 

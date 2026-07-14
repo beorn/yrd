@@ -137,6 +137,8 @@ type SourceRewrite = Readonly<{
   newBaseSha: string
   newTipSha: string
   candidateRef: string // refs/heads/yrd/candidates/<newTipSha>
+  patchId: string // stable patch-id shared by predecessor and successor
+  rangeDiff: "=" // every commit in the two ranges is patch-equivalent
   payload: readonly string[]
 }>
 ```
@@ -159,6 +161,9 @@ type SourceRewrite = Readonly<{
 - A composed Candidate's root tree must pin every repository's final
   `SourceRewrite.newTipSha`. The receipt retains every sequential rewrite in a
   same-repository batch, while the final rewrite is the root gitlink binding.
+- Every generated rewrite records its predecessor and successor SHAs, their
+  shared stable patch ID, and an all-`=` range-diff result before the existing
+  payload-manifest and root-tree certificates can pass.
 - Bisection on a failing multi-rev Candidate creates **new child Candidates**
   (subset revs) with provenance recorded on the child Runs (`parent` run id).
   Candidates never mutate; today's `isolationPart` refits into this shape.

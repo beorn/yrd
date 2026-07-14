@@ -375,7 +375,25 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     const result = await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], true)
     return result.code === 0 ? result.stdout : undefined
   }
-  return Object.freeze({ run, commit, optionalCommit })
+  const stablePatchId = async (repo: string, from: string, to: string): Promise<string | undefined> => {
+    const diff = await run(repo, ["diff", "--full-index", "--binary", from, to, "--"], true)
+    if (diff.code !== 0) return undefined
+    const result = await process.run({
+      argv: ["git", "-C", repo, "patch-id", "--stable"],
+      cwd: repo,
+      env,
+      stdin: diff.stdout,
+    })
+    if (result.exitCode !== 0) return undefined
+    return /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(result.stdout.trim())?.[1]
+  }
+  const rangeDiff = (repo: string, oldBase: string, oldTip: string, newBase: string, newTip: string) =>
+    run(
+      repo,
+      ["range-diff", "--no-color", "--no-dual-color", "--no-patch", `${oldBase}..${oldTip}`, `${newBase}..${newTip}`],
+      true,
+    )
+  return Object.freeze({ run, commit, optionalCommit, stablePatchId, rangeDiff })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -718,6 +736,15 @@ async function prepareSource(
 
   const sourcePaths = await changedPaths(git, sourceRepo, source.baseSha, source.tipSha)
   const sourceIdentity = await changedPayloadIdentity(git, sourceRepo, source.baseSha, source.tipSha)
+  const sourcePatchId = await git.stablePatchId(sourceRepo, source.baseSha, source.tipSha)
+  if (sourcePatchId === undefined) {
+    return candidateFailure(
+      "payload-certificate",
+      `source '${source.repo}' could not derive a stable patch identity`,
+      source.repo,
+      source.payload,
+    )
+  }
   if (!samePaths(sourcePaths, source.payload)) {
     return candidateFailure(
       "payload-mismatch",
@@ -762,6 +789,24 @@ async function prepareSource(
       source.payload,
     )
   }
+  const materializedPatchId = await git.stablePatchId(sourceRepo, currentPin, newTipSha)
+  if (materializedPatchId !== sourcePatchId) {
+    return candidateFailure(
+      "payload-certificate",
+      `source '${source.repo}' rewritten payload changed stable patch identity`,
+      source.repo,
+      source.payload,
+    )
+  }
+  const rangeDiff = await git.rangeDiff(sourceRepo, source.baseSha, source.tipSha, currentPin, newTipSha)
+  if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
+    return candidateFailure(
+      "payload-certificate",
+      `source '${source.repo}' rewritten commit range is not range-diff equivalent`,
+      source.repo,
+      source.payload,
+    )
+  }
   const candidateRef = sourceCandidateRef(newTipSha)
   const pinned = await git.run(
     sourceRepo,
@@ -792,6 +837,8 @@ async function prepareSource(
       newTipSha,
       payload: source.payload,
       candidateRef,
+      patchId: sourcePatchId,
+      rangeDiff: "=",
     }),
   }
 }
@@ -907,6 +954,11 @@ function normalizeConflictPath(path: string): string {
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
   const sortedRight = right.toSorted()
   return left.length === sortedRight.length && left.every((path, index) => path === sortedRight[index])
+}
+
+function isEqualRangeDiff(output: string): boolean {
+  const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== "")
+  return lines.length > 0 && lines.every((line) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(line))
 }
 
 function intersection(left: readonly string[], right: readonly string[]): string[] {

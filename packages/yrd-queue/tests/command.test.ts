@@ -251,8 +251,17 @@ describe("Queue command adapters", () => {
   it("auto-restacks a disjoint source payload and composes the exact wrapper", async () => {
     const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await using process = createProcess()
+    const proofCommands: string[][] = []
+    const proofProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "git" && (request.argv.includes("patch-id") || request.argv.includes("range-diff"))) {
+          proofCommands.push([...request.argv])
+        }
+        return process.run(request)
+      },
+    }
     await using app = await checkedQueue(
-      process,
+      proofProcess,
       repo,
       shellCommand(
         "git -c protocol.file.allow=always submodule update --init --recursive && " +
@@ -297,8 +306,17 @@ describe("Queue command adapters", () => {
         newBaseSha: newPinSha,
         newTipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
         candidateRef: expect.stringMatching(/^refs\/heads\/yrd\/candidates\/[0-9a-f]{40}$/u),
+        patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        rangeDiff: "=",
         payload: ["src/candidate.ts"],
       },
+    ])
+    expect(proofCommands.filter((command) => command.includes("patch-id"))).toEqual([
+      expect.arrayContaining(["patch-id", "--stable"]),
+      expect.arrayContaining(["patch-id", "--stable"]),
+    ])
+    expect(proofCommands.filter((command) => command.includes("range-diff"))).toEqual([
+      expect.arrayContaining(["range-diff", "--no-color", "--no-dual-color", "--no-patch"]),
     ])
     const landedTree = await git(repo, ["ls-tree", "main", "dep"])
     const landedPinSha = landedTree.split(/\s+/u)[2]
@@ -309,6 +327,47 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
     expect(await git(join(repo, "dep"), ["rev-parse", "HEAD"])).toBe(landedPinSha)
     expect(run.integration?.sourceRewrites).toEqual(evidence.sourceRewrites)
+  })
+
+  it("rejects a rewritten source when its range-diff certificate is not exact", async () => {
+    const { repo, module, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    await using process = createProcess()
+    const divergentRangeDiff: Pick<Process, "run"> = {
+      async run(request) {
+        const result = await process.run(request)
+        return request.argv[0] === "git" && request.argv.includes("range-diff")
+          ? { ...result, stdout: result.stdout.replace(" = ", " ! ") }
+          : result
+      },
+    }
+    await using app = await checkedQueue(divergentRangeDiff, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: rootBaseSha,
+      base: "main",
+      baseSha: rootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "payload-certificate", message: expect.stringContaining("range-diff equivalent") },
+    })
+    expect(await git(repo, ["rev-parse", "main"])).toBe(rootBaseSha)
+    expect(await git(module, ["for-each-ref", "--format=%(refname)", "refs/heads/yrd/candidates"])).toBe("")
   })
 
   it("pins distinct immutable source Candidates for a same-repository batch", async () => {

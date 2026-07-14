@@ -1148,6 +1148,8 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
             oldTipSha: sourceTipSha,
             newBaseSha: newPinSha,
             newTipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            rangeDiff: "=",
             payload: ["src/candidate.ts"],
           },
         ],

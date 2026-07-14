@@ -39,6 +39,8 @@ export type SourceRewrite = Readonly<{
   newBaseSha: string
   newTipSha: string
   candidateRef: string
+  patchId: string
+  rangeDiff: "="
   payload: readonly string[]
 }>
 
@@ -51,6 +53,8 @@ export const SourceRewriteSchema = z
     newBaseSha: GitShaSchema,
     newTipSha: GitShaSchema,
     candidateRef: GitRefSchema,
+    patchId: GitShaSchema,
+    rangeDiff: z.literal("="),
     payload: z.array(z.string().min(1)).min(1),
   })
   .strict() as z.ZodType<SourceRewrite>

@@ -289,14 +289,16 @@ wrapper as the checked Candidate.
 
 Repository and payload paths are normalized, repository-relative, sorted, and
 unique. Candidate preparation proves the declared source diff exactly matches
-`payload`, including blob, mode, status, and path identity. When current main
-pins a descendant of `baseSha`, Yrd restacks only if the upstream and payload
-path sets are disjoint; overlaps and Git conflicts fail with exact paths. Each
-rewritten tip is published at
+`payload`, including blob, mode, status, and path identity. A generated
+successor must also retain the source's stable `patch-id` and produce only `=`
+rows from `git range-diff`; either proof failing rejects the Candidate before
+publication. When current main pins a descendant of `baseSha`, Yrd restacks
+only if the upstream and payload path sets are disjoint; overlaps and Git
+conflicts fail with exact paths. Each rewritten tip is published at
 `refs/heads/yrd/candidates/<new-tip-sha>` before the generated root wrapper can
-land. The Queue receipt retains that immutable ref and the old/new base and tip
-SHAs; ref loss during a remote landing fails closed and rolls the root branch
-back.
+land. The Queue receipt retains that immutable ref, patch ID, `rangeDiff: "="`,
+and the old/new base and tip SHAs; ref loss during a remote landing fails closed
+and rolls the root branch back.
 
 Human-authored gitlink commits are refused by default. During rollout only,
 `YRD_ALLOW_AUTHORED_GITLINKS=1` is the kill switch for a legacy carrier; it does
