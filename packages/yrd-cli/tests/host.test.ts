@@ -496,6 +496,213 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(jsonError).toBe("")
   })
 
+  it("runs the literal --steps merge CLI without starting the configured check process", async () => {
+    const { repo, featureSha } = await repository()
+    const checkMarker = join(repo, "configured-check-started.marker")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      [
+        "base: main",
+        "batch: 1",
+        "steps: [check, merge]",
+        `check: ${JSON.stringify(`touch ${checkMarker}`)}`,
+        "merge: {}",
+        "",
+      ].join("\n"),
+    )
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "shipping config")
+
+    let submitError = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--json"],
+        {
+          cwd: repo,
+          stdout: () => undefined,
+          stderr: (text) => {
+            submitError += text
+          },
+        },
+      ),
+      submitError,
+    ).toBe(0)
+
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--steps", "merge", "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    expect(await Bun.file(checkMarker).exists(), JSON.stringify({ exitCode, stdout, stderr })).toBe(false)
+    expect(exitCode, stderr).toBe(0)
+    const result = JSON.parse(stdout) as { results: Array<{ id: string }> }
+    expect(result).toMatchObject({
+      command: "queue.run",
+      results: [
+        {
+          status: "passed",
+          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          steps: [{ name: "merge" }],
+          prs: [{ id: "PR1", headSha: featureSha }],
+        },
+      ],
+    })
+    expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
+    const runId = result.results[0]?.id
+    if (runId === undefined) throw new Error("merge-only CLI produced no durable run")
+    await using reopened = await createYrdHost({ cwd: repo })
+    expect(reopened.app.queue.get(runId)).toMatchObject({
+      stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+    })
+  })
+
+  it("runs a literal merge-only batch without starting either configured check", async () => {
+    const { repo, featureSha } = await repository()
+    await git(repo, "switch", "-qc", "issue/second")
+    await writeFile(join(repo, "second.txt"), "second\n")
+    await git(repo, "add", "second.txt")
+    await git(repo, "commit", "-qm", "second")
+    const secondSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+    const checkMarker = join(repo, "configured-check-started.marker")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      [
+        "base: main",
+        "batch: 2",
+        "steps: [check, merge]",
+        `check: ${JSON.stringify(`touch ${checkMarker}`)}`,
+        "merge: {}",
+        "",
+      ].join("\n"),
+    )
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "shipping config")
+
+    for (const branch of ["issue/feature", "issue/second"]) {
+      let stderr = ""
+      expect(
+        await runYrdProcess(
+          ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", branch, "--base", "main", "--json"],
+          {
+            cwd: repo,
+            stdout: () => undefined,
+            stderr: (text) => {
+              stderr += text
+            },
+          },
+        ),
+        stderr,
+      ).toBe(0)
+    }
+
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "PR2", "--steps", "merge", "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    expect(await Bun.file(checkMarker).exists(), JSON.stringify({ exitCode, stdout, stderr })).toBe(false)
+    expect(exitCode, stderr).toBe(0)
+    const result = JSON.parse(stdout) as { results: Record<string, unknown>[] }
+    expect(result).toMatchObject({
+      command: "queue.run",
+      results: [
+        {
+          status: "passed",
+          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          steps: [{ name: "merge" }],
+          prs: [
+            { id: "PR1", headSha: featureSha },
+            { id: "PR2", headSha: secondSha },
+          ],
+        },
+      ],
+    })
+    expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
+    expect(await git(repo, "merge-base", "--is-ancestor", secondSha, "main")).toBe("")
+  })
+
+  it("does not reuse a prior configured check as merge-only authority", async () => {
+    const { repo } = await repository()
+    const checkMarker = join(repo, "..", "configured-check-runs.log")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      [
+        "base: main",
+        "batch: 1",
+        "steps: [check, merge]",
+        `check: ${JSON.stringify(`printf check >> ${checkMarker}`)}`,
+        "merge: {}",
+        "",
+      ].join("\n"),
+    )
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "shipping config")
+
+    let submitError = ""
+    expect(
+      await runYrdProcess(
+        ["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "issue/feature", "--base", "main", "--follow", "--json"],
+        {
+          cwd: repo,
+          stdout: () => undefined,
+          stderr: (text) => {
+            submitError += text
+          },
+        },
+      ),
+      submitError,
+    ).toBe(0)
+    expect(await readFile(checkMarker, "utf8")).toBe("check")
+
+    let stdout = ""
+    let stderr = ""
+    const exitCode = await runYrdProcess(
+      ["/usr/bin/bun", "/usr/local/bin/yrd", "queue", "run", "PR1", "--steps", "merge", "--json"],
+      {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    expect(await readFile(checkMarker, "utf8")).toBe("check")
+    expect(exitCode, JSON.stringify({ stdout, stderr })).toBe(0)
+    const result = JSON.parse(stdout) as { results: Record<string, unknown>[] }
+    expect(result).toMatchObject({
+      results: [
+        {
+          status: "passed",
+          stepSelection: { authority: "explicit", steps: ["merge"], omittedChecks: ["check"] },
+          shape: { results: {} },
+          steps: [{ name: "merge" }],
+        },
+      ],
+    })
+    expect(result.results[0]).not.toHaveProperty("reusedFrom")
+  })
+
   it("preserves a literal shipping-config main-health failure through submit --follow and pr checks", async () => {
     const { repo } = await repository()
     const tentScript = join(repo, ".claude", "skills", "tent", "scripts", "tent.ts")

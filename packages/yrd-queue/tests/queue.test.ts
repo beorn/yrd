@@ -65,6 +65,7 @@ function queuePlugin(
     checkRevision?: string
     checkClassification?: "base" | "carrier"
     requires?: readonly ["review"]
+    defaultSteps?: readonly ("check" | "review" | "merge" | "deploy")[]
     resolveBaseSha?: (base: string) => string | Promise<string>
   }> = {},
 ) {
@@ -100,7 +101,7 @@ function queuePlugin(
   return withQueue({
     steps: [check, review, merge, deploy] as const,
     batch: options.batch ?? false,
-    defaultSteps: ["check", "review", "merge", "deploy"],
+    defaultSteps: options.defaultSteps ?? ["check", "review", "merge", "deploy"],
     ...(options.requires === undefined ? {} : { requires: options.requires }),
     ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
   })
@@ -220,6 +221,151 @@ describe("Queue", () => {
       expect(mergeCalls).toBe(1)
     },
   )
+
+  it("refuses mismatched replayed steps before starting their configured process", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let checkCalls = 0
+    let mergeCalls = 0
+    const options = {
+      check: () => {
+        checkCalls += 1
+        return { status: "passed" as const, output: { checked: true } }
+      },
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/mismatched-resume")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["merge"] }, runtime)).rejects.toThrow(
+      "PR 'PR1' is already in active queue run 'R1'",
+    )
+    expect(checkCalls).toBe(0)
+    expect(mergeCalls).toBe(0)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "running",
+      stepSelection: { authority: "explicit", steps: ["check", "merge"] },
+      steps: [{ name: "check", job: { status: "requested" } }, { name: "merge" }],
+    })
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+  })
+
+  it("refuses to resume a replayed batch for only part of its pinned PR set", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let checkCalls = 0
+    let mergeCalls = 0
+    const options = {
+      batch: 2,
+      check: () => {
+        checkCalls += 1
+        return { status: "passed" as const, output: { checked: true } }
+      },
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const first = await submitBranch(app, "issue/batch-one")
+      const second = await submitBranch(app, "issue/batch-two")
+      await app.dispatch(app.commands.queue.run, {
+        prs: [first.id, second.id],
+        steps: ["check", "merge"],
+      })
+      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).rejects.toThrow(
+      "PR 'PR1' is already in active queue run 'R1'",
+    )
+    expect(checkCalls).toBe(0)
+    expect(mergeCalls).toBe(0)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "running",
+      prs: [{ id: "PR1" }, { id: "PR2" }],
+      steps: [{ name: "check", job: { status: "requested" } }, { name: "merge" }],
+    })
+  })
+
+  it("refuses to relabel configured replay authority as an explicit selection", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let checkCalls = 0
+    const options = {
+      check: () => {
+        checkCalls += 1
+        return { status: "passed" as const, output: { checked: true } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/configured-authority")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id] })
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "running",
+        stepSelection: { authority: "configured", steps: ["check", "review", "merge", "deploy"] },
+      })
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await expect(
+      replayed.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge", "deploy"] }, runtime),
+    ).rejects.toThrow("PR 'PR1' is already in active queue run 'R1'")
+    expect(checkCalls).toBe(0)
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "running",
+      stepSelection: { authority: "configured" },
+    })
+    expect(replayed.queue.get("R1")?.steps[0]).toMatchObject({ name: "check", job: { status: "requested" } })
+  })
+
+  it("does not mistake a configured check-only Run for supersedable admission", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let checkCalls = 0
+    const options = {
+      defaultSteps: ["check"] as const,
+      check: () => {
+        checkCalls += 1
+        return { status: "passed" as const, output: { checked: true } }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/configured-check-only")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id] })
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "running",
+        stepSelection: { authority: "configured", steps: ["check"] },
+      })
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)).rejects.toThrow(
+      "PR 'PR1' is already in active queue run 'R1'",
+    )
+    expect(checkCalls).toBe(0)
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+    expect(replayed.queue.get("R1")).toMatchObject({
+      status: "running",
+      stepSelection: { authority: "configured", steps: ["check"] },
+    })
+  })
 
   it("settles a stale revision and admits its resubmission in one explicit run", async () => {
     await using app = await createQueueApp({
@@ -923,6 +1069,36 @@ describe("Queue", () => {
     ])
     expect(app.queue.eligibility(waiting.id)).toMatchObject({ checks: { status: "checking" } })
     expect(app.queue.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
+  })
+
+  it("does not supersede another PR's unstarted admission for an explicit merge", async () => {
+    let checkCalls = 0
+    let mergeCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "passed", output: { checked: true } }
+      },
+      merge: () => {
+        mergeCalls += 1
+        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const first = await submitBranch(app, "issue/first-admission")
+    const second = await submitBranch(app, "issue/second-merge")
+    await app.bays.requestChecks({ pr: first.id })
+    expect(await app.queue.admit({ prs: [first.id] })).toMatchObject([
+      { id: "R1", status: "running", prs: [{ id: first.id }] },
+    ])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+
+    await expect(app.queue.run({ prs: [second.id], steps: ["merge"] }, runtime)).rejects.toThrow(
+      "queue 'main' is running 'R1'",
+    )
+    expect(checkCalls).toBe(0)
+    expect(mergeCalls).toBe(0)
+    expect(app.queue.get("R1")).toMatchObject({ status: "running", prs: [{ id: first.id }] })
+    expect(app.state().bays.prs[second.id]).toMatchObject({ status: "submitted" })
   })
 
   it("keys admission reuse by the freshly resolved base SHA", async () => {
