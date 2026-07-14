@@ -592,7 +592,7 @@ describe("runYrd", () => {
     const retiredRetry = outputIO()
     expect(await runYrd(app, yrd("pr", "retry", "PR1"), retiredRetry.io)).toBe(2)
     expect(retiredRetry.stdout()).toBe("")
-    expect(retiredRetry.stderr()).toContain("unknown command 'retry'")
+    expect(retiredRetry.stderr()).toContain("too many arguments")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRetiredRetry)
 
     const contest = outputIO()

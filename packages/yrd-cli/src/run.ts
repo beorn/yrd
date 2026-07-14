@@ -718,19 +718,6 @@ async function editPr(
   )
 }
 
-async function retryPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
-  const selectedRun = app.queue.get(selector)
-  const prs = selectedRun?.prs.map((pr) => pr.id) ?? [requiredPr(app, selector).id]
-  const runs = await app.queue.run({ prs, retry: true }, runtimeOptions(io))
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.retry", prs, runs },
-    createElement(QueueRunsView, { runs }),
-  )
-  return runs.some((run) => run.status === "failed") ? 1 : 0
-}
-
 function prFact(pr: DeepReadonly<PR>): Readonly<{
   id: string
   branch: string
@@ -984,7 +971,6 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
       "yrd pr submit",
       "yrd pr status",
       "yrd pr runs <PR>",
-      "yrd pr retry <PR|R>",
       "fix the branch and run yrd pr submit again",
     ],
     live: {
@@ -1569,12 +1555,11 @@ function prMergeRefusalDetail(
   }
   if (pr.status === "rejected") {
     const inspect = `yrd pr runs ${pr.id}`
-    const retry = `yrd pr retry ${pr.id}`
     const resubmit = "fix the branch and run yrd pr submit again"
     return {
       next: inspect,
-      guidance: { inspect, retry, resubmit },
-      message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${retry} or ${resubmit}`,
+      guidance: { inspect, resubmit },
+      message: `PR '${pr.id}' was rejected; see: ${inspect}; then ${resubmit}`,
     }
   }
   if (pr.status === "pushed") {
@@ -1889,10 +1874,6 @@ function buildProgram(
     .option("--note <text>", "set the delivery note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
-  pr.command("retry <selector>")
-    .description("retry a rejected PR or run")
-    .option("--json", "emit stable JSON")
-    .action(async (selector, options) => setExit(await retryPr(installed(), selector, options, io)))
   pr.command("ready <selector>")
     .description("move a pushed PR revision into the queue")
     .option("--json", "emit stable JSON")
