@@ -61,6 +61,7 @@ import {
   type QueueSummary,
   type QueuesState,
   type QueueStep,
+  type StepSelection,
   type PREligibility,
   type PRCheckRecord,
   type PRShape,
@@ -578,6 +579,7 @@ function createQueue<Shape extends PRShape>(
     async run(args, runOptions) {
       using _span = log.span?.("run", { prs: args.prs, steps: args.steps, retry: args.retry === true })
       if (args.steps?.length === 0) return []
+      const explicitStepAuthority = args.steps !== undefined
       await actions.refresh()
       let snapshot = runtime()
       const resumable = resumableQueueRoots(snapshot, args, steps)
@@ -597,7 +599,7 @@ function createQueue<Shape extends PRShape>(
         ),
       )
       const requested = requestedPRs(snapshot.bays, args, consumed)
-      const checked = requested.filter((pr) => checksRequested(pr))
+      const checked = explicitStepAuthority ? [] : requested.filter((pr) => checksRequested(pr))
       const before = new Map(checked.map((pr) => [pr.id, checkEligibility(snapshot, pr, steps).status]))
       await refreshCheckIdentities(checked)
       const admissions = await drainAdmissions(
@@ -616,7 +618,9 @@ function createQueue<Shape extends PRShape>(
           return admissions
         }
       }
-      const prs = runnablePRs(snapshot, args, steps, consumed).filter((pr) => !activeBases.has(baseIdentity(pr.base)))
+      const prs = runnablePRs(snapshot, args, steps, consumed, { explicitStepAuthority }).filter(
+        (pr) => !activeBases.has(baseIdentity(pr.base)),
+      )
       for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
         const started = await actions.run({
           prs: candidate.map((pr) => pr.id),
@@ -739,7 +743,13 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         const first = admissionQueue(state, steps)[0]
         if (first !== undefined && first.id !== pr.id) return { events: [] }
       }
-      return startRun(Queues.nextId(state.queues), [snapshot], selected, prShape([snapshot]))
+      return startRun(
+        Queues.nextId(state.queues),
+        [snapshot],
+        selected,
+        stepSelection(state.queues, steps, selected, "admission"),
+        prShape([snapshot]),
+      )
     },
   })
 
@@ -784,7 +794,15 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     params: QueueRunArgsSchema,
     apply(state: DeepReadonly<RuntimeState>, args: QueueRunArgs) {
       if (args.steps?.length === 0) return { events: [] }
-      const prs = runnablePRs(state, args, steps)
+      const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
+      const selection = stepSelection(
+        state.queues,
+        steps,
+        selected,
+        args.steps === undefined ? "configured" : "explicit",
+      )
+      const explicitStepAuthority = selection.authority === "explicit"
+      const prs = runnablePRs(state, args, steps, new Set(), { explicitStepAuthority })
       if (prs.length === 0) return { events: [] }
       const base = prs[0] === undefined ? undefined : baseIdentity(prs[0].base)
       if (base === undefined) throw new Error("yrd: a queue run requires at least one PR")
@@ -797,24 +815,49 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         )
       }
       const active = runningQueue(state.queues, state.jobs, base)
-      if (active !== undefined) throw new Error(`yrd: queue '${base}' is running '${active.id}'`)
-
-      const selected = selectSteps(steps, args.steps ?? state.queues.defaultSteps)
+      const selectedPRs = new Set(prs.map((pr) => pr.id))
+      const superseded =
+        active !== undefined &&
+        explicitStepAuthority &&
+        active.prs.every((pr) => selectedPRs.has(pr.id)) &&
+        unstartedAdmission(active, state.queues, steps)
+          ? active
+          : undefined
+      if (active !== undefined && superseded === undefined) {
+        throw new Error(`yrd: queue '${base}' is running '${active.id}'`)
+      }
       const integrated = integratedPRShape(prs)
       validateSequence(selected, integrated !== undefined)
       const snapshots = prs.map(Queues.snapshot)
-      const reuse = integrated === undefined ? reusablePrefix(state, snapshots, selected) : undefined
+      const reuse =
+        integrated === undefined && !explicitStepAuthority ? reusablePrefix(state, snapshots, selected) : undefined
       const remaining = reuse === undefined ? selected : selected.slice(reuse.count)
       if (remaining.length === 0) return { events: [] }
-      return startRun(
+      const started = startRun(
         Queues.nextId(state.queues),
         snapshots,
         remaining,
+        selection,
         reuse?.shape ?? integrated ?? prShape(snapshots),
         integrated?.integration,
         {},
         reuse === undefined ? undefined : { run: reuse.run, results: reuse.shape.results },
       )
+      return superseded === undefined
+        ? started
+        : {
+            run: started.run,
+            events: [
+              event("queue/run/failed", {
+                run: superseded.id,
+                error: {
+                  code: "step-selection-superseded",
+                  message: `explicit steps '${selection.steps.join(",")}' superseded unstarted configured checks`,
+                },
+              }),
+              ...started.events,
+            ],
+          }
     },
   })
 
@@ -839,10 +882,18 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const prs = args.part === 0 ? parent.prs.slice(0, pivot) : parent.prs.slice(pivot)
       if (prs.length === 0) throw new Error(`yrd: queue run '${parent.id}' has no isolation part ${args.part}`)
       const selected = parent.steps.map((planned) => requirePlannedStep(byName, planned))
-      const started = startRun(Queues.nextId(state.queues), prs, selected, prShape(prs), undefined, {
-        parent: parent.id,
-        isolationPart: args.part,
-      })
+      const started = startRun(
+        Queues.nextId(state.queues),
+        prs,
+        selected,
+        parent.stepSelection,
+        prShape(prs),
+        undefined,
+        {
+          parent: parent.id,
+          isolationPart: args.part,
+        },
+      )
       return {
         events: [
           event("queue/batch/isolated", {
@@ -933,6 +984,27 @@ function selectSteps(steps: readonly RuntimeStep[], names?: readonly string[]): 
   return steps.filter((step) => selected.has(step.name))
 }
 
+function stepSelection(
+  queues: DeepReadonly<QueuesState>,
+  installed: readonly RuntimeStep[],
+  selected: readonly RuntimeStep[],
+  authority: StepSelection["authority"],
+): StepSelection {
+  const names = selected.map((step) => step.name)
+  const selectedNames = new Set(names)
+  const omittedChecks =
+    authority === "explicit"
+      ? admissionSteps(queues, installed)
+          .map((step) => step.name)
+          .filter((name) => !selectedNames.has(name))
+      : []
+  return {
+    authority,
+    steps: names,
+    ...(omittedChecks.length === 0 ? {} : { omittedChecks }),
+  }
+}
+
 function validateSequence(steps: readonly RuntimeStep[], alreadyIntegrated: boolean): void {
   let integrated = alreadyIntegrated
   for (const step of steps) {
@@ -949,6 +1021,7 @@ function startRun(
   id: QueueRunId,
   prs: readonly PRSnapshot[],
   selected: readonly RuntimeStep[],
+  selection: StepSelection | undefined,
   shape: PRShape,
   integration?: IntegrationProof,
   lineage: Readonly<{ parent?: QueueRunId; isolationPart?: 0 | 1 }> = {},
@@ -961,6 +1034,7 @@ function startRun(
     prs,
     base: baseIdentity(pr.base),
     steps: selected.map(descriptor),
+    ...(selection === undefined ? {} : { stepSelection: selection }),
     ...(integration === undefined ? {} : { initialIntegration: integration }),
     ...(reuse === undefined ? {} : { initialResults: reuse.results, reusedFrom: reuse.run }),
     ...lineage,
@@ -1336,8 +1410,14 @@ function resumableQueueRoots(
   const explicit = explicitPRs(state.bays, args)
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(state.queues, steps)
+  const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
   return pendingQueueRoots(state).filter(
-    (run) => !samePlan(run.steps, admissions) && (selected === undefined || run.prs.some((pr) => selected.has(pr.id))),
+    (run) =>
+      !samePlan(run.steps, admissions) &&
+      (requested === undefined ||
+        (samePlan(run.steps, requested) &&
+          (run.stepSelection === undefined || run.stepSelection.authority === "explicit"))) &&
+      (selected === undefined || run.prs.every((pr) => selected.has(pr.id))),
   )
 }
 
@@ -1386,6 +1466,18 @@ function samePlan(actual: readonly DeepReadonly<InstalledStep>[], expected: read
         step.classification === candidate.classification
       )
     })
+  )
+}
+
+function unstartedAdmission(
+  run: DeepReadonly<QueueRun>,
+  queues: DeepReadonly<QueuesState>,
+  steps: readonly RuntimeStep[],
+): boolean {
+  return (
+    run.stepSelection?.authority === "admission" &&
+    samePlan(run.steps, admissionSteps(queues, steps)) &&
+    run.steps.every((step) => step.job === undefined || step.job.status === "requested")
   )
 }
 
@@ -1626,16 +1718,27 @@ function runnablePRs(
   args: QueueRunArgs,
   steps: readonly RuntimeStep[],
   excluded: ReadonlySet<string> = new Set(),
+  options: Readonly<{ explicitStepAuthority?: boolean }> = {},
 ): PR[] {
   const requested = requestedPRs(state.bays, args, excluded)
   const implicitQueue = args.prs === undefined || args.prs.length === 0
+  const ignoredClaims = new Set(
+    options.explicitStepAuthority === true
+      ? orderedQueues(state.queues, state.jobs)
+          .filter((run) => unstartedAdmission(run, state.queues, steps))
+          .map((run) => run.id)
+      : [],
+  )
   return requested.filter((pr) => {
     const eligibility = prEligibility(state, pr, steps, {
       retry: args.retry === true,
       resumeIntegrated: true,
+      ignoreChecks: options.explicitStepAuthority,
+      ignoredClaims,
     })
     if (eligibility.runnable) return true
-    if (implicitQueue || eligibility.reason?.code === "claimed") return false
+    if (implicitQueue || (eligibility.reason?.code === "claimed" && options.explicitStepAuthority !== true))
+      return false
     const reason = eligibility.reason
     raiseFailure("refusal", reason?.code ?? "pr-not-ready", `yrd: ${reason?.message ?? `PR '${pr.id}' is not ready`}`)
   })
@@ -1645,7 +1748,12 @@ function prEligibility(
   state: DeepReadonly<RuntimeState>,
   pr: DeepReadonly<PR>,
   steps: readonly RuntimeStep[],
-  options: Readonly<{ retry?: boolean; resumeIntegrated?: boolean }> = {},
+  options: Readonly<{
+    retry?: boolean
+    resumeIntegrated?: boolean
+    ignoreChecks?: boolean
+    ignoredClaims?: ReadonlySet<string>
+  }> = {},
 ): PREligibility {
   const reviewed = reviewState(pr)
   const required = state.queues.requires.includes("review")
@@ -1677,15 +1785,15 @@ function prEligibility(
     if (pr.status !== "submitted" && !(options.retry === true && pr.status === "rejected")) {
       return result({ code: "terminal", message: `PR '${pr.id}' is ${pr.status}, not queueable` })
     }
-    if (checks.status === "queued") {
+    if (options.ignoreChecks !== true && checks.status === "queued") {
       const position = checks.position === undefined ? "" : ` at position ${checks.position}`
       return result({ code: "checks-pending", message: `PR '${pr.id}' checks are queued${position}` })
     }
-    if (checks.status === "checking") {
+    if (options.ignoreChecks !== true && checks.status === "checking") {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
     }
-    if (checks.status === "failed" && options.retry !== true) {
+    if (options.ignoreChecks !== true && checks.status === "failed" && options.retry !== true) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({ code: "checks-failed", message: `PR '${pr.id}' checks failed${run}; retry=true is required` })
     }
@@ -1710,13 +1818,16 @@ function prEligibility(
       message: `queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
     })
   }
-  const claimed = orderedQueues(state.queues, state.jobs).some(
-    (run) => !Queues.terminal(run) && run.prs.some((candidate) => candidate.id === pr.id),
+  const claimed = orderedQueues(state.queues, state.jobs).find(
+    (run) =>
+      !Queues.terminal(run) &&
+      !options.ignoredClaims?.has(run.id) &&
+      run.prs.some((candidate) => candidate.id === pr.id),
   )
-  return claimed
+  return claimed !== undefined
     ? result({
         code: "claimed",
-        message: `PR '${pr.id}' is already in an active queue run`,
+        message: `PR '${pr.id}' is already in active queue run '${claimed.id}'`,
       })
     : result()
 }

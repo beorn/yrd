@@ -50,6 +50,13 @@ export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
+const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
+  baseSha: true,
+  candidateSha: true,
+  candidateRef: true,
+}).strict()
+type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
+
 export const GitCheckFailureEvidenceSchema = z.object({ artifacts: z.array(StepArtifactSchema) }).strict()
 export type GitCheckFailureEvidence = Readonly<z.infer<typeof GitCheckFailureEvidenceSchema>>
 
@@ -566,39 +573,61 @@ function candidateRef(input: Pick<StepExecution, "run" | "step">, job: string, a
   return `refs/yrd/candidates/${input.run}/${input.step}/attempt-${attempt}-${identity}`
 }
 
+type PreparedCandidateFailure = Extract<Awaited<ReturnType<typeof prepareCandidate>>, { status: "failed" }>
+
+async function withPinnedCandidate<Output extends JsonValue>(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: Readonly<{ id: string; attempt: number }>,
+  options: Readonly<{ checkoutParent?: string; artifactRoot?: string }>,
+  onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
+  use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
+  const target = await authoritativeQueueBase(git, repo, primaryPR(input).base)
+  return withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), async (path) => {
+    const candidate = await prepareCandidate(
+      git,
+      path,
+      input,
+      context.attempt,
+      resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
+    )
+    if (candidate.status === "failed") return onFailure(candidate)
+    const pinned = await pinCandidate(
+      git,
+      repo,
+      candidateRef(input, context.id, context.attempt, candidate.output),
+      candidate.output,
+    )
+    if (pinned.status === "refused") {
+      return { status: "waiting", token: pinned.token, detail: pinned.detail }
+    }
+    return use(
+      path,
+      PinnedCandidateSchema.parse({
+        baseSha: target.sha,
+        candidateSha: candidate.output,
+        candidateRef: pinned.ref,
+      }),
+    )
+  })
+}
+
 export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
-      const branch = primaryPR(input).base
-      const target = await authoritativeQueueBase(git, repo, branch)
-      const baseSha = target.sha
-      return await withScratch(
+      return await withPinnedCandidate(
         git,
         repo,
-        baseSha,
-        options.checkoutParent ?? tmpdir(),
-        async (path): Promise<JobResult<GitCheckResultEvidence>> => {
-          const candidate = await prepareCandidate(
-            git,
-            path,
-            input,
-            context.attempt,
-            resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
-          )
-          if (candidate.status === "failed") return candidate
-          const pinned = await pinCandidate(
-            git,
-            repo,
-            candidateRef(input, context.id, context.attempt, candidate.output),
-            candidate.output,
-          )
-          if (pinned.status === "refused") {
-            return { status: "waiting", token: pinned.token, detail: pinned.detail }
-          }
-          const ref = pinned.ref
+        input,
+        context,
+        { checkoutParent: options.checkoutParent, artifactRoot: options.artifactRoot },
+        (failure) => failure,
+        async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
           const configured: ConfiguredCommandOptions<PRShape> = {
             inject: options.inject,
             command: options.command,
@@ -610,18 +639,16 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
             classification: options.classification ?? "carrier",
             variables: () => ({
-              YRD_BASE_SHA: baseSha,
-              YRD_CANDIDATE_SHA: candidate.output,
+              YRD_BASE_SHA: candidate.baseSha,
+              YRD_CANDIDATE_SHA: candidate.candidateSha,
               ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
             }),
           }
           const runner =
             options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
-          const outcome = await runner({ ...input, targetSha: candidate.output }, context)
+          const outcome = await runner({ ...input, targetSha: candidate.candidateSha }, context)
           const evidence = {
-            baseSha,
-            candidateSha: candidate.output,
-            candidateRef: ref,
+            ...candidate,
             classification: options.classification ?? ("carrier" as const),
           }
           if (outcome.status === "passed") {
@@ -699,18 +726,17 @@ async function checkedOutWorktree(git: Git, repo: string, branchRef: string): Pr
   return undefined
 }
 
-type CheckedCandidateResult =
-  | Readonly<{ checked: GitCheckEvidence }>
+type PinnedCandidateResult =
+  | Readonly<{ checked: PinnedCandidate }>
   | Readonly<{ error: Readonly<{ code: string; message: string }> }>
 
-async function validateCheckedCandidate(
+async function validatePinnedCandidate(
   git: Git,
   repo: string,
   input: StepExecution,
   baseSha: string,
-): Promise<CheckedCandidateResult> {
-  const checked = checkedCandidate(input.shape)
-  if (checked === undefined) return { error: { code: "check-missing", message: "merge requires a pinned check" } }
+  checked: PinnedCandidate,
+): Promise<PinnedCandidateResult> {
   if (checked.baseSha !== baseSha) {
     return {
       error: {
@@ -728,6 +754,40 @@ async function validateCheckedCandidate(
     }
   }
   return { checked }
+}
+
+type MergeCandidateResult =
+  | Readonly<{ status: "passed"; base: GitQueueTarget; checked: PinnedCandidate }>
+  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }> }>
+  | Readonly<{ status: "waiting"; token: string; detail?: string }>
+
+async function mergeCandidate(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: Readonly<{ id: string; attempt: number }>,
+  options: Readonly<{ artifactRoot?: string }>,
+): Promise<MergeCandidateResult> {
+  const prior = checkedCandidate(input.shape)
+  const prepared =
+    prior === undefined
+      ? await withPinnedCandidate<PinnedCandidate>(
+          git,
+          repo,
+          input,
+          context,
+          { artifactRoot: options.artifactRoot },
+          (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
+          async (_path, candidate) => ({ status: "passed", output: candidate }),
+        )
+      : undefined
+  if (prepared?.status === "failed") return prepared
+  if (prepared?.status === "waiting") return prepared
+  const checked = prior ?? prepared?.output
+  if (checked === undefined) throw new Error("yrd: merge candidate preparation produced no candidate")
+  const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
+  const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
+  return "error" in validated ? { status: "failed", error: validated.error } : { status: "passed", base, checked }
 }
 
 async function authoritativeQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
@@ -787,7 +847,7 @@ async function landingError(
   git: Git,
   repo: string,
   input: StepExecution,
-  checked: GitCheckEvidence,
+  checked: PinnedCandidate,
   landingSha: string,
 ): Promise<string | undefined> {
   for (const sha of [checked.baseSha, ...input.prs.map((pr) => pr.headSha)]) {
@@ -799,14 +859,13 @@ async function landingError(
 export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  return async (input): Promise<JobResult<IntegrationProof>> => {
+  return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const base = await authoritativeQueueBase(git, repo, branch)
+      const candidate = await mergeCandidate(git, repo, input, context, {})
+      if (candidate.status !== "passed") return candidate
+      const { base, checked } = candidate
       const baseSha = base.sha
-      const candidate = await validateCheckedCandidate(git, repo, input, baseSha)
-      if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
-      const { checked } = candidate
       const remote = base.remote
       if (remote !== undefined) {
         const branchRef = `refs/heads/${branch}`
@@ -889,29 +948,25 @@ export function configuredMergeStep<Shape extends PRShape>(
 ): StepRunner<Shape, IntegrationProof> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
-  const command = configuredCommandStep<Shape>({
-    inject: options.inject,
-    command: options.command,
-    cwd: repo,
-    purpose: "merge",
-    artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
-    ...(options.env === undefined ? {} : { env: options.env }),
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-    variables: (input) => {
-      const checked = checkedCandidate(input.shape)
-      return {
-        YRD_CANDIDATE_SHA: checked?.candidateSha,
-        YRD_CANDIDATE_REF: checked?.candidateRef,
-        ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
-      }
-    },
-  })
   return async (input, context): Promise<JobResult<IntegrationProof>> => {
     try {
       const branch = primaryPR(input).base
-      const base = await authoritativeQueueBase(git, repo, branch)
-      const candidate = await validateCheckedCandidate(git, repo, input, base.sha)
-      if ("error" in candidate) return failed(candidate.error.code, candidate.error.message)
+      const candidate = await mergeCandidate(git, repo, input, context, { artifactRoot: options.artifactRoot })
+      if (candidate.status !== "passed") return candidate
+      const command = configuredCommandStep<Shape>({
+        inject: options.inject,
+        command: options.command,
+        cwd: repo,
+        purpose: "merge",
+        artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+        ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        variables: () => ({
+          YRD_CANDIDATE_SHA: candidate.checked.candidateSha,
+          YRD_CANDIDATE_REF: candidate.checked.candidateRef,
+          ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
+        }),
+      })
 
       const outcome = await command(input, context)
       let landing: GitQueueTarget

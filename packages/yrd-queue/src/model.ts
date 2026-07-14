@@ -53,6 +53,12 @@ export type InstalledStep = Readonly<{
   classification?: "base" | "carrier"
 }>
 
+export type StepSelection = Readonly<{
+  authority: "configured" | "explicit" | "admission"
+  steps: readonly StepName[]
+  omittedChecks?: readonly StepName[]
+}>
+
 export type QueueFailure = Readonly<{
   at: string
   error: JobError
@@ -63,6 +69,7 @@ export type QueueRecord = Readonly<{
   prs: readonly PRSnapshot[]
   base: string
   steps: readonly InstalledStep[]
+  stepSelection?: StepSelection
   initialIntegration?: IntegrationProof
   initialResults?: Readonly<Record<string, JsonValue>>
   reusedFrom?: QueueRunId
@@ -196,6 +203,17 @@ export const QueueRecordSchema = z
           .strict(),
       )
       .min(1),
+    stepSelection: z
+      .object({
+        authority: z.enum(["configured", "explicit", "admission"]),
+        steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
+        omittedChecks: z
+          .array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu))
+          .min(1)
+          .optional(),
+      })
+      .strict()
+      .optional(),
     initialIntegration: IntegrationProofSchema.optional(),
     initialResults: z.record(z.string(), JsonSchema).optional(),
     reusedFrom: z.string().trim().min(1).optional(),

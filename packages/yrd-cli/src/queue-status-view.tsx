@@ -926,12 +926,16 @@ export function humanQueueProjection(
 
 export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Queue idle.</Text>
-  const data = runs.map((run) => ({
-    run: run.id,
-    prs: run.prs.map((pr) => pr.id).join(","),
-    state: run.status,
-    steps: boundedQueue(run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")),
-  }))
+  const data = runs.map((run) => {
+    const omitted = run.stepSelection?.omittedChecks
+    const steps = run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")
+    return {
+      run: run.id,
+      prs: run.prs.map((pr) => pr.id).join(","),
+      state: run.status,
+      steps: boundedQueue(omitted === undefined ? steps : `${steps} (configured checks omitted: ${omitted.join(",")})`),
+    }
+  })
   return (
     <Table
       data={data}
