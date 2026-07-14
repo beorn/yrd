@@ -2809,7 +2809,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     runner: step.job !== undefined && "runner" in step.job ? step.job.runner : "-",
     lease: step.job?.status === "running" ? toIso(step.job.leaseExpiresAt) : "-",
     requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
-    started: step.job === undefined ? "-" : step.job.status === "requested" ? "-" : toIso(step.job.startedAt),
+    started: step.job === undefined || !("startedAt" in step.job) ? "-" : toIso(step.job.startedAt),
     changed: step.job === undefined ? "-" : toIso(step.job.changedAt),
     finished:
       step.job === undefined || step.job.status === "running" || step.job.status === "requested"
