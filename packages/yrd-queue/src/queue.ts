@@ -655,7 +655,8 @@ function createQueue<Shape extends PRShape>(
           (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
         )
         const hasTerminalFailure = candidate.steps.some(
-          (step) => step.job?.status === "failed" || step.job?.status === "lost",
+          (step) =>
+            step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
         )
         if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
           const reconciled = await actions.advance(candidate.id)
@@ -711,18 +712,15 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       const selected = admissionSteps(state.queues, steps)
       if (selected.length === 0) return { events: [] }
       const snapshot = Queues.snapshot(pr)
-      requireQueueAuthority(state.queues.authority, [snapshot], selected)
       const existing = checkFactRun(state, snapshot, selected)
       const status = existing === undefined ? undefined : checkRunStatus(existing, selected.length)
       if (status === "passed" || status === "checking") {
         return { events: [] }
       }
       if (existing !== undefined && status === "failed") {
-        raiseFailure(
-          "refusal",
-          "checks-failed",
-          `yrd: PR '${pr.id}' checks failed in ${existing.id}; a new push or check request is required`,
-        )
+        requireFreshCheckAuthority(state.queues.authority, snapshot, existing.id)
+      } else {
+        requireQueueAuthority(state.queues.authority, [snapshot], selected)
       }
       if (runningQueue(state.queues, state.jobs, pr.base) !== undefined) return { events: [] }
       if (checksRequested(pr)) {
@@ -868,6 +866,8 @@ function authorityRequirement(
 ): QueueAuthorityKind | undefined {
   if (steps.some((step) => step.integrates)) return "submit"
   if (steps.some((step) => step.needsIntegration)) return undefined
+  if (availableAuthorityToken(authority.checks[pr.id], pr)) return "checks"
+  if (availableAuthorityToken(authority.submits[pr.id], pr)) return "submit"
   return authority.statuses[pr.id] === "pushed" ? "checks" : "submit"
 }
 
@@ -877,6 +877,31 @@ function sameAuthorityToken(
 ): boolean {
   if (token === undefined) return false
   return token.pr === pr.id && token.revision === pr.revision && token.headSha === pr.headSha
+}
+
+function availableAuthorityToken(
+  token: DeepReadonly<QueueAuthorityToken> | undefined,
+  pr: DeepReadonly<PRSnapshot>,
+): boolean {
+  return sameAuthorityToken(token, pr) && token?.consumedBy === undefined
+}
+
+function requireFreshCheckAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  pr: DeepReadonly<PRSnapshot>,
+  failedRun: QueueRunId,
+): void {
+  const token = authority.checks[pr.id]
+  if (availableAuthorityToken(token, pr)) return
+  const detail =
+    sameAuthorityToken(token, pr) && token?.consumedBy !== undefined
+      ? `the matching checks fact was consumed by queue run '${token.consumedBy}'`
+      : "no fresh matching checks fact exists"
+  raiseFailure(
+    "refusal",
+    "checks-failed",
+    `yrd: PR '${pr.id}' checks failed in ${failedRun}; ${detail}`,
+  )
 }
 
 function queueAuthorityGaps(
@@ -1221,6 +1246,34 @@ function advanceQueue(
 
   if (job.status !== "passed") {
     const before = shapeThrough(record, state.jobs, index)
+    if (job.status === "canceled") {
+      return {
+        events: isIntegrated(before)
+          ? []
+          : record.prs.flatMap((pr) => {
+              const current = state.bays.prs[pr.id]
+              if (
+                current === undefined ||
+                current.revision !== pr.revision ||
+                current.headSha !== pr.headSha ||
+                (current.status !== "pushed" && current.status !== "submitted")
+              ) {
+                return []
+              }
+              return [
+                event("pr/canceled", {
+                  pr: pr.id,
+                  revision: pr.revision,
+                  headSha: pr.headSha,
+                  ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                  by: job.canceledBy,
+                  reason: job.cancelReason,
+                }),
+              ]
+            }),
+      }
+    }
+
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
     const failure = jobFailure(job)
@@ -1230,7 +1283,15 @@ function advanceQueue(
         !isIntegrated(before) &&
         pr !== undefined &&
         current?.status === "submitted"
-          ? [event("pr/rejected", { pr: pr.id, revision: pr.revision, detail: failure.message })]
+          ? [
+              event("pr/rejected", {
+                pr: pr.id,
+                revision: pr.revision,
+                headSha: pr.headSha,
+                ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                detail: failure.message,
+              }),
+            ]
           : [],
     }
   }
@@ -1254,6 +1315,7 @@ function advanceQueue(
           headSha: current.headSha,
           commit: shape.integration.commit,
           baseSha: shape.integration.baseSha,
+          ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
         }),
       )
     }
@@ -1283,7 +1345,10 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
     }),
   )
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
-  const failed = steps.find((step) => step.job?.status === "failed" || step.job?.status === "lost")?.job
+  const failed = steps.find(
+    (step) =>
+      step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+  )?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
   const passed = steps.every((step) => step.job?.status === "passed")
   const status =
@@ -1299,7 +1364,7 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
   const last = steps.at(-1)?.job
   const finishedAt =
     record.failure?.at ??
-    (failed?.status === "failed" || failed?.status === "lost"
+    (failed?.status === "failed" || failed?.status === "lost" || failed?.status === "canceled"
       ? failed.finishedAt
       : status === "passed"
         ? last?.status === "passed"
@@ -1662,7 +1727,14 @@ function checkFactRun(
 function checkRunStatus(run: QueueRun, selectedCount: number): PREligibility["checks"]["status"] {
   const selected = run.steps.slice(0, selectedCount)
   if (selected.every((step) => step.job?.status === "passed")) return "passed"
-  if (selected.some((step) => step.job?.status === "failed" || step.job?.status === "lost")) return "failed"
+  if (
+    selected.some(
+      (step) =>
+        step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+    )
+  ) {
+    return "failed"
+  }
   return run.status === "failed" ? "failed" : "checking"
 }
 
@@ -1673,8 +1745,13 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
     .filter((pr) => checksRequested(pr))
     .filter((pr) => {
-      const run = admissionRun(state, Queues.snapshot(pr), selected)
-      return run === undefined
+      const snapshot = Queues.snapshot(pr)
+      const run = admissionRun(state, snapshot, selected)
+      if (run === undefined) return true
+      return (
+        checkRunStatus(run, selected.length) === "failed" &&
+        availableAuthorityToken(state.queues.authority.checks[pr.id], snapshot)
+      )
     })
     .toSorted((left, right) => {
       const leftAt = checkQueueTime(left)
@@ -1740,13 +1817,14 @@ function checkEvidence(job: Job): Record<string, unknown> | undefined {
 function checkError(job: Job | undefined, run: QueueRun): JobError | undefined {
   if (job?.status === "failed") return job.error
   if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
+  if (job?.status === "canceled") return jobFailure(job)
   return run.error
 }
 
 function checkStatus(job: Job | undefined, run: QueueRun): PRCheckRecord["status"] {
   if (run.status === "failed" && (job === undefined || !Job.terminal(job))) return "failed"
   if (job?.status === "passed") return "passed"
-  if (job?.status === "failed" || job?.status === "lost") return "failed"
+  if (job?.status === "failed" || job?.status === "lost" || job?.status === "canceled") return "failed"
   return "checking"
 }
 
@@ -2048,5 +2126,8 @@ function isIntegrated(shape: PRShape): shape is IntegratedShape {
 function jobFailure(job: Job): JobError {
   if (job.status === "failed") return job.error
   if (job.status === "lost") return { code: "job-lost", message: job.lostReason }
+  if (job.status === "canceled") {
+    return { code: "run-canceled", message: `Queue run canceled by ${job.canceledBy}: ${job.cancelReason}` }
+  }
   throw new Error(`yrd: job '${job.id}' is ${job.status}, not failed`)
 }
