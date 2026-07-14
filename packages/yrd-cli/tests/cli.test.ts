@@ -57,6 +57,7 @@ import {
   runRevisionClock,
   queueShowData,
   queueStatusRows,
+  queueTimelineProjection,
   queueTimelineRows,
   watchQueueRows,
   type QueueLogCoverage,
@@ -1965,6 +1966,163 @@ describe("runYrd", () => {
       },
       queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
     })
+  })
+
+  it("builds one filtered status-major timeline and FLOW projection from the same snapshot", () => {
+    const minute = 60_000
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const member = (id: string, revision: number, headSha: string) => ({
+      id,
+      branch: `topic/${id}`,
+      base: "main",
+      revision,
+      headSha,
+      baseSha: BASE_SHA,
+    })
+    const integrated: QueueRun = {
+      ...fakeRun({
+        id: "R1",
+        status: "passed",
+        startedAt: "2026-07-13T10:00:00.000Z",
+        finishedAt: "2026-07-13T10:10:00.000Z",
+        steps: [],
+        integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
+      }),
+      prs: [member("PR1", 1, "1".repeat(40)), member("PR2", 1, "2".repeat(40))],
+    }
+    const rejected = fakeRun({
+      id: "R2",
+      status: "failed",
+      pr: { id: "PR3", revision: 1, headSha: "3".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-13T11:00:00.000Z",
+      finishedAt: "2026-07-13T11:20:00.000Z",
+      steps: [],
+      error: { code: "typecheck-failed", message: "payload does not typecheck" },
+    })
+    const environment = fakeRun({
+      id: "R3",
+      status: "failed",
+      pr: { id: "PR4", revision: 1, headSha: "4".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-13T11:15:00.000Z",
+      finishedAt: "2026-07-13T11:45:00.000Z",
+      steps: [],
+      error: { code: "queue-environment-refused", message: "origin was unavailable" },
+    })
+    const running = fakeRun({
+      id: "R4",
+      status: "running",
+      pr: { id: "PR5", revision: 1, headSha: "5".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-13T11:50:00.000Z",
+      steps: [],
+    })
+    const prs = [
+      { id: "PR1", status: "integrated", name: "one", submittedAt: "2026-07-13T09:55:00.000Z" },
+      { id: "PR2", status: "integrated", name: "two", submittedAt: "2026-07-13T09:45:00.000Z" },
+      { id: "PR3", status: "rejected", name: "three", submittedAt: "2026-07-13T10:35:00.000Z" },
+      { id: "PR4", status: "submitted", name: "four", submittedAt: "2026-07-13T10:40:00.000Z" },
+      { id: "PR5", status: "submitted", name: "five", submittedAt: "2026-07-13T11:40:00.000Z" },
+      { id: "PR6", status: "submitted", name: "six", submittedAt: "2026-07-13T11:55:00.000Z" },
+    ].map((pr, index) => ({
+      ...pr,
+      branch: `topic/${pr.id}`,
+      base: "main",
+      revision: 1,
+      headSha: String(index + 1).repeat(40),
+    })) as unknown as PR[]
+    const result: QueueStatusResult = {
+      base: "main",
+      prs,
+      running: [running],
+      waiting: [],
+      finished: [integrated, rejected, environment],
+      pause: {
+        base: "main",
+        reason: "operator freeze",
+        allowedPRs: ["PR6"],
+        pausedAt: "2026-07-13T11:30:00.000Z",
+      },
+    }
+    const submissionTimes = new Map(prs.map((pr) => [queueRevisionKey(pr), pr.submittedAt!]))
+
+    const projection = queueTimelineProjection([result], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 4,
+      submissionTimes,
+      retainedSinceMs: Date.parse("2026-07-13T07:00:00.000Z"),
+      siblingBases: ["release"],
+    })
+
+    expect(projection.base).toBe("main")
+    expect(projection.siblingBases).toEqual(["release"])
+    expect(projection.pause).toMatchObject({ reason: "operator freeze", allowedPRs: ["PR6"] })
+    expect(projection.oldestOpenMs).toBe(80 * minute)
+    expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.prs[0]])).toEqual([
+      ["pending", "pending", "PR4"],
+      ["pending", "pending", "PR6"],
+      ["running", "running", "R4"],
+      ["completed", "environment-refused", "R3"],
+      ["completed", "rejected", "R2"],
+      ["completed", "integrated", "R1"],
+    ])
+    expect(projection.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR1", "PR2"])
+    expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 2 })
+    expect(projection.coverage).toEqual({
+      requestedSince: "2026-07-13T06:00:00.000Z",
+      retainedSince: "2026-07-13T07:00:00.000Z",
+      complete: false,
+    })
+    expect(projection.metrics).toMatchObject({
+      terminalAttempts: 3,
+      outcomes: { integrated: 1, rejected: 1, environmentRefused: 1, canceled: 0 },
+      decisionRejection: { rejected: 1, decisions: 2, rate: 0.5 },
+      activeRun: {
+        allTerminal: { n: 3, minMs: 10 * minute, avgMs: 20 * minute, p50Ms: 20 * minute },
+        integratedOnly: { n: 1, minMs: 10 * minute, avgMs: 10 * minute },
+      },
+      queueWait: { n: 4, avgMs: 20 * minute, p50Ms: 20 * minute, p90Ms: 35 * minute },
+    })
+
+    const integratedOnly = queueTimelineProjection([result], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["integrated"],
+      terms: ["PR2"],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes,
+    })
+    expect(integratedOnly.rows.map((row) => row.run)).toEqual(["R1"])
+    expect(integratedOnly.metrics).toMatchObject({
+      terminalAttempts: 1,
+      outcomes: { integrated: 1, rejected: 0, environmentRefused: 0, canceled: 0 },
+      queueWait: { n: 2 },
+    })
+
+    const newerPrOne = fakeRun({
+      id: "R5",
+      status: "failed",
+      pr: { id: "PR1", revision: 2, headSha: "9".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-13T11:50:00.000Z",
+      finishedAt: "2026-07-13T11:55:00.000Z",
+      steps: [],
+      error: { code: "check-failed", message: "newer PR1 attempt failed" },
+    })
+    const latest = queueTimelineProjection([{ ...result, finished: [...result.finished, newerPrOne] }], {
+      now,
+      windowMs: 6 * 60 * minute,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: true,
+      rowLimit: 20,
+      submissionTimes,
+    })
+    expect(latest.rows.find((row) => row.run === "R5")?.prs).toEqual(["PR1"])
+    expect(latest.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR2"])
+    expect(latest.rows.flatMap((row) => row.prs).filter((pr) => pr === "PR1")).toHaveLength(1)
   })
 
   it("mounts watch as one read-only queue-focused live pane", async () => {

@@ -26,6 +26,70 @@ export type QueueTimelineRow = Readonly<{
   timestampMs: number
 }>
 
+export type QueueTimelineStatusFilter = "pending" | "running" | "rejected" | "integrated" | "other"
+export type QueueTimelineStatus = "pending" | "running" | QueueTerminalOutcome
+export type QueueTimelineGroup = "pending" | "running" | "completed"
+
+export type QueueTimelineProjectedRow = Readonly<{
+  id: string
+  base: string
+  group: QueueTimelineGroup
+  status: QueueTimelineStatus
+  glyph: string
+  timestamp: string | null
+  timestampMs: number | null
+  run?: string
+  prs: readonly string[]
+  branches: readonly string[]
+  subject: string
+  detail: string
+  position?: number
+  failure?: Readonly<{ code: string; message: string }>
+  ageMs: number | null
+  tookMs: number | null
+  activeMs: number | null
+  queueWaitMs: readonly (number | null)[]
+}>
+
+export type QueueTimelineProjection = Readonly<{
+  now: string
+  base: string
+  siblingBases: readonly string[]
+  pause?: QueueSummary["pause"]
+  oldestOpenMs: number | null
+  filters: Readonly<{
+    windowMs: number
+    since: string
+    statuses: readonly QueueTimelineStatusFilter[]
+    terms: readonly string[]
+    latest: boolean
+  }>
+  coverage: Readonly<{
+    requestedSince: string
+    retainedSince?: string
+    complete: boolean
+  }>
+  display: Readonly<{ limit: number; shown: number; hidden: number }>
+  rows: readonly QueueTimelineProjectedRow[]
+  details: readonly QueueShowData[]
+  metrics: QueueFlowMetrics
+}>
+
+export type QueueTimelineProjectionOptions = Readonly<{
+  now: number
+  windowMs: number
+  statuses: readonly QueueTimelineStatusFilter[]
+  terms: readonly string[]
+  latest: boolean
+  rowLimit: number
+  submissionTimes: ReadonlyMap<string, string | null>
+  attempts?: readonly QueueAttempt[]
+  retainedSinceMs?: number
+  siblingBases?: readonly string[]
+  base?: string
+  state?: BaysState
+}>
+
 export type QueueTerminalOutcome = "integrated" | "rejected" | "environment-refused" | "canceled"
 
 export type QueueTerminalFact = Readonly<{
@@ -422,39 +486,6 @@ function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
   return { status: pr.status, at }
 }
 
-function queueTimelineTimestamp(run: QueueRun | undefined, pr: PR): string | undefined {
-  return run?.finishedAt ?? run?.startedAt ?? pr.submittedAt
-}
-
-function queueTimelineDetail(result: QueueStatusResult, pr: PR, run: QueueRun | undefined): string {
-  if (run === undefined) {
-    const position = submittedPrPositions(result.prs).get(pr.id)
-    return position === undefined ? "queued" : `position ${position}`
-  }
-  const step = relevantStep(run)
-  if (step?.job?.status === "failed") return step.job.error.message
-  return queueLanding(run)
-}
-
-function queueTimelineGroup(row: QueueTimelineRow): 0 | 1 | 2 {
-  if (row.run === undefined) return 0
-  return row.status === "running" || row.status === "waiting" ? 1 : 2
-}
-
-function compareQueueTimelineRows(left: QueueTimelineRow, right: QueueTimelineRow): number {
-  const group = queueTimelineGroup(left)
-  const groupOrder = group - queueTimelineGroup(right)
-  if (groupOrder !== 0) return groupOrder
-  if (group === 0) {
-    const positionOrder = (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER)
-    if (positionOrder !== 0) return positionOrder
-  } else if (left.timestampMs !== right.timestampMs) {
-    return group === 1 ? left.timestampMs - right.timestampMs : right.timestampMs - left.timestampMs
-  }
-  const prOrder = left.pr.localeCompare(right.pr, undefined, { numeric: true })
-  return prOrder === 0 ? left.key.localeCompare(right.key) : prOrder
-}
-
 function finiteNonnegative(value: number, subject: string): number {
   if (!Number.isFinite(value)) throw new TypeError(`yrd: ${subject} must be finite`)
   if (value < 0) throw new RangeError(`yrd: ${subject} must not be negative`)
@@ -556,82 +587,31 @@ export function queueTimelineRows(
   latest: boolean,
   state?: BaysState,
 ): QueueTimelineRow[] {
-  const rows = results.flatMap((result) => {
-    const runs = [...result.running, ...result.waiting, ...result.finished]
-    const positions = submittedPrPositions(result.prs)
-    const pending = result.prs
-      .filter(
-        (pr) =>
-          pr.status === "submitted" &&
-          !runs.some((run) =>
-            run.prs.some(
-              (member) => member.id === pr.id && member.revision === pr.revision && member.headSha === pr.headSha,
-            ),
-          ),
-      )
-      .map((pr) => {
-        const position = positions.get(pr.id)
-        const timestamp = pr.submittedAt
-        const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
-        return {
-          key: `pending:${result.base}:${pr.id}`,
-          pr: pr.id,
-          ...(position === undefined ? {} : { position }),
-          base: result.base,
-          status: pr.status,
-          subject: boundedQueue(
-            (pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr.branch ?? pr.id,
-            80,
-          ),
-          detail: queueTimelineDetail(result, pr, undefined),
-          clock: age(timestamp, now, "queue timeline row"),
-          timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
-        }
-      })
-    const runRows = runs.flatMap((run) =>
-      run.prs.map((member) => {
-        const pr = result.prs.find((candidate) => candidate.id === member.id)
-        const timestamp = queueTimelineTimestamp(
-          run,
-          pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR),
-        )
-        const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
-        return {
-          key: `run:${result.base}:${run.id}:${member.id}`,
-          pr: member.id,
-          run: run.id,
-          base: result.base,
-          status: queueOutcome(run),
-          subject: boundedQueue(
-            (pr?.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr?.name ?? member.branch ?? member.id,
-            80,
-          ),
-          detail: queueTimelineDetail(
-            result,
-            pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR),
-            run,
-          ),
-          clock: age(timestamp, now, "queue timeline row"),
-          timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
-        }
-      }),
-    )
-    return [...pending, ...runRows]
+  const projection = queueTimelineProjection(results, {
+    now,
+    windowMs: now,
+    statuses: [],
+    terms: [],
+    latest,
+    rowLimit: Number.MAX_SAFE_INTEGER,
+    submissionTimes: queueTimelineSubmissionTimes(results),
+    state,
   })
-
-  if (!latest) return rows.toSorted(compareQueueTimelineRows)
-  const latestByPr = new Map<string, QueueTimelineRow>()
-  for (const row of rows) {
-    const previous = latestByPr.get(row.pr)
-    if (
-      previous === undefined ||
-      row.timestampMs > previous.timestampMs ||
-      (row.timestampMs === previous.timestampMs && compareQueueTimelineRows(row, previous) < 0)
-    ) {
-      latestByPr.set(row.pr, row)
+  return projection.rows.map((row) => {
+    const pr = row.prs[0] ?? "-"
+    return {
+      key: row.id,
+      pr,
+      ...(row.run === undefined ? {} : { run: row.run }),
+      ...(row.position === undefined ? {} : { position: row.position }),
+      base: row.base,
+      status: row.status === "pending" ? "submitted" : row.status,
+      subject: row.subject,
+      detail: row.detail,
+      clock: age(row.timestamp ?? undefined, now, "queue timeline row"),
+      timestampMs: row.timestampMs ?? -1,
     }
-  }
-  return [...latestByPr.values()].toSorted(compareQueueTimelineRows)
+  })
 }
 
 function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisionHistoryClock {
@@ -1228,6 +1208,327 @@ function causalSummary(message: string): string {
   const cause = rawCause ?? first
   const usefulHint = hint === undefined || /^(?:please|this can|[-])/iu.test(hint) ? undefined : hint
   return boundedQueue(`${cause.replace(/[:\s]+$/u, "")}${usefulHint === undefined ? "" : `: ${usefulHint}`}`, 104)
+}
+
+const ENVIRONMENT_REFUSAL_CODES = new Set(["queue-environment-refused", "stale-pr", "stale-check", "job-lost"])
+const CANCELED_CODES = new Set([
+  "canceled",
+  "cancelled",
+  "queue-canceled",
+  "queue-cancelled",
+  "run-canceled",
+  "run-cancelled",
+])
+const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
+  "pending",
+  "running",
+  "rejected",
+  "integrated",
+  "other",
+]
+
+function terminalOutcome(run: QueueRun): QueueTerminalOutcome {
+  if (run.status === "passed") return "integrated"
+  const status = run.status as string
+  if (status === "canceled" || status === "cancelled") return "canceled"
+  const failure = failureFact(run, relevantStep(run))
+  if (failure !== undefined && CANCELED_CODES.has(failure.code)) return "canceled"
+  if (failure !== undefined && ENVIRONMENT_REFUSAL_CODES.has(failure.code)) return "environment-refused"
+  return "rejected"
+}
+
+function timelineStatusFilter(status: QueueTimelineStatus): QueueTimelineStatusFilter {
+  if (status === "pending" || status === "running" || status === "rejected" || status === "integrated") {
+    return status
+  }
+  return "other"
+}
+
+function parsedTimelineTimestamp(timestamp: string | undefined, subject: string): number | null {
+  if (timestamp === undefined) return null
+  const value = Date.parse(timestamp)
+  if (!Number.isFinite(value)) throw new TypeError(`yrd: ${subject} has invalid timestamp '${timestamp}'`)
+  return value
+}
+
+function timelineAge(timestamp: string | undefined, nowIso: string, subject: string): number | null {
+  return elapsedMs(timestamp, nowIso, subject) ?? null
+}
+
+function timelineSubject(result: QueueStatusResult, run: QueueRun, state: BaysState | undefined): string {
+  return boundedQueue(
+    run.prs
+      .map((member) => {
+        const current = result.prs.find((candidate) => candidate.id === member.id)
+        const bayPath = current?.bay === undefined ? undefined : state?.byId[current.bay]?.path
+        return bayPath ?? current?.name ?? member.name ?? current?.branch ?? member.branch
+      })
+      .join(" · "),
+    80,
+  )
+}
+
+function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
+  return run.prs.map((member) => {
+    const runKey = queueRunRevisionKey(run, member)
+    const submittedAt = submissionTimes.has(runKey)
+      ? (submissionTimes.get(runKey) ?? undefined)
+      : (submissionTimes.get(queueRevisionKey(member)) ?? undefined)
+    return elapsedMs(submittedAt, run.startedAt, `PR '${member.id}' queue wait`) ?? null
+  })
+}
+
+function timelineRunRow(
+  result: QueueStatusResult,
+  run: QueueRun,
+  nowIso: string,
+  submissionTimes: ReadonlyMap<string, string | null>,
+  state: BaysState | undefined,
+): QueueTimelineProjectedRow {
+  const running = run.status === "running" || run.status === "waiting"
+  const status: QueueTimelineStatus = running ? "running" : terminalOutcome(run)
+  const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
+  const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `Run '${run.id}' timeline`)
+  const activeMs = running
+    ? timelineAge(run.startedAt, nowIso, `Run '${run.id}' active duration`)
+    : (elapsedMs(run.startedAt, run.finishedAt, `Run '${run.id}' active duration`) ?? null)
+  const failure = status === "integrated" ? undefined : failureFact(run, relevantStep(run))
+  const step = relevantStep(run)
+  const detail =
+    failure === undefined
+      ? status === "integrated"
+        ? queueLanding(run)
+        : step === undefined
+          ? run.status
+          : `${step.name}: ${jobStatus(step)}`
+      : `${failure.code}: ${causalSummary(failure.message)}`
+  return {
+    id: `${run.base}:run:${run.id}`,
+    base: run.base,
+    group: running ? "running" : "completed",
+    status,
+    glyph: statusGlyph(status),
+    timestamp,
+    timestampMs,
+    run: run.id,
+    prs: run.prs.map((member) => member.id),
+    branches: run.prs.map((member) => member.branch),
+    subject: timelineSubject(result, run, state),
+    detail,
+    ...(failure === undefined ? {} : { failure }),
+    ageMs: timelineAge(timestamp ?? undefined, nowIso, `Run '${run.id}' recency`),
+    tookMs: activeMs,
+    activeMs,
+    queueWaitMs: running ? [] : timelineQueueWaits(run, submissionTimes),
+  }
+}
+
+function timelinePendingRows(
+  result: QueueStatusResult,
+  nowIso: string,
+  submissionTimes: ReadonlyMap<string, string | null>,
+  state: BaysState | undefined,
+): QueueTimelineProjectedRow[] {
+  const activeRevisions = new Set(
+    [...result.running, ...result.waiting].flatMap((run) => run.prs.map((member) => queueRevisionKey(member))),
+  )
+  const positions = submittedPrPositions(result.prs)
+  return result.prs.flatMap((pr) => {
+    if (pr.status !== "submitted" || activeRevisions.has(queueRevisionKey(pr))) return []
+    const timestamp = submissionTimes.get(queueRevisionKey(pr)) ?? pr.submittedAt ?? null
+    const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`)
+    const position = positions.get(pr.id)
+    const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
+    return [
+      {
+        id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
+        base: pr.base,
+        group: "pending" as const,
+        status: "pending" as const,
+        glyph: statusGlyph("pending"),
+        timestamp,
+        timestampMs,
+        prs: [pr.id],
+        branches: [pr.branch],
+        subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
+        detail: position === undefined ? "queued" : `position ${position}`,
+        ...(position === undefined ? {} : { position }),
+        ageMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue age`),
+        tookMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
+        activeMs: null,
+        queueWaitMs: [],
+      },
+    ]
+  })
+}
+
+function timelineSort(left: QueueTimelineProjectedRow, right: QueueTimelineProjectedRow): number {
+  const groupOrder: Record<QueueTimelineGroup, number> = { pending: 0, running: 1, completed: 2 }
+  const group = groupOrder[left.group] - groupOrder[right.group]
+  if (group !== 0) return group
+  if (left.group === "pending" && right.group === "pending") {
+    const position = (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER)
+    if (position !== 0) return position
+  }
+  const leftAt = left.timestampMs ?? Number.NEGATIVE_INFINITY
+  const rightAt = right.timestampMs ?? Number.NEGATIVE_INFINITY
+  if (leftAt !== rightAt) return left.group === "completed" ? rightAt - leftAt : leftAt - rightAt
+  return left.id.localeCompare(right.id, undefined, { numeric: true })
+}
+
+function timelineMatches(row: QueueTimelineProjectedRow, terms: readonly string[]): boolean {
+  if (terms.length === 0) return true
+  const searchable = [row.run ?? "", ...row.prs, ...row.branches, row.subject, row.failure?.code ?? ""]
+    .join("\n")
+    .toLocaleLowerCase()
+  return terms.some((term) => searchable.includes(term))
+}
+
+function latestTimelineRows(rows: readonly QueueTimelineProjectedRow[]): QueueTimelineProjectedRow[] {
+  const latestByPr = new Map<string, QueueTimelineProjectedRow>()
+  for (const row of rows) {
+    for (const pr of row.prs) {
+      const current = latestByPr.get(pr)
+      const currentAt = current?.timestampMs ?? Number.NEGATIVE_INFINITY
+      const nextAt = row.timestampMs ?? Number.NEGATIVE_INFINITY
+      if (current === undefined || nextAt > currentAt || (nextAt === currentAt && row.id > current.id)) {
+        latestByPr.set(pr, row)
+      }
+    }
+  }
+  return rows.flatMap((row) => {
+    const memberIndexes = row.prs.flatMap((pr, index) => (latestByPr.get(pr)?.id === row.id ? [index] : []))
+    if (memberIndexes.length === 0) return []
+    if (memberIndexes.length === row.prs.length) return [row]
+    const prs = memberIndexes.flatMap((index) => {
+      const pr = row.prs[index]
+      return pr === undefined ? [] : [pr]
+    })
+    const branches = memberIndexes.flatMap((index) => {
+      const branch = row.branches[index]
+      return branch === undefined ? [] : [branch]
+    })
+    const queueWaitMs = memberIndexes.map((index) => row.queueWaitMs[index] ?? null)
+    return [{ ...row, prs, branches, subject: branches.join(" · "), queueWaitMs }]
+  })
+}
+
+function queueTimelineSubmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
+  const submissionTimes = new Map<string, string | null>()
+  for (const result of results) {
+    const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
+    for (const pr of result.prs) {
+      for (const revision of pr.revisions ?? []) {
+        if (revision.submittedAt !== undefined) {
+          submissionTimes.set(queueRevisionKey({ ...revision, id: pr.id }), revision.submittedAt)
+        }
+      }
+      const current = pr.revisions?.find(
+        (revision) => revision.revision === pr.revision && revision.headSha === pr.headSha,
+      )
+      const submittedAt = current?.submittedAt ?? pr.submittedAt
+      if (submittedAt !== undefined) submissionTimes.set(queueRevisionKey(pr), submittedAt)
+    }
+    for (const run of [...result.running, ...result.waiting, ...result.finished]) {
+      for (const member of run.prs) {
+        const pr = byId.get(member.id)
+        if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+        const runKey = queueRunRevisionKey(run, member)
+        if ((pr.revisions?.length ?? 0) > 0) {
+          const clock = runRevisionClock(pr, run)
+          submissionTimes.set(runKey, clock.admittedBy === "submission" ? clock.submittedAt : null)
+          continue
+        }
+        const submittedAt = pr.submittedAt
+        submissionTimes.set(
+          runKey,
+          submittedAt !== undefined &&
+            timestamp(submittedAt, `PR '${pr.id}' submission`) <= timestamp(run.startedAt, `run '${run.id}' start`)
+            ? submittedAt
+            : null,
+        )
+      }
+    }
+  }
+  return submissionTimes
+}
+
+export function queueTimelineProjection(
+  results: readonly QueueStatusResult[],
+  options: QueueTimelineProjectionOptions,
+): QueueTimelineProjection {
+  if (!Number.isFinite(options.now) || options.now < 0) throw new TypeError("yrd: timeline snapshot time is invalid")
+  if (!Number.isFinite(options.windowMs) || options.windowMs < 0) {
+    throw new TypeError("yrd: timeline window is invalid")
+  }
+  if (!Number.isFinite(options.rowLimit) || options.rowLimit < 0) {
+    throw new TypeError("yrd: timeline row limit is invalid")
+  }
+  const nowIso = new Date(options.now).toISOString()
+  const sinceMs = options.now - options.windowMs
+  const since = new Date(sinceMs).toISOString()
+  const requestedStatuses = options.statuses.length === 0 ? TIMELINE_STATUS_ORDER : options.statuses
+  const statuses = TIMELINE_STATUS_ORDER.filter((status) => requestedStatuses.includes(status))
+  const selectedStatuses = new Set(statuses)
+  const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
+  const rawRows = results.flatMap((result) => [
+    ...timelinePendingRows(result, nowIso, options.submissionTimes, options.state),
+    ...[...result.running, ...result.waiting, ...result.finished].map((run) =>
+      timelineRunRow(result, run, nowIso, options.submissionTimes, options.state),
+    ),
+  ])
+  const filtered = rawRows
+    .filter((row) => selectedStatuses.has(timelineStatusFilter(row.status)))
+    .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= options.now))
+    .filter((row) => timelineMatches(row, terms))
+  const rows = (options.latest ? latestTimelineRows(filtered) : filtered).toSorted(timelineSort)
+  const terminalFacts: QueueTerminalFact[] = rows.flatMap((row) => {
+    if (row.group !== "completed" || row.timestampMs === null) return []
+    return [
+      {
+        run: row.id,
+        terminalAtMs: row.timestampMs,
+        outcome: row.status as QueueTerminalOutcome,
+        activeMs: row.activeMs,
+        queueWaitMs: row.queueWaitMs.filter((wait): wait is number => wait !== null),
+      },
+    ]
+  })
+  const allRuns = results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
+  const finished = results.flatMap((result) => result.finished)
+  const details = rows.flatMap((row) => {
+    if (row.run === undefined) return []
+    const run = allRuns.find((candidate) => candidate.id === row.run && candidate.base === row.base)
+    return run === undefined ? [] : [queueShowData(run, finished, options.attempts ?? [])]
+  })
+  const limit = Math.max(1, Math.floor(options.rowLimit))
+  const retainedSince =
+    options.retainedSinceMs === undefined ? undefined : new Date(options.retainedSinceMs).toISOString()
+  const base = options.base ?? results[0]?.base ?? "main"
+  const pause = results.find((result) => result.base === base)?.pause
+  const oldestOpenMs = rows
+    .filter((row) => row.group === "pending")
+    .reduce<number | null>((oldest, row) => {
+      if (row.ageMs === null) return oldest
+      return oldest === null ? row.ageMs : Math.max(oldest, row.ageMs)
+    }, null)
+  return {
+    now: nowIso,
+    base,
+    siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
+    ...(pause === undefined ? {} : { pause }),
+    oldestOpenMs,
+    filters: { windowMs: options.windowMs, since, statuses, terms, latest: options.latest },
+    coverage: {
+      requestedSince: since,
+      ...(retainedSince === undefined ? {} : { retainedSince }),
+      complete: options.retainedSinceMs === undefined || options.retainedSinceMs <= sinceMs,
+    },
+    display: { limit, shown: Math.min(rows.length, limit), hidden: Math.max(0, rows.length - limit) },
+    rows,
+    details,
+    metrics: queueFlowMetrics(terminalFacts, { now: options.now, windowMs: options.windowMs }),
+  }
 }
 
 function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["evidence"] {
