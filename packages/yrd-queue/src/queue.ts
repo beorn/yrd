@@ -562,8 +562,8 @@ function createQueue<Shape extends PRShape>(
           ? admissionQueue(snapshot, steps).map((pr) => pr.id)
           : [...args.prs]
       return runOptions === undefined
-        ? dispatchAdmissions(selectors, args.retry === true)
-        : drainAdmissions(selectors, args.retry === true, runOptions)
+        ? await dispatchAdmissions(selectors, args.retry === true)
+        : await drainAdmissions(selectors, args.retry === true, runOptions)
     },
     async pause(args) {
       const base = baseIdentity(args.base)
@@ -1047,10 +1047,12 @@ function samePayloadPRs(
   state: DeepReadonly<BaysState>,
   snapshots: readonly DeepReadonly<PRSnapshot>[],
 ): readonly DeepReadonly<PR>[] {
-  const payloads = new Set(snapshots.map((pr) => `${baseIdentity(pr.base)}\0${pr.headSha}`))
-  return Object.values(state.prs).filter(
-    (pr) => pr.status !== "withdrawn" && payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
-  )
+  const payloads = new Set(snapshots.map(payloadIdentity))
+  return Object.values(state.prs).filter((pr) => pr.status !== "withdrawn" && payloads.has(payloadIdentity(pr)))
+}
+
+function payloadIdentity(pr: Pick<DeepReadonly<PR>, "base" | "headSha" | "composition">): string {
+  return `${baseIdentity(pr.base)}\0${pr.headSha}\0${JSON.stringify(pr.composition)}`
 }
 
 function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<JobsState>): QueueRun {

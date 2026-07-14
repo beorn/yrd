@@ -225,6 +225,107 @@ describe("withBays", () => {
     )
   })
 
+  it("journals normalized source compositions and rejects ambiguous payload paths", async () => {
+    const { app } = await createHarness()
+    await app.bays.submit({
+      branch: "issue/composed",
+      headSha: HEAD_1,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "vendor/example",
+            branch: "issue/source",
+            baseSha: "2".repeat(40),
+            tipSha: "3".repeat(40),
+            payload: ["src/z.ts", "src/a.ts"],
+          },
+        ],
+      },
+    })
+
+    expect(app.bays.pr("PR1")).toMatchObject({
+      composition: {
+        version: 1,
+        sources: [{ repo: "vendor/example", payload: ["src/a.ts", "src/z.ts"] }],
+      },
+      revisions: [
+        {
+          composition: {
+            version: 1,
+            sources: [{ repo: "vendor/example", payload: ["src/a.ts", "src/z.ts"] }],
+          },
+        },
+      ],
+    })
+    await expect(
+      app.bays.submit({
+        branch: "issue/invalid",
+        headSha: HEAD_2,
+        composition: {
+          version: 1,
+          sources: [
+            {
+              repo: "../escape",
+              branch: "issue/source",
+              baseSha: "2".repeat(40),
+              tipSha: "3".repeat(40),
+              payload: ["src/a.ts", "src/a.ts"],
+            },
+          ],
+        },
+      }),
+    ).rejects.toThrow("normalized repository-relative Git path")
+    await app.close()
+  })
+
+  it("preserves and canonicalizes an existing composition when resubmitting a selection", async () => {
+    const { app } = await createHarness()
+    await app.bays.submit({
+      branch: "issue/composed",
+      headSha: HEAD_1,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "vendor/example",
+            branch: "issue/source",
+            baseSha: "2".repeat(40),
+            tipSha: "3".repeat(40),
+            payload: ["src/a.ts", "src/z.ts"],
+          },
+        ],
+      },
+    })
+    const original = app.bays.pr("PR1")
+
+    const canonicalRepeat = await app.bays.submitSelection("issue/composed", {
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "vendor/example",
+            branch: "issue/source",
+            baseSha: "2".repeat(40),
+            tipSha: "3".repeat(40),
+            payload: ["src/z.ts", "src/a.ts"],
+          },
+        ],
+      },
+      resolveRevision: async () => HEAD_1,
+      run: runtime,
+    })
+    const omittedRepeat = await app.bays.submitSelection("issue/composed", {
+      resolveRevision: async () => HEAD_1,
+      run: runtime,
+    })
+
+    expect(canonicalRepeat).toMatchObject({ revision: 1, composition: original?.composition })
+    expect(omittedRepeat).toMatchObject({ revision: 1, composition: original?.composition })
+    expect(app.bays.pr("PR1")?.revisions).toHaveLength(1)
+    await app.close()
+  })
+
   it("closes a direct bayless PR so it leaves live selection while history remains", async () => {
     const { app, workspace } = await createHarness()
 

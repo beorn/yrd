@@ -24,6 +24,7 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import * as z from "zod"
 import {
   BayIdSchema,
+  CompositionV1Schema,
   DeprovisionBayInputSchema,
   DeprovisionedBaySchema,
   GitRefSchema,
@@ -45,6 +46,7 @@ import {
   resolvePR,
   type Bay,
   type BaysState,
+  type CompositionV1,
   type DeprovisionBayInput,
   type DeprovisionedBay,
   type PR,
@@ -85,6 +87,7 @@ const IntakePRArgsSchema = z
     base: GitRefSchema.optional(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    composition: CompositionV1Schema.optional(),
     receipt: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
@@ -107,6 +110,7 @@ const SubmitArgsSchema = z.union([
       name: TextSchema.optional(),
       issue: TextSchema.optional(),
       draft: z.boolean().optional(),
+      composition: CompositionV1Schema.optional(),
     })
     .strict(),
 ])
@@ -116,6 +120,7 @@ export type SubmitSelectionOptions = Readonly<{
   base?: string
   issue?: string
   draft?: boolean
+  composition?: CompositionV1
   resolveRevision(ref: string): Promise<string | undefined>
   run: RunJobOptions
 }>
@@ -176,6 +181,7 @@ const PRPushedSchema = z
     base: GitRefSchema,
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    composition: CompositionV1Schema.optional(),
     receipt: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
@@ -374,6 +380,8 @@ export function createBays(
   }
 
   const submitSelection = async (selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>> => {
+    const requestedComposition =
+      options.composition === undefined ? undefined : CompositionV1Schema.parse(options.composition)
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
@@ -398,11 +406,13 @@ export function createBays(
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
       }
       pr = prForBay(snapshot, bay.id)
-      if (pr === undefined || pr.headSha !== bay.headSha) {
+      const composition = requestedComposition ?? pr?.composition
+      if (pr === undefined || pr.headSha !== bay.headSha || !sameComposition(composition, pr.composition)) {
         await intake({
           bay: bay.id,
           headSha: bay.headSha,
           ...(bay.baseSha === undefined ? {} : { baseSha: bay.baseSha }),
+          ...(composition === undefined ? {} : { composition }),
         })
         pr = prForBay(state(), bay.id)
       }
@@ -414,12 +424,19 @@ export function createBays(
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${pr.branch}'`)
       }
       const resolved = await target(options.base ?? pr.base, undefined)
-      if (headSha !== pr.headSha || resolved.base !== pr.base || resolved.baseSha !== pr.baseSha) {
+      const composition = requestedComposition ?? pr.composition
+      if (
+        headSha !== pr.headSha ||
+        resolved.base !== pr.base ||
+        resolved.baseSha !== pr.baseSha ||
+        !sameComposition(composition, pr.composition)
+      ) {
         await intake({
           branch: pr.branch,
           headSha,
           ...resolved,
           ...(options.issue === undefined ? {} : { issue: options.issue }),
+          ...(composition === undefined ? {} : { composition }),
         })
         pr = resolvePR(state(), pr.id)
         if (pr === undefined) {
@@ -449,7 +466,8 @@ export function createBays(
         (candidate) =>
           (candidate.status === "pushed" || candidate.status === "submitted") &&
           candidate.headSha === headSha &&
-          candidate.base === resolved.base,
+          candidate.base === resolved.base &&
+          sameComposition(candidate.composition, requestedComposition),
       )
       if (live !== undefined) {
         if (live.status === "submitted") return live
@@ -467,6 +485,7 @@ export function createBays(
         ...resolved,
         ...(options.issue === undefined ? {} : { issue: options.issue }),
         ...(options.draft === true ? { draft: true } : {}),
+        ...(requestedComposition === undefined ? {} : { composition: requestedComposition }),
       })
       const submitted = resolvePR(state(), selector)
       if (submitted === undefined) {
@@ -718,13 +737,14 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
         received.branch === branch &&
         received.headSha === args.headSha &&
         received.base === base &&
-        received.baseSha === args.baseSha
+        received.baseSha === args.baseSha &&
+        sameComposition(received.composition, args.composition)
       if (!matches) throw new Error(`yrd: receiver receipt '${args.receipt}' does not match its recorded intake`)
       return { events: [] }
     }
   }
   const existing = bay === undefined ? resolvePR(current, branch) : prForBay(current, bay.id)
-  refuseDuplicatePayload(current, args.headSha, base, existing?.id)
+  refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
   if (existing?.status === "integrated" || existing?.status === "withdrawn") {
     throw new Error(`yrd: PR '${existing.id}' is ${existing.status}; start a new bay`)
   }
@@ -742,6 +762,7 @@ function intakePR(state: DeepReadonly<BayState>, args: IntakePRArgs, defaultBase
         base,
         headSha: args.headSha,
         ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
+        ...(args.composition === undefined ? {} : { composition: args.composition }),
         ...(args.receipt === undefined ? {} : { receipt: args.receipt }),
         revision: (existing?.revision ?? 0) + 1,
       }),
@@ -762,7 +783,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
   if (existing?.status === "pushed" || existing?.status === "submitted") {
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
-  refuseDuplicatePayload(current, args.headSha, base, existing?.id)
+  refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
   const resubmitted = existing?.status === "rejected" ? existing : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
@@ -774,6 +795,7 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     base,
     headSha: args.headSha,
     ...(args.baseSha === undefined ? {} : { baseSha: args.baseSha }),
+    ...(args.composition === undefined ? {} : { composition: args.composition }),
     revision,
   }
   return {
@@ -860,10 +882,20 @@ function reviewFact(
   return { events: [event(kind === "review" ? "pr/reviewed" : "pr/commented", fact)] }
 }
 
-function refuseDuplicatePayload(state: DeepReadonly<BaysState>, headSha: string, base: string, except?: string): void {
+function refuseDuplicatePayload(
+  state: DeepReadonly<BaysState>,
+  headSha: string,
+  base: string,
+  composition: CompositionV1 | undefined,
+  except?: string,
+): void {
   const identity = baseIdentity(base)
   const duplicate = Object.values(state.prs).find(
-    (pr) => pr.id !== except && pr.headSha === headSha && baseIdentity(pr.base) === identity,
+    (pr) =>
+      pr.id !== except &&
+      pr.headSha === headSha &&
+      baseIdentity(pr.base) === identity &&
+      sameComposition(pr.composition, composition),
   )
   if (duplicate !== undefined) {
     throw new Error(`yrd: payload already recorded as PR '${duplicate.id}' on queue '${identity}'`)
@@ -952,6 +984,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         headSha: pushed.headSha,
         base,
         ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+        ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
         pushedAt: applied.ts,
       }
       const pr: PR =
@@ -967,6 +1000,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revision: pushed.revision,
               headSha: pushed.headSha,
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+              ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
               revisions: [record],
               reviews: [],
               comments: [],
@@ -980,6 +1014,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               revision: pushed.revision,
               headSha: pushed.headSha,
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+              ...(pushed.composition === undefined ? { composition: undefined } : { composition: pushed.composition }),
               revisions: [...existing.revisions, record],
               submittedAt: undefined,
               rejectedAt: undefined,
@@ -999,6 +1034,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
                   headSha: pushed.headSha,
                   base,
                   ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
+                  ...(pushed.composition === undefined ? {} : { composition: pushed.composition }),
                 },
               },
             },
@@ -1152,6 +1188,10 @@ function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: Jo
 function required<Value>(value: Value | undefined, kind: "bay" | "PR", selector: string): Value {
   if (value === undefined) throw new Error(`yrd: no ${kind} '${selector}'`)
   return value
+}
+
+function sameComposition(left: CompositionV1 | undefined, right: CompositionV1 | undefined): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 function nextId(prefix: string, records: Readonly<Record<string, unknown>>): string {

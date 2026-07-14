@@ -205,7 +205,8 @@ yrd prime                   agent briefing plus current delivery context
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay refresh [selector...] [--json]
-yrd bay submit [selector...] [--base <branch>] [--json]
+yrd bay submit [selector...] [--base <branch>]
+  [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
 
@@ -263,6 +264,43 @@ resolved base SHA, head SHA, installed-step revision/config, and toolchain
 fingerprint all match. Base-classified admission steps always rerun before
 integration, so a later same-base red lock cannot reuse an earlier green fact.
 There is no TTL, invalidation database, or second workflow engine.
+
+### Composed Source Payloads
+
+`--composition` submits an immutable version-1 JSON source manifest for one
+selector. It is the source-only path for submodule work: the selected root
+branch contains no root changes, and Yrd Queue generates the root gitlink
+wrapper as the checked Candidate.
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "repo": "vendor/example",
+      "branch": "issue/fix",
+      "baseSha": "0123456789abcdef0123456789abcdef01234567",
+      "tipSha": "89abcdef0123456789abcdef0123456789abcdef",
+      "payload": ["src/fix.ts", "tests/fix.test.ts"]
+    }
+  ]
+}
+```
+
+Repository and payload paths are normalized, repository-relative, sorted, and
+unique. Candidate preparation proves the declared source diff exactly matches
+`payload`, including blob, mode, status, and path identity. When current main
+pins a descendant of `baseSha`, Yrd restacks only if the upstream and payload
+path sets are disjoint; overlaps and Git conflicts fail with exact paths. Each
+rewritten tip is published at
+`refs/heads/yrd/candidates/<new-tip-sha>` before the generated root wrapper can
+land. The Queue receipt retains that immutable ref and the old/new base and tip
+SHAs; ref loss during a remote landing fails closed and rolls the root branch
+back.
+
+Human-authored gitlink commits are refused by default. During rollout only,
+`YRD_ALLOW_AUTHORED_GITLINKS=1` is the kill switch for a legacy carrier; it does
+not weaken Candidate pinning or exact landing.
 
 #### Manning an Ordinary Bay
 

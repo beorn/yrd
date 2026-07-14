@@ -22,7 +22,7 @@ function hasSelector(args: readonly string[]): boolean {
     const argument = args[index]
     if (argument === undefined) continue
     if (argument === "--") return index + 1 < args.length
-    if (argument === "--base" || argument === "--queue") {
+    if (argument === "--base" || argument === "--queue" || argument === "--issue" || argument === "--composition") {
       index += 1
       continue
     }
@@ -30,6 +30,8 @@ function hasSelector(args: readonly string[]): boolean {
       argument === "--json" ||
       argument.startsWith("--base=") ||
       argument.startsWith("--queue=") ||
+      argument.startsWith("--issue=") ||
+      argument.startsWith("--composition=") ||
       argument.startsWith("-")
     ) {
       continue

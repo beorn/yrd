@@ -1,4 +1,12 @@
-import { GitRefSchema, GitShaSchema, PRIdSchema, baseIdentity, checkRequest, type PR } from "@yrd/bay"
+import {
+  CompositionV1Schema,
+  GitRefSchema,
+  GitShaSchema,
+  PRIdSchema,
+  baseIdentity,
+  checkRequest,
+  type PR,
+} from "@yrd/bay"
 import { JsonSchema, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
@@ -18,18 +26,49 @@ export const PRSnapshotSchema = z
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    composition: CompositionV1Schema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
+
+export type SourceRewrite = Readonly<{
+  repo: string
+  branch: string
+  oldBaseSha: string
+  oldTipSha: string
+  newBaseSha: string
+  newTipSha: string
+  candidateRef: string
+  payload: readonly string[]
+}>
+
+export const SourceRewriteSchema = z
+  .object({
+    repo: z.string().min(1),
+    branch: GitRefSchema,
+    oldBaseSha: GitShaSchema,
+    oldTipSha: GitShaSchema,
+    newBaseSha: GitShaSchema,
+    newTipSha: GitShaSchema,
+    candidateRef: GitRefSchema,
+    payload: z.array(z.string().min(1)).min(1),
+  })
+  .strict() as z.ZodType<SourceRewrite>
+
+export type IntegrationProof = Readonly<{
+  commit: string
+  baseSha: string
+  sourceRewrites?: readonly SourceRewrite[]
+}>
 
 export const IntegrationProofSchema = z
   .object({
     commit: GitShaSchema,
     // The base branch tip after integration, not the pre-integration base.
     baseSha: GitShaSchema,
+    sourceRewrites: z.array(SourceRewriteSchema).optional(),
   })
-  .strict()
-export type IntegrationProof = Readonly<z.infer<typeof IntegrationProofSchema>>
+  .strict() as z.ZodType<IntegrationProof>
 
 export type PRShape = Readonly<{
   results: Readonly<Record<string, JsonValue>>
@@ -250,6 +289,7 @@ export const Queues = Object.freeze({
       revision: pr.revision,
       headSha: pr.headSha,
       ...(baseSha === undefined ? {} : { baseSha }),
+      ...(pr.composition === undefined ? {} : { composition: pr.composition }),
     })
   },
 

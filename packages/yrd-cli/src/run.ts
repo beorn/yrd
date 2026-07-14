@@ -3,7 +3,16 @@ import { readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
-import { baseIdentity, resolveBay, resolvePR, type Bay, type BaysState, type PR } from "@yrd/bay"
+import {
+  CompositionV1Schema,
+  baseIdentity,
+  resolveBay,
+  resolvePR,
+  type Bay,
+  type BaysState,
+  type CompositionV1,
+  type PR,
+} from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
@@ -473,6 +482,7 @@ async function submitBays(
     base?: string
     queue?: string
     issue?: string
+    composition?: string
     json?: boolean
   },
   io: YrdCliIO,
@@ -485,11 +495,16 @@ async function submitBays(
       : selectedBays(state.bays, [], io.cwd ?? process.cwd(), "submit").map((bay) => bay.id)
   const prs: PR[] = []
   const base = oneOfAliases(options.base, options.queue, "base", "queue")
+  const composition = await readComposition(options.composition, io)
+  if (composition !== undefined && inferred.length !== 1) {
+    usage("--composition requires exactly one bay or branch selector")
+  }
   for (const selector of inferred) {
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(options.draft === true ? { draft: true } : {}),
+      ...(composition === undefined ? {} : { composition }),
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
@@ -519,6 +534,19 @@ async function submitBays(
     }),
   )
   return checks.some((check) => check.status === "failed") || followed.some((run) => run.status === "failed") ? 1 : 0
+}
+
+async function readComposition(path: string | undefined, io: YrdCliIO): Promise<CompositionV1 | undefined> {
+  if (path === undefined) return undefined
+  const absolute = resolve(io.cwd ?? process.cwd(), path)
+  try {
+    return CompositionV1Schema.parse(JSON.parse(await readFile(absolute, "utf8")))
+  } catch (cause) {
+    usage(
+      `invalid composition manifest '${path}': ${cause instanceof Error ? cause.message : String(cause)}; ` +
+        "provide version 1 with normalized repo-relative payload paths",
+    )
+  }
 }
 
 function requiredPr(app: YrdCliApp, selector: string): PR {
@@ -630,7 +658,33 @@ async function diffPr(
   } catch (error) {
     refusal(`cannot diff PR '${pr.id}': ${error instanceof Error ? error.message : String(error)}`)
   }
-  await printResult(io, jsonEnabled(options), { command: "pr.diff", pr: pr.id, base, head: pr.headSha, diff }, diff)
+  const composition = pr.composition
+  const rendered =
+    composition === undefined
+      ? diff
+      : [
+          "Source composition (the Queue generates the root gitlink wrapper):",
+          ...composition.sources.flatMap((source) => [
+            `  ${source.repo} ${source.branch} ${source.baseSha.slice(0, 12)}..${source.tipSha.slice(0, 12)}`,
+            ...source.payload.map((path) => `    ${path}`),
+          ]),
+          "",
+          "Root diff:",
+          diff === "" ? "  (none before Candidate construction)" : diff,
+        ].join("\n")
+  await printResult(
+    io,
+    jsonEnabled(options),
+    {
+      command: "pr.diff",
+      pr: pr.id,
+      base,
+      head: pr.headSha,
+      ...(composition === undefined ? {} : { composition }),
+      diff,
+    },
+    rendered,
+  )
 }
 
 async function checkoutPr(
@@ -1713,6 +1767,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "bay.submit")))
   bay
@@ -1859,6 +1914,7 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   pr.command("view <selector>")
