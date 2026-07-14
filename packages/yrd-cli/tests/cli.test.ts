@@ -831,7 +831,7 @@ describe("runYrd", () => {
       const output = outputIO({ scope: { signal: controller.signal, sleep: async () => {} } })
       expect(await runYrd(app, yrd("watch", ...scope, "--json"), output.io), output.stderr()).toBe(0)
       expect(JSON.parse(output.stdout())).toMatchObject({
-        command: "watch",
+        command: "queue.list",
         results: [{ base: "main", prs: [{ id: "PR1" }] }],
       })
     }
