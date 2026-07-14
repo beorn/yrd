@@ -811,6 +811,43 @@ describe("Queue command adapters", () => {
     })
   })
 
+  it("redirects an invalid manual composition to the authored-root draft and recut flow", async () => {
+    const { repo, candidate } = await repository("candidate")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/candidate",
+      headSha: candidate,
+      base: "main",
+      baseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: "2".repeat(40),
+            tipSha: "3".repeat(40),
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "composition-invalid",
+        message: expect.stringMatching(
+          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest or manual recut/iu,
+        ),
+      },
+    })
+  })
+
   it("bounces an overlapping source payload with the exact repository paths", async () => {
     const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository({
       upstreamPath: "src/candidate.ts",

@@ -138,15 +138,17 @@ revision is queueable:
 
 ```console
 $ yrd pr submit issue/another-fix --draft --correlation tribe-request:review-42
-$ yrd pr checks PR2 --follow
 $ yrd pr review PR2 --approve --by @cto --ref verdict-42
 $ yrd pr ready PR2
+$ yrd pr checks PR2 --follow
 ```
 
-`--draft` is the existing `pushed` state, not a second flag or status. Review
-and comment facts pin the current revision and head SHA; a new head makes old
-verdicts visibly stale. Reviewer assignment and richer policy belong to the
-calling coordination system.
+`--draft` is the existing `pushed` state, not a second flag or status. It only
+registers the immutable revision: no check request, admission, or Queue work is
+started until `pr ready` (ordinary reviewed work) or `pr recut --queue`
+(authored-root carriers). Review and comment facts pin the current revision and
+head SHA; a new head makes old verdicts visibly stale. Reviewer assignment and
+richer policy belong to the calling coordination system.
 
 During development in this repository:
 
@@ -221,7 +223,7 @@ yrd prime                   agent briefing plus current delivery context
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay refresh [selector...] [--json]
-yrd bay submit [selector...] [--base <branch>]
+yrd bay submit [selector...] [--draft] [--base <branch>]
   [--correlation <namespace:id>] [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
@@ -231,12 +233,12 @@ The same commands are available through the standalone `git bay` projection.
 submission core as `pr submit`; `bay submit` remains a handoff, while new
 callers use the PR-native check-admission surface below.
 
-| Command   | Input                                                 | Output and state                                                            |
-| --------- | ----------------------------------------------------- | --------------------------------------------------------------------------- |
-| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                |
-| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                 |
-| `submit`  | Bays, PRs, or source branches                         | Creates or advances PRs to `submitted`; never executes queue work           |
-| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR |
+| Command   | Input                                                 | Output and state                                                                                   |
+| --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                                       |
+| `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                                        |
+| `submit`  | Bays, PRs, or source branches; optional `--draft`     | Creates or advances PRs to `submitted`, or only `pushed` with `--draft`; never executes Queue work |
+| `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR                        |
 
 `--head` is an alias for `--from`. `--queue` is an alias for `--base`. The
 canonical words are source branch (`--from`) and base branch (`--base`).
@@ -275,19 +277,32 @@ yrd pr close [selector...] [--json]
 ```
 
 Plain `pr submit` appends the revision, records a check request, schedules the
-configured pre-merge Queue steps, and returns. `--follow` stays attached to that
-same journaled Run. `pr checks` renders the same typed evidence in human or
-newline-delimited JSON output, including command argv, concise diagnostics,
-base-versus-carrier classification, and artifact paths.
+configured pre-merge Queue steps, and returns. `--draft` instead registers only
+the pushed revision and returns without requesting checks or admitting a Run.
+`pr ready` requests and admits configured checks for an ordinary draft.
+`--follow` stays attached to the same journaled Run. `pr checks` renders the
+same typed evidence in human or newline-delimited JSON output, including
+command argv, concise diagnostics, base-versus-carrier classification, and
+artifact paths.
 
 `pr recut` fetches the authoritative base internally and records a mechanically
-equivalent successor on the same PR. `--revision` selects an older immutable
-revision; its correlation and approved-review provenance follow that selected
-payload. When submission recorded authority newer than the source branch,
-recut derives exactly one source merge base and refuses ambiguous lineage.
-`--queue` readies and admits the fresh checks. List, detail, and watch output
-retain the recut lineage and cumulative source-ready age while reporting the
-successor revision's queue wait separately.
+equivalent, certificate-bearing successor on the same PR. `--revision` selects
+an older immutable revision; its correlation and approved-review provenance
+follow that selected payload. When submission recorded authority newer than
+the source branch, recut derives exactly one source merge base and refuses
+ambiguous lineage. A pin-only carrier that already has the authoritative parent
+still receives a successor revision with the derived patch/tree certificate.
+`--queue` readies and admits only that certified revision's fresh checks. List,
+detail, and watch output retain the recut lineage and cumulative source-ready
+age while reporting the successor revision's queue wait separately.
+
+For a human-authored root carrier, use the machine-owned path rather than
+attaching a composition manifest:
+
+```bash
+yrd pr submit <branch> --draft
+yrd pr recut <PR> --queue
+```
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
@@ -331,9 +346,10 @@ land. The Queue receipt retains that immutable ref, patch ID, `rangeDiff: "="`,
 and the old/new base and tip SHAs; ref loss during a remote landing fails closed
 and rolls the root branch back.
 
-Human-authored gitlink commits are refused by default. During rollout only,
-`YRD_ALLOW_AUTHORED_GITLINKS=1` is the kill switch for a legacy carrier; it does
-not weaken Candidate pinning or exact landing.
+Human-authored gitlink commits are refused by default. The normal path is the
+draft-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
+only for a legacy carrier and does not weaken Candidate pinning or exact
+landing.
 
 #### Manning an Ordinary Bay
 
