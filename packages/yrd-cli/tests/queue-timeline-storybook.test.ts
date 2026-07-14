@@ -87,6 +87,23 @@ describe("queue timeline storybook", () => {
       }
     }
 
+    const boundaryStory = queueTimelineStories["detail-below"]
+    const fullAtFooterBoundary = await run(
+      createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot, paused: false }),
+      { writable: { write: () => {} }, cols: 100, rows: 25 },
+    )
+    const belowAfterFooter = await run(
+      createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot, paused: false }),
+      { writable: { write: () => {} }, cols: 100, rows: 26 },
+    )
+    try {
+      expect(fullAtFooterBoundary.text).not.toContain("MEMBERS PR4")
+      expect(belowAfterFooter.text).toContain("MEMBERS PR4")
+    } finally {
+      fullAtFooterBoundary.unmount()
+      belowAfterFooter.unmount()
+    }
+
     const live = queueTimelineStories["live-output-growth"]
     expect(live.snapshot.outputs?.[0]?.text).toBe("checking one\n")
     expect(live.nextSnapshot?.outputs?.[0]?.text).toBe("checking one\nchecking two\n")

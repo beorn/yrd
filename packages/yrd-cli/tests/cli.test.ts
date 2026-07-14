@@ -3,7 +3,7 @@
 // @consumer @yrd/cli
 
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -75,7 +75,6 @@ import {
   QueueWatchFrame,
   QueueWatchPane,
   queueDetailTier,
-  queueSplitRatioAfterDrag,
   reduceWatchControl,
   type QueueWatchPaneProps,
 } from "../src/watch-pane.tsx"
@@ -2712,12 +2711,15 @@ describe("runYrd", () => {
   })
 
   it("uses the natural-size right, below, and full-area detail ladder", async () => {
+    const source = readFileSync(new URL("../src/watch-pane.tsx", import.meta.url), "utf8")
+    expect(source).toMatch(/import\s*\{[^}]*\bSplitPane\b[^}]*\}\s*from\s*"silvery"/su)
+    expect(source).toContain("resolveSplitPaneLayout")
+    expect(source).not.toContain("PaneDivider")
+    expect(source).not.toContain("queueSplitRatioAfterDrag")
+
     expect(queueDetailTier(200, 50)).toBe("right")
     expect(queueDetailTier(100, 40)).toBe("below")
     expect(queueDetailTier(80, 24)).toBe("full")
-    expect(queueSplitRatioAfterDrag("right", 0.52, 100, 120, 200, 50)).toBeGreaterThan(0.52)
-    expect(queueSplitRatioAfterDrag("right", 0.52, 100, 999, 200, 50)).toBeCloseTo(1 - 72 / 199)
-    expect(queueSplitRatioAfterDrag("below", 0.52, 20, -999, 100, 40)).toBeCloseTo(12 / 38)
 
     const app = await createApp()
     await openAndSubmit(app)
