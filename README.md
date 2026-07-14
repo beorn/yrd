@@ -87,7 +87,7 @@ $ cd /work/my-repository/.bays/B1
 $ ...edit and test...
 $ git commit -am "fix: release ordering"
 
-$ yrd pr submit --follow
+$ yrd pr submit --follow --correlation tribe-request:req-42
 PR   STATUS     BRANCH             BASE  REV  HEAD
 PR1  submitted  issue/fix-release  main  1    a13f09b1c821
 
@@ -121,7 +121,7 @@ For a review-gated repository, the PR-native flow admits checks before the
 revision is queueable:
 
 ```console
-$ yrd pr submit task/another-fix --draft
+$ yrd pr submit task/another-fix --draft --correlation tribe-request:review-42
 $ yrd pr checks PR2 --follow
 $ yrd pr review PR2 --approve --by @cto --ref verdict-42
 $ yrd pr ready PR2
@@ -188,7 +188,7 @@ The top-level surface is deliberately small:
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd pr                      list PRs; submit, view, runs, diff, checkout,
-                            status, edit, retry, close, and merge teaching
+                            status, edit, checks, close, and merge teaching
 yrd bay                     list bays; open, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
@@ -205,7 +205,8 @@ yrd prime                   agent briefing plus current delivery context
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
 yrd bay refresh [selector...] [--json]
-yrd bay submit [selector...] [--base <branch>] [--json]
+yrd bay submit [selector...] [--base <branch>]
+  [--correlation <namespace:id>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
 ```
 
@@ -235,13 +236,18 @@ branch submission does not provision a worktree:
 
 ```bash
 yrd bay open release-fix --from fix/release --base release/2.0
-yrd pr submit fix/release --base release/2.0
+yrd pr submit fix/release --base release/2.0 --correlation tribe-request:req-42
 ```
+
+Both submission surfaces accept `--correlation <namespace:id>`. The namespace
+and opaque id bind to the exact PR revision and remain on its terminal facts;
+rebinding a live PR to a different correlation is refused.
 
 ### PR Eligibility and Checks
 
 ```text
-yrd pr submit [selector...] [--draft] [--follow] [--base <branch>] [--json]
+yrd pr submit [selector...] [--draft] [--follow] [--base <branch>]
+  [--correlation <namespace:id>] [--json]
 yrd pr list [--needs-review] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)
@@ -317,8 +323,12 @@ yrd queue deinit [base] [--json]
 | `deinit`  | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
-explicit empty `--steps` runs no steps. Re-entry is PR-owned: use `yrd pr
-retry <PR-or-run>` for rejected work.
+explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
+rejected work with `yrd pr runs <PR>`, fix its source branch, then run `yrd pr
+submit <branch>` again. That appends a fresh revision and records submit and
+check authority for its exact head; check admission consumes the check fact,
+and an integrating Queue run consumes the submit fact. Queue commands cannot
+mint or refresh either authority.
 
 The bare dashboard shows active and recent work. `AGE` is immutable queue
 lifetime—submission to terminal outcome—while `TOUCHED` is the latest state or
@@ -537,8 +547,9 @@ They do not require a second queue or a second queue.
 Each check pins its candidate to the then-current base. Several PRs may wait on
 remote work concurrently, but only one candidate can move a base branch first.
 If another candidate then reaches merge, Yrd rejects its stale proof instead of
-landing untested work; `yrd pr retry PR7` rebuilds and rechecks it on the new
-base.
+landing untested work. The PR owner inspects the rejected run, fixes the source
+branch if needed, and submits that branch again; the new revision gets fresh
+submit and check authority and is rebuilt and rechecked against the new base.
 
 ### Batching
 
@@ -552,7 +563,7 @@ event journal, receiver, artifacts, and configured plugins:
 
 ```bash
 yrd bay open release-fix --base release/2.0
-yrd bay submit --base release/2.0
+yrd bay submit --base release/2.0 --correlation tribe-request:release-2.0
 yrd queue --base release/2.0
 ```
 
