@@ -94,6 +94,7 @@ type RuntimeOptions = {
   runner: string
   leaseMs: number
   now?: () => number
+  continueAdmissions?: () => boolean
 }
 
 type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
@@ -101,10 +102,12 @@ type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
 type JsonOption = { json?: boolean }
 
 function runtimeOptions(io: YrdCliIO): RuntimeOptions {
+  const drainSignal = io.drainSignal
   return {
     runner: io.runner ?? "yrd-cli",
     leaseMs: io.leaseMs ?? 5 * 60_000,
     ...(io.now === undefined ? {} : { now: io.now }),
+    ...(drainSignal === undefined ? {} : { continueAdmissions: () => !drainSignal.aborted }),
   }
 }
 
@@ -1274,8 +1277,11 @@ async function watchQueueRuns(
   }
   const interval = intervalSeconds * 1_000
   const scope = io.scope ?? app.scope
+  const drainSignal = io.drainSignal
+  const drainRequested = () => drainSignal?.aborted === true
   let exit: YrdCliExitCode = 0
   while (true) {
+    if (drainRequested()) return exit
     const runs = await runQueues(app, selectors, options, io)
     if (jsonEnabled(options)) {
       for (const run of runs) io.stdout(stableJson({ command: "queue.run", mode: "watch", run }))
@@ -1283,10 +1289,31 @@ async function watchQueueRuns(
       await printHuman(io, createElement(QueueRunsView, { runs }))
     }
     if (runs.some((run) => run.status === "failed")) exit = 1
-    if (selectors.length > 0 || scope.signal.aborted) return exit
-    await scope.sleep(interval)
-    if (scope.signal.aborted) return exit
+    if (selectors.length > 0 || scope.signal.aborted || drainRequested()) return exit
+    await sleepUntilDrain(scope.sleep(interval), drainSignal)
+    if (scope.signal.aborted || drainRequested()) return exit
   }
+}
+
+async function sleepUntilDrain(sleep: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return sleep
+  if (signal.aborted) return
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (result: () => void): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener("abort", onAbort)
+      result()
+    }
+    const onAbort = () => finish(resolve)
+    signal.addEventListener("abort", onAbort, { once: true })
+    if (signal.aborted) onAbort()
+    void sleep.then(
+      () => finish(resolve),
+      (error: unknown) => finish(() => reject(error)),
+    )
+  })
 }
 
 async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {

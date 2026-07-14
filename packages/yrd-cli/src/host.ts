@@ -49,7 +49,7 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { resolveSubmitArgv } from "./submit-selection.ts"
 import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
-import { classifyFailure, resolveInvocation } from "./invocation.ts"
+import { classifyFailure, resolveInvocation, type Invocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
@@ -519,8 +519,9 @@ type ShutdownSignal = "SIGINT" | "SIGTERM"
 
 /** Own process signals at the run-to-exit CLI boundary, then restore native
  * signal exit semantics only after the host has drained its resources. */
-function bindProcessShutdown(shutdown: () => Promise<void>): () => void {
-  let received: ShutdownSignal | undefined
+function bindProcessShutdown(shutdown: () => Promise<void>, drain?: () => void): () => void {
+  let draining = false
+  let hardSignal: ShutdownSignal | undefined
   const remove = (): void => {
     globalThis.process.off("SIGINT", onSigint)
     globalThis.process.off("SIGTERM", onSigterm)
@@ -530,11 +531,16 @@ function bindProcessShutdown(shutdown: () => Promise<void>): () => void {
     globalThis.process.kill(globalThis.process.pid, signal)
   }
   const onSignal = (signal: ShutdownSignal): void => {
-    if (received !== undefined) {
+    if (drain !== undefined && !draining) {
+      draining = true
+      drain()
+      return
+    }
+    if (hardSignal !== undefined) {
       forward(signal)
       return
     }
-    received = signal
+    hardSignal = signal
     void shutdown().then(
       () => forward(signal),
       () => forward(signal),
@@ -542,9 +548,18 @@ function bindProcessShutdown(shutdown: () => Promise<void>): () => void {
   }
   const onSigint = () => onSignal("SIGINT")
   const onSigterm = () => onSignal("SIGTERM")
-  globalThis.process.once("SIGINT", onSigint)
-  globalThis.process.once("SIGTERM", onSigterm)
+  globalThis.process.on("SIGINT", onSigint)
+  globalThis.process.on("SIGTERM", onSigterm)
   return remove
+}
+
+function isResidentQueueRun(invocation: Invocation): boolean {
+  return (
+    invocation.projection === "root" &&
+    invocation.args[0] === "queue" &&
+    invocation.args[1] === "run" &&
+    invocation.args.includes("--watch")
+  )
 }
 
 export async function createYrdHost(options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<YrdHost> {
@@ -691,11 +706,20 @@ export async function runYrdProcess(
   let host: YrdHost | undefined
   let closePromise: Promise<void> | undefined
   const closeHost = () => (closePromise ??= host?.close() ?? Promise.resolve())
+  const drain = isResidentQueueRun(invocation) ? new AbortController() : undefined
   let removeShutdownSignals: () => void = () => undefined
   try {
     const activeHost = await createYrdHost({ cwd: io.cwd })
     host = activeHost
-    removeShutdownSignals = bindProcessShutdown(closeHost)
+    removeShutdownSignals = bindProcessShutdown(
+      closeHost,
+      drain === undefined
+        ? undefined
+        : () => {
+            io.stderr("drain latched; second signal forces shutdown\n")
+            drain.abort()
+          },
+    )
     const selectedArgv = await resolveSubmitArgv(invocation, {
       worktree: activeHost.repository.worktree,
       process: activeHost.process,
@@ -713,6 +737,7 @@ export async function runYrdProcess(
           io.resolveQueueTarget === undefined
             ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)
             : io.resolveQueueTarget(ref, cwd),
+        ...(drain === undefined ? {} : { drainSignal: drain.signal }),
       },
       activeHost.services,
     )

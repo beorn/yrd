@@ -49,4 +49,5 @@ export type YrdCliIO = {
   resolveQueueTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
   currentBranch?(cwd: string): string | undefined
   scope?: Pick<Scope, "signal" | "sleep">
+  drainSignal?: AbortSignal
 }
