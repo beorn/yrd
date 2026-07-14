@@ -15,7 +15,7 @@ import {
   type CommandResult,
 } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
+import { GitShaSchema, type DeprovisionedBay, type ProvisionedBay, type RefreshedBay } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
 const HEAD_1 = "1".repeat(40)
@@ -71,6 +71,16 @@ async function createHarness() {
 }
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
+
+describe("GitShaSchema", () => {
+  it("accepts only native SHA-1 and SHA-256 object widths", () => {
+    expect(GitShaSchema.safeParse("a".repeat(40)).success).toBe(true)
+    expect(GitShaSchema.safeParse("b".repeat(64)).success).toBe(true)
+    expect(GitShaSchema.safeParse("c".repeat(39)).success).toBe(false)
+    expect(GitShaSchema.safeParse("d".repeat(48)).success).toBe(false)
+    expect(GitShaSchema.safeParse("e".repeat(65)).success).toBe(false)
+  })
+})
 
 async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
   const id = app.jobs.requested(result)[0]
@@ -236,6 +246,89 @@ describe("withBays", () => {
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyIntegrate, undefined)).rejects.toThrow()
+  })
+
+  it("fails replay loudly when a regression event names a different integrated tuple", async () => {
+    const nextId = ids()
+    const seededCommand = { id: nextId(), op: "fixture.invalid-regression-tuple" }
+    const originalIssue = "@km/all/21091-original"
+    const repairIssue = "@km/all/21091-repair"
+    const originalLanding = "c".repeat(40)
+    const repairLanding = "d".repeat(40)
+    const at = (hour: number) => `2026-01-01T${String(hour).padStart(2, "0")}:00:00.000Z`
+    const pushed = (pr: string, branch: string, headSha: string, issue: string, ts: string) => ({
+      id: nextId(),
+      name: "pr/pushed",
+      ts,
+      data: { pr, branch, base: "main", baseSha: BASE, headSha, issue, revision: 1 },
+    })
+    const integrated = (
+      pr: string,
+      headSha: string,
+      issueRef: string,
+      run: string,
+      landingSha: string,
+      ts: string,
+    ) => ({
+      id: nextId(),
+      name: "pr/integrated",
+      ts,
+      data: {
+        pr,
+        revision: 1,
+        headSha,
+        issueRef,
+        run,
+        commit: landingSha,
+        landingSha,
+        baseSha: BASE,
+      },
+    })
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          pushed("PR1", "topic/original", HEAD_1, originalIssue, at(12)),
+          integrated("PR1", HEAD_1, originalIssue, "R1", originalLanding, at(12)),
+          pushed("PR2", "topic/repair", HEAD_2, repairIssue, at(14)),
+          integrated("PR2", HEAD_2, repairIssue, "R2", repairLanding, at(14)),
+          {
+            id: nextId(),
+            name: "pr/regression-recorded",
+            ts: at(15),
+            data: {
+              pr: "PR1",
+              issueRef: originalIssue,
+              revision: 1,
+              headSha: HEAD_1,
+              run: "R1",
+              landingSha: "e".repeat(40),
+              detectedAt: at(13),
+              severity: "high",
+              evidence: "artifact://regression",
+              implementationRunRef: "hab:turn/original",
+              reviewRef: "tribe:review/original",
+              repairIssueRef: repairIssue,
+              repairPr: "PR2",
+              repairRun: "R2",
+              repairLandingSha: repairLanding,
+            },
+          },
+        ],
+      },
+    ])
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+
+    await expect(createYrd(definition, { inject: { journal, clock: () => at(15), id: nextId } })).rejects.toThrow(
+      "regression tuple does not match",
+    )
   })
 
   it("persists one opaque correlation on a draft revision and preserves it through ready", async () => {

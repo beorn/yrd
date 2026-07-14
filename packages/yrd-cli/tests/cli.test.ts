@@ -10,7 +10,17 @@ import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
-import { createMemoryJournal, createYrd, createYrdDef, EventSchema, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import {
+  Command,
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  EventSchema,
+  JsonSchema,
+  pipe,
+  type Journal,
+  type JsonValue,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import {
   type QueueRun,
@@ -234,6 +244,7 @@ async function createApp(
     baseFailure?: boolean
     clock?: () => string
     mergeCommits?: readonly string[]
+    journal?: Journal<unknown>
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -319,7 +330,7 @@ async function createApp(
   )
   return createYrd(contests(queue(base)), {
     inject: {
-      journal: createMemoryJournal(),
+      journal: options.journal ?? createMemoryJournal(),
       clock: options.clock ?? (() => "2026-07-09T12:00:00.000Z"),
       id: ids(),
     },
@@ -4615,19 +4626,67 @@ describe("typed issue landing bridge", () => {
     ])
   })
 
+  it("refuses to label a historical rejection without a typed Queue bounce as trackerBridge v1", async () => {
+    const nextId = ids()
+    const issueRef = "@yrd/core/21091-legacy-rejection"
+    const at = "2026-07-09T12:00:00.000Z"
+    const seededCommand = { id: nextId(), op: "fixture.legacy-rejected" }
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: {
+              pr: "PR1",
+              branch: "topic/legacy-rejected",
+              base: "main",
+              headSha: HEAD_SHA,
+              issue: issueRef,
+              revision: 1,
+            },
+          },
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: { pr: "PR1", revision: 1, detail: "historical check failure" },
+          },
+        ],
+      },
+    ])
+    await using app = await createApp({ journal })
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io)).toBe(1)
+    expect(output.stdout()).toBe("")
+    expect(output.stderr()).toContain("cannot project rejected PR 'PR1' without a typed Queue bounce run")
+  })
+
   it("records a completed escaped regression without rewriting either integration", async () => {
     const originalIssue = "@yrd/core/21090-original"
     const repairIssue = "@yrd/core/21091-repair"
     const originalLanding = "c".repeat(40)
     const repairLanding = "d".repeat(40)
     const repairHead = "2".repeat(40)
-    await using app = await createApp({ mergeCommits: [originalLanding, repairLanding] })
+    let now = "2026-07-09T12:00:00.000Z"
+    await using app = await createApp({ mergeCommits: [originalLanding, repairLanding], clock: () => now })
     await app.bays.submit({ branch: "topic/original", headSha: HEAD_SHA, base: "main", issue: originalIssue })
     await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    now = "2026-07-09T14:00:00.000Z"
     await app.bays.submit({ branch: "topic/repair", headSha: repairHead, base: "main", issue: repairIssue })
     await app.queue.run({ prs: ["PR2"] }, { runner: "cli-test", leaseMs: 60_000 })
+    now = "2026-07-09T15:00:00.000Z"
 
-    const command = (run = "R1", repairRun = "R2") =>
+    const command = (run = "R1", repairRun = "R2", detectedAt = "2026-07-09T13:00:00.000Z") =>
       yrd(
         "pr",
         "regression",
@@ -4635,7 +4694,7 @@ describe("typed issue landing bridge", () => {
         "--run",
         run,
         "--detected-at",
-        "2026-07-13T14:18:00.000-07:00",
+        detectedAt,
         "--severity",
         "high",
         "--evidence",
@@ -4657,7 +4716,7 @@ describe("typed issue landing bridge", () => {
       headSha: HEAD_SHA,
       run: "R1",
       landingSha: originalLanding,
-      detectedAt: "2026-07-13T21:18:00.000Z",
+      detectedAt: "2026-07-09T13:00:00.000Z",
       severity: "high",
       evidence: "artifact://tty/21091-red",
       implementationRunRef: "hab:turn/original-implementation",
@@ -4667,13 +4726,20 @@ describe("typed issue landing bridge", () => {
       repairRun: "R2",
       repairLandingSha: repairLanding,
     }
+    for (const impossible of ["2026-07-09T11:59:59.999Z", "2026-07-09T14:00:00.001Z"]) {
+      const refusedChronology = outputIO()
+      expect(await runYrd(app, command("R1", "R2", impossible), refusedChronology.io)).toBe(1)
+      expect(refusedChronology.stdout()).toBe("")
+      expect(refusedChronology.stderr()).toContain("regression chronology")
+    }
+
     const recorded = outputIO()
     expect(await runYrd(app, command(), recorded.io), recorded.stderr()).toBe(0)
     expect(JSON.parse(recorded.stdout())).toEqual({ command: "pr.regression", regression: expected })
     expect(app.bays.pr("PR1")).toMatchObject({
       status: "integrated",
       integration: { commit: originalLanding },
-      regressions: [{ ...expected, recordedAt: "2026-07-09T12:00:00.000Z" }],
+      regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
     })
     expect(app.bays.pr("PR2")).toMatchObject({ status: "integrated", integration: { commit: repairLanding } })
 
@@ -4698,7 +4764,7 @@ describe("typed issue landing bridge", () => {
         pr: "PR1",
         status: "integrated",
         landingSha: originalLanding,
-        regressions: [{ ...expected, recordedAt: "2026-07-09T12:00:00.000Z" }],
+        regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
       }),
     ])
   })
