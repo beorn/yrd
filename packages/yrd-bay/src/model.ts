@@ -4,9 +4,16 @@ export const BayIdSchema = z.string().trim().min(1)
 export const PRIdSchema = z.string().trim().min(1)
 export const GitRefSchema = z.string().trim().min(1)
 export const GitShaSchema = z.string().regex(/^[0-9a-f]{40,64}$/iu)
+export const CorrelationSchema = z
+  .object({
+    namespace: z.string().trim().min(1),
+    id: z.string().min(1).refine((id) => id.trim().length > 0, { message: "correlation id cannot be blank" }),
+  })
+  .strict()
 
 export type BayId = string
 export type PRId = string
+export type Correlation = z.infer<typeof CorrelationSchema>
 
 /** Stable persisted queue key for local and origin-qualified base refs. */
 export function baseIdentity(ref: string): string {
@@ -45,7 +52,7 @@ export type Bay = Readonly<{
   failure?: BayFailure
 }>
 
-export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn"
+export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
 export type PRRevision = Readonly<{
   revision: number
@@ -53,6 +60,7 @@ export type PRRevision = Readonly<{
   base: string
   baseSha?: string
   pushedAt: string
+  correlation?: Correlation
 }>
 
 export type PRReviewDecision = "approve" | "reject"
@@ -101,6 +109,7 @@ export type PR = Readonly<{
   revision: number
   headSha: string
   baseSha?: string
+  correlation?: Correlation
   revisions: readonly PRRevision[]
   reviews: readonly PRReview[]
   comments: readonly PRComment[]
@@ -110,6 +119,7 @@ export type PR = Readonly<{
   integratedAt?: string
   integration?: Readonly<{ commit: string; baseSha: string }>
   withdrawnAt?: string
+  canceledAt?: string
   detail?: string
 }>
 
