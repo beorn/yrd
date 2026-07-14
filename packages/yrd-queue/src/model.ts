@@ -99,11 +99,21 @@ export type InstalledStep = Readonly<{
   classification?: "base" | "carrier"
 }>
 
-export type StepSelection = Readonly<{
+export type SkippedStep = InstalledStep &
+  Readonly<{
+    index: number
+    status: "skipped"
+    reason: "not-selected"
+  }>
+
+type StepSelectionBase = Readonly<{
   authority: "configured" | "explicit" | "admission"
   steps: readonly StepName[]
-  omittedChecks?: readonly StepName[]
 }>
+
+export type StepSelection =
+  | (StepSelectionBase & Readonly<{ omittedSteps?: readonly SkippedStep[] }>)
+  | (StepSelectionBase & Readonly<{ omittedChecks: readonly StepName[] }>)
 
 export type QueueFailure = Readonly<{
   at: string
@@ -272,46 +282,81 @@ export type QueueAuditFinding = Readonly<{
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 
-export const QueueRecordSchema = z
+const InstalledStepSchema = z
   .object({
-    id: z.string().trim().min(1),
-    prs: z.array(PRSnapshotSchema).min(1),
-    base: GitRefSchema,
-    steps: z
-      .array(
-        z
-          .object({
-            name: z.string().regex(/^[a-z][a-z0-9_-]*$/iu),
-            title: z.string().trim().min(1),
-            revision: z.string().trim().min(1),
-            integrates: z.boolean(),
-            needsIntegration: z.boolean(),
-            classification: z.enum(["base", "carrier"]).optional(),
-          })
-          .strict(),
-      )
-      .min(1),
-    stepSelection: z
-      .object({
-        authority: z.enum(["configured", "explicit", "admission"]),
-        steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
-        omittedChecks: z
-          .array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu))
-          .min(1)
-          .optional(),
-      })
-      .strict()
-      .optional(),
-    initialIntegration: IntegrationProofSchema.optional(),
-    initialResults: z.record(z.string(), JsonSchema).optional(),
-    reusedFrom: z.string().trim().min(1).optional(),
-    startedAt: z.iso.datetime({ offset: true }),
-    parent: z.string().trim().min(1).optional(),
-    isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
-    failure: z
-      .object({ at: z.iso.datetime({ offset: true }), error: JobErrorSchema })
-      .strict()
-      .optional(),
+    name: z.string().regex(/^[a-z][a-z0-9_-]*$/iu),
+    title: z.string().trim().min(1),
+    revision: z.string().trim().min(1),
+    integrates: z.boolean(),
+    needsIntegration: z.boolean(),
+    classification: z.enum(["base", "carrier"]).optional(),
+  })
+  .strict()
+
+const SkippedStepSchema = InstalledStepSchema.extend({
+  index: z.number().int().nonnegative(),
+  status: z.literal("skipped"),
+  reason: z.literal("not-selected"),
+}).strict()
+
+const StepSelectionSchema = z
+  .object({
+    authority: z.enum(["configured", "explicit", "admission"]),
+    steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
+    omittedSteps: z.array(SkippedStepSchema).min(1).optional(),
+  })
+  .strict()
+  .superRefine((selection, context) => {
+    const omitted = selection.omittedSteps ?? []
+    const selectedNames = new Set(selection.steps)
+    const omittedNames = new Set<string>()
+    const omittedIndexes = new Set<number>()
+    const planLength = selection.steps.length + omitted.length
+    for (const step of omitted) {
+      if (selectedNames.has(step.name) || omittedNames.has(step.name)) {
+        context.addIssue({ code: "custom", message: `duplicate step-selection evidence for '${step.name}'` })
+      }
+      if (step.index >= planLength || omittedIndexes.has(step.index)) {
+        context.addIssue({ code: "custom", message: `invalid omitted-step index ${step.index}` })
+      }
+      omittedNames.add(step.name)
+      omittedIndexes.add(step.index)
+    }
+  })
+
+const LegacyStepSelectionSchema = z
+  .object({
+    authority: z.enum(["configured", "explicit", "admission"]),
+    steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
+    omittedChecks: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
+  })
+  .strict()
+
+const queueRecordShape = {
+  id: z.string().trim().min(1),
+  prs: z.array(PRSnapshotSchema).min(1),
+  base: GitRefSchema,
+  steps: z.array(InstalledStepSchema).min(1),
+  initialIntegration: IntegrationProofSchema.optional(),
+  initialResults: z.record(z.string(), JsonSchema).optional(),
+  reusedFrom: z.string().trim().min(1).optional(),
+  startedAt: z.iso.datetime({ offset: true }),
+  parent: z.string().trim().min(1).optional(),
+  isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
+  failure: z
+    .object({ at: z.iso.datetime({ offset: true }), error: JobErrorSchema })
+    .strict()
+    .optional(),
+}
+
+export const QueueRecordSchema = z
+  .object({ ...queueRecordShape, stepSelection: StepSelectionSchema.optional() })
+  .strict()
+
+export const ReplayQueueRecordSchema = z
+  .object({
+    ...queueRecordShape,
+    stepSelection: z.union([StepSelectionSchema, LegacyStepSelectionSchema]).optional(),
   })
   .strict()
 

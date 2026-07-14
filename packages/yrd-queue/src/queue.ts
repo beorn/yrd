@@ -51,6 +51,7 @@ import {
   IntegrationProofSchema,
   QueuePauseSchema,
   QueueRecordSchema,
+  ReplayQueueRecordSchema,
   Queues,
   PRSnapshotSchema,
   type AddStepResult,
@@ -127,6 +128,7 @@ const PauseQueueArgsSchema = z
   }) as z.ZodType<PauseQueueArgs>
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
+const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
 const QueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
 const QueueAuthorityTokenFactSchema = z.object({
   pr: PRIdSchema,
@@ -433,6 +435,9 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
             prs: z.array(z.string().trim().min(1)).min(1),
           })
           .strict(),
+      },
+      replayEvents: {
+        "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
       },
       project: projectQueues,
       create(yrd) {
@@ -1756,9 +1761,9 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     }
   }
   if (applied.name === "queue/run/started") {
-    const started = QueueStartSchema.parse((applied.data as { run?: unknown }).run)
+    const started = ReplayQueueStartSchema.parse((applied.data as { run?: unknown }).run)
     if (state.queues.records[started.id] !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
-    const record = QueueRecordSchema.parse({
+    const record = ReplayQueueRecordSchema.parse({
       ...started,
       base: baseIdentity(started.base),
       prs: started.prs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
@@ -1835,16 +1840,27 @@ function stepSelection(
 ): StepSelection {
   const names = selected.map((step) => step.name)
   const selectedNames = new Set(names)
-  const omittedChecks =
+  const configuredNames = new Set(selectSteps(installed, queues.defaultSteps).map((step) => step.name))
+  const plan = installed.filter((step) => selectedNames.has(step.name) || configuredNames.has(step.name))
+  const omittedSteps =
     authority === "explicit"
-      ? admissionSteps(queues, installed)
-          .map((step) => step.name)
-          .filter((name) => !selectedNames.has(name))
+      ? plan.flatMap((step, index) =>
+          selectedNames.has(step.name)
+            ? []
+            : [
+                {
+                  ...descriptor(step),
+                  index,
+                  status: "skipped" as const,
+                  reason: "not-selected" as const,
+                },
+              ],
+        )
       : []
   return {
     authority,
     steps: names,
-    ...(omittedChecks.length === 0 ? {} : { omittedChecks }),
+    ...(omittedSteps.length === 0 ? {} : { omittedSteps }),
   }
 }
 
