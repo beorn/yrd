@@ -2780,6 +2780,48 @@ describe("runYrd", () => {
     }
   })
 
+  it("reads the merged step artifact into successive watch snapshots", async () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-output-"))
+    const outputPath = join(artifactRoot, "R-output", "0-check", "attempt-2", "output.log")
+    mkdirSync(join(outputPath, ".."), { recursive: true })
+    const run = fakeRun({
+      id: "R-output",
+      status: "running",
+      startedAt: "2026-07-13T11:59:00.000Z",
+      steps: [
+        fakeStep(
+          "check",
+          "running",
+          fakeJob({
+            id: JOB_CHECK_PASS_ID,
+            status: "running",
+            attempt: 2,
+            startedAt: "2026-07-13T11:59:00.000Z",
+          }),
+        ),
+      ],
+    })
+    const result = { ...fakeSummary([run]), prs: [] } as QueueStatusResult
+    try {
+      writeFileSync(outputPath, "checking one\n")
+      expect(await runInternals.queueArtifactOutputs([result], artifactRoot)).toEqual([
+        {
+          run: "R-output",
+          step: "check",
+          attempt: 2,
+          path: outputPath,
+          text: "checking one\n",
+        },
+      ])
+      writeFileSync(outputPath, "checking one\nchecking two\n")
+      expect((await runInternals.queueArtifactOutputs([result], artifactRoot))[0]?.text).toBe(
+        "checking one\nchecking two\n",
+      )
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
   it("accepts queue ls --latest as the canonical queue list lens", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -4033,6 +4075,38 @@ describe("runYrd", () => {
     const app = await createApp()
     await openAndSubmit(app)
     expect(await runYrd(app, yrd("queue", "run", "PR1"), outputIO().io)).toBe(0)
+
+    const detailJson = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), detailJson.io)).toBe(0)
+    expect(JSON.parse(detailJson.stdout())).toMatchObject({
+      command: "pr.view",
+      detail: {
+        runs: [{ run: "R1" }],
+        run: {
+          run: "R1",
+          prs: [{ id: "PR1" }],
+          landing: expect.any(String),
+          steps: expect.arrayContaining([
+            expect.objectContaining({
+              uuid: expect.any(String),
+              runner: expect.any(String),
+              lease: "-",
+              changed: expect.any(String),
+            }),
+          ]),
+        },
+      },
+    })
+    const detailHuman = outputIO({ columns: 80 })
+    expect(await runYrd(app, yrd("pr", "view", "PR1"), detailHuman.io)).toBe(0)
+    expect(detailHuman.stdout()).toContain("RUN R1")
+    expect(detailHuman.stdout()).toContain("RELATED RUNS R1")
+    expect(detailHuman.stdout()).toContain("JOB ")
+    expect(detailHuman.stdout()).toContain("RUNNER ")
+    expect(detailHuman.stdout()).toContain("LEASE -")
+    expect(detailHuman.stdout()).toContain("CHANGED ")
+    expect(detailHuman.stdout()).toContain("PROOF ART")
+    expect(detailHuman.stdout()).toContain("NEXT")
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)

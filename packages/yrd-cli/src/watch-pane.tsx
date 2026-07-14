@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Box, PaneDivider, Text, useInput, useScopeEffect, useWindowSize } from "silvery"
 import {
+  QueueEvidenceView,
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
@@ -17,6 +18,15 @@ const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.52
 
 export type QueueDetailTier = "right" | "below" | "full"
+
+export type QueueArtifactOutput = Readonly<{
+  run: string
+  step: string
+  attempt: number
+  path: string
+  text: string
+  truncatedBytes?: number
+}>
 
 export function queueDetailTier(columns: number, rows: number): QueueDetailTier {
   if (columns >= LIST_NATURAL_WIDTH + DIVIDER_SIZE + DETAIL_NATURAL_WIDTH) return "right"
@@ -49,9 +59,11 @@ export type QueueWatchSnapshot = Readonly<{
   results: readonly QueueStatusResult[]
   now: number
   projection?: QueueTimelineProjection
+  outputs?: readonly QueueArtifactOutput[]
 }>
 
 export type WatchControl = Readonly<{ paused: boolean }>
+type QueueDetailMode = "detail" | "filters" | "evidence"
 
 export type QueueWatchPaneProps = Readonly<{
   initial: QueueWatchSnapshot
@@ -64,6 +76,47 @@ export function reduceWatchControl(control: WatchControl, input: string): WatchC
   if (input === "q") return "exit"
   if (input === "p") return { paused: !control.paused }
   return control
+}
+
+function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  if (outputs.length === 0) return null
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {outputs.map((output) => {
+        const lines = output.text.split("\n")
+        if (lines.at(-1) === "") lines.pop()
+        const hidden = Math.max(0, lines.length - 12)
+        const visible = lines.slice(-12).join("\n")
+        return (
+          <Box key={`${output.run}:${output.step}:${output.attempt}:${output.path}`} flexDirection="column">
+            <Text bold wrap="truncate">
+              OUTPUT {output.step}#{output.attempt}
+            </Text>
+            {output.truncatedBytes === undefined ? null : (
+              <Text color="$fg-muted">... {output.truncatedBytes} earlier bytes</Text>
+            )}
+            {hidden === 0 ? null : <Text color="$fg-muted">... {hidden} earlier lines</Text>}
+            <Text>{visible === "" ? "Waiting for output..." : visible}</Text>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+function QueueFilterView({ projection }: { projection: QueueTimelineProjection }) {
+  const filters = projection.filters
+  return (
+    <Box flexDirection="column">
+      <Text bold>FILTERS</Text>
+      <Text>BASE {projection.base}</Text>
+      <Text>SINCE {filters.since}</Text>
+      <Text>STATUS {filters.statuses.join(",")}</Text>
+      <Text>TERMS {filters.terms.length === 0 ? "none" : filters.terms.join(" OR ")}</Text>
+      <Text>RUNS {filters.latest ? "latest per PR" : "all"}</Text>
+      <Text color="$fg-muted">Press Esc to return to selected-row detail.</Text>
+    </Box>
+  )
 }
 
 export function QueueWatchFrame({
@@ -95,8 +148,11 @@ export function QueueWatchFrame({
   const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => rows[0]?.key)
   const [selectedPr, setSelectedPr] = useState<string | undefined>(() => pr ?? rows[0]?.pr)
   const [detailOpen, setDetailOpen] = useState(() => snapshot.projection === undefined || tier !== "full")
+  const [detailMode, setDetailMode] = useState<QueueDetailMode>("detail")
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
+  const [newRows, setNewRows] = useState(0)
   const previousTier = useRef(tier)
+  const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
   const dragStart = useRef<Readonly<{ coordinate: number; ratio: number }> | undefined>(undefined)
   const cursor = Math.max(
     0,
@@ -116,15 +172,41 @@ export function QueueWatchFrame({
   }, [cursorRowKey, pr, rows, selectedPr])
 
   useEffect(() => {
+    const previous = new Set(previousRowKeys.current)
+    const selectedIndex = rows.findIndex((row) => row.key === cursorRowKey)
+    if (selectedIndex > 0) {
+      const addedBeforeCursor = rows.slice(0, selectedIndex).filter((row) => !previous.has(row.key)).length
+      if (addedBeforeCursor > 0) setNewRows((count) => count + addedBeforeCursor)
+    }
+    previousRowKeys.current = rows.map((row) => row.key)
+  }, [cursorRowKey, rows])
+
+  useEffect(() => {
     if (previousTier.current === tier) return
     previousTier.current = tier
     setDetailOpen(tier !== "full")
   }, [tier])
 
-  useInput((_input, key) => {
+  useInput((input, key) => {
     if (snapshot.projection === undefined) return
-    if (key.escape) setDetailOpen(false)
-    if (key.return) setDetailOpen(true)
+    if (input === "f") {
+      setDetailMode("filters")
+      setDetailOpen(true)
+      return
+    }
+    if (input === "o") {
+      setDetailMode("evidence")
+      setDetailOpen(true)
+      return
+    }
+    if (key.escape) {
+      if (detailMode === "detail") setDetailOpen(false)
+      else setDetailMode("detail")
+    }
+    if (key.return) {
+      setDetailMode("detail")
+      setDetailOpen(true)
+    }
   })
 
   const selectRow = (index: number): void => {
@@ -132,6 +214,7 @@ export function QueueWatchFrame({
     if (row === undefined) return
     setCursorRowKey(row.key)
     setSelectedPr(row.pr)
+    setNewRows(0)
   }
 
   const selectedRow = rows[cursor]
@@ -140,6 +223,8 @@ export function QueueWatchFrame({
     selectedRow?.run === undefined
       ? undefined
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
+  const detailOutputs =
+    selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
@@ -159,7 +244,7 @@ export function QueueWatchFrame({
         onSelect={selectRow}
       />
     )
-  const detail =
+  const selectedDetail =
     detailData === undefined ? (
       detailPr === undefined ? (
         <Text color="$fg-muted">No queue row selected.</Text>
@@ -167,14 +252,16 @@ export function QueueWatchFrame({
         <QueueWatchView results={snapshot.results} now={snapshot.now} pr={detailPr} />
       )
     ) : (
-      <QueueShowView data={detailData} />
+      <Box flexDirection="column">
+        <QueueShowView data={detailData} compact={tier === "full"} />
+        <QueueArtifactOutputView outputs={detailOutputs} />
+      </Box>
     )
-
   if (snapshot.projection === undefined) {
     return (
       <Box flexDirection="column">
         {timeline}
-        {detailPr === undefined ? null : <Box marginTop={1}>{detail}</Box>}
+        {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
         <Box marginTop={1}>
           <Text bold>{paused ? "PAUSED" : "LIVE"}</Text>
           <Text color="$fg-muted"> {paused ? "p resume" : "p pause"} q quit</Text>
@@ -182,6 +269,19 @@ export function QueueWatchFrame({
       </Box>
     )
   }
+
+  const detail =
+    detailMode === "filters" ? (
+      <QueueFilterView projection={snapshot.projection} />
+    ) : detailMode === "evidence" ? (
+      detailData === undefined ? (
+        <Text color="$fg-muted">No run evidence for the selected pending PR.</Text>
+      ) : (
+        <QueueEvidenceView data={detailData} />
+      )
+    ) : (
+      selectedDetail
+    )
 
   const splitTier = tier === "full" ? undefined : tier
   const available = Math.max(1, (tier === "right" ? columns : viewportRows - 1) - DIVIDER_SIZE)
@@ -247,6 +347,8 @@ export function QueueWatchFrame({
         <Text color="$fg-muted">
           {" "}
           {paused ? "p resume" : "p pause"} q quit · {footerHint}
+          {" · f filters · o evidence"}
+          {newRows === 0 ? "" : ` · ${newRows} new`}
         </Text>
       </Box>
     </Box>

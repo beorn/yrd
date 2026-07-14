@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { readFile } from "node:fs/promises"
+import { open, readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
 import { createElement } from "react"
@@ -49,6 +49,7 @@ import {
   queueLogAttempts,
   queueLogRows,
   prListRows,
+  prDetailData,
   queueRevisionKey,
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
@@ -65,7 +66,7 @@ import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
-import { QueueWatchPane, type QueueWatchSnapshot } from "./watch-pane.tsx"
+import { QueueWatchPane, type QueueArtifactOutput, type QueueWatchSnapshot } from "./watch-pane.tsx"
 
 function gitSync(cwd: string, args: readonly string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
@@ -144,7 +145,6 @@ type WatchOptions = QueueListOptions
 type JsonOption = { json?: boolean }
 
 const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
-const QUEUE_TIMELINE_ROW_LIMIT = 20
 const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "pending",
   "running",
@@ -152,6 +152,12 @@ const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "integrated",
   "other",
 ]
+
+function queueTimelineRowLimit(io: YrdCliIO): number {
+  if (io.rows === undefined) return 20
+  // Header, filters, four FLOW lines, columns, footer, and cap/coverage disclosures.
+  return Math.max(1, io.rows - 11)
+}
 
 function queueTimelineWindow(value: string | undefined): number {
   if (value === undefined) return QUEUE_TIMELINE_DEFAULT_WINDOW_MS
@@ -859,13 +865,16 @@ async function viewPr(
   const positions = pr.status === "submitted" ? await queuedPrPositions(state, pr.base, io) : undefined
   const position = positions?.get(pr.id)
   const runs = prQueueRuns(app, pr)
+  const attempts = await queueLogAttempts(app.events())
+  const detail = prDetailData(pr, runs, attempts)
   await printResult(
     io,
     jsonEnabled(options),
-    { command, pr, ...(position === undefined ? {} : { position }), results },
+    { command, pr, ...(position === undefined ? {} : { position }), results, detail },
     createElement(PRDetailView, {
       pr,
       runs,
+      attempts,
       now: io.now?.() ?? Date.now(),
       ...(position === undefined ? {} : { position }),
     }),
@@ -1341,11 +1350,61 @@ function queueBases(state: YrdCliState): string[] {
 
 type QueueListSnapshot = QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>
 
+const QUEUE_ARTIFACT_TAIL_BYTES = 64 * 1_024
+
+async function artifactTail(path: string): Promise<Readonly<{ text: string; truncatedBytes: number }> | undefined> {
+  let file
+  try {
+    file = await open(path, "r")
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw cause
+  }
+  try {
+    const size = (await file.stat()).size
+    const length = Math.min(size, QUEUE_ARTIFACT_TAIL_BYTES)
+    const truncatedBytes = size - length
+    const bytes = new Uint8Array(length)
+    if (length > 0) await file.read(bytes, 0, length, truncatedBytes)
+    return { text: new TextDecoder().decode(bytes), truncatedBytes }
+  } finally {
+    await file.close()
+  }
+}
+
+export async function queueArtifactOutputs(
+  results: readonly QueueStatusResult[],
+  artifactRoot: string,
+): Promise<QueueArtifactOutput[]> {
+  const outputs: QueueArtifactOutput[] = []
+  for (const result of results) {
+    for (const run of [...result.running, ...result.waiting, ...result.finished]) {
+      for (const [index, step] of run.steps.entries()) {
+        const attempt = step.job?.attempt
+        if (attempt === undefined) continue
+        const path = join(artifactRoot, run.id, `${index}-${step.name}`, `attempt-${attempt}`, "output.log")
+        const tail = await artifactTail(path)
+        if (tail === undefined) continue
+        outputs.push({
+          run: run.id,
+          step: step.name,
+          attempt,
+          path,
+          text: tail.text,
+          ...(tail.truncatedBytes === 0 ? {} : { truncatedBytes: tail.truncatedBytes }),
+        })
+      }
+    }
+  }
+  return outputs
+}
+
 async function queueListSnapshot(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
+  includeOutputs = false,
 ): Promise<QueueListSnapshot> {
   const state = stateOf(app)
   const requestedBase = options.base ?? "main"
@@ -1353,21 +1412,25 @@ async function queueListSnapshot(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
+  const projection = queueTimelineProjection(results, {
+    now,
+    windowMs: queueTimelineWindow(options.since),
+    statuses: queueTimelineStatuses(options.status),
+    terms: filters,
+    latest: options.latest === true,
+    rowLimit: queueTimelineRowLimit(io),
+    submissionTimes: queueTimelineAdmissionTimes(results),
+    siblingBases: queueBases(state),
+    base,
+    state: state.bays,
+  })
+  const outputs =
+    includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(results, io.artifactRoot) : []
   return {
     results,
     now,
-    projection: queueTimelineProjection(results, {
-      now,
-      windowMs: queueTimelineWindow(options.since),
-      statuses: queueTimelineStatuses(options.status),
-      terms: filters,
-      latest: options.latest === true,
-      rowLimit: QUEUE_TIMELINE_ROW_LIMIT,
-      submissionTimes: queueTimelineAdmissionTimes(results),
-      siblingBases: queueBases(state),
-      base,
-      state: state.bays,
-    }),
+    projection,
+    ...(outputs.length === 0 ? {} : { outputs }),
   }
 }
 
@@ -1750,7 +1813,8 @@ async function watchQueue(
 ): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const load = async (): Promise<QueueListSnapshot> => queueListSnapshot(app, filters, options, io)
+  const load = async (): Promise<QueueListSnapshot> =>
+    queueListSnapshot(app, filters, options, io, !jsonEnabled(options))
 
   if (!jsonEnabled(options)) {
     const renderLive = getLiveRenderer(io)

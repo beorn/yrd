@@ -970,6 +970,7 @@ describe("Queue command adapters", () => {
     const dir = join(artifactRoot, "R-stream", "0-check", "attempt-2")
     const stdoutPath = join(dir, "stdout.log")
     const stderrPath = join(dir, "stderr.log")
+    const outputPath = join(dir, "output.log")
     const watcherAbort = new AbortController()
     using _watcher = { [Symbol.dispose]: () => watcherAbort.abort() }
     const events = watch(dir, { signal: watcherAbort.signal })[Symbol.asyncIterator]()
@@ -1003,6 +1004,7 @@ describe("Queue command adapters", () => {
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
+        expect(await readFile(outputPath, "utf8")).toBe("first ")
       },
       { timeout: 5_000, interval: 10 },
     )
@@ -1014,6 +1016,7 @@ describe("Queue command adapters", () => {
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
         expect(Array.from(await readFile(stderrPath))).toEqual(Array.from(stderr))
+        expect(await readFile(outputPath, "utf8")).toBe("first warning\n")
       },
       { timeout: 5_000, interval: 10 },
     )
@@ -1024,6 +1027,7 @@ describe("Queue command adapters", () => {
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
+        expect(await readFile(outputPath, "utf8")).toBe("first warning\n€ last\n")
       },
       { timeout: 5_000, interval: 10 },
     )
@@ -1047,9 +1051,10 @@ describe("Queue command adapters", () => {
         ],
       },
     })
-    expect((await readdir(dir)).sort()).toEqual(["stderr.log", "stdout.log"])
+    expect((await readdir(dir)).sort()).toEqual(["output.log", "stderr.log", "stdout.log"])
     expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))
     expect(Array.from(await readFile(stderrPath))).toEqual(Array.from(stderr))
+    expect(await readFile(outputPath, "utf8")).toBe("first warning\n€ last\n")
   }, 10_000)
 
   it("grows a real slow command artifact while the child is still running", async () => {
@@ -1058,6 +1063,7 @@ describe("Queue command adapters", () => {
     const release = join(cwd, "release")
     const artifactRoot = join(cwd, "artifacts")
     const stdoutPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "stdout.log")
+    const outputPath = join(artifactRoot, "R-slow", "0-check", "attempt-1", "output.log")
     await using process = createProcess()
     const step = configuredCommandStep<PRShape>({
       inject: { process },
@@ -1088,6 +1094,7 @@ describe("Queue command adapters", () => {
     await vi.waitFor(
       async () => {
         expect(await readFile(stdoutPath, "utf8")).toBe("first\n")
+        expect(await readFile(outputPath, "utf8")).toBe("first\n")
       },
       { timeout: 5_000, interval: 10 },
     )
@@ -1099,6 +1106,7 @@ describe("Queue command adapters", () => {
       output: { artifacts: [{ name: "stdout", path: stdoutPath }] },
     })
     expect(await readFile(stdoutPath, "utf8")).toBe("first\nsecond\n")
+    expect(await readFile(outputPath, "utf8")).toBe("first\nsecond\n")
   }, 10_000)
 
   it.each([
