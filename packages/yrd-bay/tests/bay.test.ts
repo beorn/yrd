@@ -198,9 +198,17 @@ describe("withBays", () => {
 
     await app.bays.submit({ branch: "issue/review-me", headSha: HEAD_1, draft: true })
     expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 1, headSha: HEAD_1 })
-    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).events).toHaveLength(1)
-    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: BASE })).events).toHaveLength(0)
-    expect((await app.bays.requestChecks({ pr: "PR1", baseSha: HEAD_2 })).events).toHaveLength(1)
+    const requestChecks = async (baseSha: string) =>
+      (await app.bays.requestChecks({ pr: "PR1", baseSha })).events.map(({ name, data }) => ({ name, data }))
+    const fact = (baseSha: string) => [
+      {
+        name: "pr/checks-requested",
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, baseSha },
+      },
+    ]
+    expect(await requestChecks(BASE)).toEqual(fact(BASE))
+    expect(await requestChecks(BASE)).toEqual(fact(BASE))
+    expect(await requestChecks(HEAD_2)).toEqual(fact(HEAD_2))
     expect(app.bays.checksRequested("PR1")).toBe(true)
     expect(app.bays.pr("PR1")?.checkRequests.at(-1)).toMatchObject({ baseSha: HEAD_2 })
 

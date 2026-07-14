@@ -36,7 +36,6 @@ import {
   RefreshedBaySchema,
   baseIdentity,
   defaultBayBranch,
-  checkRequest,
   checksRequested,
   emptyBaysState,
   isLivePR,
@@ -220,7 +219,11 @@ const PRIntegratedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const PRCanceledSchema = PRRevisionIdentitySchema.extend({ correlation: CorrelationSchema.optional() }).strict()
+const PRCanceledSchema = PRRevisionIdentitySchema.extend({
+  correlation: CorrelationSchema.optional(),
+  by: TextSchema,
+  reason: TextSchema,
+}).strict()
 const PRReviewFactSchema = z
   .object({
     pr: PRIdSchema,
@@ -948,8 +951,6 @@ function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArg
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not checkable`)
   }
   const baseSha = args.baseSha ?? pr.baseSha
-  const current = checkRequest(pr)
-  if (current !== undefined && current.baseSha === baseSha) return { events: [] }
   return {
     events: [
       event("pr/checks-requested", {
@@ -1202,7 +1203,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const pr = current.prs[changed.pr]
       return pr === undefined || !terminalApplies(pr, changed)
         ? state
-        : patchPR(pr, { status: "canceled", canceledAt: applied.ts })
+        : patchPR(pr, {
+            status: "canceled",
+            canceledAt: applied.ts,
+            canceledBy: changed.by,
+            cancelReason: changed.reason,
+          })
     }
     case "pr/edited": {
       const changed = PrEditArgsSchema.parse(data)
