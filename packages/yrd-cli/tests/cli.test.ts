@@ -654,7 +654,7 @@ describe("runYrd", () => {
     const retiredRetry = outputIO()
     expect(await runYrd(app, yrd("pr", "retry", "PR1"), retiredRetry.io)).toBe(2)
     expect(retiredRetry.stdout()).toBe("")
-    expect(retiredRetry.stderr()).toContain("too many arguments")
+    expect(retiredRetry.stderr()).toContain("unknown command 'retry'")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRetiredRetry)
 
     const contest = outputIO()
@@ -817,15 +817,10 @@ describe("runYrd", () => {
       ...(submittedAt === undefined ? {} : { submittedAt }),
       ...(terminal === undefined ? {} : { terminal }),
     })
-    const pr = (
-      id: string,
-      branch: string,
-      status: PR["status"],
-      clock: PR["revisions"][number],
-    ): PR => ({
+    const pr = (id: string, branch: string, status: PR["status"], clock: PR["revisions"][number]): PR => ({
       id,
       branch,
-      base: "main",
+      base: clock.base,
       status,
       revision: 1,
       headSha: clock.headSha,
@@ -873,7 +868,10 @@ describe("runYrd", () => {
         },
       },
       {
-        pr: pr("PR3", "topic/checks", "pushed", revision("3".repeat(40), "2026-07-09T12:02:00.000Z")),
+        pr: pr("PR3", "topic/checks", "pushed", {
+          ...revision("3".repeat(40), "2026-07-09T12:02:00.000Z"),
+          base: "release/2.0",
+        }),
         eligibility: {
           pr: "PR3",
           revision: 1,
@@ -924,20 +922,23 @@ describe("runYrd", () => {
     ]
 
     const rows = prListRows(entries, [], Date.parse("2026-07-09T12:10:00.000Z"))
-    expect(rows.map(({ pr: id, state, glyph, review: reviewState, checks, why }) => ({
-      id,
-      state,
-      glyph,
-      review: reviewState,
-      checks,
-      why,
-    }))).toEqual([
+    expect(
+      rows.map(({ pr: id, state, glyph, review: reviewState, checks, why }) => ({
+        id,
+        state,
+        glyph,
+        review: reviewState,
+        checks,
+        why,
+      })),
+    ).toEqual([
       { id: "PR1", state: "pushed", glyph: "[ ]", review: "n/a", checks: "n/a", why: "draft" },
       { id: "PR2", state: "submitted", glyph: "[ ]", review: "need", checks: "n/a", why: "review-required" },
       { id: "PR3", state: "pushed", glyph: "[ ]", review: "n/a", checks: "fail", why: "checks-failed" },
       { id: "PR4", state: "rejected", glyph: "[!]", review: "n/a", checks: "n/a", why: "rejected" },
       { id: "PR5", state: "integrated", glyph: "[x]", review: "ok", checks: "pass", why: "terminal" },
     ])
+    expect(rows[2]?.target).toBe("release/2.0")
 
     for (const columns of [80, 120]) {
       const human = await renderString(createElement(PRListView, { rows, columns }), {
@@ -957,6 +958,9 @@ describe("runYrd", () => {
       expect(human).toContain("[x] integrated")
       expect(human).not.toContain(entries[0]!.pr.branch)
       expect(physical[0]?.includes("AGE")).toBe(columns === 120)
+      expect(physical[0]?.includes("BASE")).toBe(columns === 120)
+      expect(physical[0]?.includes("CHANGED")).toBe(columns === 120)
+      expect(human.includes("release/2.0")).toBe(columns === 120)
     }
   })
 
@@ -1183,7 +1187,7 @@ describe("runYrd", () => {
     expect(dashboard.stdout()).not.toContain("Usage: yrd")
 
     const prs = outputIO()
-    expect(await runYrd(app, yrd("pr"), prs.io), prs.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "list"), prs.io), prs.stderr()).toBe(0)
     expect(prs.stdout()).toContain("PR1")
 
     const queues = outputIO()
@@ -1382,8 +1386,8 @@ describe("runYrd", () => {
     const humanInbox = outputIO({ columns: 160 })
     expect(await runYrd(app, yrd("pr", "list", "--needs-review"), humanInbox.io), humanInbox.stderr()).toBe(0)
     expect(humanInbox.stdout()).toContain("WHY")
-    expect(humanInbox.stdout()).toContain("pushed, not ready")
-    expect(humanInbox.stdout()).toContain("required")
+    expect(humanInbox.stdout()).toContain("draft")
+    expect(humanInbox.stdout()).toContain("need")
     expect(humanInbox.stdout()).toContain("checking")
 
     const comment = outputIO()

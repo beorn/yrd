@@ -498,6 +498,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd"], {
         cwd: repo,
+        columns: 80,
         stdout: (text) => {
           plain += text
         },
@@ -510,6 +511,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(plain).toContain("Usage: yrd [options] [command]")
     expect(plain).not.toContain("OPEN")
     expect(plain).not.toContain("\u001b[")
+    expect(Math.max(...plain.split("\n").map((line) => line.length))).toBeLessThanOrEqual(80)
     expect(plainError).toBe("")
 
     let json = ""
@@ -1752,7 +1754,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
 
     const journalPath = join(repo, ".git", "yrd", "events-v3.jsonl")
     const journalBefore = await readFile(journalPath)
-    const cli = Bun.spawn([process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts")], {
+    const cli = Bun.spawn([process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "_dashboard"], {
       cwd: repo,
       env: { ...process.env, NO_COLOR: "1" },
       stdout: "pipe",

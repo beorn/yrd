@@ -36,7 +36,7 @@ import {
   QueueListView,
   PRChecksView,
   PRDetailView,
-  PREligibilityView,
+  PRListView,
   PRRunsView,
   QueueRunsView,
   QueueTimelineView,
@@ -47,6 +47,7 @@ import {
   PRResultView,
   queueLogAttempts,
   queueLogRows,
+  prListRows,
   queueRevisionKey,
   queueRunRevisionClocks,
   runRevisionClock,
@@ -716,7 +717,10 @@ async function listPrs(
     io,
     jsonEnabled(options),
     { command: "pr.list", prs: rows.map(({ pr, eligibility }) => ({ ...pr, eligibility })), runs },
-    createElement(PREligibilityView, { rows }),
+    createElement(PRListView, {
+      rows: prListRows(rows, runs, io.now?.() ?? Date.now()),
+      columns: io.columns ?? 120,
+    }),
   )
 }
 
@@ -1841,6 +1845,8 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: { wroteError
     },
     getOutHasColors: () => io.color === true,
     getErrHasColors: () => io.color === true,
+    getOutHelpWidth: () => io.columns ?? 80,
+    getErrHelpWidth: () => io.columns ?? 80,
   })
   for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
@@ -1852,6 +1858,8 @@ function configureCanonicalHelp(program: CliCommand): void {
     return alias === "" ? value : value.replace(`|${alias}`, "")
   }
   program.configureHelp({
+    ...program.configureHelp(),
+    minWidthToWrap: 20,
     subcommandTerm: (command) => withoutAlias(standard.subcommandTerm(command), command as unknown as CliCommand),
     commandUsage: (command) => withoutAlias(standard.commandUsage(command), command as unknown as CliCommand),
   })
@@ -1865,7 +1873,7 @@ function addExamples(program: CliCommand, name: string, projection: "root" | "ba
   ]
   if (projection === "root") {
     examples.push(
-      [`$ ${name} pr`, "inspect active PRs"],
+      [`$ ${name} pr list`, "inspect active PRs"],
       [`$ ${name} queue run --steps check,merge`, "run selected steps"],
       [`$ ${name} watch --pr PR7`, "monitor PR and queue health"],
       [`$ ${name} contest open km:T1 -a codex/claude`, "compare implementations"],
@@ -2136,14 +2144,8 @@ function buildProgram(
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)
   pr.alias("prs")
-  pr.command("_list", { isDefault: true, hidden: true })
-    .option("--base <branch>", "scope PRs to one base")
-    .option("--state <state>", "scope PRs to one native state")
-    .option("--issue <ref>", "scope PRs to one issue reference")
-    .option("--needs-review", "show revisions needing approval")
-    .option("--json", "emit stable JSON")
-    .action(async (options) => listPrs(installed(), options, io))
   pr.command("list")
+    .alias("ls")
     .description("list pull requests")
     .option("--base <branch>", "scope PRs to one base")
     .option("--state <state>", "scope PRs to one native state")
@@ -2345,7 +2347,10 @@ async function executeYrd(
     commanderOutput,
     bootstrap,
   )
-  const args = invocation.args
+  const args =
+    invocation.projection === "root" && invocation.args.length === 1 && invocation.args[0] === "pr"
+      ? ["pr", "--help"]
+      : invocation.args
   try {
     await program.parseAsync(args, { from: "user" })
     return exit
