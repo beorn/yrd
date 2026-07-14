@@ -27,6 +27,7 @@ function per implementation detail.
 | `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
 | `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`          |
 | `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
+| Signal observer | `createSignalObserver()`                  | Route an enumerated post-append event subset outside the Queue lane                         | `start()`, `close()`                                                                                                                      |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -156,6 +157,13 @@ Current event schemas remain strict for every append. A plugin may additionally
 declare a replay-only schema for an older payload; Core tries it only while
 folding committed history. This lets a domain strengthen future facts without
 making weak legacy shapes valid commands again.
+
+The CLI may wrap the Journal with a signal observer. A successful append only
+wakes the observer; it never awaits delivery. The observer reads those same
+committed frames and atomically records its journal cursor plus successful
+event-id/recipient sends for crash replay. It does not own PR state, schedule
+work, or append facts. Delivery is at-least-once: a crash after an external send
+but before its local cursor record may redeliver that event.
 
 When a strict consumer needs a typed fact that old replay-only history omitted,
 the repair is an explicit domain command that appends a validated compensating
