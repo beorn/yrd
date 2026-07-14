@@ -307,6 +307,24 @@ function outputIO(overrides: Partial<YrdCliIO> = {}) {
   return { io, stdout: () => stdout, stderr: () => stderr }
 }
 
+type TrackerBridgeEnvelope = Readonly<
+  Record<string, unknown> & {
+    trackerBridge: Readonly<Record<string, unknown> & { deliveries: readonly unknown[] }>
+  }
+>
+
+function parseTrackerBridgeEnvelope(output: string): TrackerBridgeEnvelope {
+  const parsed: unknown = JSON.parse(output)
+  if (typeof parsed !== "object" || parsed === null || !("trackerBridge" in parsed)) {
+    throw new Error("expected JSON object with trackerBridge")
+  }
+  const bridge = parsed.trackerBridge
+  if (typeof bridge !== "object" || bridge === null || !("deliveries" in bridge) || !Array.isArray(bridge.deliveries)) {
+    throw new Error("expected trackerBridge with deliveries")
+  }
+  return parsed as TrackerBridgeEnvelope
+}
+
 function yrd(...args: string[]): string[] {
   return ["/usr/bin/bun", "/repo/bin/yrd.ts", ...args]
 }
@@ -716,7 +734,7 @@ describe("runYrd", () => {
     const currentDelivery = async (app: TestApp) => {
       const output = outputIO()
       expect(await runYrd(app, yrd("issue", "--json"), output.io), output.stderr()).toBe(0)
-      const parsed = JSON.parse(output.stdout())
+      const parsed = parseTrackerBridgeEnvelope(output.stdout())
       expect(parsed).toMatchObject({
         command: "issue.list",
         trackerBridge: { version: 1, asOf: { cursor: expect.any(Number), at } },
@@ -893,7 +911,7 @@ describe("runYrd", () => {
 
     const before = outputIO()
     expect(await runYrd(app, yrd("issue", "view", originalIssue, "--json"), before.io), before.stderr()).toBe(0)
-    const beforeBridge = JSON.parse(before.stdout()).trackerBridge
+    const beforeBridge = parseTrackerBridgeEnvelope(before.stdout()).trackerBridge
 
     const edit = outputIO()
     expect(await runYrd(app, yrd("pr", "edit", "PR1", "--issue", replacementIssue, "--json"), edit.io)).toBe(1)
@@ -904,7 +922,7 @@ describe("runYrd", () => {
 
     const after = outputIO()
     expect(await runYrd(app, yrd("issue", "view", originalIssue, "--json"), after.io), after.stderr()).toBe(0)
-    expect(JSON.parse(after.stdout()).trackerBridge).toEqual(beforeBridge)
+    expect(parseTrackerBridgeEnvelope(after.stdout()).trackerBridge).toEqual(beforeBridge)
   })
 
   it("records one completed escaped regression and exposes the same lossless tracker bridge", async () => {
@@ -1028,8 +1046,8 @@ describe("runYrd", () => {
       at: "2026-07-09T12:00:00.000Z",
       regressions: [projectedRegression],
     }
-    const issueJson = JSON.parse(issue.stdout())
-    const runsJson = JSON.parse(runs.stdout())
+    const issueJson = parseTrackerBridgeEnvelope(issue.stdout())
+    const runsJson = parseTrackerBridgeEnvelope(runs.stdout())
     expect(issueJson).toMatchObject({
       command: "issue.view",
       trackerBridge: {
