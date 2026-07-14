@@ -937,6 +937,60 @@ describe("Queue", () => {
     expect(changedChecks).toBe(1)
   })
 
+  it("audits a rejected revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
+    let rejectFirstRun = true
+    await using app = await createQueueApp({
+      check: (input) => {
+        if (rejectFirstRun && input.prs.some((pr) => pr.id === "PR1")) {
+          rejectFirstRun = false
+          return { status: "failed", error: { code: "check-failed", message: "reject R1" } }
+        }
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+
+    const retried = await submitBranch(app, "issue/retry-without-submit")
+    const first = (await app.queue.run({ prs: [retried.id] }, runtime))[0]
+    if (first === undefined) throw new Error("expected authorized R1")
+    expect(first).toMatchObject({ id: "R1", status: "failed" })
+    expect(app.state().bays.prs[retried.id]?.status).toBe("rejected")
+
+    const retry = (await app.queue.admit({ prs: [retried.id], retry: true }, runtime))[0]
+    if (retry === undefined) throw new Error("expected unauthorized R2")
+    expect(retry).toMatchObject({ id: "R2", status: "passed" })
+
+    const submitted = await submitBranch(app, "issue/submitted-control")
+    const submittedRun = (await app.queue.run({ prs: [submitted.id] }, runtime))[0]
+    if (submittedRun === undefined) throw new Error("expected submitted control run")
+
+    await app.bays.submit({
+      branch: "issue/draft-check-control",
+      headSha: UPDATED,
+      base: "main",
+      baseSha: BASE,
+      draft: true,
+    })
+    await app.bays.requestChecks({ pr: "PR3" })
+    const draftCheck = (await app.queue.admit({ prs: ["PR3"] }, runtime))[0]
+    if (draftCheck === undefined) throw new Error("expected pushed draft-check control run")
+    expect(app.state().bays.prs.PR3?.status).toBe("pushed")
+
+    expect(app.queue.audit().findings).toEqual([
+      expect.objectContaining({ code: "run-without-submit-ancestry", run: retry.id, pr: retried.id }),
+    ])
+  })
+
+  it("schema-refuses queue.run retry authority without appending events", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/retry-schema")
+    const before = await Array.fromAsync(app.events())
+    const untrusted = { prs: [pr.id], retry: true }
+
+    await expect(app.dispatch(app.commands.queue.run, untrusted)).rejects.toThrow(/retry/iu)
+
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+  })
+
   it("keeps a draft admission failure ineligible after ready until an explicit retry", async () => {
     let fail = true
     await using app = await createQueueApp({
