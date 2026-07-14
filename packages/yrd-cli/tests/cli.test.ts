@@ -43,6 +43,7 @@ import {
   queueLogRows,
   queueRevisionKey,
   queueRunRevisionKey,
+  queueTimelineRows,
   runRevisionClock,
   queueShowData,
   queueStatusRows,
@@ -1973,6 +1974,76 @@ describe("runYrd", () => {
       step: "review",
       elapsed: "1m",
     })
+  })
+
+  it("collapses queue timeline rows to the latest row per PR when requested", () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          revisions: [
+            { revision: 1, headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA, pushedAt: "2026-07-09T11:59:00.000Z" },
+          ],
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "2".repeat(40),
+          revisions: [
+            {
+              revision: 1,
+              headSha: "2".repeat(40),
+              base: "main",
+              baseSha: BASE_SHA,
+              pushedAt: "2026-07-09T12:01:30.000Z",
+            },
+          ],
+        },
+      ],
+      running: [
+        {
+          id: "R1",
+          base: "main",
+          status: "running",
+          startedAt: "2026-07-09T12:00:00.000Z",
+          shape: {},
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+      ],
+      waiting: [],
+      finished: [
+        {
+          id: "R2",
+          base: "main",
+          status: "passed",
+          startedAt: "2026-07-09T12:10:00.000Z",
+          finishedAt: "2026-07-09T12:11:00.000Z",
+          shape: {},
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+      ],
+    } as unknown as QueueStatusResult
+
+    const allRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), false)
+    const latestRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)
+
+    expect(allRows.map((row) => row.pr)).toEqual(["PR1", "PR1", "PR2"])
+    expect(latestRows.map((row) => row.pr)).toEqual(["PR1", "PR2"])
+    expect(latestRows.find((row) => row.pr === "PR1")?.run).toBe("R2")
   })
 
   it("falls back to job status when a watch queue job carries no evidence detail", () => {
