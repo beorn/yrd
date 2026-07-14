@@ -59,6 +59,7 @@ import {
   type QueueRecord,
   type QueueRequirement,
   type QueueRun,
+  type QueueRunAuthority,
   type QueueRunId,
   type QueueSummary,
   type QueuesState,
@@ -663,8 +664,7 @@ function createQueue<Shape extends PRShape>(
           (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
         )
         const hasTerminalFailure = candidate.steps.some(
-          (step) =>
-            step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+          (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
         )
         if (hasTerminalFailure && needsAdvance(snapshot, candidate)) {
           const reconciled = await actions.advance(candidate.id)
@@ -725,7 +725,11 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       if (status === "passed" || status === "checking") {
         return { events: [] }
       }
-      if (existing !== undefined && status === "failed") {
+      if (
+        existing !== undefined &&
+        status === "failed" &&
+        state.queues.authority.runs[existing.id]?.released === undefined
+      ) {
         requireFreshCheckAuthority(state.queues.authority, snapshot, existing.id)
       } else {
         requireQueueAuthority(state.queues.authority, [snapshot], selected)
@@ -858,6 +862,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
 }
 
 type QueueAuthorityKind = "submit" | "checks"
+type QueueAuthorityRelease = NonNullable<QueueRunAuthority["released"]>
 type QueueAuthorityGap = Readonly<{
   kind: QueueAuthorityKind
   pr: string
@@ -866,6 +871,13 @@ type QueueAuthorityGap = Readonly<{
   reason: "missing" | "consumed"
   consumedBy?: QueueRunId
 }>
+
+function queueAuthorityReleaseReason(
+  error: DeepReadonly<JobError> | undefined,
+): QueueAuthorityRelease["reason"] | undefined {
+  if (error?.code === "queue-environment-refused" || error?.code === "job-lost") return error.code
+  return undefined
+}
 
 function authorityRequirement(
   authority: DeepReadonly<QueueAuthorityState>,
@@ -905,11 +917,7 @@ function requireFreshCheckAuthority(
     sameAuthorityToken(token, pr) && token?.consumedBy !== undefined
       ? `the matching checks fact was consumed by queue run '${token.consumedBy}'`
       : "no fresh matching checks fact exists"
-  raiseFailure(
-    "refusal",
-    "checks-failed",
-    `yrd: PR '${pr.id}' checks failed in ${failedRun}; ${detail}`,
-  )
+  raiseFailure("refusal", "checks-failed", `yrd: PR '${pr.id}' checks failed in ${failedRun}; ${detail}`)
 }
 
 function queueAuthorityGaps(
@@ -975,8 +983,7 @@ function projectRunAuthority(
             inherited === undefined
               ? run.prs.map((pr) => pr.id)
               : inherited.missingSubmits.filter((pr) => members.has(pr)),
-          missingChecks:
-            inherited === undefined ? [] : inherited.missingChecks.filter((pr) => members.has(pr)),
+          missingChecks: inherited === undefined ? [] : inherited.missingChecks.filter((pr) => members.has(pr)),
         },
       },
     }
@@ -1011,6 +1018,47 @@ function projectRunAuthority(
         missingChecks: gaps.filter((gap) => gap.kind === "checks").map((gap) => gap.pr),
       },
     },
+  }
+}
+
+function resolveQueueAuthorityRoot(authority: DeepReadonly<QueueAuthorityState>, run: QueueRunId): QueueRunId {
+  const seen = new Set<QueueRunId>()
+  let root = run
+  while (true) {
+    if (seen.has(root)) throw new Error(`yrd: queue authority ancestry for '${run}' is cyclic`)
+    seen.add(root)
+    const projected = authority.runs[root]
+    if (projected === undefined) throw new Error(`yrd: queue run '${root}' has no authority projection`)
+    if (projected.inheritedFrom === undefined) return root
+    root = projected.inheritedFrom
+  }
+}
+
+function releaseRunAuthority(
+  authority: DeepReadonly<QueueAuthorityState>,
+  run: DeepReadonly<QueueRecord>,
+  release: QueueAuthorityRelease,
+): QueueAuthorityState {
+  const root = resolveQueueAuthorityRoot(authority, run.id)
+  const projected = authority.runs[run.id]
+  if (projected === undefined) throw new Error(`yrd: queue run '${run.id}' has no authority projection`)
+  const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
+  const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
+  for (const pr of run.prs) {
+    const submit = authority.submits[pr.id]
+    if (submit !== undefined && sameAuthorityToken(submit, pr) && submit.consumedBy === root) {
+      submits[pr.id] = { pr: submit.pr, revision: submit.revision, headSha: submit.headSha }
+    }
+    const check = authority.checks[pr.id]
+    if (check !== undefined && sameAuthorityToken(check, pr) && check.consumedBy === root) {
+      checks[pr.id] = { pr: check.pr, revision: check.revision, headSha: check.headSha }
+    }
+  }
+  return {
+    ...authority,
+    submits,
+    checks,
+    runs: { ...authority.runs, [run.id]: { ...projected, released: release } },
   }
 }
 
@@ -1148,9 +1196,17 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     const failed = QueueFailedSchema.parse(applied.data)
     const record = state.queues.records[failed.run]
     if (record === undefined) throw new Error(`yrd: no queue run '${failed.run}'`)
+    const releaseReason = queueAuthorityReleaseReason(failed.error)
     return {
       queues: {
         ...state.queues,
+        authority:
+          releaseReason === undefined
+            ? state.queues.authority
+            : releaseRunAuthority(state.queues.authority, record, {
+                reason: releaseReason,
+                ref: applied.id,
+              }),
         records: {
           ...state.queues.records,
           [record.id]: { ...record, failure: { at: applied.ts, error: failed.error } },
@@ -1241,8 +1297,9 @@ function advanceQueue(
   record: DeepReadonly<QueueRecord>,
   steps: ReadonlyMap<string, RuntimeStep>,
 ): Readonly<{ events: readonly EventDraft[] }> {
+  if (record.failure !== undefined) return { events: [] }
   const stale = pinnedPRError(state.bays, record.prs)
-  if (stale !== undefined && record.failure === undefined) {
+  if (stale !== undefined) {
     return { events: [event("queue/run/failed", { run: record.id, error: stale })] }
   }
 
@@ -1286,15 +1343,15 @@ function advanceQueue(
       }
     }
 
+    const failure = jobFailure(job)
+    if (queueAuthorityReleaseReason(failure) !== undefined) {
+      return { events: [event("queue/run/failed", { run: record.id, error: failure })] }
+    }
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
-    const failure = jobFailure(job)
     return {
       events:
-        failure.code !== "queue-environment-refused" &&
-        !isIntegrated(before) &&
-        pr !== undefined &&
-        current?.status === "submitted"
+        !isIntegrated(before) && pr !== undefined && current?.status === "submitted"
           ? [
               event("pr/rejected", {
                 pr: pr.id,
@@ -1345,9 +1402,7 @@ function samePayloadPRs(
   const payloads = new Set(snapshots.map((pr) => `${baseIdentity(pr.base)}\0${pr.headSha}`))
   return Object.values(state.prs).filter(
     (pr) =>
-      pr.status !== "withdrawn" &&
-      pr.status !== "canceled" &&
-      payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
+      pr.status !== "withdrawn" && pr.status !== "canceled" && payloads.has(`${baseIdentity(pr.base)}\0${pr.headSha}`),
   )
 }
 
@@ -1361,8 +1416,7 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
   )
   const cursor = steps.findIndex((step) => step.job === undefined || !Job.terminal(step.job))
   const failed = steps.find(
-    (step) =>
-      step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+    (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
   )?.job
   const waiting = steps.some((step) => step.job?.status === "waiting")
   const passed = steps.every((step) => step.job?.status === "passed")
@@ -1654,7 +1708,10 @@ function resumableQueueRoots(
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(state.queues, steps)
   return pendingQueueRoots(state).filter(
-    (run) => !samePlan(run.steps, admissions) && (selected === undefined || run.prs.some((pr) => selected.has(pr.id))),
+    (run) =>
+      state.queues.authority.runs[run.id]?.released === undefined &&
+      !samePlan(run.steps, admissions) &&
+      (selected === undefined || run.prs.some((pr) => selected.has(pr.id))),
   )
 }
 
@@ -1744,8 +1801,7 @@ function checkRunStatus(run: QueueRun, selectedCount: number): PREligibility["ch
   if (selected.every((step) => step.job?.status === "passed")) return "passed"
   if (
     selected.some(
-      (step) =>
-        step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+      (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
     )
   ) {
     return "failed"
@@ -2001,7 +2057,10 @@ function prEligibility(
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({ code: "checking", message: `PR '${pr.id}' checks are running${run}` })
     }
-    if (checks.status === "failed") {
+    if (
+      checks.status === "failed" &&
+      (checks.run === undefined || state.queues.authority.runs[checks.run]?.released === undefined)
+    ) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({
         code: "checks-failed",
@@ -2107,11 +2166,17 @@ function normalizeBatch(config: BatchConfig): number {
 
 function bisectable(run: QueueRun): boolean {
   const failed = run.steps.some((step) => step.job?.status === "failed" || step.job?.status === "lost")
-  return run.status === "failed" && failed && !isIntegrated(run.shape) && run.prs.length > 1
+  return (
+    run.status === "failed" &&
+    failed &&
+    queueAuthorityReleaseReason(run.error) === undefined &&
+    !isIntegrated(run.shape) &&
+    run.prs.length > 1
+  )
 }
 
 function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean {
-  if (run.error?.code === "stale-pr") return false
+  if (Queues.record(state.queues, run.id).failure !== undefined) return false
   const index = run.steps.findLastIndex((step) => step.job !== undefined)
   const step = run.steps[index]
   if (step?.job === undefined || !Job.terminal(step.job)) return false
@@ -2127,6 +2192,7 @@ function needsAdvance(state: DeepReadonly<RuntimeState>, run: QueueRun): boolean
       )
     })
   }
+  if (queueAuthorityReleaseReason(jobFailure(step.job)) !== undefined) return true
   if (run.prs.length !== 1 || isIntegrated(run.shape)) return false
   const pr = run.prs[0]
   if (pr === undefined) return false

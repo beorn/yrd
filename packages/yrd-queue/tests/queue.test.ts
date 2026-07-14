@@ -418,14 +418,10 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
-    expect(appended).toMatchObject([
-      { name: "queue/run/failed", data: { run: "R1", error: { code: "job-lost" } } },
-    ])
+    expect(appended).toMatchObject([{ name: "queue/run/failed", data: { run: "R1", error: { code: "job-lost" } } }])
     const failed = appended[0]
     if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
-    const authority = replayed.state().queues.authority.runs.R1 as
-      | Readonly<{ released?: Readonly<{ reason: "queue-environment-refused" | "job-lost"; ref: string }> }>
-      | undefined
+    const authority = replayed.state().queues.authority.runs.R1
     expect(authority?.released).toEqual({ reason: "job-lost", ref: failed.id })
     expect(appended.map(({ name }) => name)).not.toContain("pr/rejected")
 
@@ -435,9 +431,7 @@ describe("Queue", () => {
 
     const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
-    expect(retried).toMatchObject([
-      { id: "R2", status: "passed", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] },
-    ])
+    expect(retried).toMatchObject([{ id: "R2", status: "passed", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] }])
     expect(replayed.state().bays.prs.PR1).toMatchObject({
       status: "integrated",
       revision: 1,
@@ -1141,15 +1135,10 @@ describe("Queue", () => {
 
       const events = await Array.fromAsync(app.events())
       const failed = events.find(
-        (applied) =>
-          applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+        (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
       )
       if (failed === undefined) throw new Error("expected the environment refusal to append queue/run/failed")
-      const authority = app.state().queues.authority.runs.R1 as
-        | Readonly<{
-            released?: Readonly<{ reason: "queue-environment-refused" | "job-lost"; ref: string }>
-          }>
-        | undefined
+      const authority = app.state().queues.authority.runs.R1
       expect(authority?.released).toEqual({ reason: "queue-environment-refused", ref: failed.id })
       expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
     }
@@ -1157,15 +1146,10 @@ describe("Queue", () => {
     await using replayed = await createQueueApp(options, journal, undefined, id)
     const replayedEvents = await Array.fromAsync(replayed.events())
     const replayedFailure = replayedEvents.find(
-      (applied) =>
-        applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
+      (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
     )
     if (replayedFailure === undefined) throw new Error("expected replay to retain queue/run/failed")
-    const replayedAuthority = replayed.state().queues.authority.runs.R1 as
-      | Readonly<{
-          released?: Readonly<{ reason: "queue-environment-refused" | "job-lost"; ref: string }>
-        }>
-      | undefined
+    const replayedAuthority = replayed.state().queues.authority.runs.R1
     expect(replayedAuthority?.released).toEqual({
       reason: "queue-environment-refused",
       ref: replayedFailure.id,
@@ -1224,9 +1208,7 @@ describe("Queue", () => {
     const revised = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
     const newRuns = revised.filter(({ id: run }) => run === "R2")
     expect(newRuns).toHaveLength(1)
-    expect(newRuns).toMatchObject([
-      { id: "R2", status: "passed", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] },
-    ])
+    expect(newRuns).toMatchObject([{ id: "R2", status: "passed", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] }])
     expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
     expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "integrated", revision: 2, headSha: UPDATED })
     expect(mergeCalls).toBe(2)
@@ -1890,6 +1872,80 @@ describe("Queue", () => {
       PR2: "integrated",
       PR3: "rejected",
       PR4: "integrated",
+    })
+  })
+
+  it("releases root-owned authority when an isolated child is environment-refused", async () => {
+    const checked: string[][] = []
+    let isolatedPR1Checks = 0
+    await using app = await createQueueApp({
+      batch: 2,
+      check: (input) => {
+        const prs = input.prs.map((pr) => pr.id)
+        checked.push(prs)
+        if (prs.length === 2) {
+          return { status: "failed", error: { code: "check-failed", message: "batch is merit-red" } }
+        }
+        if (prs[0] === "PR1" && ++isolatedPR1Checks === 1) {
+          return {
+            status: "failed",
+            error: { code: "queue-environment-refused", message: "isolated runner unavailable" },
+          }
+        }
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const first = await submitBranch(app, "issue/environment-child")
+    const second = await submitBranch(app, "issue/passing-child")
+
+    const runs = await app.queue.run({ prs: [first.id, second.id] }, runtime)
+
+    expect(runs).toMatchObject([
+      { id: "R1", status: "failed", error: { code: "check-failed" } },
+      { id: "R2", parent: "R1", status: "failed", error: { code: "queue-environment-refused" } },
+      { id: "R3", parent: "R1", status: "passed" },
+    ])
+    expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3"])
+    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, pr.status]))).toEqual({
+      PR1: "submitted",
+      PR2: "integrated",
+    })
+
+    const events = await Array.fromAsync(app.events())
+    const childFailure = events.find((applied) => {
+      if (applied.name !== "queue/run/failed") return false
+      const data = applied.data as Readonly<{ run?: unknown; error?: Readonly<{ code?: unknown }> }>
+      return data.run === "R2" && data.error?.code === "queue-environment-refused"
+    })
+    if (childFailure === undefined) throw new Error("expected isolated environment refusal to fail R2")
+    expect(app.state().queues.authority.runs.R1).not.toHaveProperty("released")
+    expect(app.state().queues.authority.runs.R2).toMatchObject({
+      inheritedFrom: "R1",
+      released: { reason: "queue-environment-refused", ref: childFailure.id },
+    })
+    expect(app.state().queues.authority.submits.PR1).toEqual({
+      pr: first.id,
+      revision: first.revision,
+      headSha: first.headSha,
+    })
+    expect(events.filter(({ name }) => name === "queue/batch/isolated")).toHaveLength(2)
+
+    const retried = await app.queue.run({ prs: [first.id] }, runtime)
+    const newRuns = retried.filter(({ id: run }) => run === "R4")
+    expect(newRuns).toHaveLength(1)
+    expect(newRuns).toMatchObject([
+      {
+        id: "R4",
+        status: "passed",
+        prs: [{ id: first.id, revision: first.revision, headSha: first.headSha }],
+      },
+    ])
+    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3", "R4"])
+    expect(app.state().bays.prs[first.id]).toMatchObject({
+      status: "integrated",
+      revision: first.revision,
+      headSha: first.headSha,
     })
   })
 })

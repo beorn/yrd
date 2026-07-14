@@ -78,6 +78,10 @@ export type QueueRunAuthority = Readonly<{
   inheritedFrom?: QueueRunId
   missingSubmits: readonly string[]
   missingChecks: readonly string[]
+  released?: Readonly<{
+    reason: "queue-environment-refused" | "job-lost"
+    ref: string
+  }>
 }>
 
 export type QueueAuthorityState = Readonly<{
