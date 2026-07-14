@@ -519,6 +519,43 @@ describe("Yrd domain objects", () => {
   })
 })
 
+describe("entity selector resolution", () => {
+  const candidates: readonly Core.SelectorCandidate<{ readonly id: string }>[] = [
+    { canonical: "PR13", aliases: ["Topic/Alpha", "B13"], value: { id: "PR13" } },
+    { canonical: "PR14", aliases: ["Topic/Beta", "B14"], value: { id: "PR14" } },
+  ]
+
+  it.each([
+    ["PR13", "PR13"],
+    ["pr13", "PR13"],
+    ["TOPIC/ALPHA", "PR13"],
+    ["b14", "PR14"],
+    ["missing", undefined],
+  ])("resolves %s without changing canonical identity", (selector, expected) => {
+    expect(Core.resolveSelector(selector, candidates, { kind: "PR" })?.id).toBe(expected)
+  })
+
+  it("prefers an exact canonical identity and rejects an ambiguous folded selector", () => {
+    const colliding: readonly Core.SelectorCandidate<{ readonly id: string }>[] = [
+      { canonical: "PR13", aliases: ["topic/one"], value: { id: "PR13" } },
+      { canonical: "PR14", aliases: ["pr13", "PR13"], value: { id: "PR14" } },
+    ]
+
+    expect(Core.resolveSelector("PR13", colliding, { kind: "PR" })?.id).toBe("PR13")
+
+    try {
+      Core.resolveSelector("Pr13", colliding, { kind: "PR" })
+      throw new Error("expected folded selector ambiguity")
+    } catch (error) {
+      expect(Core.failureFact(error)).toEqual({
+        kind: "refusal",
+        code: "selector-ambiguous",
+        message: "yrd: PR selector 'Pr13' is ambiguous: PR13, PR14",
+      })
+    }
+  })
+})
+
 describe("Memory Journal", () => {
   it("is a passable cursor-CAS object", async () => {
     const journal = createMemoryJournal([1, 2])

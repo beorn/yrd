@@ -3,6 +3,7 @@ import {
   event,
   observeYrdLifecycle,
   raiseFailure,
+  resolveSelector,
   type CommandHandler,
   type CommandResult,
   type CommandTree,
@@ -1220,14 +1221,24 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
   if (original.integratedAt === undefined || repair.integratedAt === undefined) {
     throw new Error("yrd: integrated regression tuple is missing its journal timestamp")
   }
-  if (original.terminalRun !== args.run) {
+  const run = resolveSelector(
+    args.run,
+    original.terminalRun === undefined ? [] : [{ canonical: original.terminalRun, value: original.terminalRun }],
+    { kind: "queue run" },
+  )
+  if (run === undefined) {
     raiseFailure(
       "refusal",
       "regression-run-mismatch",
       `yrd: queue run '${args.run}' does not prove integrated revision ${original.revision} of PR '${original.id}'`,
     )
   }
-  if (repair.terminalRun !== args.repairRun) {
+  const repairRun = resolveSelector(
+    args.repairRun,
+    repair.terminalRun === undefined ? [] : [{ canonical: repair.terminalRun, value: repair.terminalRun }],
+    { kind: "queue run" },
+  )
+  if (repairRun === undefined) {
     raiseFailure(
       "refusal",
       "regression-repair-run-mismatch",
@@ -1253,7 +1264,7 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     issueRef: original.issue,
     revision: original.revision,
     headSha: original.headSha,
-    run: args.run,
+    run,
     landingSha: original.integration.commit,
     detectedAt,
     severity: args.severity,
@@ -1262,7 +1273,7 @@ function recordPrRegression(state: DeepReadonly<BayState>, args: PrRegressionArg
     reviewRef: args.reviewRef,
     repairIssueRef: repair.issue,
     repairPr: repair.id,
-    repairRun: args.repairRun,
+    repairRun,
     repairLandingSha: repair.integration.commit,
   })
   if (original.regressions?.some((existing) => regressionKey(existing) === regressionKey(fact)) === true) {
