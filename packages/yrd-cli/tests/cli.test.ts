@@ -2176,6 +2176,43 @@ describe("runYrd", () => {
     expect(latestRows.find((row) => row.pr === "PR1")?.run).toBe("R2")
   })
 
+  it("keeps a fresh submitted revision newer than its prior finished run", () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "Revised",
+          branch: "topic/revised",
+          base: "main",
+          status: "submitted",
+          revision: 2,
+          headSha: "2".repeat(40),
+          submittedAt: "2026-07-09T12:15:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [],
+      finished: [
+        {
+          id: "R1",
+          base: "main",
+          status: "failed",
+          startedAt: "2026-07-09T12:10:00.000Z",
+          finishedAt: "2026-07-09T12:11:00.000Z",
+          shape: {},
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/revised", base: "main" }],
+          steps: [],
+        },
+      ],
+    } as unknown as QueueStatusResult
+
+    expect(queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)).toMatchObject([
+      { pr: "PR1", status: "submitted", clock: "5m", detail: "position 1" },
+    ])
+  })
+
   it("falls back to job status when a watch queue job carries no evidence detail", () => {
     const result = {
       base: "main",
