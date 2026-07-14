@@ -958,13 +958,139 @@ describe("runYrd", () => {
 
   it("exposes the canonical same-PR recut command", async () => {
     const app = await createApp()
+    const submitHelp = outputIO({ columns: 100 })
     const help = outputIO({ columns: 100 })
+
+    expect(await runYrd(app, yrd("pr", "submit", "--help"), submitHelp.io), submitHelp.stderr()).toBe(0)
+    expect(submitHelp.stdout()).toContain("Authored root carrier")
+    expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch> --draft")
+    expect(submitHelp.stdout()).toContain("$ yrd pr recut <PR> --queue")
+    expect(submitHelp.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
     expect(help.stdout()).toContain("--revision <number>")
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
+    expect(help.stdout()).toContain("Authored root carrier")
+    expect(help.stdout()).toContain("$ yrd pr submit <branch> --draft")
+    expect(help.stdout()).toContain("$ yrd pr recut <PR> --queue")
+    expect(help.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
+  })
+
+  it("draft-submits an authored carrier and queues a recut revision on the same PR", async () => {
+    const checkedRevisions: string[] = []
+    const app = await createApp({ waitingCheck: true, checkedRevisions })
+    const nextHead = "2".repeat(40)
+    const nextBase = "b".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: nextHead,
+            baseSha: nextBase,
+            treeSha,
+            patchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const submitted = outputIO({ resolveRevision: () => Promise.resolve(HEAD_SHA) })
+
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/root-carrier", "--draft", "--json"), submitted.io),
+      submitted.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(submitted.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR1", branch: "topic/root-carrier", status: "pushed", revision: 1 }],
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "waiting",
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
+    })
+
+    const recut = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(JSON.parse(recut.stdout())).toMatchObject({
+      pr: "PR1",
+      revision: 2,
+      baseSha: nextBase,
+      treeSha,
+      patchId,
+      lineage: [1, 2],
+      unchanged: false,
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      id: "PR1",
+      branch: "topic/root-carrier",
+      status: "submitted",
+      revision: 2,
+      headSha: nextHead,
+      revisions: [
+        { revision: 1, headSha: HEAD_SHA },
+        { revision: 2, headSha: nextHead },
+      ],
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: { code: "stale-pr" },
+    })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "canceled" })
+    expect(app.queue.get("R2")).toMatchObject({
+      status: "waiting",
+      prs: [{ id: "PR1", revision: 2, headSha: nextHead }],
+    })
+    expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+    expect(checkedRevisions).toEqual(["PR1@1", "PR1@2"])
+  })
+
+  it("keeps unrelated members runnable when a recut supersedes their shared predecessor batch", async () => {
+    const app = await createApp({ batch: 2, waitingCheck: true })
+    await openAndSubmit(app)
+    expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
+    expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
+    expect(await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
+      {
+        id: "R1",
+        status: "waiting",
+        prs: [
+          { id: "PR1", revision: 1 },
+          { id: "PR2", revision: 1 },
+        ],
+      },
+    ])
+
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: "3".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const recut = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: { code: "stale-pr" },
+    })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "canceled" })
+    expect(app.queue.get("R2")).toMatchObject({
+      status: "waiting",
+      prs: [{ id: "PR1", revision: 2 }],
+    })
+    expect(app.bays.pr("PR2")).toMatchObject({ status: "submitted", revision: 1 })
+    expect(app.queue.eligibility("PR2")).toMatchObject({ runnable: true })
   })
 
   it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {
