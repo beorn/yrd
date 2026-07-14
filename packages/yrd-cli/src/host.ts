@@ -30,6 +30,7 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   configuredWaitingCommandStep,
+  createGitPRRecutter,
   gitCheckStep,
   gitMergeStep,
   inspectGitQueueTarget,
@@ -708,7 +709,10 @@ async function createYrdRuntimeHost(
       }
     }
     await drain()
-    const services = Object.freeze({ queue: queueAdministration(process, repository, loaded.config) })
+    const services = Object.freeze({
+      queue: queueAdministration(process, repository, loaded.config),
+      recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
+    })
     let closePromise: Promise<void> | undefined
     const close = () =>
       (closePromise ??= closeRuntime(app, process, scope, residentLease).finally(() => {

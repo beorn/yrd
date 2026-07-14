@@ -19,7 +19,7 @@ import {
   type PRRegressionSeverity,
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
-import type { DeepReadonly, JournalSnapshot } from "@yrd/core"
+import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import type { Job } from "@yrd/job"
 import { Queues, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -526,6 +526,99 @@ async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io
     { command: "pr.ready", pr: prFact(pr), eligibility: app.queue.eligibility(pr.id) },
     createElement(PRResultView, { prs: [pr], runs: [] }),
   )
+}
+
+async function recutPr(
+  app: YrdCliApp,
+  services: YrdCliServices,
+  selector: string,
+  options: JsonOption & Readonly<{ revision?: number; queue?: boolean }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  const service = services.recut ?? configuration("pr.recut capability is not installed")
+  const pr = requiredPr(app, selector)
+  if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
+    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
+  }
+  if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
+    usage("--revision must be a positive integer")
+  }
+  const fromRevision = options.revision ?? pr.revision
+  const source = pr.revisions.find((revision) => revision.revision === fromRevision)
+  if (source === undefined) {
+    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${fromRevision}`)
+  }
+  const approval = pr.reviews.findLast(
+    (review) =>
+      review.revision === source.revision && review.headSha === source.headSha && review.decision === "approve",
+  )
+  const result = await service.recut({
+    id: pr.id,
+    ...(pr.bay === undefined ? {} : { bay: pr.bay }),
+    ...(pr.name === undefined ? {} : { name: pr.name }),
+    branch: pr.branch,
+    base: pr.base,
+    revision: source.revision,
+    headSha: source.headSha,
+    ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
+    ...(source.correlation === undefined ? {} : { correlation: source.correlation }),
+    ...(source.composition === undefined ? {} : { composition: source.composition }),
+    ...(pr.recut === undefined
+      ? {}
+      : {
+          current: {
+            revision: pr.revision,
+            headSha: pr.headSha,
+            ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }),
+            treeSha: pr.recut.treeSha,
+            patchId: pr.recut.patchId,
+            fromRevision: pr.recut.fromRevision,
+            ...(pr.composition === undefined ? {} : { composition: pr.composition }),
+          },
+        }),
+  })
+  let unchanged = result.unchanged
+  if (!unchanged) {
+    const recorded = await app.bays.recut({
+      pr: pr.id,
+      fromRevision: source.revision,
+      headSha: result.headSha,
+      baseSha: result.baseSha,
+      treeSha: result.treeSha,
+      patchId: result.patchId,
+      reviewCarried: approval !== undefined,
+      ...(result.composition === undefined ? {} : { composition: result.composition }),
+    })
+    unchanged = recorded.events.length === 0
+  }
+
+  let current = requiredPr(app, pr.id)
+  let admitted: readonly QueueRun[] = []
+  if (options.queue === true) {
+    if (current.status === "pushed") await app.bays.ready({ pr: current.id })
+    current = requiredPr(app, current.id)
+    if (current.status !== "submitted") {
+      raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${current.status}, not ready`)
+    }
+    if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
+    admitted = await app.queue.admit({})
+    current = requiredPr(app, current.id)
+  }
+  const output = {
+    revision: current.revision,
+    baseSha: result.baseSha,
+    treeSha: result.treeSha,
+    patchId: result.patchId,
+    reviewCarried: approval !== undefined,
+    unchanged,
+  }
+  await printResult(
+    io,
+    jsonEnabled(options),
+    output,
+    `${current.id} revision ${current.revision} ${unchanged ? "already matches" : "recut onto"} ${result.baseSha}`,
+  )
+  return admitted.some((run) => run.status === "failed") ? 1 : 0
 }
 
 async function reviewPr(
@@ -2317,6 +2410,14 @@ function buildProgram(
     .option("--note <text>", "set the delivery note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
+  pr.command("recut <selector>")
+    .description("mechanically recut an immutable PR revision onto authoritative current base")
+    .option("--revision <number>", "select an older immutable PR revision", int)
+    .option("--queue", "ready the fresh revision and admit its configured checks")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      setExit(await recutPr(installed(), installedServices(), selector, options, io)),
+    )
   pr.command("ready <selector>")
     .description("move a pushed PR revision into the queue")
     .option("--json", "emit stable JSON")

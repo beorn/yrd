@@ -1131,6 +1131,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     await writeFile(oldBayJournal, "old bay journal remains opaque\n")
 
     await using host = await createYrdHost({ cwd: repo })
+    expect(host.services.recut).toBeDefined()
     const headSha = await git(repo, "rev-parse", "issue/feature")
     await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
 

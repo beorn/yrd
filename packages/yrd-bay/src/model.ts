@@ -168,6 +168,16 @@ export type PRRevisionClock = Readonly<{
   terminal?: PRRevisionTerminal
 }>
 
+export const PRRecutProofSchema = z
+  .object({
+    fromRevision: z.number().int().positive(),
+    patchId: GitShaSchema,
+    treeSha: GitShaSchema,
+    reviewCarried: z.boolean(),
+  })
+  .strict()
+export type PRRecutProof = Readonly<z.infer<typeof PRRecutProofSchema>>
+
 export type PRRevision = Readonly<{
   revision: number
   headSha: string
@@ -175,6 +185,7 @@ export type PRRevision = Readonly<{
   baseSha?: string
   correlation?: Correlation
   composition?: CompositionV1
+  recut?: PRRecutProof
 }> &
   PRRevisionClock
 
@@ -188,6 +199,7 @@ export type PRReview = Readonly<{
   at: string
   ref?: string
   note?: string
+  carriedFrom?: Readonly<{ revision: number; headSha: string }>
 }>
 
 export type PRComment = Readonly<{
@@ -249,6 +261,7 @@ export type PR = Readonly<{
   baseSha?: string
   correlation?: Correlation
   composition?: CompositionV1
+  recut?: PRRecutProof
   revisions: readonly PRRevision[]
   reviews: readonly PRReview[]
   comments: readonly PRComment[]

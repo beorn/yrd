@@ -4,6 +4,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  PRRecutProofSchema,
   type PRTerminalAssociation,
   baseIdentity,
   checkRequest,
@@ -30,6 +31,7 @@ export const PRSnapshotSchema = z
     baseSha: GitShaSchema.optional(),
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
+    recut: PRRecutProofSchema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -372,6 +374,7 @@ export const Queues = Object.freeze({
       ...(baseSha === undefined ? {} : { baseSha }),
       ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
       ...(pr.composition === undefined ? {} : { composition: pr.composition }),
+      ...(pr.recut === undefined ? {} : { recut: pr.recut }),
     })
   },
 
