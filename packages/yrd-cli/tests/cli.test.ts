@@ -1844,6 +1844,12 @@ describe("runYrd", () => {
     expect(submitted).toMatchObject({ prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }] })
     expect(submitted.prs[0]).toMatchObject({ status: "submitted" })
 
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["check"] })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "running",
+      steps: [{ job: { status: "requested", attempt: 0 } }],
+    })
+
     const close = outputIO()
     expect(await runYrd(app, yrd("pr", "close", "PR1", "--json"), close.io), close.stderr()).toBe(0)
     const closed = JSON.parse(close.stdout()) as { prs: Record<string, unknown>[] }
@@ -1852,10 +1858,50 @@ describe("runYrd", () => {
       prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
     })
     expect(closed.prs[0]).toMatchObject({ status: "withdrawn" })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      steps: [
+        {
+          job: {
+            status: "canceled",
+            attempt: 0,
+            canceledBy: "cli-test",
+            cancelReason: "PR withdrawn",
+          },
+        },
+      ],
+    })
+
+    await app.bays.submit({ branch: "topic/next", headSha: MERGED_SHA, base: "main", baseSha: BASE_SHA })
+    await expect(app.dispatch(app.commands.queue.run, { prs: ["PR2"], steps: ["check"] })).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({ name: "queue/run/started" }),
+        expect.objectContaining({ name: "job/requested" }),
+      ],
+    })
 
     // A terminal PR refuses re-close with a nonzero exit — never a silent no-op.
     const again = outputIO()
     expect(await runYrd(app, yrd("pr", "close", "PR1"), again.io)).not.toBe(0)
+  })
+
+  it("terminalizes unclaimed Queue work when `bay close --withdraw` closes its PR", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    await expect(
+      app.queue.run({ prs: ["PR1"], steps: ["check"] }, { runner: "history-runner", leaseMs: 60_000 }),
+    ).resolves.toMatchObject([{ id: "R1", status: "passed" }])
+    await app.dispatch(app.commands.queue.run, { prs: ["PR1"], steps: ["merge"] })
+
+    const close = outputIO({ cwd: "/repo/.bays/B1" })
+    expect(await runYrd(app, yrd("bay", "close", "--withdraw", "--json"), close.io), close.stderr()).toBe(0)
+
+    expect(app.state().bays.prs.PR1?.status).toBe("withdrawn")
+    expect(app.queue.get("R1")).toMatchObject({ status: "passed" })
+    expect(app.queue.get("R2")).toMatchObject({
+      status: "failed",
+      steps: [{ job: { status: "canceled", attempt: 0, cancelReason: "PR withdrawn" } }],
+    })
   })
 
   it("requires the exact waiting Job owner to finish and resume the same durable run", async () => {

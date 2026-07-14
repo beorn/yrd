@@ -593,6 +593,28 @@ describe("Jobs", () => {
     await expect(settled).resolves.toEqual({ error: expect.objectContaining({ message: "yrd: runtime is closed" }) })
   })
 
+  it("cancels an unclaimed requested Job without inventing runner identity", async () => {
+    await using app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID) })
+    await app.dispatch(app.commands.sender.send, { message: "unclaimed" })
+
+    const canceled = await app.jobs.cancel({
+      id: JOB_ID,
+      attempt: 0,
+      by: "@chief",
+      reason: "authorization withdrawn before claim",
+    })
+
+    expect(canceled).toMatchObject({
+      id: JOB_ID,
+      attempt: 0,
+      status: "canceled",
+      canceledBy: "@chief",
+      cancelReason: "authorization withdrawn before claim",
+    })
+    expect(canceled).not.toHaveProperty("runner")
+    expect(canceled).not.toHaveProperty("startedAt")
+  })
+
   it("cancels an active Job immediately without projecting runner loss", async () => {
     const started = Promise.withResolvers<void>()
     const aborted = Promise.withResolvers<void>()
