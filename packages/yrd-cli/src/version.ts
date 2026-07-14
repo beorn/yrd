@@ -43,10 +43,13 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
 }
 
 /** Runtime identity for every Yrd CLI projection, anchored to Yrd source. */
-export function formatYrdRuntimeVersion(): string {
-  const head = sourceGit(["rev-parse", "--short=10", "--verify", "HEAD"])
-  const sha = head.status === 0 && head.stdout.trim() !== "" ? head.stdout.trim() : "unknown"
-  const status = sourceGit(["status", "--porcelain=v1"])
-  const dirty = status.status === 0 && status.stdout.trim() !== ""
+export function formatYrdRuntimeVersion(git: typeof sourceGit = sourceGit): string {
+  const head = git(["rev-parse", "--short=10", "--verify", "HEAD"])
+  const status = git(["status", "--porcelain=v1"])
+  const sha = head.stdout.trim()
+  if (head.status !== 0 || !/^[0-9a-f]{10}$/iu.test(sha) || status.status !== 0) {
+    return `yrd ${YRD_VERSION}+unknown`
+  }
+  const dirty = status.stdout.trim() !== ""
   return `yrd ${YRD_VERSION}+${sha}${dirty ? "-dirty" : ""}`
 }

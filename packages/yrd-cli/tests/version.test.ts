@@ -3,9 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { YRD_VERSION } from "../src/version.ts"
+import { formatYrdRuntimeVersion, YRD_VERSION } from "../src/version.ts"
 
 const root = resolve(import.meta.dirname, "../../..")
+
+type GitProbe = (args: readonly string[]) => { status: number; stdout: string }
 
 async function run(executable: "yrd" | "git-yrd" | "git-bay", flag: "--version" | "-V", cwd: string) {
   const child = Bun.spawn([resolve(root, "bin", executable), flag], {
@@ -28,6 +30,30 @@ async function run(executable: "yrd" | "git-yrd" | "git-bay", flag: "--version" 
 }
 
 describe("version CLI", () => {
+  it("reports unknown when HEAD succeeds but git status fails", () => {
+    const calls: string[][] = []
+    const git: GitProbe = (args) => {
+      calls.push([...args])
+      if (calls.length === 1) return { status: 0, stdout: "0123456789\n" }
+      return { status: 1, stdout: "" }
+    }
+    expect(formatYrdRuntimeVersion(git)).toBe(`yrd ${YRD_VERSION}+unknown`)
+    expect(calls).toEqual([
+      ["rev-parse", "--short=10", "--verify", "HEAD"],
+      ["status", "--porcelain=v1"],
+    ])
+  })
+
+  it.each(["a", "not-a-sha", "0123456789extra", "012345678Z"])(
+    "reports unknown when successful HEAD output is malformed: %s",
+    (head) => {
+      const git: GitProbe = (args) =>
+        args.includes("rev-parse") ? { status: 0, stdout: `${head}\n` } : { status: 0, stdout: "" }
+
+      expect(formatYrdRuntimeVersion(git)).toBe(`yrd ${YRD_VERSION}+unknown`)
+    },
+  )
+
   it.each([
     ["yrd", "--version"],
     ["yrd", "-V"],
