@@ -204,7 +204,7 @@ The top-level surface is deliberately small:
 ```text
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd pr                      list PRs; submit, view, runs, diff, checkout,
-                            status, edit, checks, close, and merge teaching
+                            status, edit, checks, regression, close, and merge teaching
 yrd bay                     list bays; open, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
@@ -375,6 +375,9 @@ public repair path for expired runner leases; it never retries or executes work.
 ```text
 yrd issue [--json]
 yrd issue view <issue> [--json]
+yrd pr regression <pr> --run <run> --detected-at <timestamp>
+  --severity <level> --evidence <ref> --implementation-run <ref>
+  --review <ref> --repair-pr <pr> --repair-run <run> [--json]
 yrd contest open <issue> -a <harness-and-models> [--prompt <text>] [--json]
 yrd contest eval <contest> [--retry] [--json]
 yrd contest view <contest> [--json]
@@ -394,7 +397,26 @@ artifacts, the write-once attempt ref, and evaluator results. Missing provider
 metrics remain missing; Yrd does not guess cost.
 
 The issue surface is read-only and joins delivery facts to tracker references;
-issue creation and editing remain in the tracker. `contest eval` resumes
+issue creation and editing remain in the tracker. `yrd issue --json` and `yrd
+pr runs --json` include the same versioned `trackerBridge` projection. Each
+delivery carries the exact opaque `issueRef`, PR revision/head, native status,
+terminal Queue run, and one journal `asOf` cursor; integrated deliveries alone
+carry `landingSha`. Rejected deliveries carry their typed bounce run. Canceled
+and withdrawn are distinct terminal outcomes.
+
+`pr regression` records a completed repair without rewriting either integration.
+It accepts only the exact original and repair Queue runs named by their terminal
+journal facts, and preserves detection time, severity, evidence, opaque
+implementation/review provenance, both issue/PR/run identities, and both landing
+SHAs. Consumers may derive flow metrics from this join; Yrd does not add a
+telemetry store or interpret opaque provenance.
+
+The bridge contract is the journal plus JSON data, not a tracker plugin
+registry. Independent consumers checkpoint `trackerBridge.asOf.cursor` and
+write projections into their own tracker. References such as `@km/...`,
+`gh:1234`, and `JIRA-123` stay opaque to Yrd.
+
+`contest eval` resumes
 missing competitor and evaluator work. It never
 reruns a competitor whose implementation is already pinned. `--retry` returns
 failed or lost infrastructure Jobs to `requested` and retains their Job ids. A
@@ -624,6 +646,11 @@ final record is uncommitted and is truncated under the writer lock; malformed
 newline-committed records are
 reported as corruption. There is no second mutable database or read-model
 cache to reconcile.
+
+New terminal PR facts are revision/head-bound. Queue terminals also name their
+exact Run; integration facts expose `landingSha`, which must equal the
+`IntegrationProof.commit`. Historical payloads accepted by a replay-only schema
+remain readable, but the current append schema is never widened for them.
 
 Pre-cutover `.git/yrd/events.jsonl` and `.git/bay/journal.jsonl` files remain
 opaque, read-only legacy data. Yrd never decodes, migrates, appends, or rewrites

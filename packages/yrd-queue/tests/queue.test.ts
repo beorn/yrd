@@ -257,6 +257,107 @@ describe("Queue", () => {
     void invalid
   })
 
+  it("journals exact issue joins for integrated and rejected PRs without inferring prose", async () => {
+    const issueRef = "@km/all/21063-steering-laser"
+    const correlation = { namespace: "tribe-request", id: "21091-terminal-join" }
+
+    await using integratedApp = await createQueueApp()
+    await integratedApp.bays.submit({
+      branch: "topic/partial-2106-token",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      issue: issueRef,
+      correlation,
+    })
+    await integratedApp.queue.run({ prs: ["PR1"] }, runtime)
+
+    expect(await Array.fromAsync(integratedApp.events())).toContainEqual(
+      expect.objectContaining({
+        name: "pr/integrated",
+        data: {
+          pr: "PR1",
+          revision: 1,
+          headSha: HEAD,
+          issueRef,
+          run: "R1",
+          commit: MERGED,
+          landingSha: MERGED,
+          baseSha: BASE,
+          correlation,
+        },
+      }),
+    )
+
+    await using rejectedApp = await createQueueApp({
+      check: () => ({ status: "failed", error: { code: "check-failed", message: "typed bounce" } }),
+    })
+    await rejectedApp.bays.submit({
+      branch: "topic/unrelated-20685-subject",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      issue: issueRef,
+      correlation,
+    })
+    await rejectedApp.queue.run({ prs: ["PR1"] }, runtime)
+
+    expect(await Array.fromAsync(rejectedApp.events())).toContainEqual(
+      expect.objectContaining({
+        name: "pr/rejected",
+        data: {
+          pr: "PR1",
+          revision: 1,
+          headSha: HEAD,
+          issueRef,
+          run: "R1",
+          correlation,
+          detail: "typed bounce",
+        },
+      }),
+    )
+  })
+
+  it("binds an issue attached while checks wait to the eventual terminal fact", async () => {
+    await using app = await createQueueApp({
+      check: () => ({ status: "waiting", token: "remote-issue-attach" }),
+    })
+    const pr = await submitBranch(app, "issue/attach-while-waiting")
+    const waiting = (await app.queue.run({ prs: [pr.id] }, runtime))[0]
+    const job = waiting?.steps[0]?.job
+    if (job?.status !== "waiting") throw new Error("check did not wait")
+
+    const issueRef = "@km/all/21091-attached-while-waiting"
+    await app.bays.editPr({ pr: pr.id, issue: issueRef })
+    expect(
+      await app.queue.finish(
+        pr.id,
+        {
+          job: job.id,
+          step: "check",
+          attempt: job.attempt,
+          runner: job.runner,
+          token: job.token,
+          result: { status: "passed", output: { checked: true } },
+        },
+        runtime,
+      ),
+    ).toMatchObject({ status: "passed" })
+    expect(await Array.fromAsync(app.events())).toContainEqual(
+      expect.objectContaining({
+        name: "pr/integrated",
+        data: expect.objectContaining({
+          pr: pr.id,
+          revision: 1,
+          headSha: HEAD,
+          issueRef,
+          run: "R1",
+          landingSha: MERGED,
+        }),
+      }),
+    )
+  })
+
   it("treats an explicit empty step selection as a true no-op", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/no-steps")
@@ -726,6 +827,7 @@ describe("Queue", () => {
           pr: pr.id,
           revision: pr.revision,
           headSha: pr.headSha,
+          run: "R1",
           correlation,
           by: "@chief",
           reason: "authorization revoked",

@@ -96,8 +96,18 @@ derive narrower signals with `computed()`. `await yrd.refresh()` replays journal
 written by another process and publishes the newest snapshot. Commands refresh
 before deciding and publish after a successful append.
 
+`await yrd.journalSnapshot()` captures that projected state together with its
+journal cursor and latest event timestamp as one deeply frozen value. External
+consumers use the cursor as an explicit resume/staleness boundary instead of
+mixing projections from two journal cuts.
+
 All state is rebuildable from the Journal. There is no mutable projection
 database.
+
+An extension may declare `replayEvents` alongside its current `events`. Core
+uses those schemas only to read committed historical payloads that predate a
+strengthened contract. Dispatch always validates against the current event
+schema, so replay compatibility cannot reopen a weak append path.
 
 ## Journal Contract
 
