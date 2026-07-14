@@ -605,7 +605,7 @@ describe("runYrd", () => {
     const queue = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
     expect(queue.stdout()).toContain("manage integration queues")
-    expect(queue.stdout()).toMatch(/^\s+list \[options\]\s+list integration queues$/mu)
+    expect(queue.stdout()).toMatch(/^\s+list \[options\] \[filter\.\.\.\]\s+show the queue timeline$/mu)
     expect(queue.stdout()).not.toMatch(/^\s+ls \[options\]/mu)
     expect(queue.stdout()).toMatch(/^\s+init \[options\] \[base\]\s+prepare queue resources$/mu)
     expect(queue.stdout()).toMatch(/^\s+deinit \[options\] \[base\]\s+release queue resources$/mu)
@@ -2161,7 +2161,7 @@ describe("runYrd", () => {
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
-  it("selects a timeline row before switching the existing PR detail pane", async () => {
+  it("keeps the detail pane on the timeline cursor without requiring Enter", async () => {
     const result = {
       base: "main",
       headSha: BASE_SHA,
@@ -2208,7 +2208,8 @@ describe("runYrd", () => {
       await handle.press("j")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("> 1m submitted PR2")
-      expect(handle.text).toContain("PR PR1 STATUS")
+      expect(handle.text).toContain("PR PR2 STATUS")
+      expect(handle.text).not.toContain("PR PR1 STATUS")
 
       await handle.press("Enter")
       await handle.waitForLayoutStable()
@@ -2229,7 +2230,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
     expect(status.stdout()).toContain("PR1")
-    expect(status.stdout()).toContain("submitted")
+    expect(status.stdout()).toContain("pending")
     expect(status.stdout()).toContain("position 1")
   })
 
@@ -2252,10 +2253,11 @@ describe("runYrd", () => {
 
     expect(plain.stdout()).toContain("PR1")
     expect(plain.stdout()).toContain("PR2")
-    expect(plain.stdout()).toContain("submitted")
+    expect(plain.stdout()).toContain("pending")
     expect(latest.stdout()).toContain("PR1")
     expect(latest.stdout()).toContain("PR2")
-    expect(plain.stdout()).toBe(latest.stdout())
+    expect(plain.stdout()).toContain("latest=no")
+    expect(latest.stdout()).toContain("latest=yes")
   })
 
   it("renders queue --watch identically to root watch", async () => {
@@ -2299,6 +2301,96 @@ describe("runYrd", () => {
       )
       expect(frame).toBe(rootFrame)
     }
+  })
+
+  it("keeps queue aliases and plural filters on one lossless JSON projection", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/alpha", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "topic/beta", headSha: "2".repeat(40), base: "main" })
+    const now = () => Date.parse("2026-07-09T12:01:00.000Z")
+    const resolveQueueTarget = async () => ({ base: "main", sha: BASE_SHA })
+
+    const filtered = outputIO({ now, resolveQueueTarget })
+    expect(
+      await runYrd(
+        app,
+        yrd("queue", "list", "does-not-match", "TOPIC/ALPHA", "--status", "PENDING", "--since", "6h", "--json"),
+        filtered.io,
+      ),
+      filtered.stderr(),
+    ).toBe(0)
+    const expectedFiltered = JSON.parse(filtered.stdout()) as Record<string, unknown>
+    expect(expectedFiltered).toMatchObject({
+      command: "queue.list",
+      projection: {
+        base: "main",
+        filters: { terms: ["does-not-match", "topic/alpha"], statuses: ["pending"], windowMs: 21_600_000 },
+        rows: [{ prs: ["PR1"], branches: ["topic/alpha"] }],
+        metrics: { terminalAttempts: 0 },
+      },
+    })
+
+    const filteredAlias = outputIO({ now, resolveQueueTarget })
+    expect(
+      await runYrd(
+        app,
+        yrd("queue", "ls", "does-not-match", "TOPIC/ALPHA", "--status", "PENDING", "--since", "6h", "--json"),
+        filteredAlias.io,
+      ),
+      filteredAlias.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(filteredAlias.stdout())).toEqual(expectedFiltered)
+
+    const canonical = outputIO({ now, resolveQueueTarget })
+    expect(await runYrd(app, yrd("queue", "list", "--json"), canonical.io), canonical.stderr()).toBe(0)
+    const expected = JSON.parse(canonical.stdout()) as Record<string, unknown>
+    for (const args of [
+      ["queue", "ls", "--json"],
+      ["queue", "--json"],
+    ] as const) {
+      const output = outputIO({ now, resolveQueueTarget })
+      expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toEqual(expected)
+    }
+
+    for (const args of [
+      ["queue", "ls", "--watch", "--json"],
+      ["watch", "--json"],
+    ] as const) {
+      const controller = new AbortController()
+      const output = outputIO({
+        now,
+        resolveQueueTarget,
+        scope: { signal: controller.signal, sleep: async () => controller.abort() },
+      })
+      expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
+      expect(
+        output
+          .stdout()
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line) as Record<string, unknown>),
+      ).toEqual([expected])
+    }
+
+    let mounted: ReactElement | undefined
+    const interactive = outputIO({ now, resolveQueueTarget })
+    const live = withLiveRenderer(interactive.io, async (element) => {
+      mounted = element
+    })
+    expect(
+      await runYrd(app, yrd("queue", "ls", "TOPIC/ALPHA", "--status", "pending", "--watch"), live),
+      interactive.stderr(),
+    ).toBe(0)
+    if (mounted === undefined) throw new Error("expected filtered queue watch pane to mount")
+    const props = mounted.props as QueueWatchPaneProps
+    const frame = await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false }), {
+      width: 120,
+      height: 24,
+      plain: true,
+    })
+    expect(frame).toContain("PR1")
+    expect(frame).not.toContain("PR2")
   })
 
   it("renders pause and drain health in watch output", async () => {
@@ -2651,7 +2743,7 @@ describe("runYrd", () => {
       },
     })
     expect(await runYrd(app, yrd("watch", "--json"), watch.io)).toBe(0)
-    expect(watch.stdout()).toContain('"command":"watch"')
+    expect(watch.stdout()).toContain('"command":"queue.list"')
     expect(watch.stdout()).toContain('"base":"main"')
     expect(watch.stdout()).toContain('"id":"PR1"')
     expect(sleeps).toEqual([1_000])

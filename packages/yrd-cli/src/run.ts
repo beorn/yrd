@@ -39,7 +39,6 @@ import {
   PRRunsView,
   QueueRunsView,
   QueueTimelineView,
-  QueueWatchView,
   QueueStatusView,
   type PRCheckViewRecord,
   type QueueLogCoverage,
@@ -48,8 +47,12 @@ import {
   queueLogRows,
   queueRevisionKey,
   queueRunRevisionClocks,
+  queueTimelineAdmissionTimes,
+  queueTimelineProjection,
   runRevisionClock,
   queueShowData,
+  type QueueTimelineProjection,
+  type QueueTimelineStatusFilter,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
@@ -122,9 +125,62 @@ type RuntimeOptions = {
   continueAdmissions?: () => boolean
 }
 
-type WatchOptions = Readonly<{ base?: string; pr?: string; json?: boolean }>
+type QueueListOptions = Readonly<{
+  base?: string
+  pr?: string
+  status?: string
+  since?: string
+  latest?: boolean
+  watch?: boolean
+  json?: boolean
+}>
+
+type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
+
+const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
+const QUEUE_TIMELINE_ROW_LIMIT = 20
+const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
+  "pending",
+  "running",
+  "rejected",
+  "integrated",
+  "other",
+]
+
+function queueTimelineWindow(value: string | undefined): number {
+  if (value === undefined) return QUEUE_TIMELINE_DEFAULT_WINDOW_MS
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/iu.exec(value.trim())
+  if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
+  const amount = Number(match?.[1])
+  const unit = match?.[2]?.toLocaleLowerCase()
+  const multiplier =
+    unit === "ms" ? 1 : unit === "s" ? 1_000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000
+  const milliseconds = amount * multiplier
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    usage("--since must be a finite non-negative duration")
+  }
+  return milliseconds
+}
+
+function queueTimelineStatuses(value: string | undefined): QueueTimelineStatusFilter[] {
+  if (value === undefined) return [...QUEUE_TIMELINE_STATUSES]
+  const statuses = [
+    ...new Set(
+      value
+        .split(",")
+        .map((status) => status.trim().toLocaleLowerCase())
+        .filter(Boolean),
+    ),
+  ]
+  if (statuses.length === 0) usage("--status must name at least one timeline status")
+  const invalid = statuses.find((status) => !QUEUE_TIMELINE_STATUSES.includes(status as QueueTimelineStatusFilter))
+  if (invalid !== undefined) {
+    usage(`--status '${invalid}' is invalid; expected ${QUEUE_TIMELINE_STATUSES.join(",")}`)
+  }
+  return statuses as QueueTimelineStatusFilter[]
+}
 
 type TrackerDeliveryIdentity = Readonly<{
   issueRef: string
@@ -1178,20 +1234,59 @@ async function queueStatusSnapshots(
   return { results }
 }
 
-async function listQueues(
+function queueBases(state: YrdCliState): string[] {
+  return [
+    ...new Set([
+      ...Object.values(state.bays.prs).map((pr) => baseIdentity(pr.base)),
+      ...Object.values(state.queues.records).map((run) => baseIdentity(run.base)),
+    ]),
+  ].toSorted()
+}
+
+type QueueListSnapshot = QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>
+
+async function queueListSnapshot(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ base?: string; latest?: boolean }>,
+  filters: readonly string[],
+  options: QueueListOptions,
   io: YrdCliIO,
-): Promise<void> {
+): Promise<QueueListSnapshot> {
   const state = stateOf(app)
-  const target = resolveQueueTargets(state, [], options.base, undefined)
+  const requestedBase = options.base ?? "main"
+  const target = resolveQueueTargets(state, [], requestedBase, options.pr)
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
+  const base = results[0]?.base ?? baseIdentity(requestedBase)
+  return {
+    results,
+    now,
+    projection: queueTimelineProjection(results, {
+      now,
+      windowMs: queueTimelineWindow(options.since),
+      statuses: queueTimelineStatuses(options.status),
+      terms: filters,
+      latest: options.latest === true,
+      rowLimit: QUEUE_TIMELINE_ROW_LIMIT,
+      submissionTimes: queueTimelineAdmissionTimes(results),
+      siblingBases: queueBases(state),
+      base,
+      state: state.bays,
+    }),
+  }
+}
+
+async function listQueues(
+  app: YrdCliApp,
+  filters: readonly string[],
+  options: QueueListOptions,
+  io: YrdCliIO,
+): Promise<void> {
+  const snapshot = await queueListSnapshot(app, filters, options, io)
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.list", results },
-    createElement(QueueTimelineView, { results, now, latest: options.latest === true, state: state.bays }),
+    { command: "queue.list", projection: snapshot.projection, results: snapshot.results },
+    createElement(QueueTimelineView, { projection: snapshot.projection }),
   )
 }
 
@@ -1547,15 +1642,15 @@ async function sleepUntilDrain(sleep: Promise<void>, signal: AbortSignal | undef
   })
 }
 
-async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+async function watchQueue(
+  app: YrdCliApp,
+  filters: readonly string[],
+  options: WatchOptions,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const load = async (): Promise<QueueWatchSnapshot> => {
-    const state = stateOf(app)
-    const target = resolveQueueTargets(state, [], options.base, options.pr)
-    const { results } = await queueStatusSnapshots(app, state, target, io)
-    return { results, now: io.now?.() ?? Date.now() }
-  }
+  const load = async (): Promise<QueueListSnapshot> => queueListSnapshot(app, filters, options, io)
 
   if (!jsonEnabled(options)) {
     const renderLive = getLiveRenderer(io)
@@ -1582,11 +1677,8 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
     await printResult(
       io,
       true,
-      { command: "watch", results: snapshot.results },
-      createElement(QueueWatchView, {
-        ...snapshot,
-        ...(options.pr === undefined ? {} : { pr: options.pr }),
-      }),
+      { command: "queue.list", projection: snapshot.projection, results: snapshot.results },
+      createElement(QueueTimelineView, { projection: snapshot.projection }),
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)
@@ -2039,13 +2131,16 @@ function buildProgram(
     .action(async (options) => logRuns(installed(), [], options, io))
 
   program
-    .command("watch")
-    .description("monitor queue progress")
-    .option("--base <branch>", "scope watch to one base")
+    .command("watch [filter...]")
+    .description("alias for queue ls --watch")
+    .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one PR")
+    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--since <duration>", "timeline window", "6h")
+    .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
-    .action(async (options) => {
-      setExit(await watchQueue(installed(), options, io))
+    .action(async (filters, options) => {
+      setExit(await watchQueue(installed(), filters, options, io))
     })
 
   program
@@ -2058,31 +2153,35 @@ function buildProgram(
   queue.helpCommand(false)
   queue.alias("queues")
   queue
-    .command("_list", { isDefault: true, hidden: true })
-    .option("--base <branch>", "scope queues to one base")
-    .option("--latest", "collapse queue rows to the latest per PR")
-    .option("--watch", "render the live queue timeline")
+    .command("_list [filter...]", { isDefault: true, hidden: true })
+    .option("--base <branch>", "select one base queue")
+    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--since <duration>", "timeline window", "6h")
+    .option("--latest", "show only the latest Run for each PR")
+    .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
-    .action(async (options) => {
+    .action(async (filters, options) => {
       if (options.watch === true) {
-        setExit(await watchQueue(installed(), options, io))
+        setExit(await watchQueue(installed(), filters, options, io))
         return
       }
-      await listQueues(installed(), options, io)
+      await listQueues(installed(), filters, options, io)
     })
   const queueList = queue
-    .command("list")
-    .description("list integration queues")
-    .option("--base <branch>", "scope queues to one base")
-    .option("--latest", "collapse queue rows to the latest per PR")
-    .option("--watch", "render the live queue timeline")
+    .command("list [filter...]")
+    .description("show the queue timeline")
+    .option("--base <branch>", "select one base queue")
+    .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
+    .option("--since <duration>", "timeline window", "6h")
+    .option("--latest", "show only the latest Run for each PR")
+    .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
-    .action(async (options) => {
+    .action(async (filters, options) => {
       if (options.watch === true) {
-        setExit(await watchQueue(installed(), options, io))
+        setExit(await watchQueue(installed(), filters, options, io))
         return
       }
-      await listQueues(installed(), options, io)
+      await listQueues(installed(), filters, options, io)
     })
   queueList.alias("ls")
   queue

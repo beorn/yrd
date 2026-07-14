@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from "react"
 import { Box, Text, useInput, useScopeEffect } from "silvery"
-import { QueueTimelineView, QueueWatchView, queueTimelineRows, type QueueStatusResult } from "./queue-status-view.tsx"
+import {
+  QueueTimelineView,
+  QueueWatchView,
+  queueTimelineRows,
+  type QueueStatusResult,
+  type QueueTimelineProjection,
+} from "./queue-status-view.tsx"
 
 export type QueueWatchSnapshot = Readonly<{
   results: readonly QueueStatusResult[]
   now: number
+  projection?: QueueTimelineProjection
 }>
 
 export type WatchControl = Readonly<{ paused: boolean }>
@@ -31,33 +38,60 @@ export function QueueWatchFrame({
   paused: boolean
   pr?: string
 }) {
-  const rows = useMemo(() => queueTimelineRows(snapshot.results, snapshot.now, false), [snapshot.results, snapshot.now])
-  const [cursor, setCursor] = useState(0)
+  const rows = useMemo(
+    () =>
+      snapshot.projection === undefined
+        ? queueTimelineRows(snapshot.results, snapshot.now, false).map((row) => ({ key: row.key, pr: row.pr }))
+        : snapshot.projection.rows.map((row) => ({ key: row.id, pr: row.prs[0] })),
+    [snapshot],
+  )
+  const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => rows[0]?.key)
   const [selectedPr, setSelectedPr] = useState<string | undefined>(() => pr ?? rows[0]?.pr)
+  const cursor = Math.max(
+    0,
+    rows.findIndex((row) => row.key === cursorRowKey),
+  )
 
   useEffect(() => {
     if (rows.length === 0) {
-      setCursor(0)
+      setCursorRowKey(undefined)
       setSelectedPr(pr)
       return
     }
-    const nextCursor = Math.min(cursor, rows.length - 1)
-    if (nextCursor !== cursor) setCursor(nextCursor)
-    const nextSelected = selectedPr === undefined ? rows[nextCursor]?.pr : rows.find((row) => row.pr === selectedPr)?.pr
-    if (nextSelected === undefined) setSelectedPr(rows[nextCursor]?.pr)
-  }, [cursor, pr, rows, selectedPr])
+    const selected = rows.find((row) => row.key === cursorRowKey) ?? rows[0]
+    if (selected === undefined) return
+    if (selected.key !== cursorRowKey) setCursorRowKey(selected.key)
+    if (selected.pr !== selectedPr) setSelectedPr(selected.pr)
+  }, [cursorRowKey, pr, rows, selectedPr])
+
+  const selectRow = (index: number): void => {
+    const row = rows[index]
+    if (row === undefined) return
+    setCursorRowKey(row.key)
+    setSelectedPr(row.pr)
+  }
 
   const detailPr = pr ?? selectedPr
   return (
     <Box flexDirection="column">
-      <QueueTimelineView
-        results={snapshot.results}
-        now={snapshot.now}
-        nav
-        cursorKey={cursor}
-        onCursor={setCursor}
-        onSelect={(index) => setSelectedPr(rows[index]?.pr)}
-      />
+      {snapshot.projection === undefined ? (
+        <QueueTimelineView
+          results={snapshot.results}
+          now={snapshot.now}
+          nav
+          cursorKey={cursor}
+          onCursor={selectRow}
+          onSelect={selectRow}
+        />
+      ) : (
+        <QueueTimelineView
+          projection={snapshot.projection}
+          nav
+          cursorKey={cursor}
+          onCursor={selectRow}
+          onSelect={selectRow}
+        />
+      )}
       {detailPr === undefined ? null : (
         <Box marginTop={1}>
           <QueueWatchView results={snapshot.results} now={snapshot.now} pr={detailPr} />

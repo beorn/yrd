@@ -594,7 +594,7 @@ export function queueTimelineRows(
     terms: [],
     latest,
     rowLimit: Number.MAX_SAFE_INTEGER,
-    submissionTimes: queueTimelineSubmissionTimes(results),
+    submissionTimes: queueTimelineAdmissionTimes(results),
     state,
   })
   return projection.rows.map((row) => {
@@ -1413,7 +1413,7 @@ function latestTimelineRows(rows: readonly QueueTimelineProjectedRow[]): QueueTi
   })
 }
 
-function queueTimelineSubmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
+export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
   const submissionTimes = new Map<string, string | null>()
   for (const result of results) {
     const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
@@ -2263,7 +2263,117 @@ function queueLogSubmissionTime(
   return clock.admittedBy === "submission" ? clock.submittedAt : undefined
 }
 
+function timelineMetric(value: number | null): string {
+  return value === null ? "-" : mediaDuration(value)
+}
+
+function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
+  const decision = metrics.decisionRejection.rate
+  const all = metrics.activeRun.allTerminal
+  const integrated = metrics.activeRun.integratedOnly
+  const wait = metrics.queueWait
+  return (
+    <Box flexDirection="column">
+      <Text wrap="truncate">
+        FLOW terminal={metrics.terminalAttempts} integrated={metrics.outcomes.integrated} rejected=
+        {metrics.outcomes.rejected} decision={decision === null ? "-" : `${(decision * 100).toFixed(1)}%`} environment=
+        {metrics.outcomes.environmentRefused} canceled={metrics.outcomes.canceled}
+      </Text>
+      <Text color="$fg-muted" wrap="truncate">
+        ACTIVE ALL n={all.n} min={timelineMetric(all.minMs)} avg={timelineMetric(all.avgMs)} p50=
+        {timelineMetric(all.p50Ms)} p90={timelineMetric(all.p90Ms)} max={timelineMetric(all.maxMs)}
+      </Text>
+      <Text color="$fg-muted" wrap="truncate">
+        ACTIVE INTEGRATED n={integrated.n} min={timelineMetric(integrated.minMs)} avg=
+        {timelineMetric(integrated.avgMs)} p50={timelineMetric(integrated.p50Ms)} p90=
+        {timelineMetric(integrated.p90Ms)} max={timelineMetric(integrated.maxMs)}
+      </Text>
+      <Text color="$fg-muted" wrap="truncate">
+        WAIT n={wait.n} avg={timelineMetric(wait.avgMs)} p50={timelineMetric(wait.p50Ms)} p90=
+        {timelineMetric(wait.p90Ms)} max={timelineMetric(wait.maxMs)}
+      </Text>
+    </Box>
+  )
+}
+
+function ProjectedQueueTimeline({
+  projection,
+  nav,
+  cursorKey,
+  onCursor,
+  onSelect,
+}: {
+  projection: QueueTimelineProjection
+  nav: boolean
+  cursorKey?: number
+  onCursor?: (index: number) => void
+  onSelect?: (index: number) => void
+}) {
+  const rows = projection.rows.slice(0, projection.display.shown)
+  const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
+  const includeDate = rows.some(
+    (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
+  )
+  const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(",")
+  return (
+    <Box flexDirection="column">
+      <Text bold wrap="truncate">
+        QUEUE {projection.base}{" "}
+        <Text color="$fg-muted">
+          siblings {siblings} · updated {queueLogClock(projection.now, false, includeDate)}
+        </Text>
+      </Text>
+      <Text color="$fg-muted" wrap="truncate">
+        FILTER since={mediaDuration(projection.filters.windowMs)} status={projection.filters.statuses.join(",")} terms=
+        {projection.filters.terms.length === 0 ? "none" : projection.filters.terms.join("|")} latest=
+        {projection.filters.latest ? "yes" : "no"}
+      </Text>
+      {projection.pause === undefined ? null : (
+        <Text wrap="truncate">
+          <Text color="$fg-warning" bold>
+            PAUSED
+          </Text>{" "}
+          {projection.pause.reason} (allowed: {allowed})
+        </Text>
+      )}
+      {projection.oldestOpenMs === null ? null : (
+        <Text color="$fg-muted">OLDEST OPEN {mediaDuration(projection.oldestOpenMs)}</Text>
+      )}
+      <TimelineFlow metrics={projection.metrics} />
+      {rows.length === 0 ? (
+        <Text color="$fg-muted">No matching queue rows.</Text>
+      ) : (
+        <ListView
+          items={rows}
+          nav={nav}
+          cursorKey={cursorKey}
+          onCursor={onCursor}
+          onSelect={onSelect}
+          active={true}
+          getKey={(row) => row.id}
+          estimateHeight={1}
+          renderItem={(row, _index, meta) => (
+            <Box height={1}>
+              <Text wrap="truncate">
+                {meta.isCursor ? "> " : "  "}
+                <Text bold>{row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)}</Text>{" "}
+                <StatusValue value={row.status} /> {row.run ?? "-"}·{row.prs.join(",")} {row.subject}{" "}
+                <Text color="$fg-muted">{row.detail}</Text>
+              </Text>
+            </Box>
+          )}
+        />
+      )}
+      {projection.display.hidden === 0 ? null : <Text color="$fg-muted">... {projection.display.hidden} more</Text>}
+      {projection.coverage.complete ? null : (
+        <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
+      )}
+    </Box>
+  )
+}
+
 export function QueueTimelineView({
+  projection,
   results,
   now,
   latest = false,
@@ -2273,8 +2383,9 @@ export function QueueTimelineView({
   onCursor,
   onSelect,
 }: {
-  results: readonly QueueStatusResult[]
-  now: number
+  projection?: QueueTimelineProjection
+  results?: readonly QueueStatusResult[]
+  now?: number
   latest?: boolean
   state?: BaysState
   nav?: boolean
@@ -2282,6 +2393,19 @@ export function QueueTimelineView({
   onCursor?: (index: number) => void
   onSelect?: (index: number) => void
 }) {
+  if (projection !== undefined) {
+    return (
+      <ProjectedQueueTimeline
+        projection={projection}
+        nav={nav}
+        cursorKey={cursorKey}
+        onCursor={onCursor}
+        onSelect={onSelect}
+      />
+    )
+  }
+  if (results === undefined || now === undefined)
+    {throw new Error("yrd: queue timeline requires results and snapshot time")}
   const rows = queueTimelineRows(results, now, latest, state)
   return (
     <Box flexDirection="column">
