@@ -5,9 +5,9 @@ import type { BaysState, Correlation, PR, PRRevision, PRRevisionClock, PRRevisio
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, ListView, Table, Text } from "silvery"
+import { Box, Link, ListView, Table, Text, type TableColumn } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
-import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
+import { formatDuration, PRStatusView, statusVariant, StatusValue } from "./status-view.tsx"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -1101,7 +1101,7 @@ function failureEvidence(step: QueueStep | undefined): HumanFailureProjection["e
 
 function projectPR(
   state: BaysState | undefined,
-  result: QueueStatusResult,
+  result: QueueSummary,
   pr: PR,
   now: number,
   runOverride?: QueueRun,
@@ -1293,38 +1293,105 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
   )
 }
 
-export function PREligibilityView({ rows }: { rows: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[] }) {
-  const data = rows.map(({ pr, eligibility }) => ({
-    pr: pr.id,
-    branch: pr.branch,
-    revision: pr.revision,
-    ready: eligibility.runnable ? "yes" : "no",
-    why: eligibility.reason?.message ?? "ready",
-    review: eligibility.review.required
-      ? eligibility.review.approved
-        ? `approved${eligibility.review.actor === undefined ? "" : ` by ${eligibility.review.actor}`}`
-        : eligibility.review.decision === "reject"
-          ? `rejected${eligibility.review.actor === undefined ? "" : ` by ${eligibility.review.actor}`}`
-          : "required"
-      : "not required",
-    checks: `${eligibility.checks.status}${
-      eligibility.checks.position === undefined ? "" : ` #${eligibility.checks.position}`
-    }`,
-  }))
+export type PRListRow = Readonly<{
+  pr: string
+  state: string
+  stateLabel: string
+  glyph: string
+  revision: number
+  subject: string
+  target: string
+  review: "n/a" | "need" | "ok" | "reject"
+  checks: "n/a" | "wait" | "run" | "pass" | "fail"
+  why: string
+  age: string
+  touched: string
+}>
+
+const checkLabels = {
+  "not-requested": "n/a",
+  queued: "wait",
+  checking: "run",
+  passed: "pass",
+  failed: "fail",
+} as const satisfies Record<PREligibility["checks"]["status"], PRListRow["checks"]>
+
+function reviewLabel(eligibility: PREligibility): PRListRow["review"] {
+  if (!eligibility.review.required) return "n/a"
+  if (eligibility.review.decision === "reject") return "reject"
+  return eligibility.review.approved && !eligibility.review.stale ? "ok" : "need"
+}
+
+export function prListRows(
+  entries: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[],
+  runs: readonly QueueRun[],
+  now: number,
+): PRListRow[] {
+  const summary: QueueSummary = {
+    base: "*",
+    running: runs.filter((run) => run.status === "running"),
+    waiting: runs.filter((run) => run.status === "waiting"),
+    finished: runs.filter((run) => run.status === "passed" || run.status === "failed"),
+  }
+  return entries.map(({ pr, eligibility }) => {
+    if (eligibility.pr !== pr.id || eligibility.revision !== pr.revision) {
+      throw new Error(
+        `yrd: PR '${pr.id}' revision ${pr.revision} has mismatched eligibility for '${eligibility.pr}' revision ${eligibility.revision}`,
+      )
+    }
+    if (!eligibility.runnable && eligibility.reason === undefined) {
+      throw new Error(`yrd: PR '${pr.id}' revision ${pr.revision} is ineligible without a typed blocking reason`)
+    }
+    const projected = projectPR(undefined, summary, pr, now)
+    return {
+      pr: projected.pr,
+      state: projected.state,
+      stateLabel: `${projected.glyph} ${projected.state}`,
+      glyph: projected.glyph,
+      revision: pr.revision,
+      subject: projected.subject,
+      target: projected.target,
+      review: reviewLabel(eligibility),
+      checks: checkLabels[eligibility.checks.status],
+      why: eligibility.reason?.code ?? "-",
+      age: projected.age,
+      touched: projected.touched,
+    }
+  })
+}
+
+function PRStateValue({ row }: { row: PRListRow }) {
+  const variant = statusVariant(row.state)
   return (
-    <Table
-      data={data}
-      columns={[
-        { header: "PR", key: "pr" },
-        { header: "BRANCH", key: "branch" },
-        { header: "REV", key: "revision" },
-        { header: "READY", key: "ready" },
-        { header: "WHY", key: "why", grow: true },
-        { header: "REVIEW", key: "review" },
-        { header: "CHECKS", key: "checks" },
-      ]}
-    />
+    <Text bold color={variant === "default" ? "$fg" : `$fg-${variant}`}>
+      {row.stateLabel}
+    </Text>
   )
+}
+
+export function PRListView({ rows, columns: terminalColumns }: { rows: readonly PRListRow[]; columns: number }) {
+  const base: TableColumn<PRListRow> = { header: "BASE", key: "target", minWidth: 6, maxWidth: 14 }
+  const ageColumn: TableColumn<PRListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
+  const changed: TableColumn<PRListRow> = { header: "CHANGED", key: "touched", minWidth: 9, maxWidth: 9 }
+  const columns: TableColumn<PRListRow>[] = [
+    { header: "PR", key: "pr", minWidth: 4, maxWidth: 7 },
+    {
+      header: "STATE",
+      key: "stateLabel",
+      minWidth: 15,
+      maxWidth: 16,
+      render: (row: PRListRow) => <PRStateValue row={row} />,
+    },
+    { header: "REV", key: "revision", minWidth: 5, maxWidth: 6 },
+    { header: "SUBJECT", key: "subject", minWidth: 9, maxWidth: 26, grow: true },
+    ...(terminalColumns >= 100 ? [base] : []),
+    { header: "REVIEW", key: "review", minWidth: 8, maxWidth: 8 },
+    { header: "CHECKS", key: "checks", minWidth: 8, maxWidth: 8 },
+    { header: "WHY", key: "why", minWidth: 5, maxWidth: 18, grow: true },
+    ...(terminalColumns >= 110 ? [ageColumn] : []),
+    ...(terminalColumns >= 120 ? [changed] : []),
+  ]
+  return <Table data={rows} columns={columns} />
 }
 
 export type PRCheckViewRecord = PRCheckRecord

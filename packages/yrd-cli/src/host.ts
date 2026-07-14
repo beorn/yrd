@@ -814,12 +814,14 @@ export async function runYrdProcess(
     }
   }
 
+  const wantsRootHelp = invocation.projection === "root" && invocation.args.length === 0
   if (
+    wantsRootHelp ||
     invocation.args.some(
       (argument) => argument === "--help" || argument === "-h" || argument === "--version" || argument === "-V",
     )
   ) {
-    return runYrdHelp(argv, io)
+    return runYrdHelp(wantsRootHelp ? [...argv, "--help"] : argv, io)
   }
 
   let log: ConditionalLogger | undefined

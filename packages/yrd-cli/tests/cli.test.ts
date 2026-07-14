@@ -25,6 +25,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import {
   type QueueRun,
   type QueueSummary,
+  type PREligibility,
   withQueue,
   withMerge,
   withStep,
@@ -46,11 +47,13 @@ import {
 import {
   QueueShowView,
   QueueLogView,
+  PRListView,
   QueueWatchView,
   activeWatchRow,
   humanQueueProjection,
   queueLogAttempts,
   queueLogRows,
+  prListRows,
   queueRevisionKey,
   queueRunRevisionKey,
   runRevisionClock,
@@ -651,7 +654,7 @@ describe("runYrd", () => {
     const retiredRetry = outputIO()
     expect(await runYrd(app, yrd("pr", "retry", "PR1"), retiredRetry.io)).toBe(2)
     expect(retiredRetry.stdout()).toBe("")
-    expect(retiredRetry.stderr()).toContain("too many arguments")
+    expect(retiredRetry.stderr()).toContain("unknown command 'retry'")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforeRetiredRetry)
 
     const contest = outputIO()
@@ -906,7 +909,7 @@ describe("runYrd", () => {
     const surfaces = [
       { args: ["--json"], command: "dashboard" },
       { args: ["queue", "--json"], command: "queue.list" },
-      { args: ["pr", "--json"], command: "pr.list" },
+      { args: ["pr", "list", "--json"], command: "pr.list" },
       { args: ["issue", "--json"], command: "issue.list" },
       { args: ["log", "--json"], command: "log" },
       { args: ["prime", "--json"], command: "prime" },
@@ -917,6 +920,188 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd(...surface.args), output.io), output.stderr()).toBe(0)
       expect(JSON.parse(output.stdout())).toMatchObject({ command: surface.command })
       expect(output.stdout()).not.toContain("Usage:")
+    }
+  })
+
+  it("keeps bare pr on noun help and makes list plus ls the explicit lossless projection", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/one", headSha: HEAD_SHA, base: "main" })
+
+    const help = outputIO({ columns: 80 })
+    expect(await runYrd(app, yrd("pr"), help.io), help.stderr()).toBe(0)
+    expect(help.stdout()).toContain("Usage: yrd pr [options] [command]")
+    expect(help.stdout()).toContain("list [options]")
+    expect(help.stdout()).not.toMatch(/^PR\s+BRANCH/mu)
+
+    for (const verb of ["list", "ls"]) {
+      const json = outputIO()
+      expect(await runYrd(app, yrd("pr", verb, "--json"), json.io), json.stderr()).toBe(0)
+      expect(JSON.parse(json.stdout())).toMatchObject({
+        command: "pr.list",
+        prs: [{ id: "PR1", branch: "topic/one", eligibility: { revision: 1 } }],
+      })
+    }
+  })
+
+  it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
+    const revision = (
+      headSha: string,
+      pushedAt: string,
+      submittedAt?: string,
+      terminal?: PR["revisions"][number]["terminal"],
+    ): PR["revisions"][number] => ({
+      revision: 1,
+      headSha,
+      base: "main",
+      baseSha: BASE_SHA,
+      pushedAt,
+      ...(submittedAt === undefined ? {} : { submittedAt }),
+      ...(terminal === undefined ? {} : { terminal }),
+    })
+    const pr = (id: string, branch: string, status: PR["status"], clock: PR["revisions"][number]): PR => ({
+      id,
+      branch,
+      base: clock.base,
+      status,
+      revision: 1,
+      headSha: clock.headSha,
+      baseSha: BASE_SHA,
+      revisions: [clock],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+      ...(clock.submittedAt === undefined ? {} : { submittedAt: clock.submittedAt }),
+      ...(status === "rejected" ? { rejectedAt: clock.terminal?.at } : {}),
+      ...(status === "integrated" ? { integratedAt: clock.terminal?.at } : {}),
+    })
+    const review = { required: false, approved: false, stale: false } as const
+    const entries: ReadonlyArray<Readonly<{ pr: PR; eligibility: PREligibility }>> = [
+      {
+        pr: pr(
+          "PR1",
+          "task/a-branch-name-that-is-deliberately-long-enough-to-yield-before-semantic-columns",
+          "pushed",
+          revision("1".repeat(40), "2026-07-09T12:00:00.000Z"),
+        ),
+        eligibility: {
+          pr: "PR1",
+          revision: 1,
+          runnable: false,
+          reason: { code: "draft", message: "not ready" },
+          review,
+          checks: { status: "not-requested" },
+        },
+      },
+      {
+        pr: pr(
+          "PR2",
+          "topic/review",
+          "submitted",
+          revision("2".repeat(40), "2026-07-09T12:01:00.000Z", "2026-07-09T12:01:00.000Z"),
+        ),
+        eligibility: {
+          pr: "PR2",
+          revision: 1,
+          runnable: false,
+          reason: { code: "review-required", message: "needs approval" },
+          review: { required: true, approved: false, stale: false },
+          checks: { status: "not-requested" },
+        },
+      },
+      {
+        pr: pr("PR3", "topic/checks", "pushed", {
+          ...revision("3".repeat(40), "2026-07-09T12:02:00.000Z"),
+          base: "release/2.0",
+        }),
+        eligibility: {
+          pr: "PR3",
+          revision: 1,
+          runnable: false,
+          reason: { code: "checks-failed", message: "checks failed" },
+          review,
+          checks: { status: "failed", run: "R3" },
+        },
+      },
+      {
+        pr: pr(
+          "PR4",
+          "topic/rejected",
+          "rejected",
+          revision("4".repeat(40), "2026-07-09T11:00:00.000Z", "2026-07-09T11:00:00.000Z", {
+            status: "rejected",
+            at: "2026-07-09T11:05:00.000Z",
+          }),
+        ),
+        eligibility: {
+          pr: "PR4",
+          revision: 1,
+          runnable: false,
+          reason: { code: "rejected", message: "rejected" },
+          review,
+          checks: { status: "not-requested" },
+        },
+      },
+      {
+        pr: pr(
+          "PR5",
+          "topic/integrated",
+          "integrated",
+          revision("5".repeat(40), "2026-07-09T10:00:00.000Z", "2026-07-09T10:00:00.000Z", {
+            status: "integrated",
+            at: "2026-07-09T10:10:00.000Z",
+          }),
+        ),
+        eligibility: {
+          pr: "PR5",
+          revision: 1,
+          runnable: false,
+          reason: { code: "terminal", message: "integrated" },
+          review: { required: true, approved: true, stale: false, decision: "approve", actor: "@cto" },
+          checks: { status: "passed", run: "R5" },
+        },
+      },
+    ]
+
+    const rows = prListRows(entries, [], Date.parse("2026-07-09T12:10:00.000Z"))
+    expect(
+      rows.map(({ pr: id, state, glyph, review: reviewState, checks, why }) => ({
+        id,
+        state,
+        glyph,
+        review: reviewState,
+        checks,
+        why,
+      })),
+    ).toEqual([
+      { id: "PR1", state: "pushed", glyph: "[ ]", review: "n/a", checks: "n/a", why: "draft" },
+      { id: "PR2", state: "submitted", glyph: "[ ]", review: "need", checks: "n/a", why: "review-required" },
+      { id: "PR3", state: "pushed", glyph: "[ ]", review: "n/a", checks: "fail", why: "checks-failed" },
+      { id: "PR4", state: "rejected", glyph: "[!]", review: "n/a", checks: "n/a", why: "rejected" },
+      { id: "PR5", state: "integrated", glyph: "[x]", review: "ok", checks: "pass", why: "terminal" },
+    ])
+    expect(rows[2]?.target).toBe("release/2.0")
+
+    for (const columns of [80, 120]) {
+      const human = await renderString(createElement(PRListView, { rows, columns }), {
+        width: columns,
+        height: entries.length + 1,
+        plain: true,
+      })
+      const physical = human.split("\n").filter((row) => row !== "")
+      expect(physical).toHaveLength(entries.length + 1)
+      expect(Math.max(...physical.map((row) => row.length))).toBeLessThanOrEqual(columns)
+      for (const header of ["PR", "STATE", "REV", "SUBJECT", "REVIEW", "CHECKS", "WHY"]) {
+        expect(physical[0]).toContain(header)
+      }
+      expect(physical[0]).not.toContain("READY")
+      expect(physical[0]).not.toMatch(/\sC$/u)
+      expect(human).toContain("[!] rejected")
+      expect(human).toContain("[x] integrated")
+      expect(human).not.toContain(entries[0]!.pr.branch)
+      expect(physical[0]?.includes("AGE")).toBe(columns === 120)
+      expect(physical[0]?.includes("BASE")).toBe(columns === 120)
+      expect(physical[0]?.includes("CHANGED")).toBe(columns === 120)
+      expect(human.includes("release/2.0")).toBe(columns === 120)
     }
   })
 
@@ -1143,7 +1328,7 @@ describe("runYrd", () => {
     expect(dashboard.stdout()).not.toContain("Usage: yrd")
 
     const prs = outputIO()
-    expect(await runYrd(app, yrd("pr"), prs.io), prs.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("pr", "list"), prs.io), prs.stderr()).toBe(0)
     expect(prs.stdout()).toContain("PR1")
 
     const queues = outputIO()
@@ -1342,8 +1527,8 @@ describe("runYrd", () => {
     const humanInbox = outputIO({ columns: 160 })
     expect(await runYrd(app, yrd("pr", "list", "--needs-review"), humanInbox.io), humanInbox.stderr()).toBe(0)
     expect(humanInbox.stdout()).toContain("WHY")
-    expect(humanInbox.stdout()).toContain("pushed, not ready")
-    expect(humanInbox.stdout()).toContain("required")
+    expect(humanInbox.stdout()).toContain("draft")
+    expect(humanInbox.stdout()).toContain("need")
     expect(humanInbox.stdout()).toContain("checking")
 
     const comment = outputIO()
