@@ -1365,7 +1365,7 @@ export function PRDetailView({
           </Text>
           <Text>
             <Text bold>TIME</Text> START {toIso(run.startedAt)} END {toIso(run.finishedAt)} ELAPSED{" "}
-            {age(run.startedAt, now, `run '${run.id}' elapsed`)}
+            {duration(run.startedAt, run.finishedAt ?? new Date(now).toISOString())}
           </Text>
           {run.steps.map((step) => {
             const job = step.job
