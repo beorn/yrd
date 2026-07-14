@@ -1085,8 +1085,8 @@ function samePaths(left: readonly string[], right: readonly string[]): boolean {
 }
 
 function isEqualRangeDiff(output: string): boolean {
-  const lines = output.split(/\r?\n/u).filter((line) => line.trim() !== "")
-  return lines.length > 0 && lines.every((line) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(line))
+  const rows = output.split(/\r?\n/u).filter((row) => row.trim() !== "")
+  return rows.length > 0 && rows.every((row) => /^\d+:\s+[0-9a-f]+ = \d+:\s+[0-9a-f]+(?:\s|$)/iu.test(row))
 }
 
 function intersection(left: readonly string[], right: readonly string[]): string[] {
