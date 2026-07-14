@@ -4810,6 +4810,124 @@ function trackerBridge(output: string): Readonly<{
   return bridge as ReturnType<typeof trackerBridge>
 }
 
+function legacyRejectedJournal(runIds: readonly string[] = ["R1"]) {
+  const nextId = ids()
+  const command = { id: nextId(), op: "fixture.legacy-rejected-run" }
+  const cause = {
+    id: nextId(),
+    commandId: command.id,
+    op: command.op,
+    commandHash: Command.hash(command),
+  }
+  const issueRef = "@yrd/core/21091-legacy-run"
+  const pr = {
+    id: "PR1",
+    branch: "topic/legacy-rejected-run",
+    base: "main",
+    revision: 1,
+    headSha: HEAD_SHA,
+    baseSha: BASE_SHA,
+  }
+  const startedAt = (index: number) => `2026-07-09T12:00:${String(index * 10 + 1).padStart(2, "0")}.000Z`
+  const requestedAt = (index: number) => `2026-07-09T12:00:${String(index * 10 + 2).padStart(2, "0")}.000Z`
+  const runningAt = (index: number) => `2026-07-09T12:00:${String(index * 10 + 3).padStart(2, "0")}.000Z`
+  const finishedAt = (index: number) => `2026-07-09T12:00:${String(index * 10 + 4).padStart(2, "0")}.000Z`
+  const runEvents = runIds.flatMap((run, index) => {
+    const job = nextId()
+    return [
+      {
+        id: nextId(),
+        name: "queue/run/started",
+        ts: startedAt(index),
+        data: {
+          run: {
+            id: run,
+            prs: [pr],
+            base: "main",
+            steps: [
+              {
+                name: "check",
+                title: "check",
+                revision: "check-v1",
+                integrates: false,
+                needsIntegration: false,
+                classification: "carrier",
+              },
+            ],
+          },
+        },
+      },
+      {
+        id: job,
+        name: "job/requested",
+        ts: requestedAt(index),
+        data: {
+          definition: "queue.step.check",
+          revision: "check-v1",
+          input: { run, step: "check", index: 0, prs: [pr], shape: { results: {} } },
+          key: `queue:${run}:0`,
+        },
+      },
+      {
+        id: nextId(),
+        name: "job/transitioned",
+        ts: runningAt(index),
+        data: {
+          type: "start",
+          id: job,
+          attempt: 1,
+          runner: "yrd-cli",
+          leaseExpiresAt: "2026-07-09T12:30:00.000Z",
+        },
+      },
+      {
+        id: nextId(),
+        name: "job/transitioned",
+        ts: finishedAt(index),
+        data: {
+          type: "finish",
+          id: job,
+          attempt: 1,
+          runner: "yrd-cli",
+          result: { status: "failed", error: { code: "check-failed", message: "historical check failure" } },
+        },
+      },
+    ]
+  })
+  const terminalEvent = nextId()
+  return {
+    issueRef,
+    terminalEvent,
+    journal: createMemoryJournal([
+      {
+        command,
+        cause,
+        events: [
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: "2026-07-09T12:00:00.000Z",
+            data: { pr: pr.id, branch: pr.branch, base: pr.base, headSha: pr.headSha, issue: issueRef, revision: 1 },
+          },
+          {
+            id: nextId(),
+            name: "pr/submitted",
+            ts: "2026-07-09T12:00:00.001Z",
+            data: { pr: pr.id, revision: 1, headSha: pr.headSha },
+          },
+          ...runEvents,
+          {
+            id: terminalEvent,
+            name: "pr/rejected",
+            ts: "2026-07-09T12:00:30.000Z",
+            data: { pr: pr.id, revision: 1, detail: "historical check failure" },
+          },
+        ],
+      },
+    ]),
+  }
+}
+
 describe("typed issue landing bridge", () => {
   it("projects every native PR state from exact issue ownership at one journal cursor", async () => {
     for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
@@ -4955,6 +5073,45 @@ describe("typed issue landing bridge", () => {
     expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io)).toBe(1)
     expect(output.stdout()).toBe("")
     expect(output.stderr()).toContain("cannot project rejected PR 'PR1' without a typed Queue bounce run")
+  })
+
+  it("dry-runs a unique failed Queue run association for a legacy rejection without writing", async () => {
+    const seeded = legacyRejectedJournal()
+    await using app = await createApp({ journal: seeded.journal })
+    const before = await Array.fromAsync(app.events())
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("migrate", "terminal-associations", "--json"), output.io),
+      output.stderr(),
+    ).toBe(0)
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "migrate.terminal-associations",
+      mode: "dry-run",
+      provenance: "migration/21091",
+      summary: { unprojectable: 1, ready: 1, refused: 0, appended: 0 },
+      rows: [
+        {
+          status: "ready",
+          terminal: {
+            event: seeded.terminalEvent,
+            pr: "PR1",
+            revision: 1,
+            headSha: HEAD_SHA,
+            at: "2026-07-09T12:00:30.000Z",
+          },
+          association: {
+            pr: "PR1",
+            revision: 1,
+            headSha: HEAD_SHA,
+            run: "R1",
+            provenance: "migration/21091",
+            evidence: { terminalEvent: seeded.terminalEvent, run: "R1" },
+          },
+        },
+      ],
+    })
   })
 
   it("records a completed escaped regression without rewriting either integration", async () => {
