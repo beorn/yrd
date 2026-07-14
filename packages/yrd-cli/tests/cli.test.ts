@@ -1936,7 +1936,9 @@ describe("runYrd", () => {
     if (rootMounted === undefined) throw new Error("expected root watch pane to mount")
 
     const rootFrame = stripOsc8Targets(
-      await renderString(createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial, paused: false })),
+      await renderString(
+        createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial, paused: false }),
+      ),
     )
     for (const variant of watchVariants) {
       let mounted: ReactElement | undefined
@@ -1949,7 +1951,9 @@ describe("runYrd", () => {
       expect(await runYrd(app, variant.argv, live)).toBe(0)
       if (mounted === undefined) throw new Error("expected watch panes to mount")
       const frame = stripOsc8Targets(
-        await renderString(createElement(QueueWatchFrame, { snapshot: (mounted.props as QueueWatchPaneProps).initial, paused: false })),
+        await renderString(
+          createElement(QueueWatchFrame, { snapshot: (mounted.props as QueueWatchPaneProps).initial, paused: false }),
+        ),
       )
       expect(frame).toBe(rootFrame)
     }
@@ -2021,8 +2025,24 @@ describe("runYrd", () => {
       base: "main",
       headSha: BASE_SHA,
       prs: [
-        { id: "PR1", name: "First", branch: "topic/one", base: "main", status: "submitted", revision: 1, headSha: HEAD_SHA },
-        { id: "PR2", name: "Second", branch: "topic/two", base: "main", status: "submitted", revision: 1, headSha: "2".repeat(40) },
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "2".repeat(40),
+        },
       ],
       running: [
         {

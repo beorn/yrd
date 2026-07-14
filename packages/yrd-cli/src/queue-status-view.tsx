@@ -338,9 +338,16 @@ function queueTimelineDetail(result: QueueStatusResult, pr: PR, run: QueueRun | 
   return queueLanding(run)
 }
 
-export function queueTimelineRows(results: readonly QueueStatusResult[], now: number, latest: boolean, state?: BaysState): QueueTimelineRow[] {
+export function queueTimelineRows(
+  results: readonly QueueStatusResult[],
+  now: number,
+  latest: boolean,
+  state?: BaysState,
+): QueueTimelineRow[] {
   const rows = results.flatMap((result) => {
-    const activePrs = new Set([...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs.map((member) => member.id)))
+    const activePrs = new Set(
+      [...result.running, ...result.waiting, ...result.finished].flatMap((run) => run.prs.map((member) => member.id)),
+    )
     const pending = result.prs
       .filter((pr) => pr.status === "submitted" && !activePrs.has(pr.id))
       .map((pr) => {
@@ -365,7 +372,10 @@ export function queueTimelineRows(results: readonly QueueStatusResult[], now: nu
     const runRows = [...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
       run.prs.map((member) => {
         const pr = result.prs.find((candidate) => candidate.id === member.id)
-        const timestamp = queueTimelineTimestamp(run, pr ?? { id: member.id, branch: member.branch, status: "submitted" } as PR)
+        const timestamp = queueTimelineTimestamp(
+          run,
+          pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR),
+        )
         const timestampMs = timestamp === undefined ? -1 : Date.parse(timestamp)
         return {
           key: `run:${result.base}:${run.id}:${member.id}`,
@@ -377,7 +387,11 @@ export function queueTimelineRows(results: readonly QueueStatusResult[], now: nu
             (pr?.bay === undefined ? undefined : state?.byId[pr.bay]?.path) ?? pr?.name ?? member.branch ?? member.id,
             80,
           ),
-          detail: queueTimelineDetail(result, pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR), run),
+          detail: queueTimelineDetail(
+            result,
+            pr ?? ({ id: member.id, branch: member.branch, status: "submitted" } as PR),
+            run,
+          ),
           clock: age(timestamp, now, "queue timeline row"),
           timestampMs: Number.isFinite(timestampMs) ? timestampMs : -1,
         }
