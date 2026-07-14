@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Box, ListView, PaneDivider, Text, useInput, useScopeEffect, useWindowSize } from "silvery"
+import {
+  Box,
+  ListView,
+  SplitPane,
+  Text,
+  resolveSplitPaneLayout,
+  useInput,
+  useScopeEffect,
+  useWindowSize,
+} from "silvery"
 import {
   QueueEvidenceView,
   QueueShowView,
@@ -29,30 +38,17 @@ export type QueueArtifactOutput = Readonly<{
 }>
 
 export function queueDetailTier(columns: number, rows: number): QueueDetailTier {
-  if (columns >= LIST_NATURAL_WIDTH + DIVIDER_SIZE + DETAIL_NATURAL_WIDTH) return "right"
-  if (rows >= LIST_NATURAL_HEIGHT + DIVIDER_SIZE + DETAIL_NATURAL_HEIGHT) return "below"
+  const layout = resolveSplitPaneLayout({
+    availableWidth: columns,
+    availableHeight: Math.max(0, rows - 1),
+    primary: { width: LIST_NATURAL_WIDTH, height: LIST_NATURAL_HEIGHT },
+    secondary: { width: DETAIL_NATURAL_WIDTH, height: DETAIL_NATURAL_HEIGHT },
+    dividerSize: DIVIDER_SIZE,
+    preferredDirection: "row",
+  })
+  if (layout === "row") return "right"
+  if (layout === "column") return "below"
   return "full"
-}
-
-function clampSplitRatio(tier: Exclude<QueueDetailTier, "full">, ratio: number, columns: number, rows: number): number {
-  const available = Math.max(1, (tier === "right" ? columns : rows - 1) - DIVIDER_SIZE)
-  const listMinimum = tier === "right" ? LIST_NATURAL_WIDTH : LIST_NATURAL_HEIGHT
-  const detailMinimum = tier === "right" ? DETAIL_NATURAL_WIDTH : DETAIL_NATURAL_HEIGHT
-  const minimum = listMinimum / available
-  const maximum = 1 - detailMinimum / available
-  return Math.min(maximum, Math.max(minimum, ratio))
-}
-
-export function queueSplitRatioAfterDrag(
-  tier: Exclude<QueueDetailTier, "full">,
-  startRatio: number,
-  startCoordinate: number,
-  coordinate: number,
-  columns: number,
-  rows: number,
-): number {
-  const available = Math.max(1, (tier === "right" ? columns : rows - 1) - DIVIDER_SIZE)
-  return clampSplitRatio(tier, startRatio + (coordinate - startCoordinate) / available, columns, rows)
 }
 
 export type QueueWatchSnapshot = Readonly<{
@@ -186,7 +182,6 @@ export function QueueWatchFrame({
   const [newRows, setNewRows] = useState(0)
   const previousTier = useRef(tier)
   const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
-  const dragStart = useRef<Readonly<{ coordinate: number; ratio: number }> | undefined>(undefined)
   const cursor = Math.max(
     0,
     rows.findIndex((row) => row.key === cursorRowKey),
@@ -316,23 +311,6 @@ export function QueueWatchFrame({
       selectedDetail
     )
 
-  const splitTier = tier === "full" ? undefined : tier
-  const available = Math.max(1, (tier === "right" ? columns : viewportRows - 1) - DIVIDER_SIZE)
-  const ratio = splitTier === undefined ? splitRatio : clampSplitRatio(splitTier, splitRatio, columns, viewportRows)
-  const listSize = Math.max(1, Math.round(available * ratio))
-  const resizeMove = (coordinate: number): void => {
-    if (splitTier === undefined || dragStart.current === undefined) return
-    setSplitRatio(
-      queueSplitRatioAfterDrag(
-        splitTier,
-        dragStart.current.ratio,
-        dragStart.current.coordinate,
-        coordinate,
-        columns,
-        viewportRows,
-      ),
-    )
-  }
   const footerHint =
     tier === "full"
       ? detailOpen
@@ -344,35 +322,23 @@ export function QueueWatchFrame({
 
   return (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>
-      <Box flexGrow={1} minWidth={0} minHeight={0} flexDirection={tier === "right" ? "row" : "column"}>
-        {!detailOpen || tier === "full" ? (
+      <Box flexGrow={1} minWidth={0} minHeight={0}>
+        {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>
             {detailOpen ? detail : timeline}
           </Box>
         ) : (
-          <>
-            <Box
-              flexShrink={0}
-              minWidth={0}
-              minHeight={0}
-              {...(tier === "right" ? { width: listSize } : { height: listSize })}
-            >
-              {timeline}
-            </Box>
-            <PaneDivider
-              orientation={tier === "right" ? "vertical" : "horizontal"}
-              onResizeStart={(event) => {
-                dragStart.current = { coordinate: event.coordinate, ratio }
-              }}
-              onResizeMove={resizeMove}
-              onResizeEnd={() => {
-                dragStart.current = undefined
-              }}
-            />
-            <Box flexGrow={1} minWidth={0} minHeight={0}>
-              {detail}
-            </Box>
-          </>
+          <SplitPane
+            direction={tier === "right" ? "row" : "column"}
+            ratio={splitRatio}
+            onRatioChange={setSplitRatio}
+            minPrimarySize={tier === "right" ? LIST_NATURAL_WIDTH : LIST_NATURAL_HEIGHT}
+            minSecondarySize={tier === "right" ? DETAIL_NATURAL_WIDTH : DETAIL_NATURAL_HEIGHT}
+            dividerSize={DIVIDER_SIZE}
+            secondaryCollapsed={!detailOpen}
+            primary={timeline}
+            secondary={detail}
+          />
         )}
       </Box>
       <Box height={1} flexShrink={0}>
