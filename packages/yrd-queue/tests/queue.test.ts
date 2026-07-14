@@ -424,6 +424,65 @@ describe("Queue", () => {
     expect(await Array.fromAsync(replayed.events())).toEqual(reconciled)
   })
 
+  it("cancels a correlated PR when its active Queue Job is canceled", async () => {
+    const correlation = { namespace: "tribe-request", id: "request-20925" } as const
+    await using app = await createQueueApp()
+    await app.bays.submit({
+      branch: "issue/canceled",
+      headSha: HEAD,
+      base: "main",
+      baseSha: BASE,
+      correlation,
+    })
+    const pr = app.state().bays.prs.PR1
+    if (pr === undefined) throw new Error("correlated PR was not recorded")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("Queue did not request a Job")
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "worker-1",
+      leaseExpiresAt: "2026-01-01T00:01:00.000Z",
+    })
+    await app.jobs.cancel({ id: job.id, attempt: 1, by: "@chief", reason: "authorization revoked" })
+
+    const advanced = await app.dispatch(app.commands.queue.advance, { run: "R1" })
+
+    expect(advanced.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      {
+        name: "pr/canceled",
+        data: {
+          pr: pr.id,
+          revision: pr.revision,
+          headSha: pr.headSha,
+          correlation,
+          by: "@chief",
+          reason: "authorization revoked",
+        },
+      },
+    ])
+    expect(app.state().bays.prs[pr.id]).toMatchObject({
+      status: "canceled",
+      revision: pr.revision,
+      headSha: pr.headSha,
+      correlation,
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: { code: "run-canceled" },
+      steps: [
+        expect.objectContaining({
+          job: expect.objectContaining({ status: "canceled", canceledBy: "@chief", cancelReason: "authorization revoked" }),
+        }),
+      ],
+    })
+    const eventNames = (await Array.fromAsync(app.events())).map(({ name }) => name)
+    expect(eventNames).not.toContain("pr/rejected")
+    expect(app.queue.get("R1")?.error?.code).not.toBe("job-lost")
+  })
+
   it("keys a selected step suffix by run order rather than installed order", async () => {
     await using app = await createQueueApp()
     const pr = await submitBranch(app, "issue/selected-suffix")
