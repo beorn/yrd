@@ -202,6 +202,26 @@ const PRIntegratedSchema = z
     message: "landingSha must match the integration commit",
     path: ["landingSha"],
   })
+
+// V3 journals predate the exact issue/revision landing join. Keep their three
+// historical terminal shapes explicit at the replay compatibility boundary;
+// append validation below remains on the stricter schemas above.
+const LegacyPRWithdrawnSchema = z.object({ pr: PRIdSchema }).strict()
+const LegacyPRRejectedSchema = z
+  .object({ pr: PRIdSchema, revision: RevisionSchema, detail: z.string().optional() })
+  .strict()
+const LegacyPRIntegratedSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: RevisionSchema,
+    headSha: GitShaSchema,
+    commit: GitShaSchema,
+    baseSha: GitShaSchema,
+  })
+  .strict()
+const PRWithdrawnEventSchema = z.union([PRWithdrawnSchema, LegacyPRWithdrawnSchema])
+const PRRejectedEventSchema = z.union([PRRejectedSchema, LegacyPRRejectedSchema])
+const PRIntegratedEventSchema = z.union([PRIntegratedSchema, LegacyPRIntegratedSchema])
 const PRReviewFactSchema = z
   .object({
     pr: PRIdSchema,
@@ -547,6 +567,11 @@ export function withBays(options: WithBaysOptions) {
         "pr/reviewed": PRReviewFactSchema,
         "pr/commented": PRCommentFactSchema,
         "pr/checks-requested": PRCheckRequestFactSchema,
+      },
+      replayEvents: {
+        "pr/withdrawn": LegacyPRWithdrawnSchema,
+        "pr/rejected": LegacyPRRejectedSchema,
+        "pr/integrated": LegacyPRIntegratedSchema,
       },
       project: projectBays,
       create(yrd) {
@@ -1048,17 +1073,18 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       return patchPR(pr, { status: "submitted", submittedAt: applied.ts })
     }
     case "pr/withdrawn": {
-      const changed = PRWithdrawnSchema.parse(data)
+      const changed = PRWithdrawnEventSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
-      assertPRRevisionJoin(pr, changed)
+      if ("headSha" in changed) assertPRRevisionJoin(pr, changed)
       return patchPR(pr, { status: "withdrawn", withdrawnAt: applied.ts })
     }
     case "pr/rejected": {
-      const changed = PRRejectedSchema.parse(data)
+      const changed = PRRejectedEventSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
-      assertPRRevisionJoin(pr, changed)
+      if ("headSha" in changed) assertPRRevisionJoin(pr, changed)
+      else if (pr.revision !== changed.revision) return state
       return patchPR(pr, {
         status: "rejected",
         rejectedAt: applied.ts,
@@ -1066,10 +1092,11 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       })
     }
     case "pr/integrated": {
-      const changed = PRIntegratedSchema.parse(data)
+      const changed = PRIntegratedEventSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined) return state
-      assertPRRevisionJoin(pr, changed)
+      if ("landingSha" in changed) assertPRRevisionJoin(pr, changed)
+      else if (pr.revision !== changed.revision || pr.headSha !== changed.headSha) return state
       return patchPR(pr, {
         status: "integrated",
         integratedAt: applied.ts,

@@ -106,6 +106,8 @@ type Contribution<
   initialState?: AddedState
   commands?: AddedCommands
   events?: EventSchemas
+  /** Read-only compatibility schemas for committed payloads rejected by `events`. */
+  replayEvents?: EventSchemas
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
   create?(yrd: Yrd<State & AddedState, Commands & AddedCommands> & Features): AddedFeatures
 }>
@@ -118,6 +120,8 @@ export type YrdDef<
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
+  /** Compatibility schemas used only as replay fallbacks after `events` rejects. */
+  replayEvents?: EventSchemas
   project: Project<State>
   create(yrd: Yrd<State, Commands>): Features
   extend<
@@ -169,6 +173,7 @@ export function createYrdDef(): YrdDef {
     initialState: {},
     commands: {},
     events: {},
+    replayEvents: {},
     project: (state) => state,
     create: () => ({}),
   })
@@ -231,7 +236,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
         const frame = parseJournalFrame(value)
         frames += 1
         events += frame.events.length
-        next = projectFrame(next, frame)
+        next = projectFrame(next, frame, "replay")
       }
       next = { ...next, cursor: batch.cursor }
     }
@@ -239,7 +244,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return next
   }
 
-  const projectFrame = (base: Projection, frame: JournalFrame): Projection => {
+  const projectFrame = (base: Projection, frame: JournalFrame, source: "append" | "replay"): Projection => {
     if (base.receiptsById.has(frame.command.id)) {
       throw new Error(`yrd: journal contains duplicate command id '${frame.cause.commandId}'`)
     }
@@ -254,9 +259,17 @@ export async function createYrd<State extends object, Commands extends CommandTr
     for (const applied of frame.events) {
       if (eventIds.has(applied.id)) throw new Error(`yrd: journal contains duplicate event id '${applied.id}'`)
       eventIds.add(applied.id)
-      const schema = definition.events[applied.name]
-      if (schema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
-      const validated = freeze(EventSchema.parse({ ...applied, data: schema.parse(applied.data) })) as Event
+      const appendSchema = definition.events[applied.name]
+      if (appendSchema === undefined) throw new Error(`yrd: no event definition for '${applied.name}'`)
+      const replaySchema = source === "replay" ? definition.replayEvents?.[applied.name] : undefined
+      let data: JsonValue
+      if (replaySchema === undefined) {
+        data = appendSchema.parse(applied.data)
+      } else {
+        const appendData = appendSchema.safeParse(applied.data)
+        data = appendData.success ? appendData.data : replaySchema.parse(applied.data)
+      }
+      const validated = freeze(EventSchema.parse({ ...applied, data })) as Event
       nextState = freeze(definition.project(nextState, validated, frame.cause)) as DeepReadonly<State>
     }
     const receiptsById = new Map(base.receiptsById)
@@ -370,7 +383,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       })
       const value = result.value === undefined ? undefined : JsonSchema.parse(result.value)
       const frame = parseJournalFrame({ cause, command: canonical, events, ...(value === undefined ? {} : { value }) })
-      const candidate = projectFrame(current, frame)
+      const candidate = projectFrame(current, frame, "append")
       const appended = await journal.append(frame, current.cursor)
       if (!appended.appended) continue
       publish({ ...candidate, cursor: appended.cursor })
@@ -456,6 +469,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   initialState: DeepReadonly<State>
   commands: Commands
   events: EventSchemas
+  replayEvents: EventSchemas
   project: Project<State>
   create(yrd: Yrd<State, Commands>): Features
 }): YrdDef<State, Commands, Features> {
@@ -473,12 +487,17 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
       const initialState = mergeState(values.initialState, addedState)
       const commands = mergeCommands(values.commands, addedCommands)
       const events = mergeFields(values.events, contribution.events ?? {}, "event")
+      const replayEvents = mergeFields(values.replayEvents, contribution.replayEvents ?? {}, "replay event")
+      for (const name of Object.keys(replayEvents)) {
+        if (!Object.hasOwn(events, name)) throw new Error(`yrd: replay event '${name}' has no append event definition`)
+      }
       const previousFields = Object.keys(values.initialState)
       const owned = Object.keys(addedState)
       return buildDef<State & AddedState, Commands & AddedCommands, Features & AddedFeatures>({
         initialState,
         commands,
         events,
+        replayEvents,
         project(state, applied, cause) {
           const previousState = selectFields(state, previousFields) as DeepReadonly<State>
           const projected = {

@@ -165,6 +165,60 @@ describe("Yrd domain objects", () => {
     await Promise.all([writer.close(), reader.close()])
   })
 
+  it("replays historical events without widening append validation", async () => {
+    const nextId = ids()
+    const replayedCommand = { id: nextId(), op: "legacy.counter.add" }
+    const legacyFrame = {
+      command: replayedCommand,
+      cause: {
+        id: nextId(),
+        commandId: replayedCommand.id,
+        op: replayedCommand.op,
+        commandHash: Core.Command.hash(replayedCommand),
+      },
+      events: [
+        {
+          id: nextId(),
+          name: "counter/changed",
+          ts: "2026-07-09T12:00:00.000Z",
+          data: { by: 4 },
+        },
+      ],
+    }
+    const legacyAdd = command({
+      title: "Emit a legacy counter event",
+      apply: () => ({ events: [event("counter/changed", { by: 1 })] }),
+    })
+    const strict = withCounter()(createYrdDef()).extend({ commands: { fixture: { legacyAdd } } })
+    const { replayEvents: strictReplayEvents, ...withoutReplayEvents } = strict
+    void strictReplayEvents
+
+    await expect(
+      createYrd(withoutReplayEvents, { inject: { journal: createMemoryJournal([legacyFrame]) } }),
+    ).rejects.toThrow()
+
+    const compatible = strict.extend({
+      replayEvents: {
+        "counter/changed": z.object({ by: z.number().int() }).strict(),
+      },
+    })
+    const journal = createMemoryJournal([legacyFrame])
+    await using app = await createYrd(compatible, {
+      inject: {
+        journal,
+        clock: () => "2026-07-09T12:00:00.000Z",
+        id: nextId,
+      },
+    })
+
+    expect(app.counter.value()).toBe(4)
+    await expect(app.dispatch(app.commands.fixture.legacyAdd, undefined)).rejects.toThrow()
+    await app.dispatch(app.commands.counter.add, { by: 2 })
+    expect(app.counter.value()).toBe(6)
+    await using replayed = await createYrd(compatible, { inject: { journal } })
+    expect(replayed.counter.value()).toBe(6)
+  })
+
   it("retries cursor conflicts without losing concurrent commands", async () => {
     const journal = createMemoryJournal()
     const definition = withCounter()(createYrdDef())

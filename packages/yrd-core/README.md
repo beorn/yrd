@@ -50,6 +50,12 @@ await yrd.messages.send("hello")
 Composition is synchronous. `createYrd()` asynchronously replays the injected
 Journal and returns one frozen runtime. Plugins never mutate a running app.
 
+`events` is always the append-time write gate. While reading the Journal, Core
+tries that canonical schema first. A plugin may additionally register
+`replayEvents` as a fallback for historical payloads the canonical schema
+rejects; absence means replay stays strict. Replay tolerance must never widen
+append.
+
 ## Command Contract
 
 A Command is serializable JSON. Callers may provide an id, or let Core create a

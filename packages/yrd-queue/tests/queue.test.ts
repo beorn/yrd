@@ -147,7 +147,15 @@ describe("Queue", () => {
     expect(integratedEvents).toContainEqual(
       expect.objectContaining({
         name: "pr/integrated",
-        data: expect.objectContaining({ pr: "PR1", issueRef, landingSha: MERGED }),
+        data: {
+          pr: "PR1",
+          revision: 1,
+          headSha: HEAD,
+          issueRef,
+          commit: MERGED,
+          landingSha: MERGED,
+          baseSha: BASE,
+        },
       }),
     )
 
@@ -166,7 +174,13 @@ describe("Queue", () => {
     expect(await Array.fromAsync(rejectedApp.events())).toContainEqual(
       expect.objectContaining({
         name: "pr/rejected",
-        data: expect.objectContaining({ pr: "PR1", issueRef, detail: "typed bounce" }),
+        data: {
+          pr: "PR1",
+          revision: 1,
+          headSha: HEAD,
+          issueRef,
+          detail: "typed bounce",
+        },
       }),
     )
   })

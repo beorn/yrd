@@ -4,7 +4,16 @@
  * @consumer @yrd/bay
  */
 import { describe, expect, it } from "vitest"
-import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
+import {
+  Command,
+  command,
+  createMemoryJournal,
+  createYrd,
+  createYrdDef,
+  event,
+  pipe,
+  type CommandResult,
+} from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import type { DeprovisionedBay, ProvisionedBay, RefreshedBay } from "../src/model.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
@@ -70,6 +79,143 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("replays pre-join v3 terminal PR events without weakening current emitted facts", async () => {
+    const nextId = ids()
+    const command = { id: nextId(), op: "fixture.legacy-pr-terminals" }
+    const at = "2026-01-01T00:00:00.000Z"
+    const issueRef = "@km/all/21063-steering-laser"
+    const pushed = (pr: string, branch: string, headSha: string, revision = 1) => ({
+      id: nextId(),
+      name: "pr/pushed",
+      ts: at,
+      data: { pr, branch, base: "main", headSha, issue: issueRef, revision },
+    })
+    const journal = createMemoryJournal([
+      {
+        command,
+        cause: {
+          id: nextId(),
+          commandId: command.id,
+          op: command.op,
+          commandHash: Command.hash(command),
+        },
+        events: [
+          pushed("PR1", "issue/legacy-rejected", HEAD_1),
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: { pr: "PR1", revision: 1, detail: "historical check failure" },
+          },
+          pushed("PR2", "issue/legacy-integrated", HEAD_2),
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: { pr: "PR2", revision: 1, headSha: HEAD_2, commit: BASE, baseSha: BASE },
+          },
+          pushed("PR3", "issue/legacy-withdrawn", HEAD_1),
+          { id: nextId(), name: "pr/withdrawn", ts: at, data: { pr: "PR3" } },
+          pushed("PR4", "issue/stale-legacy-rejected", HEAD_1),
+          pushed("PR4", "issue/stale-legacy-rejected", HEAD_2, 2),
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: { pr: "PR4", revision: 1, detail: "obsolete check failure" },
+          },
+          pushed("PR5", "issue/stale-legacy-integrated", HEAD_1),
+          pushed("PR5", "issue/stale-legacy-integrated", HEAD_2, 2),
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: { pr: "PR5", revision: 1, headSha: HEAD_1, commit: BASE, baseSha: BASE },
+          },
+        ],
+      },
+    ])
+    const workspace = createWorkspaceHarness().adapter
+    const jobs = createBayJobDefs(workspace)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+
+    await using replayed = await createYrd(definition, { inject: { journal } })
+
+    expect(replayed.bays.pr("PR1")).toMatchObject({
+      status: "rejected",
+      issue: issueRef,
+      revision: 1,
+      headSha: HEAD_1,
+      detail: "historical check failure",
+    })
+    expect(replayed.bays.pr("PR2")).toMatchObject({
+      status: "integrated",
+      issue: issueRef,
+      revision: 1,
+      headSha: HEAD_2,
+      integration: { commit: BASE, baseSha: BASE },
+    })
+    expect(replayed.bays.pr("PR3")).toMatchObject({
+      status: "withdrawn",
+      issue: issueRef,
+      revision: 1,
+      headSha: HEAD_1,
+    })
+    expect(replayed.bays.pr("PR4")).toMatchObject({ status: "pushed", revision: 2, headSha: HEAD_2 })
+    expect(replayed.bays.pr("PR5")).toMatchObject({ status: "pushed", revision: 2, headSha: HEAD_2 })
+  })
+
+  it("rejects newly emitted pre-join terminal PR facts", async () => {
+    const legacyWithdraw = command({
+      title: "Emit a legacy PR withdrawal",
+      apply: () => ({ events: [event("pr/withdrawn", { pr: "PR1" })] }),
+    })
+    const legacyReject = command({
+      title: "Emit a legacy PR rejection",
+      apply: () => ({
+        events: [event("pr/rejected", { pr: "PR1", revision: 1, detail: "legacy rejection" })],
+      }),
+    })
+    const legacyIntegrate = command({
+      title: "Emit a legacy PR integration",
+      apply: () => ({
+        events: [
+          event("pr/integrated", {
+            pr: "PR1",
+            revision: 1,
+            headSha: HEAD_1,
+            commit: BASE,
+            baseSha: BASE,
+          }),
+        ],
+      }),
+    })
+    const workspace = createWorkspaceHarness().adapter
+    const jobs = createBayJobDefs(workspace)
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ jobs, defaultBase: "main" }),
+    ).extend({ commands: { fixture: { legacyWithdraw, legacyReject, legacyIntegrate } } })
+    await using app = await createYrd(definition, {
+      inject: {
+        journal: createMemoryJournal(),
+        clock: () => "2026-01-01T00:00:00.000Z",
+        id: ids(),
+      },
+    })
+    await app.bays.submit({
+      branch: "issue/current-terminal-facts-stay-strict",
+      headSha: HEAD_1,
+      issue: "@km/all/21063-steering-laser",
+    })
+
+    await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.legacyIntegrate, undefined)).rejects.toThrow()
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 1, headSha: HEAD_1 })
+  })
+
   it("journals an exact tracker issue on retirement without parsing branch prose", async () => {
     await using app = (await createHarness()).app
     const issueRef = "@km/all/21063-steering-laser"
