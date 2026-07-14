@@ -2,7 +2,7 @@ import type { BayCommands, BaysState, HasBays } from "@yrd/bay"
 import type { ContestCommands, ContestsState, HasContests } from "@yrd/contest"
 import type { Yrd } from "@yrd/core"
 import type { HasJobs, JobCommands, JobsState } from "@yrd/job"
-import type { HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
+import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
 import type { Scope } from "@silvery/scope"
 
@@ -31,6 +31,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> & HasJobs & HasBays & H
 
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
+  recut?: GitPRRecutter
 }>
 
 export type YrdCliIO = {

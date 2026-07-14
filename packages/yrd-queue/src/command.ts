@@ -6,7 +6,7 @@ import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yr
 import { parseJobLaunch, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
-import type { IntegratedShape, IntegrationProof, PRShape, SourceRewrite } from "./model.ts"
+import type { IntegratedShape, IntegrationProof, PRShape, PRSnapshot, SourceRewrite } from "./model.ts"
 import { IntegrationProofSchema, SourceRewriteSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
 
@@ -532,6 +532,282 @@ export type GitQueueTarget = Readonly<{
   diverged: boolean
 }>
 
+export type PRRecutInput = PRSnapshot &
+  Readonly<{
+    current?: Readonly<{
+      revision: number
+      headSha: string
+      baseSha?: string
+      treeSha?: string
+      patchId?: string
+      fromRevision?: number
+      composition?: PRSnapshot["composition"]
+    }>
+  }>
+
+export type PRRecutResult = Readonly<{
+  headSha: string
+  baseSha: string
+  treeSha: string
+  patchId: string
+  unchanged: boolean
+  composition?: PRSnapshot["composition"]
+  sourceRewrites?: readonly SourceRewrite[]
+}>
+
+export type GitPRRecutter = Readonly<{ recut(input: PRRecutInput): Promise<PRRecutResult> }>
+
+export function createGitPRRecutter(options: {
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  env?: NodeJS.ProcessEnv
+}): GitPRRecutter {
+  const repo = resolve(options.repo)
+  const git = createGit(options.inject.process, options.env)
+  return Object.freeze({ recut: (input: PRRecutInput) => recutPR(git, repo, input) })
+}
+
+async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRRecutResult> {
+  const target = await authoritativeQueueBase(git, repo, input.base)
+  if (
+    (input.current?.revision === input.revision || input.current?.fromRevision === input.revision) &&
+    input.current.baseSha === target.sha &&
+    input.current.treeSha !== undefined &&
+    input.current.patchId !== undefined
+  ) {
+    return {
+      headSha: input.current.headSha,
+      baseSha: target.sha,
+      treeSha: input.current.treeSha,
+      patchId: input.current.patchId,
+      unchanged: true,
+      ...((input.current.composition ?? input.composition) === undefined
+        ? {}
+        : { composition: input.current.composition ?? input.composition }),
+    }
+  }
+  if (input.composition === undefined) {
+    return recutDirectPR(git, repo, target, input)
+  }
+  const declared = input.composition
+  const outcome = await withScratch<PRRecutResult>(git, repo, target.sha, tmpdir(), async (path) => {
+    const composed = await composePR(git, repo, path, input)
+    if (composed.status === "failed") {
+      throw createFailure({ kind: "refusal", code: composed.error.code, message: composed.error.message })
+    }
+    const candidateSha = await git.commit(path, "HEAD")
+    const treeSha = (await git.run(path, ["rev-parse", `${candidateSha}^{tree}`])).stdout
+    const rewrites = composed.output
+    const byRepo = new Map(rewrites.map((rewrite) => [rewrite.repo, rewrite]))
+    const composition = {
+      version: 1 as const,
+      sources: declared.sources.map((source) => {
+        const rewrite = byRepo.get(source.repo)
+        if (rewrite === undefined) {
+          throw createFailure({
+            kind: "infrastructure",
+            code: "recut-certificate-missing",
+            message: `yrd: recut produced no source certificate for '${source.repo}'`,
+          })
+        }
+        return {
+          ...source,
+          branch: rewrite.candidateRef,
+          baseSha: rewrite.newBaseSha,
+          tipSha: rewrite.newTipSha,
+        }
+      }),
+    }
+    const onlyRewrite = rewrites.length === 1 ? rewrites[0] : undefined
+    const patchId =
+      onlyRewrite !== undefined
+        ? onlyRewrite.patchId
+        : createHash("sha256")
+            .update(
+              JSON.stringify(
+                rewrites.map(({ repo: sourceRepo, patchId: sourcePatchId }) => [sourceRepo, sourcePatchId]),
+              ),
+            )
+            .digest("hex")
+    return {
+      status: "passed",
+      output: {
+        headSha: target.sha,
+        baseSha: target.sha,
+        treeSha,
+        patchId,
+        unchanged: false,
+        composition,
+        sourceRewrites: rewrites,
+      },
+    }
+  })
+  if (outcome.status === "passed") return outcome.output
+  const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+}
+
+async function recutDirectPR(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: PRRecutInput,
+): Promise<PRRecutResult> {
+  const oldBase = input.baseSha
+  if (oldBase === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-base-missing",
+      message: `yrd: PR '${input.id}' revision ${input.revision} has no immutable base SHA`,
+    })
+  }
+  for (const [label, sha] of [
+    ["base", oldBase],
+    ["head", input.headSha],
+  ] as const) {
+    if ((await git.optionalCommit(repo, sha)) !== sha) {
+      throw createFailure({
+        kind: "refusal",
+        code: "recut-source-missing",
+        message: `yrd: PR '${input.id}' ${label} '${sha}' is missing`,
+      })
+    }
+  }
+  if (!(await isAncestor(git, repo, oldBase, input.headSha)) || !(await isAncestor(git, repo, oldBase, target.sha))) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-lineage",
+      message: `yrd: PR '${input.id}' base '${oldBase}' is not an ancestor of both payload and '${target.sha}'`,
+    })
+  }
+  const payload = await changedPaths(git, repo, oldBase, input.headSha)
+  const sourceIdentity = await changedPayloadIdentity(git, repo, oldBase, input.headSha)
+  const sourcePatchId = await git.stablePatchId(repo, oldBase, input.headSha)
+  if (sourcePatchId === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "payload-certificate",
+      message: `yrd: PR '${input.id}' revision ${input.revision} has no stable patch identity`,
+    })
+  }
+  if (oldBase === target.sha) {
+    return {
+      headSha: input.headSha,
+      baseSha: target.sha,
+      treeSha: (await git.run(repo, ["rev-parse", `${input.headSha}^{tree}`])).stdout,
+      patchId: sourcePatchId,
+      unchanged: true,
+    }
+  }
+  const authority = await changedPaths(git, repo, oldBase, target.sha)
+  const overlap = intersection(payload, authority)
+  if (overlap.length > 0) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-conflict",
+      message: `yrd: PR '${input.id}' payload overlaps authoritative '${input.base}' at [${overlap.join(", ")}]`,
+    })
+  }
+  const outcome = await withScratch<PRRecutResult>(git, repo, input.headSha, tmpdir(), async (path) => {
+    const rebased = await git.run(
+      path,
+      [
+        "-c",
+        "user.name=Yrd Queue",
+        "-c",
+        "user.email=yrd-queue@example.invalid",
+        "rebase",
+        "--onto",
+        target.sha,
+        oldBase,
+        input.headSha,
+      ],
+      true,
+    )
+    if (rebased.code !== 0) {
+      const paths = await unmergedPaths(git, path)
+      await git.run(path, ["rebase", "--abort"], true)
+      throw createFailure({
+        kind: "refusal",
+        code: "recut-conflict",
+        message:
+          paths.length === 0
+            ? `yrd: PR '${input.id}' could not recut onto '${target.sha}': ${rebased.stderr || rebased.stdout}`
+            : `yrd: PR '${input.id}' could not recut onto '${target.sha}' at [${paths.join(", ")}]`,
+      })
+    }
+    const headSha = await git.commit(path, "HEAD")
+    const materialized = await changedPaths(git, path, target.sha, headSha)
+    if (!samePaths(materialized, payload)) {
+      throw createFailure({
+        kind: "refusal",
+        code: "payload-mismatch",
+        message: `yrd: PR '${input.id}' recut paths differ: expected [${payload.join(", ")}], got [${materialized.join(", ")}]`,
+      })
+    }
+    if ((await changedPayloadIdentity(git, path, target.sha, headSha)) !== sourceIdentity) {
+      throw createFailure({
+        kind: "refusal",
+        code: "payload-identity",
+        message: `yrd: PR '${input.id}' recut changed blob, mode, status, path, or gitlink identity`,
+      })
+    }
+    const materializedPatchId = await git.stablePatchId(path, target.sha, headSha)
+    if (materializedPatchId !== sourcePatchId) {
+      throw createFailure({
+        kind: "refusal",
+        code: "payload-certificate",
+        message: `yrd: PR '${input.id}' recut changed stable patch identity`,
+      })
+    }
+    const rangeDiff = await git.rangeDiff(path, oldBase, input.headSha, target.sha, headSha)
+    if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
+      throw createFailure({
+        kind: "refusal",
+        code: "payload-certificate",
+        message: `yrd: PR '${input.id}' recut is not range-diff equivalent`,
+      })
+    }
+    const ref = sourceCandidateRef(headSha)
+    const pinned = await git.run(
+      repo,
+      ["update-ref", "--create-reflog", ref, headSha, "0".repeat(headSha.length)],
+      true,
+    )
+    if (pinned.code !== 0 && (await git.optionalCommit(repo, ref)) !== headSha) {
+      throw createFailure({
+        kind: "infrastructure",
+        code: "recut-publish",
+        message: `yrd: PR '${input.id}' recut ref could not be pinned: ${pinned.stderr || pinned.stdout}`,
+      })
+    }
+    const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+    if (remote.code === 0 && remote.stdout !== "") {
+      const published = await git.run(repo, ["push", "--porcelain", "origin", `${headSha}:${ref}`], true)
+      if (published.code !== 0) {
+        throw createFailure({
+          kind: "infrastructure",
+          code: "recut-publish",
+          message: `yrd: PR '${input.id}' recut ref could not be published: ${published.stderr || published.stdout}`,
+        })
+      }
+    }
+    return {
+      status: "passed",
+      output: {
+        headSha,
+        baseSha: target.sha,
+        treeSha: (await git.run(path, ["rev-parse", `${headSha}^{tree}`])).stdout,
+        patchId: sourcePatchId,
+        unchanged: false,
+      },
+    }
+  })
+  if (outcome.status === "passed") return outcome.output
+  const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+}
+
 async function inspectQueueBase(git: Git, repo: string, branch: string): Promise<GitQueueTarget> {
   await git.run(repo, ["check-ref-format", "--branch", branch])
   const branchRef = `refs/heads/${branch}`
@@ -647,12 +923,19 @@ async function prepareCandidate(
   const sourceRewrites: SourceRewrite[] = []
   for (const pr of input.prs) {
     if (pr.composition !== undefined) {
+      const baseCertificate = await verifyComposedRecutBase(git, path, pr)
+      if (baseCertificate !== undefined) return baseCertificate
       const composed = await composePR(git, repo, path, pr)
       if (composed.status === "failed") return composed
+      const treeCertificate = await verifyComposedRecutTree(git, path, pr)
+      if (treeCertificate !== undefined) return treeCertificate
       sourceRewrites.push(...composed.output)
       continue
     }
-    if (!allowAuthoredGitlinks) {
+    if (pr.recut !== undefined) {
+      const certified = await verifyRecutCertificate(git, path, pr)
+      if (certified !== undefined) return certified
+    } else if (!allowAuthoredGitlinks) {
       const inspected = await authoredGitlinkPaths(git, path, pr.headSha)
       if (inspected.status === "failed") return inspected
       const gitlinks = inspected.output
@@ -690,6 +973,60 @@ async function prepareCandidate(
     }
   }
   return { status: "passed", output: { sha: await git.commit(path, "HEAD"), sourceRewrites } }
+}
+
+async function verifyRecutCertificate(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  if (pr.recut === undefined) return undefined
+  const baseSha = pr.baseSha
+  if (baseSha === undefined || (await git.commit(repo, "HEAD")) !== baseSha) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut base does not match the authoritative candidate base`,
+    )
+  }
+  const treeSha = (await git.run(repo, ["rev-parse", `${pr.headSha}^{tree}`], true)).stdout
+  const patchId = await git.stablePatchId(repo, baseSha, pr.headSha)
+  if (treeSha !== pr.recut.treeSha || patchId !== pr.recut.patchId) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut patch/tree certificate does not match revision ${pr.revision}`,
+    )
+  }
+  return undefined
+}
+
+async function verifyComposedRecutBase(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  if (pr.recut === undefined) return undefined
+  if (pr.baseSha === undefined || (await git.commit(repo, "HEAD")) !== pr.baseSha) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut base does not match the authoritative candidate base`,
+    )
+  }
+  return undefined
+}
+
+async function verifyComposedRecutTree(
+  git: Git,
+  repo: string,
+  pr: StepExecution["prs"][number],
+): Promise<CandidateFailure | undefined> {
+  if (pr.recut === undefined) return undefined
+  const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
+  return treeSha === pr.recut.treeSha
+    ? undefined
+    : candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recomposed tree certificate does not match revision ${pr.revision}`,
+      )
 }
 
 type CandidateFailure = Readonly<{

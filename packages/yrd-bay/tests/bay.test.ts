@@ -574,6 +574,80 @@ describe("withBays", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
   })
 
+  it("recuts one immutable payload as a new revision of the same PR and carries exact approval", async () => {
+    await using app = (await createHarness()).app
+    const nextBase = "b".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+
+    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.review({
+      pr: "PR1",
+      actor: "@cto",
+      decision: "approve",
+      ref: "review-revision-1",
+      note: "Reviewed immutable payload.",
+    })
+
+    const args = {
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: nextBase,
+      treeSha,
+      patchId,
+      reviewCarried: true,
+    } as const
+    const recut = await app.bays.recut(args)
+
+    expect(recut.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/recut",
+        data: {
+          pr: "PR1",
+          fromRevision: 1,
+          patchId,
+          baseSha: nextBase,
+          treeSha,
+          reviewCarried: true,
+          predecessor: { revision: 1, headSha: HEAD_1, baseSha: BASE },
+          successor: { revision: 2, headSha: HEAD_2, baseSha: nextBase },
+        },
+      }),
+    )
+    expect(app.bays.pr("PR1")).toMatchObject({
+      id: "PR1",
+      branch: "issue/recut",
+      status: "pushed",
+      revision: 2,
+      headSha: HEAD_2,
+      baseSha: nextBase,
+      recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
+      revisions: [
+        { revision: 1, headSha: HEAD_1 },
+        {
+          revision: 2,
+          headSha: HEAD_2,
+          baseSha: nextBase,
+          recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
+        },
+      ],
+      reviews: [
+        { revision: 1, headSha: HEAD_1, ref: "review-revision-1" },
+        { revision: 2, headSha: HEAD_2, carriedFrom: { revision: 1, headSha: HEAD_1 } },
+      ],
+    })
+    expect(app.bays.reviewState("PR1")).toMatchObject({
+      approved: true,
+      current: { revision: 2, headSha: HEAD_2, carriedFrom: { revision: 1, headSha: HEAD_1 } },
+    })
+    expect((await app.bays.recut(args)).events).toEqual([])
+    await app.bays.closePr({ pr: "PR1" })
+    await expect(app.bays.recut(args)).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "terminal-target" },
+    })
+  })
+
   it("refuses to append check requests to terminal PR history", async () => {
     await using app = (await createHarness()).app
     await app.bays.submit({ branch: "issue/terminal-checks", headSha: HEAD_1 })

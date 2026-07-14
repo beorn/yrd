@@ -955,6 +955,83 @@ describe("runYrd", () => {
     }
   })
 
+  it("exposes the canonical same-PR recut command", async () => {
+    const app = await createApp()
+    const help = outputIO({ columns: 100 })
+
+    expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
+    expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
+    expect(help.stdout()).toContain("--revision <number>")
+    expect(help.stdout()).toContain("--queue")
+    expect(help.stdout()).toContain("--json")
+  })
+
+  it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {
+    const app = await createApp({ requires: ["review"] })
+    const nextHead = "2".repeat(40)
+    const nextBase = "b".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const requests: unknown[] = []
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          requests.push(input)
+          return Promise.resolve({
+            headSha: nextHead,
+            baseSha: nextBase,
+            treeSha,
+            patchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "review-r1" })
+    const output = outputIO()
+
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--queue", "--json"), output.io, services),
+    ).toBe(0)
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        id: "PR1",
+        branch: "issue/recut",
+        base: "main",
+        revision: 1,
+        headSha: HEAD_SHA,
+        baseSha: BASE_SHA,
+      }),
+    ])
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      revision: 2,
+      baseSha: nextBase,
+      treeSha,
+      patchId,
+      reviewCarried: true,
+      unchanged: false,
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      id: "PR1",
+      status: "submitted",
+      revision: 2,
+      headSha: nextHead,
+      recut: { fromRevision: 1, treeSha, patchId, reviewCarried: true },
+    })
+    expect(app.bays.reviewState("PR1")).toMatchObject({
+      approved: true,
+      current: { carriedFrom: { revision: 1, headSha: HEAD_SHA } },
+    })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+
+    const repeated = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
+    expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
+    expect(app.bays.pr("PR1")?.revisions).toHaveLength(2)
+  })
+
   it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
     const revision = (
       headSha: string,

@@ -135,6 +135,10 @@ const QueueAuthorityTokenFactSchema = z.object({
   revision: z.number().int().positive(),
   headSha: GitShaSchema,
 })
+const QueueRecutAuthorityFactSchema = z.object({
+  pr: PRIdSchema,
+  successor: z.object({ revision: z.number().int().positive(), headSha: GitShaSchema }),
+})
 const QueueAuthorityPRFactSchema = z
   .object({
     pr: PRIdSchema,
@@ -1618,8 +1622,11 @@ function currentAuthorityMatches(
 }
 
 function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
-  if (applied.name === "pr/pushed") {
-    const token = QueueAuthorityTokenFactSchema.parse(applied.data)
+  if (applied.name === "pr/pushed" || applied.name === "pr/recut") {
+    const token =
+      applied.name === "pr/pushed"
+        ? QueueAuthorityTokenFactSchema.parse(applied.data)
+        : ((fact) => ({ pr: fact.pr, ...fact.successor }))(QueueRecutAuthorityFactSchema.parse(applied.data))
     const invalidated = invalidatePRAuthority(state.queues.authority, token.pr, "pushed")
     return {
       queues: {

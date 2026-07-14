@@ -20,6 +20,7 @@ import {
   GitCheckResultEvidenceSchema,
   configuredCommandStep,
   configuredMergeStep,
+  createGitPRRecutter,
   gitCheckStep,
   gitMergeStep,
   withQueue,
@@ -249,6 +250,235 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
 }
 
 describe("Queue command adapters", () => {
+  it("recuts one direct payload as an exact direct child and refuses overlapping authority", async () => {
+    const { repo, candidate } = await repository("candidate")
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await writeFile(join(repo, "upstream.txt"), "upstream\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    const currentBaseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+
+    const result = await recutter.recut({
+      id: "PR1",
+      branch: "issue/candidate",
+      base: "main",
+      revision: 1,
+      headSha: candidate,
+      baseSha: oldBaseSha,
+    })
+
+    expect(result).toMatchObject({
+      baseSha: currentBaseSha,
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+    expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(currentBaseSha)
+    expect(await git(repo, ["diff", "--name-only", currentBaseSha, result.headSha])).toBe("candidate.txt")
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "candidate.txt"), "authority overlap\n")
+    await git(repo, ["add", "candidate.txt"])
+    await git(repo, ["commit", "-qm", "overlap candidate"])
+    await expect(
+      recutter.recut({
+        id: "PR2",
+        branch: "issue/candidate",
+        base: "main",
+        revision: 1,
+        headSha: candidate,
+        baseSha: oldBaseSha,
+      }),
+    ).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "recut-conflict", message: expect.stringContaining("candidate.txt") },
+    })
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
+  it("admits a mechanically certified recut that preserves an authored root gitlink", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "base",
+    })
+    await writeFile(join(repo, "upstream.txt"), "upstream\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    await git(repo, ["push", "-q", "origin", "main"])
+    await writeFile(join(repo, ".git", "hooks", "pre-push"), "#!/bin/sh\nexit 0\n")
+    await using process = createProcess()
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha,
+    })
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    await git(repo, ["fetch", "-q", "origin", "main"])
+    expect(await git(repo, ["ls-tree", "FETCH_HEAD", "dep"])).toBe(await git(repo, ["ls-tree", recut.headSha, "dep"]))
+  })
+
+  it("recuts one composition revision onto the authoritative root and returns its exact certificate", async () => {
+    const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const oldRootBaseSha = await git(repo, ["rev-parse", `${rootBaseSha}^`])
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+
+    const input = {
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha: oldRootBaseSha,
+      baseSha: oldRootBaseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: oldPinSha,
+            tipSha: sourceTipSha,
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    } as const
+    const result = await recutter.recut(input)
+
+    expect(result).toMatchObject({
+      headSha: rootBaseSha,
+      baseSha: rootBaseSha,
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: expect.stringMatching(/^refs\/heads\/yrd\/candidates\/[0-9a-f]{40}$/u),
+            baseSha: newPinSha,
+            tipSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+    const rewritten = result.composition?.sources[0]
+    expect(rewritten).toBeDefined()
+    expect(await git(repo, ["ls-tree", result.treeSha, "dep"])).toContain(rewritten!.tipSha)
+    expect(await git(module, ["diff", "--name-only", newPinSha, rewritten!.tipSha])).toBe("src/candidate.ts")
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+    await expect(
+      recutter.recut({
+        ...input,
+        current: {
+          revision: 2,
+          headSha: result.headSha,
+          baseSha: result.baseSha,
+          treeSha: result.treeSha,
+          patchId: result.patchId,
+          fromRevision: 1,
+          composition: result.composition,
+        },
+      }),
+    ).resolves.toMatchObject({
+      headSha: result.headSha,
+      baseSha: result.baseSha,
+      treeSha: result.treeSha,
+      patchId: result.patchId,
+      composition: result.composition,
+      unchanged: true,
+    })
+  })
+
+  it.each([
+    { certificate: "exact", valid: true },
+    { certificate: "mismatched", valid: false },
+  ] as const)("admits a composed recut only when its $certificate tree certificate replays", async ({ valid }) => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const oldRootBaseSha = await git(repo, ["rev-parse", `${rootBaseSha}^`])
+    await using process = createProcess()
+    const composition = {
+      version: 1,
+      sources: [
+        {
+          repo: "dep",
+          branch: "issue/source",
+          baseSha: oldPinSha,
+          tipSha: sourceTipSha,
+          payload: ["src/candidate.ts"],
+        },
+      ],
+    } as const
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha: oldRootBaseSha,
+      baseSha: oldRootBaseSha,
+      composition,
+    })
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: oldRootBaseSha,
+      base: "main",
+      baseSha: oldRootBaseSha,
+      composition,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: valid ? recut.treeSha : "f".repeat(40),
+      patchId: recut.patchId,
+      reviewCarried: false,
+      composition: recut.composition,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    if (valid) {
+      expect(run.status, run.error?.message).toBe("passed")
+      expect(errors).not.toHaveBeenCalled()
+    } else {
+      expect(run.status).toBe("failed")
+      expect(run.error).toMatchObject({
+        code: "recut-certificate",
+        message: expect.stringContaining("tree certificate"),
+      })
+      expect(errors).toHaveBeenCalled()
+    }
+    errors.mockRestore()
+  })
+
   it("auto-restacks a disjoint source payload and composes the exact wrapper", async () => {
     const { repo, module, oldPinSha, newPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     await using process = createProcess()

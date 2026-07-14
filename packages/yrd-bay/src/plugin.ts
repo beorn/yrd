@@ -59,6 +59,7 @@ import {
   type PR,
   type PRComment,
   type PRRegression,
+  type PRRecutProof,
   type PRReview,
   type PRReviewState,
   type PRRevision,
@@ -149,6 +150,19 @@ export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
 const PrReadyArgsSchema = z.object({ pr: TextSchema }).strict()
 export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
+const PrRecutArgsSchema = z
+  .object({
+    pr: TextSchema,
+    fromRevision: RevisionSchema,
+    headSha: GitShaSchema,
+    baseSha: GitShaSchema,
+    treeSha: GitShaSchema,
+    patchId: GitShaSchema,
+    reviewCarried: z.boolean(),
+    composition: CompositionV1Schema.optional(),
+  })
+  .strict()
+export type PrRecutArgs = z.infer<typeof PrRecutArgsSchema>
 const PrRequestChecksArgsSchema = z.object({ pr: TextSchema, baseSha: GitShaSchema.optional() }).strict()
 export type PrRequestChecksArgs = z.infer<typeof PrRequestChecksArgsSchema>
 
@@ -215,6 +229,22 @@ const PRPushedSchema = z
       .optional(),
     revision: RevisionSchema,
     correlation: CorrelationSchema.optional(),
+  })
+  .strict()
+const PRRecutLineageSchema = z
+  .object({ revision: RevisionSchema, headSha: GitShaSchema, baseSha: GitShaSchema.optional() })
+  .strict()
+const PRRecutFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    fromRevision: RevisionSchema,
+    patchId: GitShaSchema,
+    baseSha: GitShaSchema,
+    treeSha: GitShaSchema,
+    reviewCarried: z.boolean(),
+    predecessor: PRRecutLineageSchema,
+    successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
+    composition: CompositionV1Schema.optional(),
   })
   .strict()
 const PRRevisionIdentitySchema = z.object({ pr: PRIdSchema, revision: RevisionSchema, headSha: GitShaSchema }).strict()
@@ -377,6 +407,7 @@ export type BayCommands = Readonly<{
   pr: Readonly<{
     close: CommandHandler<PrCloseArgs, BayState>
     edit: CommandHandler<PrEditArgs, BayState>
+    recut: CommandHandler<PrRecutArgs, BayState>
     ready: CommandHandler<PrReadyArgs, BayState>
     review: CommandHandler<PrReviewArgs, BayState>
     comment: CommandHandler<PrCommentArgs, BayState>
@@ -401,6 +432,7 @@ export type Bays = Readonly<{
   close(args: CloseBayArgs): Promise<CommandResult>
   closePr(args: PrCloseArgs): Promise<CommandResult>
   editPr(args: PrEditArgs): Promise<CommandResult>
+  recut(args: PrRecutArgs): Promise<CommandResult>
   ready(args: PrReadyArgs): Promise<CommandResult>
   review(args: PrReviewArgs): Promise<CommandResult>
   comment(args: PrCommentArgs): Promise<CommandResult>
@@ -419,6 +451,7 @@ type BayActions = Pick<
   | "close"
   | "closePr"
   | "editPr"
+  | "recut"
   | "ready"
   | "review"
   | "comment"
@@ -726,6 +759,7 @@ export function createBays(
     close: actions.close,
     closePr: actions.closePr,
     editPr: actions.editPr,
+    recut: actions.recut,
     ready: actions.ready,
     review: actions.review,
     comment: actions.comment,
@@ -754,6 +788,7 @@ export function withBays(options: WithBaysOptions) {
         "bay/opened": BayOpenedSchema,
         "bay/closing": BayClosingSchema,
         "pr/pushed": PRPushedSchema,
+        "pr/recut": PRRecutFactSchema,
         "pr/submitted": PRRevisionSchema,
         "pr/correlation-bound": PRCorrelationBoundSchema,
         "pr/withdrawn": PRWithdrawnSchema,
@@ -789,6 +824,7 @@ export function withBays(options: WithBaysOptions) {
               close: (args) => yrd.dispatch(commands.bay.close, args),
               closePr: (args) => yrd.dispatch(commands.pr.close, args),
               editPr: (args) => yrd.dispatch(commands.pr.edit, args),
+              recut: (args) => yrd.dispatch(commands.pr.recut, args),
               ready: (args) => yrd.dispatch(commands.pr.ready, args),
               review: (args) => yrd.dispatch(commands.pr.review, args),
               comment: (args) => yrd.dispatch(commands.pr.comment, args),
@@ -864,6 +900,12 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string): BayCommands {
         visibility: "public",
         params: PrEditArgsSchema,
         apply: (state: BayState, args: PrEditArgs) => editPr(state, args),
+      }),
+      recut: command({
+        title: "Record a mechanically equivalent PR recut",
+        visibility: "public",
+        params: PrRecutArgsSchema,
+        apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args),
       }),
       ready: command({
         title: "Mark a PR ready",
@@ -1180,6 +1222,60 @@ function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
   if (pr.status === "submitted") return { events: [] }
   return submitWork(state, args, "main")
+}
+
+function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
+    raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
+  }
+  const predecessor = pr.revisions.find((revision) => revision.revision === args.fromRevision)
+  if (predecessor === undefined) {
+    raiseFailure("refusal", "revision-missing", `yrd: PR '${pr.id}' has no revision ${args.fromRevision}`)
+  }
+  const unchanged =
+    pr.headSha === args.headSha &&
+    pr.baseSha === args.baseSha &&
+    pr.recut?.fromRevision === args.fromRevision &&
+    pr.recut.patchId === args.patchId &&
+    pr.recut.treeSha === args.treeSha &&
+    pr.recut.reviewCarried === args.reviewCarried &&
+    sameComposition(pr.composition, args.composition)
+  if (unchanged) return { events: [] }
+
+  const approved = pr.reviews.findLast(
+    (review) =>
+      review.revision === predecessor.revision &&
+      review.headSha === predecessor.headSha &&
+      review.decision === "approve",
+  )
+  if (args.reviewCarried && approved === undefined) {
+    raiseFailure(
+      "refusal",
+      "review-carry-invalid",
+      `yrd: PR '${pr.id}' revision ${predecessor.revision} has no approval to carry`,
+    )
+  }
+  const successor = { revision: pr.revision + 1, headSha: args.headSha, baseSha: args.baseSha }
+  return {
+    events: [
+      event("pr/recut", {
+        pr: pr.id,
+        fromRevision: predecessor.revision,
+        patchId: args.patchId,
+        baseSha: args.baseSha,
+        treeSha: args.treeSha,
+        reviewCarried: args.reviewCarried,
+        predecessor: {
+          revision: predecessor.revision,
+          headSha: predecessor.headSha,
+          ...(predecessor.baseSha === undefined ? {} : { baseSha: predecessor.baseSha }),
+        },
+        successor,
+        ...(args.composition === undefined ? {} : { composition: args.composition }),
+      }),
+    ],
+  }
 }
 
 function reviewPr(state: DeepReadonly<BayState>, args: PrReviewArgs) {
@@ -1545,6 +1641,80 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               },
             },
       )
+    }
+    case "pr/recut": {
+      const recut = PRRecutFactSchema.parse(data)
+      const pr = current.prs[recut.pr]
+      if (pr === undefined) throw new Error(`yrd: no PR '${recut.pr}' for recut`)
+      const predecessor = pr.revisions.find(
+        (revision) =>
+          revision.revision === recut.predecessor.revision && revision.headSha === recut.predecessor.headSha,
+      )
+      if (
+        predecessor === undefined ||
+        recut.fromRevision !== recut.predecessor.revision ||
+        predecessor.baseSha !== recut.predecessor.baseSha ||
+        recut.successor.revision !== pr.revision + 1
+      ) {
+        throw new Error(`yrd: recut lineage does not match PR '${pr.id}'`)
+      }
+      const proof: PRRecutProof = {
+        fromRevision: recut.fromRevision,
+        patchId: recut.patchId,
+        treeSha: recut.treeSha,
+        reviewCarried: recut.reviewCarried,
+      }
+      const revision: PRRevision = {
+        revision: recut.successor.revision,
+        headSha: recut.successor.headSha,
+        base: pr.base,
+        baseSha: recut.successor.baseSha,
+        ...(recut.composition === undefined ? {} : { composition: recut.composition }),
+        recut: proof,
+        pushedAt: applied.ts,
+      }
+      const approval = pr.reviews.findLast(
+        (review) =>
+          review.revision === predecessor.revision &&
+          review.headSha === predecessor.headSha &&
+          review.decision === "approve",
+      )
+      if (recut.reviewCarried && approval === undefined) {
+        throw new Error(`yrd: PR '${pr.id}' recut carries a missing approval`)
+      }
+      const carriedReview: PRReview | undefined =
+        recut.reviewCarried && approval !== undefined
+          ? {
+              revision: revision.revision,
+              headSha: revision.headSha,
+              actor: approval.actor,
+              decision: "approve",
+              at: applied.ts,
+              ...(approval.note === undefined ? {} : { note: approval.note }),
+              carriedFrom: { revision: predecessor.revision, headSha: predecessor.headSha },
+            }
+          : undefined
+      return patchPR(pr, {
+        status: "pushed",
+        revision: revision.revision,
+        headSha: revision.headSha,
+        baseSha: revision.baseSha,
+        correlation: undefined,
+        ...(recut.composition === undefined ? { composition: undefined } : { composition: recut.composition }),
+        recut: proof,
+        revisions: [...pr.revisions, revision],
+        reviews: carriedReview === undefined ? pr.reviews : [...pr.reviews, carriedReview],
+        terminalRun: undefined,
+        submittedAt: undefined,
+        rejectedAt: undefined,
+        integratedAt: undefined,
+        integration: undefined,
+        withdrawnAt: undefined,
+        canceledAt: undefined,
+        canceledBy: undefined,
+        cancelReason: undefined,
+        detail: undefined,
+      })
     }
     case "pr/submitted": {
       const changed = PRRevisionSchema.parse(data)
