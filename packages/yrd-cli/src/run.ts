@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process"
 import { open, readFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
-import { Command as CliCommand, CommanderError, Help, int } from "@silvery/commander"
+import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
 import {
   CompositionV1Schema,
@@ -2128,20 +2128,6 @@ function configureOutput(command: CliCommand, io: YrdCliIO, output: { wroteError
   for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
 }
 
-function configureCanonicalHelp(program: CliCommand): void {
-  const standard = new Help()
-  const withoutAlias = (value: string, command: CliCommand): string => {
-    const alias = command.alias()
-    return alias === "" ? value : value.replace(`|${alias}`, "")
-  }
-  program.configureHelp({
-    ...program.configureHelp(),
-    minWidthToWrap: 20,
-    subcommandTerm: (command) => withoutAlias(standard.subcommandTerm(command), command as unknown as CliCommand),
-    commandUsage: (command) => withoutAlias(standard.commandUsage(command), command as unknown as CliCommand),
-  })
-}
-
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
   const bay = projection === "bay" ? name : `${name} bay`
   const examples: [string, string][] = [
@@ -2191,7 +2177,7 @@ function buildProgram(
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
-  configureCanonicalHelp(program)
+  program.configureHelp({ minWidthToWrap: 20 })
   if (app === undefined) {
     const increase = (_value: string, previous: number): number => previous + 1
     program
@@ -2246,7 +2232,7 @@ function buildProgram(
 
   const bay = projection === "bay" ? program : program.command("bay").description("manage isolated Git work bays")
   bay.helpCommand(false)
-  if (projection === "root") bay.alias("bays")
+  if (projection === "root") bay.silentAlias("bays")
   bay
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
@@ -2320,7 +2306,7 @@ function buildProgram(
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
-  queue.alias("queues")
+  queue.silentAlias("queues")
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--base <branch>", "select one base queue")
@@ -2352,7 +2338,7 @@ function buildProgram(
       }
       await listQueues(installed(), filters, options, io)
     })
-  queueList.alias("ls")
+  queueList.silentAlias("ls")
   queue
     .command("audit")
     .description("check queue state")
@@ -2428,9 +2414,9 @@ function buildProgram(
 
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)
-  pr.alias("prs")
+  pr.silentAlias("prs")
   pr.command("list")
-    .alias("ls")
+    .silentAlias("ls")
     .description("list pull requests")
     .option("--base <branch>", "scope PRs to one base")
     .option("--state <state>", "scope PRs to one native state")
@@ -2536,7 +2522,7 @@ function buildProgram(
 
   const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)
-  issue.alias("issues")
+  issue.silentAlias("issues")
   issue
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
@@ -2549,7 +2535,7 @@ function buildProgram(
 
   const contest = program.command("contest").description("inspect and select contest attempts")
   contest.helpCommand(false)
-  contest.alias("contests")
+  contest.silentAlias("contests")
   contest
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
