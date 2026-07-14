@@ -488,6 +488,13 @@ describe("Queue", () => {
       revision: pr.revision,
       headSha: pr.headSha,
       correlation,
+      revisions: [
+        {
+          revision: pr.revision,
+          headSha: pr.headSha,
+          terminal: { status: "canceled", at: "2026-01-01T00:00:00.000Z" },
+        },
+      ],
     })
     expect(app.queue.get("R1")).toMatchObject({
       status: "failed",
@@ -511,6 +518,10 @@ describe("Queue", () => {
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "failed",
       prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
+    })
+    expect(replayed.state().bays.prs[pr.id]).toMatchObject({
+      status: "canceled",
+      revisions: [{ terminal: { status: "canceled", at: "2026-01-01T00:00:00.000Z" } }],
     })
   })
 

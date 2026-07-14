@@ -45,9 +45,9 @@ import {
   queueLogAttempts,
   queueLogRows,
   queueRevisionKey,
+  queueRunRevisionClocks,
   runRevisionClock,
   queueShowData,
-  queueSubmissionTimes,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
@@ -657,19 +657,11 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
   const pr = requiredPr(app, selector)
   const runs = prQueueRuns(app, pr)
   const attempts = await queueLogAttempts(app.events())
-  const data = runs.map((run) => {
-    const revisionClock = runRevisionClock(pr, run)
-    if (revisionClock === undefined) {
-      throw new Error(`yrd: run '${run.id}' has no retained revision clock for PR '${pr.id}'`)
-    }
-    return queueShowData(run, runs, attempts, revisionClock)
-  })
-  await printResult(
-    io,
-    jsonEnabled(options),
-    { command: "pr.runs", pr, runs: data },
-    createElement(PRRunsView, { runs: data }),
-  )
+  const data = {
+    pr,
+    runs: runs.map((run) => queueShowData(run, runs, attempts, runRevisionClock(pr, run))),
+  }
+  await printResult(io, jsonEnabled(options), { command: "pr.runs", ...data }, createElement(PRRunsView, { data }))
 }
 
 async function diffPr(
@@ -1137,7 +1129,10 @@ async function logRuns(
     summaries.flatMap((summary) => [...summary.running, ...summary.waiting, ...summary.finished].map((run) => run.id)),
   )
   const attempts = (await queueLogAttempts(app.events())).filter((attempt) => runIds.has(attempt.run))
-  const submissionTimes = queueSubmissionTimes(Object.values(state.bays.prs))
+  const revisionClocks = queueRunRevisionClocks(
+    Object.values(state.bays.prs),
+    summaries.flatMap((summary) => summary.finished),
+  )
   const rows = queueLogRows(
     summaries,
     target.selected,
@@ -1145,7 +1140,7 @@ async function logRuns(
     prStatusById,
     attempts,
     revisionSubjects,
-    submissionTimes,
+    revisionClocks,
   )
   const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
