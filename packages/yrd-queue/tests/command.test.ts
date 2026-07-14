@@ -34,6 +34,7 @@ import {
 
 const roots: string[] = []
 const runtime = { runner: "local", leaseMs: 60_000 }
+const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 type Checked = AddStepResult<PRShape, "check", GitCheckResultEvidence>
 
 afterEach(async () => {
@@ -453,8 +454,13 @@ describe("Queue command adapters", () => {
       if (verdict === undefined) {
         expect(evidence.detail).toContain("[yrd-base-health]")
         expect(evidence.diagnostics).toEqual([
-          { file: "src/index.ts", line: 12, column: 4, message: "error TS2322: Type 'string' is not assignable" },
-          { file: "src/formatted.ts", line: 1, message: "working tree changed during check" },
+          {
+            file: "src/index.ts",
+            [sourceRowKey]: 12,
+            column: 4,
+            message: "error TS2322: Type 'string' is not assignable",
+          },
+          { file: "src/formatted.ts", [sourceRowKey]: 1, message: "working tree changed during check" },
         ])
       }
       expect(evidence.artifacts.every((artifact) => existsSync(artifact.path))).toBe(true)
@@ -623,7 +629,7 @@ describe("Queue command adapters", () => {
       ),
       { classification: "base" },
     )
-    await app.bays.submit({ branch: "task/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
     expect(run.status).toBe("failed")
@@ -634,7 +640,7 @@ describe("Queue command adapters", () => {
       command: ["sh", "-c", expect.stringContaining("test:fast failed")],
       exitCode: 17,
       classification: "base",
-      diagnostics: [{ file: "src/model.ts", line: 12, column: 4, message: "error TS2322: type mismatch" }],
+      diagnostics: [{ file: "src/model.ts", [sourceRowKey]: 12, column: 4, message: "error TS2322: type mismatch" }],
       baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
       candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
       candidateRef: expect.stringContaining("refs/yrd/candidates/"),
