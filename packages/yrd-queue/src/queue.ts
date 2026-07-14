@@ -266,7 +266,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   admit(args: AdmitSelection, options?: RunJobOptions): Promise<readonly QueueRun[]>
   pause(args: PauseQueueArgs): Promise<QueuePause>
   resume(base: string): Promise<void>
-  run(args: QueueRunArgs, options: RunJobOptions): Promise<readonly QueueRun[]>
+  run(args: QueueRunArgs, options: QueueRunOptions): Promise<readonly QueueRun[]>
   waiting(selector: string, step?: string): WaitingQueueStep
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<QueueRun>
   recover(options: RecoverQueueOptions): Promise<readonly QueueRun[]>
@@ -277,6 +277,8 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   get(run: QueueRunId): QueueRun | undefined
   status(base: string): QueueSummary
 }>
+
+export type QueueRunOptions = RunJobOptions & Readonly<{ continueAdmissions?: () => boolean }>
 
 export type WaitingQueueStep = Readonly<{
   run: QueueRun
@@ -501,7 +503,7 @@ function createQueue<Shape extends PRShape>(
     return admitted
   }
 
-  const drainAdmissions = async (selectors: readonly string[], options: RunJobOptions): Promise<QueueRun[]> => {
+  const drainAdmissions = async (selectors: readonly string[], options: QueueRunOptions): Promise<QueueRun[]> => {
     const targets = new Set(selectors)
     const outcomes = new Map<QueueRunId, QueueRun>()
     const remember = (candidate: QueueRun): void => {
@@ -509,6 +511,7 @@ function createQueue<Shape extends PRShape>(
     }
 
     while (targets.size > 0) {
+      if (options.continueAdmissions?.() === false) break
       await actions.refresh()
       const snapshot = runtime()
       const active = orderedQueues(snapshot.queues, snapshot.jobs).find(
@@ -523,7 +526,9 @@ function createQueue<Shape extends PRShape>(
       }
 
       const queued = admissionQueue(snapshot, steps)
-      const admitted = await dispatchAdmissions(queued.map((pr) => pr.id))
+      const admitted = await dispatchAdmissions(
+        (options.continueAdmissions === undefined ? queued : queued.slice(0, 1)).map((pr) => pr.id),
+      )
       if (admitted.length > 0) continue
 
       for (const selector of targets) {
@@ -563,7 +568,9 @@ function createQueue<Shape extends PRShape>(
         args.prs === undefined || args.prs.length === 0
           ? admissionQueue(snapshot, steps).map((pr) => pr.id)
           : [...args.prs]
-      return runOptions === undefined ? await dispatchAdmissions(selectors) : await drainAdmissions(selectors, runOptions)
+      return runOptions === undefined
+        ? await dispatchAdmissions(selectors)
+        : await drainAdmissions(selectors, runOptions)
     },
     async pause(args) {
       const base = baseIdentity(args.base)
@@ -616,6 +623,7 @@ function createQueue<Shape extends PRShape>(
       }
       const prs = runnablePRs(snapshot, args, steps, consumed).filter((pr) => !activeBases.has(baseIdentity(pr.base)))
       for (const candidate of partitionCandidates(prs, snapshot.queues.batchSize)) {
+        if (runOptions.continueAdmissions?.() === false) break
         const started = await actions.run({
           prs: candidate.map((pr) => pr.id),
           ...(args.steps === undefined ? {} : { steps: args.steps }),

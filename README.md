@@ -330,6 +330,11 @@ check authority for its exact head; check admission consumes the check fact,
 and an integrating Queue run consumes the submit fact. Queue commands cannot
 mint or refresh either authority.
 
+To stop a resident `queue run --watch`, send `SIGINT` (Ctrl-C) or `SIGTERM`.
+The first signal stops new admission, lets the active run finish, and exits with
+that run's result; an idle runner exits cleanly. Send either signal again to
+force the existing hard shutdown and job-tree reap.
+
 The bare dashboard shows active and recent work. `AGE` is immutable queue
 lifetime—submission to terminal outcome—while `TOUCHED` is the latest state or
 step event and `RUN` is execution duration. `yrd pr runs <PR>` is the canonical
