@@ -46,6 +46,7 @@ import {
   runRevisionClock,
   queueShowData,
   queueStatusRows,
+  queueTimelineRows,
   watchQueueRows,
   type QueueLogCoverage,
   type QueueStatusResult,
@@ -587,6 +588,8 @@ describe("runYrd", () => {
     const queue = outputIO({ columns: 100 })
     expect(await runYrd(app, yrd("queue", "--help"), queue.io)).toBe(0)
     expect(queue.stdout()).toContain("manage integration queues")
+    expect(queue.stdout()).toMatch(/^\s+list \[options\]\s+list integration queues$/mu)
+    expect(queue.stdout()).not.toMatch(/^\s+ls \[options\]/mu)
     expect(queue.stdout()).toMatch(/^\s+init \[options\] \[base\]\s+prepare queue resources$/mu)
     expect(queue.stdout()).toMatch(/^\s+deinit \[options\] \[base\]\s+release queue resources$/mu)
     expect(queue.stdout()).not.toMatch(/^\s+(?:provision|deprovision)\b/mu)
@@ -726,7 +729,9 @@ describe("runYrd", () => {
       now: () => Date.parse("2026-07-09T12:01:00.000Z"),
     })
     expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
-    expect(humanStatus.stdout()).toContain("6. [ ] PR6")
+    expect(humanStatus.stdout()).toContain("STATUS submitted")
+    expect(humanStatus.stdout()).toContain("POSITION 6")
+    expect(humanStatus.stdout()).toContain("PR6")
 
     const status = outputIO({ currentBranch: () => "topic/6" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
@@ -1864,11 +1869,12 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), human.io)).toBe(0)
     expect(human.stdout()).toContain("PR1")
-    expect(human.stdout()).toContain("[x]")
+    expect(human.stdout()).toContain("STATUS")
+    expect(human.stdout()).toContain("integrated")
     expect(human.stdout()).toContain("one")
     expect(human.stdout()).toContain("integrated")
     expect(human.stdout()).toContain(MERGED_SHA.slice(0, 12))
-    expect(human.stdout()).toContain("file:///repo/.bays/B1")
+    expect(human.stdout()).not.toContain("file:///repo/.bays/B1")
 
     const show = outputIO()
     expect(await runYrd(app, yrd("contest", "view", "C1", "--json"), show.io)).toBe(0)
@@ -1896,19 +1902,158 @@ describe("runYrd", () => {
     const frame = stripOsc8Targets(
       await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false })),
     )
-    expect(frame).toContain("QUEUE")
-    expect(frame).toContain("OPEN")
-    expect(frame).toContain("ACTIVE")
-    expect(frame).toContain("INTEGRATED")
-    expect(frame).toContain("REJECTED")
-    expect(frame).toContain("POS")
     expect(frame).toContain("PR1")
+    expect(frame).toContain("STATUS")
+    expect(frame).toContain("SOURCE")
+    expect(frame).toContain("REV")
+    expect(frame).toContain("HEAD")
+    expect(frame).toContain("BASE")
+    expect(frame).toContain("LANDING")
+    expect(frame).toContain("position 1")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
     expect(frame).not.toContain("PATH")
     expect(frame).not.toContain("file:///repo/.bays/B1")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
+  })
+
+  it("selects a timeline row before switching the existing PR detail pane", async () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "2".repeat(40),
+          submittedAt: "2026-07-09T12:01:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [],
+      finished: [],
+    } as unknown as QueueStatusResult
+    const handle = await run(
+      createElement(QueueWatchFrame, {
+        snapshot: { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") },
+        paused: false,
+      }),
+      { writable: { write: () => {} }, cols: 120, rows: 30 },
+    )
+
+    try {
+      expect(handle.text).toContain("> 2m submitted PR1")
+      expect(handle.text).toContain("PR PR1 STATUS")
+
+      await handle.press("j")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("> 1m submitted PR2")
+      expect(handle.text).toContain("PR PR1 STATUS")
+
+      await handle.press("Enter")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("PR PR2 STATUS")
+      expect(handle.text).not.toContain("PR PR1 STATUS")
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  it("accepts queue ls --latest as the canonical queue list lens", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const status = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
+    expect(status.stdout()).toContain("PR1")
+    expect(status.stdout()).toContain("submitted")
+    expect(status.stdout()).toContain("position 1")
+  })
+
+  it("keeps queue ls --latest distinct from the default queue list projection", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/one", headSha: "1".repeat(40), base: "main" })
+    await app.bays.submit({ branch: "topic/two", headSha: "2".repeat(40), base: "main" })
+
+    const plain = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls"), plain.io), plain.stderr()).toBe(0)
+
+    const latest = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
+
+    expect(plain.stdout()).toContain("QUEUE")
+    expect(plain.stdout()).toContain("OPEN")
+    expect(latest.stdout()).toContain("PR1")
+    expect(latest.stdout()).toContain("PR2")
+    expect(latest.stdout()).not.toContain("OPEN")
+    expect(latest.stdout()).not.toBe(plain.stdout())
+  })
+
+  it("renders queue --watch identically to root watch", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    let rootMounted: ReactElement | undefined
+    const watchVariants: Array<{ argv: readonly string[]; mounted?: ReactElement }> = [
+      { argv: yrd("queue", "--watch") },
+      { argv: yrd("queue", "ls", "--watch") },
+    ]
+
+    const rootWatch = outputIO({
+      now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+    })
+    const rootLive = withLiveRenderer(rootWatch.io, async (element) => {
+      rootMounted = element
+    })
+    expect(await runYrd(app, yrd("watch"), rootLive)).toBe(0)
+    if (rootMounted === undefined) throw new Error("expected root watch pane to mount")
+
+    const rootFrame = stripOsc8Targets(
+      await renderString(
+        createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial, paused: false }),
+      ),
+    )
+    for (const variant of watchVariants) {
+      let mounted: ReactElement | undefined
+      const watch = outputIO({
+        now: () => Date.parse("2026-07-09T12:01:00.000Z"),
+      })
+      const live = withLiveRenderer(watch.io, async (element) => {
+        mounted = element
+      })
+      expect(await runYrd(app, variant.argv, live)).toBe(0)
+      if (mounted === undefined) throw new Error("expected watch panes to mount")
+      const frame = stripOsc8Targets(
+        await renderString(
+          createElement(QueueWatchFrame, { snapshot: (mounted.props as QueueWatchPaneProps).initial, paused: false }),
+        ),
+      )
+      expect(frame).toBe(rootFrame)
+    }
   })
 
   it("renders pause and drain health in watch output", async () => {
@@ -1973,6 +2118,149 @@ describe("runYrd", () => {
       step: "review",
       elapsed: "1m",
     })
+  })
+
+  it("orders queue timeline rows status-major and collapses to the latest row per PR", () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "2".repeat(40),
+          submittedAt: "2026-07-09T12:01:00.000Z",
+        },
+        {
+          id: "PR3",
+          name: "Third",
+          branch: "topic/three",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "3".repeat(40),
+          submittedAt: "2026-07-09T12:19:00.000Z",
+        },
+        {
+          id: "PR4",
+          name: "Fourth",
+          branch: "topic/four",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: "4".repeat(40),
+        },
+        {
+          id: "PR5",
+          name: "Fifth",
+          branch: "topic/five",
+          base: "main",
+          status: "integrated",
+          revision: 1,
+          headSha: "5".repeat(40),
+        },
+      ],
+      running: [
+        {
+          id: "R1",
+          base: "main",
+          status: "running",
+          startedAt: "2026-07-09T12:00:00.000Z",
+          shape: {},
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+        {
+          id: "R3",
+          base: "main",
+          status: "running",
+          startedAt: "2026-07-09T12:05:00.000Z",
+          shape: {},
+          prs: [{ id: "PR4", revision: 1, headSha: "4".repeat(40), branch: "topic/four" }],
+          steps: [],
+        },
+      ],
+      waiting: [],
+      finished: [
+        {
+          id: "R2",
+          base: "main",
+          status: "passed",
+          startedAt: "2026-07-09T12:10:00.000Z",
+          finishedAt: "2026-07-09T12:11:00.000Z",
+          shape: {},
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/one" }],
+          steps: [],
+        },
+        {
+          id: "R4",
+          base: "main",
+          status: "passed",
+          startedAt: "2026-07-09T12:14:00.000Z",
+          finishedAt: "2026-07-09T12:15:00.000Z",
+          shape: {},
+          prs: [{ id: "PR5", revision: 1, headSha: "5".repeat(40), branch: "topic/five" }],
+          steps: [],
+        },
+      ],
+    } as unknown as QueueStatusResult
+
+    const allRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), false)
+    const latestRows = queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)
+
+    expect(allRows.map((row) => row.run ?? row.pr)).toEqual(["PR2", "PR3", "R1", "R3", "R4", "R2"])
+    expect(latestRows.map((row) => row.run ?? row.pr)).toEqual(["PR2", "PR3", "R3", "R4", "R2"])
+    expect(latestRows.find((row) => row.pr === "PR1")?.run).toBe("R2")
+  })
+
+  it("keeps a fresh submitted revision newer than its prior finished run", () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "Revised",
+          branch: "topic/revised",
+          base: "main",
+          status: "submitted",
+          revision: 2,
+          headSha: "2".repeat(40),
+          submittedAt: "2026-07-09T12:15:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [],
+      finished: [
+        {
+          id: "R1",
+          base: "main",
+          status: "failed",
+          startedAt: "2026-07-09T12:10:00.000Z",
+          finishedAt: "2026-07-09T12:11:00.000Z",
+          shape: {},
+          prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA, branch: "topic/revised", base: "main" }],
+          steps: [],
+        },
+      ],
+    } as unknown as QueueStatusResult
+
+    expect(queueTimelineRows([result], Date.parse("2026-07-09T12:20:00.000Z"), true)).toMatchObject([
+      { pr: "PR1", status: "submitted", clock: "5m", detail: "position 1" },
+    ])
   })
 
   it("falls back to job status when a watch queue job carries no evidence detail", () => {
@@ -2088,10 +2376,7 @@ describe("runYrd", () => {
       { writable: { write: () => {} }, cols: 40, rows: 8 },
     )
     try {
-      expect(handle.text).toContain("QUEUE")
-      expect(handle.text).toContain("main")
-      expect(handle.text).toContain("PAUSE")
-      expect(handle.text).toContain("DRAIN")
+      expect(handle.text).toContain("No matching queue rows.")
       expect(handle.text).toContain("LIVE")
       await handle.press("p")
       await handle.waitForLayoutStable()
@@ -2796,7 +3081,8 @@ describe("runYrd", () => {
 
     const status = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("pr", "status"), status.io), status.stderr()).toBe(0)
-    expect.soft(status.stdout()).toContain("2. [ ] PR2")
+    expect.soft(status.stdout()).toContain("STATUS submitted")
+    expect.soft(status.stdout()).toContain("POSITION 2")
 
     const prime = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
