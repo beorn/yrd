@@ -52,7 +52,7 @@ describe("queue timeline storybook", () => {
         })
         expect(rendered, name).toContain(`QUEUE ${projection.base}`)
         expect(
-          Math.max(...rendered.split("\n").map((line) => line.length)),
+          Math.max(...rendered.split("\n").map((row) => row.length)),
           `${name} at ${width} columns`,
         ).toBeLessThanOrEqual(width)
       }
@@ -132,10 +132,9 @@ describe("queue timeline storybook", () => {
       outputs: [
         {
           ...outputTemplate,
-          text: `${Array.from(
-            { length: count },
-            (_, index) => `detail-line-${String(index + 1).padStart(3, "0")}`,
-          ).join("\n")}\n`,
+          text: `${Array.from({ length: count }, (_, index) => `detail-row-${String(index + 1).padStart(3, "0")}`).join(
+            "\n",
+          )}\n`,
         },
       ],
     })
@@ -149,29 +148,29 @@ describe("queue timeline storybook", () => {
       await handle.press("j")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("MEMBERS PR3")
-      expect(handle.text).toContain("detail-line-080")
+      expect(handle.text).toContain("detail-row-080")
 
       // This long fixture makes the lossless follow contract observable: wheel
       // input targets the detail pane, never the selected master-list row.
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, -3)
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-001")
+      expect(handle.text).toContain("detail-row-001")
       expect(handle.text).toContain("MEMBERS PR3")
 
       handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(81), paused: false }))
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-001")
-      expect(handle.text).not.toContain("detail-line-081")
+      expect(handle.text).toContain("detail-row-001")
+      expect(handle.text).not.toContain("detail-row-081")
       expect(handle.text).toContain("MEMBERS PR3")
 
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, 3)
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-081")
+      expect(handle.text).toContain("detail-row-081")
       expect(handle.text).toContain("MEMBERS PR3")
 
       handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(82), paused: false }))
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-082")
+      expect(handle.text).toContain("detail-row-082")
       expect(handle.text).toContain("MEMBERS PR3")
     } finally {
       handle.unmount()
@@ -222,7 +221,7 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR1 STATUS")
 
-      // Seven summary lines plus the table header put the second height-1 row at y=9.
+      // Seven summary rows plus the table header put the second height-1 row at y=9.
       await handle.click(2, 9)
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR2 STATUS")

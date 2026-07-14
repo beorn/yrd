@@ -78,19 +78,19 @@ export function reduceWatchControl(control: WatchControl, input: string): WatchC
   return control
 }
 
-type QueueArtifactOutputLine = Readonly<{
+type QueueArtifactOutputRow = Readonly<{
   key: string
   text: string
   kind: "heading" | "muted" | "body"
 }>
 
 function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
-  const lines = useMemo<readonly QueueArtifactOutputLine[]>(
+  const rows = useMemo<readonly QueueArtifactOutputRow[]>(
     () =>
       outputs.flatMap((output) => {
         const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
-        const textLines = output.text.split("\n")
-        if (textLines.at(-1) === "") textLines.pop()
+        const textRows = output.text.split("\n")
+        if (textRows.at(-1) === "") textRows.pop()
         return [
           { key: `${outputKey}:heading`, text: `OUTPUT ${output.step}#${output.attempt}`, kind: "heading" },
           ...(output.truncatedBytes === undefined
@@ -102,34 +102,34 @@ function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactO
                   kind: "muted" as const,
                 },
               ]),
-          ...(textLines.length === 0
+          ...(textRows.length === 0
             ? [{ key: `${outputKey}:waiting`, text: "Waiting for output...", kind: "body" as const }]
-            : textLines.map((text, index) => ({
-                key: `${outputKey}:line:${index}`,
+            : textRows.map((text, index) => ({
+                key: `${outputKey}:row:${index}`,
                 text,
                 kind: "body" as const,
               }))),
-        ] satisfies readonly QueueArtifactOutputLine[]
+        ] satisfies readonly QueueArtifactOutputRow[]
       }),
     [outputs],
   )
-  if (lines.length === 0) return null
+  if (rows.length === 0) return null
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} marginTop={1}>
       <ListView
-        items={lines}
-        getKey={(line) => line.key}
+        items={rows}
+        getKey={(row) => row.key}
         follow="end"
         scrollbarVisibility="always"
-        renderItem={(line) =>
-          line.kind === "heading" ? (
+        renderItem={(row) =>
+          row.kind === "heading" ? (
             <Text bold wrap="truncate">
-              {line.text}
+              {row.text}
             </Text>
-          ) : line.kind === "muted" ? (
-            <Text color="$fg-muted">{line.text}</Text>
+          ) : row.kind === "muted" ? (
+            <Text color="$fg-muted">{row.text}</Text>
           ) : (
-            <Text>{line.text}</Text>
+            <Text>{row.text}</Text>
           )
         }
       />

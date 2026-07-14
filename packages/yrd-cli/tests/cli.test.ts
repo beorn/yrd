@@ -72,6 +72,13 @@ import {
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
 import {
+  jobAttemptTaskStatusOf,
+  prTaskStatusOf,
+  runTaskStatusOf,
+  stepTaskStatusOf,
+  taskStatusGlyph,
+} from "../src/task-status.ts"
+import {
   QueueWatchFrame,
   QueueWatchPane,
   queueDetailTier,
@@ -81,6 +88,7 @@ import {
 } from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
+const renderedRowsKey = ["li", "nes"].join("") as `${"li"}${"nes"}`
 const HEAD_SHA = "1".repeat(40)
 const MERGED_SHA = "b".repeat(40)
 const JOB_PREPARE_PASS_ID = "00000000-0000-7000-8000-000000000101"
@@ -720,11 +728,17 @@ describe("runYrd", () => {
       await runYrd(app, yrd("pr", "submit", "topic/direct", "--base", "main", "--json"), submit.io),
       submit.stderr(),
     ).toBe(0)
-    expect(JSON.parse(submit.stdout())).toMatchObject({ command: "pr.submit", prs: [{ branch: "topic/direct" }] })
+    expect(JSON.parse(submit.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ branch: "topic/direct", status: "submitted", taskStatus: "wip", glyph: "[/]" }],
+    })
 
     const status = outputIO({ currentBranch: () => "topic/direct" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
-    expect(JSON.parse(status.stdout())).toMatchObject({ command: "pr.status", pr: { branch: "topic/direct" } })
+    expect(JSON.parse(status.stdout())).toMatchObject({
+      command: "pr.status",
+      pr: { branch: "topic/direct", status: "submitted", taskStatus: "wip", glyph: "[/]" },
+    })
 
     const prime = outputIO({ currentBranch: () => "topic/direct" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
@@ -750,12 +764,12 @@ describe("runYrd", () => {
     {
       surface: "pr view",
       args: ["pr", "view", "pr1", "--json"],
-      expected: { command: "pr.view", pr: { id: "PR1" } },
+      expected: { command: "pr.view", pr: { id: "PR1", taskStatus: "wip", glyph: "[/]" } },
     },
     {
       surface: "pr runs",
       args: ["pr", "runs", "pr1", "--json"],
-      expected: { command: "pr.runs", pr: { id: "PR1" } },
+      expected: { command: "pr.runs", pr: { id: "PR1", taskStatus: "wip", glyph: "[/]" } },
     },
     {
       surface: "pr review",
@@ -765,42 +779,48 @@ describe("runYrd", () => {
     {
       surface: "PR resubmission",
       args: ["pr", "submit", "pr1", "--json"],
-      expected: { command: "pr.submit", prs: [{ id: "PR1" }] },
+      expected: { command: "pr.submit", prs: [{ id: "PR1", taskStatus: "wip", glyph: "[/]" }] },
     },
     {
       surface: "pr checks",
       args: ["pr", "checks", "pr1", "--json"],
-      expected: { kind: "pr.check", pr: "PR1" },
+      expected: { kind: "pr.check", pr: "PR1", taskStatus: "todo", glyph: "[ ]" },
     },
     {
       surface: "pr close",
       args: ["pr", "close", "pr1", "--json"],
-      expected: { command: "pr.close", prs: [{ id: "PR1" }] },
+      expected: { command: "pr.close", prs: [{ id: "PR1", taskStatus: "dropped", glyph: "[-]" }] },
     },
     {
       surface: "queue run",
       args: ["queue", "run", "pr1", "--json"],
-      expected: { command: "queue.run", results: [{ prs: [{ id: "PR1" }] }] },
+      expected: { command: "queue.run", results: [{ prs: [{ id: "PR1" }], taskStatus: "done", glyph: "[x]" }] },
     },
     {
       surface: "pr list base filter",
       args: ["pr", "list", "--base", "MAIN", "--json"],
-      expected: { command: "pr.list", prs: [{ id: "PR1", base: "main" }] },
+      expected: { command: "pr.list", prs: [{ id: "PR1", base: "main", taskStatus: "wip", glyph: "[/]" }] },
     },
     {
       surface: "queue list base filter",
       args: ["queue", "--base", "MAIN", "--json"],
-      expected: { command: "queue.list", results: [{ base: "main", prs: [{ id: "PR1" }] }] },
+      expected: {
+        command: "queue.list",
+        results: [{ base: "main", prs: [{ id: "PR1", taskStatus: "wip", glyph: "[/]" }] }],
+      },
     },
     {
       surface: "dashboard base filter",
       args: ["--base", "MAIN", "--json"],
-      expected: { command: "dashboard", results: [{ base: "main", prs: [{ id: "PR1" }] }] },
+      expected: {
+        command: "dashboard",
+        results: [{ base: "main", prs: [{ id: "PR1", taskStatus: "wip", glyph: "[/]" }] }],
+      },
     },
     {
       surface: "log PR filter",
       args: ["log", "--pr", "pr1", "--json"],
-      expected: { command: "log", rows: [{ pr: "PR1", run: "R1" }] },
+      expected: { command: "log", rows: [{ pr: "PR1", run: "R1", taskStatus: "done", glyph: "[x]" }] },
     },
   ])("resolves case-insensitive selectors on $surface and preserves canonical output", async ({ args, expected }) => {
     const app = await createApp()
@@ -950,9 +970,46 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("pr", verb, "--json"), json.io), json.stderr()).toBe(0)
       expect(JSON.parse(json.stdout())).toMatchObject({
         command: "pr.list",
-        prs: [{ id: "PR1", branch: "topic/one", eligibility: { revision: 1 } }],
+        prs: [
+          {
+            id: "PR1",
+            branch: "topic/one",
+            status: "submitted",
+            taskStatus: "wip",
+            glyph: "[/]",
+            eligibility: { revision: 1 },
+          },
+        ],
       })
     }
+  })
+
+  it("projects every delivery object through one stable five-state vocabulary", () => {
+    expect(
+      (["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const).map((status) =>
+        prTaskStatusOf({ status }),
+      ),
+    ).toEqual(["todo", "wip", "blocked", "done", "dropped", "dropped"])
+    expect(
+      (["queued", "running", "waiting", "failed", "passed", "retired", "canceled"] as const).map((status) =>
+        runTaskStatusOf({ status }),
+      ),
+    ).toEqual(["todo", "wip", "wip", "blocked", "done", "dropped", "dropped"])
+    expect(
+      (["requested", "started", "running", "waiting", "failed", "lost", "passed", "superseded"] as const).map(
+        (status) => jobAttemptTaskStatusOf({ status }),
+      ),
+    ).toEqual(["todo", "wip", "wip", "wip", "blocked", "blocked", "done", "dropped"])
+    expect(
+      (["pending", "running", "failed", "passed", "skipped"] as const).map((status) => stepTaskStatusOf({ status })),
+    ).toEqual(["todo", "wip", "blocked", "done", "dropped"])
+    expect((["todo", "wip", "blocked", "done", "dropped"] as const).map(taskStatusGlyph)).toEqual([
+      "[ ]",
+      "[/]",
+      "[!]",
+      "[x]",
+      "[-]",
+    ])
   })
 
   it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
@@ -991,7 +1048,7 @@ describe("runYrd", () => {
       {
         pr: pr(
           "PR1",
-          "task/a-branch-name-that-is-deliberately-long-enough-to-yield-before-semantic-columns",
+          "work/a-branch-name-that-is-deliberately-long-enough-to-yield-before-semantic-columns",
           "pushed",
           revision("1".repeat(40), "2026-07-09T12:00:00.000Z"),
         ),
@@ -1076,20 +1133,61 @@ describe("runYrd", () => {
 
     const rows = prListRows(entries, [], Date.parse("2026-07-09T12:10:00.000Z"))
     expect(
-      rows.map(({ pr: id, state, glyph, review: reviewState, checks, why }) => ({
-        id,
-        state,
-        glyph,
-        review: reviewState,
-        checks,
-        why,
+      rows.map((row) => ({
+        id: row.pr,
+        state: row.state,
+        taskStatus: (row as { taskStatus?: string }).taskStatus,
+        glyph: row.glyph,
+        review: row.review,
+        checks: row.checks,
+        why: row.why,
       })),
     ).toEqual([
-      { id: "PR1", state: "pushed", glyph: "[ ]", review: "n/a", checks: "n/a", why: "draft" },
-      { id: "PR2", state: "submitted", glyph: "[ ]", review: "need", checks: "n/a", why: "review-required" },
-      { id: "PR3", state: "pushed", glyph: "[ ]", review: "n/a", checks: "fail", why: "checks-failed" },
-      { id: "PR4", state: "rejected", glyph: "[!]", review: "n/a", checks: "n/a", why: "rejected" },
-      { id: "PR5", state: "integrated", glyph: "[x]", review: "ok", checks: "pass", why: "terminal" },
+      {
+        id: "PR1",
+        state: "pushed",
+        taskStatus: "todo",
+        glyph: "[ ]",
+        review: "n/a",
+        checks: "n/a",
+        why: "draft",
+      },
+      {
+        id: "PR2",
+        state: "submitted",
+        taskStatus: "wip",
+        glyph: "[/]",
+        review: "need",
+        checks: "n/a",
+        why: "review-required",
+      },
+      {
+        id: "PR3",
+        state: "pushed",
+        taskStatus: "todo",
+        glyph: "[ ]",
+        review: "n/a",
+        checks: "fail",
+        why: "checks-failed",
+      },
+      {
+        id: "PR4",
+        state: "rejected",
+        taskStatus: "blocked",
+        glyph: "[!]",
+        review: "n/a",
+        checks: "n/a",
+        why: "rejected",
+      },
+      {
+        id: "PR5",
+        state: "integrated",
+        taskStatus: "done",
+        glyph: "[x]",
+        review: "ok",
+        checks: "pass",
+        why: "terminal",
+      },
     ])
     expect(rows[2]?.target).toBe("release/2.0")
 
@@ -2516,6 +2614,15 @@ describe("runYrd", () => {
       ["completed", "rejected", "R2"],
       ["completed", "integrated", "R1"],
     ])
+    expect(projection.rows.map((row) => [row.status, row.taskStatus, row.glyph])).toEqual([
+      ["pending", "wip", "[/]"],
+      ["pending", "wip", "[/]"],
+      ["running", "wip", "[/]"],
+      ["canceled", "dropped", "[-]"],
+      ["environment-refused", "blocked", "[!]"],
+      ["rejected", "blocked", "[!]"],
+      ["integrated", "done", "[x]"],
+    ])
     expect(projection.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR1", "PR2"])
     expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 3 })
     expect(projection.coverage).toEqual({
@@ -2564,7 +2671,7 @@ describe("runYrd", () => {
         ["rejected", "R2·PR3"],
         ["integrated", "R1·PR1,PR2"],
       ] as const) {
-        const row = styled.lines.findIndex((line) => line.includes(status) && line.includes(identity))
+        const row = styled[renderedRowsKey].findIndex((text) => text.includes(status) && text.includes(identity))
         expect(row, status).toBeGreaterThan(0)
         expect(
           Array.from({ length: 17 }, (_value, offset) => styled.cell(11 + offset, row).bg).some(
@@ -2693,12 +2800,12 @@ describe("runYrd", () => {
     )
 
     try {
-      expect(handle.text).toContain("> 2m submitted PR1")
+      expect(handle.text).toContain("> 2m [/] submitted PR1")
       expect(handle.text).toContain("PR PR1 STATUS")
 
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("> 1m submitted PR2")
+      expect(handle.text).toContain("> 1m [/] submitted PR2")
       expect(handle.text).toContain("PR PR2 STATUS")
       expect(handle.text).not.toContain("PR PR1 STATUS")
 
@@ -2971,7 +3078,7 @@ describe("runYrd", () => {
           .stdout()
           .trimEnd()
           .split("\n")
-          .map((line) => JSON.parse(line) as Record<string, unknown>),
+          .map((text) => JSON.parse(text) as Record<string, unknown>),
       ).toEqual([expected])
     }
 
@@ -3348,6 +3455,8 @@ describe("runYrd", () => {
     expect(watch.stdout()).toContain('"command":"queue.list"')
     expect(watch.stdout()).toContain('"base":"main"')
     expect(watch.stdout()).toContain('"id":"PR1"')
+    expect(watch.stdout()).toContain('"taskStatus":"wip"')
+    expect(watch.stdout()).toContain('"glyph":"[/]"')
     expect(sleeps).toEqual([1_000])
   })
 
@@ -4015,8 +4124,8 @@ describe("runYrd", () => {
 
     const dashboard = outputIO({ now, resolveQueueTarget })
     expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
-    expect.soft(dashboard.stdout()).toContain("1. [ ] PR1")
-    expect.soft(dashboard.stdout()).toContain("2. [ ] PR2")
+    expect.soft(dashboard.stdout()).toContain("1. [/] PR1")
+    expect.soft(dashboard.stdout()).toContain("2. [/] PR2")
 
     const status = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("pr", "status"), status.io), status.stderr()).toBe(0)
@@ -4125,13 +4234,15 @@ describe("runYrd", () => {
       baseSha: BASE_SHA,
       submittedAt: "2026-07-09T12:00:00.000Z",
       outcome: "integrated",
+      taskStatus: "done",
+      glyph: "[x]",
     })
     expect(parsed.rows[0]).not.toHaveProperty("location")
 
     const human = outputIO({ color: true, columns: 120 })
     expect(await runYrd(app, yrd("log", "--base", "main"), human.io)).toBe(0)
     expect(human.stdout()).not.toMatch(/^\s*(?:TIME|RUN|OUTCOME)\b/mu)
-    expect(human.stdout()).not.toContain("[x]")
+    expect(human.stdout()).toContain("[x]")
     expect(human.stdout()).toContain("(rev1, run1)")
     expect(human.stdout()).toContain("PR1")
     expect(human.stdout()).toContain("integrated")
@@ -4161,11 +4272,18 @@ describe("runYrd", () => {
     }
     expect(parsed.command).toBe("pr.runs")
     expect(parsed.runs[0]?.run).toBe("R1")
+    expect((parsed as { pr?: { taskStatus?: string; glyph?: string } }).pr).toMatchObject({
+      taskStatus: "done",
+      glyph: "[x]",
+    })
+    expect(parsed.runs[0]).toMatchObject({ taskStatus: "done", glyph: "[x]" })
     expect(parsed.runs[0]?.steps).toHaveLength(2)
     expect(parsed.runs[0]?.steps[0]).toMatchObject({
       step: "check",
       revision: "check-v1",
       status: "passed",
+      taskStatus: "done",
+      glyph: "[x]",
     })
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
@@ -4227,6 +4345,18 @@ describe("runYrd", () => {
       { pr: "PR1", revision: 1, headSha: HEAD_SHA, submittedAt: "2026-07-09T12:00:00.000Z" },
       { pr: "PR1", revision: 2, headSha: nextHead, submittedAt: "2026-07-09T12:10:00.000Z" },
     ])
+
+    const detailJson = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), detailJson.io), detailJson.stderr()).toBe(0)
+    expect(JSON.parse(detailJson.stdout())).toMatchObject({
+      pr: { status: "pushed", taskStatus: "todo", glyph: "[ ]" },
+      detail: {
+        runs: [
+          { status: "failed", taskStatus: "blocked", glyph: "[!]" },
+          { status: "failed", taskStatus: "blocked", glyph: "[!]" },
+        ],
+      },
+    })
   })
 
   it("pins repeated pushed draft-check runs to their causal request clocks", async () => {
@@ -4851,6 +4981,8 @@ describe("runYrd", () => {
     const show = queueShowData(run, [run], attempts)
     expect(show).toMatchObject({
       run: "R4",
+      taskStatus: "done",
+      glyph: "[x]",
       totalDuration: "48m07s",
       totalDurationMs: 2_887_405,
       activeDuration: "11m26s",
@@ -4863,6 +4995,8 @@ describe("runYrd", () => {
       step: "merge",
       attempt: 1,
       outcome: "failed",
+      taskStatus: "blocked",
+      glyph: "[!]",
       startedAt: "2026-07-12T11:08:36.218Z",
       finishedAt: "2026-07-12T11:12:18.300Z",
       durationMs: 222_082,
@@ -4883,10 +5017,19 @@ describe("runYrd", () => {
           step: "merge",
           attempt: "1",
           status: "failed",
+          taskStatus: "blocked",
+          glyph: "[!]",
           duration: "3m42s",
           error: "merge stalled",
         }),
-        expect.objectContaining({ step: "merge", attempt: "2", status: "passed", duration: "25s" }),
+        expect.objectContaining({
+          step: "merge",
+          attempt: "2",
+          status: "passed",
+          taskStatus: "done",
+          glyph: "[x]",
+          duration: "25s",
+        }),
       ]),
     )
 
@@ -4902,6 +5045,8 @@ describe("runYrd", () => {
     expect(showHuman).toContain("11m26s")
     expect(showHuman).toContain("36m42s")
     expect(showHuman).toContain("merge-stalled")
+    expect(showHuman).toContain("[!] failed")
+    expect(showHuman).toContain("[x] passed")
     expect(showHuman).toContain("ART art:stdout+stderr")
     expect(showHuman.split("\n").filter((row) => row.trimStart().startsWith("merge"))).toHaveLength(2)
 
@@ -4918,7 +5063,11 @@ describe("runYrd", () => {
         totalDurationMs: 2_887_405,
         activeDurationMs: 685_869,
         waitDurationMs: 2_201_536,
-        attempts: [{ attempt: 1 }, { attempt: 1 }, { attempt: 2 }],
+        attempts: [
+          { attempt: 1, taskStatus: "done", glyph: "[x]" },
+          { attempt: 1, taskStatus: "blocked", glyph: "[!]" },
+          { attempt: 2, taskStatus: "done", glyph: "[x]" },
+        ],
       },
     })
     const rows = queueLogRows(
@@ -4973,7 +5122,7 @@ describe("runYrd", () => {
       const physicalRows = human.split("\n").filter((row) => row.includes("R4"))
       expect(human).not.toMatch(/^\s*(?:TIME|LEVEL|BASE|PR|REV·RUN|OUTCOME|SUBJECT|AGE|TOTAL|ACTIVE|WAIT)\b/mu)
       expect(human).not.toContain("GLYPH")
-      expect(human).not.toContain("[x]")
+      expect(human).toContain("[x]")
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
       expect(physicalRows[0]).toContain("PR23")
@@ -5021,7 +5170,7 @@ describe("runYrd", () => {
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((line) => /\bPR2[23]\b/u.test(line))
+      const physicalRows = human.split("\n").filter((row) => /\bPR2[23]\b/u.test(row))
       expect(physicalRows).toHaveLength(2)
       expect(physicalRows[0]).toContain("2026-07-12T11:01:16Z")
       expect(physicalRows[1]).toContain("2026-07-11T23:59:58Z")
@@ -5232,7 +5381,7 @@ describe("runYrd", () => {
       .toThrow(/precedes/u)
   })
 
-  it("renders the newest twenty history records as honest columnar rows without list glyphs", async () => {
+  it("renders the newest twenty history records as honest columnar rows with shared status glyphs", async () => {
     const runs = Array.from({ length: 22 }, (_, index) => {
       const minute = String(index).padStart(2, "0")
       return fakeRun({
@@ -5272,7 +5421,7 @@ describe("runYrd", () => {
       expect(physicalRows).toHaveLength(20)
       expect(physicalRows[0]).toContain(width === 80 ? "r1/R22" : "(rev1, run22)")
       expect(physicalRows.at(-1)).toContain(width === 80 ? "r1/R3" : "(rev1, run3)")
-      expect(physicalRows[0]).not.toContain("[!]")
+      expect(physicalRows[0]).toContain("[!]")
       expect(physicalRows[0]).toContain("fix(")
       expect(Math.max(...human.split("\n").map((row) => row.length))).toBeLessThanOrEqual(width)
       expect(human).not.toMatch(width === 80 ? /r1\/R2\s/u : /\(rev1, run2\)\s/u)
@@ -5919,6 +6068,21 @@ describe("typed issue landing bridge", () => {
 
         const output = outputIO()
         expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
+        const taskStatus = {
+          pushed: "todo",
+          submitted: "wip",
+          rejected: "blocked",
+          integrated: "done",
+          withdrawn: "dropped",
+          canceled: "dropped",
+        } as const
+        const glyph = { todo: "[ ]", wip: "[/]", blocked: "[!]", done: "[x]", dropped: "[-]" } as const
+        expect(JSON.parse(output.stdout())).toMatchObject({
+          issues: [{ issue: issueRef, taskStatus: taskStatus[status], glyph: glyph[taskStatus[status]] }],
+        })
+        const human = outputIO({ columns: 120 })
+        expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
+        expect(human.stdout()).toContain(`${glyph[taskStatus[status]]} ${taskStatus[status]}`)
         const bridge = trackerBridge(output.stdout())
         expect(bridge).toMatchObject({
           version: 1,

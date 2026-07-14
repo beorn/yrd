@@ -559,7 +559,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     expect(plain).toContain("Usage: yrd [options] [command]")
     expect(plain).not.toContain("OPEN")
     expect(plain).not.toContain("\u001b[")
-    expect(Math.max(...plain.split("\n").map((line) => line.length))).toBeLessThanOrEqual(80)
+    expect(Math.max(...plain.split("\n").map((row) => row.length))).toBeLessThanOrEqual(80)
     expect(plainError).toBe("")
 
     let json = ""
@@ -1233,7 +1233,7 @@ describe("createYrdHost", { timeout: 20_000 }, () => {
     }
   })
 
-  it("refuses a second resident watch with the active executor identity", async () => {
+  it("refuses a second resident watch with the active runner identity", async () => {
     const { repo, featureSha } = await repository()
     const startedPath = join(repo, "resident-check.started")
     const executionsPath = join(repo, "resident-check.executions")

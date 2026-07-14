@@ -256,7 +256,7 @@ describe("observable CLI exemplar", () => {
     const records = (await readFile(logFile, "utf8"))
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((row) => JSON.parse(row) as Record<string, unknown>)
     const evidence = records.filter((record) =>
       ["yrd:bay:submit", "yrd:journal:append", "yrd:journal:lock", "yrd:process:run"].includes(String(record.name)),
     )
@@ -323,7 +323,7 @@ describe("observable CLI exemplar", () => {
     const records = (await readFile(logFile, "utf8"))
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((row) => JSON.parse(row) as Record<string, unknown>)
     expect(records.some((record) => record.level === "span" && String(record.name).startsWith("yrd:"))).toBe(true)
   })
 
@@ -348,7 +348,7 @@ describe("observable CLI exemplar", () => {
     const records = (await readFile(logFile, "utf8"))
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((row) => JSON.parse(row) as Record<string, unknown>)
     expect(records).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -378,7 +378,7 @@ describe("observable CLI exemplar", () => {
     const records = (await readFile(logFile, "utf8"))
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((row) => JSON.parse(row) as Record<string, unknown>)
     expect(records).toEqual([
       expect.objectContaining({ level: "info", name: "yrd:queue", msg: "queue admitted", pr: "PR1", revision: 2 }),
     ])
@@ -398,7 +398,7 @@ describe("observable CLI exemplar", () => {
     const records = (await readFile(logFile, "utf8"))
       .trim()
       .split("\n")
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((row) => JSON.parse(row) as Record<string, unknown>)
     const check = records.find((record) => record.name === "yrd:jobs:check")
     const process = records.find((record) => record.name === "yrd:process:run")
     expect(check).toEqual(expect.objectContaining({ trace_id: expect.any(String), span_id: expect.any(String) }))
