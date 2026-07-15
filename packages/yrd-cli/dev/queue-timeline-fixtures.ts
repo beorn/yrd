@@ -14,6 +14,8 @@ import {
 import type { QueueArtifactOutput, QueueWatchSnapshot } from "../src/watch-pane.tsx"
 
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
+const NEXT_NOW = Date.parse("2026-07-13T12:00:05.000Z")
+const NEXT_NOW_ISO = new Date(NEXT_NOW).toISOString()
 const BASE_SHA = "a".repeat(40)
 const INTEGRATED_SHA = "b".repeat(40)
 const ALL_STATUSES: readonly QueueTimelineStatusFilter[] = ["pending", "running", "rejected", "integrated", "other"]
@@ -858,9 +860,32 @@ const productionOverviewResult = fixtureResult(
   [batchRun, integratedRun, rejectedRun, environmentRun, canceledRun],
 )
 
+const secondaryQueueResult: QueueStatusResult = {
+  ...fixtureResult([], []),
+  base: "release/next",
+}
+const multipleQueuesSnapshot: QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> = {
+  ...fixtureSnapshot(productionOverviewResult),
+  results: [productionOverviewResult, secondaryQueueResult],
+}
+
+function advanceSnapshotClock(
+  snapshot: QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }>,
+): QueueWatchSnapshot & Readonly<{ projection: QueueTimelineProjection }> {
+  return {
+    ...snapshot,
+    now: NEXT_NOW,
+    projection: {
+      ...snapshot.projection,
+      now: NEXT_NOW_ISO,
+    },
+  }
+}
+
 export const QUEUE_TIMELINE_STORY_NAMES = [
   "production-overview",
   "idle",
+  "multiple-queues",
   "pending-only",
   "running-spinner",
   "mixed-completed",
@@ -904,6 +929,10 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     viewport: { columns: 200, rows: 50 },
   },
   idle: { snapshot: fixtureSnapshot(fixtureResult([], [])), widths: [100] },
+  "multiple-queues": {
+    snapshot: multipleQueuesSnapshot,
+    widths: [100],
+  },
   "pending-only": { snapshot: fixtureSnapshot(fixtureResult([pendingOne, pendingTwo], [])), widths: [100] },
   "running-spinner": {
     snapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun])),
@@ -920,10 +949,10 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
   },
   "latest-vs-all-lineage": {
     snapshot: fixtureSnapshot(lineageResult, { latest: true }),
-    nextSnapshot: fixtureSnapshot(lineageResult),
+    nextSnapshot: advanceSnapshotClock(fixtureSnapshot(lineageResult)),
     widths: [100],
   },
-  "narrow-wide": { snapshot: fixtureSnapshot(mixedResult), widths: [80, 140] },
+  "narrow-wide": { snapshot: fixtureSnapshot(mixedResult), widths: [80, 120, 160, 200] },
   "anchored-new": {
     snapshot: fixtureSnapshot(fixtureResult(anchoredPrs.slice(0, 3), anchoredRuns.slice(0, 3))),
     nextSnapshot: fixtureSnapshot(fixtureResult(anchoredPrs, anchoredRuns)),
@@ -951,15 +980,17 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
   "detail-controls": { snapshot: integratedSnapshot, widths: [140], viewport: { columns: 200, rows: 50 } },
   "long-subject": {
     snapshot: fixtureSnapshot(fixtureResult([longSubjectPr], [longSubjectRun])),
-    widths: [80, 140],
+    widths: [80, 120, 160, 200],
     selectedStatus: "integrated",
   },
   "live-output-growth": {
     snapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun]), {}, [initialOutput, initialStderr]),
-    nextSnapshot: fixtureSnapshot(fixtureResult([runningPr], [runningRun]), {}, [
-      { ...initialOutput, text: "checking one\nchecking two\n" },
-      { ...initialStderr, text: "stderr: retry warning retained\nstderr: retry recovered\n" },
-    ]),
+    nextSnapshot: advanceSnapshotClock(
+      fixtureSnapshot(fixtureResult([runningPr], [runningRun]), {}, [
+        { ...initialOutput, text: "checking one\nchecking two\n" },
+        { ...initialStderr, text: "stderr: retry warning retained\nstderr: retry recovered\n" },
+      ]),
+    ),
     widths: [120],
     selectedStatus: "running",
     viewport: { columns: 200, rows: 50 },
