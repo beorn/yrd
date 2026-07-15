@@ -394,6 +394,8 @@ export const Queues = Object.freeze({
   },
 
   record(state: QueuesState, id: QueueRunId): QueueRecord {
+    const direct = state.records[id]
+    if (direct !== undefined) return direct
     const record = resolveQueueRecord(state, id)
     if (record === undefined) throw new Error(`yrd: no queue run '${id}'`)
     return record

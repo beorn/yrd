@@ -3,7 +3,7 @@
  * @level l2
  * @consumer @yrd/queue
  */
-import { describe, expect, expectTypeOf, it } from "vitest"
+import { describe, expect, expectTypeOf, it, vi } from "vitest"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
@@ -18,6 +18,7 @@ import {
   type AddStepResult,
   type IntegratedShape,
   type Queue,
+  type QueueRecord,
   type PRShape,
   type StepExecution,
   type StepRunner,
@@ -146,6 +147,40 @@ describe("Queue", () => {
     expect(app.queue.status("MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
     expect(app.queue.status("ORIGIN/MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
   })
+
+  it.each([0, 10_000, 10_001])(
+    "advances one canonical run without enumerating %i historical runs",
+    async (historicalRuns) => {
+      await using app = await createQueueApp()
+      const pr = await submitBranch(app, "issue/bounded-advance")
+      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      const records = app.state().queues.records
+      const target = records.R1
+      if (target === undefined) throw new Error("expected canonical R1")
+      const history = Array.from(
+        { length: historicalRuns },
+        (_, index): QueueRecord => ({ ...target, id: `R${index + 2}` }),
+      )
+      let enumerations = 0
+      const originalValues = Object.values
+      const values = vi.spyOn(Object, "values").mockImplementation(
+        ((value: object) => {
+          if (value === records) {
+            enumerations += 1
+            return [target, ...history]
+          }
+          return originalValues(value)
+        }) as typeof Object.values,
+      )
+      try {
+        await app.dispatch(app.commands.queue.advance, { run: "R1" })
+      } finally {
+        values.mockRestore()
+      }
+
+      expect(enumerations).toBe(0)
+    },
+  )
 
   it("emits one terminal run lifecycle with lossless PR revision and correlation identity", async () => {
     const events: LogEvent[] = []

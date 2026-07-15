@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { copyFile, link, mkdir, open, readFile, rename, rm, unlink, type FileHandle } from "node:fs/promises"
+import { chmod, copyFile, link, mkdir, open, readFile, rename, rm, unlink, type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { gunzipSync, gzipSync } from "node:zlib"
@@ -25,6 +25,7 @@ const DEFAULT_THRESHOLD_FRAMES = 10_000
 const MANIFEST_FILE = "events-v4.manifest.json"
 const RECOVERY_FILE = "events-v4.recovery.json"
 const V3_FILE = "events-v3.jsonl"
+const V3_CUTOVER = Buffer.from(`{"v":${FORMAT_VERSION},"cutover":"${MANIFEST_FILE}"}\n`)
 const EMPTY_DIGEST = sha256(Buffer.alloc(0))
 const DigestSchema = z.string().regex(/^[0-9a-f]{64}$/)
 const IntegerSchema = z.number().int().nonnegative()
@@ -394,6 +395,7 @@ async function writableState(
   await recoverPending(runtime)
   const current = await loadManifestRecord(runtime.dir)
   if (current !== null) {
+    await ensureV3Cutover(runtime)
     const active = await loadActive(runtime, current)
     if (active.state.logicalEnd !== expectedCursor) {
       return { result: { appended: false as const, cursor: active.state.logicalEnd } }
@@ -595,7 +597,7 @@ async function installGeneration(
     }
 
     await runtime.phase("before-cleanup", { fromGeneration, toGeneration, recoveryPath: RECOVERY_FILE })
-    await removePaths(runtime, successPaths)
+    await finalizeGeneration(runtime, recovery, manifest)
     await removeIfExists(join(runtime.dir, RECOVERY_FILE))
     await syncDirectory(runtime.dir)
     runtime.log.warn?.("journal generation installed and verified", {
@@ -644,6 +646,65 @@ async function installCandidate(runtime: Runtime, candidate: SegmentCandidate): 
   }
   await rename(join(runtime.dir, candidate.tempPath), finalPath)
   return true
+}
+
+async function finalizeGeneration(runtime: Runtime, recovery: Recovery, manifest: Manifest): Promise<void> {
+  if (recovery.sourceV3Path !== null) await sealMigratedV3(runtime, recovery, manifest)
+  await removePaths(runtime, recovery.successPaths.filter((path) => path !== V3_FILE))
+}
+
+async function sealMigratedV3(runtime: Runtime, recovery: Recovery, manifest: Manifest): Promise<void> {
+  const path = join(runtime.dir, V3_FILE)
+  let raw: Buffer | undefined
+  try {
+    raw = await readFile(path)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+  }
+  if (raw?.equals(V3_CUTOVER) === true) return
+  if (raw !== undefined) {
+    const source = manifest.segments.find(
+      (segment) => segment.sourceGeneration === 3 && segment.sourceTailIdentity === V3_FILE,
+    )
+    if (
+      raw.length !== recovery.verifyEnd ||
+      (source !== undefined && sha256(raw) !== source.rawSha256)
+    ) {
+      throw new Error(
+        `yrd: legacy v3 journal changed during v4 cutover at ${path}; preserve it for reconciliation`,
+      )
+    }
+  }
+  await installV3Cutover(runtime)
+}
+
+async function ensureV3Cutover(runtime: Runtime): Promise<void> {
+  const path = join(runtime.dir, V3_FILE)
+  let raw: Buffer
+  try {
+    raw = await readFile(path)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+    await installV3Cutover(runtime)
+    return
+  }
+  if (raw.equals(V3_CUTOVER)) return
+  throw new Error(
+    `yrd: legacy v3 journal changed after v4 cutover at ${path}; preserve it for reconciliation`,
+  )
+}
+
+async function installV3Cutover(runtime: Runtime): Promise<void> {
+  const temp = await writeDurableTemp(runtime, V3_CUTOVER)
+  const source = join(runtime.dir, temp)
+  try {
+    await chmod(source, 0o444)
+    await rename(source, join(runtime.dir, V3_FILE))
+    await syncDirectory(runtime.dir)
+  } catch (error) {
+    await removeIfExists(source)
+    throw error
+  }
 }
 
 async function createGenerationFiles(runtime: Runtime, generation: number, logicalStart: number) {
@@ -703,7 +764,7 @@ async function recoverPending(runtime: Runtime): Promise<void> {
       await rollbackGeneration(runtime, recovery, cause)
       throw new Error("yrd: interrupted journal generation failed verification and was restored", { cause })
     }
-    await removePaths(runtime, recovery.successPaths)
+    await finalizeGeneration(runtime, recovery, current.manifest)
     await removeIfExists(join(runtime.dir, RECOVERY_FILE))
     await syncDirectory(runtime.dir)
     runtime.log.warn?.("journal recovered a verified interrupted generation", {
@@ -822,6 +883,7 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
     }
   }
 
+  await ensureV3Cutover(runtime)
   const active = await loadActive(runtime, manifestRecord)
   const logicalEnd = active.state.logicalEnd
   const end = before ?? logicalEnd
