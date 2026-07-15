@@ -161,9 +161,12 @@ making weak legacy shapes valid commands again.
 The CLI may wrap the Journal with a signal observer. A successful append only
 wakes the observer; it never awaits delivery. The observer reads those same
 committed frames and atomically records its journal cursor plus successful
-event-id/recipient sends for crash replay. It does not own PR state, schedule
-work, or append facts. Delivery is at-least-once: a crash after an external send
-but before its local cursor record may redeliver that event.
+event-id/recipient sends and terminal unsubscribe actions for crash replay. It
+may project a needs-review signal from a committed submission under the trusted
+review policy, aggregate integration facts that share one landing, and route a
+typed failed-Run fact; it does not own PR state, schedule work, or append facts.
+Delivery is at-least-once: a crash after an external action but before its local
+cursor record may repeat that action.
 
 When a strict consumer needs a typed fact that old replay-only history omitted,
 the repair is an explicit domain command that appends a validated compensating

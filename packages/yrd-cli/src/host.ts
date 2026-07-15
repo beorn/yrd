@@ -700,14 +700,19 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     const journal = createJournal({ dir: repository.stateDir, inject: { log } })
     const routes = loaded.config.notify ?? {}
     const defaultActor = env.TRIBE_NAME?.trim() || "operator"
-    if (
-      routes["pr/rejected"]?.includes("submitter") === true &&
-      !SignalRecipientSchema.safeParse(defaultActor).success
-    ) {
+    const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
+    if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultActor).success) {
       raiseFailure(
         "configuration",
         "signal-submitter-missing",
-        "yrd: notify.pr/rejected targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)",
+        `yrd: notify.${submitterRoute} targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)`,
+      )
+    }
+    if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {
+      raiseFailure(
+        "configuration",
+        "signal-review-policy-missing",
+        "yrd: notify.pr/needs-review requires 'requires: [review]' so the routed eligibility transition can exist",
       )
     }
     if (Object.keys(routes).length > 0) {
@@ -715,6 +720,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
         journal,
         stateDir: repository.stateDir,
         routes,
+        reviewRequired: loaded.config.requires.includes("review"),
         adapter: options.signalAdapter ?? createTribeSignalAdapter(process),
         log,
       })

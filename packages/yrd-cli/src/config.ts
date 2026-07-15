@@ -15,9 +15,10 @@ const RequirementsSchema = z.array(z.enum(["review"])).superRefine((requirements
 })
 const RunnerSchema = z.enum(["local", "waiting"])
 export const SignalRecipientSchema = TextSchema.regex(/^@[a-z0-9][a-z0-9/_-]*$/iu)
-const NotifyTargetSchema = z.union([z.literal("submitter"), SignalRecipientSchema])
-const NotifyTargetsSchema = z
-  .array(NotifyTargetSchema)
+const DirectNotifyTargetSchema = z.union([z.literal("submitter"), SignalRecipientSchema])
+const NotifyTargetSchema = z.union([DirectNotifyTargetSchema, z.literal("broadcast")])
+const DirectNotifyTargetsSchema = z
+  .array(DirectNotifyTargetSchema)
   .min(1)
   .superRefine((targets, context) => {
     if (new Set(targets).size !== targets.length) {
@@ -26,11 +27,15 @@ const NotifyTargetsSchema = z
   })
 const NotifySchema = z
   .object({
-    "pr/rejected": NotifyTargetsSchema.optional(),
+    "pr/rejected": DirectNotifyTargetsSchema.optional(),
+    "pr/needs-review": DirectNotifyTargetsSchema.optional(),
+    "pr/integrated": z.tuple([z.literal("broadcast")]).optional(),
+    "run/failed": DirectNotifyTargetsSchema.optional(),
   })
   .strict()
 export type SignalRouteTarget = z.infer<typeof NotifyTargetSchema>
-export type SignalRoutes = Readonly<Partial<Record<"pr/rejected", readonly SignalRouteTarget[]>>>
+export type SignalKind = "pr/rejected" | "pr/needs-review" | "pr/integrated" | "run/failed"
+export type SignalRoutes = Readonly<Partial<Record<SignalKind, readonly SignalRouteTarget[]>>>
 const StepObjectSchema = z
   .object({
     run: TextSchema.optional(),

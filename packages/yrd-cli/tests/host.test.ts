@@ -478,6 +478,24 @@ notify:
     expect((failure as Error).message).toContain("set TRIBE_NAME to the submitting Tribe handle")
   })
 
+  it("refuses a needs-review route when review is not an eligibility requirement", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+notify:
+  pr/needs-review: ["@cto"]
+`,
+    )
+
+    await expect(
+      createYrdHost({ cwd: repo, signalAdapter: { send() {} } }),
+    ).rejects.toMatchObject({ failure: { kind: "configuration", code: "signal-review-policy-missing" } })
+  })
+
   it("classifies typed failure facts without scraping their messages", () => {
     const failure = createFailure({
       kind: "configuration",

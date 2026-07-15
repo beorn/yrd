@@ -15,6 +15,7 @@ import {
   createTribeSignalAdapter,
   type SignalDelivery,
   type SignalDeliveryAdapter,
+  type SignalClosure,
 } from "../src/signals.ts"
 
 const roots: string[] = []
@@ -95,8 +96,11 @@ function legacyRevisionRejectedFrame() {
   }
 }
 
-function recordingAdapter(deliveries: SignalDelivery[]): SignalDeliveryAdapter {
-  return { send: (delivery) => void deliveries.push(delivery) }
+function recordingAdapter(deliveries: SignalDelivery[], closures: SignalClosure[] = []): SignalDeliveryAdapter {
+  return {
+    send: (delivery) => void deliveries.push(delivery),
+    close: (closure) => void closures.push(closure),
+  }
 }
 
 describe("PR signal observer", () => {
@@ -226,6 +230,149 @@ describe("PR signal observer", () => {
     expect(deliveries.map(({ recipient }) => recipient)).toEqual(["@agent/7", "@ci"])
   })
 
+  it("routes a submitted revision to the configured reviewer only when review is required", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000013")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            name: "pr/submitted",
+            data: { pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" },
+          },
+        ],
+      },
+    ])
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/needs-review": ["@cto"] },
+      reviewRequired: true,
+      adapter: recordingAdapter(deliveries),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries).toEqual([
+      {
+        recipient: "@cto",
+        event: expect.objectContaining({ kind: "pr/needs-review", pr: "PR7", revision: 3 }),
+      },
+    ])
+  })
+
+  it("aggregates one integration broadcast and closes every routed PR request ball", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000016")
+    const event = frame.events[0]!
+    const landingSha = "b".repeat(40)
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000016",
+            name: "pr/integrated",
+            data: {
+              pr: "PR7",
+              revision: 3,
+              headSha: "a".repeat(40),
+              actor: "@agent/7",
+              run: "R9",
+              landingSha,
+            },
+          },
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000017",
+            name: "pr/integrated",
+            data: {
+              pr: "PR8",
+              revision: 1,
+              headSha: "c".repeat(40),
+              actor: "@agent/8",
+              run: "R9",
+              landingSha,
+            },
+          },
+        ],
+      },
+    ])
+    const deliveries: SignalDelivery[] = []
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: {
+        "pr/rejected": ["submitter"],
+        "pr/needs-review": ["@cto"],
+        "pr/integrated": ["broadcast"],
+      },
+      adapter: recordingAdapter(deliveries, closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries).toEqual([
+      {
+        recipient: "*",
+        event: expect.objectContaining({
+          kind: "pr/integrated",
+          landingSha,
+          prs: [expect.objectContaining({ pr: "PR7" }), expect.objectContaining({ pr: "PR8" })],
+        }),
+      },
+    ])
+    expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:3:@agent/7",
+      "@cto yrd:pr/needs-review:PR7:3:@cto",
+      "@agent/8 yrd:pr/rejected:PR8:1:@agent/8",
+      "@cto yrd:pr/needs-review:PR8:1:@cto",
+    ])
+  })
+
+  it("routes a typed failed Run to each submitter and the configured CI recipient", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000020")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            name: "queue/run/failed",
+            data: {
+              run: "R9",
+              error: { code: "job-lost", message: "runner disappeared" },
+              prs: [
+                { pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" },
+                { pr: "PR8", revision: 1, headSha: "c".repeat(40), actor: "@agent/8" },
+              ],
+            },
+          },
+        ],
+      },
+    ])
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "run/failed": ["submitter", "@ci"] },
+      adapter: recordingAdapter(deliveries),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries.map(({ recipient }) => recipient)).toEqual(["@agent/7", "@agent/8", "@ci"])
+    expect(deliveries[0]?.event).toMatchObject({ kind: "run/failed", run: "R9" })
+  })
+
   it("refuses startup when configured Tribe routes have no live adapter", () => {
     const which = vi.spyOn(Bun, "which").mockReturnValue(null)
     try {
@@ -284,9 +431,64 @@ describe("PR signal observer", () => {
             "--summary",
             "PR7 rejected at check",
             "--request",
+            "yrd:pr/rejected:PR7:3:@agent/7",
           ],
           timeoutMs: 5_000,
         }),
+      ])
+    } finally {
+      which.mockRestore()
+    }
+  })
+
+  it("uses ambient notify for integration and closes terminal request ids without a wakeup message", async () => {
+    const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
+    const requests: ProcessRequest[] = []
+    try {
+      const adapter = createTribeSignalAdapter({
+        async run(request) {
+          requests.push(request)
+          return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
+        },
+      })
+      await adapter.send({
+        recipient: "*",
+        event: {
+          id: "00000000-0000-7000-8000-000000000030",
+          kind: "pr/integrated",
+          at: "2026-07-14T10:00:00.000Z",
+          run: "R9",
+          landingSha: "b".repeat(40),
+          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" }],
+        },
+      })
+      await adapter.close?.({
+        recipient: "@agent/7",
+        request: "yrd:pr/rejected:PR7:3:@agent/7",
+        pr: "PR7",
+        revision: 3,
+        kind: "pr/rejected",
+      })
+
+      expect(requests.map(({ argv }) => argv)).toEqual([
+        [
+          "/usr/local/bin/tribe",
+          "send",
+          "*",
+          expect.stringContaining(`at ${"b".repeat(40)}`),
+          "--type",
+          "notify",
+          "--summary",
+          "PR7 integrated",
+        ],
+        [
+          "/usr/local/bin/tribe",
+          "pending",
+          "--owner",
+          "@agent/7",
+          "--close",
+          "yrd:pr/rejected:PR7:3:@agent/7",
+        ],
       ])
     } finally {
       which.mockRestore()

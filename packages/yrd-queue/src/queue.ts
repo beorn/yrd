@@ -129,7 +129,17 @@ const PauseQueueArgsSchema = z
 const ResumeQueueArgsSchema = z.object({ base: GitRefSchema }).strict()
 const QueueStartSchema = QueueRecordSchema.omit({ startedAt: true, failure: true })
 const ReplayQueueStartSchema = ReplayQueueRecordSchema.omit({ startedAt: true, failure: true })
-const QueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
+const QueueFailedPRSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    actor: z.string().trim().min(1).optional(),
+  })
+  .strict()
+const LegacyQueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
+const QueueFailedSchema = LegacyQueueFailedSchema.extend({ prs: z.array(QueueFailedPRSchema).min(1) }).strict()
+const ReplayQueueFailedSchema = z.union([QueueFailedSchema, LegacyQueueFailedSchema])
 const QueueAuthorityTokenFactSchema = z.object({
   pr: PRIdSchema,
   revision: z.number().int().positive(),
@@ -442,6 +452,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       },
       replayEvents: {
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
+        "queue/run/failed": ReplayQueueFailedSchema,
       },
       project: projectQueues,
       create(yrd) {
@@ -1151,6 +1162,29 @@ function queueRunsOutcome(runs: readonly DeepReadonly<QueueRun>[]): YrdLifecycle
   return "succeeded"
 }
 
+function queueFailedEvent(
+  state: DeepReadonly<RuntimeState>,
+  run: DeepReadonly<Pick<QueueRecord, "id" | "prs">>,
+  error: DeepReadonly<JobError>,
+): EventDraft {
+  return event("queue/run/failed", {
+    run: run.id,
+    error,
+    prs: run.prs.map((pr) => {
+      const current = state.bays.prs[pr.id]
+      const actor = current?.revisions.find(
+        (revision) => revision.revision === pr.revision && revision.headSha === pr.headSha,
+      )?.actor
+      return {
+        pr: pr.id,
+        revision: pr.revision,
+        headSha: pr.headSha,
+        ...(actor === undefined ? {} : { actor }),
+      }
+    }),
+  })
+}
+
 function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<string, RuntimeStep>): QueueCommands {
   const admit = command({
     title: "Admit PR checks",
@@ -1289,12 +1323,9 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
         : {
             run: started.run,
             events: [
-              event("queue/run/failed", {
-                run: superseded.id,
-                error: {
+              queueFailedEvent(state, superseded, {
                   code: "step-selection-superseded",
                   message: `explicit steps '${selection.steps.join(",")}' superseded unstarted configured checks`,
-                },
               }),
               ...started.events,
             ],
@@ -1785,7 +1816,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     }
   }
   if (applied.name === "queue/run/failed") {
-    const failed = QueueFailedSchema.parse(applied.data)
+    const failed = ReplayQueueFailedSchema.parse(applied.data)
     const record = state.queues.records[failed.run]
     if (record === undefined) throw new Error(`yrd: no queue run '${failed.run}'`)
     const releaseReason = queueAuthorityReleaseReason(failed.error)
@@ -1926,7 +1957,7 @@ function advanceQueue(
   if (record.failure !== undefined) return { events: [] }
   const stale = pinnedPRError(state.bays, record.prs)
   if (stale !== undefined) {
-    return { events: [event("queue/run/failed", { run: record.id, error: stale })] }
+    return { events: [queueFailedEvent(state, record, stale)] }
   }
 
   const jobs = queueJobs(record, state.jobs)
@@ -1973,7 +2004,7 @@ function advanceQueue(
 
     const failure = jobFailure(job)
     if (queueAuthorityReleaseReason(failure) !== undefined) {
-      return { events: [event("queue/run/failed", { run: record.id, error: failure })] }
+      return { events: [queueFailedEvent(state, record, failure)] }
     }
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]
@@ -2018,6 +2049,9 @@ function advanceQueue(
       ) {
         continue
       }
+      const revision = current.revisions.find(
+        (candidate) => candidate.revision === current.revision && candidate.headSha === current.headSha,
+      )
       events.push(
         event("pr/integrated", {
           pr: current.id,
@@ -2029,6 +2063,7 @@ function advanceQueue(
           landingSha: shape.integration.commit,
           baseSha: shape.integration.baseSha,
           ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+          ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
         }),
       )
     }
