@@ -4,7 +4,7 @@
  * @consumer @yrd/persistence
  */
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, readdir, stat, writeFile, type FileHandle } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -31,6 +31,7 @@ import * as z from "zod"
 const MANIFEST = "events-v4.manifest.json"
 const RECOVERY = "events-v4.recovery.json"
 const V3 = "events-v3.jsonl"
+const V3_CUTOVER = `{"v":4,"cutover":"events-v4.manifest.json"}\n`
 
 type Manifest = Readonly<{
   formatVersion: 4
@@ -632,7 +633,7 @@ describe("filesystem Journal", () => {
     log.end()
   })
 
-  it("keeps v3 authoritative until process-fresh v4 replay verifies, then removes it", async () => {
+  it("keeps v3 authoritative until process-fresh v4 replay verifies, then seals it", async () => {
     const dir = await directory()
     const legacy = Buffer.from(v3Line(frame("legacy-first")) + v3Line(frame("legacy-second")))
     await writeFile(join(dir, V3), legacy)
@@ -651,12 +652,30 @@ describe("filesystem Journal", () => {
     release.resolve()
     const result = await append
     if (!result.appended) throw new Error("expected migrated append")
-    expect(await missing(join(dir, V3))).toBe(true)
+    expect(await readFile(join(dir, V3), "utf8")).toBe(V3_CUTOVER)
+    expect((await stat(join(dir, V3))).mode & 0o222).toBe(0)
 
     const restarted = createJournal({ dir })
     await expect(Array.fromAsync(restarted.read(legacy.length))).resolves.toEqual([
       { cursor: result.cursor, values: [frame("post-migration")] },
     ])
+  })
+
+  it("preserves and refuses a v3 tail recreated after v4 cutover", async () => {
+    const dir = await directory()
+    const legacy = Buffer.from(v3Line(frame("legacy-authority")))
+    await writeFile(join(dir, V3), legacy)
+    const journal = createJournal({ dir })
+    await accepted(journal, frame("post-migration"), legacy.length)
+
+    const recreated = Buffer.from(v3Line(frame("phantom-old-writer")))
+    await rm(join(dir, V3), { force: true })
+    await writeFile(join(dir, V3), recreated)
+
+    await expect(Array.fromAsync(createJournal({ dir }).read())).rejects.toThrow(
+      "legacy v3 journal changed after v4 cutover",
+    )
+    expect(await readFile(join(dir, V3))).toEqual(recreated)
   })
 
   it("restores v3 and preserves failed-generation evidence when production verification fails", async () => {
