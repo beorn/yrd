@@ -3325,7 +3325,9 @@ describe("runYrd", () => {
       activeMs: 0,
       waitMs: 10 * minute,
     })
-    expect(JSON.parse(JSON.stringify(projection.rows)).find((row: { run?: string }) => row.run === "R1")).toMatchObject(
+    expect(
+      (JSON.parse(JSON.stringify(projection.rows)) as readonly { run?: string }[]).find((row) => row.run === "R1"),
+    ).toMatchObject(
       {
         ageMs: 110 * minute,
         totalMs: 10 * minute,
