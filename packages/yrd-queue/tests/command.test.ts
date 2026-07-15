@@ -341,6 +341,7 @@ describe("Queue command adapters", () => {
 
   it("recuts an authored root after a certified same-issue source superseded its gitlink", async () => {
     const { repo } = await repository()
+    const doctrineText = (lines: readonly string[]) => `${lines.join("\n")}\n`
     const module = join(repo, "..", "module")
     await Bun.$`git init -q -b main ${module}`
     await git(module, ["config", "user.name", "Yrd Test"])
@@ -352,6 +353,9 @@ describe("Queue command adapters", () => {
 
     await git(repo, ["config", "protocol.file.allow", "always"])
     await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    await writeFile(join(repo, ".gitattributes"), "doctrine.md merge=union\n")
+    await writeFile(join(repo, "doctrine.md"), doctrineText(["Validate admitted work.", "Keep it flowing."]))
+    await git(repo, ["add", ".gitattributes", "doctrine.md"])
     await git(repo, ["commit", "-qam", "add dependency"])
     const sourceBase = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["branch", "issue/root", sourceBase])
@@ -386,13 +390,30 @@ describe("Queue command adapters", () => {
 
     await git(join(repo, "dep"), ["fetch", "-q", "origin"])
     await git(join(repo, "dep"), ["checkout", "-q", currentPin])
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "Keep it flowing.",
+      ]),
+    )
     await git(repo, ["add", "dep"])
+    await git(repo, ["add", "doctrine.md"])
     await git(repo, ["commit", "-qm", "advance authoritative dependency"])
     const currentBase = await git(repo, ["rev-parse", "HEAD"])
 
     await git(repo, ["switch", "-q", "issue/root"])
     await git(join(repo, "dep"), ["checkout", "-q", sourceTip])
-    await writeFile(join(repo, "doctrine.md"), "same PR recut\n")
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "For authored roots, draft then recut the same PR.",
+        "Keep it flowing.",
+      ]),
+    )
     await git(repo, ["add", "dep", "doctrine.md"])
     await git(repo, ["commit", "-qm", "authored root"])
     const authoredHead = await git(repo, ["rev-parse", "HEAD"])
@@ -408,7 +429,7 @@ describe("Queue command adapters", () => {
       headSha: authoredHead,
       baseSha: currentBase,
     }
-    await expect(recutter.recut(input)).rejects.toThrow(/could not recut.+at \[dep\]/u)
+    await expect(recutter.recut(input)).rejects.toThrow(/could not recut.+at \[[^\]]*dep/u)
 
     const result = await recutter.recut({
       ...input,
@@ -448,6 +469,9 @@ describe("Queue command adapters", () => {
     })
     expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(currentBase)
     expect(await git(repo, ["diff", "--name-only", currentBase, result.headSha])).toBe("doctrine.md")
+    const recutDoctrine = await git(repo, ["show", `${result.headSha}:doctrine.md`])
+    expect(recutDoctrine).toContain("generated `current_command` verbatim")
+    expect(recutDoctrine).toContain("For authored roots, draft then recut the same PR")
     expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(currentPin)
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })

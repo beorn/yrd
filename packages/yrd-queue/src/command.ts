@@ -734,7 +734,13 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' has no root payload after absorbing current gitlinks`,
     })
   }
-  const sourceIdentity = await changedPayloadIdentity(git, repo, sourceBase, input.headSha, effectivePayload)
+  const overlap = intersection(effectivePayload, authority)
+  const overlapSet = new Set(overlap)
+  const disjointPayload = effectivePayload.filter((path) => !overlapSet.has(path))
+  const sourceIdentity =
+    disjointPayload.length === 0
+      ? undefined
+      : await changedPayloadIdentity(git, repo, sourceBase, input.headSha, disjointPayload)
   const effectiveSourcePatchId = await git.stablePatchId(repo, sourceBase, input.headSha, effectivePayload)
   if (effectiveSourcePatchId === undefined) {
     throw createFailure({
@@ -743,7 +749,6 @@ async function recutDirectPR(
       message: `yrd: PR '${input.id}' revision ${input.revision} has no current-composition patch identity`,
     })
   }
-  const overlap = intersection(effectivePayload, authority)
   const outcome = await withScratch<PRRecutResult>(git, repo, input.headSha, tmpdir(), async (path) => {
     let rebased = await git.run(
       path,
@@ -797,8 +802,8 @@ async function recutDirectPR(
       })
     }
     if (
-      overlap.length === 0 &&
-      (await changedPayloadIdentity(git, path, target.sha, headSha, effectivePayload)) !== sourceIdentity
+      sourceIdentity !== undefined &&
+      (await changedPayloadIdentity(git, path, target.sha, headSha, disjointPayload)) !== sourceIdentity
     ) {
       throw createFailure({
         kind: "refusal",
@@ -807,7 +812,17 @@ async function recutDirectPR(
       })
     }
     const materializedPatchId = await git.stablePatchId(path, target.sha, headSha)
-    if (materializedPatchId !== effectiveSourcePatchId) {
+    if (materializedPatchId === undefined) {
+      throw createFailure({
+        kind: "refusal",
+        code: "payload-certificate",
+        message: `yrd: PR '${input.id}' recut has no stable patch identity`,
+      })
+    }
+    if (
+      materializedPatchId !== effectiveSourcePatchId &&
+      !(overlap.length > 0 && (await usesUnionMerge(git, path, overlap)))
+    ) {
       throw createFailure({
         kind: "refusal",
         code: "payload-certificate",
@@ -1555,6 +1570,20 @@ async function certifiesSupersededGitlink(
   const authoredPayload = await changedPaths(git, repo, authoredBase, authoredTip)
   const certifiedPayload = await changedPaths(git, repo, source.baseSha, source.tipSha)
   return samePaths(authoredPayload, source.payload) && samePaths(certifiedPayload, source.payload)
+}
+
+async function usesUnionMerge(git: Git, repo: string, paths: readonly string[]): Promise<boolean> {
+  const result = await git.run(repo, ["check-attr", "-z", "merge", "--", ...paths], true)
+  if (result.code !== 0) return false
+  const fields = result.stdout.split("\0")
+  const attributes = new Map<string, string>()
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const path = fields[index]
+    const attribute = fields[index + 1]
+    const value = fields[index + 2]
+    if (path !== undefined && attribute === "merge" && value !== undefined) attributes.set(path, value)
+  }
+  return paths.length > 0 && paths.every((path) => attributes.get(path) === "union")
 }
 
 async function stagedPaths(git: Git, repo: string): Promise<string[]> {
