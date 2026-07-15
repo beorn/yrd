@@ -71,7 +71,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   timestamp: string | null
   timestampMs: number | null
   run?: string
-  actor?: string
+  submitter?: string
   prs: readonly string[]
   branches: readonly string[]
   subject: string
@@ -513,15 +513,15 @@ function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
 
 /** The submitter/creator handle recorded on the PR's latest (current) revision,
  * or undefined for revisions journaled before submitter identity was recorded. */
-function latestRevisionActor(pr: PR): string | undefined {
+function latestRevisionSubmitter(pr: PR): string | undefined {
   return pr.revisions.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)?.actor
 }
 
-function runActor(result: QueueStatusResult, run: QueueRun): string | undefined {
+function runSubmitter(result: QueueStatusResult, run: QueueRun): string | undefined {
   const lead = run.prs[0]
   if (lead === undefined) return undefined
   const pr = result.prs.find((candidate) => candidate.id === lead.id)
-  return pr === undefined ? undefined : latestRevisionActor(pr)
+  return pr === undefined ? undefined : latestRevisionSubmitter(pr)
 }
 
 function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
@@ -1439,7 +1439,7 @@ function timelineRunRow(
       : `${failure.code}: ${causalSummary(failure.message)}`
   const revisionLineage = timelineRunLineages(result, run)
   const detail = withTimelineLineage(baseDetail, revisionLineage)
-  const actor = runActor(result, run)
+  const submitter = runSubmitter(result, run)
   return {
     id: `${run.base}:run:${run.id}`,
     base: run.base,
@@ -1449,7 +1449,7 @@ function timelineRunRow(
     timestamp,
     timestampMs,
     run: run.id,
-    ...(actor === undefined ? {} : { actor }),
+    ...(submitter === undefined ? {} : { submitter }),
     prs: run.prs.map((member) => member.id),
     branches: run.prs.map((member) => member.branch),
     subject: timelineSubject(result, run, state),
@@ -1483,7 +1483,7 @@ function timelinePendingRows(
     const revisionLineage = [timelineRevisionLineage(pr)]
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
     const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
-    const actor = latestRevisionActor(pr)
+    const submitter = latestRevisionSubmitter(pr)
     return [
       {
         id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1493,7 +1493,7 @@ function timelinePendingRows(
         glyph: statusGlyph("pending"),
         timestamp,
         timestampMs,
-        ...(actor === undefined ? {} : { actor }),
+        ...(submitter === undefined ? {} : { submitter }),
         prs: [pr.id],
         branches: [pr.branch],
         subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
@@ -1920,7 +1920,7 @@ export type PRListRow = Readonly<{
   revision: number
   lineage: string
   subject: string
-  actor: string
+  submitter: string
   target: string
   review: "n/a" | "need" | "ok" | "reject"
   checks: "n/a" | "wait" | "run" | "pass" | "fail"
@@ -1972,7 +1972,7 @@ export function prListRows(
       revision: pr.revision,
       lineage: projected.revisionLineage.join("→"),
       subject: projected.subject,
-      actor: latestRevisionActor(pr) ?? "-",
+      submitter: latestRevisionSubmitter(pr) ?? "-",
       target: projected.target,
       review: reviewLabel(eligibility),
       checks: checkLabels[eligibility.checks.status],
@@ -1994,7 +1994,7 @@ function PRStateValue({ row }: { row: PRListRow }) {
 
 export function PRListView({ rows, columns: terminalColumns }: { rows: readonly PRListRow[]; columns: number }) {
   const base: TableColumn<PRListRow> = { header: "BASE", key: "target", minWidth: 6, maxWidth: 14 }
-  const actor: TableColumn<PRListRow> = { header: "ACTOR", key: "actor", minWidth: 6, maxWidth: 10 }
+  const submitter: TableColumn<PRListRow> = { header: "BY", key: "submitter", minWidth: 4, maxWidth: 10 }
   const ageColumn: TableColumn<PRListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
   const changed: TableColumn<PRListRow> = { header: "CHANGED", key: "touched", minWidth: 9, maxWidth: 9 }
   const columns: TableColumn<PRListRow>[] = [
@@ -2008,7 +2008,7 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
     },
     { header: "REV", key: "revision", minWidth: 5, maxWidth: 6 },
     { header: "LINEAGE", key: "lineage", minWidth: 8, maxWidth: 10 },
-    ...(terminalColumns >= 110 ? [actor] : []),
+    ...(terminalColumns >= 110 ? [submitter] : []),
     { header: "SUBJECT", key: "subject", minWidth: 9, maxWidth: 26, grow: true },
     ...(terminalColumns >= 100 ? [base] : []),
     { header: "REVIEW", key: "review", minWidth: 8, maxWidth: 8 },
@@ -2600,16 +2600,16 @@ function TimelineStatusBand({ row }: { row: QueueTimelineProjectedRow }) {
 
 // Fits the agent handles operators submit under (@ci, @cto, @agent/0, @chief);
 // longer identities truncate rather than widen the identity band.
-const ACTOR_COLUMN_WIDTH = 10
+const BY_COLUMN_WIDTH = 10
 
 function TimelineHeader({
   includeDate,
   compact,
-  showActor,
+  showBy,
 }: {
   includeDate: boolean
   compact: boolean
-  showActor: boolean
+  showBy: boolean
 }) {
   const timeWidth = includeDate ? (compact ? 16 : 21) : 10
   return (
@@ -2627,10 +2627,10 @@ function TimelineHeader({
           RUN·PR
         </Text>
       </Box>
-      {showActor ? (
-        <Box width={ACTOR_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+      {showBy ? (
+        <Box width={BY_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
           <Text color="$fg-muted" wrap="truncate">
-            ACTOR
+            BY
           </Text>
         </Box>
       ) : null}
@@ -2662,13 +2662,13 @@ function TimelineProjectedRow({
   cursor,
   includeDate,
   compact,
-  showActor,
+  showBy,
 }: {
   row: QueueTimelineProjectedRow
   cursor: boolean
   includeDate: boolean
   compact: boolean
-  showActor: boolean
+  showBy: boolean
 }) {
   const color = row.status === "integrated" ? "$fg-muted" : undefined
   const rawClock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
@@ -2695,10 +2695,10 @@ function TimelineProjectedRow({
           {identity}
         </Text>
       </Box>
-      {showActor ? (
-        <Box width={ACTOR_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+      {showBy ? (
+        <Box width={BY_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
           <Text color={color ?? "$fg-muted"} wrap="truncate">
-            {row.actor ?? "-"}
+            {row.submitter ?? "-"}
           </Text>
         </Box>
       ) : null}
@@ -2749,9 +2749,9 @@ function ProjectedQueueTimeline({
   columns: number
 }) {
   const compact = columns <= 80
-  // Actor is supplementary identity; only surface it once there is room, matching
-  // the responsive breakpoints PRListView uses for BASE/AGE/CHANGED.
-  const showActor = columns >= 100
+  // BY (the submitter) is supplementary identity; per the 21106 contract it drops
+  // before the identity/clock/measurement columns, so surface it only at wide tiers.
+  const showBy = columns >= 100
   const rows = projection.rows.slice(0, projection.display.shown)
   const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
   const statusFilter = projection.filters.statuses.length === 5 ? "all" : projection.filters.statuses.join(",")
@@ -2788,7 +2788,7 @@ function ProjectedQueueTimeline({
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (
         <Box flexDirection="column">
-          <TimelineHeader includeDate={includeDate} compact={compact} showActor={showActor} />
+          <TimelineHeader includeDate={includeDate} compact={compact} showBy={showBy} />
           <ListView
             items={rows}
             nav={nav}
@@ -2804,7 +2804,7 @@ function ProjectedQueueTimeline({
                 cursor={meta.isCursor}
                 includeDate={includeDate}
                 compact={compact}
-                showActor={showActor}
+                showBy={showBy}
               />
             )}
           />

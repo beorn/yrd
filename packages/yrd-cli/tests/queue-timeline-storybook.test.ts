@@ -243,18 +243,19 @@ describe("queue timeline storybook", () => {
     }
   })
 
-  it("surfaces the latest revision actor in the wide timeline and hides it on the narrow tier", async () => {
+  it("surfaces the latest revision submitter in the wide BY column and hides it on the narrow tier", async () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
+    const header = (frame: string) => frame.split("\n").find((line) => line.includes("TIME") && line.includes("STATUS"))
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
       height: 20,
       plain: true,
     })
-    expect(wide).toContain("ACTOR")
+    expect(header(wide), "wide header").toContain("BY")
     const batchRow = wide.split("\n").find((row) => row.includes("R42·"))
     expect(batchRow, "batch run row").toContain("@ci")
     const rejectedRow = wide.split("\n").find((row) => row.includes("R5·"))
-    // R5's revision has no recorded actor, so its ACTOR cell falls back to "-" (no handle).
+    // R5's revision has no recorded submitter, so its BY cell falls back to "-" (no handle).
     expect(rejectedRow, "rejected run row").not.toContain("@")
 
     const narrow = await renderString(createElement(QueueTimelineView, { projection, columns: 90 }), {
@@ -262,7 +263,7 @@ describe("queue timeline storybook", () => {
       height: 20,
       plain: true,
     })
-    expect(narrow).not.toContain("ACTOR")
+    expect(header(narrow), "narrow header").not.toContain("BY")
   })
 
   it.each(TERMLESS_DETAIL_TIERS)(

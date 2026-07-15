@@ -1679,14 +1679,14 @@ describe("runYrd", () => {
     ]
 
     const rows = prListRows(entries, [], Date.parse("2026-07-09T12:10:00.000Z"))
-    // The current revision's submitter surfaces as the actor; PRs whose revision
+    // The current revision's submitter surfaces in the BY column; PRs whose revision
     // predates submitter identity fall back to "-".
-    expect(rows.map(({ pr: id, actor }) => ({ id, actor }))).toEqual([
-      { id: "PR1", actor: "-" },
-      { id: "PR2", actor: "@ci" },
-      { id: "PR3", actor: "-" },
-      { id: "PR4", actor: "-" },
-      { id: "PR5", actor: "-" },
+    expect(rows.map(({ pr: id, submitter }) => ({ id, submitter }))).toEqual([
+      { id: "PR1", submitter: "-" },
+      { id: "PR2", submitter: "@ci" },
+      { id: "PR3", submitter: "-" },
+      { id: "PR4", submitter: "-" },
+      { id: "PR5", submitter: "-" },
     ])
     expect(
       rows.map(({ pr: id, state, glyph, review: reviewState, checks, why }) => ({
@@ -1727,8 +1727,8 @@ describe("runYrd", () => {
       expect(physical[0]?.includes("BASE")).toBe(columns === 120)
       expect(physical[0]?.includes("CHANGED")).toBe(columns === 120)
       expect(human.includes("release/2.0")).toBe(columns === 120)
-      // ACTOR is a wide-only column (>=110); it carries PR2's submitter and hides on the narrow tier.
-      expect(physical[0]?.includes("ACTOR")).toBe(columns === 120)
+      // BY is a wide-only column (>=110); it carries PR2's submitter and hides on the narrow tier.
+      expect(physical[0]?.includes("BY")).toBe(columns === 120)
       expect(human.includes("@ci")).toBe(columns === 120)
     }
   })
