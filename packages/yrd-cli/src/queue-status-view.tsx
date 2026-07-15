@@ -2494,7 +2494,18 @@ function queueLogSubmissionTime(
 }
 
 function timelineMetric(value: number | null): string {
-  return value === null ? "-" : mediaDuration(value)
+  if (value === null) return "-"
+  const duration = mediaDuration(value)
+  if (duration.length <= 6) return duration
+
+  const totalMinutes = Math.floor(value / 60_000)
+  const totalHours = Math.floor(totalMinutes / 60)
+  if (totalHours < 100) return `${totalHours}h${String(totalMinutes % 60).padStart(2, "0")}m`
+
+  const totalDays = Math.floor(totalHours / 24)
+  if (totalDays < 100) return `${totalDays}d${String(totalHours % 24).padStart(2, "0")}h`
+  if (totalDays < 100_000) return `${totalDays}d`
+  return ">99kd"
 }
 
 function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
@@ -2505,8 +2516,8 @@ function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
   return (
     <Box flexDirection="column">
       <Text wrap="truncate">
-        FLOW terminal={metrics.terminalAttempts} integrated={metrics.outcomes.integrated} rejected=
-        {metrics.outcomes.rejected} decision={decision === null ? "-" : `${(decision * 100).toFixed(1)}%`} environment=
+        FLOW attempts={metrics.terminalAttempts} integrated={metrics.outcomes.integrated} rejected=
+        {metrics.outcomes.rejected} decision={decision === null ? "-" : `${(decision * 100).toFixed(1)}%`} env=
         {metrics.outcomes.environmentRefused} canceled={metrics.outcomes.canceled}
       </Text>
       <Text color="$fg-muted" wrap="truncate">
@@ -2556,10 +2567,11 @@ function TimelineStatusBand({ row }: { row: QueueTimelineProjectedRow }) {
   )
 }
 
-function TimelineHeader({ includeDate }: { includeDate: boolean }) {
+function TimelineHeader({ includeDate, compact }: { includeDate: boolean; compact: boolean }) {
+  const timeWidth = includeDate ? (compact ? 16 : 21) : 10
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={includeDate ? 21 : 10} flexShrink={0} minWidth={0}>
+      <Box width={timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           {"  TIME"}
         </Text>
@@ -2572,16 +2584,20 @@ function TimelineHeader({ includeDate }: { includeDate: boolean }) {
           RUN·PR
         </Text>
       </Box>
-      <Box flexGrow={1} flexBasis={0} minWidth={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          SUBJECT
-        </Text>
-      </Box>
-      <Box flexGrow={1} flexBasis={0} minWidth={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          DETAIL
-        </Text>
-      </Box>
+      {compact ? null : (
+        <>
+          <Box flexGrow={1} flexBasis={0} minWidth={0}>
+            <Text color="$fg-muted" wrap="truncate">
+              SUBJECT
+            </Text>
+          </Box>
+          <Box flexGrow={1} flexBasis={0} minWidth={0}>
+            <Text color="$fg-muted" wrap="truncate">
+              DETAIL
+            </Text>
+          </Box>
+        </>
+      )}
       {(["AGE", "TOTAL", "ACTIVE", "WAIT"] as const).map((label) => (
         <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
           <Text color="$fg-muted">{label}</Text>
@@ -2595,13 +2611,17 @@ function TimelineProjectedRow({
   row,
   cursor,
   includeDate,
+  compact,
 }: {
   row: QueueTimelineProjectedRow
   cursor: boolean
   includeDate: boolean
+  compact: boolean
 }) {
   const color = row.status === "integrated" ? "$fg-muted" : undefined
-  const clock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
+  const rawClock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
+  const clock = compact && includeDate ? rawClock.slice(5) : rawClock
+  const timeWidth = includeDate ? (compact ? 16 : 21) : 10
   const identity = `${row.run === undefined ? "" : `${row.run}·`}${row.prs.join(",")}`
   const measurements = [
     ["age", row.ageMs],
@@ -2611,7 +2631,7 @@ function TimelineProjectedRow({
   ] as const
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={includeDate ? 21 : 10} flexShrink={0} minWidth={0}>
+      <Box width={timeWidth} flexShrink={0} minWidth={0}>
         <Text color={color} wrap="truncate">
           {cursor ? "> " : "  "}
           {clock}
@@ -2623,22 +2643,26 @@ function TimelineProjectedRow({
           {identity}
         </Text>
       </Box>
-      <Box flexGrow={1} flexBasis={0} minWidth={6}>
-        <Text color={color} wrap="truncate">
-          {row.subject}
-        </Text>
-      </Box>
-      <Box flexGrow={1} flexBasis={0} minWidth={10}>
-        {row.failure === undefined ? (
-          <Text color={color} wrap="truncate">
-            {row.detail}
-          </Text>
-        ) : (
-          <Text wrap="truncate">
-            {row.failure.code}: <Text color="$fg-muted">{causalSummary(row.failure.message)}</Text>
-          </Text>
-        )}
-      </Box>
+      {compact ? null : (
+        <>
+          <Box flexGrow={1} flexBasis={0} minWidth={6}>
+            <Text color={color} wrap="truncate">
+              {row.subject}
+            </Text>
+          </Box>
+          <Box flexGrow={1} flexBasis={0} minWidth={10}>
+            {row.failure === undefined ? (
+              <Text color={color} wrap="truncate">
+                {row.detail}
+              </Text>
+            ) : (
+              <Text wrap="truncate">
+                {row.failure.code}: <Text color="$fg-muted">{causalSummary(row.failure.message)}</Text>
+              </Text>
+            )}
+          </Box>
+        </>
+      )}
       {measurements.map(([label, value]) => (
         <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
           <Text color={color} wrap="truncate">
@@ -2656,13 +2680,16 @@ function ProjectedQueueTimeline({
   cursorKey,
   onCursor,
   onSelect,
+  columns,
 }: {
   projection: QueueTimelineProjection
   nav: boolean
   cursorKey?: number
   onCursor?: (index: number) => void
   onSelect?: (index: number) => void
+  columns: number
 }) {
+  const compact = columns <= 80
   const rows = projection.rows.slice(0, projection.display.shown)
   const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
   const includeDate = rows.some(
@@ -2698,7 +2725,7 @@ function ProjectedQueueTimeline({
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (
         <Box flexDirection="column">
-          <TimelineHeader includeDate={includeDate} />
+          <TimelineHeader includeDate={includeDate} compact={compact} />
           <ListView
             items={rows}
             nav={nav}
@@ -2709,7 +2736,7 @@ function ProjectedQueueTimeline({
             getKey={(row) => row.id}
             estimateHeight={1}
             renderItem={(row, _index, meta) => (
-              <TimelineProjectedRow row={row} cursor={meta.isCursor} includeDate={includeDate} />
+              <TimelineProjectedRow row={row} cursor={meta.isCursor} includeDate={includeDate} compact={compact} />
             )}
           />
         </Box>
@@ -2732,6 +2759,7 @@ export function QueueTimelineView({
   cursorKey,
   onCursor,
   onSelect,
+  columns = 120,
 }: {
   projection?: QueueTimelineProjection
   results?: readonly QueueStatusResult[]
@@ -2742,6 +2770,7 @@ export function QueueTimelineView({
   cursorKey?: number
   onCursor?: (index: number) => void
   onSelect?: (index: number) => void
+  columns?: number
 }) {
   if (projection !== undefined) {
     return (
@@ -2751,6 +2780,7 @@ export function QueueTimelineView({
         cursorKey={cursorKey}
         onCursor={onCursor}
         onSelect={onSelect}
+        columns={columns}
       />
     )
   }

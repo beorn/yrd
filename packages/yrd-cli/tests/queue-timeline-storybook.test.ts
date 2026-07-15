@@ -198,7 +198,7 @@ describe("queue timeline storybook", () => {
       expect(projection?.now, name).toBe("2026-07-13T12:00:00.000Z")
       if (projection === undefined) throw new Error(`story '${name}' is missing its projection`)
       for (const width of story.widths) {
-        const rendered = await renderString(createElement(QueueTimelineView, { projection }), {
+        const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width }), {
           width,
           height: 24,
           plain: true,

@@ -256,6 +256,7 @@ export function QueueWatchFrame({
       <QueueTimelineView
         results={snapshot.results}
         now={snapshot.now}
+        columns={columns}
         nav
         cursorKey={cursor}
         onCursor={selectRow}
@@ -264,6 +265,7 @@ export function QueueWatchFrame({
     ) : (
       <QueueTimelineView
         projection={snapshot.projection}
+        columns={columns}
         nav
         cursorKey={cursor}
         onCursor={selectRow}
