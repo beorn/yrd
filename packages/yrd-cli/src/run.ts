@@ -2766,6 +2766,7 @@ function buildProgram(
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--base <branch>", "select one base queue")
+    .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
     .option("--since <duration>", "timeline window", "6h")
     .option("--latest", "show only the latest Run for each PR")
@@ -2782,6 +2783,7 @@ function buildProgram(
     .command("list [filter...]")
     .description("show the queue timeline")
     .option("--base <branch>", "select one base queue")
+    .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
     .option("--since <duration>", "timeline window", "6h")
     .option("--latest", "show only the latest Run for each PR")
