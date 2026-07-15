@@ -90,6 +90,15 @@ async function localConfig(git: Git, repo: string, key: string): Promise<string 
   return configured.stdout.trim()
 }
 
+async function localBool(git: Git, repo: string, key: string): Promise<boolean | undefined> {
+  const configured = await git.run(repo, ["config", "--local", "--get", "--type=bool", key], true)
+  if (configured.code === 1) return undefined
+  if (configured.code !== 0) {
+    throw new Error(configured.stderr.trim() || `could not inspect shared ${key} config`)
+  }
+  return configured.stdout.trim() === "true"
+}
+
 async function removeLegacySharedPushDefault(git: Git, repo: string): Promise<void> {
   const configured = await localConfig(git, repo, "remote.pushDefault")
   if (configured !== "bay") return
@@ -103,21 +112,57 @@ async function removeLegacySharedPushDefault(git: Git, repo: string): Promise<vo
   )
 }
 
-async function prepareWorktreeConfig(git: Git, repo: string, required: boolean): Promise<void> {
-  const configured = await localConfig(git, repo, "core.worktree")
-  if (configured === undefined && !required) return
-
-  const enabled = await git.mutateConfig(repo, ["config", "extensions.worktreeConfig", "true"])
-  if (enabled.code !== 0) throw new Error(enabled.stderr || "could not enable worktree config")
-  if (configured === undefined) return
-
-  if (configured === "") throw new Error("Git core.worktree is empty")
-  const moved = await git.mutateConfig(repo, ["config", "--worktree", "core.worktree", configured])
+async function relocateSharedWorktree(git: Git, repo: string, worktree: string): Promise<void> {
+  if (worktree === "") throw new Error("Git core.worktree is empty")
+  const moved = await git.mutateConfig(repo, ["config", "--worktree", "core.worktree", worktree])
   if (moved.code !== 0) throw new Error(moved.stderr || "could not set primary worktree config")
   const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "core.worktree"])
   if (removed.code === 0) return
   const remaining = await localConfig(git, repo, "core.worktree")
   if (remaining !== undefined) throw new Error(removed.stderr || "could not remove shared core.worktree config")
+}
+
+async function relocateSharedBare(git: Git, repo: string): Promise<void> {
+  // A shared core.bare=false (or unset) is harmless: linked worktrees are non-bare regardless. Only a
+  // shared core.bare=true is dangerous once extensions.worktreeConfig is enabled.
+  if ((await localBool(git, repo, "core.bare")) !== true) return
+  // git-worktree(1) CONFIGURATION FILE: with extensions.worktreeConfig enabled, a `core.bare=true` in the
+  // SHARED config is inherited by every LINKED worktree, so `git rev-parse --is-bare-repository` reports
+  // true there and the worktree becomes unusable (this is what took the whole worktree fleet down). A Bay
+  // is only ever provisioned on a repository that already has a working tree, so the repository is
+  // non-bare: record the corrected flag in the MAIN worktree's config.worktree, then drop the stray value
+  // from the shared config so no linked worktree can inherit it.
+  const scoped = await git.mutateConfig(repo, ["config", "--worktree", "core.bare", "false"])
+  if (scoped.code !== 0) throw new Error(scoped.stderr || "could not scope core.bare to the main worktree")
+  const removed = await git.mutateConfig(repo, ["config", "--local", "--unset-all", "core.bare"])
+  if (removed.code === 0) return
+  if ((await localBool(git, repo, "core.bare")) !== undefined) {
+    throw new Error(removed.stderr || "could not remove shared core.bare config")
+  }
+}
+
+async function prepareWorktreeConfig(git: Git, repo: string, required: boolean): Promise<void> {
+  const worktree = await localConfig(git, repo, "core.worktree")
+  if (worktree === undefined && !required) return
+
+  const enabled = await git.mutateConfig(repo, ["config", "extensions.worktreeConfig", "true"])
+  if (enabled.code !== 0) throw new Error(enabled.stderr || "could not enable worktree config")
+
+  // Enabling extensions.worktreeConfig exposes the shared config to every linked worktree, so a
+  // `core.bare=true` or `core.worktree` left there makes those worktrees report as bare. git-worktree(1)
+  // requires relocating both into the MAIN worktree's config.worktree.
+  await relocateSharedBare(git, repo)
+  if (worktree !== undefined) await relocateSharedWorktree(git, repo, worktree)
+}
+
+async function healPoisonedWorktreeConfig(git: Git, repo: string): Promise<void> {
+  // A shared core.bare=true set AFTER extensions.worktreeConfig was enabled (by any tool, not just Yrd)
+  // takes every linked worktree down and blocks a fresh provision, because the main worktree then reports
+  // as bare. Repair it on host startup — the config is readable even while the repository reports bare.
+  // Only act when the extension is enabled: without it a shared core.bare=true affects only the main
+  // worktree and may describe an intentionally bare repository, which is not Yrd's to rewrite.
+  if ((await localBool(git, repo, "extensions.worktreeConfig")) !== true) return
+  await relocateSharedBare(git, repo)
 }
 
 async function ignoreInRepositoryBays(git: Git, repo: string, baysRoot: string): Promise<void> {
@@ -161,6 +206,9 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     // Older Yrd versions set this in shared config, making plain `git push` target the Bay receiver.
     await removeLegacySharedPushDefault(git, repo)
   }
+  // Repair a shared config that a previous run (or another tool) left in the fleet-breaking
+  // worktreeConfig + core.bare=true state before provisioning anything on top of it.
+  await healPoisonedWorktreeConfig(git, repo)
   return {
     revision: createHash("sha256")
       .update(

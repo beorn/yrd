@@ -386,6 +386,55 @@ describe("createGitWorkspace", () => {
     expect((await git(repo, ["config", "--worktree", "--get", "core.worktree"])).stdout).toBe(relative(gitDir, repo))
   })
 
+  it("never reports any worktree as bare when enabling worktree config alongside pool worktrees", async () => {
+    const { root, repo, intake } = await repository()
+    // A pre-existing linked worktree mirrors the shared pool slots that the incident took down.
+    const pool = join(root, "pool")
+    await git(repo, ["worktree", "add", "-q", pool, "-b", "pool"])
+    await using process = createProcess()
+    await using app = await createApp(
+      await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
+    )
+
+    await runRequested(app, await app.bays.open({ name: "bare-guard" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+
+    // Provisioning enables extensions.worktreeConfig; it must never make main, a linked pool worktree, or
+    // the new Bay report as bare.
+    expect((await git(repo, ["config", "--get", "extensions.worktreeConfig"])).stdout).toBe("true")
+    expect((await git(repo, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
+    expect((await git(pool, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
+    expect((await git(bay.path, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
+  })
+
+  it("repairs a shared core.bare=true that would take every linked worktree down", async () => {
+    const { root, repo, intake } = await repository()
+    const pool = join(root, "pool")
+    await git(repo, ["worktree", "add", "-q", pool, "-b", "pool"])
+    // Reproduce the incident: extensions.worktreeConfig was enabled by an earlier run, then a stray
+    // core.bare=true landed in the SHARED config and propagated to every linked worktree.
+    await git(repo, ["config", "extensions.worktreeConfig", "true"])
+    await git(repo, ["config", "core.bare", "true"])
+    expect((await git(pool, ["rev-parse", "--is-bare-repository"])).stdout).toBe("true")
+
+    await using process = createProcess()
+    // Constructing the workspace (host startup) must heal the poisoned shared config.
+    await using app = await createApp(
+      await workspace(process, { repo, baysRoot: join(root, "bays"), intakeRemote: intake }),
+    )
+
+    expect((await git(repo, ["config", "--local", "--get", "core.bare"], true)).code).toBe(1)
+    expect((await git(repo, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
+    expect((await git(pool, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
+
+    // A Bay provisioned after the repair is also non-bare and usable.
+    await runRequested(app, await app.bays.open({ name: "healed" }))
+    const bay = app.bays.get("B1")
+    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    expect((await git(bay.path, ["rev-parse", "--is-bare-repository"])).stdout).toBe("false")
+  })
+
   it("opens an existing branch without inventing an adopt operation", async () => {
     const { root, repo } = await repository()
     await git(repo, ["branch", "release-fix"])
