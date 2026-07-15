@@ -339,6 +339,101 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it("recuts an authored root after a certified same-issue source superseded its gitlink", async () => {
+    const { repo } = await repository()
+    const module = join(repo, "..", "module")
+    await Bun.$`git init -q -b main ${module}`
+    await git(module, ["config", "user.name", "Yrd Test"])
+    await git(module, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(module, "README.md"), "base\n")
+    await git(module, ["add", "README.md"])
+    await git(module, ["commit", "-qm", "base"])
+    const oldPin = await git(module, ["rev-parse", "HEAD"])
+
+    await git(repo, ["config", "protocol.file.allow", "always"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    await git(repo, ["commit", "-qam", "add dependency"])
+    const sourceBase = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "issue/root", sourceBase])
+
+    await git(module, ["switch", "-qc", "issue/source"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'authored context'\n")
+    await git(module, ["add", "source-a.ts"])
+    await git(module, ["commit", "-qm", "source a"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'settled'\n")
+    await writeFile(join(module, "source-b.ts"), "export const b = true\n")
+    await git(module, ["add", "source-a.ts", "source-b.ts"])
+    await git(module, ["commit", "-qm", "source b"])
+    const sourceTip = await git(module, ["rev-parse", "HEAD"])
+
+    await git(module, ["switch", "-q", "main"])
+    await writeFile(join(module, "upstream.ts"), "export const upstream = true\n")
+    await writeFile(join(module, "source-a.ts"), "export const source = 'current context'\n")
+    await git(module, ["add", "upstream.ts", "source-a.ts"])
+    await git(module, ["commit", "-qm", "current source base"])
+    const composedBase = await git(module, ["rev-parse", "HEAD"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'settled'\n")
+    await writeFile(join(module, "source-b.ts"), "export const b = true\n")
+    await git(module, ["add", "source-a.ts", "source-b.ts"])
+    await git(module, ["commit", "-qm", "compose current source"])
+    const currentPin = await git(module, ["rev-parse", "HEAD"])
+    expect(currentPin).not.toBe(sourceTip)
+    expect(await git(module, ["cherry", currentPin, sourceTip, oldPin])).toMatch(/^\+ [0-9a-f]{40}/u)
+
+    await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+    await git(join(repo, "dep"), ["checkout", "-q", currentPin])
+    await git(repo, ["add", "dep"])
+    await git(repo, ["commit", "-qm", "advance authoritative dependency"])
+    const currentBase = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "issue/root"])
+    await git(join(repo, "dep"), ["checkout", "-q", sourceTip])
+    await writeFile(join(repo, "doctrine.md"), "same PR recut\n")
+    await git(repo, ["add", "dep", "doctrine.md"])
+    await git(repo, ["commit", "-qm", "authored root"])
+    const authoredHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["submodule", "update", "--init", "--recursive"])
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const input = {
+      id: "PR1",
+      branch: "issue/root",
+      base: "main",
+      revision: 1,
+      headSha: authoredHead,
+      baseSha: currentBase,
+    }
+    await expect(recutter.recut(input)).rejects.toThrow(/could not recut.+at \[dep\]/u)
+
+    const result = await recutter.recut({
+      ...input,
+      currentComposition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "main",
+            baseSha: composedBase,
+            tipSha: currentPin,
+            payload: ["source-a.ts", "source-b.ts"],
+          },
+        ],
+      },
+    })
+
+    expect(result).toMatchObject({
+      baseSha: currentBase,
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+    expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(currentBase)
+    expect(await git(repo, ["diff", "--name-only", currentBase, result.headSha])).toBe("doctrine.md")
+    expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(currentPin)
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
   it("refuses a recorded base with ambiguous source merge bases", async () => {
     const { repo } = await repository()
     await git(repo, ["switch", "-qc", "issue/left"])

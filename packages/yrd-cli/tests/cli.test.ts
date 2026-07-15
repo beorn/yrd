@@ -30,6 +30,7 @@ import {
   withMerge,
   withStep,
   type AddStepResult,
+  type SourceRewrite,
   type PRShape,
   type StepExecution,
 } from "@yrd/queue"
@@ -261,6 +262,7 @@ async function createApp(
     clock?: () => string
     mergeCommits?: readonly string[]
     mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
+    sourceRewrites?: readonly SourceRewrite[]
     journal?: Journal<unknown>
   } = {},
 ) {
@@ -320,14 +322,20 @@ async function createApp(
   )
   let mergeIndex = 0
   const merge = withMerge(
-    async (_input: StepExecution<CheckedShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => {
+    async (
+      _input: StepExecution<CheckedShape>,
+    ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => {
       options.mergeRuns?.push("merge")
       options.mergeWait?.started()
       if (options.mergeWait !== undefined) await options.mergeWait.until
       const commit = options.mergeCommits?.[mergeIndex++] ?? MERGED_SHA
       return {
         status: "passed",
-        output: { commit, baseSha: commit },
+        output: {
+          commit,
+          baseSha: commit,
+          ...(options.sourceRewrites === undefined ? {} : { sourceRewrites: options.sourceRewrites }),
+        },
       }
     },
     { revision: "merge-v1" },
@@ -1060,6 +1068,81 @@ describe("runYrd", () => {
     expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
     expect(checkedRevisions).toEqual(["PR1@2"])
+  })
+
+  it("forwards a same-issue integrated source composition when recutting an authored carrier", async () => {
+    const issue = "@ag/super/21075-role-rotation/21142-authored-root-flow"
+    const rewrite: SourceRewrite = {
+      repo: "vendor/yrd",
+      branch: "task/21142-source",
+      oldBaseSha: "3".repeat(40),
+      oldTipSha: "4".repeat(40),
+      newBaseSha: "5".repeat(40),
+      newTipSha: "6".repeat(40),
+      candidateRef: "refs/yrd/candidates/R1/merge/attempt-1-source",
+      patchId: "7".repeat(40),
+      rangeDiff: "=",
+      payload: ["packages/yrd-cli/src/run.ts", "packages/yrd-queue/src/command.ts"],
+    }
+    const app = await createApp({ sourceRewrites: [rewrite] })
+    await app.bays.submit({
+      branch: "task/21142-source",
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      issue,
+    })
+    await app.bays.requestChecks({ pr: "PR1" })
+    const landed = outputIO()
+    expect(
+      await runYrd(app, yrd("queue", "run", "PR1", "--steps", "check,merge", "--json"), landed.io),
+      landed.stderr(),
+    ).toBe(0)
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "integrated", issue })
+
+    await app.bays.submit({
+      branch: "task/21142-root",
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: "2".repeat(40),
+      issue,
+      draft: true,
+    })
+    const requests: unknown[] = []
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          requests.push(input)
+          return Promise.resolve({
+            headSha: "8".repeat(40),
+            baseSha: "9".repeat(40),
+            treeSha: "a".repeat(40),
+            patchId: "b".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const recut = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(requests).toEqual([
+      expect.objectContaining({
+        id: "PR2",
+        currentComposition: {
+          version: 1,
+          sources: [
+            {
+              repo: rewrite.repo,
+              branch: rewrite.candidateRef,
+              baseSha: rewrite.newBaseSha,
+              tipSha: rewrite.newTipSha,
+              payload: rewrite.payload,
+            },
+          ],
+        },
+      }),
+    ])
   })
 
   it("certifies and queues a pin-only authored carrier after draft registration", async () => {
