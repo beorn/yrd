@@ -260,6 +260,7 @@ async function createApp(
     baseFailure?: boolean
     clock?: () => string
     mergeCommits?: readonly string[]
+    mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
     journal?: Journal<unknown>
   } = {},
 ) {
@@ -319,8 +320,10 @@ async function createApp(
   )
   let mergeIndex = 0
   const merge = withMerge(
-    (_input: StepExecution<CheckedShape>): JobResult<{ commit: string; baseSha: string }> => {
+    async (_input: StepExecution<CheckedShape>): Promise<JobResult<{ commit: string; baseSha: string }>> => {
       options.mergeRuns?.push("merge")
+      options.mergeWait?.started()
+      if (options.mergeWait !== undefined) await options.mergeWait.until
       const commit = options.mergeCommits?.[mergeIndex++] ?? MERGED_SHA
       return {
         status: "passed",
@@ -6094,29 +6097,49 @@ describe("explicit queue step authority", () => {
     })
   })
 
-  it("runs a PR batch with only merge and makes the omitted checks explicit", async () => {
+  it("renders a merge-only PR batch with a concise skipped check", async () => {
     const checkRuns: string[] = []
     const mergeRuns: string[] = []
-    const app = await createApp({ batch: 2, checkRuns, mergeRuns })
+    const mergeStarted = Promise.withResolvers<void>()
+    const releaseMerge = Promise.withResolvers<void>()
+    const app = await createApp({
+      batch: 2,
+      checkRuns,
+      mergeRuns,
+      mergeWait: { started: () => mergeStarted.resolve(), until: releaseMerge.promise },
+    })
     await openAndSubmit(app)
     expect(await runYrd(app, yrd("bay", "open", "two"), outputIO().io)).toBe(0)
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
-    const output = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "PR1", "PR2", "--steps", "merge"), output.io), output.stderr()).toBe(0)
-    expect(checkRuns).toEqual([])
-    expect(mergeRuns).toEqual(["merge"])
-    expect(output.stdout()).toContain("check=skipped merge=passed")
-    expect(app.queue.get("R1")).toMatchObject({
-      status: "passed",
-      stepSelection: {
-        authority: "explicit",
-        steps: ["merge"],
-        omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
-      },
-      steps: [{ name: "merge" }],
-      prs: [{ id: "PR1" }, { id: "PR2" }],
-    })
+    const completed = outputIO()
+    const running = runYrd(app, yrd("queue", "run", "PR1", "PR2", "--steps", "merge"), completed.io)
+    await mergeStarted.promise
+
+    try {
+      const output = outputIO()
+      expect(
+        await runYrd(app, yrd("pr", "edit", "PR1", "--note", "render running steps"), output.io),
+        output.stderr(),
+      ).toBe(0)
+      expect(checkRuns).toEqual([])
+      expect(mergeRuns).toEqual(["merge"])
+      expect(output.stdout()).toContain("check=skipped merge=running")
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "running",
+        stepSelection: {
+          authority: "explicit",
+          steps: ["merge"],
+          omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+        },
+        steps: [{ name: "merge", job: { status: "running" } }],
+        prs: [{ id: "PR1" }, { id: "PR2" }],
+      })
+    } finally {
+      releaseMerge.resolve()
+      await running
+    }
+    expect(await running, completed.stderr()).toBe(0)
   })
 })
 
