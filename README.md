@@ -229,10 +229,10 @@ yrd pr                      list PRs; submit, view, runs, diff, checkout,
 yrd bay                     list bays; open, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
-yrd queue                   list queues; run, pause, resume, recover, finish,
-                            init, deinit, audit
+yrd queue                   show the queue timeline by default; list/ls is canonical;
+                            run, pause, resume, recover, finish, init, deinit, audit
 yrd log                     terminal queue history; --all adds lossless records
-yrd watch                   live read-only dashboard
+yrd watch                   thin alias for yrd queue list --watch
 yrd prime                   agent briefing plus current delivery context
 ```
 
@@ -397,7 +397,11 @@ turning actor attribution into a hidden side effect of `bay open`.
 ### Queue Operations
 
 ```text
-yrd queue [--base <branch>] [--json]
+yrd queue list [filter...] [--base <branch>]
+  [--status <statuses>] [--since <duration>] [--latest] [--watch] [--json]
+yrd queue ls [filter...] [the same options]
+yrd queue [filter...] [the same options]
+yrd watch [filter...] [the same options except --watch is implied]
 yrd queue run [selector...] [--steps [step...]] [--watch] [--json]
 yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
@@ -410,17 +414,25 @@ yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command   | Input                                             | Output and state                                                                        |
-| --------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| bare      | Optional base                                     | One queue row per base: counts, pause, target, and oldest-open age                      |
-| `run`     | Zero or more eligible PRs                         | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
-| `pause`   | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
-| `resume`  | Optional base                                     | Removes the queue pause                                                                 |
-| `recover` | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`  | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`   | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`    | Optional base                                     | Resolves and validates queue environment resources                                      |
-| `deinit`  | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
+| Command             | Input                                             | Output and state                                                                        |
+| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
+| `run`               | Zero or more eligible PRs                         | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
+| `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
+| `resume`            | Optional base                                     | Removes the queue pause                                                                 |
+| `recover`           | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
+| `finish`            | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
+| `audit`             | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
+| `init`              | Optional base                                     | Resolves and validates queue environment resources                                      |
+| `deinit`            | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
+
+`queue list` is the canonical read-only surface. `queue ls` is its spelling
+alias, bare `queue` defaults to it, and top-level `watch` is the same command
+with `--watch` implied. All four forms share filters and projection semantics;
+positional filters are case-insensitive OR terms over PR, Run, branch, subject,
+and failure code. `--latest` is the opt-in one-row-per-PR lens; the default
+preserves every matching Run. `--json` carries the same rows and summary fields
+losslessly.
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
