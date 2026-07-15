@@ -812,9 +812,9 @@ export function withBays(options: WithBaysOptions) {
         "pr/pushed": LegacyPRPushedSchema,
         "pr/submitted": LegacyPRRevisionSchema,
         "pr/withdrawn": LegacyPRWithdrawnSchema,
-        "pr/rejected": LegacyPRRejectedSchema,
-        "pr/integrated": LegacyPRIntegratedSchema,
-        "pr/canceled": LegacyPRCanceledSchema,
+        "pr/rejected": z.union([PRRejectedFactSchema, LegacyPRRejectedSchema]),
+        "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
+        "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
       project: projectBays,
       create(yrd) {

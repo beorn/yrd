@@ -202,7 +202,7 @@ describe("withBays", () => {
     await app.close()
   })
 
-  it("replays historical terminal payloads without accepting them for new appends", async () => {
+  it("replays historical current and legacy terminal payloads without accepting legacy appends", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.legacy-pr-terminals" }
     const issueRef = "@km/all/21063-steering-laser"
@@ -251,6 +251,58 @@ describe("withBays", () => {
           },
           pushed("PR3", "topic/legacy-withdrawn", HEAD_1),
           { id: nextId(), name: "pr/withdrawn", ts: at, data: { pr: "PR3" } },
+          pushed("PR4", "topic/current-integrated", HEAD_2),
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: {
+              pr: "PR4",
+              revision: 1,
+              headSha: HEAD_2,
+              issueRef,
+              run: "R91",
+              commit: BASE,
+              landingSha: BASE,
+              baseSha: BASE,
+            },
+          },
+          pushed("PR5", "topic/current-rejected", HEAD_1),
+          {
+            id: nextId(),
+            name: "pr/submitted",
+            ts: at,
+            data: { pr: "PR5", revision: 1, headSha: HEAD_1 },
+          },
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: {
+              pr: "PR5",
+              revision: 1,
+              headSha: HEAD_1,
+              issueRef,
+              run: "R92",
+              step: "check",
+              detail: "current check failure",
+            },
+          },
+          pushed("PR6", "topic/current-canceled", HEAD_2),
+          {
+            id: nextId(),
+            name: "pr/canceled",
+            ts: at,
+            data: {
+              pr: "PR6",
+              revision: 1,
+              headSha: HEAD_2,
+              issueRef,
+              run: "R93",
+              by: "@ci",
+              reason: "superseded",
+            },
+          },
         ],
       },
     ])
@@ -314,6 +366,18 @@ describe("withBays", () => {
       integration: { commit: BASE, baseSha: BASE },
     })
     expect(app.bays.pr("PR3")).toMatchObject({ status: "withdrawn", issue: issueRef })
+    expect(app.bays.pr("PR4")).toMatchObject({ status: "integrated", terminalRun: "R91" })
+    expect(app.bays.pr("PR5")).toMatchObject({
+      status: "rejected",
+      terminalRun: "R92",
+      detail: "current check failure",
+    })
+    expect(app.bays.pr("PR6")).toMatchObject({
+      status: "canceled",
+      terminalRun: "R93",
+      canceledBy: "@ci",
+      cancelReason: "superseded",
+    })
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyIntegrate, undefined)).rejects.toThrow()
