@@ -1968,8 +1968,6 @@ function advanceQueue(
   }
   const planned = record.steps[index]
   if (planned === undefined) throw new Error(`yrd: queue run '${record.id}' lost step ${index}`)
-  if (runningQueue(state.queues, state.jobs, record.base, record.id) !== undefined) return { events: [] }
-
   if (job.status !== "passed") {
     const before = shapeThrough(record, state.jobs, index)
     if (job.status === "canceled") {
