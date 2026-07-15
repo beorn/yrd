@@ -86,7 +86,13 @@ export function canonicalizeYrdCommandAliases(args: readonly string[], projectio
   ) {
     canonical[commandIndex + 1] = "list"
   }
-  if (canonical[commandIndex] === "queue" && !QUEUE_SUBCOMMANDS.has(canonical[commandIndex + 1] ?? "")) {
+  const queueOperand = canonical[commandIndex + 1]
+  if (
+    canonical[commandIndex] === "queue" &&
+    queueOperand !== "--help" &&
+    queueOperand !== "-h" &&
+    !QUEUE_SUBCOMMANDS.has(queueOperand ?? "")
+  ) {
     canonical.splice(commandIndex + 1, 0, "list")
   }
   return canonical
