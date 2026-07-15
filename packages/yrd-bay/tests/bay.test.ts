@@ -402,6 +402,96 @@ describe("withBays", () => {
     await expect(app.dispatch(app.commands.fixture.legacySubmit, undefined)).rejects.toThrow()
   })
 
+  // P0 stop-line regression lock. A pre-fix replay schema (LegacyPRRejectedSchema, which lacks
+  // run/issueRef) aborted `yrd pr submit` with Zod `unrecognized_keys [issueRef, run]` while
+  // replaying journals that already contained terminal rejection facts. The rejected emitter grew
+  // `run` and `issueRef` before `step` joined the payload, so BOTH shapes exist on disk:
+  //   1. transitional  — { run, issueRef, detail } with no step  (the exact @ci abort shape)
+  //   2. current       — { run, issueRef, step, actor, evidence, correlation, detail }
+  // The strict fact schema matches shape 2 directly; shape 1 must survive via the replay union.
+  it("replays run+issueRef rejection facts in transitional and current emitter shapes without aborting submit", async () => {
+    const nextId = ids()
+    const seededCommand = { id: nextId(), op: "fixture.rejected-terminal-shapes" }
+    const issueRef = "@km/all/21091-carrier"
+    const at = "2026-01-01T00:00:00.000Z"
+    const pushed = (pr: string, branch: string, headSha: string) => ({
+      id: nextId(),
+      name: "pr/pushed",
+      ts: at,
+      data: { pr, branch, base: "main", headSha, issue: issueRef, revision: 1 },
+    })
+    const submitted = (pr: string, headSha: string) => ({
+      id: nextId(),
+      name: "pr/submitted",
+      ts: at,
+      data: { pr, revision: 1, headSha },
+    })
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          // Transitional: run+issueRef but no step — the exact payload that aborted @ci's submit.
+          pushed("PR_TRANSITIONAL", "topic/transitional-rejected", HEAD_1),
+          submitted("PR_TRANSITIONAL", HEAD_1),
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: { pr: "PR_TRANSITIONAL", revision: 1, headSha: HEAD_1, issueRef, run: "R100", detail: "transitional check failure" },
+          },
+          // Current: exactly what the queue emitter writes today (queue.ts pr/rejected block).
+          pushed("PR_CURRENT", "topic/current-rejected", HEAD_2),
+          submitted("PR_CURRENT", HEAD_2),
+          {
+            id: nextId(),
+            name: "pr/correlation-bound",
+            ts: at,
+            data: { pr: "PR_CURRENT", revision: 1, headSha: HEAD_2, correlation: { namespace: "yrd", id: "corr-current" } },
+          },
+          {
+            id: nextId(),
+            name: "pr/rejected",
+            ts: at,
+            data: {
+              pr: "PR_CURRENT",
+              revision: 1,
+              headSha: HEAD_2,
+              run: "R101",
+              issueRef,
+              correlation: { namespace: "yrd", id: "corr-current" },
+              actor: "@agent/2",
+              step: "check",
+              evidence: "stderr: current check failure",
+              detail: "current check failure",
+            },
+          },
+        ],
+      },
+    ])
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    await using app = await createYrd(definition, { inject: { journal, clock: () => at, id: nextId } })
+
+    expect(app.bays.pr("PR_TRANSITIONAL")).toMatchObject({
+      status: "rejected",
+      terminalRun: "R100",
+      issue: issueRef,
+      detail: "transitional check failure",
+    })
+    expect(app.bays.pr("PR_CURRENT")).toMatchObject({
+      status: "rejected",
+      terminalRun: "R101",
+      issue: issueRef,
+      detail: "current check failure",
+    })
+  })
+
   it("fails replay loudly when a regression event names a different integrated tuple", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.invalid-regression-tuple" }
