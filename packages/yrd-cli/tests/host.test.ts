@@ -1772,8 +1772,11 @@ notify:
 
     const diff = await run(["pr", "diff", "PR1", "--repo", relativeRepo, "--json"], poisoned)
     expect(diff.exitCode, diff.stderr).toBe(0)
-    expect(JSON.parse(diff.stdout)).toMatchObject({ command: "pr.diff", pr: "PR1" })
-    expect(JSON.parse(diff.stdout).diff).toContain("feature.txt")
+    expect(JSON.parse(diff.stdout)).toMatchObject({
+      command: "pr.diff",
+      pr: "PR1",
+      diff: expect.stringContaining("feature.txt"),
+    })
     expect(diff.stderr).toBe("")
 
     const submitted = await run(["pr", "submit", "--follow", "--repo", relativeRepo, "--json"])
