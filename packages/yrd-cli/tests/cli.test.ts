@@ -1563,6 +1563,7 @@ describe("runYrd", () => {
       pushedAt: string,
       submittedAt?: string,
       terminal?: PR["revisions"][number]["terminal"],
+      actor?: string,
     ): PR["revisions"][number] => ({
       revision: 1,
       headSha,
@@ -1571,6 +1572,7 @@ describe("runYrd", () => {
       pushedAt,
       ...(submittedAt === undefined ? {} : { submittedAt }),
       ...(terminal === undefined ? {} : { terminal }),
+      ...(actor === undefined ? {} : { actor }),
     })
     const pr = (id: string, branch: string, status: PR["status"], clock: PR["revisions"][number]): PR => ({
       id,
@@ -1611,7 +1613,7 @@ describe("runYrd", () => {
           "PR2",
           "topic/review",
           "submitted",
-          revision("2".repeat(40), "2026-07-09T12:01:00.000Z", "2026-07-09T12:01:00.000Z"),
+          revision("2".repeat(40), "2026-07-09T12:01:00.000Z", "2026-07-09T12:01:00.000Z", undefined, "@ci"),
         ),
         eligibility: {
           pr: "PR2",
@@ -1677,6 +1679,15 @@ describe("runYrd", () => {
     ]
 
     const rows = prListRows(entries, [], Date.parse("2026-07-09T12:10:00.000Z"))
+    // The current revision's submitter surfaces as the actor; PRs whose revision
+    // predates submitter identity fall back to "-".
+    expect(rows.map(({ pr: id, actor }) => ({ id, actor }))).toEqual([
+      { id: "PR1", actor: "-" },
+      { id: "PR2", actor: "@ci" },
+      { id: "PR3", actor: "-" },
+      { id: "PR4", actor: "-" },
+      { id: "PR5", actor: "-" },
+    ])
     expect(
       rows.map(({ pr: id, state, glyph, review: reviewState, checks, why }) => ({
         id,
@@ -1716,6 +1727,9 @@ describe("runYrd", () => {
       expect(physical[0]?.includes("BASE")).toBe(columns === 120)
       expect(physical[0]?.includes("CHANGED")).toBe(columns === 120)
       expect(human.includes("release/2.0")).toBe(columns === 120)
+      // ACTOR is a wide-only column (>=110); it carries PR2's submitter and hides on the narrow tier.
+      expect(physical[0]?.includes("ACTOR")).toBe(columns === 120)
+      expect(human.includes("@ci")).toBe(columns === 120)
     }
   })
 

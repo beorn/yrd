@@ -243,6 +243,28 @@ describe("queue timeline storybook", () => {
     }
   })
 
+  it("surfaces the latest revision actor in the wide timeline and hides it on the narrow tier", async () => {
+    const projection = queueTimelineStories["production-overview"].snapshot.projection
+    const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
+      width: 120,
+      height: 20,
+      plain: true,
+    })
+    expect(wide).toContain("ACTOR")
+    const batchRow = wide.split("\n").find((line) => line.includes("R42·"))
+    expect(batchRow, "batch run row").toContain("@ci")
+    const rejectedRow = wide.split("\n").find((line) => line.includes("R5·"))
+    // R5's revision has no recorded actor, so its ACTOR cell falls back to "-" (no handle).
+    expect(rejectedRow, "rejected run row").not.toContain("@")
+
+    const narrow = await renderString(createElement(QueueTimelineView, { projection, columns: 90 }), {
+      width: 90,
+      height: 20,
+      plain: true,
+    })
+    expect(narrow).not.toContain("ACTOR")
+  })
+
   it.each(TERMLESS_DETAIL_TIERS)(
     "renders the $name A15 tier through a real terminal buffer",
     async ({ name, divider }) => {

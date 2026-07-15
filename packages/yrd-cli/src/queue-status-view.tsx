@@ -71,6 +71,7 @@ export type QueueTimelineProjectedRow = Readonly<{
   timestamp: string | null
   timestampMs: number | null
   run?: string
+  actor?: string
   prs: readonly string[]
   branches: readonly string[]
   subject: string
@@ -508,6 +509,19 @@ function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
     )
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
+}
+
+/** The submitter/creator handle recorded on the PR's latest (current) revision,
+ * or undefined for revisions journaled before submitter identity was recorded. */
+function latestRevisionActor(pr: PR): string | undefined {
+  return pr.revisions.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)?.actor
+}
+
+function runActor(result: QueueStatusResult, run: QueueRun): string | undefined {
+  const lead = run.prs[0]
+  if (lead === undefined) return undefined
+  const pr = result.prs.find((candidate) => candidate.id === lead.id)
+  return pr === undefined ? undefined : latestRevisionActor(pr)
 }
 
 function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
@@ -1425,6 +1439,7 @@ function timelineRunRow(
       : `${failure.code}: ${causalSummary(failure.message)}`
   const revisionLineage = timelineRunLineages(result, run)
   const detail = withTimelineLineage(baseDetail, revisionLineage)
+  const actor = runActor(result, run)
   return {
     id: `${run.base}:run:${run.id}`,
     base: run.base,
@@ -1434,6 +1449,7 @@ function timelineRunRow(
     timestamp,
     timestampMs,
     run: run.id,
+    ...(actor === undefined ? {} : { actor }),
     prs: run.prs.map((member) => member.id),
     branches: run.prs.map((member) => member.branch),
     subject: timelineSubject(result, run, state),
@@ -1467,6 +1483,7 @@ function timelinePendingRows(
     const revisionLineage = [timelineRevisionLineage(pr)]
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
     const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
+    const actor = latestRevisionActor(pr)
     return [
       {
         id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1476,6 +1493,7 @@ function timelinePendingRows(
         glyph: statusGlyph("pending"),
         timestamp,
         timestampMs,
+        ...(actor === undefined ? {} : { actor }),
         prs: [pr.id],
         branches: [pr.branch],
         subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
@@ -1902,6 +1920,7 @@ export type PRListRow = Readonly<{
   revision: number
   lineage: string
   subject: string
+  actor: string
   target: string
   review: "n/a" | "need" | "ok" | "reject"
   checks: "n/a" | "wait" | "run" | "pass" | "fail"
@@ -1953,6 +1972,7 @@ export function prListRows(
       revision: pr.revision,
       lineage: projected.revisionLineage.join("→"),
       subject: projected.subject,
+      actor: latestRevisionActor(pr) ?? "-",
       target: projected.target,
       review: reviewLabel(eligibility),
       checks: checkLabels[eligibility.checks.status],
@@ -1974,6 +1994,7 @@ function PRStateValue({ row }: { row: PRListRow }) {
 
 export function PRListView({ rows, columns: terminalColumns }: { rows: readonly PRListRow[]; columns: number }) {
   const base: TableColumn<PRListRow> = { header: "BASE", key: "target", minWidth: 6, maxWidth: 14 }
+  const actor: TableColumn<PRListRow> = { header: "ACTOR", key: "actor", minWidth: 6, maxWidth: 10 }
   const ageColumn: TableColumn<PRListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
   const changed: TableColumn<PRListRow> = { header: "CHANGED", key: "touched", minWidth: 9, maxWidth: 9 }
   const columns: TableColumn<PRListRow>[] = [
@@ -1987,6 +2008,7 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
     },
     { header: "REV", key: "revision", minWidth: 5, maxWidth: 6 },
     { header: "LINEAGE", key: "lineage", minWidth: 8, maxWidth: 10 },
+    ...(terminalColumns >= 110 ? [actor] : []),
     { header: "SUBJECT", key: "subject", minWidth: 9, maxWidth: 26, grow: true },
     ...(terminalColumns >= 100 ? [base] : []),
     { header: "REVIEW", key: "review", minWidth: 8, maxWidth: 8 },
@@ -2576,7 +2598,19 @@ function TimelineStatusBand({ row }: { row: QueueTimelineProjectedRow }) {
   )
 }
 
-function TimelineHeader({ includeDate, compact }: { includeDate: boolean; compact: boolean }) {
+// Fits the agent handles operators submit under (@ci, @cto, @agent/0, @chief);
+// longer identities truncate rather than widen the identity band.
+const ACTOR_COLUMN_WIDTH = 10
+
+function TimelineHeader({
+  includeDate,
+  compact,
+  showActor,
+}: {
+  includeDate: boolean
+  compact: boolean
+  showActor: boolean
+}) {
   const timeWidth = includeDate ? (compact ? 16 : 21) : 10
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
@@ -2593,6 +2627,13 @@ function TimelineHeader({ includeDate, compact }: { includeDate: boolean; compac
           RUN·PR
         </Text>
       </Box>
+      {showActor ? (
+        <Box width={ACTOR_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+          <Text color="$fg-muted" wrap="truncate">
+            ACTOR
+          </Text>
+        </Box>
+      ) : null}
       {compact ? null : (
         <>
           <Box flexGrow={1} flexBasis={0} minWidth={0}>
@@ -2621,11 +2662,13 @@ function TimelineProjectedRow({
   cursor,
   includeDate,
   compact,
+  showActor,
 }: {
   row: QueueTimelineProjectedRow
   cursor: boolean
   includeDate: boolean
   compact: boolean
+  showActor: boolean
 }) {
   const color = row.status === "integrated" ? "$fg-muted" : undefined
   const rawClock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
@@ -2652,6 +2695,13 @@ function TimelineProjectedRow({
           {identity}
         </Text>
       </Box>
+      {showActor ? (
+        <Box width={ACTOR_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+          <Text color={color ?? "$fg-muted"} wrap="truncate">
+            {row.actor ?? "-"}
+          </Text>
+        </Box>
+      ) : null}
       {compact ? null : (
         <>
           <Box flexGrow={1} flexBasis={0} minWidth={6}>
@@ -2699,6 +2749,9 @@ function ProjectedQueueTimeline({
   columns: number
 }) {
   const compact = columns <= 80
+  // Actor is supplementary identity; only surface it once there is room, matching
+  // the responsive breakpoints PRListView uses for BASE/AGE/CHANGED.
+  const showActor = columns >= 100
   const rows = projection.rows.slice(0, projection.display.shown)
   const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
   const statusFilter = projection.filters.statuses.length === 5 ? "all" : projection.filters.statuses.join(",")
@@ -2735,7 +2788,7 @@ function ProjectedQueueTimeline({
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (
         <Box flexDirection="column">
-          <TimelineHeader includeDate={includeDate} compact={compact} />
+          <TimelineHeader includeDate={includeDate} compact={compact} showActor={showActor} />
           <ListView
             items={rows}
             nav={nav}
@@ -2746,7 +2799,13 @@ function ProjectedQueueTimeline({
             getKey={(row) => row.id}
             estimateHeight={1}
             renderItem={(row, _index, meta) => (
-              <TimelineProjectedRow row={row} cursor={meta.isCursor} includeDate={includeDate} compact={compact} />
+              <TimelineProjectedRow
+                row={row}
+                cursor={meta.isCursor}
+                includeDate={includeDate}
+                compact={compact}
+                showActor={showActor}
+              />
             )}
           />
         </Box>
