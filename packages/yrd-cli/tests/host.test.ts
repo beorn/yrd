@@ -1338,7 +1338,7 @@ notify:
     }
   })
 
-  it("refuses a second resident watch with the active executor identity", async () => {
+  it("refuses a second resident watch with the active runner identity", async () => {
     const { repo, featureSha } = await repository()
     const startedPath = join(repo, "resident-check.started")
     const executionsPath = join(repo, "resident-check.executions")

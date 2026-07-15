@@ -226,9 +226,9 @@ describe("queue timeline storybook", () => {
       plain: true,
     })
     expect(wide).toContain("ACTOR")
-    const batchRow = wide.split("\n").find((line) => line.includes("R42·"))
+    const batchRow = wide.split("\n").find((row) => row.includes("R42·"))
     expect(batchRow, "batch run row").toContain("@ci")
-    const rejectedRow = wide.split("\n").find((line) => line.includes("R5·"))
+    const rejectedRow = wide.split("\n").find((row) => row.includes("R5·"))
     // R5's revision has no recorded actor, so its ACTOR cell falls back to "-" (no handle).
     expect(rejectedRow, "rejected run row").not.toContain("@")
 
