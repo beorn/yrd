@@ -1772,10 +1772,55 @@ function queueLogTargets(
   return target
 }
 
+type QueueLogOptions = Readonly<{
+  all?: boolean
+  base?: string
+  failed?: boolean
+  json?: boolean
+  limit?: number
+  pr?: string
+  since?: string
+}>
+
+type QueueLogFilterRow = Readonly<{
+  outcome: string
+  finishedAt?: string
+  startedAt?: string
+  submittedAt?: string
+}>
+
+function queueLogSinceMs(value: string): number {
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(value.trim())
+  if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
+  const amount = Number(match[1])
+  const unitMs = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]!]
+  const durationMs = amount * unitMs!
+  if (!Number.isFinite(durationMs) || durationMs < 0) usage("--since must be a finite non-negative duration")
+  return durationMs
+}
+
+function filterQueueLogRows<T extends QueueLogFilterRow>(
+  rows: readonly T[],
+  options: QueueLogOptions,
+  now: number,
+): readonly T[] {
+  const since = options.since === undefined ? undefined : now - queueLogSinceMs(options.since)
+  const filtered = rows.filter((row) => {
+    if (options.failed === true && row.outcome !== "rejected") return false
+    if (since === undefined) return true
+    const timestamp = row.finishedAt ?? row.startedAt ?? row.submittedAt
+    return timestamp === undefined || Date.parse(timestamp) >= since
+  })
+  if (options.all === true) return filtered
+  const limit = options.limit ?? 20
+  if (!Number.isSafeInteger(limit) || limit < 1) usage("--limit must be a positive integer")
+  return filtered.slice(-limit)
+}
+
 async function logRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { all?: boolean; base?: string; pr?: string; json?: boolean },
+  options: QueueLogOptions,
   io: YrdCliIO,
 ): Promise<void> {
   const state = stateOf(app)
@@ -1820,7 +1865,7 @@ async function logRuns(
     Object.values(state.bays.prs),
     summaries.flatMap((summary) => summary.finished),
   )
-  const rows = queueLogRows(
+  const projectedRows = queueLogRows(
     summaries,
     target.selected,
     target.prFilter,
@@ -1829,6 +1874,7 @@ async function logRuns(
     revisionSubjects,
     revisionClocks,
   )
+  const rows = filterQueueLogRows(projectedRows, options, io.now?.() ?? Date.now())
   const coverage = await queueLegacyCoverage(io.cwd ?? process.cwd(), await firstEventTimestamp(app))
   await printResult(
     io,
@@ -2535,7 +2581,10 @@ function buildProgram(
     .description("show queue history, newest first")
     .option("--base <branch>", "scope log to one base branch")
     .option("--pr <pr>", "scope log to one PR")
-    .option("--all", "include lossless queue and run records in JSON")
+    .option("--failed", "show rejected history only")
+    .option("--since <duration>", "show history within a duration")
+    .option("-L, --limit <count>", "limit history rows", int, 20)
+    .option("--all", "show all rows; include lossless queue and run records in JSON")
     .option("--json", "emit stable JSON")
     .action(async (options) => logRuns(installed(), [], options, io))
 

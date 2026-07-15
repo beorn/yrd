@@ -1754,6 +1754,36 @@ describe("runYrd", () => {
     })
   })
 
+  it("supports bounded, failed-only, and recent log projections", async () => {
+    const app = await createApp()
+    for (let index = 1; index <= 3; index += 1) {
+      await app.bays.submit({
+        branch: `topic/log-filter-${index}`,
+        headSha: String(index).repeat(40),
+        base: "main",
+      })
+      await app.queue.run({ prs: [`PR${index}`] }, { runner: "test", leaseMs: 60_000 })
+    }
+
+    const rows = (stdout: string) => (JSON.parse(stdout) as { rows: readonly { outcome: string }[] }).rows
+
+    const limited = outputIO()
+    expect(await runYrd(app, yrd("log", "-L", "2", "--json"), limited.io), limited.stderr()).toBe(0)
+    expect(rows(limited.stdout())).toHaveLength(2)
+
+    const failed = outputIO()
+    expect(await runYrd(app, yrd("log", "--failed", "--json"), failed.io), failed.stderr()).toBe(0)
+    expect(rows(failed.stdout())).toEqual([])
+
+    const recent = outputIO({ now: () => Date.parse("2026-07-09T12:30:00.000Z") })
+    expect(await runYrd(app, yrd("log", "--since", "1m", "--json"), recent.io), recent.stderr()).toBe(0)
+    expect(rows(recent.stdout())).toEqual([])
+
+    const all = outputIO()
+    expect(await runYrd(app, yrd("log", "--all", "--json"), all.io), all.stderr()).toBe(0)
+    expect(rows(all.stdout())).toHaveLength(3)
+  })
+
   it("keeps lossless log results and attempts inside base and PR scopes", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/main-one", headSha: "1".repeat(40), base: "main" })
