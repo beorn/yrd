@@ -792,7 +792,11 @@ describe("runYrd", () => {
     {
       surface: "pr view",
       args: ["pr", "view", "pr1", "--json"],
-      expected: { command: "pr.view", pr: { id: "PR1" } },
+      expected: {
+        command: "pr.view",
+        pr: { id: "PR1" },
+        landing: { outcome: "not-landed", status: "submitted" },
+      },
     },
     {
       surface: "pr runs",
@@ -2098,6 +2102,19 @@ describe("runYrd", () => {
     expect(app.state().bays.prs.PR1).toMatchObject({
       status: "integrated",
       integration: { commit: MERGED_SHA },
+    })
+
+    const landed = outputIO()
+    expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), landed.io), landed.stderr()).toBe(0)
+    expect(JSON.parse(landed.stdout())).toMatchObject({
+      command: "pr.view",
+      pr: { id: "PR1", status: "integrated" },
+      landing: {
+        outcome: "landed",
+        landingSha: MERGED_SHA,
+        baseSha: MERGED_SHA,
+        run: "R1",
+      },
     })
   })
 

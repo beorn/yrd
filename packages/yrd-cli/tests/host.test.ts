@@ -536,7 +536,9 @@ notify:
         failure = error
       }
       expect(failure).toBeInstanceOf(Error)
-      expect((failure as Error).message).toContain("writer lock is busy")
+      expect((failure as Error).message).toContain(
+        `writer lock is busy (owner=yrd-cli:${process.pid}; contender=yrd-cli:${process.pid}; ${join(root, "writer.lock")})`,
+      )
       expect(classifyFailure(failure)).toMatchObject({
         exitCode: 3,
         failure: { kind: "infrastructure", code: "exclusive-busy" },
@@ -1403,7 +1405,9 @@ notify:
         Bun.sleep(1_000).then(() => ({ exitCode: "still-running" as const })),
       ])
       expect(outcome).toEqual({ exitCode: 1 })
-      expect(await second.stderr).toContain(`resident-runner-active: writer lock is busy (yrd-cli:${first.child.pid}`)
+      expect(await second.stderr).toContain(
+        `resident-runner-active: writer lock is busy (owner=yrd-cli:${first.child.pid}; contender=yrd-cli:${second.child.pid}`,
+      )
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
       await expect(first.child.exited).resolves.toBe(0)
 
