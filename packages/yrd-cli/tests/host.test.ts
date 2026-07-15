@@ -1340,6 +1340,84 @@ notify:
     }
   })
 
+  it("keeps repeated resident signals idempotent while hard escalation reaps the active process tree", async () => {
+    const { repo, featureSha } = await repository()
+    const childPidPath = join(repo, "resident-hard-stop.pid")
+    const grandchildPidPath = join(repo, "resident-hard-stop-grandchild.pid")
+    const hardStopPath = join(repo, "resident-hard-stop.started")
+    const command = [
+      `trap 'touch ${JSON.stringify(hardStopPath)}' TERM`,
+      `printf '%s\\n' "$$" > ${JSON.stringify(childPidPath)}`,
+      `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
+      "while :; do sleep 1; done",
+    ].join("; ")
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
+    )
+
+    await using submitter = await createYrdHost({ cwd: repo })
+    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await submitter.close()
+
+    const cli = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dirname, "../../../bin/yrd.ts"),
+        "queue",
+        "run",
+        "--watch",
+        "--interval",
+        "1",
+        "--json",
+      ],
+      { cwd: repo, stdout: "pipe", stderr: "pipe" },
+    )
+    const stdout = new Response(cli.stdout).text()
+    const stderr = new Response(cli.stderr).text()
+    let childPid: number | undefined
+    let grandchildPid: number | undefined
+    let cleanupError: unknown
+    try {
+      await vi.waitFor(async () => expect(await Bun.file(childPidPath).exists()).toBe(true), { timeout: 5_000 })
+      childPid = Number.parseInt((await readFile(childPidPath, "utf8")).trim(), 10)
+      expect(Number.isSafeInteger(childPid)).toBe(true)
+      await vi.waitFor(async () => expect(await Bun.file(grandchildPidPath).exists()).toBe(true), { timeout: 5_000 })
+      grandchildPid = Number.parseInt((await readFile(grandchildPidPath, "utf8")).trim(), 10)
+      expect(Number.isSafeInteger(grandchildPid)).toBe(true)
+
+      cli.kill("SIGINT")
+      await Bun.sleep(100)
+      cli.kill("SIGTERM")
+      await vi.waitFor(async () => expect(await Bun.file(hardStopPath).exists()).toBe(true), { timeout: 5_000 })
+      cli.kill("SIGINT")
+
+      await expect(cli.exited).resolves.toBe(143)
+      await vi.waitFor(() => expect(processExists(childPid!)).toBe(false), { timeout: 5_000 })
+      await vi.waitFor(() => expect(processExists(grandchildPid!)).toBe(false), { timeout: 5_000 })
+    } finally {
+      if (childPid !== undefined && processExists(childPid)) {
+        try {
+          process.kill(-childPid, "SIGKILL")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+        }
+      }
+      if (grandchildPid !== undefined && processExists(grandchildPid)) {
+        try {
+          process.kill(grandchildPid, "SIGKILL")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupError ??= error
+        }
+      }
+      cli.kill("SIGKILL")
+      await cli.exited
+      await stdout
+      await stderr
+    }
+    if (cleanupError !== undefined) throw cleanupError
+  }, 30_000)
+
   it("refuses a second resident watch with the active runner identity", async () => {
     const { repo, featureSha } = await repository()
     const startedPath = join(repo, "resident-check.started")

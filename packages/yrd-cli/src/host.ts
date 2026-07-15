@@ -650,10 +650,7 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
       drain(signal)
       return
     }
-    if (hardSignal !== undefined) {
-      forward(signal)
-      return
-    }
+    if (hardSignal !== undefined) return
     hardSignal = signal
     // Closing the host aborts a live renderer, but the renderer owns terminal
     // restoration in its surrounding `using` block. Let the command boundary
