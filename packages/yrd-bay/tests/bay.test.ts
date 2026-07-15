@@ -284,7 +284,6 @@ describe("withBays", () => {
               headSha: HEAD_1,
               issueRef,
               run: "R92",
-              step: "check",
               detail: "current check failure",
             },
           },
@@ -313,6 +312,21 @@ describe("withBays", () => {
     const legacyReject = command({
       title: "Emit a legacy PR rejection",
       apply: () => ({ events: [event("pr/rejected", { pr: "PR1", revision: 1, detail: "legacy rejection" })] }),
+    })
+    const transitionalReject = command({
+      title: "Emit a transitional PR rejection",
+      apply: () => ({
+        events: [
+          event("pr/rejected", {
+            pr: "PR5",
+            revision: 1,
+            headSha: HEAD_1,
+            issueRef,
+            run: "R92",
+            detail: "current check failure",
+          }),
+        ],
+      }),
     })
     const legacyIntegrate = command({
       title: "Emit a legacy PR integration",
@@ -352,7 +366,9 @@ describe("withBays", () => {
       withJobs({ definitions: jobs }),
       withBays({ jobs, defaultBase: "main" }),
     ).extend({
-      commands: { fixture: { legacyWithdraw, legacyReject, legacyIntegrate, legacyPush, legacySubmit } },
+      commands: {
+        fixture: { legacyWithdraw, legacyReject, transitionalReject, legacyIntegrate, legacyPush, legacySubmit },
+      },
     })
     await using app = await createYrd(definition, {
       inject: { journal, clock: () => at, id: nextId },
@@ -380,6 +396,7 @@ describe("withBays", () => {
     })
     await expect(app.dispatch(app.commands.fixture.legacyWithdraw, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyReject, undefined)).rejects.toThrow()
+    await expect(app.dispatch(app.commands.fixture.transitionalReject, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyIntegrate, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacyPush, undefined)).rejects.toThrow()
     await expect(app.dispatch(app.commands.fixture.legacySubmit, undefined)).rejects.toThrow()
