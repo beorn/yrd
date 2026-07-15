@@ -1,16 +1,14 @@
 /**
- * @failure JSONL replay or append can accept corruption, expose torn frames, or violate cursor-CAS durability.
+ * @failure Durable replay, migration, compaction, recovery, or cursor CAS can lose or expose journal frames.
  * @level l1
  * @consumer @yrd/persistence
  */
 import { createHash } from "node:crypto"
-import { appendFile, mkdtemp, readFile, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdtemp, readFile, readdir, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { describe, expect, it } from "vitest"
-import { createLogger, type Event as LogEvent } from "loggily"
-import * as z from "zod"
+import { gunzipSync } from "node:zlib"
 import {
   CauseSchema,
   Command,
@@ -20,9 +18,75 @@ import {
   createYrdDef,
   event,
   type Cause,
+  type Cursor,
   type Event,
+  type Journal,
 } from "@yrd/core"
-import { createJournal } from "@yrd/persistence"
+import { createJournal, type Exclusive, type ExclusiveOptions } from "@yrd/persistence"
+import canonicalize from "canonicalize"
+import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
+import { describe, expect, expectTypeOf, it } from "vitest"
+import * as z from "zod"
+
+const MANIFEST = "events-v4.manifest.json"
+const RECOVERY = "events-v4.recovery.json"
+const V3 = "events-v3.jsonl"
+
+type Manifest = Readonly<{
+  formatVersion: 4
+  generation: number
+  logicalEnd: number
+  frames: number
+  digest: string
+  segments: readonly Readonly<{
+    path: string
+    rawSha256: string
+    compressedSha256: string
+    logicalStart: number
+    logicalEnd: number
+    rawBytes: number
+    frames: number
+  }>[]
+  tail: Readonly<{ path: string; identity: string; logicalStart: number }>
+  tailState: Readonly<{ path: string }>
+}>
+
+type TailState = Readonly<{
+  committedBytes: number
+  logicalEnd: number
+  frames: number
+  digest: string
+}>
+
+type TestInject = Readonly<{
+  thresholds?: Readonly<{ bytes?: number; frames?: number }>
+  platform?: string
+  phase?: (phase: string, details: Readonly<Record<string, unknown>>) => void | Promise<void>
+  log?: ConditionalLogger
+  exclusive?: Exclusive
+  io?: Partial<
+    Readonly<{
+      write(
+        file: FileHandle,
+        bytes: Uint8Array,
+        offset: number,
+        length: number,
+        position: number,
+      ): Promise<Readonly<{ bytesWritten: number }>>
+      datasync(file: FileHandle): Promise<void>
+    }>
+  >
+}>
+
+type ExpectedJournalOptions = Readonly<{
+  dir: string
+  lock?: ExclusiveOptions
+  inject?: Readonly<{
+    exclusive?: Exclusive
+    io?: TestInject["io"]
+    log?: ConditionalLogger
+  }>
+}>
 
 function uuid(label: string): string {
   const hex = createHash("sha256").update(label).digest("hex")
@@ -46,8 +110,56 @@ function frame(key: string, text = "hello") {
   return { cause, command: commandValue, events: [applied] }
 }
 
+function digest(value: unknown): string {
+  const encoded = canonicalize(value)
+  if (encoded === undefined) throw new TypeError("expected canonical JSON")
+  return createHash("sha256").update(encoded).digest("hex")
+}
+
+function v3Line(value: ReturnType<typeof frame>): string {
+  const data = { v: 3, ...value }
+  return `${JSON.stringify({ ...data, checksum: digest(data) })}\n`
+}
+
 async function directory() {
   return mkdtemp(join(tmpdir(), "yrd-journal-"))
+}
+
+function testJournal(dir: string, inject: TestInject = {}): Journal<unknown> {
+  return createJournal({ dir, inject } as unknown as Parameters<typeof createJournal>[0])
+}
+
+async function manifest(dir: string): Promise<Manifest> {
+  return JSON.parse(await readFile(join(dir, MANIFEST), "utf8")) as Manifest
+}
+
+async function tailState(dir: string, value?: Manifest): Promise<TailState> {
+  const active = value ?? (await manifest(dir))
+  return JSON.parse(await readFile(join(dir, active.tailState.path), "utf8")) as TailState
+}
+
+async function accepted(journal: Journal<unknown>, value: ReturnType<typeof frame>, cursor: number) {
+  const result = await journal.append(value, cursor)
+  if (!result.appended) throw new Error(`expected append at ${cursor}, observed ${result.cursor}`)
+  return result.cursor
+}
+
+async function missing(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return false
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return true
+    throw error
+  }
+}
+
+async function authoritativeBytes(dir: string): Promise<Record<string, string>> {
+  const value = await manifest(dir)
+  const paths = [MANIFEST, ...value.segments.map((segment) => segment.path), value.tail.path, value.tailState.path]
+  return Object.fromEntries(
+    await Promise.all(paths.map(async (path) => [path, (await readFile(join(dir, path))).toString("base64")])),
+  )
 }
 
 async function dispatchInFreshProcess(dir: string): Promise<unknown> {
@@ -105,11 +217,23 @@ function ids(prefix: string) {
 }
 
 describe("filesystem Journal", () => {
+  it("keeps Core cursors opaque, createJournal synchronous, and the public option surface frozen", async () => {
+    expectTypeOf<Cursor>().toEqualTypeOf<number>()
+    expectTypeOf<Parameters<typeof createJournal>[0]>().toEqualTypeOf<ExpectedJournalOptions>()
+    expectTypeOf(createJournal).returns.toEqualTypeOf<Journal<unknown>>()
+
+    const dir = await directory()
+    const journal = createJournal({ dir })
+    expect(journal).not.toBeInstanceOf(Promise)
+    expect(Object.keys(journal).sort()).toEqual(["append", "read"])
+    expect(await missing(join(dir, MANIFEST))).toBe(true)
+  })
+
   it("emits structured append and writer-lock lifecycle evidence", async () => {
     const dir = await directory()
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
-    const journal = await createJournal({ dir, inject: { log } })
+    const journal = createJournal({ dir, inject: { log } })
 
     await expect(journal.append(frame("observable"), 0)).resolves.toMatchObject({ appended: true })
     await expect(journal.append(frame("stale-writer"), 0)).resolves.toMatchObject({ appended: false })
@@ -152,68 +276,56 @@ describe("filesystem Journal", () => {
   it("generates UUIDv7 command, cause, and event ids uniquely across fresh processes", async () => {
     const dir = await directory()
     const results = await Promise.all([dispatchInFreshProcess(dir), dispatchInFreshProcess(dir)])
-    const stored = (await readFile(join(dir, "events-v3.jsonl"), "utf8"))
-      .trim()
-      .split("\n")
-      .map(
-        (queue) =>
-          JSON.parse(queue) as {
-            v: number
-            cause: { id: string }
-            command: { id: string }
-            events: { id: string }[]
-          },
-      )
+    const stored = (await Array.fromAsync(createJournal({ dir }).read())).flatMap((batch) => batch.values) as {
+      cause: { id: string }
+      command: { id: string }
+      events: { id: string }[]
+    }[]
     const resultIds = results.flatMap((value) => {
       const result = value as { command: { id: string }; events: { id: string }[] }
       return [result.command.id, ...result.events.map((event) => event.id)]
     })
-    const ids = stored.flatMap((frame) => [frame.cause.id, frame.command.id, ...frame.events.map((event) => event.id)])
+    const storedIds = stored.flatMap((value) => [
+      value.cause.id,
+      value.command.id,
+      ...value.events.map((event) => event.id),
+    ])
 
     expect(stored).toHaveLength(2)
-    expect(stored.every(({ v }) => v === 3)).toBe(true)
-    expect(new Set(ids).size).toBe(ids.length)
+    expect(new Set(storedIds).size).toBe(storedIds.length)
     expect(new Set(resultIds).size).toBe(resultIds.length)
-    expect(ids.every((id) => z.uuidv7().safeParse(id).success)).toBe(true)
-    expect(resultIds.every((id) => ids.includes(id))).toBe(true)
+    expect(storedIds.every((id) => z.uuidv7().safeParse(id).success)).toBe(true)
+    expect(resultIds.every((id) => storedIds.includes(id))).toBe(true)
   })
 
-  it("round-trips frames as cursor-addressed JSONL batches", async () => {
+  it("round-trips frames as logical cursor-addressed batches", async () => {
     const dir = await directory()
-    const journal = await createJournal({ dir })
-    const first = { ...frame("c1", "héllo"), value: { receipt: "saved" } }
+    const journal = createJournal({ dir })
+    const first = { ...frame("c1", "hello"), value: { receipt: "saved" } }
     const second = frame("c2")
 
-    const appendedFirst = await journal.append(first, 0)
-    expect(appendedFirst).toMatchObject({ appended: true })
-    if (!appendedFirst.appended) throw new Error("expected append")
-    const appendedSecond = await journal.append(second, appendedFirst.cursor)
-    expect(appendedSecond).toMatchObject({ appended: true })
-    if (!appendedSecond.appended) throw new Error("expected append")
+    const firstCursor = await accepted(journal, first, 0)
+    const secondCursor = await accepted(journal, second, firstCursor)
 
-    expect(await Array.fromAsync(journal.read())).toEqual([{ cursor: appendedSecond.cursor, values: [first, second] }])
-    expect(await Array.fromAsync(journal.read(appendedFirst.cursor))).toEqual([
-      { cursor: appendedSecond.cursor, values: [second] },
-    ])
-    expect(Buffer.byteLength(await readFile(join(dir, "events-v3.jsonl"), "utf8"))).toBe(appendedSecond.cursor)
+    expect(await Array.fromAsync(journal.read())).toEqual([{ cursor: secondCursor, values: [first, second] }])
+    expect(await Array.fromAsync(journal.read(firstCursor))).toEqual([{ cursor: secondCursor, values: [second] }])
+    const active = await manifest(dir)
+    const state = await tailState(dir, active)
+    expect(active.logicalEnd + state.committedBytes).toBe(secondCursor)
   })
 
   it("uses compare-and-append instead of exposing writer leases", async () => {
     const dir = await directory()
-    const journal = await createJournal({ dir })
-    const accepted = await journal.append(frame("c1"), 0)
-    if (!accepted.appended) throw new Error("expected append")
+    const journal = createJournal({ dir })
+    const cursor = await accepted(journal, frame("c1"), 0)
 
-    await expect(journal.append(frame("stale"), 0)).resolves.toEqual({
-      appended: false,
-      cursor: accepted.cursor,
-    })
-    expect(await Array.fromAsync(journal.read())).toEqual([{ cursor: accepted.cursor, values: [frame("c1")] }])
+    await expect(journal.append(frame("stale"), 0)).resolves.toEqual({ appended: false, cursor })
+    expect(await Array.fromAsync(journal.read())).toEqual([{ cursor, values: [frame("c1")] }])
   })
 
   it("preserves concurrent commands from independent runtimes", async () => {
     const dir = await directory()
-    const journal = await createJournal({ dir })
+    const journal = createJournal({ dir })
     const add = command({
       title: "Add",
       visibility: "public",
@@ -247,18 +359,19 @@ describe("filesystem Journal", () => {
 
   it("does not expose an append until its data sync completes", async () => {
     const dir = await directory()
-    await createJournal({ dir })
+    createJournal({ dir })
     const syncEntered = Promise.withResolvers<void>()
     const syncRelease = Promise.withResolvers<void>()
-    const journal = await createJournal({
-      dir,
-      inject: {
-        io: {
-          async datasync(file) {
+    let syncs = 0
+    const journal = testJournal(dir, {
+      io: {
+        async datasync(file) {
+          syncs += 1
+          if (syncs === 4) {
             syncEntered.resolve()
             await syncRelease.promise
-            await file.datasync()
-          },
+          }
+          await file.datasync()
         },
       },
     })
@@ -273,146 +386,357 @@ describe("filesystem Journal", () => {
     expect(readFinished).toBe(false)
 
     syncRelease.resolve()
-    const accepted = await append
-    if (!accepted.appended) throw new Error("expected append")
-    await expect(read).resolves.toEqual([{ cursor: accepted.cursor, values: [frame("durable")] }])
+    const result = await append
+    if (!result.appended) throw new Error("expected append")
+    await expect(read).resolves.toEqual([{ cursor: result.cursor, values: [frame("durable")] }])
   })
 
-  it("does not hold the journal lock while a reader consumes its snapshot", async () => {
+  it("does not hold the journal lock while a reader consumes its pinned snapshot", async () => {
     const dir = await directory()
-    const journal = await createJournal({ dir })
-    const first = await journal.append(frame("first"), 0)
-    if (!first.appended) throw new Error("expected append")
-
-    const reader = journal.read()[Symbol.asyncIterator]()
-    await expect(reader.next()).resolves.toMatchObject({ done: false })
-
-    let appended = false
-    const next = journal.append(frame("next"), first.cursor).finally(() => {
-      appended = true
+    const seed = createJournal({ dir })
+    const cursor = await accepted(seed, frame("first"), 0)
+    const snapshotReady = Promise.withResolvers<void>()
+    const snapshotRelease = Promise.withResolvers<void>()
+    const readerJournal = testJournal(dir, {
+      async phase(phase) {
+        if (phase !== "after-read-snapshot") return
+        snapshotReady.resolve()
+        await snapshotRelease.promise
+      },
     })
-    await Bun.sleep(25)
+    const reader = readerJournal.read()[Symbol.asyncIterator]()
+    const next = reader.next()
+    await snapshotReady.promise
+
+    const writer = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 } })
+    const secondCursor = await accepted(writer, frame("second"), cursor)
+    snapshotRelease.resolve()
+
+    await expect(next).resolves.toEqual({ done: false, value: { cursor, values: [frame("first")] } })
     await reader.return?.()
 
-    expect(appended).toBe(true)
-    await expect(next).resolves.toMatchObject({ appended: true })
+    const unadvanced = createJournal({ dir }).read()
+    expect(await Array.fromAsync(unadvanced)).toEqual([
+      { cursor, values: [frame("first")] },
+      { cursor: secondCursor, values: [frame("second")] },
+    ])
   })
 
-  it("retries short file writes until the whole frame is durable", async () => {
+  it("retries short file writes until metadata and frames are durable", async () => {
     const dir = await directory()
     let writes = 0
-    const journal = await createJournal({
-      dir,
-      inject: {
-        io: {
-          write(file, bytes, offset, length, position) {
-            writes += 1
-            return file.write(bytes, offset, Math.min(length, 7), position)
-          },
+    const journal = testJournal(dir, {
+      io: {
+        write(file, bytes, offset, length, position) {
+          writes += 1
+          return file.write(bytes, offset, Math.min(length, 7), position)
         },
       },
     })
 
-    const accepted = await journal.append(frame("short-write"), 0)
-    if (!accepted.appended) throw new Error("expected append")
+    const cursor = await accepted(journal, frame("short-write"), 0)
     expect(writes).toBeGreaterThan(1)
-    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
-      { cursor: accepted.cursor, values: [frame("short-write")] },
-    ])
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor, values: [frame("short-write")] }])
   })
 
-  it("rejects invalid write progress and rolls back to the committed cursor", async () => {
+  it("rejects invalid write progress without creating authority", async () => {
     const dir = await directory()
-    const broken = await createJournal({
-      dir,
-      inject: {
-        io: {
-          async write() {
-            return { bytesWritten: 0 }
-          },
+    const broken = testJournal(dir, {
+      io: {
+        async write() {
+          return { bytesWritten: 0 }
         },
       },
     })
 
     await expect(broken.append(frame("stalled"), 0)).rejects.toThrow("invalid progress")
 
-    const journal = await createJournal({ dir })
+    const journal = createJournal({ dir })
     expect(await Array.fromAsync(journal.read())).toEqual([])
-    const accepted = await journal.append(frame("recovered"), 0)
-    if (!accepted.appended) throw new Error("expected append")
-    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
-      { cursor: accepted.cursor, values: [frame("recovered")] },
-    ])
+    const cursor = await accepted(journal, frame("recovered"), 0)
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor, values: [frame("recovered")] }])
   })
 
-  it("truncates a partial write after append failure", async () => {
+  it("never acknowledges tail bytes whose state pointer did not commit", async () => {
     const dir = await directory()
-    let writes = 0
-    const broken = await createJournal({
-      dir,
-      inject: {
-        io: {
-          async write(file, bytes, offset, length, position) {
-            writes += 1
-            if (writes > 1) throw new Error("injected write failure")
-            return file.write(bytes, offset, Math.min(length, 7), position)
-          },
-        },
+    const seed = createJournal({ dir })
+    const cursor = await accepted(seed, frame("committed"), 0)
+    const before = await manifest(dir)
+    const state = await tailState(dir, before)
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const broken = testJournal(dir, {
+      log,
+      phase(phase) {
+        if (phase === "before-tail-state-replace") throw new Error("injected state-pointer interruption")
       },
     })
 
-    await expect(broken.append(frame("partial"), 0)).rejects.toThrow("injected write failure")
+    let acknowledged = false
+    await expect(
+      broken.append(frame("unacknowledged"), cursor).then((result) => {
+        acknowledged = result.appended
+        return result
+      }),
+    ).rejects.toThrow("state-pointer interruption")
+    expect(acknowledged).toBe(false)
+    expect((await stat(join(dir, before.tail.path))).size).toBeGreaterThan(state.committedBytes)
 
-    const journal = await createJournal({ dir })
-    expect(await Array.fromAsync(journal.read())).toEqual([])
-    const accepted = await journal.append(frame("clean"), 0)
-    if (!accepted.appended) throw new Error("expected append")
-    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
-      { cursor: accepted.cursor, values: [frame("clean")] },
-    ])
+    const recovered = testJournal(dir, { log })
+    await expect(Array.fromAsync(recovered.read())).resolves.toEqual([{ cursor, values: [frame("committed")] }])
+    expect((await stat(join(dir, before.tail.path))).size).toBe(state.committedBytes)
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          props: expect.objectContaining({ action: "recovered", reason: "uncommitted-tail" }),
+        }),
+      ]),
+    )
+    log.end()
   })
 
-  it("ignores an uncommitted tail and repairs it on the next append", async () => {
+  it("repairs a legacy file with no committed newline before migration", async () => {
     const dir = await directory()
-    const journal = await createJournal({ dir })
-    const accepted = await journal.append(frame("c1"), 0)
-    if (!accepted.appended) throw new Error("expected append")
-    const path = join(dir, "events-v3.jsonl")
-    await appendFile(path, "x".repeat(130 * 1024))
+    await writeFile(join(dir, V3), "x".repeat(130 * 1024))
+    const journal = createJournal({ dir })
 
-    expect(await Array.fromAsync(journal.read())).toEqual([{ cursor: accepted.cursor, values: [frame("c1")] }])
-
-    const repaired = await journal.append(frame("c2"), accepted.cursor)
-    expect(repaired).toMatchObject({ appended: true })
-    expect((await readFile(path, "utf8")).trimEnd().split("\n")).toHaveLength(2)
-  })
-
-  it("repairs a file with no committed newline from cursor zero", async () => {
-    const dir = await directory()
-    const path = join(dir, "events-v3.jsonl")
-    await writeFile(path, "x".repeat(130 * 1024))
-    const journal = await createJournal({ dir })
-
-    const accepted = await journal.append(frame("first"), 0)
-    if (!accepted.appended) throw new Error("expected append")
-
-    await expect(Array.fromAsync(journal.read())).resolves.toEqual([
-      { cursor: accepted.cursor, values: [frame("first")] },
-    ])
+    const cursor = await accepted(journal, frame("first"), 0)
+    await expect(Array.fromAsync(journal.read())).resolves.toEqual([{ cursor, values: [frame("first")] }])
   })
 
   it("fails on newline-committed corruption and checksum drift", async () => {
     const corruptDir = await directory()
-    await writeFile(join(corruptDir, "events-v3.jsonl"), "{bad}\n")
-    const corrupt = await createJournal({ dir: corruptDir })
-    await expect(Array.fromAsync(corrupt.read())).rejects.toThrow("journal corrupt")
+    await writeFile(join(corruptDir, V3), "{bad}\n")
+    await expect(Array.fromAsync(createJournal({ dir: corruptDir }).read())).rejects.toThrow("journal corrupt")
 
     const driftDir = await directory()
-    const valid = await createJournal({ dir: driftDir })
-    await valid.append(frame("c1"), 0)
-    const path = join(driftDir, "events-v3.jsonl")
+    const valid = createJournal({ dir: driftDir })
+    await accepted(valid, frame("c1"), 0)
+    const active = await manifest(driftDir)
+    const path = join(driftDir, active.tail.path)
     const text = await readFile(path, "utf8")
     await writeFile(path, text.replace("hello", "jello"))
     await expect(Array.fromAsync(valid.read())).rejects.toThrow("checksum")
+  })
+
+  it("activates byte and frame thresholds inclusively while below-threshold appends remain a no-op", async () => {
+    const byteDir = await directory()
+    const byteSeed = testJournal(byteDir, {
+      thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: Number.MAX_SAFE_INTEGER },
+    })
+    const byteCursor = await accepted(byteSeed, frame("byte-first"), 0)
+    const byteState = await tailState(byteDir)
+    expect((await manifest(byteDir)).segments).toHaveLength(0)
+
+    const exactByte = testJournal(byteDir, {
+      thresholds: { bytes: byteState.committedBytes, frames: Number.MAX_SAFE_INTEGER },
+    })
+    await accepted(exactByte, frame("byte-second"), byteCursor)
+    expect((await manifest(byteDir)).segments).toHaveLength(1)
+
+    const frameDir = await directory()
+    const below = testJournal(frameDir, {
+      thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 2 },
+    })
+    const firstCursor = await accepted(below, frame("frame-first"), 0)
+    const secondCursor = await accepted(below, frame("frame-second"), firstCursor)
+    expect((await manifest(frameDir)).segments).toHaveLength(0)
+    await accepted(below, frame("frame-third"), secondCursor)
+    expect((await manifest(frameDir)).segments).toHaveLength(1)
+
+    const aboveDir = await directory()
+    const aboveSeed = testJournal(aboveDir, {
+      thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: Number.MAX_SAFE_INTEGER },
+    })
+    const aboveFirst = await accepted(aboveSeed, frame("above-first"), 0)
+    const aboveSecond = await accepted(aboveSeed, frame("above-second"), aboveFirst)
+    const above = testJournal(aboveDir, {
+      thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 },
+    })
+    await accepted(above, frame("above-third"), aboveSecond)
+    expect((await manifest(aboveDir)).segments).toHaveLength(1)
+  })
+
+  it("keeps prior persistence cursors valid across compaction and process restart", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 } })
+    const persistedCursor = await accepted(journal, frame("before-compact"), 0)
+    const currentCursor = await accepted(journal, frame("after-compact"), persistedCursor)
+    expect(currentCursor).toBeGreaterThan(persistedCursor)
+
+    const restarted = createJournal({ dir })
+    await expect(Array.fromAsync(restarted.read(persistedCursor))).resolves.toEqual([
+      { cursor: currentCursor, values: [frame("after-compact")] },
+    ])
+  })
+
+  it("seals exact tail bytes with both digests and never rewrites retained segments", async () => {
+    const dir = await directory()
+    const seed = createJournal({ dir })
+    const firstCursor = await accepted(seed, frame("raw-first", "exact bytes"), 0)
+    const before = await manifest(dir)
+    const raw = await readFile(join(dir, before.tail.path))
+
+    const compacting = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 } })
+    const secondCursor = await accepted(compacting, frame("raw-second"), firstCursor)
+    const once = await manifest(dir)
+    expect(once.segments).toHaveLength(1)
+    const firstSegment = once.segments[0]
+    if (firstSegment === undefined) throw new Error("expected compacted segment")
+    const compressed = await readFile(join(dir, firstSegment.path))
+    expect(gunzipSync(compressed)).toEqual(raw)
+    expect(createHash("sha256").update(raw).digest("hex")).toBe(firstSegment.rawSha256)
+    expect(createHash("sha256").update(compressed).digest("hex")).toBe(firstSegment.compressedSha256)
+
+    await accepted(compacting, frame("raw-third"), secondCursor)
+    const twice = await manifest(dir)
+    expect(twice.segments).toHaveLength(2)
+    expect(twice.segments[0]).toEqual(firstSegment)
+    expect(await readFile(join(dir, firstSegment.path))).toEqual(compressed)
+  })
+
+  it("refuses a stale compactor with zero authoritative mutation", async () => {
+    const dir = await directory()
+    const seed = createJournal({ dir })
+    const cursor = await accepted(seed, frame("cas-seed"), 0)
+    const paused = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const stale = testJournal(dir, {
+      thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 },
+      log,
+      async phase(phase) {
+        if (phase !== "candidate-ready") return
+        paused.resolve()
+        await release.promise
+      },
+    })
+    const staleAppend = stale.append(frame("cas-stale"), cursor)
+    await paused.promise
+
+    const winner = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 } })
+    const winnerCursor = await accepted(winner, frame("cas-winner"), cursor)
+    const beforeStaleInstall = await authoritativeBytes(dir)
+    release.resolve()
+
+    await expect(staleAppend).resolves.toEqual({ appended: false, cursor: winnerCursor })
+    expect(await authoritativeBytes(dir)).toEqual(beforeStaleInstall)
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          props: expect.objectContaining({ action: "refused", reason: "concurrent-generation-or-writer" }),
+        }),
+      ]),
+    )
+    log.end()
+  })
+
+  it("keeps v3 authoritative until process-fresh v4 replay verifies, then removes it", async () => {
+    const dir = await directory()
+    const legacy = Buffer.from(v3Line(frame("legacy-first")) + v3Line(frame("legacy-second")))
+    await writeFile(join(dir, V3), legacy)
+    const verifying = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const journal = testJournal(dir, {
+      async phase(phase) {
+        if (phase !== "before-verification") return
+        verifying.resolve()
+        await release.promise
+      },
+    })
+    const append = journal.append(frame("post-migration"), legacy.length)
+    await verifying.promise
+    expect(await readFile(join(dir, V3))).toEqual(legacy)
+    release.resolve()
+    const result = await append
+    if (!result.appended) throw new Error("expected migrated append")
+    expect(await missing(join(dir, V3))).toBe(true)
+
+    const restarted = createJournal({ dir })
+    await expect(Array.fromAsync(restarted.read(legacy.length))).resolves.toEqual([
+      { cursor: result.cursor, values: [frame("post-migration")] },
+    ])
+  })
+
+  it("restores v3 and preserves failed-generation evidence when production verification fails", async () => {
+    const dir = await directory()
+    const legacy = Buffer.from(v3Line(frame("legacy-authority")))
+    await writeFile(join(dir, V3), legacy)
+    const journal = testJournal(dir, {
+      async phase(phase, details) {
+        if (phase !== "before-verification") return
+        const paths = details.segmentPaths as string[]
+        await writeFile(join(dir, paths.at(-1) ?? "missing-segment"), "corrupt")
+      },
+    })
+
+    await expect(journal.append(frame("must-not-commit"), legacy.length)).rejects.toThrow("previous authority restored")
+    expect(await readFile(join(dir, V3))).toEqual(legacy)
+    expect((await readdir(dir)).some((path) => path.includes(".failed-") && path.endsWith(".manifest.json"))).toBe(true)
+    expect((await readdir(dir)).some((path) => path.includes(".failed-") && path.endsWith(".recovery.json"))).toBe(true)
+    await expect(Array.fromAsync(createJournal({ dir }).read())).resolves.toEqual([
+      { cursor: legacy.length, values: [frame("legacy-authority")] },
+    ])
+  })
+
+  it.each(["before-manifest-replace", "after-manifest-replace", "before-cleanup"])(
+    "recovers losslessly after interruption at %s",
+    async (faultPhase) => {
+      const dir = await directory()
+      const seed = createJournal({ dir })
+      const cursor = await accepted(seed, frame(`fault-seed:${faultPhase}`), 0)
+      const interrupted = testJournal(dir, {
+        thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 },
+        phase(phase) {
+          if (phase === faultPhase) throw new Error(`injected ${faultPhase}`)
+        },
+      })
+
+      await expect(interrupted.append(frame(`fault-attempt:${faultPhase}`), cursor)).rejects.toThrow(faultPhase)
+      const recovered = createJournal({ dir })
+      await expect(Array.fromAsync(recovered.read())).resolves.toEqual([
+        { cursor, values: [frame(`fault-seed:${faultPhase}`)] },
+      ])
+      const nextCursor = await accepted(recovered, frame(`fault-retry:${faultPhase}`), cursor)
+      await expect(Array.fromAsync(recovered.read(cursor))).resolves.toEqual([
+        { cursor: nextCursor, values: [frame(`fault-retry:${faultPhase}`)] },
+      ])
+      expect(await missing(join(dir, RECOVERY))).toBe(true)
+    },
+  )
+
+  it("refuses Windows before creating the journal directory or any authority", async () => {
+    const parent = await directory()
+    const dir = join(parent, "unsupported")
+    const journal = testJournal(dir, { platform: "win32" })
+
+    await expect(journal.append(frame("windows"), 0)).rejects.toThrow("unsupported platform")
+    expect(await missing(dir)).toBe(true)
+  })
+
+  it("reports cold replay cost as retained-history work rather than bounded compaction", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 } })
+    const first = await accepted(journal, frame("cold-first"), 0)
+    await accepted(journal, frame("cold-second"), first)
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const cold = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 }, log })
+
+    await Array.fromAsync(cold.read())
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          props: expect.objectContaining({
+            action: "none",
+            reason: "cold-replay-retained-history",
+            frames: 2,
+            coldReplayMs: expect.any(Number),
+          }),
+        }),
+      ]),
+    )
+    log.end()
   })
 })
