@@ -1839,7 +1839,7 @@ function queueRunSteps(run: QueueRun): string {
   let selectedIndex = 0
   return Array.from({ length: run.steps.length + omitted.length }, (_, index) => {
     const skipped = omittedByIndex.get(index)
-    if (skipped !== undefined) return `${skipped.name}=${skipped.status}(${skipped.reason})`
+    if (skipped !== undefined) return `${skipped.name}=${skipped.status}`
     const selected = run.steps[selectedIndex]
     if (selected === undefined) throw new Error(`yrd: Run '${run.id}' has invalid omitted-step positions`)
     selectedIndex += 1
