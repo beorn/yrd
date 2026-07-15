@@ -7,6 +7,11 @@ describe("canonicalizeYrdCommandAliases", () => {
   it.each([
     { args: ["prs", "ls", "--json"], expected: ["pr", "list", "--json"] },
     { args: ["queues", "ls", "--latest"], expected: ["queue", "list", "--latest"] },
+    { args: ["watch", "--status", "running"], expected: ["queue", "list", "--watch", "--status", "running"] },
+    { args: ["queue", "--status", "pending"], expected: ["queue", "list", "--status", "pending"] },
+    { args: ["queue", "topic/alpha", "--latest"], expected: ["queue", "list", "topic/alpha", "--latest"] },
+    { args: ["queue", "run", "PR1"], expected: ["queue", "run", "PR1"] },
+    { args: ["queue", "finish", "R1"], expected: ["queue", "finish", "R1"] },
     { args: ["--repo", "prs", "issues", "--json"], expected: ["--repo", "prs", "issue", "--json"] },
     { args: ["--log-level=debug", "contests"], expected: ["--log-level=debug", "contest"] },
     { args: ["bay", "open", "prs"], expected: ["bay", "open", "prs"] },

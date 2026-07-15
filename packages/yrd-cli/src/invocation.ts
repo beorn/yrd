@@ -38,6 +38,19 @@ const ROOT_COMMAND_ALIASES = {
   queues: "queue",
 } as const
 
+const QUEUE_SUBCOMMANDS = new Set([
+  "_list",
+  "list",
+  "audit",
+  "init",
+  "deinit",
+  "pause",
+  "resume",
+  "recover",
+  "run",
+  "finish",
+])
+
 function rootCommandIndex(args: readonly string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
@@ -63,11 +76,18 @@ export function canonicalizeYrdCommandAliases(args: readonly string[], projectio
   const alias = command === undefined ? undefined : ROOT_COMMAND_ALIASES[command as keyof typeof ROOT_COMMAND_ALIASES]
   if (alias !== undefined) canonical[commandIndex] = alias
 
+  if (canonical[commandIndex] === "watch") {
+    canonical.splice(commandIndex, 1, "queue", "list", "--watch")
+  }
+
   if (
     (canonical[commandIndex] === "pr" || canonical[commandIndex] === "queue") &&
     canonical[commandIndex + 1] === "ls"
   ) {
     canonical[commandIndex + 1] = "list"
+  }
+  if (canonical[commandIndex] === "queue" && !QUEUE_SUBCOMMANDS.has(canonical[commandIndex + 1] ?? "")) {
+    canonical.splice(commandIndex + 1, 0, "list")
   }
   return canonical
 }
