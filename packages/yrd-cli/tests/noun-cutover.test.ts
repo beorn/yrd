@@ -43,6 +43,7 @@ describe("noun cutover ratchet", () => {
     const holdVerb = ["ho", "ld"].join("")
     const releaseVerb = ["re", "lease"].join("")
     const statusVerb = ["sta", "tus"].join("")
+    const projectionStatus = new RegExp(`${issueNoun}[-_]?${statusVerb}`, "giu")
     const showVerb = ["sh", "ow"].join("")
     const logVerb = ["lo", "g"].join("")
     const evaluateVerb = ["eval", "uate"].join("")
@@ -81,7 +82,7 @@ describe("noun cutover ratchet", () => {
     ]) {
       const relative = file.slice(root.length + 1)
       for (const [index, text] of readFileSync(file, "utf8").split(/\r?\n/u).entries()) {
-        const searchable = text.replaceAll(lintDirective, "")
+        const searchable = text.replaceAll(lintDirective, "").replaceAll(projectionStatus, "")
         for (const expression of forbidden) {
           const match = expression.exec(searchable)
           if (match !== null) failures.push(`${relative}:${index + 1}: ${match[0]}`)

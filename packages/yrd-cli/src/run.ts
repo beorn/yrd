@@ -16,7 +16,7 @@ import {
 import type { Contest } from "@yrd/contest"
 import type { DeepReadonly } from "@yrd/core"
 import type { Job } from "@yrd/job"
-import { Queues, type QueueRun, type QueueSummary } from "@yrd/queue"
+import { Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
   classifyFailure,
@@ -54,6 +54,14 @@ import { submittedPrPositions } from "./queue-position.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
+import {
+  checkTaskStatusOf,
+  issueTaskStatusOf,
+  jobAttemptTaskStatusOf,
+  projectPRTaskStatus,
+  projectQueueRunTaskStatus,
+  taskStatusFields,
+} from "./task-status.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { QueueWatchPane, type QueueWatchSnapshot } from "./watch-pane.tsx"
@@ -264,6 +272,33 @@ function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
 }
 
+function projectQueueSummaryTaskStatus(summary: QueueSummary) {
+  return {
+    ...summary,
+    running: summary.running.map(projectQueueRunTaskStatus),
+    waiting: summary.waiting.map(projectQueueRunTaskStatus),
+    finished: summary.finished.map(projectQueueRunTaskStatus),
+  }
+}
+
+function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
+  return {
+    ...projectQueueSummaryTaskStatus(result),
+    prs: result.prs.map(projectPRTaskStatus),
+  }
+}
+
+function projectEligibilityTaskStatus(eligibility: PREligibility) {
+  return {
+    ...eligibility,
+    checks: { ...eligibility.checks, ...taskStatusFields(checkTaskStatusOf(eligibility.checks)) },
+  }
+}
+
+function projectCheckTaskStatus(check: PRCheckViewRecord) {
+  return { ...check, ...taskStatusFields(checkTaskStatusOf(check)) }
+}
+
 async function openBay(
   app: YrdCliApp,
   name: string,
@@ -371,7 +406,7 @@ async function closePrs(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.close", prs },
+    { command: "pr.close", prs: prs.map(projectPRTaskStatus) },
     createElement(PRResultView, { prs, runs: [] }),
   )
 }
@@ -383,7 +418,7 @@ async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.ready", pr: prFact(pr), eligibility: app.queue.eligibility(pr.id) },
+    { command: "pr.ready", pr: prFact(pr), eligibility: projectEligibilityTaskStatus(app.queue.eligibility(pr.id)) },
     createElement(PRResultView, { prs: [pr], runs: [] }),
   )
 }
@@ -412,7 +447,12 @@ async function reviewPr(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.review", pr: prFact(pr), review, eligibility: app.queue.eligibility(pr.id) },
+    {
+      command: "pr.review",
+      pr: prFact(pr),
+      review,
+      eligibility: projectEligibilityTaskStatus(app.queue.eligibility(pr.id)),
+    },
     `${pr.id} revision ${pr.revision} ${review.decision} by ${review.actor}`,
   )
 }
@@ -457,7 +497,7 @@ async function prChecks(
     checks = await followCheckRecords(app, selectors, checks, io)
   }
   if (jsonEnabled(options)) {
-    for (const check of checks) io.stdout(stableJson({ kind: "pr.check", ...check }))
+    for (const check of checks) io.stdout(stableJson({ kind: "pr.check", ...projectCheckTaskStatus(check) }))
   } else {
     await printHuman(io, createElement(PRChecksView, { records: checks, now: io.now?.() ?? Date.now() }))
   }
@@ -551,7 +591,12 @@ async function submitBays(
     prs.push(pr)
   }
   if (command === "bay.submit") {
-    await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command, prs: prs.map(projectPRTaskStatus) },
+      createElement(PRResultView, { prs, runs: [] }),
+    )
     return 0
   }
   for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
@@ -565,7 +610,11 @@ async function submitBays(
   await printResult(
     io,
     jsonEnabled(options),
-    { command, prs: currentPrs, checks },
+    {
+      command,
+      prs: currentPrs.map(projectPRTaskStatus),
+      checks: checks.map(projectCheckTaskStatus),
+    },
     createElement(PRResultView, {
       prs: currentPrs,
       runs: followed,
@@ -621,7 +670,14 @@ async function listPrs(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.list", prs: rows.map(({ pr, eligibility }) => ({ ...pr, eligibility })), runs },
+    {
+      command: "pr.list",
+      prs: rows.map(({ pr, eligibility }) => ({
+        ...projectPRTaskStatus(pr),
+        eligibility: projectEligibilityTaskStatus(eligibility),
+      })),
+      runs: runs.map(projectQueueRunTaskStatus),
+    },
     createElement(PREligibilityView, { rows }),
   )
 }
@@ -643,7 +699,12 @@ async function viewPr(
   await printResult(
     io,
     jsonEnabled(options),
-    { command, pr, ...(position === undefined ? {} : { position }), results },
+    {
+      command,
+      pr: projectPRTaskStatus(pr),
+      ...(position === undefined ? {} : { position }),
+      results: results.map(projectQueueStatusResultTaskStatus),
+    },
     createElement(PRDetailView, {
       pr,
       runs,
@@ -667,7 +728,7 @@ async function viewPrRuns(app: YrdCliApp, selector: string, options: JsonOption,
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.runs", pr, runs: data },
+    { command: "pr.runs", pr: projectPRTaskStatus(pr), runs: data },
     createElement(PRRunsView, { runs: data }),
   )
 }
@@ -767,7 +828,7 @@ async function editPr(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "pr.edit", pr: edited },
+    { command: "pr.edit", pr: projectPRTaskStatus(edited) },
     createElement(PRResultView, { prs: [edited], runs: prQueueRuns(app, edited) }),
   )
 }
@@ -823,8 +884,10 @@ function issueRows(app: YrdCliApp, selected?: string): IssueLensRow[] {
       const joinedContests = contests.filter(
         (contest) => `${contest.issue.ref.source}:${contest.issue.ref.id}` === issue,
       )
+      const taskStatus = issueTaskStatusOf({ prs, contests: joinedContests })
       return {
         issue,
+        ...taskStatusFields(taskStatus),
         bays: bays.map((bay) => bay.id).join(",") || "-",
         prs: prs.map((pr) => pr.id).join(",") || "-",
         contests: joinedContests.map((contest) => contest.id).join(",") || "-",
@@ -919,7 +982,7 @@ async function recoverQueue(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.recover", results: runs },
+    { command: "queue.recover", results: runs.map(projectQueueRunTaskStatus) },
     createElement(QueueRunsView, { runs }),
   )
 }
@@ -947,7 +1010,7 @@ async function renderDashboard(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "dashboard", results },
+    { command: "dashboard", results: results.map(projectQueueStatusResultTaskStatus) },
     createElement(QueueStatusView, {
       state: state.bays,
       results,
@@ -997,7 +1060,7 @@ async function listQueues(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.list", results },
+    { command: "queue.list", results: results.map(projectQueueStatusResultTaskStatus) },
     createElement(QueueListView, { results, now: io.now?.() ?? Date.now() }),
   )
 }
@@ -1154,7 +1217,15 @@ async function logRuns(
     {
       command: "log",
       rows,
-      ...(options.all === true ? { results: summaries, attempts } : {}),
+      ...(options.all === true
+        ? {
+            results: summaries.map(projectQueueStatusResultTaskStatus),
+            attempts: attempts.map((attempt) => ({
+              ...attempt,
+              ...taskStatusFields(jobAttemptTaskStatusOf(attempt)),
+            })),
+          }
+        : {}),
       ...(coverage === undefined ? {} : { coverage }),
     },
     createElement(QueueLogView, { rows, coverage, columns: Math.min(io.columns ?? 120, 120) }),
@@ -1292,7 +1363,7 @@ async function finishQueue(
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "queue.finish", run: resumed },
+    { command: "queue.finish", run: projectQueueRunTaskStatus(resumed) },
     `${resumed.id} ${resumed.status}`,
   )
 }
@@ -1315,7 +1386,9 @@ async function watchQueueRuns(
   while (true) {
     const runs = await runQueues(app, selectors, options, io)
     if (jsonEnabled(options)) {
-      for (const run of runs) io.stdout(stableJson({ command: "queue.run", mode: "watch", run }))
+      for (const run of runs) {
+        io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
+      }
     } else if (runs.length > 0) {
       await printHuman(io, createElement(QueueRunsView, { runs }))
     }
@@ -1387,7 +1460,7 @@ async function watchQueue(app: YrdCliApp, options: WatchOptions, io: YrdCliIO): 
     await printResult(
       io,
       true,
-      { command: "watch", results: snapshot.results },
+      { command: "watch", results: snapshot.results.map(projectQueueStatusResultTaskStatus) },
       createElement(QueueWatchView, {
         ...snapshot,
         ...(options.pr === undefined ? {} : { pr: options.pr }),
@@ -1906,7 +1979,7 @@ function buildProgram(
       await printResult(
         io,
         jsonEnabled(options),
-        { command: "queue.run", results: runs },
+        { command: "queue.run", results: runs.map(projectQueueRunTaskStatus) },
         createElement(QueueRunsView, { runs }),
       )
       setExit(runs.some((run) => run.status === "failed") ? 1 : 0)

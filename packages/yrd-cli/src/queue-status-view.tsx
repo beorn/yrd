@@ -7,7 +7,18 @@ import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "
 import type { PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Link, Table, Text } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
-import { formatDuration, PRStatusView, StatusValue } from "./status-view.tsx"
+import { formatDuration, PRStatusView, StatusValue, TaskStatusGlyph, TaskStatusValue } from "./status-view.tsx"
+import {
+  checkTaskStatusOf,
+  jobAttemptTaskStatusOf,
+  prTaskStatusOf,
+  runTaskStatusOf,
+  stepTaskStatusOf,
+  taskStatusFields,
+  type StatusGlyph,
+  type TaskStatus,
+  type TaskStatusFields,
+} from "./task-status.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -21,7 +32,8 @@ export type QueueLogRow = Readonly<{
   pr: string
   branch: string
   subject: string
-  glyph: string
+  taskStatus: TaskStatus
+  glyph: StatusGlyph
   revision: string
   headSha: string
   baseSha: string
@@ -40,7 +52,7 @@ export type QueueLogRow = Readonly<{
   activeDurationMs?: number
   waitDuration: string
   waitDurationMs?: number
-  attempts: readonly QueueLogAttempt[]
+  attempts: readonly (QueueLogAttempt & TaskStatusFields)[]
   activeSteps: readonly Readonly<{ step: string; duration: string; durationMs: number }>[]
   retries: string
   parent: string
@@ -197,7 +209,8 @@ export type HumanPRProjection = Row &
     branch: string
     subject: string
     nativeStatus: PR["status"]
-    glyph: string
+    taskStatus: TaskStatus
+    glyph: StatusGlyph
     runId?: string
     submittedAt?: string
     touchedAt?: string
@@ -222,6 +235,8 @@ type QueueShowRow = Readonly<{
   step: string
   revision: string
   status: string
+  taskStatus: TaskStatus
+  glyph: StatusGlyph
   attempt: string
   uuid: string
   requested: string
@@ -246,6 +261,8 @@ export type QueueShowData = Readonly<{
   run: string
   base: string
   status: string
+  taskStatus: TaskStatus
+  glyph: StatusGlyph
   outcome: string
   started: string
   finished: string
@@ -267,7 +284,7 @@ export type QueueShowData = Readonly<{
   isolationPart: "0" | "1" | "-"
   prs: QueueRun["prs"]
   revisionClock?: PRRunRevisionClock
-  attempts: readonly QueueAttempt[]
+  attempts: readonly (QueueAttempt & TaskStatusFields)[]
   steps: readonly QueueShowRow[]
 }>
 
@@ -605,7 +622,7 @@ function stepOutput(step: QueueStep): string {
   return "-"
 }
 
-function queueOutcome(run: QueueRun): string {
+function queueOutcome(run: QueueRun): "passed" | "integrated" | "rejected" | "running" | "waiting" {
   if (run.status === "passed") return queueIntegration(run) === undefined ? "passed" : "integrated"
   if (run.status === "failed") return "rejected"
   return run.status
@@ -765,14 +782,6 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
 const QUEUE_ROW_LIMIT = 5
 const RECENT_ROW_LIMIT = 3
 
-function statusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return "[/]"
-  if (["integrated", "passed"].includes(status)) return "[x]"
-  if (["rejected", "failed", "lost"].includes(status)) return "[!]"
-  if (["withdrawn", "retired"].includes(status)) return "[-]"
-  return "[ ]"
-}
-
 function failureFact(
   run: QueueRun | undefined,
   step: QueueStep | undefined,
@@ -849,6 +858,7 @@ function projectPR(
   const artifacts = stepArtifacts(step)
   const artifact = artifactHref(artifacts[0])
   const stateLabel = queueState(pr, run)
+  const taskStatus = prTaskStatusOf(pr)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
   const terminalAt =
@@ -880,7 +890,7 @@ function projectPR(
     subject: boundedQueue(pr.name ?? pr.branch, 80),
     nativeStatus: pr.status,
     state: stateLabel,
-    glyph: statusGlyph(stateLabel),
+    ...taskStatusFields(taskStatus),
     ...(run === undefined ? {} : { runId: run.id }),
     ...(submittedAt === undefined ? {} : { submittedAt }),
     target: pr.base,
@@ -970,12 +980,16 @@ export function humanQueueProjection(
 
 export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Queue idle.</Text>
-  const data = runs.map((run) => ({
-    run: run.id,
-    prs: run.prs.map((pr) => pr.id).join(","),
-    state: run.status,
-    steps: boundedQueue(run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")),
-  }))
+  const data = runs.map((run) => {
+    const taskStatus = runTaskStatusOf(run)
+    return {
+      run: run.id,
+      prs: run.prs.map((pr) => pr.id).join(","),
+      state: run.status,
+      ...taskStatusFields(taskStatus),
+      steps: boundedQueue(run.steps.map((step) => `${step.name}=${jobStatus(step)}`).join(" ")),
+    }
+  })
   return (
     <Table
       data={data}
@@ -985,8 +999,8 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
         {
           header: "STATE",
           key: "state",
-          minWidth: 8,
-          render: (row) => <StatusValue value={row.state} />,
+          minWidth: 12,
+          render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.state} />,
         },
         { header: "STEPS", key: "steps", grow: true },
       ]}
@@ -1048,20 +1062,24 @@ function checkDiagnosticText(value: unknown): string {
 }
 
 export function PRChecksView({ records, now = Date.now() }: { records: readonly PRCheckViewRecord[]; now?: number }) {
-  const data = records.map((record) => ({
-    pr: record.pr,
-    revision: record.revision,
-    check: record.step ?? (record.position === undefined ? "-" : `queue #${record.position}`),
-    state: record.status,
-    classification: record.classification ?? "-",
-    age:
-      record.queuedAt === undefined || !Number.isFinite(Date.parse(record.queuedAt))
-        ? "-"
-        : formatDuration(Math.max(0, now - Date.parse(record.queuedAt))),
-    command: singleQueue(record.command?.join(" ") ?? "-"),
-    diagnostic: checkDiagnosticText(record.diagnostics ?? record.error?.message),
-    artifact: record.artifact,
-  }))
+  const data = records.map((record) => {
+    const taskStatus = checkTaskStatusOf(record)
+    return {
+      pr: record.pr,
+      revision: record.revision,
+      check: record.step ?? (record.position === undefined ? "-" : `queue #${record.position}`),
+      state: record.status,
+      ...taskStatusFields(taskStatus),
+      classification: record.classification ?? "-",
+      age:
+        record.queuedAt === undefined || !Number.isFinite(Date.parse(record.queuedAt))
+          ? "-"
+          : formatDuration(Math.max(0, now - Date.parse(record.queuedAt))),
+      command: singleQueue(record.command?.join(" ") ?? "-"),
+      diagnostic: checkDiagnosticText(record.diagnostics ?? record.error?.message),
+      artifact: record.artifact,
+    }
+  })
   return (
     <Box flexDirection="column">
       <Table
@@ -1073,7 +1091,7 @@ export function PRChecksView({ records, now = Date.now() }: { records: readonly 
           {
             header: "STATE",
             key: "state",
-            render: (row) => <StatusValue value={row.state} />,
+            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.state} />,
           },
           { header: "CLASS", key: "classification" },
           { header: "AGE", key: "age" },
@@ -1176,11 +1194,14 @@ export function PRDetailView({
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
+  const taskStatus = prTaskStatusOf(pr)
+  const projectionFields = taskStatusFields(taskStatus)
 
   return (
     <Box flexDirection="column">
       <Text>
-        <Text bold>PR</Text> {pr.id} <Text bold>STATUS</Text> <StatusValue value={pr.status} />
+        <Text bold>PR</Text> {pr.id} <Text bold>STATUS</Text> <StatusValue value={pr.status} />{" "}
+        <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
       <Text>
@@ -1276,7 +1297,8 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
   return (
     <Box height={1}>
       <Text wrap="truncate">
-        <Text bold>ACTIVE</Text> {active.run} {active.pr} {active.subject} {active.glyph} {active.step} {active.elapsed}
+        <Text bold>ACTIVE</Text> {active.run} {active.pr} {active.subject}{" "}
+        <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.step} {active.elapsed}
       </Text>
     </Box>
   )
@@ -1287,7 +1309,8 @@ function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?
     <Box height={1}>
       <Text wrap="truncate">
         {position === undefined ? "" : `${position}. `}
-        {row.glyph} {row.prHref === undefined ? row.pr : <CellLink href={row.prHref}>{row.pr}</CellLink>} {row.subject}{" "}
+        <TaskStatusGlyph taskStatus={row.taskStatus} glyph={row.glyph} />{" "}
+        {row.prHref === undefined ? row.pr : <CellLink href={row.prHref}>{row.pr}</CellLink>} {row.subject}{" "}
         <StatusValue value={row.state} href={row.log} /> age={row.age}
       </Text>
     </Box>
@@ -1408,7 +1431,8 @@ export type WatchQueueRow = Readonly<{
   pos: number
   pr: string
   subject: string
-  glyph: string
+  glyph: StatusGlyph
+  taskStatus: TaskStatus
   state: string
   step: string
   age: string
@@ -1423,6 +1447,7 @@ export function watchQueueRows(result: QueueStatusResult, now: number): WatchQue
     pr: row.pr,
     subject: row.subject,
     glyph: row.glyph,
+    taskStatus: row.taskStatus,
     state: row.state,
     step: row.step,
     age: row.age,
@@ -1437,7 +1462,9 @@ export type WatchActiveRow = Readonly<{
   pr: string
   subject: string
   step: string
-  glyph: string
+  status: QueueRun["status"]
+  taskStatus: TaskStatus
+  glyph: StatusGlyph
   elapsed: string
 }>
 
@@ -1455,12 +1482,14 @@ export function activeWatchRow(
   if (member === undefined) return undefined
   const pr = result.prs.find((candidate) => candidate.id === member.id)
   const step = relevantStep(run) ?? run.steps.at(0)
+  const taskStatus = runTaskStatusOf(run)
   return {
     run: run.id,
     pr: member.id,
     subject: boundedQueue(pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
-    glyph: statusGlyph(run.status),
+    status: run.status,
+    ...taskStatusFields(taskStatus),
     elapsed: age(run.startedAt, now, `run '${run.id}' elapsed`),
   }
 }
@@ -1559,6 +1588,7 @@ export function queueLogRows(
             attempt,
             runner,
             outcome: attemptOutcome,
+            ...taskStatusFields(jobAttemptTaskStatusOf({ outcome: attemptOutcome })),
             startedAt,
             finishedAt,
             durationMs,
@@ -1570,13 +1600,14 @@ export function queueLogRows(
         const submittedAt = submissionTimes.get(queueRevisionKey(pr))
         const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
+        const taskStatus = runTaskStatusOf({ status: outcome })
         rows.push({
           run: run.id,
           base: run.base,
           pr: pr.id,
           branch: pr.branch,
           subject: revisionSubjects.get(queueRevisionKey(pr)) ?? pr.branch,
-          glyph: statusGlyph(outcome),
+          ...taskStatusFields(taskStatus),
           revision: String(pr.revision),
           headSha: pr.headSha,
           baseSha: pr.baseSha ?? "-",
@@ -1630,6 +1661,7 @@ export function queueLogRows(
           .find((candidate) => candidate.id === prFilter)
       const headSha = (exampleResult?.headSha ?? "-").slice(0, 40)
       const baseSha = (exampleResult?.baseSha ?? "-").slice(0, 40)
+      const taskStatus = runTaskStatusOf({ status: "retired" })
       rows.push({
         run: "-",
         base: exampleResult?.base ?? "-",
@@ -1639,7 +1671,7 @@ export function queueLogRows(
           (exampleResult === undefined ? undefined : revisionSubjects.get(queueRevisionKey(exampleResult))) ??
           exampleResult?.branch ??
           prFilter,
-        glyph: statusGlyph("retired"),
+        ...taskStatusFields(taskStatus),
         revision: String(exampleResult?.revision ?? 0),
         headSha,
         baseSha,
@@ -1691,6 +1723,7 @@ function correlationField(pr: QueueRun["prs"][number] | PR | undefined): Readonl
 function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
+  const taskStatus = stepTaskStatusOf(step)
   const stepDurationMs =
     step.job === undefined || !("finishedAt" in step.job)
       ? undefined
@@ -1699,6 +1732,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     step: step.name,
     revision: step.revision,
     status: jobStatus(step),
+    ...taskStatusFields(taskStatus),
     attempt: step.job === undefined ? "-" : String(step.job.attempt),
     uuid: step.job?.id ?? "-",
     requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
@@ -1741,10 +1775,12 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
   const firstLocation = locations[0]?.location
   const artifacts = attemptArtifacts(attempt)
   const detail = isObjectValue(output) && typeof output.detail === "string" ? output.detail : undefined
+  const taskStatus = jobAttemptTaskStatusOf(attempt)
   return {
     step: attempt.step,
     revision: attempt.revision,
     status: attempt.outcome,
+    ...taskStatusFields(taskStatus),
     attempt: String(attempt.attempt),
     uuid: attempt.job,
     requested: toIso(attempt.requestedAt),
@@ -1779,12 +1815,15 @@ export function queueShowData(
   const runAttempts = attempts
     .filter((attempt) => attempt.run === run.id)
     .toSorted((left, right) => left.index - right.index || left.attempt - right.attempt)
+    .map((attempt) => ({ ...attempt, ...taskStatusFields(jobAttemptTaskStatusOf(attempt)) }))
   const durations = runDurations(run, runAttempts)
   const runDurationMs = durations.totalDurationMs
+  const taskStatus = runTaskStatusOf(run)
   return {
     run: run.id,
     base: run.base,
     status: run.status,
+    ...taskStatusFields(taskStatus),
     outcome: queueOutcome(run),
     started: toIso(run.startedAt),
     finished: run.finishedAt === undefined ? "-" : toIso(run.finishedAt),
@@ -1886,8 +1925,8 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
           {
             header: "STATUS",
             key: "status",
-            minWidth: 11,
-            render: (row) => <StatusValue value={row.status} />,
+            minWidth: 15,
+            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.status} />,
           },
           { header: "OUTCOME", key: "outcome", minWidth: 11 },
           { header: "START", key: "started", grow: true },
@@ -1939,8 +1978,8 @@ export function QueueShowView({ data }: { data: QueueShowData }) {
             {
               header: "STATUS",
               key: "status",
-              minWidth: 8,
-              render: (row) => <StatusValue value={row.status} />,
+              minWidth: 12,
+              render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.status} />,
             },
             { header: "ATT", key: "attempt", align: "right" },
             { header: "DUR", key: "duration", align: "right", minWidth: 8 },

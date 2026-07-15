@@ -199,6 +199,25 @@ Every public verb accepts `--json` and returns an invoked-command discriminator
 such as `pr.submit`, `pr.status`, or `queue.run`. Human output uses Silvery
 tables, semantic status color, and OSC 8 links for paths, logs, and artifacts.
 
+Delivery objects keep their domain-native `status` (or attempt `outcome`) and
+also expose one stable projection in human and JSON output. The additive JSON
+fields are `taskStatus` and `glyph`; changing a future native status vocabulary
+does not change this five-state contract:
+
+| `taskStatus` | Glyph | PR                    | Run                 | Job attempt            | Step    |
+| ------------ | ----- | --------------------- | ------------------- | ---------------------- | ------- |
+| `todo`       | `[ ]` | pushed                | queued              | requested              | pending |
+| `wip`        | `[/]` | submitted             | running or waiting  | started                | running |
+| `blocked`    | `[!]` | rejected              | failed              | failed or lost         | failed  |
+| `done`       | `[x]` | integrated            | passed              | passed                 | passed  |
+| `dropped`    | `[-]` | withdrawn or canceled | retired or canceled | superseded or canceled | skipped |
+
+The read-only issue lens derives the same projection from its joined PR and
+Contest facts. A blocked child wins, then active work, then todo work; an issue
+whose remaining children are terminal is done when any landed result remains,
+otherwise dropped. Colors follow the projected state, while native labels stay
+visible for diagnosis.
+
 The top-level surface is deliberately small:
 
 ```text
