@@ -8,6 +8,7 @@ import {
   useInput,
   useScopeEffect,
   useWindowSize,
+  type ListViewHandle,
 } from "silvery"
 import {
   QueueEvidenceView,
@@ -78,7 +79,10 @@ type QueueArtifactOutputLine = Readonly<{
   kind: "heading" | "muted" | "body"
 }>
 
-function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  const listRef = useRef<ListViewHandle | null>(null)
+  const [atEnd, setAtEnd] = useState(true)
+  const [unseenLines, setUnseenLines] = useState(0)
   const lines = useMemo<readonly QueueArtifactOutputLine[]>(
     () =>
       outputs.flatMap((output) => {
@@ -107,13 +111,42 @@ function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactO
       }),
     [outputs],
   )
+  const previousLineCount = useRef(lines.length)
+
+  useEffect(() => {
+    const addedLines = Math.max(0, lines.length - previousLineCount.current)
+    previousLineCount.current = lines.length
+    if (atEnd) setUnseenLines(0)
+    else if (addedLines > 0) setUnseenLines((count) => count + addedLines)
+  }, [atEnd, lines.length])
+
+  useInput((_input, key) => {
+    if (!key.end) return
+    listRef.current?.scrollToBottom()
+    setAtEnd(true)
+    setUnseenLines(0)
+  })
+
   if (lines.length === 0) return null
+  const followStatus = atEnd
+    ? "FOLLOWING END"
+    : `FOLLOW PAUSED${
+        unseenLines === 0 ? "" : ` | ${unseenLines} new ${unseenLines === 1 ? "line" : "lines"}`
+      } | End resumes`
   return (
     <Box flexDirection="column" flexGrow={1} minHeight={0} marginTop={1}>
+      <Text color="$fg-muted" bold={!atEnd}>
+        {followStatus}
+      </Text>
       <ListView
+        ref={listRef}
         items={lines}
         getKey={(line) => line.key}
         follow="end"
+        onAtBottomChange={(nextAtEnd) => {
+          setAtEnd(nextAtEnd)
+          if (nextAtEnd) setUnseenLines(0)
+        }}
         scrollbarVisibility="always"
         renderItem={(line) =>
           line.kind === "heading" ? (
