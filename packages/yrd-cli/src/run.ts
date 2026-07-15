@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { open, readFile } from "node:fs/promises"
+import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
@@ -61,6 +61,7 @@ import {
   runRevisionClock,
   queueShowData,
   type QueueTimelineProjection,
+  type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
@@ -100,6 +101,143 @@ function queueGitDir(cwd: string): string | undefined {
     return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
   } catch {
     return undefined
+  }
+}
+
+const RESIDENT_RUNNER_HEARTBEAT_MS = 5_000
+
+function residentRunnerStatusPath(cwd: string): string | undefined {
+  const gitDir = queueGitDir(cwd)
+  return gitDir === undefined ? undefined : join(gitDir, "yrd", "resident-runner", "status.json")
+}
+
+function residentRunnerTimestamp(value: unknown, field: string): string {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", `yrd: resident runner ${field} is invalid`)
+  }
+  return value
+}
+
+function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner status is not JSON")
+  }
+  if (typeof value !== "object" || value === null) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner status is not an object")
+  }
+  const record = value as Record<string, unknown>
+  if (!Number.isSafeInteger(record.pid) || (record.pid as number) <= 0) {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner pid is invalid")
+  }
+  const startedAt = residentRunnerTimestamp(record.startedAt, "startedAt")
+  const lastTickAt = residentRunnerTimestamp(record.lastTickAt, "lastTickAt")
+  if (Date.parse(lastTickAt) < Date.parse(startedAt)) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-invalid",
+      "yrd: resident runner lastTickAt precedes startedAt",
+    )
+  }
+  return { pid: record.pid as number, startedAt, lastTickAt }
+}
+
+export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRunner | null> {
+  const path = residentRunnerStatusPath(cwd)
+  if (path === undefined) return null
+  try {
+    return parseResidentRunnerStatus(await readFile(path, "utf8"))
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
+    throw cause
+  }
+}
+
+type ResidentRunnerHeartbeat = Readonly<{
+  check(): void
+  close(): Promise<void>
+}>
+
+function heartbeatDelay(intervalMs: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolveDelay) => {
+    let settled = false
+    const finish = (elapsed: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal.removeEventListener("abort", onAbort)
+      resolveDelay(elapsed)
+    }
+    const onAbort = () => finish(false)
+    const timer = setTimeout(() => finish(true), intervalMs)
+    timer.unref?.()
+    signal.addEventListener("abort", onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
+}
+
+export async function startResidentRunnerHeartbeat(
+  io: YrdCliIO,
+  options: Readonly<{ intervalMs?: number }> = {},
+): Promise<ResidentRunnerHeartbeat> {
+  const cwd = io.cwd ?? process.cwd()
+  const path = residentRunnerStatusPath(cwd)
+  if (path === undefined) {
+    raiseFailure(
+      "infrastructure",
+      "resident-runner-status-unavailable",
+      `yrd: cannot resolve resident runner status path from '${cwd}'`,
+    )
+  }
+  const intervalMs = options.intervalMs ?? RESIDENT_RUNNER_HEARTBEAT_MS
+  if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
+    throw new RangeError("yrd: resident runner heartbeat interval must be a positive integer")
+  }
+  const directory = join(path, "..")
+  const temporary = `${path}.${process.pid}.tmp`
+  const nowIso = (): string => {
+    const now = io.now?.() ?? Date.now()
+    if (!Number.isFinite(now) || now < 0) throw new TypeError("yrd: resident runner heartbeat clock is invalid")
+    return new Date(now).toISOString()
+  }
+  const startedAt = nowIso()
+  const write = async (): Promise<void> => {
+    await mkdir(directory, { recursive: true })
+    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso() }
+    try {
+      await writeFile(temporary, `${JSON.stringify(status)}\n`, "utf8")
+      await rename(temporary, path)
+    } finally {
+      await rm(temporary, { force: true })
+    }
+  }
+
+  await write()
+  const stop = new AbortController()
+  let failure: unknown
+  const loop = (async () => {
+    while (await heartbeatDelay(intervalMs, stop.signal)) await write()
+  })().catch((cause: unknown) => {
+    failure = cause
+  })
+  let closePromise: Promise<void> | undefined
+  return {
+    check() {
+      if (failure !== undefined) throw failure
+    },
+    close: () =>
+      (closePromise ??= (async () => {
+        stop.abort()
+        await loop
+        try {
+          await rm(path, { force: true })
+        } finally {
+          await rm(temporary, { force: true })
+        }
+        if (failure !== undefined) throw failure
+      })()),
   }
 }
 
@@ -171,8 +309,9 @@ const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
 
 function queueTimelineRowLimit(io: YrdCliIO): number {
   if (io.rows === undefined) return 20
-  // Header, filters, four FLOW lines, columns, footer, and cap/coverage disclosures.
-  return Math.max(1, io.rows - 11)
+  // Tabs, metadata, worst-case abnormal STATUS box, filter, columns,
+  // STATISTICS, and cap/coverage disclosures remain outside ListView.
+  return Math.max(1, io.rows - 14)
 }
 
 function queueTimelineWindow(value: string | undefined): number {
@@ -1642,6 +1781,7 @@ async function queueListSnapshot(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
+  const runner = await residentRunnerStatus(io.cwd ?? process.cwd())
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -1653,6 +1793,7 @@ async function queueListSnapshot(
     siblingBases: queueBases(state),
     base,
     state: state.bays,
+    runner,
   })
   const outputs =
     includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(results, io.artifactRoot) : []
@@ -2053,24 +2194,32 @@ async function watchQueueRuns(
   const scope = io.scope ?? app.scope
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
-  while (true) {
-    const runs = await runQueues(app, selectors, options, io)
-    if (jsonEnabled(options)) {
-      for (const run of runs) {
-        io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
+  const heartbeat = io.runner?.startsWith("yrd-cli:") === true ? await startResidentRunnerHeartbeat(io) : undefined
+  try {
+    while (true) {
+      heartbeat?.check()
+      const runs = await runQueues(app, selectors, options, io)
+      heartbeat?.check()
+      if (jsonEnabled(options)) {
+        for (const run of runs) {
+          io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
+        }
+      } else if (runs.length > 0) {
+        await printHuman(io, createElement(QueueRunsView, { runs }))
       }
-    } else if (runs.length > 0) {
-      await printHuman(io, createElement(QueueRunsView, { runs }))
+      const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
+      if (drainRequested()) {
+        if (runs.every(Queues.terminal)) return runs.at(-1)?.status === "failed" ? 1 : 0
+        await scope.sleep(interval)
+        continue
+      }
+      if (selectors.length > 0 || scope.signal.aborted) return exit
+      await sleepUntilDrain(scope.sleep(interval), drainSignal)
+      heartbeat?.check()
+      if (scope.signal.aborted) return exit
     }
-    const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
-    if (drainRequested()) {
-      if (runs.every(Queues.terminal)) return runs.at(-1)?.status === "failed" ? 1 : 0
-      await scope.sleep(interval)
-      continue
-    }
-    if (selectors.length > 0 || scope.signal.aborted) return exit
-    await sleepUntilDrain(scope.sleep(interval), drainSignal)
-    if (scope.signal.aborted) return exit
+  } finally {
+    await heartbeat?.close()
   }
 }
 
