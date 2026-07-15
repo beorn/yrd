@@ -408,7 +408,7 @@ function deliveryText(delivery: SignalDelivery): string {
   if (event.kind === "pr/integrated") {
     return `Yrd integrated ${event.prs.map(({ pr }) => pr).join(", ")} at ${event.landingSha}. run=${event.run} event=${event.id}`
   }
-  return `Yrd run ${event.run} failed for ${event.prs.map(({ pr }) => pr).join(", ")}. ${event.error.code}: ${event.error.message} event=${event.id}`
+  return `Yrd failed ${event.prs.map(({ pr }) => pr).join(", ")}. run=${event.run} ${event.error.code}: ${event.error.message} event=${event.id}`
 }
 
 function deliverySummary(delivery: SignalDelivery): string {

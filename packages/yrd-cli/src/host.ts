@@ -530,7 +530,7 @@ function residentRunnerIdentity(env: NodeJS.ProcessEnv): ResidentRunnerIdentity 
 
 function residentRunnerLog(log: ConditionalLogger, identity: ResidentRunnerIdentity): ConditionalLogger {
   return log.child({
-    executor: identity.id,
+    runner: identity.id,
     host: identity.host,
     ...(identity.pane === undefined ? {} : { pane: identity.pane }),
   })
@@ -560,7 +560,7 @@ async function acquireResidentRunner(
     }
     throw error
   }
-  log.info?.("Resident runner lease acquired", { executor: identity.id, stateDir })
+  log.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
 
   let closePromise: Promise<void> | undefined
   return Object.freeze({
@@ -568,7 +568,7 @@ async function acquireResidentRunner(
       (closePromise ??= (async () => {
         released.resolve()
         await held
-        log.info?.("Resident runner lease released", { executor: identity.id, stateDir })
+        log.info?.("Resident runner lease released", { runner: identity.id, stateDir })
       })()),
   })
 }

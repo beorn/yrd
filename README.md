@@ -438,7 +438,7 @@ force the existing hard shutdown and job-tree reap.
 A resident acquires one OS-held lease in the repository's common Yrd state
 before receiver intake or Queue admission. A second resident exits with the
 typed `resident-runner-active` refusal and identifies the active
-`yrd-cli:<pid>` executor. Job events retain that executor id; trace logs add
+`yrd-cli:<pid>` runner. Job events retain that runner id; trace logs add
 host and available Herdr/cmux pane provenance. Normal exit and graceful
 shutdown release the lease, while the OS releases it if the owner dies.
 
