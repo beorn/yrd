@@ -1675,7 +1675,7 @@ async function listQueues(
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
     },
-    createElement(QueueTimelineView, { projection: snapshot.projection }),
+    createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
   )
 }
 
@@ -2087,7 +2087,7 @@ async function watchQueue(
         projection: snapshot.projection,
         results: snapshot.results.map(projectQueueStatusResultTaskStatus),
       },
-      createElement(QueueTimelineView, { projection: snapshot.projection }),
+      createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
     )
     if (scope.signal.aborted) return 0
     await scope.sleep(interval)

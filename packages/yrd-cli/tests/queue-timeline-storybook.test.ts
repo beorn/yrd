@@ -73,8 +73,8 @@ describe("queue timeline storybook", () => {
       expect(frame).toContain("QUEUE main")
       expect(frame).toContain("running")
       expect(frame).toContain("MEMBERS PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
-      expect(frame).toContain("R42 main running")
-      expect(frame).toContain("check     step-v2 running     2")
+      expect(frame).toContain("R42 main [/] running")
+      expect(frame).toContain("check     step-v2 [/] running   2")
       expect(frame).toContain("OUTPUT check#2")
       expect(frame).toContain("p pause q quit · Esc close detail · f filters · o evidence")
       expect(frame).not.toContain("No matching queue rows.")
@@ -198,7 +198,7 @@ describe("queue timeline storybook", () => {
       expect(projection?.now, name).toBe("2026-07-13T12:00:00.000Z")
       if (projection === undefined) throw new Error(`story '${name}' is missing its projection`)
       for (const width of story.widths) {
-        const rendered = await renderString(createElement(QueueTimelineView, { projection }), {
+        const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width }), {
           width,
           height: 24,
           plain: true,

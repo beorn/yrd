@@ -3293,9 +3293,20 @@ describe("runYrd", () => {
       },
       queueWait: { n: 5, avgMs: 1_044_000, p50Ms: 15 * minute, p90Ms: 35 * minute },
     })
+    const constrainedProjection = {
+      ...projection,
+      now: "2026-07-14T12:00:00.000Z",
+      metrics: {
+        ...projection.metrics,
+        terminalAttempts: 44,
+        outcomes: { integrated: 39, rejected: 5, environmentRefused: 0, canceled: 0 },
+        decisionRejection: { rejected: 5, decisions: 44, rate: 5 / 44 },
+      },
+    }
     const rendered = await renderString(
       createElement(QueueTimelineView, {
-        projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+        projection: { ...constrainedProjection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+        columns: 200,
       }),
       { width: 200, height: 20, plain: true },
     )
@@ -3315,23 +3326,38 @@ describe("runYrd", () => {
       const fixed = stripOsc8Targets(
         await renderString(
           createElement(QueueTimelineView, {
-            projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+            projection: {
+              ...constrainedProjection,
+              display: { limit: 20, shown: projection.rows.length, hidden: 0 },
+            },
+            columns: width,
           }),
           { width, height: 20, plain: true },
         ),
       )
       const lines = fixed.split("\n")
+      const filter = lines.find((line) => line.startsWith("FILTER "))
+      expect.soft(filter).toBe("FILTER since=6:00:00 status=all terms=none latest=no")
+      const flow = lines.find((line) => line.startsWith("FLOW "))
+      expect.soft(flow).toBe("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
       const header = lines.find((line) => line.includes("TOTAL"))
       expect(header).toContain("AGE")
       expect(header).toContain("TOTAL")
       expect(header).toContain("ACTIVE")
       expect(header).toContain("WAIT")
+      if (width === 80) {
+        expect(header).not.toContain("SUBJECT")
+        expect(header).not.toContain("DETAIL")
+      } else {
+        expect(header).toContain("SUBJECT")
+        expect(header).toContain("DETAIL")
+      }
       const integratedLine = lines.find((line) => line.includes("R1·PR1,PR2"))
       expect(integratedLine).toBeDefined()
+      expect(integratedLine).toContain("07-13")
       const measurements = integratedLine?.slice(-27).trim().split(/\s+/u)
-      expect(measurements).toHaveLength(4)
-      expect(measurements).toContain("10:00")
+      expect.soft(measurements).toEqual(["1h50m", "10:00", "0:00", "10:00"])
     }
     const renderStyledTimeline = createRenderer({ cols: 200, rows: 20 })
     const styled = renderStyledTimeline(
@@ -3428,7 +3454,9 @@ describe("runYrd", () => {
     expect(frame).toContain("PR1")
     expect(frame).toContain("QUEUE main")
     expect(frame).toContain("pending")
-    expect(frame).toContain("position 1")
+    expect(frame).not.toContain("position 1")
+    expect(frame).toContain("AGE")
+    expect(frame).toContain("WAIT")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
