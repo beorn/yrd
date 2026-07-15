@@ -21,6 +21,7 @@ const ALL_STATUSES: readonly QueueTimelineStatusFilter[] = ["pending", "running"
 type FixturePrOptions = Readonly<{
   revision?: number
   headSha?: string
+  actor?: string
   revisions?: PR["revisions"]
   reviews?: PR["reviews"]
   comments?: PR["comments"]
@@ -66,6 +67,7 @@ function fixturePr(
         baseSha: BASE_SHA,
         pushedAt: submittedAt,
         submittedAt,
+        ...(options.actor === undefined ? {} : { actor: options.actor }),
       },
     ],
     submittedAt,
@@ -107,6 +109,7 @@ function terminalFixturePr(
         pushedAt: submittedAt,
         submittedAt,
         terminal: { status, at: terminalAt, run },
+        ...(options.actor === undefined ? {} : { actor: options.actor }),
       },
     ],
     ...(status === "rejected" ? { rejectedAt: terminalAt } : {}),
@@ -341,6 +344,7 @@ function fixtureSnapshot(
 const pendingOneHead = "1".repeat(40)
 const pendingOne = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes", {
   issue: "@yrd/core/21120-pr-state-notifications",
+  actor: "@cto",
   note: "Keep the operator-facing notification contract visible during review.",
   reviews: [
     {
@@ -381,6 +385,7 @@ const integratedPr = terminalFixturePr(
   "2026-07-13T10:55:00.000Z",
   "R4",
   "Land the durable patch",
+  { actor: "@ci" },
 )
 const rejectedPr = terminalFixturePr(
   "PR5",
@@ -410,6 +415,7 @@ const batchLeadPr = fixturePr(
   "Align host navigation keybindings without disturbing internal pane controls",
   {
     headSha: batchLeadHead,
+    actor: "@ci",
     issue: "@hab/super/21135-herdr-keybindings",
     reviews: [
       {
