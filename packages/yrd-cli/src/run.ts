@@ -626,7 +626,7 @@ async function recutPr(
     (review) =>
       review.revision === source.revision && review.headSha === source.headSha && review.decision === "approve",
   )
-  const currentComposition = source.composition === undefined ? sameIssueIntegratedComposition(app, pr) : undefined
+  const currentCompositions = source.composition === undefined ? sameIssueIntegratedCompositions(app, pr) : undefined
   const result = await service.recut({
     id: pr.id,
     ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -638,7 +638,7 @@ async function recutPr(
     ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
     ...(source.correlation === undefined ? {} : { correlation: source.correlation }),
     ...(source.composition === undefined ? {} : { composition: source.composition }),
-    ...(currentComposition === undefined ? {} : { currentComposition }),
+    ...(currentCompositions === undefined ? {} : { currentCompositions }),
     ...(pr.recut === undefined
       ? {}
       : {
@@ -935,7 +935,7 @@ function prQueueRuns(app: YrdCliApp, pr: PR): QueueRun[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
 }
 
-function sameIssueIntegratedComposition(app: YrdCliApp, pr: PR): CompositionV1 | undefined {
+function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly CompositionV1[] | undefined {
   if (pr.issue === undefined) return undefined
   const integrated = new Set(
     app.bays
@@ -945,25 +945,28 @@ function sameIssueIntegratedComposition(app: YrdCliApp, pr: PR): CompositionV1 |
       )
       .map((candidate) => candidate.id),
   )
-  const prior = allQueueRuns(app).findLast(
-    (run) =>
-      run.status === "passed" &&
-      run.prs.length > 0 &&
-      run.prs.every((member) => integrated.has(member.id)) &&
-      (run.integration?.sourceRewrites?.length ?? 0) > 0,
-  )
-  const rewrites = prior?.integration?.sourceRewrites
-  if (rewrites === undefined || rewrites.length === 0) return undefined
-  return CompositionV1Schema.parse({
-    version: 1,
-    sources: rewrites.map((rewrite) => ({
-      repo: rewrite.repo,
-      branch: rewrite.candidateRef,
-      baseSha: rewrite.newBaseSha,
-      tipSha: rewrite.newTipSha,
-      payload: rewrite.payload,
-    })),
-  })
+  const compositions = allQueueRuns(app)
+    .filter(
+      (run) => run.status === "passed" && run.prs.length > 0 && run.prs.every((member) => integrated.has(member.id)),
+    )
+    .toReversed()
+    .flatMap((run) => {
+      const rewrites = run.integration?.sourceRewrites
+      if (rewrites === undefined || rewrites.length === 0) return []
+      return [
+        CompositionV1Schema.parse({
+          version: 1,
+          sources: rewrites.map((rewrite) => ({
+            repo: rewrite.repo,
+            branch: rewrite.candidateRef,
+            baseSha: rewrite.newBaseSha,
+            tipSha: rewrite.newTipSha,
+            payload: rewrite.payload,
+          })),
+        }),
+      ]
+    })
+  return compositions.length === 0 ? undefined : compositions
 }
 
 async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {

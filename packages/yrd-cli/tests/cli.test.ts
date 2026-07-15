@@ -1084,7 +1084,19 @@ describe("runYrd", () => {
       rangeDiff: "=",
       payload: ["packages/yrd-cli/src/run.ts", "packages/yrd-queue/src/command.ts"],
     }
-    const app = await createApp({ sourceRewrites: [rewrite] })
+    const shadow: SourceRewrite = {
+      ...rewrite,
+      branch: "task/21142-repair",
+      oldBaseSha: "8".repeat(40),
+      oldTipSha: "9".repeat(40),
+      newBaseSha: "a".repeat(40),
+      newTipSha: "b".repeat(40),
+      candidateRef: "refs/yrd/candidates/R2/merge/attempt-1-repair",
+      patchId: "c".repeat(40),
+      payload: ["packages/yrd-cli/src/run.ts"],
+    }
+    const behavior = { sourceRewrites: [rewrite] }
+    const app = await createApp(behavior)
     await app.bays.submit({
       branch: "task/21142-source",
       base: "main",
@@ -1099,6 +1111,22 @@ describe("runYrd", () => {
       landed.stderr(),
     ).toBe(0)
     expect(app.bays.pr("PR1")).toMatchObject({ status: "integrated", issue })
+
+    behavior.sourceRewrites = [shadow]
+    await app.bays.submit({
+      branch: "task/21142-repair",
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: "d".repeat(40),
+      issue,
+    })
+    await app.bays.requestChecks({ pr: "PR2" })
+    const repaired = outputIO()
+    expect(
+      await runYrd(app, yrd("queue", "run", "PR2", "--steps", "check,merge", "--json"), repaired.io),
+      repaired.stderr(),
+    ).toBe(0)
+    expect(app.bays.pr("PR2")).toMatchObject({ status: "integrated", issue })
 
     await app.bays.submit({
       branch: "task/21142-root",
@@ -1125,22 +1153,22 @@ describe("runYrd", () => {
     } as unknown as YrdCliServices
     const recut = outputIO()
 
-    expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), recut.io, services)).toBe(0)
+    expect(await runYrd(app, yrd("pr", "recut", "PR3", "--queue", "--json"), recut.io, services)).toBe(0)
     expect(requests).toEqual([
       expect.objectContaining({
-        id: "PR2",
-        currentComposition: {
+        id: "PR3",
+        currentCompositions: [shadow, rewrite].map((source) => ({
           version: 1,
           sources: [
             {
-              repo: rewrite.repo,
-              branch: rewrite.candidateRef,
-              baseSha: rewrite.newBaseSha,
-              tipSha: rewrite.newTipSha,
-              payload: rewrite.payload,
+              repo: source.repo,
+              branch: source.candidateRef,
+              baseSha: source.newBaseSha,
+              tipSha: source.newTipSha,
+              payload: source.payload,
             },
           ],
-        },
+        })),
       }),
     ])
   })

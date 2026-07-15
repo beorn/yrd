@@ -539,8 +539,8 @@ export type GitQueueTarget = Readonly<{
 
 export type PRRecutInput = PRSnapshot &
   Readonly<{
-    /** Same-issue source integration already present on the authoritative root line. */
-    currentComposition?: PRSnapshot["composition"]
+    /** Same-issue source integrations already present on the authoritative root line, newest first. */
+    currentCompositions?: readonly NonNullable<PRSnapshot["composition"]>[]
     current?: Readonly<{
       revision: number
       headSha: string
@@ -723,7 +723,7 @@ async function recutDirectPR(
     input.headSha,
     target.sha,
     intersection(payload, authority),
-    input.currentComposition,
+    input.currentCompositions,
   )
   const absorbedSet = new Set(absorbedGitlinks)
   const effectivePayload = payload.filter((path) => !absorbedSet.has(path))
@@ -1485,7 +1485,7 @@ async function absorbedAuthoredGitlinks(
   sourceHead: string,
   target: string,
   overlaps: readonly string[],
-  currentComposition: PRSnapshot["composition"],
+  currentCompositions: readonly NonNullable<PRSnapshot["composition"]>[] | undefined,
 ): Promise<string[]> {
   const absorbed: string[] = []
   for (const path of overlaps) {
@@ -1509,11 +1509,17 @@ async function absorbedAuthoredGitlinks(
       absorbed.push(path)
       continue
     }
-    const certified = currentComposition?.sources.find((source) => source.repo === path)
-    if (
-      certified !== undefined &&
-      (await certifiesSupersededGitlink(git, sourceRepo, oldPin, sourcePin, currentPin, certified))
-    ) {
+    let certified = false
+    for (const source of currentCompositions?.flatMap((composition) => composition.sources) ?? []) {
+      if (
+        source.repo === path &&
+        (await certifiesSupersededGitlink(git, sourceRepo, oldPin, sourcePin, currentPin, source))
+      ) {
+        certified = true
+        break
+      }
+    }
+    if (certified) {
       absorbed.push(path)
       continue
     }

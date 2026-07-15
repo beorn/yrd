@@ -376,6 +376,10 @@ describe("Queue command adapters", () => {
     await writeFile(join(module, "source-b.ts"), "export const b = true\n")
     await git(module, ["add", "source-a.ts", "source-b.ts"])
     await git(module, ["commit", "-qm", "compose current source"])
+    const composedTip = await git(module, ["rev-parse", "HEAD"])
+    await writeFile(join(module, "repair.ts"), "export const repair = true\n")
+    await git(module, ["add", "repair.ts"])
+    await git(module, ["commit", "-qm", "repair source tooling"])
     const currentPin = await git(module, ["rev-parse", "HEAD"])
     expect(currentPin).not.toBe(sourceTip)
     expect(await git(module, ["cherry", currentPin, sourceTip, oldPin])).toMatch(/^\+ [0-9a-f]{40}/u)
@@ -408,18 +412,32 @@ describe("Queue command adapters", () => {
 
     const result = await recutter.recut({
       ...input,
-      currentComposition: {
-        version: 1,
-        sources: [
-          {
-            repo: "dep",
-            branch: "main",
-            baseSha: composedBase,
-            tipSha: currentPin,
-            payload: ["source-a.ts", "source-b.ts"],
-          },
-        ],
-      },
+      currentCompositions: [
+        {
+          version: 1,
+          sources: [
+            {
+              repo: "dep",
+              branch: "main",
+              baseSha: composedTip,
+              tipSha: currentPin,
+              payload: ["repair.ts"],
+            },
+          ],
+        },
+        {
+          version: 1,
+          sources: [
+            {
+              repo: "dep",
+              branch: "main",
+              baseSha: composedBase,
+              tipSha: composedTip,
+              payload: ["source-a.ts", "source-b.ts"],
+            },
+          ],
+        },
+      ],
     })
 
     expect(result).toMatchObject({
