@@ -3,6 +3,7 @@
 // @consumer @yrd/cli
 
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -22,6 +23,7 @@ import {
   type JsonValue,
 } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
+import { createJournal } from "@yrd/persistence"
 import {
   type QueueRun,
   type QueueSummary,
@@ -72,6 +74,7 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
+import { YRD_VERSION } from "../src/version.ts"
 import {
   jobAttemptTaskStatusOf,
   prTaskStatusOf,
@@ -7168,6 +7171,146 @@ describe("typed issue landing bridge", () => {
     expect(exhausted.stdout()).toBe("")
     expect(exhausted.stderr()).toBe(
       "yrd: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'\n",
+    )
+  })
+})
+
+describe("journal version skew fail-loud", () => {
+  // Simulates a journal written by a NEWER yrd: rows stay storage-valid but
+  // carry fields this build's domain schemas do not recognize.
+  const newerWriterFields = Object.freeze({
+    forwardCompatProbe: "vNext",
+    landingReceipt: "9".repeat(40),
+  })
+
+  /** RFC 8785-shaped JSON for journal frame data (strings, ints, arrays,
+   * objects only). Any divergence from the journal's own canonicalization
+   * fails loud as a frame checksum mismatch, never a silent pass. */
+  function canonicalJson(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
+    if (typeof value !== "object" || value === null) return JSON.stringify(value)
+    const record = value as Record<string, unknown>
+    const entries = Object.keys(record)
+      .sort()
+      .filter((key) => record[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    return `{${entries.join(",")}}`
+  }
+
+  type StoredJournalRow = Record<string, unknown> & {
+    events: (Record<string, unknown> & { name: string; data: unknown })[]
+  }
+
+  async function seededJournalDir(): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "yrd-journal-skew-"))
+    const seeded = await createApp({ journal: createJournal({ dir }) })
+    await openAndSubmit(seeded)
+    await seeded.close()
+    return dir
+  }
+
+  function rewriteJournalRows(dir: string, poison: (row: StoredJournalRow) => boolean): number {
+    const path = join(dir, "events-v3.jsonl")
+    const rows = readFileSync(path, "utf8")
+      .split("\n")
+      .filter((entry) => entry.trim() !== "")
+    let poisoned = 0
+    const rewritten = rows.map((entry) => {
+      const { checksum: _replaced, ...row } = JSON.parse(entry) as StoredJournalRow
+      if (poison(row as StoredJournalRow)) poisoned += 1
+      const checksum = createHash("sha256").update(canonicalJson(row)).digest("hex")
+      return JSON.stringify({ ...row, checksum })
+    })
+    writeFileSync(path, `${rewritten.join("\n")}\n`)
+    return poisoned
+  }
+
+  function poisonPrEventData(row: StoredJournalRow): boolean {
+    let hit = false
+    for (const event of row.events) {
+      if (!event.name.startsWith("pr/")) continue
+      if (typeof event.data !== "object" || event.data === null || Array.isArray(event.data)) continue
+      event.data = { ...event.data, ...newerWriterFields }
+      hit = true
+    }
+    return hit
+  }
+
+  function journalBootstrap(dir: string) {
+    return {
+      ambientCwd: "/repo",
+      env: {} as NodeJS.ProcessEnv,
+      load: async () => ({ app: await createApp({ journal: createJournal({ dir }) }), services: {} }),
+    }
+  }
+
+  async function withPoisonedJournal(
+    poison: (row: StoredJournalRow) => boolean,
+    read: (dir: string) => Promise<void>,
+  ): Promise<void> {
+    const dir = await seededJournalDir()
+    try {
+      expect(rewriteJournalRows(dir, poison)).toBeGreaterThan(0)
+      await read(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it("exits nonzero and keeps stdout clean when replayed rows fail domain schema validation", async () => {
+    await withPoisonedJournal(poisonPrEventData, async (dir) => {
+      const out = outputIO()
+      const exit = await runInternals.runYrdProcessRuntime(yrd("pr", "list"), out.io, journalBootstrap(dir))
+      expect(exit).toBe(3)
+      expect(out.stdout()).toBe("")
+      expect(out.stderr()).not.toBe("")
+    })
+  })
+
+  it("explains newer-writer rows as version skew instead of dumping raw zod issues", async () => {
+    await withPoisonedJournal(poisonPrEventData, async (dir) => {
+      const out = outputIO()
+      const exit = await runInternals.runYrdProcessRuntime(yrd("pr", "list"), out.io, journalBootstrap(dir))
+      expect(exit).toBe(3)
+      const stderr = out.stderr()
+      expect(stderr).toContain("newer")
+      expect(stderr).toContain("forwardCompatProbe")
+      expect(stderr).toContain("landingReceipt")
+      expect(stderr).toContain(`${YRD_VERSION}+`)
+      expect(stderr).toContain("-v")
+      expect(stderr).not.toContain("unrecognized_keys")
+      expect(stderr).not.toContain("invalid_union")
+    })
+  })
+
+  it("keeps the raw validation detail available behind --verbose", async () => {
+    await withPoisonedJournal(poisonPrEventData, async (dir) => {
+      const out = outputIO()
+      const exit = await runInternals.runYrdProcessRuntime(yrd("-v", "pr", "list"), out.io, journalBootstrap(dir))
+      expect(exit).toBe(3)
+      const stderr = out.stderr()
+      expect(stderr).toContain("forwardCompatProbe")
+      expect(stderr).toContain("unrecognized_keys")
+    })
+  })
+
+  it("gives the same skew guidance when stored frames carry unknown top-level fields", async () => {
+    await withPoisonedJournal(
+      (row) => {
+        row.writerBuild = "yrd 9.9.9+ffffffffff"
+        return true
+      },
+      async (dir) => {
+        const out = outputIO()
+        const exit = await runInternals.runYrdProcessRuntime(yrd("pr", "list"), out.io, journalBootstrap(dir))
+        expect(exit).toBe(3)
+        expect(out.stdout()).toBe("")
+        const stderr = out.stderr()
+        expect(stderr).toContain("newer")
+        expect(stderr).toContain("writerBuild")
+        expect(stderr).toContain(`${YRD_VERSION}+`)
+        expect(stderr).not.toContain("unrecognized_keys")
+      },
     )
   })
 })
