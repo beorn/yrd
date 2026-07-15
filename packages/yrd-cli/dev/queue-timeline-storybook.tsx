@@ -4,6 +4,50 @@ import { run } from "silvery/runtime"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 import { QUEUE_TIMELINE_STORY_NAMES, queueTimelineStories } from "./queue-timeline-fixtures.ts"
 
+export const QUEUE_TIMELINE_STORYBOOK_CONTRACT = [
+  {
+    area: "queue-navigation-and-status",
+    stories: ["production-overview", "idle", "multiple-queues", "paused"],
+    controls: ["[", "]", "1-9"],
+  },
+  {
+    area: "run-lifecycle",
+    stories: ["pending-only", "running-spinner", "mixed-completed"],
+    controls: ["j", "k", "enter"],
+  },
+  {
+    area: "query-retention-and-stats",
+    stories: ["honest-cap", "non-default-filters", "latest-vs-all-lineage"],
+    controls: ["a", "l"],
+  },
+  {
+    area: "responsive-widths",
+    stories: ["narrow-wide", "long-subject"],
+    controls: ["terminal resize"],
+  },
+  {
+    area: "selection-and-follow",
+    stories: ["anchored-new", "selected-pending", "selected-running", "selected-rejected", "selected-integrated"],
+    controls: ["j", "k", "end"],
+  },
+  {
+    area: "master-detail",
+    stories: ["detail-right", "detail-below", "detail-full", "detail-controls"],
+    controls: ["enter", "d"],
+  },
+  {
+    area: "output-artifacts-and-evidence",
+    stories: ["live-output-growth"],
+    controls: ["wheel", "end"],
+  },
+] as const
+
+export const QUEUE_TIMELINE_STORYBOOK_EXTERNAL_OWNERS = {
+  degradedQueueStatus: "packages/yrd-cli/src/queue-status-view.tsx",
+  followPauseAndEndResume: "packages/yrd-cli/src/watch-pane.tsx",
+  rootQueueWiring: "packages/yrd-cli/src/run.ts",
+} as const
+
 export function QueueTimelineStorybook() {
   const [index, setIndex] = useState(0)
   const [showNext, setShowNext] = useState(false)

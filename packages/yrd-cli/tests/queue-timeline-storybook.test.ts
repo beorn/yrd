@@ -8,13 +8,18 @@ import { renderString } from "silvery"
 import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"
 import { QUEUE_TIMELINE_STORY_NAMES, queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
-import { QueueTimelineStorybook } from "../dev/queue-timeline-storybook.tsx"
+import {
+  QUEUE_TIMELINE_STORYBOOK_CONTRACT,
+  QUEUE_TIMELINE_STORYBOOK_EXTERNAL_OWNERS,
+  QueueTimelineStorybook,
+} from "../dev/queue-timeline-storybook.tsx"
 import { QueueTimelineView } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const STORY_NAMES = [
   "production-overview",
   "idle",
+  "multiple-queues",
   "pending-only",
   "running-spinner",
   "mixed-completed",
@@ -116,7 +121,8 @@ describe("queue timeline storybook", () => {
     })
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
-      for (let index = 0; index < 10; index += 1) {
+      const anchoredStoryIndex = STORY_NAMES.indexOf("anchored-new")
+      for (let index = 0; index < anchoredStoryIndex; index += 1) {
         await handle.press("]")
         await handle.waitForLayoutStable()
       }
@@ -213,6 +219,23 @@ describe("queue timeline storybook", () => {
     expect(live.nextSnapshot?.outputs?.[1]?.text).toContain("retry recovered")
   })
 
+  it("publishes the recovered contract against one shared fixture graph", () => {
+    const coveredStories = QUEUE_TIMELINE_STORYBOOK_CONTRACT.flatMap(({ stories }) => [...stories])
+
+    expect([...new Set(coveredStories)].sort()).toEqual([...STORY_NAMES].sort())
+    expect(QUEUE_TIMELINE_STORYBOOK_EXTERNAL_OWNERS).toEqual({
+      degradedQueueStatus: "packages/yrd-cli/src/queue-status-view.tsx",
+      followPauseAndEndResume: "packages/yrd-cli/src/watch-pane.tsx",
+      rootQueueWiring: "packages/yrd-cli/src/run.ts",
+    })
+    expect(queueTimelineStories["multiple-queues"].snapshot.results.map(({ base }) => base)).toEqual([
+      "main",
+      "release/next",
+    ])
+    expect(queueTimelineStories["narrow-wide"].widths).toEqual([80, 120, 160, 200])
+    expect(queueTimelineStories["long-subject"].widths).toEqual([80, 120, 160, 200])
+  })
+
   it("shares every deterministic named story with the acceptance surface", async () => {
     expect(QUEUE_TIMELINE_STORY_NAMES).toEqual(STORY_NAMES)
     expect(Object.keys(queueTimelineStories)).toEqual(QUEUE_TIMELINE_STORY_NAMES)
@@ -238,7 +261,12 @@ describe("queue timeline storybook", () => {
         expect(projection.rows[0]?.status, name).toBe(story.selectedStatus)
       }
       if (story.nextSnapshot !== undefined) {
-        expect(story.nextSnapshot.projection?.now, name).toBe("2026-07-13T12:00:00.000Z")
+        if (name === "anchored-new") {
+          expect(story.nextSnapshot.projection?.now, name).toBe(projection.now)
+        } else {
+          expect(Date.parse(story.nextSnapshot.projection?.now ?? ""), name).toBeGreaterThan(Date.parse(projection.now))
+          expect(story.nextSnapshot.now, name).toBe(Date.parse(story.nextSnapshot.projection?.now ?? ""))
+        }
       }
     }
   })
