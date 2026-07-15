@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { existsSync } from "node:fs"
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm } from "node:fs/promises"
 import { basename, delimiter, dirname, join, resolve } from "node:path"
 import { createExclusive } from "@yrd/persistence"
@@ -82,13 +83,40 @@ type ReceiverOptions = Readonly<{
   process: Pick<Process, "run">
   receiverPath?: string
   inboxDir?: string
+  /** Yrd entry the managed hook re-invokes; defaults to the worktree-anchored `bin/yrd`. */
+  hookEntry?: string
 }>
 
-export function receiverHookSource(mode: HookMode): string {
+/**
+ * Absolute path to the `bin/yrd` entry of the Yrd checkout that owns THIS module.
+ *
+ * The managed receive hook re-invokes Yrd in a fresh process that cold-replays
+ * the journal and statically imports `@yrd/bay`. Resolving that entry through
+ * the ambient `PATH` (the previous `["yrd", …]` spawn) let a push validated from
+ * one linked worktree load `@yrd/bay` from a *different* (mutable) checkout — the
+ * hermeticity leak in @yrd/core/21170. Anchoring to `import.meta` binds the hook
+ * to the worktree whose code wrote it, mirroring the source-root walk in
+ * `@yrd/cli`'s version identity. A missing entry is raised loudly; it never
+ * silently falls back to a parent Git repository.
+ */
+export function defaultReceiverHookEntry(): string {
+  let directory = import.meta.dirname
+  for (;;) {
+    if (existsSync(join(directory, "bin", "yrd"))) return join(directory, "bin", "yrd")
+    const parent = dirname(directory)
+    if (parent === directory) {
+      throw new Error(`yrd: receiver: unable to locate the owning Yrd 'bin/yrd' from '${import.meta.dirname}'`)
+    }
+    directory = parent
+  }
+}
+
+export function receiverHookSource(mode: HookMode, entry: string): string {
+  check(entry.length > 0, "receiver hook entry must be a non-empty path")
   return [
     "#!/usr/bin/env bun",
     MANAGED_HOOK_MARKER,
-    `const child = Bun.spawn(["yrd", "receiver-hook", "${mode}"], {`,
+    `const child = Bun.spawn([process.execPath, ${JSON.stringify(entry)}, "receiver-hook", "${mode}"], {`,
     '  stdin: "inherit",',
     '  stdout: "inherit",',
     '  stderr: "inherit",',
@@ -100,6 +128,7 @@ export function receiverHookSource(mode: HookMode): string {
 }
 
 export async function createGitPushReceiver(options: ReceiverOptions): Promise<GitPushReceiver> {
+  const hookEntry = options.hookEntry ?? defaultReceiverHookEntry()
   const requestedState = resolve(options.stateDir)
   await mkdir(requestedState, { recursive: true, mode: 0o700 })
   const mainRepo = await realpath(resolve(options.mainRepo))
@@ -138,7 +167,7 @@ export async function createGitPushReceiver(options: ReceiverOptions): Promise<G
       ...receiverFormat,
     })
     await validateBinding(receiver)
-    await preflightHooks(receiverPath)
+    await preflightHooks(receiverPath, hookEntry)
     await mkdir(inboxDir, { recursive: true, mode: 0o700 })
     for (const [key, value] of receiverConfig(receiver)) {
       await receiverGit(receiver, ["config", "--local", key, value])
@@ -148,8 +177,8 @@ export async function createGitPushReceiver(options: ReceiverOptions): Promise<G
     ) {
       await receiverGit(receiver, ["fetch", "--quiet", "--no-tags", mainRepo, "+refs/heads/*:refs/yrd/bases/*"])
     }
-    await writeHook(receiverPath, "pre-receive")
-    await writeHook(receiverPath, "post-receive")
+    await writeHook(receiverPath, "pre-receive", hookEntry)
+    await writeHook(receiverPath, "post-receive", hookEntry)
     return receiver
   })
 }
@@ -481,21 +510,21 @@ async function text(path: string): Promise<string | undefined> {
   return (await entry(path)) ? readFile(path, "utf8") : undefined
 }
 
-async function preflightHooks(receiverPath: string): Promise<void> {
+async function preflightHooks(receiverPath: string, entry: string): Promise<void> {
   for (const mode of ["pre-receive", "post-receive"] as const) {
     const path = join(receiverPath, "hooks", mode)
     const body = await text(path)
     check(
-      body === undefined || body === receiverHookSource(mode) || body.startsWith(MANAGED_HOOK_PREFIX),
+      body === undefined || body === receiverHookSource(mode, entry) || body.startsWith(MANAGED_HOOK_PREFIX),
       `refusing to replace unmanaged ${mode} hook at '${path}'`,
     )
   }
 }
 
-async function writeHook(receiverPath: string, mode: HookMode): Promise<void> {
+async function writeHook(receiverPath: string, mode: HookMode, entry: string): Promise<void> {
   const hooks = join(receiverPath, "hooks")
   const path = join(hooks, mode)
-  const source = receiverHookSource(mode)
+  const source = receiverHookSource(mode, entry)
   await mkdir(hooks, { recursive: true, mode: 0o700 })
   if ((await text(path)) === source) return chmod(path, 0o755)
   const temporary = await durableTemp(hooks, mode, source, 0o755)
