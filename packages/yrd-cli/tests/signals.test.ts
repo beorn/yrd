@@ -13,6 +13,7 @@ import type { ProcessRequest } from "@yrd/process"
 import {
   createSignalObserver,
   createTribeSignalAdapter,
+  type RejectedSignal,
   type SignalDelivery,
   type SignalDeliveryAdapter,
   type SignalClosure,
@@ -415,7 +416,7 @@ describe("PR signal observer", () => {
           id: raw.id,
           kind: "pr/rejected",
           at: raw.ts,
-          ...(raw.data as Omit<SignalDelivery["event"], "id" | "kind" | "at">),
+          ...(raw.data as Omit<RejectedSignal, "id" | "kind" | "at">),
         },
       })
 
