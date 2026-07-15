@@ -152,6 +152,40 @@ export function classifyFailure(error: unknown): FailureVerdict {
   return Object.freeze({ exitCode, failure })
 }
 
+export type UnrecognizedKeyFailure = Readonly<{ keys: readonly string[] }>
+
+/** Journal rows written by a newer Yrd surface as Zod `unrecognized_keys`
+ * issues, either bare (domain event replay) or as the cause of a journal
+ * corruption error (storage frame decode). Detection duck-types the issue
+ * shape because the raising Zod instance may not be this module's import. */
+export function unrecognizedKeyFailure(error: unknown): UnrecognizedKeyFailure | undefined {
+  const keys = new Set<string>()
+  let cause: unknown = error
+  for (let depth = 0; typeof cause === "object" && cause !== null && depth < 8; depth += 1) {
+    const record = cause as Readonly<{ issues?: unknown; cause?: unknown }>
+    if (Array.isArray(record.issues)) collectUnrecognizedKeys(record.issues, keys, 0)
+    cause = record.cause
+  }
+  if (keys.size === 0) return undefined
+  return Object.freeze({ keys: Object.freeze([...keys].sort()) })
+}
+
+function collectUnrecognizedKeys(issues: readonly unknown[], into: Set<string>, depth: number): void {
+  if (depth > 4) return
+  for (const issue of issues) {
+    if (typeof issue !== "object" || issue === null) continue
+    const record = issue as Readonly<{ code?: unknown; keys?: unknown; errors?: unknown }>
+    if (record.code === "unrecognized_keys" && Array.isArray(record.keys)) {
+      for (const key of record.keys) if (typeof key === "string") into.add(key)
+    }
+    if (record.code === "invalid_union" && Array.isArray(record.errors)) {
+      for (const branch of record.errors) {
+        if (Array.isArray(branch)) collectUnrecognizedKeys(branch, into, depth + 1)
+      }
+    }
+  }
+}
+
 export function usage(message: string): never {
   raiseFailure("usage", "invalid-usage", message)
 }

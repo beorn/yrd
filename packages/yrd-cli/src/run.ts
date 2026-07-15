@@ -2906,7 +2906,8 @@ async function executeYrd(
       return 2
     }
     const { exitCode } = classifyFailure(error)
-    await diagnostic(runtimeIO, invocation.name, error)
+    const globals = program.opts() as Readonly<{ verbose?: number }>
+    await diagnostic(runtimeIO, invocation.name, error, { verbose: (globals.verbose ?? 0) > 0 })
     return exitCode
   }
 }
