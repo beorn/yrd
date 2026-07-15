@@ -4,6 +4,7 @@
  * @consumer @yrd/bay Git push receiver
  */
 import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -27,6 +28,7 @@ type Fixture = {
   baseSha: string
   receiver: GitPushReceiver
   process: Process
+  hookEntry: string
 }
 
 const roots: string[] = []
@@ -77,8 +79,11 @@ async function fixture(label: string): Promise<Fixture> {
   const stateDir = join(root, "state with 'quotes $()")
   const process = createProcess()
   processes.push(process)
-  const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process })
-  return { root, mainRepo: main.path, stateDir, baseSha: main.head, receiver, process }
+  // Anchor the managed hook at the yrd `installHookHost` will publish, so pushes
+  // exercise a real (lightweight) receiver process instead of the full CLI entry.
+  const hookEntry = join(root, "bin", "yrd")
+  const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process, hookEntry })
+  return { root, mainRepo: main.path, stateDir, baseSha: main.head, receiver, process, hookEntry }
 }
 
 function target(baseSha: string, overrides: Partial<ReceiverTarget> = {}): ReceiverTarget {
@@ -131,12 +136,17 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
 
     for (const mode of ["pre-receive", "post-receive"] as const) {
       const hook = join(f.receiver.receiverPath, "hooks", mode)
-      expect(await readFile(hook, "utf8")).toBe(receiverHookSource(mode))
+      expect(await readFile(hook, "utf8")).toBe(receiverHookSource(mode, f.hookEntry))
       expect((await stat(hook)).mode & 0o111).not.toBe(0)
     }
 
     await git(f.receiver.receiverPath, "update-ref", "refs/heads/preserved", f.baseSha)
-    const reopened = await createGitPushReceiver({ mainRepo: f.mainRepo, stateDir: f.stateDir, process: f.process })
+    const reopened = await createGitPushReceiver({
+      mainRepo: f.mainRepo,
+      stateDir: f.stateDir,
+      process: f.process,
+      hookEntry: f.hookEntry,
+    })
     expect(await git(reopened.receiverPath, "rev-parse", "refs/heads/preserved")).toBe(f.baseSha)
     expect(await git(reopened.receiverPath, "cat-file", "-e", `${f.baseSha}^{commit}`)).toBe("")
     const loaded = await loadGitPushReceiver(reopened.receiverPath, f.process)
@@ -197,6 +207,35 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
       }),
     ])
     expect(await inboxFiles(f.receiver)).toEqual([])
+  })
+
+  it("re-invokes the worktree-anchored yrd and ignores an ambient PATH yrd (hermetic cold replay)", async () => {
+    const f = await fixture("hermetic")
+    await git(f.mainRepo, "switch", "-qc", "issue/hermetic")
+    const headSha = await commit(f.mainRepo, "hermetic.txt")
+
+    // The fixture's managed hook is anchored to f.hookEntry (the worktree yrd).
+    // Publish a DIFFERENT yrd earlier on PATH to stand in for a foreign (mutable
+    // main) checkout. The pre-21170 hook spawned a bare ["yrd", …] and would run
+    // this decoy — dropping a marker and failing intake with its own exit code.
+    // A hermetic hook resolves its entry by absolute path and never consults PATH.
+    const foreign = join(f.root, "foreign-bin")
+    await mkdir(foreign, { recursive: true })
+    const marker = join(f.root, "foreign-yrd-ran.txt")
+    await writeFile(
+      join(foreign, "yrd"),
+      `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(marker)}, "foreign")\nprocess.exit(3)\n`,
+    )
+    await chmod(join(foreign, "yrd"), 0o755)
+
+    const env = await installHookHost(f.root, { "issue/hermetic": target(f.baseSha) })
+    const poisoned = { ...env, PATH: `${foreign}:${env.PATH ?? ""}` }
+    const result = await push(f, "issue/hermetic:refs/heads/issue/hermetic", poisoned)
+
+    expect(result.code, result.stderr).toBe(0)
+    expect(existsSync(marker)).toBe(false)
+    expect(await git(f.receiver.receiverPath, "rev-parse", "refs/heads/issue/hermetic")).toBe(headSha)
+    expect(await inboxFiles(f.receiver)).toEqual([expect.stringMatching(/\.pending\.json$/u)])
   })
 
   it("rejects unknown branches, deletes, and commits outside the pinned base", async () => {
