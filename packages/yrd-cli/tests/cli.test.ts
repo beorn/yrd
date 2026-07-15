@@ -3333,6 +3333,8 @@ describe("runYrd", () => {
         ),
       )
       const lines = fixed.split("\n")
+      const filter = lines.find((line) => line.startsWith("FILTER "))
+      expect.soft(filter).toBe("FILTER since=6:00:00 status=all terms=none latest=no")
       const flow = lines.find((line) => line.startsWith("FLOW "))
       expect.soft(flow).toBe("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)

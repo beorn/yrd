@@ -2692,6 +2692,7 @@ function ProjectedQueueTimeline({
   const compact = columns <= 80
   const rows = projection.rows.slice(0, projection.display.shown)
   const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
+  const statusFilter = projection.filters.statuses.length === 5 ? "all" : projection.filters.statuses.join(",")
   const includeDate = rows.some(
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
   )
@@ -2705,7 +2706,7 @@ function ProjectedQueueTimeline({
         </Text>
       </Text>
       <Text color="$fg-muted" wrap="truncate">
-        FILTER since={mediaDuration(projection.filters.windowMs)} status={projection.filters.statuses.join(",")} terms=
+        FILTER since={mediaDuration(projection.filters.windowMs)} status={statusFilter} terms=
         {projection.filters.terms.length === 0 ? "none" : projection.filters.terms.join("|")} latest=
         {projection.filters.latest ? "yes" : "no"}
       </Text>
