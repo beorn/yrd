@@ -13,7 +13,7 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, ListView, Spinner, Table, Text, type TableColumn } from "silvery"
+import { Box, Link, ListView, Pulse, Table, Text, type TableColumn } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -71,7 +71,10 @@ export type QueueTimelineProjectedRow = Readonly<{
   timestamp: string | null
   timestampMs: number | null
   run?: string
+  revision: number
+  headSha: string
   submitter?: string
+  step: string
   prs: readonly string[]
   branches: readonly string[]
   subject: string
@@ -87,10 +90,17 @@ export type QueueTimelineProjectedRow = Readonly<{
   queueWaitMs: readonly (number | null)[]
 }>
 
+export type QueueTimelineRunner = Readonly<{
+  pid: number
+  startedAt: string
+  lastTickAt: string
+}>
+
 export type QueueTimelineProjection = Readonly<{
   now: string
   base: string
   siblingBases: readonly string[]
+  runner: QueueTimelineRunner | null
   pause?: QueueSummary["pause"]
   oldestOpenMs: number | null
   filters: Readonly<{
@@ -124,6 +134,7 @@ export type QueueTimelineProjectionOptions = Readonly<{
   siblingBases?: readonly string[]
   base?: string
   state?: BaysState
+  runner?: QueueTimelineRunner | null
 }>
 
 export type QueueTerminalOutcome = "integrated" | "rejected" | "environment-refused" | "canceled"
@@ -511,17 +522,10 @@ function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
     .at(-1)
 }
 
-/** The submitter/creator handle recorded on the PR's latest (current) revision,
- * or undefined for revisions journaled before submitter identity was recorded. */
-function latestRevisionSubmitter(pr: PR): string | undefined {
-  return pr.revisions.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)?.actor
-}
-
-function runSubmitter(result: QueueStatusResult, run: QueueRun): string | undefined {
-  const lead = run.prs[0]
-  if (lead === undefined) return undefined
-  const pr = result.prs.find((candidate) => candidate.id === lead.id)
-  return pr === undefined ? undefined : latestRevisionSubmitter(pr)
+/** The submitter handle recorded on one exact immutable PR revision, or
+ * undefined for revisions journaled before submitter identity was recorded. */
+function revisionSubmitter(pr: PR, revision = pr.revision, headSha = pr.headSha): string | undefined {
+  return pr.revisions?.find((candidate) => candidate.revision === revision && candidate.headSha === headSha)?.actor
 }
 
 function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
@@ -1328,15 +1332,16 @@ function timelineAge(timestamp: string | undefined, nowIso: string, subject: str
   return elapsedMs(timestamp, nowIso, subject) ?? null
 }
 
-function timelineSubject(result: QueueStatusResult, run: QueueRun, state: BaysState | undefined): string {
+function timelineMemberSubject(
+  result: QueueStatusResult,
+  member: QueueRun["prs"][number],
+  state: BaysState | undefined,
+): string {
+  const current = result.prs.find((candidate) => candidate.id === member.id)
+  const isCurrent = current?.revision === member.revision && current.headSha === member.headSha
+  const bayPath = isCurrent && current?.bay !== undefined ? state?.byId[current.bay]?.path : undefined
   return boundedQueue(
-    run.prs
-      .map((member) => {
-        const current = result.prs.find((candidate) => candidate.id === member.id)
-        const bayPath = current?.bay === undefined ? undefined : state?.byId[current.bay]?.path
-        return bayPath ?? current?.name ?? member.name ?? current?.branch ?? member.branch
-      })
-      .join(" · "),
+    bayPath ?? (isCurrent ? current?.name : undefined) ?? member.name ?? current?.branch ?? member.branch,
     80,
   )
 }
@@ -1357,14 +1362,6 @@ function timelineRevisionLineage(pr: PR, revision = pr.revision): QueueTimelineR
     revisions: revisions.map((candidate) => candidate.revision),
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
   }
-}
-
-function timelineRunLineages(result: QueueStatusResult, run: QueueRun): QueueTimelineRevisionLineage[] {
-  return run.prs.map((member) => {
-    const pr = result.prs.find((candidate) => candidate.id === member.id)
-    if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
-    return timelineRevisionLineage(pr, member.revision)
-  })
 }
 
 function timelineLineageLabel(lineages: readonly QueueTimelineRevisionLineage[]): string | undefined {
@@ -1405,14 +1402,14 @@ function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, 
   })
 }
 
-function timelineRunRow(
+function timelineRunRows(
   result: QueueStatusResult,
   run: QueueRun,
   nowIso: string,
   submissionTimes: ReadonlyMap<string, string | null>,
   state: BaysState | undefined,
   attempts: readonly QueueAttempt[],
-): QueueTimelineProjectedRow {
+): QueueTimelineProjectedRow[] {
   const running = run.status === "running" || run.status === "waiting"
   const status: QueueTimelineStatus = running ? "running" : terminalOutcome(run)
   const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
@@ -1437,31 +1434,39 @@ function timelineRunRow(
           ? run.status
           : `${step.name}: ${jobStatus(step)}`
       : `${failure.code}: ${causalSummary(failure.message)}`
-  const revisionLineage = timelineRunLineages(result, run)
-  const detail = withTimelineLineage(baseDetail, revisionLineage)
-  const submitter = runSubmitter(result, run)
-  return {
-    id: `${run.base}:run:${run.id}`,
-    base: run.base,
-    group: running ? "running" : "completed",
-    status,
-    glyph: statusGlyph(status),
-    timestamp,
-    timestampMs,
-    run: run.id,
-    ...(submitter === undefined ? {} : { submitter }),
-    prs: run.prs.map((member) => member.id),
-    branches: run.prs.map((member) => member.branch),
-    subject: timelineSubject(result, run, state),
-    detail,
-    revisionLineage,
-    ...(failure === undefined ? {} : { failure }),
-    ageMs: timelineAge(timestamp ?? undefined, nowIso, `Run '${run.id}' recency`),
-    totalMs,
-    activeMs,
-    waitMs,
-    queueWaitMs: running ? [] : timelineQueueWaits(run, submissionTimes),
-  }
+  const queueWaits = running ? [] : timelineQueueWaits(run, submissionTimes)
+  return run.prs.map((member, index) => {
+    const pr = result.prs.find((candidate) => candidate.id === member.id)
+    if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+    const revisionLineage = [timelineRevisionLineage(pr, member.revision)]
+    const detail = withTimelineLineage(baseDetail, revisionLineage)
+    const submitter = revisionSubmitter(pr, member.revision, member.headSha)
+    return {
+      id: `${run.base}:run:${run.id}:${member.id}:${member.revision}`,
+      base: run.base,
+      group: running ? "running" : "completed",
+      status,
+      glyph: statusGlyph(status),
+      timestamp,
+      timestampMs,
+      run: run.id,
+      revision: member.revision,
+      headSha: member.headSha,
+      ...(submitter === undefined ? {} : { submitter }),
+      step: step?.name ?? "-",
+      prs: [member.id],
+      branches: [member.branch],
+      subject: timelineMemberSubject(result, member, state),
+      detail,
+      revisionLineage,
+      ...(failure === undefined ? {} : { failure }),
+      ageMs: timelineAge(timestamp ?? undefined, nowIso, `Run '${run.id}' recency`),
+      totalMs,
+      activeMs,
+      waitMs,
+      queueWaitMs: running ? [] : [queueWaits[index] ?? null],
+    }
+  })
 }
 
 function timelinePendingRows(
@@ -1483,7 +1488,7 @@ function timelinePendingRows(
     const revisionLineage = [timelineRevisionLineage(pr)]
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
     const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
-    const submitter = latestRevisionSubmitter(pr)
+    const submitter = revisionSubmitter(pr)
     return [
       {
         id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1493,7 +1498,10 @@ function timelinePendingRows(
         glyph: statusGlyph("pending"),
         timestamp,
         timestampMs,
+        revision: pr.revision,
+        headSha: pr.headSha,
         ...(submitter === undefined ? {} : { submitter }),
+        step: "-",
         prs: [pr.id],
         branches: [pr.branch],
         subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
@@ -1624,8 +1632,8 @@ export function queueTimelineProjection(
   const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
   const rawRows = results.flatMap((result) => [
     ...timelinePendingRows(result, nowIso, options.submissionTimes, options.state),
-    ...[...result.running, ...result.waiting, ...result.finished].map((run) =>
-      timelineRunRow(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
+    ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
+      timelineRunRows(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
     ),
   ])
   const filtered = rawRows
@@ -1633,22 +1641,33 @@ export function queueTimelineProjection(
     .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= options.now))
     .filter((row) => timelineMatches(row, terms))
   const rows = (options.latest ? latestTimelineRows(filtered) : filtered).toSorted(timelineSort)
-  const terminalFacts: QueueTerminalFact[] = rows.flatMap((row) => {
-    if (row.group !== "completed" || row.timestampMs === null) return []
-    return [
-      {
-        run: row.id,
+  const terminalByRun = new Map<string, QueueTerminalFact>()
+  for (const row of rows) {
+    if (row.group !== "completed" || row.timestampMs === null || row.run === undefined) continue
+    const key = `${row.base}\0${row.run}`
+    const queueWaitMs = row.queueWaitMs.filter((wait): wait is number => wait !== null)
+    const current = terminalByRun.get(key)
+    if (current === undefined) {
+      terminalByRun.set(key, {
+        run: row.run,
         terminalAtMs: row.timestampMs,
         outcome: row.status as QueueTerminalOutcome,
         activeMs: row.totalMs,
-        queueWaitMs: row.queueWaitMs.filter((wait): wait is number => wait !== null),
-      },
-    ]
-  })
+        queueWaitMs,
+      })
+      continue
+    }
+    terminalByRun.set(key, { ...current, queueWaitMs: [...current.queueWaitMs, ...queueWaitMs] })
+  }
+  const terminalFacts = [...terminalByRun.values()]
   const allRuns = results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
   const finished = results.flatMap((result) => result.finished)
+  const detailRuns = new Set<string>()
   const details = rows.flatMap((row) => {
     if (row.run === undefined) return []
+    const key = `${row.base}\0${row.run}`
+    if (detailRuns.has(key)) return []
+    detailRuns.add(key)
     const run = allRuns.find((candidate) => candidate.id === row.run && candidate.base === row.base)
     return run === undefined ? [] : [queueShowData(run, finished, options.attempts ?? [])]
   })
@@ -1667,6 +1686,7 @@ export function queueTimelineProjection(
     now: nowIso,
     base,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
+    runner: options.runner ?? null,
     ...(pause === undefined ? {} : { pause }),
     oldestOpenMs,
     filters: { windowMs: options.windowMs, since, statuses, terms, latest: options.latest },
@@ -1972,7 +1992,7 @@ export function prListRows(
       revision: pr.revision,
       lineage: projected.revisionLineage.join("→"),
       subject: projected.subject,
-      submitter: latestRevisionSubmitter(pr) ?? "-",
+      submitter: revisionSubmitter(pr) ?? "-",
       target: projected.target,
       review: reviewLabel(eligibility),
       checks: checkLabels[eligibility.checks.status],
@@ -2539,7 +2559,7 @@ function timelineMetric(value: number | null): string {
   return ">99kd"
 }
 
-function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
+function TimelineStatistics({ metrics }: { metrics: QueueFlowMetrics }) {
   const decision = metrics.decisionRejection.rate
   const all = metrics.activeRun.allTerminal
   const integrated = metrics.activeRun.integratedOnly
@@ -2547,7 +2567,7 @@ function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
   return (
     <Box flexDirection="column">
       <Text wrap="truncate">
-        FLOW attempts={metrics.terminalAttempts} integrated={metrics.outcomes.integrated} rejected=
+        STATISTICS attempts={metrics.terminalAttempts} integrated={metrics.outcomes.integrated} rejected=
         {metrics.outcomes.rejected} decision={decision === null ? "-" : `${(decision * 100).toFixed(1)}%`} env=
         {metrics.outcomes.environmentRefused} canceled={metrics.outcomes.canceled}
       </Text>
@@ -2556,7 +2576,7 @@ function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
         {timelineMetric(all.p50Ms)} p90={timelineMetric(all.p90Ms)} max={timelineMetric(all.maxMs)}
       </Text>
       <Text color="$fg-muted" wrap="truncate">
-        ACTIVE INTEGRATED n={integrated.n} min={timelineMetric(integrated.minMs)} avg=
+        INTEGRATED n={integrated.n} min={timelineMetric(integrated.minMs)} avg=
         {timelineMetric(integrated.avgMs)} p50={timelineMetric(integrated.p50Ms)} p90=
         {timelineMetric(integrated.p90Ms)} max={timelineMetric(integrated.maxMs)}
       </Text>
@@ -2568,91 +2588,98 @@ function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
   )
 }
 
-function TimelineStatusBand({ row }: { row: QueueTimelineProjectedRow }) {
-  const colors: Record<QueueTimelineStatus, Readonly<{ backgroundColor: string; color: string }>> = {
-    pending: { backgroundColor: "$bg-accent", color: "$fg-on-accent" },
-    running: { backgroundColor: "$bg-info", color: "$fg-on-info" },
-    integrated: { backgroundColor: "$bg-success", color: "$fg-on-success" },
-    rejected: { backgroundColor: "$bg-error", color: "$fg-on-error" },
-    "environment-refused": { backgroundColor: "$bg-warning", color: "$fg-on-warning" },
-    canceled: { backgroundColor: "$bg-inverse", color: "$fg-on-inverse" },
-  }
-  const label = row.status === "environment-refused" ? "env-refused" : row.status
+const BY_COLUMN_WIDTH = 10
+const RUN_COLUMN_WIDTH = 12
+const STEP_COLUMN_WIDTH = 11
+const AGE_COLUMN_WIDTH = 6
+const TOTAL_COLUMN_WIDTH = 9
+
+function timelineRunLabel(row: QueueTimelineProjectedRow, compact: boolean): string {
+  if (row.run === undefined) return "-"
+  const numeric = /([0-9]+)$/u.exec(row.run)?.[1]
+  const suffix = numeric ?? row.run
+  return compact ? `#${suffix}` : `${row.base}#${suffix}`
+}
+
+function TimelineMarker({
+  row,
+  cursor,
+  animate,
+}: {
+  row: QueueTimelineProjectedRow
+  cursor: boolean
+  animate: boolean
+}) {
+  const marker =
+    row.status === "integrated"
+      ? "✓"
+      : row.status === "rejected"
+        ? "×"
+        : row.status === "environment-refused"
+          ? "!"
+          : row.status === "canceled"
+            ? "−"
+            : "○"
+  const color =
+    row.status === "rejected"
+      ? "$fg-error"
+      : row.status === "environment-refused"
+        ? "$fg-warning"
+        : row.status === "integrated" || row.status === "canceled"
+          ? "$fg-muted"
+          : "$fg-info"
   return (
-    <Box
-      width={17}
-      height={1}
-      flexShrink={0}
-      minWidth={0}
-      gap={1}
-      paddingX={1}
-      overflow="hidden"
-      backgroundColor={colors[row.status].backgroundColor}
-      color={colors[row.status].color}
-    >
-      {row.status === "running" ? <Spinner type="line" /> : <Text>{row.glyph}</Text>}
-      <Text bold wrap="truncate">
-        {label}
-      </Text>
+    <Box width={2} flexShrink={0} minWidth={0}>
+      <Text color={color}>{cursor ? ">" : " "}</Text>
+      {row.status === "running" && animate ? (
+        <Pulse colors={["$fg-info", "$fg-muted"]}>●</Pulse>
+      ) : row.status === "running" ? (
+        <Text color="$fg-info">●</Text>
+      ) : (
+        <Text color={color} bold={row.status === "integrated"}>
+          {marker}
+        </Text>
+      )}
     </Box>
   )
 }
 
-// Fits the agent handles operators submit under (@ci, @cto, @agent/0, @chief);
-// longer identities truncate rather than widen the identity band.
-const BY_COLUMN_WIDTH = 10
-
 function TimelineHeader({
   includeDate,
   compact,
-  showBy,
+  showSubmitter,
 }: {
   includeDate: boolean
   compact: boolean
-  showBy: boolean
+  showSubmitter: boolean
 }) {
-  const timeWidth = includeDate ? (compact ? 16 : 21) : 10
+  const timeWidth = includeDate ? (compact ? 11 : 19) : 8
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+      <Box width={2} flexShrink={0} />
       <Box width={timeWidth} flexShrink={0} minWidth={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          {"  TIME"}
-        </Text>
+        <Text color="$fg-muted">TIME</Text>
       </Box>
-      <Box width={17} flexShrink={0} minWidth={0}>
-        <Text color="$fg-muted">STATUS</Text>
+      <Box width={RUN_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted">RUN</Text>
       </Box>
-      <Box width={16} flexShrink={0} minWidth={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          RUN·PR
-        </Text>
-      </Box>
-      {showBy ? (
+      {showSubmitter ? (
         <Box width={BY_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
-          <Text color="$fg-muted" wrap="truncate">
-            BY
-          </Text>
+          <Text color="$fg-muted">BY</Text>
         </Box>
       ) : null}
-      {compact ? null : (
-        <>
-          <Box flexGrow={1} flexBasis={0} minWidth={0}>
-            <Text color="$fg-muted" wrap="truncate">
-              SUBJECT
-            </Text>
-          </Box>
-          <Box flexGrow={1} flexBasis={0} minWidth={0}>
-            <Text color="$fg-muted" wrap="truncate">
-              DETAIL
-            </Text>
-          </Box>
-        </>
-      )}
-      {(["AGE", "TOTAL", "ACTIVE", "WAIT"] as const).map((label) => (
-        <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
-          <Text color="$fg-muted">{label}</Text>
-        </Box>
-      ))}
+      <Box flexGrow={1} flexBasis={0} minWidth={8}>
+        <Text color="$fg-muted">PR</Text>
+      </Box>
+      <Box width={STEP_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted">STEP</Text>
+      </Box>
+      <Box width={AGE_COLUMN_WIDTH} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">AGE</Text>
+      </Box>
+      <Box width={TOTAL_COLUMN_WIDTH} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">TOTAL</Text>
+      </Box>
     </Box>
   )
 }
@@ -2662,75 +2689,81 @@ function TimelineProjectedRow({
   cursor,
   includeDate,
   compact,
-  showBy,
+  showSubmitter,
+  animate,
 }: {
   row: QueueTimelineProjectedRow
   cursor: boolean
   includeDate: boolean
   compact: boolean
-  showBy: boolean
+  showSubmitter: boolean
+  animate: boolean
 }) {
-  const color = row.status === "integrated" ? "$fg-muted" : undefined
+  const integrated = row.status === "integrated"
+  const color = integrated ? "$fg-muted" : undefined
   const rawClock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
-  const clock = compact && includeDate ? rawClock.slice(5) : rawClock
-  const timeWidth = includeDate ? (compact ? 16 : 21) : 10
-  const identity = `${row.run === undefined ? "" : `${row.run}·`}${row.prs.join(",")}`
-  const measurements = [
-    ["age", row.ageMs],
-    ["total", row.totalMs],
-    ["active", row.activeMs],
-    ["wait", row.waitMs],
-  ] as const
+  const clock = compact && includeDate ? rawClock.slice(5, 16) : rawClock
+  const timeWidth = includeDate ? (compact ? 11 : 19) : 8
+  const pr = row.prs[0] ?? "-"
+  const lineage = timelineLineageLabel(row.revisionLineage)
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+      <TimelineMarker row={row} cursor={cursor} animate={animate} />
       <Box width={timeWidth} flexShrink={0} minWidth={0}>
-        <Text color={color} wrap="truncate">
-          {cursor ? "> " : "  "}
+        <Text color={color} bold={integrated} wrap="truncate">
           {clock}
         </Text>
       </Box>
-      <TimelineStatusBand row={row} />
-      <Box width={16} flexShrink={0} minWidth={0}>
-        <Text color={color} wrap="truncate">
-          {identity}
+      <Box width={RUN_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+        <Text color={color} bold={integrated} wrap="truncate">
+          {timelineRunLabel(row, compact)}
         </Text>
       </Box>
-      {showBy ? (
+      {showSubmitter ? (
         <Box width={BY_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
-          <Text color={color ?? "$fg-muted"} wrap="truncate">
+          <Text color="$fg-muted" bold={integrated} wrap="truncate">
             {row.submitter ?? "-"}
           </Text>
         </Box>
       ) : null}
-      {compact ? null : (
-        <>
-          <Box flexGrow={1} flexBasis={0} minWidth={6}>
-            <Text color={color} wrap="truncate">
-              {row.subject}
-            </Text>
-          </Box>
-          <Box flexGrow={1} flexBasis={0} minWidth={10}>
-            {row.failure === undefined ? (
-              <Text color={color} wrap="truncate">
-                {row.detail}
-              </Text>
-            ) : (
-              <Text wrap="truncate">
-                {row.failure.code}: <Text color="$fg-muted">{causalSummary(row.failure.message)}</Text>
-              </Text>
-            )}
-          </Box>
-        </>
-      )}
-      {measurements.map(([label, value]) => (
-        <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
-          <Text color={color} wrap="truncate">
-            {timelineMetric(value)}
-          </Text>
-        </Box>
-      ))}
+      <Box flexGrow={1} flexBasis={0} minWidth={8}>
+        <Text color={color} bold={integrated} wrap="truncate">
+          {pr}.{row.revision} {row.subject}
+          {lineage === undefined ? "" : ` · ${lineage}`}
+        </Text>
+      </Box>
+      <Box width={STEP_COLUMN_WIDTH} flexShrink={0} minWidth={0}>
+        <Text color={color} bold={integrated} wrap="truncate">
+          {row.step}
+        </Text>
+      </Box>
+      <Box width={AGE_COLUMN_WIDTH} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted" bold={integrated} wrap="truncate">
+          {timelineMetric(row.ageMs)}
+        </Text>
+      </Box>
+      <Box width={TOTAL_COLUMN_WIDTH} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">◷</Text>
+        <Text color={color} bold={integrated} wrap="truncate">
+          {timelineMetric(row.totalMs)}
+        </Text>
+      </Box>
     </Box>
   )
+}
+
+const RUNNER_STALE_MS = 15_000
+
+function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: number; uptimeMs: number }> | null {
+  const runner = projection.runner
+  if (runner === null) return null
+  const now = Date.parse(projection.now)
+  const startedAt = Date.parse(runner.startedAt)
+  const lastTickAt = Date.parse(runner.lastTickAt)
+  if (![now, startedAt, lastTickAt].every(Number.isFinite)) {
+    throw new Error("yrd: queue runner projection contains an invalid timestamp")
+  }
+  return { ageMs: Math.max(0, now - lastTickAt), uptimeMs: Math.max(0, now - startedAt) }
 }
 
 function ProjectedQueueTimeline({
@@ -2749,46 +2782,77 @@ function ProjectedQueueTimeline({
   columns: number
 }) {
   const compact = columns <= 80
-  // BY (the submitter) is supplementary identity; per the 21106 contract it drops
-  // before the identity/clock/measurement columns, so surface it only at wide tiers.
-  const showBy = columns >= 100
+  // Submitter is the first fixed column dropped at the compact breakpoint; the
+  // PR subject remains the only flexible field.
+  const showSubmitter = columns >= 100
   const rows = projection.rows.slice(0, projection.display.shown)
-  const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
   const statusFilter = projection.filters.statuses.length === 5 ? "all" : projection.filters.statuses.join(",")
   const includeDate = rows.some(
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
   )
   const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(",")
+  const timing = runnerTiming(projection)
+  const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
+  const abnormal = projection.pause !== undefined || projection.runner === null || runnerStale
   return (
-    <Box flexDirection="column">
-      <Text bold wrap="truncate">
-        QUEUE {projection.base}{" "}
-        <Text color="$fg-muted">
-          siblings {siblings} · updated {queueLogClock(projection.now, false, includeDate)}
+    <Box flexDirection="column" width="100%" minWidth={0}>
+      <Box height={1} minWidth={0} overflow="hidden">
+        <Text bold>QUEUE </Text>
+        <Text bold underline>
+          {projection.base}
         </Text>
-      </Text>
-      <Text color="$fg-muted" wrap="truncate">
-        FILTER since={mediaDuration(projection.filters.windowMs)} status={statusFilter} terms=
-        {projection.filters.terms.length === 0 ? "none" : projection.filters.terms.join("|")} latest=
-        {projection.filters.latest ? "yes" : "no"}
-      </Text>
-      {projection.pause === undefined ? null : (
-        <Text wrap="truncate">
-          <Text color="$fg-warning" bold>
-            PAUSED
-          </Text>{" "}
-          {projection.pause.reason} (allowed: {allowed})
+        {projection.siblingBases.map((base) => (
+          <Text key={base} color="$fg-muted">
+            {" "}
+            {base}
+          </Text>
+        ))}
+      </Box>
+      <Box height={1} minWidth={0} justifyContent="space-between" overflow="hidden">
+        <Text color="$fg-muted" wrap="truncate">
+          runner=
+          {projection.runner === null
+            ? "absent"
+            : `pid:${projection.runner.pid} up:${timelineMetric(timing?.uptimeMs ?? null)} tick:${timelineMetric(
+                timing?.ageMs ?? null,
+              )}`}
+          {projection.oldestOpenMs === null ? "" : ` · oldest:${timelineMetric(projection.oldestOpenMs)}`}
         </Text>
-      )}
-      {projection.oldestOpenMs === null ? null : (
-        <Text color="$fg-muted">OLDEST OPEN {mediaDuration(projection.oldestOpenMs)}</Text>
-      )}
-      <TimelineFlow metrics={projection.metrics} />
+        <Text color="$fg-muted">updated {queueLogClock(projection.now, false, includeDate)}</Text>
+      </Box>
+      {abnormal ? (
+        <Box flexDirection="column" borderStyle="single" borderColor="$fg-warning" paddingX={1} minWidth={0}>
+          <Text bold color="$fg-warning">
+            STATUS
+          </Text>
+          {projection.runner === null ? (
+            <Text color="$fg-error" bold>
+              RUNNER ABSENT — no resident queue executor heartbeat
+            </Text>
+          ) : runnerStale ? (
+            <Text color="$fg-error" bold>
+              RUNNER STALE — last heartbeat {timelineMetric(timing?.ageMs ?? null)} ago
+            </Text>
+          ) : null}
+          {projection.pause === undefined ? null : (
+            <Text color="$fg-warning" bold wrap="truncate">
+              PAUSED — {projection.pause.reason} (allowed: {allowed})
+            </Text>
+          )}
+        </Box>
+      ) : null}
+      <Box height={1} minWidth={0} justifyContent="flex-end" overflow="hidden">
+        <Text color="$fg-muted" wrap="truncate">
+          FILTER since={mediaDuration(projection.filters.windowMs)} status={statusFilter} terms=
+          {projection.filters.terms.length === 0 ? "none" : projection.filters.terms.join("|")} latest=
+          {projection.filters.latest ? "yes" : "no"}
+        </Text>
+      </Box>
       {rows.length === 0 ? (
         <Text color="$fg-muted">No matching queue rows.</Text>
       ) : (
         <Box flexDirection="column">
-          <TimelineHeader includeDate={includeDate} compact={compact} showBy={showBy} />
+          <TimelineHeader includeDate={includeDate} compact={compact} showSubmitter={showSubmitter} />
           <ListView
             items={rows}
             nav={nav}
@@ -2804,7 +2868,8 @@ function ProjectedQueueTimeline({
                 cursor={meta.isCursor}
                 includeDate={includeDate}
                 compact={compact}
-                showBy={showBy}
+                showSubmitter={showSubmitter}
+                animate={nav}
               />
             )}
           />
@@ -2814,6 +2879,7 @@ function ProjectedQueueTimeline({
       {projection.coverage.complete ? null : (
         <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
       )}
+      <TimelineStatistics metrics={projection.metrics} />
     </Box>
   )
 }
@@ -2842,15 +2908,19 @@ export function QueueTimelineView({
   columns?: number
 }) {
   if (projection !== undefined) {
+    const surfaceWidth = Math.max(1, Math.min(columns - 2, 160))
+    const gutter = Math.max(0, Math.floor((columns - surfaceWidth) / 2))
     return (
-      <ProjectedQueueTimeline
-        projection={projection}
-        nav={nav}
-        cursorKey={cursorKey}
-        onCursor={onCursor}
-        onSelect={onSelect}
-        columns={columns}
-      />
+      <Box flexDirection="column" width={surfaceWidth} maxWidth={160} marginX={gutter} minWidth={0}>
+        <ProjectedQueueTimeline
+          projection={projection}
+          nav={nav}
+          cursorKey={cursorKey}
+          onCursor={onCursor}
+          onSelect={onSelect}
+          columns={surfaceWidth}
+        />
+      </Box>
     )
   }
   if (results === undefined || now === undefined) {
