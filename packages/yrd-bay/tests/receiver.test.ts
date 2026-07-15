@@ -152,6 +152,28 @@ describe("Git push receiver", { timeout: 20_000 }, () => {
     expect([loaded.prepare, loaded.finalize, loaded.drain].every((method) => typeof method === "function")).toBe(true)
   })
 
+  it("initializes prs.git in an isolated directory without making the host repository bare", async () => {
+    const root = await mkdtemp(join(tmpdir(), "yrd-isolation-"))
+    roots.push(root)
+    const main = await createRepo(root, "host repo")
+    const runner = createProcess()
+    processes.push(runner)
+    // Mirror the real layout: the receiver state dir lives inside the host's own git directory.
+    const gitDir = await realpath(join(main.path, ".git"))
+    const stateDir = join(gitDir, "yrd")
+    const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process: runner })
+
+    // `git init --bare` must target the isolated prs.git, strictly inside .git and never the host git dir.
+    expect(receiver.receiverPath).toBe(join(gitDir, "yrd", "prs.git"))
+    expect(receiver.receiverPath.startsWith(`${gitDir}/`)).toBe(true)
+    expect(receiver.receiverPath).not.toBe(gitDir)
+    expect(await git(receiver.receiverPath, "rev-parse", "--is-bare-repository")).toBe("true")
+
+    // The host repository and its git directory must stay non-bare and usable after the receiver init.
+    expect(await git(main.path, "rev-parse", "--is-bare-repository")).toBe("false")
+    expect(await git(main.path, "rev-parse", "--show-toplevel")).toBe(await realpath(main.path))
+  })
+
   it("refuses unmanaged hooks and retargeting", async () => {
     const f = await fixture("binding")
     const hook = join(f.receiver.receiverPath, "hooks", "pre-receive")

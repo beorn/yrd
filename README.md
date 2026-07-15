@@ -775,6 +775,12 @@ deduplicated with the PR intake event. The inbox exists only for crash recovery.
 The `bay` receiver is a push default only inside provisioned Work Bays. Host
 startup removes the legacy shared `remote.pushDefault=bay` setting if present,
 so plain `git push` in the primary worktree continues to use its normal remote.
+Because Yrd enables the `worktreeConfig` extension to scope those Bay push
+defaults, host startup also relocates any stray `core.bare=true` (and
+`core.worktree`) out of the shared config into the primary worktree's
+`config.worktree`, per git-worktree(1): once `worktreeConfig` is enabled a shared
+`core.bare=true` is inherited by every linked worktree, which would otherwise
+report as bare and become unusable.
 
 ## Integration Boundaries
 
