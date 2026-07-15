@@ -299,6 +299,7 @@ describe("Queue", () => {
           landingSha: MERGED,
           baseSha: BASE,
           correlation,
+          actor: "operator",
         },
       }),
     )
@@ -829,7 +830,16 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
-    expect(appended).toMatchObject([{ name: "queue/run/failed", data: { run: "R1", error: { code: "job-lost" } } }])
+    expect(appended).toMatchObject([
+      {
+        name: "queue/run/failed",
+        data: {
+          run: "R1",
+          error: { code: "job-lost" },
+          prs: [{ pr: "PR1", revision: 1, headSha: HEAD, actor: "operator" }],
+        },
+      },
+    ])
     const failed = appended[0]
     if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
     const authority = replayed.state().queues.authority.runs.R1

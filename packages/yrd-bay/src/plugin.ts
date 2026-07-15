@@ -286,6 +286,8 @@ const PRIntegratedSchema = PRQueueTerminalIdentitySchema.extend({
   commit: GitShaSchema,
   landingSha: GitShaSchema,
   baseSha: GitShaSchema,
+  /** Missing only when a current integration terminates a pre-actor legacy revision. */
+  actor: TextSchema.optional(),
 })
   .strict()
   .refine(({ commit, landingSha }) => commit === landingSha, {

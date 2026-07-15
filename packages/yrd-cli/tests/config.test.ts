@@ -22,6 +22,9 @@ deploy: bun run deploy
 contest: { concurrency: 2, timeoutMs: 1800000, evaluators: [check] }
 notify:
   pr/rejected: [submitter, "@ci"]
+  pr/needs-review: ["@cto"]
+  pr/integrated: [broadcast]
+  run/failed: [submitter, "@ci"]
 `),
       ),
     ).toEqual({
@@ -36,7 +39,12 @@ notify:
         deploy: { run: "bun run deploy", runner: "local" },
       },
       contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
-      notify: { "pr/rejected": ["submitter", "@ci"] },
+      notify: {
+        "pr/rejected": ["submitter", "@ci"],
+        "pr/needs-review": ["@cto"],
+        "pr/integrated": ["broadcast"],
+        "run/failed": ["submitter", "@ci"],
+      },
     })
   })
 
@@ -79,6 +87,9 @@ notify:
     [{ notify: { "pr/typo": ["submitter"] } }, "notify.pr/typo"],
     [{ notify: { "pr/rejected": ["reviewer"] } }, "notify.pr/rejected"],
     [{ notify: { "pr/rejected": ["submitter", "submitter"] } }, "duplicate notification targets"],
+    [{ notify: { "pr/needs-review": ["broadcast"] } }, "notify.pr/needs-review"],
+    [{ notify: { "pr/integrated": ["submitter"] } }, "notify.pr/integrated"],
+    [{ notify: { "run/failed": ["broadcast"] } }, "notify.run/failed"],
   ])("rejects invalid policy %#", (value, message) => {
     let failure: unknown
     try {

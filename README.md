@@ -599,6 +599,9 @@ contest:
 
 notify:
   pr/rejected: [submitter]
+  pr/needs-review: ["@cto"]
+  pr/integrated: [broadcast]
+  run/failed: [submitter, "@ci"]
 ```
 
 Names before `merge` run against the pinned Candidate. Names after `merge` run
@@ -615,15 +618,20 @@ the current revision must approve. Comments never gate, and omitting
 ### PR Signals
 
 `notify` routes an enumerated journal transition without turning delivery into
-a Queue step. The first supported route is `pr/rejected`: `submitter` resolves
-to the actor recorded on that exact PR revision, while an explicit `@name`
-routes to that Tribe member. Each delivery is a tracked Tribe request carrying
-the PR, revision, failed step, Run, and evidence path.
+a Queue step. `pr/rejected`, `pr/needs-review`, and `run/failed` are tracked
+requests: `submitter` resolves to the actor recorded on the exact PR revision,
+while an explicit `@name` routes to that Tribe member. Rejection carries the PR,
+revision, failed step, Run, and evidence path; needs-review is projected from a
+committed submission only when `requires: [review]`; Run failure names every
+affected PR. `pr/integrated: [broadcast]` aggregates all PRs sharing one landing
+fact into one ambient `yrd:integrated` notification and wakes nobody. It also
+closes the deterministic rejected/review request ids for those PR revisions.
 
 Signal delivery starts only after the journal append commits and never blocks
 the Run. A cursor under `.git/yrd/notifications/` records journal progress and
-successful event-id/recipient sends. Startup replays an append that preceded a
-crash and skips sends already recorded in that cursor. Delivery remains
+successful event-id/recipient sends and terminal unsubscribe actions. Startup
+replays an append that preceded a crash and skips actions already recorded in
+that cursor. Delivery remains
 at-least-once across the unavoidable external-send/local-record crash window;
 the event id is included in every request so recipients can identify a replay.
 The cursor is recovery bookkeeping, not another event store or scheduler.
@@ -631,7 +639,8 @@ The cursor is recovery bookkeeping, not another event store or scheduler.
 Configuration is closed-world: an unknown event name, malformed target, or
 missing Tribe executable refuses startup instead of becoming an inert label.
 Routing to `submitter` also requires `TRIBE_NAME` to identify the current
-submitting `@` handle at startup.
+submitting `@` handle at startup. A needs-review route without
+`requires: [review]` is rejected rather than stored as an inert label.
 Historical rejections written before the routable fact shape remain replayable
 but are not retroactively delivered. If a pre-actor revision is rejected after
 upgrade, its unavailable submitter is logged and skipped without starving later
