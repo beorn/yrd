@@ -874,9 +874,18 @@ function relativeAge(milliseconds: number): string {
 
 function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean): string {
   if (timestamp === "-") return timestamp
-  const iso = new Date(timestamp).toISOString()
-  if (includeDate) return `${iso.slice(0, 19)}Z`
-  return compact ? iso.slice(11, 16) : iso.slice(11, 19)
+  const when = new Date(timestamp)
+  if (Number.isNaN(when.getTime())) throw new Error(`yrd: invalid queue-log timestamp '${timestamp}'`)
+  // Operators read the queue in their own wall-clock time, so render the
+  // system-local timezone rather than UTC. The include-date decision upstream
+  // stays calendar-day-in-UTC; only the displayed value is localized.
+  const pad = (value: number) => String(value).padStart(2, "0")
+  const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
+  if (includeDate) {
+    const day = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
+    return `${day}T${clock}`
+  }
+  return compact ? clock.slice(0, 5) : clock
 }
 
 function queueLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {

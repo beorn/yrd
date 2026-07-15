@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
-import { describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import {
@@ -587,6 +587,18 @@ function coverageFixture(path: string, frames = 185): QueueLogCoverage {
 }
 
 describe("runYrd", () => {
+  // Queue clocks render in the system-local timezone, so pin a deterministic,
+  // DST-free zone (+5:30 catches minute-offset bugs) for the wall-clock assertions.
+  let priorTZ: string | undefined
+  beforeAll(() => {
+    priorTZ = process.env.TZ
+    process.env.TZ = "Asia/Kolkata"
+  })
+  afterAll(() => {
+    if (priorTZ === undefined) delete process.env.TZ
+    else process.env.TZ = priorTZ
+  })
+
   it("projects git bay onto the public bay subtree and exposes no internal operations", async () => {
     const app = await createApp()
     const gitHelp = outputIO()
@@ -5897,8 +5909,9 @@ describe("runYrd", () => {
       })
       const physicalRows = human.split("\n").filter((line) => /\bPR2[23]\b/u.test(line))
       expect(physicalRows).toHaveLength(2)
-      expect(physicalRows[0]).toContain("2026-07-12T11:01:16Z")
-      expect(physicalRows[1]).toContain("2026-07-11T23:59:58Z")
+      // Rendered in Asia/Kolkata (+5:30): 11:01:16Z → 16:31:16, 23:59:58Z → next local day 05:29:58.
+      expect(physicalRows[0]).toContain("2026-07-12T16:31:16")
+      expect(physicalRows[1]).toContain("2026-07-12T05:29:58")
       expect(Math.max(...physicalRows.map((row) => row.length))).toBeLessThanOrEqual(width)
     }
 
