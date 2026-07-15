@@ -640,6 +640,10 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
     remove()
     globalThis.process.kill(globalThis.process.pid, signal)
   }
+  const finish = (): void => {
+    remove()
+    if (hardSignal !== undefined) forward(hardSignal)
+  }
   const onSignal = (signal: ShutdownSignal): void => {
     if (drain !== undefined && !draining) {
       draining = true
@@ -651,16 +655,16 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
       return
     }
     hardSignal = signal
-    void shutdown().then(
-      () => forward(signal),
-      () => forward(signal),
-    )
+    // Closing the host aborts a live renderer, but the renderer owns terminal
+    // restoration in its surrounding `using` block. Let the command boundary
+    // unwind that block before `finish()` restores native signal exit status.
+    void shutdown().catch(() => undefined)
   }
   const onSigint = () => onSignal("SIGINT")
   const onSigterm = () => onSignal("SIGTERM")
   globalThis.process.on("SIGINT", onSigint)
   globalThis.process.on("SIGTERM", onSigterm)
-  return remove
+  return finish
 }
 
 export type YrdHostOptions = Readonly<{
