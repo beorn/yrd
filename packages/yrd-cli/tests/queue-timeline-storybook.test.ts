@@ -108,6 +108,31 @@ describe("queue timeline storybook", () => {
     }
   })
 
+  it("advances shared snapshots without remounting the interactive watch state", async () => {
+    using term = createTermless({ cols: 200, rows: 50 })
+    const handle = await run(createElement(QueueTimelineStorybook), term, {
+      mouse: true,
+      selection: false,
+    })
+    try {
+      await waitFor(() => term.screen.getText().includes("production-overview"))
+      for (let index = 0; index < 10; index += 1) {
+        await handle.press("]")
+        await handle.waitForLayoutStable()
+      }
+      await waitFor(() => term.screen.getText().includes("anchored-new · initial"))
+
+      await handle.press("n")
+      await waitFor(() => term.screen.getText().includes("anchored-new · next"))
+
+      // The next snapshot must update the existing frame. Remounting loses the
+      // anchor/follow state and makes this named visual story falsely show no new rows.
+      expect(term.screen.getText()).toContain("1 new")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("shares realistic production contracts across lifecycle, batch, lineage, proof, and output stories", () => {
     const overview = queueTimelineStories["production-overview"].snapshot
     const overviewResult = overview.results[0]
