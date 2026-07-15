@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { GitCheckEvidenceSchema, IntegrationProofSchema } from "@yrd/queue"
-import { createExclusive } from "@yrd/persistence"
+import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createLogger } from "loggily"
 import * as z from "zod"
@@ -37,6 +37,10 @@ async function git(repo: string, ...args: string[]): Promise<string> {
   ])
   if (exitCode !== 0) throw new Error(stderr || stdout)
   return stdout.trim()
+}
+
+async function journalEnvelope(repo: string) {
+  return Array.fromAsync(createJournal({ dir: join(repo, ".git", "yrd") }).read())
 }
 
 async function repository(): Promise<{ repo: string; featureSha: string }> {
@@ -491,9 +495,9 @@ notify:
 `,
     )
 
-    await expect(
-      createYrdHost({ cwd: repo, signalAdapter: { send() {} } }),
-    ).rejects.toMatchObject({ failure: { kind: "configuration", code: "signal-review-policy-missing" } })
+    await expect(createYrdHost({ cwd: repo, signalAdapter: { send() {} } })).rejects.toMatchObject({
+      failure: { kind: "configuration", code: "signal-review-policy-missing" },
+    })
   })
 
   it("classifies typed failure facts without scraping their messages", () => {
@@ -977,6 +981,7 @@ notify:
       submitStderr,
     ).toBe(1)
     expect(submitStderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/\bWARN yrd:journal journal generation installed and verified\b/u),
       expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
       expect.stringMatching(/\bERROR yrd:queue:run run failed\b/u),
       expect.stringMatching(/\bERROR yrd:queue:admit admit failed\b/u),
@@ -1093,7 +1098,6 @@ notify:
   it("finds a direct-branch PR for status and refuses pr merge without appending", async () => {
     const { repo } = await repository()
     await git(repo, "switch", "-q", "issue/feature")
-    const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
     let missingJson = ""
     let missingStdout = ""
     expect(
@@ -1114,7 +1118,7 @@ notify:
       status: "not-submitted",
       next: "yrd pr submit issue/feature",
     })
-    expect(await Bun.file(journal).exists()).toBe(false)
+    expect(await journalEnvelope(repo)).toEqual([])
 
     let submitJson = ""
     let submitError = ""
@@ -1148,7 +1152,7 @@ notify:
     ).toBe(0)
     expect(JSON.parse(statusJson)).toMatchObject({ command: "pr.status", pr: { id: "PR1" } })
 
-    const before = await readFile(journal, "utf8")
+    const before = await journalEnvelope(repo)
     let mergeJson = ""
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "merge", "PR1", "--json"], {
@@ -1165,7 +1169,7 @@ notify:
       next: "yrd watch --pr PR1",
       guidance: { watch: "yrd watch --pr PR1" },
     })
-    expect(await readFile(journal, "utf8")).toBe(before)
+    expect(await journalEnvelope(repo)).toEqual(before)
   })
 
   it("executes every bare read and no-op recovery without creating journal state", async () => {
@@ -1215,8 +1219,7 @@ notify:
       }),
     ).toBe(1)
 
-    const journal = join(repo, ".git", "yrd", "events-v3.jsonl")
-    const before = await readFile(journal, "utf8")
+    const before = await journalEnvelope(repo)
     let refusal = ""
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "merge", "PR1", "--json"], {
@@ -1239,10 +1242,10 @@ notify:
       inspect: "yrd pr runs PR1",
       resubmit: "fix the branch and run yrd pr submit again",
     })
-    expect(await readFile(journal, "utf8")).toBe(before)
+    expect(await journalEnvelope(repo)).toEqual(before)
   })
 
-  it("starts a fresh v3 journal without reading or rewriting legacy journal files", async () => {
+  it("starts a fresh current journal without reading or rewriting legacy journal files", async () => {
     const { repo } = await repository()
     const oldYrdJournal = join(repo, ".git", "yrd", "events.jsonl")
     const oldBayJournal = join(repo, ".git", "bay", "journal.jsonl")
@@ -1256,7 +1259,7 @@ notify:
     const headSha = await git(repo, "rev-parse", "issue/feature")
     await host.app.bays.submit({ branch: "issue/feature", headSha, base: "main" })
 
-    expect(await Bun.file(join(repo, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(true)
+    expect((await journalEnvelope(repo)).flatMap((batch) => batch.values)).toHaveLength(1)
     expect(await readFile(oldYrdJournal, "utf8")).toBe("old yrd journal remains opaque\n")
     expect(await readFile(oldBayJournal, "utf8")).toBe("old bay journal remains opaque\n")
   })
@@ -1768,7 +1771,9 @@ notify:
       command: "bay.submit",
       prs: [{ id: "PR1", branch: "issue/feature", headSha: featureSha }],
     })
-    expect(selected.stderr).toBe("")
+    expect(selected.stderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/\bWARN yrd:journal journal generation installed and verified\b/u),
+    ])
 
     const diff = await run(["pr", "diff", "PR1", "--repo", relativeRepo, "--json"], poisoned)
     expect(diff.exitCode, diff.stderr).toBe(0)
@@ -2060,8 +2065,7 @@ notify:
       await host.close()
     }
 
-    const journalPath = join(repo, ".git", "yrd", "events-v3.jsonl")
-    const journalBefore = await readFile(journalPath)
+    const journalBefore = await journalEnvelope(repo)
     const cli = Bun.spawn([process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "_dashboard"], {
       cwd: repo,
       env: { ...process.env, NO_COLOR: "1" },
@@ -2079,7 +2083,7 @@ notify:
     expect(stdout).toContain("Recent failures")
     expect(stdout.match(/PR1/gu)).toHaveLength(2)
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
-    expect(await readFile(journalPath)).toEqual(journalBefore)
+    expect(await journalEnvelope(repo)).toEqual(journalBefore)
   })
 
   it("renders clickable candidate-conflict evidence written by the real Git check adapter", async () => {
