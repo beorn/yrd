@@ -410,16 +410,17 @@ function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>)
         at: pr.rejectedAt,
         bounce: { run: pr.terminalRun, ...(pr.detail === undefined ? {} : { detail: pr.detail }) },
       }
-    case "integrated":
-      return pr.integratedAt === undefined || pr.integration === undefined
-        ? undefined
-        : {
-            ...identity,
-            status: "integrated",
-            at: pr.integratedAt,
-            landingSha: pr.integration.commit,
-            ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
-          }
+    case "integrated": {
+      const landing = prLandingOutcome(pr)
+      if (landing.outcome !== "landed") refusal(`integrated PR '${pr.id}' has no canonical landing outcome`)
+      return {
+        ...identity,
+        status: "integrated",
+        at: landing.at,
+        landingSha: landing.landingSha,
+        ...(pr.regressions === undefined || pr.regressions.length === 0 ? {} : { regressions: pr.regressions }),
+      }
+    }
     case "withdrawn":
       return pr.withdrawnAt === undefined ? undefined : { ...identity, status: "withdrawn", at: pr.withdrawnAt }
     case "canceled":
@@ -1117,6 +1118,32 @@ function requiredPr(app: YrdCliApp, selector: string): PR {
   return pr as PR
 }
 
+type PRLandingOutcome =
+  | Readonly<{
+      outcome: "landed"
+      status: "integrated"
+      landingSha: string
+      baseSha: string
+      at: string
+      run?: string
+    }>
+  | Readonly<{ outcome: "not-landed"; status: Exclude<PR["status"], "integrated"> }>
+
+function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
+  if (pr.status !== "integrated") return { outcome: "not-landed", status: pr.status }
+  if (pr.integration === undefined || pr.integratedAt === undefined) {
+    refusal(`integrated PR '${pr.id}' is missing canonical landing proof`)
+  }
+  return {
+    outcome: "landed",
+    status: "integrated",
+    landingSha: pr.integration.commit,
+    baseSha: pr.integration.baseSha,
+    at: pr.integratedAt,
+    ...(pr.terminalRun === undefined ? {} : { run: pr.terminalRun }),
+  }
+}
+
 function allQueueRuns(app: YrdCliApp): QueueRun[] {
   return Object.keys(stateOf(app).queues.records)
     .map((id) => app.queue.get(id))
@@ -1229,6 +1256,7 @@ async function viewPr(
     {
       command,
       pr: projectPRTaskStatus(pr),
+      landing: prLandingOutcome(pr),
       ...(position === undefined ? {} : { position }),
       results: results.map(projectQueueStatusResultTaskStatus),
       detail,

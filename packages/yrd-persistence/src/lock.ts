@@ -118,6 +118,6 @@ function busy(path: string): Error {
   return createFailure({
     kind: "infrastructure",
     code: "exclusive-busy",
-    message: `yrd: writer lock is busy (${owner}; ${path})`,
+    message: `yrd: writer lock is busy (owner=${owner}; contender=yrd-cli:${process.pid}; ${path})`,
   })
 }
