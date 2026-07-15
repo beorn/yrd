@@ -96,7 +96,8 @@ describe("queue timeline storybook", () => {
     })
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
-      expect(term.screen.getText()).toContain("R42·PR42,PR43")
+      expect(term.screen.getText()).toContain("PR42.1")
+      expect(term.screen.getText()).toContain("PR43.1")
       expect(term.screen.getText()).toContain("Enter detail")
 
       await act(async () => {
@@ -145,6 +146,7 @@ describe("queue timeline storybook", () => {
     if (overviewResult === undefined) throw new Error("production-overview is missing its queue result")
 
     expect(overview.projection.rows.map((row) => row.status)).toEqual([
+      "running",
       "running",
       "canceled",
       "environment-refused",
@@ -273,16 +275,17 @@ describe("queue timeline storybook", () => {
 
   it("surfaces the latest revision submitter in the wide BY column and hides it on the narrow tier", async () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
-    const header = (frame: string) => frame.split("\n").find((line) => line.includes("TIME") && line.includes("STATUS"))
+    const header = (frame: string) =>
+      frame.split("\n").find((line) => line.includes("TIME") && line.includes("RUN") && line.includes("PR"))
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
       height: 20,
       plain: true,
     })
     expect(header(wide), "wide header").toContain("BY")
-    const batchRow = wide.split("\n").find((row) => row.includes("R42·"))
-    expect(batchRow, "batch run row").toContain("@ci")
-    const rejectedRow = wide.split("\n").find((row) => row.includes("R5·"))
+    const batchRow = wide.split("\n").find((row) => row.includes("PR42.1"))
+    expect(batchRow, "batch revision row").toContain("@ci")
+    const rejectedRow = wide.split("\n").find((row) => row.includes("PR5.1"))
     // R5's revision has no recorded submitter, so its BY cell falls back to "-" (no handle).
     expect(rejectedRow, "rejected run row").not.toContain("@")
 
@@ -534,8 +537,14 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR1 STATUS")
 
-      // Seven summary lines plus the table header put the second height-1 row at y=9.
-      await handle.click(2, 9)
+      const lines = handle.text.split("\n")
+      const pr2Y = lines.findIndex((line) => line.includes("PR2.1"))
+      expect(pr2Y, "PR2 screen row").toBeGreaterThanOrEqual(0)
+      const pr2Line = lines[pr2Y]
+      if (pr2Line === undefined) throw new Error("pending-only story did not render the PR2 revision row")
+      const pr2X = pr2Line.indexOf("PR2.1")
+      expect(pr2X, "PR2 screen column").toBeGreaterThanOrEqual(0)
+      await handle.click(pr2X, pr2Y)
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR2 STATUS")
       expect(handle.text).not.toContain("PR PR1 STATUS")
