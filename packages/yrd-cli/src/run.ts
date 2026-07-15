@@ -78,7 +78,11 @@ import {
 } from "./task-status.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
-import { QueueWatchPane, type QueueArtifactOutput, type QueueWatchSnapshot } from "./watch-pane.tsx"
+// The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
+// module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
+// path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
+// load. Types are erased, so they stay as a static type-only import.
+import type { QueueArtifactOutput, QueueWatchSnapshot } from "./watch-pane.tsx"
 
 function gitSync(cwd: string, args: readonly string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
@@ -2063,6 +2067,7 @@ async function watchQueue(
       refusal("watch requires an interactive terminal; use --json for streaming output")
     }
     const initial = await load()
+    const { QueueWatchPane } = await import("./watch-pane.tsx")
     await renderLive(
       createElement(QueueWatchPane, {
         initial,
