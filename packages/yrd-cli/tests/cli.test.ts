@@ -2730,10 +2730,12 @@ describe("runYrd", () => {
       timestamp: currentSubmittedAt,
       sourceReadyAt: firstSubmittedAt,
       revisionLineage: [{ pr: "PR1", revisions: [1, 2], sourceReadyAt: firstSubmittedAt }],
-      detail: "position 1 · rev1→rev2",
-      ageMs: 120 * minute,
-      tookMs: 5 * minute,
-    })
+        detail: "position 1 · rev1→rev2",
+        ageMs: 120 * minute,
+        totalMs: null,
+        activeMs: null,
+        waitMs: 5 * minute,
+      })
     const rendered = await renderString(createElement(QueueTimelineView, { projection }), {
       width: 200,
       height: 20,
@@ -2878,9 +2880,35 @@ describe("runYrd", () => {
       ["completed", "environment-refused", "R3"],
       ["completed", "rejected", "R2"],
       ["completed", "integrated", "R1"],
-    ])
-    expect(projection.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR1", "PR2"])
-    expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 3 })
+      ])
+      expect(projection.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR1", "PR2"])
+      expect(projection.rows.find((row) => row.group === "pending" && row.prs[0] === "PR4")).toMatchObject({
+        ageMs: 80 * minute,
+        totalMs: null,
+        activeMs: null,
+        waitMs: 80 * minute,
+      })
+      expect(projection.rows.find((row) => row.run === "R4")).toMatchObject({
+        ageMs: 10 * minute,
+        totalMs: 10 * minute,
+        activeMs: null,
+        waitMs: null,
+      })
+      expect(projection.rows.find((row) => row.run === "R1")).toMatchObject({
+        ageMs: 110 * minute,
+        totalMs: 10 * minute,
+        activeMs: 0,
+        waitMs: 10 * minute,
+      })
+      expect(JSON.parse(JSON.stringify(projection.rows)).find((row: { run?: string }) => row.run === "R1")).toMatchObject(
+        {
+          ageMs: 110 * minute,
+          totalMs: 10 * minute,
+          activeMs: 0,
+          waitMs: 10 * minute,
+        },
+      )
+      expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 3 })
     expect(projection.coverage).toEqual({
       requestedSince: "2026-07-13T06:00:00.000Z",
       retainedSince: "2026-07-13T07:00:00.000Z",
@@ -2904,13 +2932,38 @@ describe("runYrd", () => {
     )
     expect(rendered).toContain("TIME")
     expect(rendered).toContain("STATUS")
-    expect(rendered).toContain("RUN·PR")
-    expect(rendered).toContain("SUBJECT")
-    expect(rendered).toContain("DETAIL")
-    expect(rendered).toContain("AGE/TOOK")
-    expect(rendered).toContain("R4·PR5")
-    expect(rendered).toContain("R1·PR1,PR2")
-    expect(rendered).toContain("typecheck-failed")
+      expect(rendered).toContain("RUN·PR")
+      expect(rendered).toContain("SUBJECT")
+      expect(rendered).toContain("DETAIL")
+      expect(rendered).toContain("AGE")
+      expect(rendered).toContain("TOTAL")
+      expect(rendered).toContain("ACTIVE")
+      expect(rendered).toContain("WAIT")
+      expect(rendered).toContain("R4·PR5")
+      expect(rendered).toContain("R1·PR1,PR2")
+      expect(rendered).toContain("typecheck-failed")
+      for (const width of [80, 120]) {
+        const fixed = stripOsc8Targets(
+          await renderString(
+            createElement(QueueTimelineView, {
+              projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+            }),
+            { width, height: 20, plain: true },
+          ),
+        )
+        const lines = fixed.split("\n")
+        expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
+        const header = lines.find((line) => line.includes("TOTAL"))
+        expect(header).toContain("AGE")
+        expect(header).toContain("TOTAL")
+        expect(header).toContain("ACTIVE")
+        expect(header).toContain("WAIT")
+        const integratedLine = lines.find((line) => line.includes("R1·PR1,PR2"))
+        expect(integratedLine).toBeDefined()
+        const measurements = integratedLine?.slice(-27).trim().split(/\s+/u)
+        expect(measurements).toHaveLength(4)
+        expect(measurements).toContain("10:00")
+      }
     const renderStyledTimeline = createRenderer({ cols: 200, rows: 20 })
     const styled = renderStyledTimeline(
       createElement(QueueTimelineView, {
