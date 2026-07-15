@@ -580,16 +580,26 @@ async function closePrs(
   )
 }
 
-async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+async function readyPr(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
   await app.bays.ready({ pr: selector })
-  const pr = app.bays.pr(selector)
+  let pr = app.bays.pr(selector)
   if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after ready`)
+  if (!app.bays.checksRequested(pr.id)) await app.bays.requestChecks({ pr: pr.id })
+  const admitted = await app.queue.admit({ prs: [pr.id] }, runtimeOptions(io))
+  pr = app.bays.pr(pr.id)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after check admission`)
   await printResult(
     io,
     jsonEnabled(options),
     { command: "pr.ready", pr: prFact(pr), eligibility: app.queue.eligibility(pr.id) },
     createElement(PRResultView, { prs: [pr], runs: [] }),
   )
+  return admitted.some(
+    (run) =>
+      run.status === "failed" && run.prs.some((member) => member.id === pr.id && member.revision === pr.revision),
+  )
+    ? 1
+    : 0
 }
 
 async function recutPr(
@@ -616,6 +626,7 @@ async function recutPr(
     (review) =>
       review.revision === source.revision && review.headSha === source.headSha && review.decision === "approve",
   )
+  const currentCompositions = source.composition === undefined ? sameIssueIntegratedCompositions(app, pr) : undefined
   const result = await service.recut({
     id: pr.id,
     ...(pr.bay === undefined ? {} : { bay: pr.bay }),
@@ -627,6 +638,7 @@ async function recutPr(
     ...(source.baseSha === undefined ? {} : { baseSha: source.baseSha }),
     ...(source.correlation === undefined ? {} : { correlation: source.correlation }),
     ...(source.composition === undefined ? {} : { composition: source.composition }),
+    ...(currentCompositions === undefined ? {} : { currentCompositions }),
     ...(pr.recut === undefined
       ? {}
       : {
@@ -641,20 +653,17 @@ async function recutPr(
           },
         }),
   })
-  let unchanged = result.unchanged
-  if (!unchanged) {
-    const recorded = await app.bays.recut({
-      pr: pr.id,
-      fromRevision: source.revision,
-      headSha: result.headSha,
-      baseSha: result.baseSha,
-      treeSha: result.treeSha,
-      patchId: result.patchId,
-      reviewCarried: approval !== undefined,
-      ...(result.composition === undefined ? {} : { composition: result.composition }),
-    })
-    unchanged = recorded.events.length === 0
-  }
+  const recorded = await app.bays.recut({
+    pr: pr.id,
+    fromRevision: source.revision,
+    headSha: result.headSha,
+    baseSha: result.baseSha,
+    treeSha: result.treeSha,
+    patchId: result.patchId,
+    reviewCarried: approval !== undefined,
+    ...(result.composition === undefined ? {} : { composition: result.composition }),
+  })
+  const unchanged = recorded.events.length === 0
 
   let current = requiredPr(app, pr.id)
   let admitted: readonly QueueRun[] = []
@@ -870,7 +879,7 @@ async function submitBays(
     })
     prs.push(pr)
   }
-  if (command === "bay.submit") {
+  if (command === "bay.submit" || options.draft === true) {
     await printResult(io, jsonEnabled(options), { command, prs }, createElement(PRResultView, { prs, runs: [] }))
     return 0
   }
@@ -924,6 +933,40 @@ function allQueueRuns(app: YrdCliApp): QueueRun[] {
 
 function prQueueRuns(app: YrdCliApp, pr: PR): QueueRun[] {
   return allQueueRuns(app).filter((run) => run.prs.some((member) => member.id === pr.id))
+}
+
+function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly CompositionV1[] | undefined {
+  if (pr.issue === undefined) return undefined
+  const integrated = new Set(
+    app.bays
+      .prs()
+      .filter(
+        (candidate) => candidate.id !== pr.id && candidate.issue === pr.issue && candidate.status === "integrated",
+      )
+      .map((candidate) => candidate.id),
+  )
+  const compositions = allQueueRuns(app)
+    .filter(
+      (run) => run.status === "passed" && run.prs.length > 0 && run.prs.every((member) => integrated.has(member.id)),
+    )
+    .toReversed()
+    .flatMap((run) => {
+      const rewrites = run.integration?.sourceRewrites
+      if (rewrites === undefined || rewrites.length === 0) return []
+      return [
+        CompositionV1Schema.parse({
+          version: 1,
+          sources: rewrites.map((rewrite) => ({
+            repo: rewrite.repo,
+            branch: rewrite.candidateRef,
+            baseSha: rewrite.newBaseSha,
+            tipSha: rewrite.newTipSha,
+            payload: rewrite.payload,
+          })),
+        }),
+      ]
+    })
+  return compositions.length === 0 ? undefined : compositions
 }
 
 async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
@@ -2271,6 +2314,20 @@ function addQueueExamples(queue: CliCommand, name: string): void {
   ])
 }
 
+function addAuthoredCarrierWorkflow<
+  Options extends Record<string, unknown>,
+  Arguments extends unknown[],
+  ArgumentRecord extends Record<string, unknown>,
+>(command: CliCommand<Options, Arguments, ArgumentRecord>, name: string): void {
+  command.addHelpSection("Authored root carrier:", [
+    [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
+    [
+      `$ ${name} pr recut <PR> --queue`,
+      "recut and queue a new revision on that same PR; no composition manifest or manual recut",
+    ],
+  ])
+}
+
 function buildProgram(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
@@ -2365,6 +2422,7 @@ function buildProgram(
   bay
     .command("submit [selector...]")
     .description("submit bays or branches")
+    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
@@ -2533,17 +2591,19 @@ function buildProgram(
     .option("--needs-review", "show revisions needing approval")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
-  pr.command("submit [selector...]")
+  const submit = pr
+    .command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
-    .option("--draft", "leave the PR pushed until pr ready")
+    .option("--draft", "register a pushed PR without requesting or admitting checks")
     .option("--follow", "follow admitted checks to a terminal result")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
-    .option("--composition <path>", "immutable version-1 source composition JSON")
+    .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
+  addAuthoredCarrierWorkflow(submit, name)
   pr.command("view <selector>")
     .description("show a PR and its runs")
     .option("--json", "emit stable JSON")
@@ -2572,7 +2632,8 @@ function buildProgram(
     .option("--note <text>", "set the delivery note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
-  pr.command("recut <selector>")
+  const recut = pr
+    .command("recut <selector>")
     .description("mechanically recut an immutable PR revision onto authoritative current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--queue", "ready the fresh revision and admit its configured checks")
@@ -2580,10 +2641,11 @@ function buildProgram(
     .action(async (selector, options) =>
       setExit(await recutPr(installed(), installedServices(), selector, options, io)),
     )
+  addAuthoredCarrierWorkflow(recut, name)
   pr.command("ready <selector>")
-    .description("move a pushed PR revision into the queue")
+    .description("submit a pushed PR revision and admit configured checks")
     .option("--json", "emit stable JSON")
-    .action(async (selector, options) => readyPr(installed(), selector, options, io))
+    .action(async (selector, options) => setExit(await readyPr(installed(), selector, options, io)))
   pr.command("review <selector>")
     .description("record a revision-bound review verdict")
     .option("--approve", "approve the current revision")

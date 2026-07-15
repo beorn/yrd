@@ -62,8 +62,9 @@ export type QueueTimelineProjectedRow = Readonly<{
   revisionLineage: readonly QueueTimelineRevisionLineage[]
   failure?: Readonly<{ code: string; message: string }>
   ageMs: number | null
-  tookMs: number | null
+  totalMs: number | null
   activeMs: number | null
+  waitMs: number | null
   queueWaitMs: readonly (number | null)[]
 }>
 
@@ -1363,14 +1364,22 @@ function timelineRunRow(
   nowIso: string,
   submissionTimes: ReadonlyMap<string, string | null>,
   state: BaysState | undefined,
+  attempts: readonly QueueAttempt[],
 ): QueueTimelineProjectedRow {
   const running = run.status === "running" || run.status === "waiting"
   const status: QueueTimelineStatus = running ? "running" : terminalOutcome(run)
   const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
   const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `Run '${run.id}' timeline`)
-  const activeMs = running
+  const elapsedRunMs = running
     ? timelineAge(run.startedAt, nowIso, `Run '${run.id}' active duration`)
     : (elapsedMs(run.startedAt, run.finishedAt, `Run '${run.id}' active duration`) ?? null)
+  const durations = runDurations(
+    run,
+    attempts.filter((attempt) => attempt.run === run.id),
+  )
+  const totalMs = running ? elapsedRunMs : (durations.totalDurationMs ?? null)
+  const activeMs = running ? null : (durations.activeDurationMs ?? null)
+  const waitMs = running ? null : (durations.waitDurationMs ?? null)
   const failure = status === "integrated" ? undefined : failureFact(run, relevantStep(run))
   const step = relevantStep(run)
   const baseDetail =
@@ -1399,8 +1408,9 @@ function timelineRunRow(
     revisionLineage,
     ...(failure === undefined ? {} : { failure }),
     ageMs: timelineAge(timestamp ?? undefined, nowIso, `Run '${run.id}' recency`),
-    tookMs: activeMs,
+    totalMs,
     activeMs,
+    waitMs,
     queueWaitMs: running ? [] : timelineQueueWaits(run, submissionTimes),
   }
 }
@@ -1441,8 +1451,9 @@ function timelinePendingRows(
         ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
         revisionLineage,
         ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
-        tookMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
+        totalMs: null,
         activeMs: null,
+        waitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
         queueWaitMs: [],
       },
     ]
@@ -1563,7 +1574,7 @@ export function queueTimelineProjection(
   const rawRows = results.flatMap((result) => [
     ...timelinePendingRows(result, nowIso, options.submissionTimes, options.state),
     ...[...result.running, ...result.waiting, ...result.finished].map((run) =>
-      timelineRunRow(result, run, nowIso, options.submissionTimes, options.state),
+      timelineRunRow(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
     ),
   ])
   const filtered = rawRows
@@ -1578,7 +1589,7 @@ export function queueTimelineProjection(
         run: row.id,
         terminalAtMs: row.timestampMs,
         outcome: row.status as QueueTerminalOutcome,
-        activeMs: row.activeMs,
+        activeMs: row.totalMs,
         queueWaitMs: row.queueWaitMs.filter((wait): wait is number => wait !== null),
       },
     ]
@@ -1839,7 +1850,7 @@ function queueRunSteps(run: QueueRun): string {
   let selectedIndex = 0
   return Array.from({ length: run.steps.length + omitted.length }, (_, index) => {
     const skipped = omittedByIndex.get(index)
-    if (skipped !== undefined) return `${skipped.name}=${skipped.status}(${skipped.reason})`
+    if (skipped !== undefined) return `${skipped.name}=${skipped.status}`
     const selected = run.steps[selectedIndex]
     if (selected === undefined) throw new Error(`yrd: Run '${run.id}' has invalid omitted-step positions`)
     selectedIndex += 1
@@ -2519,19 +2530,21 @@ function TimelineHeader({ includeDate }: { includeDate: boolean }) {
           RUN·PR
         </Text>
       </Box>
-      <Box flexGrow={1} flexBasis={0} minWidth={6}>
+      <Box flexGrow={1} flexBasis={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           SUBJECT
         </Text>
       </Box>
-      <Box flexGrow={1} flexBasis={0} minWidth={10}>
+      <Box flexGrow={1} flexBasis={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           DETAIL
         </Text>
       </Box>
-      <Box width={14} flexShrink={0} minWidth={0} justifyContent="flex-end">
-        <Text color="$fg-muted">AGE/TOOK</Text>
-      </Box>
+      {(["AGE", "TOTAL", "ACTIVE", "WAIT"] as const).map((label) => (
+        <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
+          <Text color="$fg-muted">{label}</Text>
+        </Box>
+      ))}
     </Box>
   )
 }
@@ -2548,7 +2561,12 @@ function TimelineProjectedRow({
   const color = row.status === "integrated" ? "$fg-muted" : undefined
   const clock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
   const identity = `${row.run === undefined ? "" : `${row.run}·`}${row.prs.join(",")}`
-  const transit = `${timelineMetric(row.ageMs)}/${timelineMetric(row.tookMs)}`
+  const measurements = [
+    ["age", row.ageMs],
+    ["total", row.totalMs],
+    ["active", row.activeMs],
+    ["wait", row.waitMs],
+  ] as const
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
       <Box width={includeDate ? 21 : 10} flexShrink={0} minWidth={0}>
@@ -2579,11 +2597,13 @@ function TimelineProjectedRow({
           </Text>
         )}
       </Box>
-      <Box width={14} flexShrink={0} minWidth={0} justifyContent="flex-end">
-        <Text color={color} wrap="truncate">
-          {transit}
-        </Text>
-      </Box>
+      {measurements.map(([label, value]) => (
+        <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
+          <Text color={color} wrap="truncate">
+            {timelineMetric(value)}
+          </Text>
+        </Box>
+      ))}
     </Box>
   )
 }

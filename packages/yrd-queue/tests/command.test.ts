@@ -339,6 +339,143 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it("recuts an authored root after a certified same-issue source superseded its gitlink", async () => {
+    const { repo } = await repository()
+    const doctrineText = (lines: readonly string[]) => `${lines.join("\n")}\n`
+    const module = join(repo, "..", "module")
+    await Bun.$`git init -q -b main ${module}`
+    await git(module, ["config", "user.name", "Yrd Test"])
+    await git(module, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(module, "README.md"), "base\n")
+    await git(module, ["add", "README.md"])
+    await git(module, ["commit", "-qm", "base"])
+    const oldPin = await git(module, ["rev-parse", "HEAD"])
+
+    await git(repo, ["config", "protocol.file.allow", "always"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    await writeFile(join(repo, ".gitattributes"), "doctrine.md merge=union\n")
+    await writeFile(join(repo, "doctrine.md"), doctrineText(["Validate admitted work.", "Keep it flowing."]))
+    await git(repo, ["add", ".gitattributes", "doctrine.md"])
+    await git(repo, ["commit", "-qam", "add dependency"])
+    const sourceBase = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["branch", "issue/root", sourceBase])
+
+    await git(module, ["switch", "-qc", "issue/source"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'authored context'\n")
+    await git(module, ["add", "source-a.ts"])
+    await git(module, ["commit", "-qm", "source a"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'settled'\n")
+    await writeFile(join(module, "source-b.ts"), "export const b = true\n")
+    await git(module, ["add", "source-a.ts", "source-b.ts"])
+    await git(module, ["commit", "-qm", "source b"])
+    const sourceTip = await git(module, ["rev-parse", "HEAD"])
+
+    await git(module, ["switch", "-q", "main"])
+    await writeFile(join(module, "upstream.ts"), "export const upstream = true\n")
+    await writeFile(join(module, "source-a.ts"), "export const source = 'current context'\n")
+    await git(module, ["add", "upstream.ts", "source-a.ts"])
+    await git(module, ["commit", "-qm", "current source base"])
+    const composedBase = await git(module, ["rev-parse", "HEAD"])
+    await writeFile(join(module, "source-a.ts"), "export const source = 'settled'\n")
+    await writeFile(join(module, "source-b.ts"), "export const b = true\n")
+    await git(module, ["add", "source-a.ts", "source-b.ts"])
+    await git(module, ["commit", "-qm", "compose current source"])
+    const composedTip = await git(module, ["rev-parse", "HEAD"])
+    await writeFile(join(module, "repair.ts"), "export const repair = true\n")
+    await git(module, ["add", "repair.ts"])
+    await git(module, ["commit", "-qm", "repair source tooling"])
+    const currentPin = await git(module, ["rev-parse", "HEAD"])
+    expect(currentPin).not.toBe(sourceTip)
+    expect(await git(module, ["cherry", currentPin, sourceTip, oldPin])).toMatch(/^\+ [0-9a-f]{40}/u)
+
+    await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+    await git(join(repo, "dep"), ["checkout", "-q", currentPin])
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "Keep it flowing.",
+      ]),
+    )
+    await git(repo, ["add", "dep"])
+    await git(repo, ["add", "doctrine.md"])
+    await git(repo, ["commit", "-qm", "advance authoritative dependency"])
+    const currentBase = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "issue/root"])
+    await git(join(repo, "dep"), ["checkout", "-q", sourceTip])
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "For authored roots, draft then recut the same PR.",
+        "Keep it flowing.",
+      ]),
+    )
+    await git(repo, ["add", "dep", "doctrine.md"])
+    await git(repo, ["commit", "-qm", "authored root"])
+    const authoredHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["submodule", "update", "--init", "--recursive"])
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const input = {
+      id: "PR1",
+      branch: "issue/root",
+      base: "main",
+      revision: 1,
+      headSha: authoredHead,
+      baseSha: currentBase,
+    }
+    await expect(recutter.recut(input)).rejects.toThrow(/could not recut.+at \[[^\]]*dep/u)
+
+    const result = await recutter.recut({
+      ...input,
+      currentCompositions: [
+        {
+          version: 1,
+          sources: [
+            {
+              repo: "dep",
+              branch: "main",
+              baseSha: composedTip,
+              tipSha: currentPin,
+              payload: ["repair.ts"],
+            },
+          ],
+        },
+        {
+          version: 1,
+          sources: [
+            {
+              repo: "dep",
+              branch: "main",
+              baseSha: composedBase,
+              tipSha: composedTip,
+              payload: ["source-a.ts", "source-b.ts"],
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(result).toMatchObject({
+      baseSha: currentBase,
+      patchId: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      treeSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      unchanged: false,
+    })
+    expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(currentBase)
+    expect(await git(repo, ["diff", "--name-only", currentBase, result.headSha])).toBe("doctrine.md")
+    const recutDoctrine = await git(repo, ["show", `${result.headSha}:doctrine.md`])
+    expect(recutDoctrine).toContain("generated `current_command` verbatim")
+    expect(recutDoctrine).toContain("For authored roots, draft then recut the same PR")
+    expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(currentPin)
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
   it("refuses a recorded base with ambiguous source merge bases", async () => {
     const { repo } = await repository()
     await git(repo, ["switch", "-qc", "issue/left"])
@@ -784,7 +921,7 @@ describe("Queue command adapters", () => {
     expect(await git(remote, ["rev-parse", "main"])).toBe(rootBaseSha)
   })
 
-  it("rejects an author-authored gitlink wrapper unless the rollout kill switch is set", async () => {
+  it("rejects an uncertified authored gitlink wrapper with same-PR recut guidance", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -800,12 +937,51 @@ describe("Queue command adapters", () => {
       status: "failed",
       error: {
         code: "authored-gitlink",
-        message: expect.stringContaining("YRD_ALLOW_AUTHORED_GITLINKS=1"),
+        message: expect.stringMatching(
+          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest or manual recut/iu,
+        ),
       },
     })
     expect(run.steps[0]?.job).toMatchObject({
       status: "failed",
       output: { conflicts: [{ repo: ".", paths: ["dep"] }] },
+    })
+  })
+
+  it("redirects an invalid manual composition to the authored-root draft and recut flow", async () => {
+    const { repo, candidate } = await repository("candidate")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await using process = createProcess()
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/candidate",
+      headSha: candidate,
+      base: "main",
+      baseSha,
+      composition: {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "issue/source",
+            baseSha: "2".repeat(40),
+            tipSha: "3".repeat(40),
+            payload: ["src/candidate.ts"],
+          },
+        ],
+      },
+    })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "composition-invalid",
+        message: expect.stringMatching(
+          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest or manual recut/iu,
+        ),
+      },
     })
   })
 

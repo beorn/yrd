@@ -278,6 +278,10 @@ const LegacyPRRejectedSchema = z
     detail: z.string().optional(),
   })
   .strict()
+const TransitionalPRRejectedSchema = PRQueueTerminalIdentitySchema.extend({
+  detail: z.string().optional(),
+}).strict()
+const PRReplayRejectedSchema = z.union([PRRejectedFactSchema, TransitionalPRRejectedSchema, LegacyPRRejectedSchema])
 const PRIntegratedSchema = PRQueueTerminalIdentitySchema.extend({
   commit: GitShaSchema,
   landingSha: GitShaSchema,
@@ -812,9 +816,9 @@ export function withBays(options: WithBaysOptions) {
         "pr/pushed": LegacyPRPushedSchema,
         "pr/submitted": LegacyPRRevisionSchema,
         "pr/withdrawn": LegacyPRWithdrawnSchema,
-        "pr/rejected": LegacyPRRejectedSchema,
-        "pr/integrated": LegacyPRIntegratedSchema,
-        "pr/canceled": LegacyPRCanceledSchema,
+        "pr/rejected": PRReplayRejectedSchema,
+        "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
+        "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
       project: projectBays,
       create(yrd) {
@@ -1801,8 +1805,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
           })
     }
     case "pr/rejected": {
-      const parsed = PRRejectedFactSchema.safeParse(data)
-      const changed = parsed.success ? parsed.data : LegacyPRRejectedSchema.parse(data)
+      const changed = PRReplayRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
       if (pr === undefined || !terminalApplies(pr, changed)) return state
       const rejected: PR = {
@@ -1815,10 +1818,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         }),
         ...(changed.detail === undefined ? {} : { detail: changed.detail }),
       }
-      return patchPR(
-        pr,
-        parsed.success ? associateRejectedTerminalRun(rejected, parsed.data, parsed.data.run) : rejected,
-      )
+      return patchPR(pr, "run" in changed ? associateRejectedTerminalRun(rejected, changed, changed.run) : rejected)
     }
     case "pr/terminal-associated": {
       const associated = PRTerminalAssociationSchema.parse(data)
