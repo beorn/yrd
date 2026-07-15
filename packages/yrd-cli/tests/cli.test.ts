@@ -1675,7 +1675,7 @@ describe("runYrd", () => {
       })),
     ).toEqual([
       { id: "PR1", state: "pushed", glyph: "[ ]", review: "n/a", checks: "n/a", why: "draft" },
-      { id: "PR2", state: "submitted", glyph: "[ ]", review: "need", checks: "n/a", why: "review-required" },
+      { id: "PR2", state: "submitted", glyph: "[/]", review: "need", checks: "n/a", why: "review-required" },
       { id: "PR3", state: "pushed", glyph: "[ ]", review: "n/a", checks: "fail", why: "checks-failed" },
       { id: "PR4", state: "rejected", glyph: "[!]", review: "n/a", checks: "n/a", why: "rejected" },
       { id: "PR5", state: "integrated", glyph: "[x]", review: "ok", checks: "pass", why: "terminal" },

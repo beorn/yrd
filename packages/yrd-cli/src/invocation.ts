@@ -30,6 +30,48 @@ export function configureYrdGlobalOptions(program: CliCommand): CliCommand {
     .option("--log-level <level>", "set trace|debug|info|warn|error|silent (env: LOG_LEVEL)")
 }
 
+const ROOT_COMMAND_ALIASES = {
+  bays: "bay",
+  contests: "contest",
+  issues: "issue",
+  prs: "pr",
+  queues: "queue",
+} as const
+
+function rootCommandIndex(args: readonly string[]): number | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+    if (arg === "--repo" || arg === "--log-level") {
+      index += 1
+      continue
+    }
+    if (arg?.startsWith("-")) continue
+    return index
+  }
+  return undefined
+}
+
+/** Translate parse-only legacy spellings before Commander sees them. This keeps
+ * help and suggestions canonical without requiring a newer Commander API. */
+export function canonicalizeYrdCommandAliases(args: readonly string[], projection: Invocation["projection"]): string[] {
+  const canonical = [...args]
+  if (projection !== "root") return canonical
+
+  const commandIndex = rootCommandIndex(canonical)
+  if (commandIndex === undefined) return canonical
+  const command = canonical[commandIndex]
+  const alias = command === undefined ? undefined : ROOT_COMMAND_ALIASES[command as keyof typeof ROOT_COMMAND_ALIASES]
+  if (alias !== undefined) canonical[commandIndex] = alias
+
+  if (
+    (canonical[commandIndex] === "pr" || canonical[commandIndex] === "queue") &&
+    canonical[commandIndex + 1] === "ls"
+  ) {
+    canonical[commandIndex + 1] = "list"
+  }
+  return canonical
+}
+
 /** Resolve the command operand with Commander's canonical global-option rules. */
 export function yrdCommandOperand(args: readonly string[]): string | undefined {
   const parser = configureYrdGlobalOptions(new CliCommand("yrd"))

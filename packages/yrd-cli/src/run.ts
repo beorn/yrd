@@ -26,6 +26,7 @@ import type { Job } from "@yrd/job"
 import { Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
+  canonicalizeYrdCommandAliases,
   classifyFailure,
   configureYrdGlobalOptions,
   configuration,
@@ -2435,7 +2436,7 @@ function buildProgram(
     .showSuggestionAfterError()
   program.helpCommand(false)
   program.exitOverride()
-  program.configureHelp({ minWidthToWrap: 20 })
+  program.configureHelp({ ...program.configureHelp(), minWidthToWrap: 20 })
   if (app === undefined) {
     configureYrdGlobalOptions(program)
   }
@@ -2485,7 +2486,6 @@ function buildProgram(
 
   const bay = projection === "bay" ? program : program.command("bay").description("manage isolated Git work bays")
   bay.helpCommand(false)
-  if (projection === "root") bay.silentAlias("bays")
   bay
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
@@ -2560,7 +2560,6 @@ function buildProgram(
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
-  queue.silentAlias("queues")
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--base <branch>", "select one base queue")
@@ -2592,7 +2591,6 @@ function buildProgram(
       }
       await listQueues(installed(), filters, options, io)
     })
-  queueList.silentAlias("ls")
   queue
     .command("audit")
     .description("check queue state")
@@ -2668,9 +2666,7 @@ function buildProgram(
 
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)
-  pr.silentAlias("prs")
   pr.command("list")
-    .silentAlias("ls")
     .description("list pull requests")
     .option("--base <branch>", "scope PRs to one base")
     .option("--state <state>", "scope PRs to one native state")
@@ -2788,7 +2784,6 @@ function buildProgram(
 
   const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)
-  issue.silentAlias("issues")
   issue
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
@@ -2801,7 +2796,6 @@ function buildProgram(
 
   const contest = program.command("contest").description("inspect and select contest attempts")
   contest.helpCommand(false)
-  contest.silentAlias("contests")
   contest
     .command("_list", { isDefault: true, hidden: true })
     .option("--json", "emit stable JSON")
@@ -2897,10 +2891,11 @@ async function executeYrd(
     commanderOutput,
     bootstrap,
   )
+  const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args, invocation.projection)
   const args =
-    invocation.projection === "root" && invocation.args.length === 1 && invocation.args[0] === "pr"
+    invocation.projection === "root" && canonicalArgs.length === 1 && canonicalArgs[0] === "pr"
       ? ["pr", "--help"]
-      : invocation.args
+      : canonicalArgs
   try {
     await program.parseAsync(args, { from: "user" })
     return exit

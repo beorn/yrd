@@ -1,7 +1,24 @@
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
+import { canonicalizeYrdCommandAliases, resolveInvocation, resolveYrdContext } from "../src/invocation.ts"
+
+describe("canonicalizeYrdCommandAliases", () => {
+  it.each([
+    { args: ["prs", "ls", "--json"], expected: ["pr", "list", "--json"] },
+    { args: ["queues", "ls", "--latest"], expected: ["queue", "list", "--latest"] },
+    { args: ["--repo", "prs", "issues", "--json"], expected: ["--repo", "prs", "issue", "--json"] },
+    { args: ["--log-level=debug", "contests"], expected: ["--log-level=debug", "contest"] },
+    { args: ["bay", "open", "prs"], expected: ["bay", "open", "prs"] },
+  ])("canonicalizes parse-only command aliases in $args", ({ args, expected }) => {
+    expect(canonicalizeYrdCommandAliases(args, "root")).toEqual(expected)
+    expect(args).not.toBe(expected)
+  })
+
+  it("does not project root aliases onto git-bay", () => {
+    expect(canonicalizeYrdCommandAliases(["bays"], "bay")).toEqual(["bays"])
+  })
+})
 
 describe("resolveInvocation", () => {
   it.each([
