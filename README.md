@@ -580,6 +580,9 @@ contest:
   concurrency: 2
   timeoutMs: 1800000
   evaluators: [check, sec-check]
+
+notify:
+  pr/rejected: [submitter]
 ```
 
 Names before `merge` run against the pinned Candidate. Names after `merge` run
@@ -592,6 +595,31 @@ identity and appears in typed check evidence.
 `requires: [review]` is the only built-in review policy: the latest verdict for
 the current revision must approve. Comments never gate, and omitting
 `requires` leaves reviews informational.
+
+### PR Signals
+
+`notify` routes an enumerated journal transition without turning delivery into
+a Queue step. The first supported route is `pr/rejected`: `submitter` resolves
+to the actor recorded on that exact PR revision, while an explicit `@name`
+routes to that Tribe member. Each delivery is a tracked Tribe request carrying
+the PR, revision, failed step, Run, and evidence path.
+
+Signal delivery starts only after the journal append commits and never blocks
+the Run. A cursor under `.git/yrd/notifications/` records journal progress and
+successful event-id/recipient sends. Startup replays an append that preceded a
+crash and skips sends already recorded in that cursor. Delivery remains
+at-least-once across the unavoidable external-send/local-record crash window;
+the event id is included in every request so recipients can identify a replay.
+The cursor is recovery bookkeeping, not another event store or scheduler.
+
+Configuration is closed-world: an unknown event name, malformed target, or
+missing Tribe executable refuses startup instead of becoming an inert label.
+Routing to `submitter` also requires `TRIBE_NAME` to identify the current
+submitting `@` handle at startup.
+Historical rejections written before the routable fact shape remain replayable
+but are not retroactively delivered. If a pre-actor revision is rejected after
+upgrade, its unavailable submitter is logged and skipped without starving later
+signals.
 
 An empty `merge: {}` uses Yrd's native Git merge. With `origin` configured,
 Yrd fast-forwards the remote base directly to the exact pinned Candidate; the
@@ -697,6 +725,8 @@ Yrd stores local authority under the primary worktree's common Git directory:
   prs.git/           bare PR ref/object receiver
   receiver-inbox/    crash-safe receive-hook handoff
   artifacts/         command, evaluator, and contest evidence
+  notifications/
+    cursor-v1.json    journal cursor plus successful event-recipient sends
 ```
 
 `events-v3.jsonl` is the source of truth. Each command appends one versioned,

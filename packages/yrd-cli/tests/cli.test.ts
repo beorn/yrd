@@ -36,7 +36,7 @@ import {
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
 import { renderString } from "silvery"
-import { createRenderer } from "@silvery/test"
+import { createRenderer } from "silvery/test"
 import { run } from "silvery/runtime"
 import {
   withContests,
@@ -965,6 +965,94 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("--revision <number>")
     expect(help.stdout()).toContain("--queue")
     expect(help.stdout()).toContain("--json")
+  })
+
+  it("cancels an active predecessor job before admitting a recut revision", async () => {
+    const app = await createApp({ waitingCheck: true })
+    await app.bays.submit({ branch: "issue/recut", headSha: HEAD_SHA, baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    expect(await app.queue.admit({ prs: ["PR1"] })).toMatchObject([
+      {
+        id: "R1",
+        status: "running",
+        prs: [{ id: "PR1", revision: 1 }],
+        steps: [{ name: "check", job: { status: "requested" } }],
+      },
+    ])
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: "2".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--queue", "--json"), output.io, services)).toBe(0)
+
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: { code: "stale-pr" },
+      steps: [{ name: "check", job: { status: "canceled" } }],
+    })
+    expect(app.queue.get("R2")).toMatchObject({
+      status: "waiting",
+      prs: [{ id: "PR1", revision: 2 }],
+    })
+  })
+
+  it("admits only the recut target when an unrelated terminal predecessor consumed checks authority", async () => {
+    const behavior = { failingCheck: true, waitingCheck: false }
+    const app = await createApp(behavior)
+    await app.bays.submit({ branch: "issue/terminal", headSha: HEAD_SHA, baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    expect(await app.queue.admit({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 5 * 60_000 })).toMatchObject([
+      {
+        id: "R1",
+        status: "failed",
+        prs: [{ id: "PR1", revision: 1 }],
+      },
+    ])
+
+    // Keep the recut target pending so only the unrelated predecessor is terminal.
+    behavior.failingCheck = false
+    behavior.waitingCheck = true
+    await app.bays.submit({ branch: "issue/recut", headSha: "2".repeat(40), baseSha: BASE_SHA })
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: "3".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+
+    const output = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR2", "--queue", "--json"), output.io, services)).toBe(0)
+
+    expect(app.queue.get("R1")).toMatchObject({
+      id: "R1",
+      status: "failed",
+      error: { code: "check-failed" },
+      prs: [{ id: "PR1", revision: 1 }],
+      steps: [{ name: "check", job: { status: "failed" } }],
+    })
+    expect(app.queue.get("R2")).toMatchObject({
+      id: "R2",
+      status: "waiting",
+      prs: [{ id: "PR2", revision: 2 }],
+    })
   })
 
   it("recuts the selected immutable revision on the same PR and optionally readies its fresh checks", async () => {

@@ -51,7 +51,7 @@ import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
 import { cleanGitEnvironment } from "./git-environment.ts"
-import { loadYrdConfig, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
+import { loadYrdConfig, SignalRecipientSchema, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, resolveYrdObservability } from "./observability.ts"
@@ -59,6 +59,12 @@ import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
+import {
+  createSignalObserver,
+  createTribeSignalAdapter,
+  type SignalDeliveryAdapter,
+  type SignalObserver,
+} from "./signals.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliQueueAdministration, YrdCliServices } from "./types.ts"
 
 type RuntimeStep = StepDef<PRShape, PRShape>
@@ -78,6 +84,7 @@ export type DefaultYrdAppOptions = Readonly<{
   contestRunners?: readonly ContestRunnerDef[]
   contestEvaluators?: readonly ContestEvaluatorDef[]
   contestGit?: ContestGit
+  defaultActor?: string
   scope?: Scope
   log?: ConditionalLogger
 }>
@@ -432,6 +439,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     withBays({
       jobs: bayJobs,
       defaultBase: baseIdentity(options.config.base),
+      ...(options.defaultActor === undefined ? {} : { defaultActor: options.defaultActor }),
       resolveBase: async (base) => {
         const target = await resolveQueueTarget(options.process, options.repo, options.config.base, base, {
           refreshAuthority: true,
@@ -570,17 +578,22 @@ async function closeRuntime(
   process: Process,
   scope: Scope,
   resident?: ResidentRunnerLease,
+  signals?: SignalObserver,
 ): Promise<void> {
   try {
     await app?.close()
   } finally {
     try {
-      await process.close()
+      await signals?.close()
     } finally {
       try {
-        await scope[Symbol.asyncDispose]()
+        await process.close()
       } finally {
-        await resident?.close()
+        try {
+          await scope[Symbol.asyncDispose]()
+        } finally {
+          await resident?.close()
+        }
       }
     }
   }
@@ -650,16 +663,18 @@ function bindProcessShutdown(shutdown: () => Promise<void>, drain?: (signal: Shu
   return remove
 }
 
-export async function createYrdHost(
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; log?: ConditionalLogger } = {},
-): Promise<YrdHost> {
+export type YrdHostOptions = Readonly<{
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+  log?: ConditionalLogger
+  signalAdapter?: SignalDeliveryAdapter
+}>
+
+export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
   return createYrdRuntimeHost(options)
 }
 
-async function createYrdRuntimeHost(
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; log?: ConditionalLogger },
-  resident?: ResidentRunnerIdentity,
-): Promise<YrdHost> {
+async function createYrdRuntimeHost(options: YrdHostOptions, resident?: ResidentRunnerIdentity): Promise<YrdHost> {
   const scope = createScope("yrd-host")
   const ownsLog = options.log === undefined
   const log =
@@ -671,6 +686,7 @@ async function createYrdRuntimeHost(
   const process = createProcess({ cwd: options.cwd, env, inject: { scope, log } })
   let app: YrdCliApp | undefined
   let residentLease: ResidentRunnerLease | undefined
+  let signals: SignalObserver | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
@@ -681,17 +697,41 @@ async function createYrdRuntimeHost(
       stateDir: repository.stateDir,
       process,
     })
+    const journal = createJournal({ dir: repository.stateDir, inject: { log } })
+    const routes = loaded.config.notify ?? {}
+    const defaultActor = env.TRIBE_NAME?.trim() || "operator"
+    if (
+      routes["pr/rejected"]?.includes("submitter") === true &&
+      !SignalRecipientSchema.safeParse(defaultActor).success
+    ) {
+      raiseFailure(
+        "configuration",
+        "signal-submitter-missing",
+        "yrd: notify.pr/rejected targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)",
+      )
+    }
+    if (Object.keys(routes).length > 0) {
+      signals = createSignalObserver({
+        journal,
+        stateDir: repository.stateDir,
+        routes,
+        adapter: options.signalAdapter ?? createTribeSignalAdapter(process),
+        log,
+      })
+    }
     app = await createDefaultYrdApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
       receiverPath: receiver.receiverPath,
-      journal: createJournal({ dir: repository.stateDir, inject: { log } }),
+      journal: signals?.journal ?? journal,
       process,
       config: loaded.config,
+      defaultActor,
       scope,
       log,
     })
+    signals?.start()
     const runtimeApp = app
     const resolveTarget = receiverTarget(runtimeApp)
     const receiverLog = log.child("receiver")
@@ -715,7 +755,7 @@ async function createYrdRuntimeHost(
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
-      (closePromise ??= closeRuntime(app, process, scope, residentLease).finally(() => {
+      (closePromise ??= closeRuntime(app, process, scope, residentLease, signals).finally(() => {
         if (ownsLog) log.end()
       }))
     return Object.freeze({
@@ -730,7 +770,7 @@ async function createYrdRuntimeHost(
       [Symbol.asyncDispose]: close,
     })
   } catch (error) {
-    await closeRuntime(app, process, scope, residentLease)
+    await closeRuntime(app, process, scope, residentLease, signals)
     if (ownsLog) log.end()
     throw error
   }

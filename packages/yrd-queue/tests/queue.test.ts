@@ -303,9 +303,22 @@ describe("Queue", () => {
       }),
     )
 
-    await using rejectedApp = await createQueueApp({
-      check: () => ({ status: "failed", error: { code: "check-failed", message: "typed bounce" } }),
-    })
+    await using rejectedApp = await createQueueApp(
+      {
+        check: () => ({
+          status: "failed",
+          error: {
+            code: "check-failed",
+            message: "typed bounce",
+            evidence: { artifacts: [{ name: "stderr", path: "artifact://R1/check/stderr.log" }] },
+          },
+        }),
+      },
+      createMemoryJournal(),
+      () => "2026-01-01T00:00:00.000Z",
+      ids(),
+      createLogger("test", [{ level: "silent" }]),
+    )
     await rejectedApp.bays.submit({
       branch: "topic/unrelated-20685-subject",
       headSha: HEAD,
@@ -319,15 +332,18 @@ describe("Queue", () => {
     expect(await Array.fromAsync(rejectedApp.events())).toContainEqual(
       expect.objectContaining({
         name: "pr/rejected",
-        data: {
+        data: expect.objectContaining({
           pr: "PR1",
           revision: 1,
           headSha: HEAD,
           issueRef,
           run: "R1",
           correlation,
+          actor: "operator",
+          step: "check",
+          evidence: "artifact://R1/check/stderr.log",
           detail: "typed bounce",
-        },
+        }),
       }),
     )
   })

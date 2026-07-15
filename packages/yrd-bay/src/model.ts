@@ -30,6 +30,26 @@ export const CorrelationSchema = z
   })
   .strict()
 
+const TextSchema = z.string().trim().min(1)
+
+/** Closed current rejection fact used by the Bay projection and post-append signal observers. */
+export const PRRejectedFactSchema = z
+  .object({
+    pr: PRIdSchema,
+    revision: z.number().int().positive(),
+    headSha: GitShaSchema,
+    run: TextSchema,
+    issueRef: TextSchema.optional(),
+    correlation: CorrelationSchema.optional(),
+    /** Missing only when a current rejection terminates a pre-actor legacy revision. */
+    actor: TextSchema.optional(),
+    step: TextSchema,
+    evidence: TextSchema.optional(),
+    detail: z.string().optional(),
+  })
+  .strict()
+export type PRRejectedFact = Readonly<z.infer<typeof PRRejectedFactSchema>>
+
 export const GitPayloadPathSchema = z
   .string()
   .min(1)
@@ -183,6 +203,8 @@ export type PRRevision = Readonly<{
   headSha: string
   base: string
   baseSha?: string
+  /** Missing only while replaying journals written before submitter identity was recorded. */
+  actor?: string
   correlation?: Correlation
   composition?: CompositionV1
   recut?: PRRecutProof
