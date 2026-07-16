@@ -78,7 +78,7 @@ export function QueueTimelineStorybook() {
         </Text>
       </Box>
       <Box flexGrow={1} minWidth={0} minHeight={0}>
-        <QueueWatchFrame key={name} snapshot={snapshot} paused={false} />
+        <QueueWatchFrame key={name} snapshot={snapshot} />
       </Box>
       <Box height={1} flexShrink={0} paddingX={1}>
         <Text color="$fg-muted" wrap="truncate">

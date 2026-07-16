@@ -85,13 +85,7 @@ import {
   stepTaskStatusOf,
   taskStatusGlyph,
 } from "../src/task-status.ts"
-import {
-  QueueWatchFrame,
-  QueueWatchPane,
-  queueDetailTier,
-  reduceWatchControl,
-  type QueueWatchPaneProps,
-} from "../src/watch-pane.tsx"
+import { QueueWatchFrame, QueueWatchPane, queueDetailTier, type QueueWatchPaneProps } from "../src/watch-pane.tsx"
 
 const BASE_SHA = "a".repeat(40)
 const HEAD_SHA = "1".repeat(40)
@@ -3308,9 +3302,9 @@ describe("runYrd", () => {
       }),
     )
     const lines = rendered.split("\n").filter(Boolean)
-    const header = lines.find((line) => line.includes("TIME") && line.includes("RUN·PR"))
+    const header = lines.find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("STEP"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "STATUS", "RUN·PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
+    for (const label of ["TIME", "STATUS", "RUN", "PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
     for (const removed of ["SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) expect(header).not.toContain(removed)
     const first = lines.find((line) => line.includes("PR1.1"))
     const second = lines.find((line) => line.includes("PR2.1"))
@@ -3362,7 +3356,7 @@ describe("runYrd", () => {
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
-      expect(absent.stdout()).toContain("RUNNER none — nothing drains this queue")
+      expect(absent.stdout()).toContain("NO RUNNER - no drained run in window")
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
@@ -3383,6 +3377,8 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-13T12:00:00.000Z",
           lastTickAt: "2026-07-13T12:00:00.000Z",
+          // The RUNNER box renders this verbatim as `[pid] <command>`.
+          command: expect.any(String),
         })
         now += 1_000
         await new Promise((resolve) => setTimeout(resolve, 20))
@@ -3596,7 +3592,7 @@ describe("runYrd", () => {
       { width: 200, height: 32, plain: true },
     )
     expect(rendered).toContain("TIME")
-    expect(rendered).toContain("RUN·PR")
+    expect(rendered).toContain("STATUS")
     expect(rendered).toContain("AGE")
     expect(rendered).toContain("main#4")
     expect(rendered).toContain("PR5.1")
@@ -3618,11 +3614,11 @@ describe("runYrd", () => {
       )
       const lines = fixed.split("\n")
       const filter = lines.find((line) => line.includes("FILTER "))
-      expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 status=all terms=none latest=no")
+      expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
       const flow = lines.find((line) => line.includes("FLOW "))
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
-      const header = lines.find((line) => line.includes("RUN·PR") && line.includes("TIME"))
+      const header = lines.find((line) => line.includes("TIME") && line.includes("STEP"))
       expect(header).toContain("STEP")
       expect(header).toContain("AGE")
       expect(header?.trimEnd()).toMatch(/RUN$/u)
@@ -3640,7 +3636,7 @@ describe("runYrd", () => {
       // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
       // date-qualified but never truncated below seconds.
       expect(integratedLine).toContain("2026-07-13T15:40:00")
-      expect(integratedLine).toContain("✓ ok")
+      expect(integratedLine).toContain("✓ done")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 ◷10:00$/u)
     }
     const renderStyledTimeline = createRenderer({ cols: 200, rows: 30 })
@@ -3731,7 +3727,7 @@ describe("runYrd", () => {
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)
     const frame = stripOsc8Targets(
-      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false }), {
+      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial }), {
         width: 200,
         height: 50,
         plain: true,
@@ -3743,11 +3739,10 @@ describe("runYrd", () => {
     expect(frame).not.toContain("position 1")
     expect(frame).toContain("AGE")
     expect(frame).toContain("WAIT")
-    expect(frame).toContain("RUNNER none — nothing drains this queue")
-    expect(frame).toContain("LIVE")
-    expect(frame).toContain("p pause")
-    expect(frame).toContain("q quit")
-    expect(frame).toContain("Enter detail")
+    expect(frame).toContain("NO RUNNER - no drained run in window")
+    expect(frame).toContain("q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate")
+    expect(frame).not.toContain("LIVE")
+    expect(frame).not.toContain("p pause")
     expect(frame).not.toContain("PATH")
     expect(frame).not.toContain("file:///repo/.bays/B1")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
@@ -3837,17 +3832,17 @@ describe("runYrd", () => {
     if (mounted === undefined) throw new Error("expected queue watch pane to mount")
     const snapshot = (mounted.props as QueueWatchPaneProps).initial
 
-    const wide = await run(createElement(QueueWatchFrame, { snapshot, paused: false }), {
+    const wide = await run(createElement(QueueWatchFrame, { snapshot }), {
       writable: { write: () => {} },
       cols: 200,
       rows: 50,
     })
-    const below = await run(createElement(QueueWatchFrame, { snapshot, paused: false }), {
+    const below = await run(createElement(QueueWatchFrame, { snapshot }), {
       writable: { write: () => {} },
       cols: 100,
       rows: 40,
     })
-    const compact = await run(createElement(QueueWatchFrame, { snapshot, paused: false }), {
+    const compact = await run(createElement(QueueWatchFrame, { snapshot }), {
       writable: { write: () => {} },
       cols: 80,
       rows: 24,
@@ -3855,7 +3850,9 @@ describe("runYrd", () => {
 
     try {
       expect(wide.text).toContain("│")
-      expect(wide.text.split("\n")[0]).toContain("PR PR1 STATUS")
+      // Right-docked: the DETAIL pane title shares the top row with the list.
+      expect(wide.text.split("\n")[0]).toContain("DETAIL")
+      expect(wide.text).toContain("PR PR1 STATUS")
       await wide.press("Escape")
       await wide.waitForLayoutStable()
       expect(wide.text).not.toContain("PR PR1 STATUS")
@@ -3864,7 +3861,8 @@ describe("runYrd", () => {
       expect(wide.text).toContain("PR PR1 STATUS")
 
       expect(below.text).toContain("─")
-      expect(below.text.split("\n")[0]).not.toContain("PR PR1 STATUS")
+      // Below-docked: the DETAIL title is not on the top row.
+      expect(below.text.split("\n")[0]).not.toContain("DETAIL")
       expect(below.text).toContain("PR PR1 STATUS")
 
       expect(compact.text).toContain("QUEUE main")
@@ -3961,8 +3959,10 @@ describe("runYrd", () => {
     expect(plain.stdout()).toContain("pending")
     expect(latest.stdout()).toContain("PR1.1")
     expect(latest.stdout()).toContain("PR2.1")
-    expect(plain.stdout()).toContain("latest=no")
-    expect(latest.stdout()).toContain("latest=yes")
+    // Non-default-only FILTER row (user respec 2026-07-15): `latest` renders
+    // only when the collapse is on — no `latest=no` placeholder.
+    expect(plain.stdout()).not.toContain("latest")
+    expect(latest.stdout()).toContain("latest")
   })
 
   it("renders queue --watch identically to root watch", async () => {
@@ -3986,7 +3986,7 @@ describe("runYrd", () => {
 
     const rootFrame = stripOsc8Targets(
       await renderString(
-        createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial, paused: false }),
+        createElement(QueueWatchFrame, { snapshot: (rootMounted.props as QueueWatchPaneProps).initial }),
       ),
     )
     for (const variant of watchVariants) {
@@ -4001,7 +4001,7 @@ describe("runYrd", () => {
       if (mounted === undefined) throw new Error("expected watch panes to mount")
       const frame = stripOsc8Targets(
         await renderString(
-          createElement(QueueWatchFrame, { snapshot: (mounted.props as QueueWatchPaneProps).initial, paused: false }),
+          createElement(QueueWatchFrame, { snapshot: (mounted.props as QueueWatchPaneProps).initial }),
         ),
       )
       expect(frame).toBe(rootFrame)
@@ -4089,7 +4089,7 @@ describe("runYrd", () => {
     ).toBe(0)
     if (mounted === undefined) throw new Error("expected filtered queue watch pane to mount")
     const props = mounted.props as QueueWatchPaneProps
-    const frame = await renderString(createElement(QueueWatchFrame, { snapshot: props.initial, paused: false }), {
+    const frame = await renderString(createElement(QueueWatchFrame, { snapshot: props.initial }), {
       width: 120,
       height: 24,
       plain: true,
@@ -4119,10 +4119,6 @@ describe("runYrd", () => {
   })
 
   it("projects watch controls, oldest-open drain age, and the active spotlight", () => {
-    expect(reduceWatchControl({ paused: false }, "p")).toEqual({ paused: true })
-    expect(reduceWatchControl({ paused: true }, "p")).toEqual({ paused: false })
-    expect(reduceWatchControl({ paused: false }, "q")).toBe("exit")
-
     const result = {
       base: "main",
       prs: [
@@ -4441,7 +4437,7 @@ describe("runYrd", () => {
     expect(frame).toContain("cold typecheck")
   })
 
-  it("handles pause and quit inside the live Silvery runtime", async () => {
+  it("quits with q inside the live Silvery runtime with pause removed", async () => {
     const initial = {
       results: [
         {
@@ -4465,10 +4461,12 @@ describe("runYrd", () => {
     )
     try {
       expect(handle.text).toContain("No matching queue rows.")
-      expect(handle.text).toContain("LIVE")
+      // Pause/resume is removed (user respec 2026-07-15): the watch is
+      // always live and `p` is a status-filter toggle, never a pause.
+      expect(handle.text).not.toContain("LIVE")
       await handle.press("p")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PAUSED")
+      expect(handle.text).not.toContain("PAUSED")
 
       const exited = handle.waitUntilExit()
       await handle.press("q")
@@ -5253,9 +5251,13 @@ describe("runYrd", () => {
     expect(detailHuman.stdout()).not.toContain("RELATED RUNS")
     expect(detailHuman.stdout()).toContain("JOB ")
     expect(detailHuman.stdout()).toContain("RUNNER ")
-    expect(detailHuman.stdout()).toContain("LEASE -")
+    // Present-facts rule (user respec 2026-07-15): an absent lease renders
+    // nothing rather than a `-` placeholder; the present CHANGED clock stays.
+    expect(detailHuman.stdout()).not.toContain("LEASE -")
     expect(detailHuman.stdout()).toContain("CHANGED ")
-    expect(detailHuman.stdout()).toContain("PROOF ART")
+    // This run records no artifacts or evidence: the PROOF row is omitted
+    // entirely under the present-facts rule.
+    expect(detailHuman.stdout()).not.toContain("PROOF")
     expect(detailHuman.stdout()).toContain("NEXT")
 
     const scoped = outputIO()
@@ -5298,7 +5300,8 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain("STEP")
     expect(human.stdout()).toContain("REV")
     expect(human.stdout()).toContain("OUTPUT")
-    expect(human.stdout()).toContain("CHECKPOINT")
+    // Present-facts rule: this run records no checkpoint, so no placeholder.
+    expect(human.stdout()).not.toContain("CHECKPOINT -")
     expect(human.stdout()).toContain("EVIDENCE")
     expect(human.stdout()).toContain("LANDING")
     expect(human.stdout()).toContain("check")

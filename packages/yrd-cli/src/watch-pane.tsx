@@ -17,16 +17,20 @@ import {
   type ListViewHandle,
 } from "silvery"
 import {
+  QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueEvidenceView,
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
+  TitledBox,
+  queueTimelineFilterBuckets,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
   queueTimelineVisibleRows,
   type QueueShowData,
   type QueueStatusResult,
   type QueueTimelineProjection,
+  type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 
 const LIST_NATURAL_WIDTH = 80
@@ -85,21 +89,12 @@ export type QueueWatchSnapshot = Readonly<{
   outputs?: readonly QueueArtifactOutput[]
 }>
 
-export type WatchControl = Readonly<{ paused: boolean }>
-type QueueDetailMode = "detail" | "filters" | "evidence"
-
 export type QueueWatchPaneProps = Readonly<{
   initial: QueueWatchSnapshot
   load(): Promise<QueueWatchSnapshot>
   intervalMs: number
   pr?: string
 }>
-
-export function reduceWatchControl(control: WatchControl, input: string): WatchControl | "exit" {
-  if (input === "q") return "exit"
-  if (input === "p") return { paused: !control.paused }
-  return control
-}
 
 type QueueArtifactOutputLine = Readonly<{
   key: string
@@ -199,21 +194,6 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
   )
 }
 
-function QueueFilterView({ projection }: { projection: QueueTimelineProjection }) {
-  const filters = projection.filters
-  return (
-    <Box flexDirection="column">
-      <Text bold>FILTERS</Text>
-      <Text>BASE {projection.base}</Text>
-      <Text>SINCE {filters.since}</Text>
-      <Text>STATUS {filters.statuses.join(",")}</Text>
-      <Text>TERMS {filters.terms.length === 0 ? "none" : filters.terms.join(" OR ")}</Text>
-      <Text>RUNS {filters.latest ? "latest per PR" : "all"}</Text>
-      <Text color="$fg-muted">Press Esc to return to selected-row detail.</Text>
-    </Box>
-  )
-}
-
 function isSuccessfulStepStatus(status: string): boolean {
   return status === "passed" || status === "skipped"
 }
@@ -306,20 +286,29 @@ function QueueWorkflowStepTabs({
   )
 }
 
-export function QueueWatchFrame({
-  snapshot,
-  paused,
-  pr,
-}: {
-  snapshot: QueueWatchSnapshot
-  paused: boolean
-  pr?: string
-}) {
+export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot; pr?: string }) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
+  // The four operator buckets (user respec 2026-07-15): p/r/f/d toggle them
+  // and the FILTER row's checkbox indicators mirror + click-toggle the same
+  // state. Initial visibility mirrors the CLI-level --status filters.
+  const [visibleBuckets, setVisibleBuckets] = useState<ReadonlySet<QueueTimelineStatusBucket>>(() =>
+    snapshot.projection === undefined
+      ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)
+      : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
+  )
+  const toggleBucket = (bucket: QueueTimelineStatusBucket): void => {
+    setVisibleBuckets((current) => {
+      const next = new Set(current)
+      if (next.has(bucket)) next.delete(bucket)
+      else next.add(bucket)
+      return next
+    })
+  }
   const projectedRows = useMemo(
-    () => (snapshot.projection === undefined ? undefined : queueTimelineVisibleRows(snapshot.projection)),
-    [snapshot.projection],
+    () =>
+      snapshot.projection === undefined ? undefined : queueTimelineVisibleRows(snapshot.projection, visibleBuckets),
+    [snapshot.projection, visibleBuckets],
   )
   const rows = useMemo(
     () =>
@@ -340,14 +329,16 @@ export function QueueWatchFrame({
   // cursor move is sticky — default-follow stops until the pinned row leaves
   // the window or the view is reopened.
   const defaultCursorKey =
-    snapshot.projection === undefined ? rows[0]?.key : queueTimelineVisibleDefaultCursorId(snapshot.projection)
+    snapshot.projection === undefined
+      ? rows[0]?.key
+      : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets)
   const [manualCursor, setManualCursor] = useState(false)
   const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
   const [selectedPr, setSelectedPr] = useState<string | undefined>(
     () => pr ?? rows.find((row) => row.key === defaultCursorKey)?.pr ?? rows[0]?.pr,
   )
   const [detailOpen, setDetailOpen] = useState(() => snapshot.projection === undefined || tier !== "full")
-  const [detailMode, setDetailMode] = useState<QueueDetailMode>("detail")
+  const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
   const [newRows, setNewRows] = useState(0)
   const previousTier = useRef(tier)
@@ -389,24 +380,25 @@ export function QueueWatchFrame({
   }, [tier])
 
   useInput((input, key) => {
-    if (snapshot.projection === undefined) return
-    if (input === "f") {
-      setDetailMode("filters")
-      setDetailOpen(true)
-      return
-    }
-    if (input === "o") {
-      setDetailMode("evidence")
-      setDetailOpen(true)
-      return
-    }
     if (key.escape) {
-      if (detailMode === "detail") setDetailOpen(false)
-      else setDetailMode("detail")
+      setDetailOpen(false)
+      return
     }
     if (key.return) {
-      setDetailMode("detail")
       setDetailOpen(true)
+      return
+    }
+    if (snapshot.projection === undefined) return
+    // Direct status-filter toggles (user respec 2026-07-15). Pause/resume is
+    // removed: `p` toggles the pending bucket.
+    if (input === "p") toggleBucket("pending")
+    if (input === "r") toggleBucket("running")
+    if (input === "f") toggleBucket("failed")
+    if (input === "d") toggleBucket("done")
+    // `o` jumps to the EVIDENCE section of the detail body.
+    if (input === "o") {
+      setDetailOpen(true)
+      setEvidenceOpen(true)
     }
   })
 
@@ -447,6 +439,11 @@ export function QueueWatchFrame({
         cursorKey={cursor}
         onCursor={selectRow}
         onSelect={selectRow}
+        paneChrome
+        fillHeight
+        visibleBuckets={visibleBuckets}
+        onToggleBucket={toggleBucket}
+        freshRows={newRows}
       />
     )
   const selectedDetail =
@@ -457,14 +454,30 @@ export function QueueWatchFrame({
         <QueueWatchView results={snapshot.results} now={snapshot.now} pr={detailPr} />
       )
     ) : (
-      <QueueWorkflowStepTabs
-        key={detailData.run}
-        data={detailData}
-        outputs={detailOutputs}
-        compact={tier === "full"}
-        active={detailOpen && detailMode === "detail"}
-        highlightPr={selectedRow?.pr}
-      />
+      // Evidence lives INSIDE the scrollable detail body as a disclosure
+      // section (user respec 2026-07-15); `o` expands it.
+      <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        <QueueWorkflowStepTabs
+          key={detailData.run}
+          data={detailData}
+          outputs={detailOutputs}
+          // Detail facts always stack vertically (user respec 2026-07-15):
+          // label/value rows that fit the pane width, never a sprawling table.
+          compact
+          active={detailOpen}
+          highlightPr={selectedRow?.pr}
+        />
+        <Accordion
+          title="EVIDENCE"
+          expanded={evidenceOpen}
+          onToggle={setEvidenceOpen}
+          marginTop={1}
+          flexShrink={0}
+          minWidth={0}
+        >
+          <QueueEvidenceView data={detailData} />
+        </Accordion>
+      </Box>
     )
   if (snapshot.projection === undefined) {
     return (
@@ -472,45 +485,34 @@ export function QueueWatchFrame({
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
         <Box marginTop={1}>
-          <Text bold>{paused ? "PAUSED" : "LIVE"}</Text>
-          <Text color="$fg-muted"> {paused ? "p resume" : "p pause"} q quit</Text>
+          <Text color="$fg-muted">q quit - enter/esc show/hide detail - h/j/k/l navigate</Text>
         </Box>
       </Box>
     )
   }
 
-  const detail =
-    detailMode === "filters" ? (
-      <QueueFilterView projection={snapshot.projection} />
-    ) : detailMode === "evidence" ? (
-      detailData === undefined ? (
-        <Text color="$fg-muted">No run evidence for the selected pending PR.</Text>
-      ) : (
-        <QueueEvidenceView data={detailData} />
-      )
-    ) : (
-      selectedDetail
-    )
+  const detail = selectedDetail
 
-  const footerHint =
-    tier === "full"
-      ? detailOpen
-        ? "Esc list"
-        : "Enter detail"
-      : detailOpen
-        ? "Esc close detail"
-        : "Enter reopen detail"
-  const stepHint =
-    detailOpen && detailMode === "detail" && detailData !== undefined && queueStepNames(detailData).length > 1
-      ? " · h/l steps"
-      : ""
-
+  // Both panes carry the one title-in-border chrome idiom with one cell of
+  // outer padding on all sides (user directive 2026-07-15); content, headers,
+  // and the FILTER/STATS rows all sit inside that padding.
+  const queuePaneTitle = `QUEUE ${snapshot.projection.base}`
+  const framedTimeline = (
+    <TitledBox title={queuePaneTitle} padding={1} fill>
+      {timeline}
+    </TitledBox>
+  )
+  const framedDetail = (
+    <TitledBox title="DETAIL" padding={1} fill>
+      {detail}
+    </TitledBox>
+  )
   return (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>
-            {detailOpen ? detail : timeline}
+            {detailOpen ? framedDetail : framedTimeline}
           </Box>
         ) : (
           <SplitPane
@@ -521,20 +523,15 @@ export function QueueWatchFrame({
             minSecondarySize={tier === "right" ? DETAIL_NATURAL_WIDTH : DETAIL_NATURAL_HEIGHT}
             dividerSize={DIVIDER_SIZE}
             secondaryCollapsed={!detailOpen}
-            primary={timeline}
-            secondary={detail}
+            primary={framedTimeline}
+            secondary={framedDetail}
           />
         )}
       </Box>
       <Box height={1} flexShrink={0}>
-        <Text bold>{paused ? "PAUSED" : "LIVE"}</Text>
-        <Text color="$fg-muted">
-          {" "}
-          {paused ? "p resume" : "p pause"} q quit · {footerHint}
-          {stepHint}
-          {" · f filters · o evidence"}
-          {newRows === 0 ? "" : ` · ${newRows} new`}
-        </Text>
+        {/* Exact keybinding footer (user respec 2026-07-15). Pause/resume is
+            removed; `N new` moved to the pane header's temporal-trust row. */}
+        <Text color="$fg-muted">q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate</Text>
       </Box>
     </Box>
   )
@@ -542,18 +539,14 @@ export function QueueWatchFrame({
 
 export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPaneProps) {
   const [snapshot, setSnapshot] = useState(initial)
-  const [control, setControl] = useState<WatchControl>({ paused: false })
   const [failure, setFailure] = useState<Error | undefined>()
 
   useInput((input) => {
-    const next = reduceWatchControl(control, input)
-    if (next === "exit") return "exit"
-    if (next !== control) setControl(next)
+    if (input === "q") return "exit"
   })
 
   useScopeEffect(
     (scope) => {
-      if (control.paused) return
       void (async () => {
         while (!scope.signal.aborted) {
           await scope.sleep(intervalMs)
@@ -567,9 +560,9 @@ export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPane
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })
     },
-    [control.paused, intervalMs, load],
+    [intervalMs, load],
   )
 
   if (failure !== undefined) throw failure
-  return <QueueWatchFrame snapshot={snapshot} paused={control.paused} {...(pr === undefined ? {} : { pr })} />
+  return <QueueWatchFrame snapshot={snapshot} {...(pr === undefined ? {} : { pr })} />
 }

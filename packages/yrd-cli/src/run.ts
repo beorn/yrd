@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { isAbsolute, join, relative, resolve } from "node:path"
+import { basename, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
 import {
@@ -142,7 +142,15 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
       "yrd: resident runner lastTickAt precedes startedAt",
     )
   }
-  return { pid: record.pid as number, startedAt, lastTickAt }
+  if (record.command !== undefined && typeof record.command !== "string") {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner command is invalid")
+  }
+  return {
+    pid: record.pid as number,
+    startedAt,
+    lastTickAt,
+    ...(record.command === undefined ? {} : { command: record.command as string }),
+  }
 }
 
 export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRunner | null> {
@@ -204,9 +212,11 @@ export async function startResidentRunnerHeartbeat(
     return new Date(now).toISOString()
   }
   const startedAt = nowIso()
+  // The operator-facing RUNNER box renders this verbatim: `[pid] <command>`.
+  const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const write = async (): Promise<void> => {
     await mkdir(directory, { recursive: true })
-    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso() }
+    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso(), command }
     try {
       await writeFile(temporary, `${JSON.stringify(status)}\n`, "utf8")
       await rename(temporary, path)
