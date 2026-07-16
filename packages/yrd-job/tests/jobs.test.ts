@@ -630,6 +630,46 @@ describe("Jobs", () => {
     await app.close()
   })
 
+  it.fails("settles a progress-gated runner even when its handler never returns after abort", async () => {
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let aborted = false
+    const app = await jobsApp(
+      delivery(async (_input, context) => {
+        context.reportProgress?.()
+        context.signal.addEventListener("abort", () => (aborted = true), { once: true })
+        started.resolve()
+        await release.promise
+        return { status: "passed", output: { receipt: "too-late" } }
+      }),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    await app.dispatch(app.commands.sender.send, { message: "stranded" })
+
+    let running: ReturnType<typeof app.jobs.run> | undefined
+    let settled: Awaited<ReturnType<typeof app.jobs.run>> | undefined
+    try {
+      running = app.jobs.run(JOB_ID, {
+        runner: "worker-1",
+        leaseMs: 20,
+        heartbeatMs: 5,
+      })
+      void running.then((job) => (settled = job))
+      await started.promise
+      await Bun.sleep(40)
+      await Promise.resolve()
+
+      expect(aborted).toBe(true)
+      expect(settled).toMatchObject({
+        status: "failed",
+        error: { code: "progress-stalled", message: expect.stringContaining("progress lease expired") },
+      })
+    } finally {
+      release.resolve()
+      if (running !== undefined) await running
+      await app.close()
+    }
+  })
   it("aborts and awaits active runner cleanup when the runtime closes", async () => {
     const started = Promise.withResolvers<void>()
     let cleaned = false
