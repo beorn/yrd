@@ -1324,8 +1324,8 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
             run: started.run,
             events: [
               queueFailedEvent(state, superseded, {
-                  code: "step-selection-superseded",
-                  message: `explicit steps '${selection.steps.join(",")}' superseded unstarted configured checks`,
+                code: "step-selection-superseded",
+                message: `explicit steps '${selection.steps.join(",")}' superseded unstarted configured checks`,
               }),
               ...started.events,
             ],
@@ -1652,6 +1652,30 @@ function currentAuthorityMatches(
   return current?.revision === token.revision && current.headSha === token.headSha
 }
 
+function terminalAuthorityMatches(
+  authority: DeepReadonly<QueueAuthorityState>,
+  terminal: DeepReadonly<{ pr: string; revision: number; headSha?: string }>,
+  eventName: string,
+  requireCurrent: boolean,
+): boolean {
+  const current = authority.current[terminal.pr]
+  if (current === undefined) {
+    if (requireCurrent) {
+      throw new Error(`yrd: terminal '${eventName}' for PR '${terminal.pr}' has no current queue authority`)
+    }
+    return false
+  }
+  if (
+    current.revision !== terminal.revision ||
+    (terminal.headSha !== undefined && current.headSha !== terminal.headSha)
+  ) {
+    throw new Error(
+      `yrd: stale terminal '${eventName}' for PR '${terminal.pr}' targets ${terminal.revision}@${terminal.headSha ?? "unknown"}; queue authority is ${current.revision}@${current.headSha}`,
+    )
+  }
+  return true
+}
+
 function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
   if (applied.name === "pr/pushed" || applied.name === "pr/recut") {
     const token =
@@ -1699,7 +1723,9 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/rejected") {
     const rejected = QueueRejectedTerminalFactSchema.parse(applied.data)
-    if (state.queues.authority.current[rejected.pr]?.revision !== rejected.revision) return state
+    if (!terminalAuthorityMatches(state.queues.authority, rejected, applied.name, typeof rejected.run === "string")) {
+      return state
+    }
     const terminalAssociations =
       rejected.run !== undefined
         ? state.queues.terminalAssociations
@@ -1759,7 +1785,8 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "pr/integrated") {
     const integrated = QueueAuthorityTokenFactSchema.parse(applied.data)
-    if (!currentAuthorityMatches(state.queues.authority, integrated)) return state
+    const currentTerminal = typeof (applied.data as { run?: unknown }).run === "string"
+    if (!terminalAuthorityMatches(state.queues.authority, integrated, applied.name, currentTerminal)) return state
     return {
       queues: {
         ...state.queues,
@@ -1770,8 +1797,10 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   if (applied.name === "pr/withdrawn" || applied.name === "pr/canceled") {
     const closed = QueueAuthorityPRFactSchema.parse(applied.data)
     if (closed.revision !== undefined && closed.headSha !== undefined) {
-      const current = state.queues.authority.current[closed.pr]
-      if (current?.revision !== closed.revision || current.headSha !== closed.headSha) return state
+      const currentTerminal =
+        applied.name === "pr/withdrawn" || typeof (applied.data as { run?: unknown }).run === "string"
+      const terminal = { pr: closed.pr, revision: closed.revision, headSha: closed.headSha }
+      if (!terminalAuthorityMatches(state.queues.authority, terminal, applied.name, currentTerminal)) return state
     }
     return {
       queues: {

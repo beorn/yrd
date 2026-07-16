@@ -202,6 +202,34 @@ describe("withBays", () => {
     await app.close()
   })
 
+  it("refuses a terminal receipt that does not transition the current PR revision", async () => {
+    const journal = createMemoryJournal()
+    const staleWithdraw = command({
+      title: "Emit a stale PR withdrawal",
+      apply: () => ({
+        events: [event("pr/withdrawn", { pr: "PR1", revision: 1, headSha: HEAD_1 })],
+      }),
+    })
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ jobs, defaultBase: "main" }),
+    ).extend({ commands: { fixture: { staleWithdraw } } })
+    await using app = await createYrd(definition, {
+      inject: { journal, clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
+    })
+    await app.bays.submit({ branch: "topic/stale-terminal", headSha: HEAD_1 })
+    await app.bays.intake({ branch: "topic/stale-terminal", headSha: HEAD_2, baseSha: BASE })
+    await app.bays.submit({ pr: "PR1" })
+    const before = await Array.fromAsync(app.events())
+
+    await expect(app.dispatch(app.commands.fixture.staleWithdraw, undefined)).rejects.toThrow(/stale terminal.*PR1/iu)
+
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
+  })
+
   it("replays historical current and legacy terminal payloads without accepting legacy appends", async () => {
     const nextId = ids()
     const seededCommand = { id: nextId(), op: "fixture.legacy-pr-terminals" }
