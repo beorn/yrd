@@ -2905,19 +2905,19 @@ describe("runYrd", () => {
     await openAndSubmit(app)
 
     const integrated = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--steps", "--json"), integrated.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--steps", "--json"), integrated.io)).toBe(0)
     expect(JSON.parse(integrated.stdout())).toEqual({ command: "queue.run", results: [] })
     expect(app.state().bays.prs.PR1?.status).toBe("submitted")
 
     const idle = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--json"), idle.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), idle.io)).toBe(0)
     expect(JSON.parse(idle.stdout())).toMatchObject({
       command: "queue.run",
       results: [{ id: "R1", prs: [{ id: "PR1" }], steps: [{ name: "check" }, { name: "merge" }], status: "passed" }],
     })
 
     const drained = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--json"), drained.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), drained.io)).toBe(0)
     expect(JSON.parse(drained.stdout())).toEqual({ command: "queue.run", results: [] })
   })
 
@@ -2959,7 +2959,7 @@ describe("runYrd", () => {
     expect(app.state().queues.records).toEqual({})
 
     const eligible = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--json"), eligible.io), eligible.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), eligible.io), eligible.stderr()).toBe(0)
     expect(JSON.parse(eligible.stdout())).toMatchObject({ results: [{ prs: [{ id: "PR2" }], status: "passed" }] })
     expect(app.state().bays.prs.PR1?.status).toBe("submitted")
     expect(app.state().bays.prs.PR2?.status).toBe("integrated")
@@ -2989,7 +2989,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "submit"), outputIO({ cwd: "/repo/.bays/B2" }).io)).toBe(0)
 
     const integrated = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--json"), integrated.io), integrated.stderr()).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), integrated.io), integrated.stderr()).toBe(0)
     expect(JSON.parse(integrated.stdout())).toMatchObject({
       results: [
         {
@@ -3316,7 +3316,8 @@ describe("runYrd", () => {
     expect(header).toBeDefined()
     for (const label of ["TIME", "STATUS", "RUN", "PR", "BY", "AGE"]) expect(header).toContain(label)
     // STEP folded into the PR cell (item Q), so it is no longer a header column.
-    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) expect(header).not.toContain(removed)
+    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
+      expect(header).not.toContain(removed)
     const first = rows.find((row) => row.includes("PR1.1"))
     const second = rows.find((row) => row.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -3325,9 +3326,7 @@ describe("runYrd", () => {
     expect(second).toContain("@agent/3")
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
-    expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(
-      rows.indexOf(header!) - 1,
-    )
+    expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(rows.indexOf(header!) - 1)
     expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(rows.indexOf(second!))
   })
 
@@ -6727,16 +6726,16 @@ describe("runYrd", () => {
         },
       },
     })
-    expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), watch.io)).toBe(0)
+    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), watch.io)).toBe(0)
     expect(watch.stdout()).toBe("")
     expect(sleeps).toEqual([1_000])
   })
 
-  it("announces one resident runner across idle watch polls while JSON stays silent", async () => {
+  it("announces one resident runner across idle follow polls while JSON stays silent", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-resident-watch-presence-"))
     execFileSync("git", ["init", "-q", repo])
     const runner = `yrd-cli:${process.pid}`
-    const presence = `Queue runner ${runner} active; watching the default queue every 1s (Ctrl-C drains).\n`
+    const presence = `Queue runner ${runner} active; following the default queue every 1s (Ctrl-C drains).\n`
 
     try {
       const app = await createApp()
@@ -6756,7 +6755,7 @@ describe("runYrd", () => {
           },
         },
       })
-      expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), human.io), human.stderr()).toBe(0)
+      expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), human.io), human.stderr()).toBe(0)
       expect(human.stdout()).toBe(presence)
       expect(sleeps).toEqual([1_000, 1_000])
 
@@ -6769,21 +6768,18 @@ describe("runYrd", () => {
           sleep: async () => jsonController.abort(),
         },
       })
-      expect(
-        await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1", "--json"), json.io),
-        json.stderr(),
-      ).toBe(0)
+      expect(await runYrd(app, yrd("queue", "run", "--interval", "1", "--json"), json.io), json.stderr()).toBe(0)
       expect(json.stdout()).toBe("")
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
   })
 
-  it("keeps resident presence out of selector and JSON runs without changing their projections", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "yrd-resident-watch-projection-"))
+  it("routes follow, --once, and selector runs to the right presence and projection", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-resident-follow-projection-"))
     execFileSync("git", ["init", "-q", repo])
     const runner = `yrd-cli:${process.pid}`
-    const presence = `Queue runner ${runner} active; watching the default queue every 1s (Ctrl-C drains).\n`
+    const presence = `Queue runner ${runner} active; following the default queue every 1s (Ctrl-C drains).\n`
 
     const readyApp = async () => {
       const app = await createApp()
@@ -6799,42 +6795,134 @@ describe("runYrd", () => {
     }
 
     try {
+      // A PR selector is a one-shot pass: it drains, prints the interactive run
+      // table, and never announces the resident follow-runner.
       const selectedHuman = outputIO({ cwd: repo, runner })
-      expect(
-        await runYrd(await readyApp(), yrd("queue", "run", "PR1", "--watch", "--interval", "1"), selectedHuman.io),
-        selectedHuman.stderr(),
-      ).toBe(0)
+      expect(await runYrd(await readyApp(), yrd("queue", "run", "PR1"), selectedHuman.io), selectedHuman.stderr()).toBe(
+        0,
+      )
       expect(selectedHuman.stdout()).not.toContain("Queue runner ")
+      expect(selectedHuman.stdout()).toContain("STATE")
 
+      // `--once` is a one-shot pass over the whole default queue — also no
+      // presence banner, and the same interactive table projection.
+      const onceHuman = outputIO({ cwd: repo, runner })
+      expect(await runYrd(await readyApp(), yrd("queue", "run", "--once"), onceHuman.io), onceHuman.stderr()).toBe(0)
+      expect(onceHuman.stdout()).not.toContain("Queue runner ")
+      expect(onceHuman.stdout()).toContain("STATE")
+
+      // Follow (the default with no selector) is the resident runner: it
+      // announces presence once and keeps stdout a loggily-only log stream — the
+      // interactive run table is the `queue watch` viewer's surface, never the
+      // follow-runner's.
       const automaticHuman = outputIO({ cwd: repo, runner, scope: onePassScope() })
       expect(
-        await runYrd(await readyApp(), yrd("queue", "run", "--watch", "--interval", "1"), automaticHuman.io),
+        await runYrd(await readyApp(), yrd("queue", "run", "--interval", "1"), automaticHuman.io),
         automaticHuman.stderr(),
       ).toBe(0)
-      expect(automaticHuman.stdout()).toBe(presence + selectedHuman.stdout())
+      expect(automaticHuman.stdout()).toBe(presence)
 
-      const selectedJson = outputIO({ cwd: repo, runner })
-      expect(
-        await runYrd(
-          await readyApp(),
-          yrd("queue", "run", "PR1", "--watch", "--interval", "1", "--json"),
-          selectedJson.io,
-        ),
-        selectedJson.stderr(),
-      ).toBe(0)
-
+      // Follow --json streams one run record per drained run, tagged
+      // mode:"follow", with no presence banner in the JSON stream.
       const automaticJson = outputIO({ cwd: repo, runner, scope: onePassScope() })
       expect(
-        await runYrd(await readyApp(), yrd("queue", "run", "--watch", "--interval", "1", "--json"), automaticJson.io),
+        await runYrd(await readyApp(), yrd("queue", "run", "--interval", "1", "--json"), automaticJson.io),
         automaticJson.stderr(),
       ).toBe(0)
-      expect(automaticJson.stdout()).toBe(selectedJson.stdout())
       expect(automaticJson.stdout().trim().split("\n")).toHaveLength(1)
-      expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.run", mode: "watch" })
+      expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.run", mode: "follow" })
       expect(automaticJson.stdout()).not.toContain("Queue runner ")
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
+  })
+})
+
+describe("queue run — follow-by-default mode selection (#62)", () => {
+  // user respec 2026-07-15: "instead of --watch use --follow"; "not confused
+  // with the watch command"; "by default it should be follow". `queue run` with
+  // no selector and no --once IS the resident follow-runner (the old --watch
+  // loop); a single pass is explicit — via a PR selector or --once. --watch is
+  // gone. The follow loop calls scope.sleep after each cycle; a one-shot pass
+  // never sleeps — that is the observable follow-vs-once discriminator here.
+  const trackedScope = () => {
+    const controller = new AbortController()
+    const sleeps: number[] = []
+    return {
+      sleeps,
+      scope: {
+        signal: controller.signal,
+        sleep: async (ms: number) => {
+          sleeps.push(ms)
+          controller.abort()
+        },
+      },
+    }
+  }
+
+  it("enters resident follow mode with no selector and no --once (the default)", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const tracked = trackedScope()
+    const run = outputIO({ scope: tracked.scope })
+    expect(await runYrd(app, yrd("queue", "run", "--interval", "1"), run.io), run.stderr()).toBe(0)
+    // Followed: the loop slept (and was aborted) rather than exiting one-shot.
+    expect(tracked.sleeps).toEqual([1_000])
+  })
+
+  it("treats explicit --follow as the same resident follow mode", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const tracked = trackedScope()
+    const run = outputIO({ scope: tracked.scope })
+    expect(await runYrd(app, yrd("queue", "run", "--follow", "--interval", "1"), run.io), run.stderr()).toBe(0)
+    expect(tracked.sleeps).toEqual([1_000])
+  })
+
+  it("--once drains the default queue exactly once and exits without looping", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const tracked = trackedScope()
+    const run = outputIO({ scope: tracked.scope })
+    expect(await runYrd(app, yrd("queue", "run", "--once"), run.io), run.stderr()).toBe(0)
+    // One-shot: never entered the follow loop, so it never slept.
+    expect(tracked.sleeps).toEqual([])
+    expect(run.stdout()).toContain("STATE")
+  })
+
+  it("a PR selector is a single pass, not a follow loop", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const tracked = trackedScope()
+    const run = outputIO({ scope: tracked.scope })
+    expect(await runYrd(app, yrd("queue", "run", "PR1"), run.io), run.stderr()).toBe(0)
+    expect(tracked.sleeps).toEqual([])
+    expect(run.stdout()).toContain("STATE")
+  })
+
+  it("rejects the removed --watch flag as an unknown option", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--watch"), run.io)).toBe(2)
+    expect(run.stdout()).toBe("")
+    expect(run.stderr()).toContain("--watch")
+  })
+
+  it("refuses --follow combined with --once", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--follow", "--once"), run.io)).toBe(2)
+    expect(run.stderr()).toContain("mutually exclusive")
+  })
+
+  it("refuses --follow combined with a PR selector", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const run = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--follow", "PR1"), run.io)).toBe(2)
+    expect(run.stderr()).toContain("cannot target")
   })
 })
 
@@ -7818,27 +7906,31 @@ describe("journal version skew fail-loud", () => {
   })
 })
 
-describe("queue run — runner output is loggily/JSON only (#undead runner-loggily-only)", () => {
-  // The `queue run --watch` runner is a background service whose stdout is a
-  // log. The QueueRunsView table (RUN/PRS/STATE/STEPS) is the interactive
-  // `queue watch` viewer's surface, not the runner's — it must never be dumped
-  // into the runner's log stream. In human mode the --watch runner emits
-  // nothing to stdout but loggily; `--json` still streams the run record.
-  // (A selector makes the watch loop run exactly one cycle and return.)
-  it("does not print the QueueRunsView table on human stdout under --watch", async () => {
+describe("queue run — follow-runner output is loggily/JSON only (#undead runner-loggily-only)", () => {
+  // The resident follow-runner (`queue run`, follow-by-default) is a background
+  // service whose stdout is a log. The QueueRunsView table (RUN/PRS/STATE/STEPS)
+  // is the interactive `queue watch` viewer's surface, not the follow-runner's —
+  // it must never be dumped into the log stream. In human mode the follow-runner
+  // emits nothing to stdout but loggily; `--json` still streams the run record.
+  const onePassScope = () => {
+    const controller = new AbortController()
+    return { signal: controller.signal, sleep: async () => controller.abort() }
+  }
+
+  it("does not print the QueueRunsView table on human stdout in follow mode", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    const runHuman = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--watch", "PR1"), runHuman.io), runHuman.stderr()).toBe(0)
+    const runHuman = outputIO({ scope: onePassScope() })
+    expect(await runYrd(app, yrd("queue", "run"), runHuman.io), runHuman.stderr()).toBe(0)
     expect(runHuman.stdout()).not.toContain("STATE")
     expect(runHuman.stdout()).not.toContain("STEPS")
   })
 
-  it("still streams the run record under --watch --json", async () => {
+  it("still streams the run record in follow mode --json", async () => {
     const app = await createApp()
     await openAndSubmit(app)
-    const runJson = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--watch", "PR1", "--json"), runJson.io), runJson.stderr()).toBe(0)
+    const runJson = outputIO({ scope: onePassScope() })
+    expect(await runYrd(app, yrd("queue", "run", "--json"), runJson.io), runJson.stderr()).toBe(0)
     expect(runJson.stdout()).toContain("queue.run")
   })
 })

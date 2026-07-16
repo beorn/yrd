@@ -9,7 +9,7 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep } from "@yrd/queue"
 import { createYrdHost } from "../src/host.ts"
-import { requireFreshInstalledBaseline, watchQueueRuns } from "../src/run.ts"
+import { requireFreshInstalledBaseline, followQueueRuns } from "../src/run.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 import {
   installedBaselineDrift,
@@ -54,7 +54,11 @@ describe("installed baseline drift", () => {
   })
 
   it("collapses every delta into one config-drift finding with the migration remedy", () => {
-    const installed = [step("check", "22adf838".padEnd(64, "0")), step("review", "review-v1"), step("merge", "merge-v1")]
+    const installed = [
+      step("check", "22adf838".padEnd(64, "0")),
+      step("review", "review-v1"),
+      step("merge", "merge-v1"),
+    ]
     const current = [step("check", "e5f6a7b8".padEnd(64, "0")), step("merge", "merge-v1"), step("deploy", "deploy-v1")]
     const finding = installedBaselineDrift(baseline(installed), current)
     expect(finding).toMatchObject({ code: "config-drift" })
@@ -139,9 +143,7 @@ describe("installed baseline persistence", () => {
 
   async function expectNoBaselineTempFiles(stateDir: string): Promise<void> {
     const entries = await readdir(stateDir)
-    expect(
-      entries.filter((name) => name.startsWith("installed-baseline.json.") && name.endsWith(".tmp")),
-    ).toEqual([])
+    expect(entries.filter((name) => name.startsWith("installed-baseline.json.") && name.endsWith(".tmp"))).toEqual([])
   }
 
   it("leaves the prior authority byte-identical and cleans temp when the staging write fails", async () => {
@@ -232,7 +234,7 @@ describe("run gate", () => {
       // Simulate a config change detected on the second cycle.
       if (gateCalls >= 2) throw new Error("installed baseline drifted mid-watch")
     }
-    await expect(watchQueueRuns(app, [], { json: true, interval: 1 }, io, gate)).rejects.toThrow(/drifted mid-watch/u)
+    await expect(followQueueRuns(app, [], { json: true, interval: 1 }, io, gate)).rejects.toThrow(/drifted mid-watch/u)
     // Gate ran on cycle 1 (before the run) and again on cycle 2 (which refused
     // before any run started): proves per-cycle re-proof, gate-before-run.
     expect(gateCalls).toBe(2)
@@ -276,17 +278,16 @@ describe("host installed baseline", () => {
       await host.close()
     }
 
-    await writeFile(
-      join(repo, ".yrd.yml"),
-      'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n',
-    )
+    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
     const drifted = await createYrdHost({ cwd: repo })
     try {
       const result = await drifted.services.queue?.auditEnvironment?.()
       expect(result?.findings).toMatchObject([{ code: "config-drift" }])
       expect(result?.findings[0]?.message).toContain("step 'check' revision")
       expect(result?.findings[0]?.message).toContain(installedBaselineRemedy("main"))
-      await expect(requireFreshInstalledBaseline(drifted.services)).rejects.toThrow(/config drift|installed baseline is stale/u)
+      await expect(requireFreshInstalledBaseline(drifted.services)).rejects.toThrow(
+        /config drift|installed baseline is stale/u,
+      )
       const deprovisioned = (await drifted.services.queue?.deprovision?.("main")) as { released: string[] }
       expect(deprovisioned.released).toEqual(["installed-baseline"])
       expect(await drifted.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })

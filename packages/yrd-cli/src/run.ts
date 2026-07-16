@@ -1624,6 +1624,47 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
   )
 }
 
+type QueueRunMode = "follow" | "once"
+
+/**
+ * `queue run` is follow-by-default (user respec 2026-07-15: "by default it
+ * should be follow"; "not confused with the watch command"). With no PR
+ * selector and no `--once`, it IS the resident follow-runner — the long-lived
+ * loop that keeps draining the default queue (the old `--watch` behavior, now
+ * the default and renamed to avoid confusion with the `queue watch` viewer).
+ *
+ * A single pass is requested explicitly: by naming PR selectors
+ * (`queue run PR7`) or with `--once` (drain the whole default queue once).
+ * `--follow` is the explicit spelling of the default; it may not combine with
+ * `--once`, nor with selectors (follow drains the default queue as a whole, it
+ * never targets a chosen PR).
+ */
+function resolveQueueRunMode(
+  selectors: readonly string[],
+  options: Readonly<{ follow?: boolean; once?: boolean }>,
+): QueueRunMode {
+  if (options.follow === true && options.once === true) {
+    usage("queue run: --follow and --once are mutually exclusive")
+  }
+  if (options.follow === true && selectors.length > 0) {
+    usage("queue run: --follow drains the default queue; it cannot target PR selectors")
+  }
+  return selectors.length > 0 || options.once === true ? "once" : "follow"
+}
+
+/**
+ * True when a `queue run` invocation is resident follow mode, mirroring
+ * {@link resolveQueueRunMode} at the pre-action boundary where only the parsed
+ * Commander action is available. The runner identity (`yrd-cli:` prefix, the
+ * exclusive resident lease) is granted only to the follow-runner, so the two
+ * decisions must agree.
+ */
+function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly string[] }>): boolean {
+  const opts = action.opts() as Readonly<{ once?: boolean }>
+  if (opts.once === true) return false
+  return action.args.length === 0
+}
+
 async function runQueues(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -2145,9 +2186,7 @@ export async function requireFreshInstalledBaseline(services: YrdCliServices): P
     configuration("queue.audit capability is not installed")
   }
   const result = await administration.auditEnvironment()
-  const drift = result.findings.filter(
-    (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
-  )
+  const drift = result.findings.filter((finding) => finding.code === "config-drift" || finding.code === "runtime-drift")
   if (drift.length === 0) return
   refusal(drift.map((finding) => finding.message).join("\n"))
 }
@@ -2347,7 +2386,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   return undefined
 }
 
-export async function watchQueueRuns(
+export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { steps?: unknown; json?: boolean; interval?: number },
@@ -2372,7 +2411,7 @@ export async function watchQueueRuns(
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
       io.stdout(
-        `Queue runner ${io.runner} active; watching the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
+        `Queue runner ${io.runner} active; following the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
       )
     }
     while (true) {
@@ -2418,7 +2457,7 @@ export async function watchQueueRuns(
       // runner's log. (#undead: runner-loggily-only)
       if (jsonEnabled(options)) {
         for (const run of runs) {
-          io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
+          io.stdout(stableJson({ command: "queue.run", mode: "follow", run: projectQueueRunTaskStatus(run) }))
         }
       }
       const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
@@ -2812,7 +2851,7 @@ function addQueueExamples(queue: CliCommand, name: string): void {
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
     [`$ ${name} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
     [`$ ${name} queue recover --json`, "recover expired runner leases"],
-    [`$ ${name} queue run --watch`, "keep the default queue moving"],
+    [`$ ${name} queue run`, "resident follow-runner: keep the default queue moving"],
   ])
 }
 
@@ -2864,10 +2903,7 @@ function buildProgram(
         logLevel?: string
       }>
       const selected = resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
-      const resident =
-        action.name() === "run" &&
-        action.parent?.name() === "queue" &&
-        (action.opts() as Readonly<{ watch?: boolean }>).watch === true
+      const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
       const loaded = await bootstrap.load(selected, { resident })
       runtimeApp = loaded.app
       runtimeServices = loaded.services
@@ -3045,15 +3081,16 @@ function buildProgram(
     .action(async (options) => recoverQueue(installed(), options, io))
   queue
     .command("run [selector...]")
-    .description("run queue steps for PRs")
+    .description("drain the queue — resident follow by default; --once or PR selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--watch", "keep draining the default queue")
-    .option("--interval <seconds>", "watch interval in seconds", int)
+    .option("--follow", "resident follow mode: keep draining the default queue (the default with no selector)")
+    .option("--once", "drain the default queue exactly once, then exit")
+    .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
       const gate = () => requireFreshInstalledBaseline(installedServices())
-      if (options.watch === true) {
-        setExit(await watchQueueRuns(installed(), selectors, options, io, gate))
+      if (resolveQueueRunMode(selectors, options) === "follow") {
+        setExit(await followQueueRuns(installed(), selectors, options, io, gate))
         return
       }
       await gate()

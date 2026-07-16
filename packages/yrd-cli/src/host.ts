@@ -366,9 +366,7 @@ function integratedRunner(
       ...(config.environment === undefined ? {} : { YRD_ENVIRONMENT: config.environment }),
     }),
     ...(config.env === undefined ? {} : { environmentOverrides: config.env }),
-    ...(config.environmentPassthrough === undefined
-      ? {}
-      : { environmentPassthrough: config.environmentPassthrough }),
+    ...(config.environmentPassthrough === undefined ? {} : { environmentPassthrough: config.environmentPassthrough }),
   }
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
@@ -728,7 +726,7 @@ async function acquireResidentRunner(
       raiseFailure(
         "refusal",
         "resident-runner-active",
-        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run --watch' before starting another.`,
+        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.`,
       )
     }
     throw error
