@@ -288,7 +288,7 @@ export type Jobs = Readonly<{
   finish(id: string, completion: JobCompletion): Promise<Job>
   cancel(input: CancelJobInput): Promise<Job>
   retry(id: string): Promise<Job>
-  recover(options: Readonly<{ now: string; reason?: string }>): Promise<readonly string[]>
+  recover(options: Readonly<{ now: string; reason?: string; runner?: string }>): Promise<readonly string[]>
   requested(source: CommandResult | readonly Event[]): readonly string[]
 }>
 
@@ -326,6 +326,7 @@ const RecoverOptionsSchema = z
   .object({
     now: TimestampSchema,
     reason: z.string().min(1).optional(),
+    runner: IdSchema.optional(),
   })
   .strict()
 
@@ -524,9 +525,17 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     async recover(recoverOptions) {
       const parsed = RecoverOptionsSchema.parse(recoverOptions)
       const cutoff = Date.parse(parsed.now)
+      // With `runner` set the caller asserts that runner is dead: reclaim only its
+      // running jobs, regardless of lease expiry. Otherwise reclaim any running job
+      // whose lease has lapsed past `now`.
+      const deadRunner = parsed.runner
+      const defaultReason = deadRunner === undefined ? "runner lease expired" : "runner disappeared"
       const recovered: string[] = []
       for (const job of Object.values(state().byId)) {
-        if (job.status !== "running" || Date.parse(job.leaseExpiresAt) > cutoff) continue
+        if (job.status !== "running") continue
+        if (deadRunner === undefined) {
+          if (Date.parse(job.leaseExpiresAt) > cutoff) continue
+        } else if (job.runner !== deadRunner) continue
         try {
           await observeYrdLifecycle(
             options.log,
@@ -535,7 +544,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
               identity: { job: job.id, attempt: job.attempt, runner: job.runner },
               attributes: {
                 leaseExpiresAt: job.leaseExpiresAt,
-                reason: parsed.reason ?? "runner lease expired",
+                reason: parsed.reason ?? defaultReason,
               },
               outcome: "recovered",
             },
@@ -546,7 +555,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
                 attempt: job.attempt,
                 runner: job.runner,
                 leaseExpiresAt: job.leaseExpiresAt,
-                reason: parsed.reason ?? "runner lease expired",
+                reason: parsed.reason ?? defaultReason,
               }),
           )
         } catch (error) {
