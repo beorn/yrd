@@ -82,7 +82,12 @@ describe("noun cutover ratchet", () => {
     ]) {
       const relative = file.slice(root.length + 1)
       for (const [index, text] of readFileSync(file, "utf8").split(/\r?\n/u).entries()) {
-        const searchable = text.replaceAll(lintDirective, "").replaceAll(projectionStatus, "")
+        // "HOLD THE LINE" is the user-settled 21106 banner for a paused
+        // queue (an idiom, not the retired queue noun).
+        const searchable = text
+          .replaceAll(lintDirective, "")
+          .replaceAll("HOLD THE LINE", "")
+          .replaceAll(projectionStatus, "")
         for (const expression of forbidden) {
           const match = expression.exec(searchable)
           if (match !== null) failures.push(`${relative}:${index + 1}: ${match[0]}`)

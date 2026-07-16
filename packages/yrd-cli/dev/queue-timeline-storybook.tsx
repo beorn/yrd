@@ -7,7 +7,7 @@ import { QUEUE_TIMELINE_STORY_NAMES, queueTimelineStories } from "./queue-timeli
 export const QUEUE_TIMELINE_STORYBOOK_CONTRACT = [
   {
     area: "queue-navigation-and-status",
-    stories: ["production-overview", "idle", "multiple-queues", "paused"],
+    stories: ["production-overview", "contract-overview", "idle", "multiple-queues", "paused"],
     controls: ["[", "]", "1-9"],
   },
   {

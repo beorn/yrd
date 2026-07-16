@@ -3175,7 +3175,8 @@ describe("runYrd", () => {
 
     expect(projection.rows).toHaveLength(1)
     expect(projection.rows[0]).toMatchObject({
-      prs: ["PR1"],
+      pr: "PR1",
+      revision: 2,
       status: "pending",
       timestamp: currentSubmittedAt,
       sourceReadyAt: firstSubmittedAt,
@@ -3188,10 +3189,13 @@ describe("runYrd", () => {
     })
     const rendered = await renderString(createElement(QueueTimelineView, { projection }), {
       width: 200,
-      height: 20,
+      height: 30,
       plain: true,
     })
-    expect(rendered).toContain("rev1→rev2")
+    // The cumulative source-ready age (2h, not the 5m of the current
+    // revision) is the visible AGE; lineage stays in the row detail/JSON.
+    expect(rendered).toContain("PR1.2")
+    expect(rendered).toContain("2:00:00")
 
     const running = fakeRun({
       id: "R1",
@@ -3213,6 +3217,8 @@ describe("runYrd", () => {
     expect(runningProjection.rows).toMatchObject([
       {
         run: "R1",
+        pr: "PR1",
+        revision: 2,
         status: "running",
         revisionLineage: [{ pr: "PR1", revisions: [1, 2], sourceReadyAt: firstSubmittedAt }],
         detail: "running · rev1→rev2",
@@ -3288,8 +3294,8 @@ describe("runYrd", () => {
     })
 
     expect(projection.rows).toMatchObject([
-      { id: "main:run:R1:PR1:1", run: "R1", prs: ["PR1"], revision: 1, submitter: "@cto" },
-      { id: "main:run:R1:PR2:1", run: "R1", prs: ["PR2"], revision: 1, submitter: "@agent/3" },
+      { id: "main:run:R1:PR1:1", run: "R1", pr: "PR1", revision: 1, submitter: "@cto" },
+      { id: "main:run:R1:PR2:1", run: "R1", pr: "PR2", revision: 1, submitter: "@agent/3" },
     ])
     expect(projection.metrics).toMatchObject({ terminalAttempts: 1, outcomes: { integrated: 1 } })
 
@@ -3301,10 +3307,11 @@ describe("runYrd", () => {
       }),
     )
     const lines = rendered.split("\n").filter(Boolean)
-    const header = lines.find((line) => line.includes("TIME") && line.includes("TOTAL"))
+    const header = lines.find((line) => line.includes("TIME") && line.includes("RUN·PR"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "RUN", "BY", "PR", "STEP", "AGE", "TOTAL"]) expect(header).toContain(label)
-    for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT"]) expect(header).not.toContain(removed)
+    for (const label of ["TIME", "RUN·PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
+    for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
+      expect(header).not.toContain(removed)
     const first = lines.find((line) => line.includes("PR1.1"))
     const second = lines.find((line) => line.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -3316,9 +3323,7 @@ describe("runYrd", () => {
     expect(lines.indexOf(lines.find((line) => line.trimStart().startsWith("FILTER "))!)).toBe(
       lines.indexOf(header!) - 1,
     )
-    expect(lines.findIndex((line) => line.trimStart().startsWith("STATISTICS "))).toBeGreaterThan(
-      lines.indexOf(second!),
-    )
+    expect(lines.findIndex((line) => line.includes("STATISTICS"))).toBeGreaterThan(lines.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3357,7 +3362,7 @@ describe("runYrd", () => {
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
-      expect(absent.stdout()).toContain("RUNNER ABSENT")
+      expect(absent.stdout()).toContain("RUNNER none — nothing drains this queue")
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
@@ -3497,7 +3502,7 @@ describe("runYrd", () => {
     expect(projection.siblingBases).toEqual(["release"])
     expect(projection.pause).toMatchObject({ reason: "operator freeze", allowedPRs: ["PR6"] })
     expect(projection.oldestOpenMs).toBe(80 * minute)
-    expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.prs[0], row.prs[0]])).toEqual([
+    expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr])).toEqual([
       ["pending", "pending", "PR4", "PR4"],
       ["pending", "pending", "PR6", "PR6"],
       ["running", "running", "R4", "PR5"],
@@ -3507,34 +3512,56 @@ describe("runYrd", () => {
       ["completed", "integrated", "R1", "PR1"],
       ["completed", "integrated", "R1", "PR2"],
     ])
-    expect(projection.rows.filter((row) => row.run === "R1").map((row) => row.prs)).toEqual([["PR1"], ["PR2"]])
-    expect(projection.rows.find((row) => row.group === "pending" && row.prs[0] === "PR4")).toMatchObject({
+    expect(projection.rows.find((row) => row.group === "pending" && row.pr === "PR4")).toMatchObject({
       ageMs: 80 * minute,
       totalMs: null,
       activeMs: null,
       waitMs: 80 * minute,
     })
+    // A running member's AGE measures its own source-readiness, not run recency.
     expect(projection.rows.find((row) => row.run === "R4")).toMatchObject({
-      ageMs: 10 * minute,
+      pr: "PR5",
+      ageMs: 20 * minute,
       totalMs: 10 * minute,
       activeMs: null,
       waitMs: null,
     })
-    expect(projection.rows.find((row) => row.run === "R1")).toMatchObject({
-      ageMs: 110 * minute,
-      totalMs: 10 * minute,
-      activeMs: 0,
-      waitMs: 10 * minute,
-    })
-    expect(projection.rows.find((row) => row.run === "R2")?.failure).toMatchObject({ code: "typecheck-failed" })
+    // One physical row per batched member: Run facts repeat, member facts differ.
     expect(
-      (JSON.parse(JSON.stringify(projection.rows)) as readonly { run?: string }[]).find((row) => row.run === "R1"),
-    ).toMatchObject({
-      ageMs: 110 * minute,
-      totalMs: 10 * minute,
-      activeMs: 0,
-      waitMs: 10 * minute,
-    })
+      projection.rows
+        .filter((row) => row.run === "R1")
+        .map((row) => ({
+          pr: row.pr,
+          ageMs: row.ageMs,
+          totalMs: row.totalMs,
+          activeMs: row.activeMs,
+          waitMs: row.waitMs,
+          queueWaitMs: row.queueWaitMs,
+        })),
+    ).toEqual([
+      {
+        pr: "PR1",
+        ageMs: 15 * minute,
+        totalMs: 10 * minute,
+        activeMs: 0,
+        waitMs: 10 * minute,
+        queueWaitMs: 5 * minute,
+      },
+      {
+        pr: "PR2",
+        ageMs: 25 * minute,
+        totalMs: 10 * minute,
+        activeMs: 0,
+        waitMs: 10 * minute,
+        queueWaitMs: 15 * minute,
+      },
+    ])
+    expect(
+      JSON.parse(JSON.stringify(projection.rows)).filter((row: { run?: string }) => row.run === "R1"),
+    ).toMatchObject([
+      { pr: "PR1", ageMs: 15 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
+      { pr: "PR2", ageMs: 25 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
+    ])
     expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 4 })
     expect(projection.coverage).toEqual({
       requestedSince: "2026-07-13T06:00:00.000Z",
@@ -3566,26 +3593,16 @@ describe("runYrd", () => {
         projection: { ...constrainedProjection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
         columns: 200,
       }),
-      { width: 200, height: 30, plain: true },
+      { width: 200, height: 32, plain: true },
     )
-    const renderedHeader = rendered.split("\n").find((line) => line.includes("TIME") && line.includes("TOTAL"))
-    expect(renderedHeader).toBeDefined()
-    for (const label of ["TIME", "RUN", "BY", "PR", "STEP", "AGE", "TOTAL"]) {
-      expect(renderedHeader).toContain(label)
-    }
-    for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT"]) {
-      expect(renderedHeader).not.toContain(removed)
-    }
-    expect(rendered).toContain("RUNNER ABSENT")
-    expect(rendered).toContain("STATISTICS")
-    expect(rendered).toContain("ACTIVE")
-    expect(rendered).toContain("WAIT")
+    expect(rendered).toContain("TIME")
+    expect(rendered).toContain("RUN·PR")
+    expect(rendered).toContain("AGE")
     expect(rendered).toContain("main#4")
     expect(rendered).toContain("PR5.1")
-    expect(rendered).toContain("main#1")
-    expect(rendered).toContain("PR1.1")
-    expect(rendered).toContain("PR2.1")
-    expect(rendered).not.toContain("R1·PR1,PR2")
+    expect(rendered).toContain("typecheck-failed")
+    expect(rendered).not.toContain("R4·PR5")
+    expect(rendered).not.toContain("SUBJECT")
     for (const width of [80, 120]) {
       const fixed = stripOsc8Targets(
         await renderString(
@@ -3600,49 +3617,55 @@ describe("runYrd", () => {
         ),
       )
       const lines = fixed.split("\n")
-      const filter = lines.find((line) => line.trimStart().startsWith("FILTER "))
+      const filter = lines.find((line) => line.includes("FILTER "))
       expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 status=all terms=none latest=no")
-      const statistics = lines.find((line) => line.trimStart().startsWith("STATISTICS "))
-      expect
-        .soft(statistics?.trim())
-        .toBe("STATISTICS attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
+      const flow = lines.find((line) => line.includes("FLOW "))
+      expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
-      const header = lines.find((line) => line.includes("TIME") && line.includes("TOTAL"))
-      for (const label of ["TIME", "RUN", "PR", "STEP", "AGE", "TOTAL"]) expect(header).toContain(label)
-      expect(header?.includes("BY")).toBe(width === 120)
-      for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT"]) {
-        expect(header).not.toContain(removed)
-      }
+      const header = lines.find((line) => line.includes("RUN·PR") && line.includes("TIME"))
+      expect(header).toContain("STEP")
+      expect(header).toContain("AGE")
+      expect(header?.trimEnd()).toMatch(/RUN$/u)
+      expect(header).not.toContain("TOTAL")
+      expect(header).not.toContain("STATUS")
+      expect(header).not.toContain("ACTIVE")
+      expect(header).not.toContain("WAIT")
+      expect(header).not.toContain("SUBJECT")
+      expect(header).not.toContain("DETAIL")
+      // The BY submitter column drops first on the narrow tier.
+      if (width === 80) expect(header).not.toContain("BY")
+      else expect(header).toContain("BY")
       const integratedLine = lines.find((line) => line.includes("PR1.1"))
       expect(integratedLine).toBeDefined()
-      expect(integratedLine).toContain("07-13")
-      expect(integratedLine).toContain("1h50m")
-      expect(integratedLine).toContain("◷10:00")
+      // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
+      // date-qualified but never truncated below seconds.
+      expect(integratedLine).toContain("2026-07-13T15:40:00")
+      expect(integratedLine).toContain("integrated")
+      expect(integratedLine?.trimEnd()).toMatch(/15:00 ◷10:00$/u)
     }
     const renderStyledTimeline = createRenderer({ cols: 200, rows: 30 })
     const styled = renderStyledTimeline(
       createElement(QueueTimelineView, {
         projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
+        columns: 200,
       }),
     )
     await styled.waitForLayoutStable()
     try {
-      for (const [status, identity] of [
-        ["pending", "PR6.1"],
-        ["running", "main#4"],
-        ["canceled", "main#6"],
-        ["environment-refused", "main#3"],
-        ["rejected", "main#2"],
-        ["integrated", "PR1.1"],
+      // Markers are semantic-foreground only — the canonical km/ag glyphs,
+      // never a colored STATUS background band.
+      for (const [glyph, anchor] of [
+        ["○", "PR6.1"],
+        ["●", "PR5.1"],
+        ["-", "PR7.1"],
+        ["×", "PR3.1"],
+        ["✓", "PR2.1"],
       ] as const) {
-        const row = styled.lines.findIndex((line) => line.includes(identity))
-        expect(row, status).toBeGreaterThan(0)
-        expect(
-          Array.from({ length: 120 }, (_value, column) => styled.cell(column, row).bg).every(
-            (background) => background === null,
-          ),
-          `${status} row background`,
-        ).toBe(true)
+        const row = styled.lines.findIndex((line) => line.includes(anchor))
+        expect(row, anchor).toBeGreaterThan(0)
+        const column = styled.lines[row]?.indexOf(glyph) ?? -1
+        expect(column, `${anchor} marker`).toBeGreaterThanOrEqual(0)
+        expect(styled.cell(column, row).bg, `${anchor} is foreground-only`).toBeNull()
       }
     } finally {
       styled.unmount()
@@ -3657,7 +3680,9 @@ describe("runYrd", () => {
       rowLimit: 20,
       submissionTimes,
     })
-    expect(integratedOnly.rows.map((row) => row.run)).toEqual(["R1"])
+    // Term filtering is per member row; metrics come from the already-filtered
+    // snapshot, so only the visible member's queue wait is counted.
+    expect(integratedOnly.rows.map((row) => [row.run, row.pr])).toEqual([["R1", "PR2"]])
     expect(integratedOnly.metrics).toMatchObject({
       terminalAttempts: 1,
       outcomes: { integrated: 1, rejected: 0, environmentRefused: 0, canceled: 0 },
@@ -3682,9 +3707,9 @@ describe("runYrd", () => {
       rowLimit: 20,
       submissionTimes,
     })
-    expect(latest.rows.find((row) => row.run === "R5")?.prs).toEqual(["PR1"])
-    expect(latest.rows.find((row) => row.run === "R1")?.prs).toEqual(["PR2"])
-    expect(latest.rows.flatMap((row) => row.prs).filter((pr) => pr === "PR1")).toHaveLength(1)
+    expect(latest.rows.find((row) => row.run === "R5")?.pr).toBe("PR1")
+    expect(latest.rows.filter((row) => row.run === "R1").map((row) => row.pr)).toEqual(["PR2"])
+    expect(latest.rows.filter((row) => row.pr === "PR1")).toHaveLength(1)
   })
 
   it("mounts watch as one read-only queue-focused live pane", async () => {
@@ -3714,11 +3739,11 @@ describe("runYrd", () => {
     )
     expect(frame).toContain("PR1.1")
     expect(frame).toContain("QUEUE main")
-    expect(frame).not.toContain("pending")
+    expect(frame).toContain("pending")
     expect(frame).not.toContain("position 1")
     expect(frame).toContain("AGE")
     expect(frame).toContain("WAIT")
-    expect(frame).toContain("RUNNER ABSENT")
+    expect(frame).toContain("RUNNER none — nothing drains this queue")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
@@ -3911,9 +3936,7 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
     expect(status.stdout()).toContain("PR1.1")
-    expect(status.stdout()).not.toContain("pending")
-    expect(status.stdout()).not.toContain("position 1")
-    expect(status.stdout()).toContain("latest=yes")
+    expect(status.stdout()).toContain("pending")
   })
 
   it("uses the queue timeline by default while --latest only changes row projection", async () => {
@@ -3935,7 +3958,7 @@ describe("runYrd", () => {
 
     expect(plain.stdout()).toContain("PR1.1")
     expect(plain.stdout()).toContain("PR2.1")
-    expect(plain.stdout()).not.toContain("pending")
+    expect(plain.stdout()).toContain("pending")
     expect(latest.stdout()).toContain("PR1.1")
     expect(latest.stdout()).toContain("PR2.1")
     expect(plain.stdout()).toContain("latest=no")
@@ -4007,7 +4030,7 @@ describe("runYrd", () => {
       projection: {
         base: "main",
         filters: { terms: ["does-not-match", "topic/alpha"], statuses: ["pending"], windowMs: 21_600_000 },
-        rows: [{ prs: ["PR1"], branches: ["topic/alpha"] }],
+        rows: [{ pr: "PR1", branch: "topic/alpha" }],
         metrics: { terminalAttempts: 0 },
       },
     })
@@ -5384,8 +5407,7 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    expect(laterQueue.stdout()).toContain("oldest:1:00")
-    expect(laterQueue.stdout()).toContain("PR1.1")
+    expect(laterQueue.stdout()).toContain("oldest=1:00")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
