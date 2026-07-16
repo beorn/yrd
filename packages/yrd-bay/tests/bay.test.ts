@@ -202,6 +202,29 @@ describe("withBays", () => {
     await app.close()
   })
 
+  it("re-resolves a moved branch tip when re-submitting a bay-less pushed (draft) PR", async () => {
+    await using app = (await createHarness()).app
+    let tip = HEAD_1
+    const submitOptions = () => ({ resolveRevision: async () => tip, run: runtime, base: "main" })
+
+    const drafted = await app.bays.submitSelection("topic/moving-draft", { ...submitOptions(), draft: true })
+    expect(drafted).toMatchObject({ status: "pushed", revision: 1, headSha: HEAD_1 })
+
+    // The branch advances to a new commit after the draft was pushed. A non-draft
+    // re-submit must register the moved head, not reuse the stored revision-1 head.
+    tip = HEAD_2
+    const resubmitted = await app.bays.submitSelection("topic/moving-draft", submitOptions())
+    expect(resubmitted).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
+    expect(resubmitted.revisions).toMatchObject([
+      { revision: 1, headSha: HEAD_1 },
+      { revision: 2, headSha: HEAD_2 },
+    ])
+
+    // A further re-submit with the branch unmoved must not manufacture a spurious revision.
+    const stable = await app.bays.submitSelection("topic/moving-draft", submitOptions())
+    expect(stable).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
+  })
+
   it("refuses a terminal receipt that does not transition the current PR revision", async () => {
     const journal = createMemoryJournal()
     const staleWithdraw = command({

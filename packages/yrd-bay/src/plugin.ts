@@ -647,29 +647,36 @@ export function createBays(
       }
     }
 
-    if (pr?.status === "submitted" && bay === undefined) {
+    // Re-submitting a bay-less PR must re-resolve the branch's current tip rather than reuse
+    // the recorded revision's head: a pushed (e.g. draft) or submitted PR whose branch has since
+    // moved would otherwise re-register the stale head. Only an active bay reads its head from
+    // the workspace (handled above), so this covers the direct-branch case.
+    if ((pr?.status === "submitted" || pr?.status === "pushed") && bay === undefined) {
       const headSha = await options.resolveRevision(pr.branch)
-      if (headSha === undefined) {
+      if (headSha === undefined && pr.status === "submitted") {
+        // A submitted PR whose branch no longer resolves cannot be re-submitted from a tip.
         raiseFailure("refusal", "git-commit-missing", `yrd: no Git commit '${pr.branch}'`)
       }
-      const resolved = await target(options.base ?? pr.base, undefined)
-      const composition = requestedComposition ?? pr.composition
-      if (
-        headSha !== pr.headSha ||
-        resolved.base !== pr.base ||
-        resolved.baseSha !== pr.baseSha ||
-        !sameComposition(composition, pr.composition)
-      ) {
-        await intake({
-          branch: pr.branch,
-          headSha,
-          ...resolved,
-          ...(options.issue === undefined ? {} : { issue: options.issue }),
-          ...(composition === undefined ? {} : { composition }),
-        })
-        pr = resolvePR(state(), pr.id)
-        if (pr === undefined) {
-          raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${selector}' disappeared after revision intake`)
+      if (headSha !== undefined) {
+        const resolved = await target(options.base ?? pr.base, undefined)
+        const composition = requestedComposition ?? pr.composition
+        if (
+          headSha !== pr.headSha ||
+          resolved.base !== pr.base ||
+          resolved.baseSha !== pr.baseSha ||
+          !sameComposition(composition, pr.composition)
+        ) {
+          await intake({
+            branch: pr.branch,
+            headSha,
+            ...resolved,
+            ...(options.issue === undefined ? {} : { issue: options.issue }),
+            ...(composition === undefined ? {} : { composition }),
+          })
+          pr = resolvePR(state(), pr.id)
+          if (pr === undefined) {
+            raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${selector}' disappeared after revision intake`)
+          }
         }
       }
     }
