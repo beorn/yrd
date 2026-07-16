@@ -9,7 +9,8 @@ import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import type { InstalledStep } from "@yrd/queue"
 import { createYrdHost } from "../src/host.ts"
-import { requireFreshInstalledBaseline } from "../src/run.ts"
+import { requireFreshInstalledBaseline, watchQueueRuns } from "../src/run.ts"
+import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 import {
   installedBaselineDrift,
   installedBaselinePath,
@@ -69,6 +70,14 @@ describe("installed baseline drift", () => {
       "step 'merge' integration contract changed",
     )
   })
+
+  it("reports drift when the same steps are reordered (revisions exclude order)", () => {
+    const installed = [step("check", "check-v1"), step("merge", "merge-v1", { integrates: true })]
+    const current = [step("merge", "merge-v1", { integrates: true }), step("check", "check-v1")]
+    const finding = installedBaselineDrift(baseline(installed), current)
+    expect(finding).toMatchObject({ code: "config-drift" })
+    expect(finding?.message).toContain("step order changed: installed check→merge, current merge→check")
+  })
 })
 
 describe("installed baseline persistence", () => {
@@ -96,6 +105,23 @@ describe("installed baseline persistence", () => {
     await writeFile(installedBaselinePath(stateDir), JSON.stringify({ version: 2 }), "utf8")
     await expect(readInstalledBaselines(stateDir)).rejects.toThrow(/installed baseline .* is malformed/u)
   })
+
+  it("serializes concurrent writes and removes without losing a surviving baseline", async () => {
+    const stateDir = await tempDir("yrd-baseline-")
+    await writeInstalledBaseline(stateDir, baseline([step("check", "check-v1")], "main"))
+    // Provision two more bases and deinit the first, all interleaved: the
+    // exclusive lock + temp-file rename must let every survivor persist and the
+    // authority file must always parse (never a torn/partial write).
+    await Promise.all([
+      writeInstalledBaseline(stateDir, baseline([step("check", "check-v2")], "release/2.0")),
+      writeInstalledBaseline(stateDir, baseline([step("check", "check-v3")], "release/3.0")),
+      removeInstalledBaseline(stateDir, "main"),
+    ])
+    const baselines = await readInstalledBaselines(stateDir)
+    expect(Object.keys(baselines).sort()).toEqual(["release/2.0", "release/3.0"])
+    const raw = await readFile(installedBaselinePath(stateDir), "utf8")
+    expect(() => JSON.parse(raw) as unknown).not.toThrow()
+  })
 })
 
 describe("run gate", () => {
@@ -111,6 +137,45 @@ describe("run gate", () => {
     await requireFreshInstalledBaseline({
       queue: { auditEnvironment: async () => ({ findings: [{ code: "operator-finding", message: "inspect" }] }) },
     })
+  })
+
+  it("fails loud when queue administration is wired without an audit capability", async () => {
+    // A host that wires queue administration but omits auditEnvironment would give
+    // the gate nothing to prove; it must refuse loudly, not grant free passage.
+    await expect(requireFreshInstalledBaseline({ queue: { provision: async () => ({}) } })).rejects.toThrow(
+      /queue\.audit capability is not installed/u,
+    )
+  })
+
+  it("stays a no-op when no queue administration is wired at all", async () => {
+    // Embedded / no-administration hosts (and CLI paths passing no services) keep
+    // the legacy no-op: absent administration is a valid shape, missing audit is not.
+    await requireFreshInstalledBaseline({})
+  })
+
+  it("re-proves the installed baseline before every watch cycle", async () => {
+    let gateCalls = 0
+    let runCalls = 0
+    const app = {
+      scope: { signal: { aborted: false }, sleep: async () => undefined },
+      queue: {
+        run: async () => {
+          runCalls += 1
+          return []
+        },
+      },
+    } as unknown as YrdCliApp
+    const io = { stdout: () => undefined, stderr: () => undefined } as unknown as YrdCliIO
+    const gate = async (): Promise<void> => {
+      gateCalls += 1
+      // Simulate a config change detected on the second cycle.
+      if (gateCalls >= 2) throw new Error("installed baseline drifted mid-watch")
+    }
+    await expect(watchQueueRuns(app, [], { json: true, interval: 1 }, io, gate)).rejects.toThrow(/drifted mid-watch/u)
+    // Gate ran on cycle 1 (before the run) and again on cycle 2 (which refused
+    // before any run started): proves per-cycle re-proof, gate-before-run.
+    expect(gateCalls).toBe(2)
+    expect(runCalls).toBe(1)
   })
 })
 
@@ -169,6 +234,40 @@ describe("host installed baseline", () => {
       await requireFreshInstalledBaseline(drifted.services)
     } finally {
       await drifted.close()
+    }
+  })
+
+  it("deinit clears a stored baseline whose base ref was deleted, even under drift", async () => {
+    const repo = await queueRepository("true")
+    await git(repo, "branch", "stale/base")
+    const host = await createYrdHost({ cwd: repo })
+    try {
+      await host.services.queue?.provision?.("stale/base")
+      expect(await host.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+    } finally {
+      await host.close()
+    }
+
+    // Delete the provisioned base ref AND change the check config so the stored
+    // baseline is both un-resolvable and drifted — exactly the wedge that used
+    // to block `queue deinit` (its own prescribed remedy) via a throwing inspect.
+    await git(repo, "branch", "-D", "stale/base")
+    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+
+    const after = await createYrdHost({ cwd: repo })
+    try {
+      const audit = await after.services.queue?.auditEnvironment?.()
+      expect(audit?.findings).toMatchObject([{ code: "config-drift" }])
+      const deprovisioned = (await after.services.queue?.deprovision?.("stale/base")) as {
+        released: string[]
+        baseSha: string
+      }
+      expect(deprovisioned.released).toEqual(["installed-baseline"])
+      expect(deprovisioned.baseSha).toMatch(/^[0-9a-f]{40}$/u)
+      expect(await after.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      await requireFreshInstalledBaseline(after.services)
+    } finally {
+      await after.close()
     }
   })
 })

@@ -2085,8 +2085,18 @@ async function logRuns(
  * Non-drift environment findings stay audit-only; config drift blocks the run
  * with the one actionable migration remedy. */
 export async function requireFreshInstalledBaseline(services: YrdCliServices): Promise<void> {
-  const result = await services.queue?.auditEnvironment?.()
-  const drift = (result?.findings ?? []).filter((finding) => finding.code === "config-drift")
+  const administration = services.queue
+  // No queue administration is wired (embedded / no-administration host) → the
+  // installed-baseline gate is a legacy no-op, as before.
+  if (administration === undefined) return
+  // Administration IS wired but the audit capability is missing: the guard cannot
+  // prove freshness, so it must fail loud rather than silently grant zero
+  // staleness protection (a config change would slip past unguarded).
+  if (administration.auditEnvironment === undefined) {
+    configuration("queue.audit capability is not installed")
+  }
+  const result = await administration.auditEnvironment()
+  const drift = result.findings.filter((finding) => finding.code === "config-drift")
   if (drift.length === 0) return
   refusal(drift.map((finding) => finding.message).join("\n"))
 }
@@ -2253,11 +2263,12 @@ async function finishQueue(
   )
 }
 
-async function watchQueueRuns(
+export async function watchQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { steps?: unknown; json?: boolean; interval?: number },
   io: YrdCliIO,
+  gate: () => Promise<void>,
 ): Promise<YrdCliExitCode> {
   const intervalSeconds = options.interval ?? 15
   if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds <= 0) {
@@ -2277,6 +2288,10 @@ async function watchQueueRuns(
     }
     while (true) {
       heartbeat?.check()
+      // Re-prove the installed baseline before EACH cycle: a config change while
+      // watching must stop the watch, never let a fresh cycle start expensive
+      // Runs on a stale baseline.
+      await gate()
       const runs = await runQueues(app, selectors, options, io)
       heartbeat?.check()
       if (jsonEnabled(options)) {
@@ -2916,11 +2931,12 @@ function buildProgram(
     .option("--interval <seconds>", "watch interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
-      await requireFreshInstalledBaseline(installedServices())
+      const gate = () => requireFreshInstalledBaseline(installedServices())
       if (options.watch === true) {
-        setExit(await watchQueueRuns(installed(), selectors, options, io))
+        setExit(await watchQueueRuns(installed(), selectors, options, io, gate))
         return
       }
+      await gate()
       const runs = await runQueues(installed(), selectors, options, io)
       await printResult(
         io,
