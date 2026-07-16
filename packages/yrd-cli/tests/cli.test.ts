@@ -4,9 +4,19 @@
 
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { gunzipSync } from "node:zlib"
 import { pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
@@ -7664,7 +7674,26 @@ describe("journal version skew fail-loud", () => {
   }
 
   type StoredJournalRow = Record<string, unknown> & {
-    events: (Record<string, unknown> & { name: string; data: unknown })[]
+    events?: (Record<string, unknown> & { name: string; data: unknown })[]
+  }
+
+  type StoredJournalManifest = Readonly<{
+    segments: readonly Readonly<{ path: string }>[]
+    tail: Readonly<{ path: string }>
+    tailState: Readonly<{ path: string }>
+  }>
+
+  function authoritativeJournalRows(dir: string): string[] {
+    const manifest = JSON.parse(readFileSync(join(dir, "events-v4.manifest.json"), "utf8")) as StoredJournalManifest
+    const tailState = JSON.parse(readFileSync(join(dir, manifest.tailState.path), "utf8")) as {
+      committedBytes: number
+    }
+    const chunks = manifest.segments.map((segment) => gunzipSync(readFileSync(join(dir, segment.path))))
+    chunks.push(readFileSync(join(dir, manifest.tail.path)).subarray(0, tailState.committedBytes))
+    return Buffer.concat(chunks)
+      .toString("utf8")
+      .split("\n")
+      .filter((entry) => entry.trim() !== "")
   }
 
   async function seededJournalDir(): Promise<string> {
@@ -7677,9 +7706,7 @@ describe("journal version skew fail-loud", () => {
 
   function rewriteJournalRows(dir: string, poison: (row: StoredJournalRow) => boolean): number {
     const path = join(dir, "events-v3.jsonl")
-    const rows = readFileSync(path, "utf8")
-      .split("\n")
-      .filter((entry) => entry.trim() !== "")
+    const rows = authoritativeJournalRows(dir)
     let poisoned = 0
     const rewritten = rows.map((entry) => {
       const { checksum: _replaced, ...row } = JSON.parse(entry) as StoredJournalRow
@@ -7687,13 +7714,19 @@ describe("journal version skew fail-loud", () => {
       const checksum = createHash("sha256").update(canonicalJson(row)).digest("hex")
       return JSON.stringify({ ...row, checksum })
     })
+    for (const entry of readdirSync(dir)) {
+      if (entry.startsWith("events-v4.") || entry === "snapshot-v4.json" || entry === "projection-checkpoint-v1.json") {
+        rmSync(join(dir, entry), { force: true })
+      }
+    }
+    rmSync(path, { force: true })
     writeFileSync(path, `${rewritten.join("\n")}\n`)
     return poisoned
   }
 
   function poisonPrEventData(row: StoredJournalRow): boolean {
     let hit = false
-    for (const event of row.events) {
+    for (const event of row.events ?? []) {
       if (!event.name.startsWith("pr/")) continue
       if (typeof event.data !== "object" || event.data === null || Array.isArray(event.data)) continue
       event.data = { ...event.data, ...newerWriterFields }
