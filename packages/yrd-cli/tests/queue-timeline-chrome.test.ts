@@ -6,7 +6,7 @@
  * right-anchored STEP/BY/AGE/RUN cells), split RUN and PR header labels,
  * muted run ids, the RUNNER title-in-border box (present / absent states),
  * bottom-aligned STATS, pane frames with padding, selection color forcing,
- * the failed/done status vocabulary, and the non-default-only FILTER line.
+ * the failed/done status vocabulary, and the non-default-only FILTER row.
  */
 
 import { createElement } from "react"
@@ -18,14 +18,14 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
 
-function lineIndex(text: string, needle: string): number {
-  return text.split("\n").findIndex((line) => line.includes(needle))
+function rowIndexOf(text: string, needle: string): number {
+  return text.split("\n").findIndex((row) => row.includes(needle))
 }
 
-function lineAt(text: string, index: number): string {
-  const line = text.split("\n")[index]
-  if (line === undefined) throw new Error(`no line ${index}`)
-  return line
+function rowAt(text: string, index: number): string {
+  const row = text.split("\n")[index]
+  if (row === undefined) throw new Error(`no rendered row ${index}`)
+  return row
 }
 
 /** mediaDuration display format (H:MM:SS / M:SS) for expected-age assertions. */
@@ -58,10 +58,36 @@ describe("queue timeline chrome 21106", () => {
       // Split header labels: RUN and PR are separate labels, each over its
       // own column — no merged RUN·PR header.
       expect(app.text).not.toContain("RUN·PR")
-      const headerY = lineIndex(app.text, "TIME")
-      const headerLine = lineAt(app.text, headerY)
+      const headerY = rowIndexOf(app.text, "TIME")
+      const headerLine = rowAt(app.text, headerY)
       expect(headerLine).toContain("RUN")
       expect(headerLine).toContain("PR")
+
+      // One renderer, two modes (user contract 2026-07-16): the one-shot
+      // (nav off) render must be layout-identical to the live (nav on)
+      // first frame — same column x-offsets. This permanently kills the
+      // "tests pass one-shot, breaks live" nav-wrapper divergence class.
+      const oneShot = createRenderer({ cols: 120, rows: 40 })(
+        createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
+      )
+      try {
+        await oneShot.waitForLayoutStable()
+        for (const cell of ["time", "status", "run", "pr", "step", "by", "age", "dur"]) {
+          const live = app.locator(`#th-${cell}`).boundingBox()
+          const plain = oneShot.locator(`#th-${cell}`).boundingBox()
+          expect(plain?.x, `one-shot '${cell}' header x`).toBe(live?.x)
+          const liveCells = app.locator(`[id^='td-${cell}-']`)
+          const plainCells = oneShot.locator(`[id^='td-${cell}-']`)
+          expect(plainCells.count(), `one-shot '${cell}' cell count`).toBe(liveCells.count())
+          for (let index = 0; index < plainCells.count(); index += 1) {
+            expect(plainCells.nth(index).boundingBox()?.x, `one-shot '${cell}' row ${index} x`).toBe(
+              liveCells.nth(index).boundingBox()?.x,
+            )
+          }
+        }
+      } finally {
+        oneShot.unmount()
+      }
     } finally {
       app.unmount()
     }
@@ -74,9 +100,9 @@ describe("queue timeline chrome 21106", () => {
     try {
       await app.waitForLayoutStable()
       const text = app.text
-      const runRowY = lineIndex(text, "PR4.1")
+      const runRowY = rowIndexOf(text, "PR4.1")
       expect(runRowY).toBeGreaterThan(0)
-      const runRow = lineAt(text, runRowY)
+      const runRow = rowAt(text, runRowY)
       const runX = runRow.indexOf("main#4 ") >= 0 ? runRow.indexOf("main#4 ") : runRow.indexOf("main#4")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
       const subjectX = runRow.indexOf("Land the durable patch")
@@ -87,8 +113,8 @@ describe("queue timeline chrome 21106", () => {
       expect(runFg, "run id shares TIME's muted fg").toEqual(timeFg)
       expect(runFg, "run id is not default fg").not.toEqual(subjectFg)
 
-      const pendingRowY = lineIndex(text, " pend ")
-      const pendingRow = lineAt(text, pendingRowY)
+      const pendingRowY = rowIndexOf(text, " pend ")
+      const pendingRow = rowAt(text, pendingRowY)
       const pendingX = pendingRow.lastIndexOf("pending")
       expect(pendingX, "pending run cell present on the pending row").toBeGreaterThan(0)
       const pendingFg = app.cell(pendingX, pendingRowY).fg
@@ -104,10 +130,10 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
     try {
       await app.waitForLayoutStable()
-      const integratedRow = lineAt(app.text, lineIndex(app.text, "PR4.1"))
+      const integratedRow = rowAt(app.text, rowIndexOf(app.text, "PR4.1"))
       expect(integratedRow).toContain(" done ")
       expect(integratedRow).not.toContain(" ok ")
-      const rejectedRow = lineAt(app.text, lineIndex(app.text, "PR5.1"))
+      const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "PR5.1"))
       expect(rejectedRow).toContain(" fail ")
       expect(rejectedRow).not.toContain(" rej ")
     } finally {
@@ -115,7 +141,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("renders a RUNNER title-in-border box with pid, command line, and right-aligned uptime", async () => {
+  it("renders a RUNNER title-in-border box with pid, command row, and right-aligned uptime", async () => {
     const story = queueTimelineStories["contract-overview"].snapshot.projection
     const projection: QueueTimelineProjection = {
       ...story,
@@ -130,21 +156,21 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      const titleY = lineIndex(app.text, "RUNNER")
+      const titleY = rowIndexOf(app.text, "RUNNER")
       expect(titleY, "RUNNER title row").toBeGreaterThanOrEqual(0)
-      const bodyY = lineIndex(app.text, "[342]")
+      const bodyY = rowIndexOf(app.text, "[342]")
       expect(bodyY, "runner body row").toBeGreaterThan(titleY)
-      const body = lineAt(app.text, bodyY)
+      const body = rowAt(app.text, bodyY)
       expect(body).toContain("[342] bun vendor/yrd/bin/yrd.ts --resident")
       expect(body).toContain("uptime 03:45")
-      // Right-aligned: uptime is the last content in the row (before border).
+      // Right-aligned: uptime ends the row content (before the border).
       expect(body.replace(/[│\s]+$/u, "").endsWith("uptime 03:45")).toBe(true)
     } finally {
       app.unmount()
     }
   })
 
-  it("renders an all-red NO RUNNER line with the last-drained age when no runner exists", async () => {
+  it("renders an all-red NO RUNNER banner with the last-drained age when no runner exists", async () => {
     const story = queueTimelineStories["contract-overview"].snapshot.projection
     const projection: QueueTimelineProjection = { ...story, runner: null }
     const newestTerminal = Math.max(
@@ -158,19 +184,19 @@ describe("queue timeline chrome 21106", () => {
     try {
       await app.waitForLayoutStable()
       const message = `NO RUNNER - queue last drained ${expectedAge} ago`
-      const messageY = lineIndex(app.text, "NO RUNNER")
+      const messageY = rowIndexOf(app.text, "NO RUNNER")
       expect(messageY, app.text).toBeGreaterThanOrEqual(0)
-      expect(lineAt(app.text, messageY)).toContain(message)
-      // All-red: every glyph of the message shares one fg, and it matches the
-      // failed status word's error fg.
-      const messageLine = lineAt(app.text, messageY)
+      expect(rowAt(app.text, messageY)).toContain(message)
+      // All-red: every glyph of the message shares one fg matching the failed
+      // status word's error fg.
+      const messageLine = rowAt(app.text, messageY)
       const startX = messageLine.indexOf("NO RUNNER")
       const messageFg = app.cell(startX, messageY).fg
       for (let offset = 0; offset < message.length; offset += 4) {
         expect(app.cell(startX + offset, messageY).fg, `fg at offset ${offset}`).toEqual(messageFg)
       }
-      const rejectedY = lineIndex(app.text, "PR5.1")
-      const rejectedLine = lineAt(app.text, rejectedY)
+      const rejectedY = rowIndexOf(app.text, "PR5.1")
+      const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)
     } finally {
@@ -184,8 +210,8 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection: defaults, nav: false, columns: 160 }))
     try {
       await app.waitForLayoutStable()
-      const filterY = lineIndex(app.text, "FILTER")
-      const filterLine = lineAt(app.text, filterY)
+      const filterY = rowIndexOf(app.text, "FILTER")
+      const filterLine = rowAt(app.text, filterY)
       expect(filterLine).toContain("since=6:00:00")
       expect(filterLine).toContain("[x] pending")
       expect(filterLine).toContain("[x] running")
@@ -204,7 +230,7 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app2.waitForLayoutStable()
-      const filterLine = lineAt(app2.text, lineIndex(app2.text, "FILTER"))
+      const filterLine = rowAt(app2.text, rowIndexOf(app2.text, "FILTER"))
       expect(filterLine).toContain("terms=typecheck")
       expect(filterLine).toContain("[ ] pending")
       expect(filterLine).toContain("[x] failed")
@@ -217,13 +243,13 @@ describe("queue timeline chrome 21106", () => {
   it("frames both watch panes with padded title-in-border chrome and bottom-aligned STATS", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
-    const app = render(createElement(QueueWatchFrame, { snapshot, paused: false }))
+    const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
       const text = app.text
-      expect(lineIndex(text, "QUEUE main"), "list pane title").toBeGreaterThanOrEqual(0)
-      expect(lineIndex(text, "DETAIL"), "detail pane title").toBeGreaterThanOrEqual(0)
+      expect(rowIndexOf(text, "QUEUE main"), "list pane title").toBeGreaterThanOrEqual(0)
+      expect(rowIndexOf(text, "DETAIL"), "detail pane title").toBeGreaterThanOrEqual(0)
       // Padded content: the TIME header sits inside border + padding.
       const timeHeader = app.locator("#th-time").boundingBox()
       expect(timeHeader).not.toBeNull()
@@ -231,9 +257,9 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader!.y).toBeGreaterThanOrEqual(2)
       // Bottom-aligned STATS: the STATS block sits in the bottom band of the
       // pane, directly above the footer, not right under the list rows.
-      const lines = text.split("\n")
-      const footerY = lines.findIndex((line) => line.includes("q quit"))
-      const statsY = lineIndex(text, "STATS")
+      const rows = text.split("\n")
+      const footerY = rows.findIndex((row) => row.includes("q quit"))
+      const statsY = rowIndexOf(text, "STATS")
       expect(footerY).toBeGreaterThan(0)
       expect(statsY).toBeGreaterThan(0)
       expect(footerY - statsY, "STATS anchors to the bottom band").toBeLessThanOrEqual(12)
@@ -245,31 +271,36 @@ describe("queue timeline chrome 21106", () => {
   it("forces selection fg/bg across every cell of the cursor row and keeps colorization elsewhere", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
-    const app = render(createElement(QueueWatchFrame, { snapshot, paused: false }))
+    const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => lineIndex(app.text, " run ") >= 0)
+      await waitFor(() => rowIndexOf(app.text, " run ") >= 0)
       const text = app.text
       // Default cursor = first RUNNING row.
-      const cursorY = lineIndex(text, " run ")
-      const cursorLine = lineAt(text, cursorY)
+      const cursorY = rowIndexOf(text, " run ")
+      const cursorLine = rowAt(text, cursorY)
       const statusX = cursorLine.indexOf(" run ") + 1
       const timeX = cursorLine.search(/\d{2}:\d{2}:\d{2}/u)
       const cursorFg = app.cell(statusX, cursorY).fg
       const cursorBg = app.cell(statusX, cursorY).bg
       expect(app.cell(timeX, cursorY).fg, "TIME cell forced to selection fg").toEqual(cursorFg)
       expect(app.cell(timeX, cursorY).bg, "TIME cell selection bg").toEqual(cursorBg)
-      const ageMatch = /\d+:\d{2}\s*$/u.exec(cursorLine.replace(/[│\s]+$/u, ""))
       // Every sampled cell shares the same forced pair.
       for (const x of [timeX, statusX]) {
         expect(app.cell(x, cursorY).fg).toEqual(cursorFg)
       }
-      void ageMatch
+      // The selection band spans the FULL row width: the run-duration glyph
+      // near the right edge AND the inter-cell gap next to it carry the same
+      // selection background as the left-edge cells.
+      const durX = cursorLine.indexOf("◷")
+      expect(durX, "cursor row run-duration glyph").toBeGreaterThan(statusX)
+      expect(app.cell(durX, cursorY).bg, "selection bg at the right edge").toEqual(cursorBg)
+      expect(app.cell(durX - 1, cursorY).bg, "selection bg across cell gaps").toEqual(cursorBg)
       // Unselected rejected row keeps its own colorization: status fg differs
       // from muted TIME fg.
-      const rejectedY = lineIndex(text, " fail ")
+      const rejectedY = rowIndexOf(text, " fail ")
       expect(rejectedY).not.toBe(cursorY)
-      const rejectedLine = lineAt(text, rejectedY)
+      const rejectedLine = rowAt(text, rejectedY)
       const failX = rejectedLine.indexOf(" fail ") + 1
       const rejectedTimeX = rejectedLine.search(/\d{2}:\d{2}:\d{2}/u)
       expect(app.cell(failX, rejectedY).fg).not.toEqual(app.cell(rejectedTimeX, rejectedY).fg)

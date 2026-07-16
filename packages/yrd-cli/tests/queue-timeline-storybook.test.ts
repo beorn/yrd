@@ -57,15 +57,6 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
   return -1
 }
 
-function findGlyphRow(term: ReturnType<typeof createTermless>, glyph: string, column = 1): number {
-  const rows = term.rows
-  if (rows === undefined) throw new Error("Termless terminal is missing its row count")
-  for (let row = 0; row < rows; row += 1) {
-    if (term.cell(row, column).char === glyph) return row
-  }
-  return -1
-}
-
 describe("queue timeline storybook", () => {
   it("opens on meaningful production queue rows and selected run detail", async () => {
     using term = createTermless({ cols: 200, rows: 50 })
@@ -79,10 +70,10 @@ describe("queue timeline storybook", () => {
       expect(frame).toContain("QUEUE main")
       expect(frame).toContain("running")
       expect(frame).toContain("PRs PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
-      expect(frame).toContain("R42 main [/] running")
-      expect(frame).toMatch(/check\s+step-v2 \[\/\] running\s+2/u)
+      expect(frame).toContain("RUN R42 STATUS running OUTCOME running")
+      expect(frame).toContain("STEP check#2 running")
       expect(frame).toContain("OUTPUT check#2")
-      expect(frame).toContain("p pause q quit · Esc close detail · h/l steps · f filters · o evidence")
+      expect(frame).toContain("q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate")
       expect(frame).not.toContain("No matching queue rows.")
     } finally {
       handle.unmount()
@@ -103,7 +94,9 @@ describe("queue timeline storybook", () => {
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
-      expect(term.screen.getText()).toContain("Esc close detail")
+      expect(term.screen.getText()).toContain(
+        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
+      )
 
       await act(async () => {
         await handle.press("Escape")
@@ -112,7 +105,9 @@ describe("queue timeline storybook", () => {
 
       await waitFor(() => timelineHeader()?.includes("BY") === true)
       expect(timelineHeader()).toContain("BY")
-      expect(term.screen.getText()).toContain("Enter reopen detail")
+      expect(term.screen.getText()).toContain(
+        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
+      )
     } finally {
       handle.unmount()
     }
@@ -128,7 +123,9 @@ describe("queue timeline storybook", () => {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(term.screen.getText()).toContain("PR42.1")
       expect(term.screen.getText()).toContain("PR43.1")
-      expect(term.screen.getText()).toContain("Enter detail")
+      expect(term.screen.getText()).toContain(
+        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
+      )
 
       await act(async () => {
         await handle.press("Enter")
@@ -137,7 +134,9 @@ describe("queue timeline storybook", () => {
       const detail = term.screen.getText()
       expect(detail).toContain("RUN R42 STATUS running OUTCOME running")
       expect(detail).toContain("JOB J42-check RUNNER runner-herdr-07")
-      expect(detail).toContain("LEASE 2026-07-13T12:05:30.000Z")
+      // Detail clocks share the timeline convention: local HH:MM:SS with a
+      // cross-day date qualifier (fixtures are 2026-07-13, tests run later).
+      expect(detail).toMatch(/LEASE \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/u)
       expect(detail).not.toContain("QUEUE main")
     } finally {
       handle.unmount()
@@ -335,7 +334,7 @@ describe("queue timeline storybook", () => {
       if (viewport === undefined) throw new Error(`story '${name}' is missing its viewport`)
 
       using term = createTermless({ cols: viewport.columns, rows: viewport.rows })
-      const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }), term, {
+      const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot }), term, {
         mouse: true,
         selection: false,
       })
@@ -377,7 +376,7 @@ describe("queue timeline storybook", () => {
   it("preserves the dragged split ratio when the queue cursor moves", async () => {
     const story = queueTimelineStories["mixed-completed"]
     using term = createTermless({ cols: 200, rows: 50 })
-    const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }), term, {
+    const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot }), term, {
       mouse: true,
       selection: false,
     })
@@ -407,7 +406,7 @@ describe("queue timeline storybook", () => {
       const story = queueTimelineStories[name]
       const viewport = story.viewport
       if (viewport === undefined) throw new Error(`story '${name}' is missing its viewport`)
-      const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }), {
+      const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot }), {
         writable: { write: () => {} },
         cols: viewport.columns,
         rows: viewport.rows,
@@ -425,14 +424,16 @@ describe("queue timeline storybook", () => {
     }
 
     const boundaryStory = queueTimelineStories["detail-below"]
-    const fullAtNaturalBoundary = await run(
-      createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot, paused: false }),
-      { writable: { write: () => {} }, cols: 100, rows: 32 },
-    )
-    const belowAfterNaturalBoundary = await run(
-      createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot, paused: false }),
-      { writable: { write: () => {} }, cols: 100, rows: 33 },
-    )
+    const fullAtNaturalBoundary = await run(createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot }), {
+      writable: { write: () => {} },
+      cols: 100,
+      rows: 32,
+    })
+    const belowAfterNaturalBoundary = await run(createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot }), {
+      writable: { write: () => {} },
+      cols: 100,
+      rows: 33,
+    })
     try {
       expect(fullAtNaturalBoundary.text).not.toContain("PRs PR4")
       expect(fullAtNaturalBoundary.text).toContain("PR4.1")
@@ -465,11 +466,11 @@ describe("queue timeline storybook", () => {
     expect(live.nextSnapshot?.outputs?.[0]?.text).toBe("checking one\nchecking two\n")
     if (live.nextSnapshot === undefined) throw new Error("live-output-growth is missing its next snapshot")
     const renderLive = createRenderer({ cols: 200, rows: 50 })
-    const outputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.snapshot, paused: false }))
+    const outputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.snapshot }))
     try {
       await outputFrame.waitForLayoutStable()
       expect(outputFrame.text).toContain("checking one")
-      const nextOutputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.nextSnapshot, paused: false }))
+      const nextOutputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.nextSnapshot }))
       await nextOutputFrame.waitForLayoutStable()
       expect(nextOutputFrame.text).toContain("checking one")
       expect(nextOutputFrame.text).toContain("checking two")
@@ -481,13 +482,11 @@ describe("queue timeline storybook", () => {
     const anchored = queueTimelineStories["anchored-new"]
     if (anchored.nextSnapshot === undefined) throw new Error("anchored-new is missing its next snapshot")
     const renderAnchored = createRenderer({ cols: 200, rows: 50 })
-    const anchoredFrame = renderAnchored(createElement(QueueWatchFrame, { snapshot: anchored.snapshot, paused: false }))
+    const anchoredFrame = renderAnchored(createElement(QueueWatchFrame, { snapshot: anchored.snapshot }))
     try {
       await anchoredFrame.waitForLayoutStable()
       expect(anchoredFrame.text).not.toContain("1 new")
-      const nextAnchoredFrame = renderAnchored(
-        createElement(QueueWatchFrame, { snapshot: anchored.nextSnapshot, paused: false }),
-      )
+      const nextAnchoredFrame = renderAnchored(createElement(QueueWatchFrame, { snapshot: anchored.nextSnapshot }))
       await nextAnchoredFrame.waitForLayoutStable()
       expect(nextAnchoredFrame.text).toContain("1 new")
     } finally {
@@ -513,7 +512,7 @@ describe("queue timeline storybook", () => {
     })
 
     const render = createRenderer({ cols: 200, rows: 50 })
-    const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80), paused: false }))
+    const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80) }))
     try {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PRs PR3")
@@ -526,7 +525,7 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("detail-row-001")
       expect(handle.text).toContain("PRs PR3")
 
-      handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(81), paused: false }))
+      handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(81) }))
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-001")
       expect(handle.text).not.toContain("detail-row-081")
@@ -537,7 +536,7 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("detail-row-081")
       expect(handle.text).toContain("PRs PR3")
 
-      handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(82), paused: false }))
+      handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(82) }))
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-082")
       expect(handle.text).toContain("PRs PR3")
@@ -546,37 +545,49 @@ describe("queue timeline storybook", () => {
     }
   })
 
-  it("opens the filter and selected-run evidence panes from the documented controls", async () => {
+  it("drives the status-filter toggles and evidence section from the documented controls", async () => {
     const story = queueTimelineStories["detail-controls"]
     const viewport = story.viewport
     if (viewport === undefined) throw new Error("detail-controls is missing its viewport")
-    const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }), {
+    const handle = await run(createElement(QueueWatchFrame, { snapshot: story.snapshot }), {
       writable: { write: () => {} },
       cols: viewport.columns,
       rows: viewport.rows,
     })
     try {
       expect(handle.text).toContain("PRs PR4")
-      expect(handle.text).toContain("f filters")
-      expect(handle.text).toContain("o evidence")
+      expect(handle.text).toContain("p/r/f/d toggle filters")
 
+      // `f` is the failed-bucket toggle (user respec 2026-07-15): the lone
+      // integrated run stays visible and the checkbox flips off and back.
+      expect(handle.text).toContain("[x] failed")
       await handle.press("f")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("FILTERS")
-      expect(handle.text).toContain("STATUS pending,running,rejected,integrated,other")
-
-      await handle.press("Escape")
+      expect(handle.text).toContain("[ ] failed")
+      expect(handle.text).toContain("PR4.1")
+      await handle.press("f")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs PR4")
+      expect(handle.text).toContain("[x] failed")
 
+      // `d` hides the done bucket — the integrated row leaves the list.
+      await handle.press("d")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("[ ] done")
+      expect(handle.text).not.toContain("PR4.1 Land the durable patch")
+      await handle.press("d")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("PR4.1 Land the durable patch")
+
+      // `o` expands the EVIDENCE section inside the detail body.
       await handle.press("o")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("EVIDENCE R4")
       expect(handle.text).toContain("LANDING")
 
+      // Esc hides the detail pane; the list keeps running.
       await handle.press("Escape")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs PR4")
+      expect(handle.text).toContain("PR4.1")
     } finally {
       handle.unmount()
     }
@@ -585,7 +596,7 @@ describe("queue timeline storybook", () => {
   it("keeps pointer selection equivalent to keyboard cursor movement", async () => {
     const story = queueTimelineStories["pending-only"]
     const render = createRenderer({ cols: 200, rows: 50 })
-    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }))
+    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR1 STATUS")

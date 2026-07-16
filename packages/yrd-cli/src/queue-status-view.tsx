@@ -104,7 +104,7 @@ export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
   lastTickAt: string
-  /** The resident runner's launch command line; absent for status records written before it was captured. */
+  /** The resident runner's launch command; absent for status records written before it was captured. */
   command?: string
 }>
 
@@ -2243,7 +2243,8 @@ export function PRDetailView({
       )}
       {detail.run === undefined && landing !== undefined ? (
         <Text>
-          <Text bold>LANDING</Text> {landing.commit}@{landing.baseSha}
+          <Text bold>LANDING</Text>{" "}
+          {landing.commit === landing.baseSha ? landing.commit : `${landing.commit}@${landing.baseSha}`}
         </Text>
       ) : null}
     </Box>
@@ -2958,10 +2959,10 @@ function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: nu
 
 /**
  * The one title-in-border chrome idiom every watch box uses (user directive
- * 2026-07-15): a name-in-border-line title over a round box with no top edge —
+ * 2026-07-15): a name-in-border title over a round box with no top edge —
  * the same style the STATS box established. `fill` makes the frame stretch to
  * its parent (pane usage); `padding` widens the inner content padding from the
- * single-line default (`paddingX=1`).
+ * single-row default (`paddingX=1`).
  */
 export function TitledBox({
   title,
@@ -3027,8 +3028,8 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
 /**
  * The RUNNER box renders the runner fact exactly once (15d), restyled per the
  * 2026-07-15 user spec: absent → one all-red `NO RUNNER - queue last drained
- * <age> ago` line; present → `[pid] <command line>` with a right-aligned
- * `uptime H:MM`; a stale heartbeat keeps its loud red line inside the box.
+ * <age> ago` banner; present → `[pid] <command>` with a right-aligned
+ * `uptime H:MM`; a stale heartbeat keeps its loud red banner inside the box.
  */
 function TimelineRunnerBox({ projection }: { projection: QueueTimelineProjection }) {
   const runner = projection.runner
@@ -3191,7 +3192,7 @@ export function queueTimelineVisibleDefaultCursorId(
 }
 
 /**
- * The FILTER line (user respec 2026-07-15): only non-default dimensions render
+ * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
  * only when on; no `none`/`no`/`all` placeholders. The four status buckets
  * render as checkbox-style indicators that are clickable (pointer toggles) and
@@ -3248,6 +3249,7 @@ function ProjectedQueueTimeline({
   fillHeight = false,
   visibleBuckets,
   onToggleBucket,
+  freshRows = 0,
 }: {
   projection: QueueTimelineProjection
   nav: boolean
@@ -3259,6 +3261,7 @@ function ProjectedQueueTimeline({
   fillHeight?: boolean
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  freshRows?: number
 }) {
   const rows = queueTimelineVisibleRows(projection, visibleBuckets)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
@@ -3285,6 +3288,12 @@ function ProjectedQueueTimeline({
               <QueueTabsLine base={projection.base} siblings={projection.siblingBases} showLabel={false} />
             )}
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
+            {/* Anchored-freshness cue: arrivals above a pinned cursor. */}
+            {freshRows === 0 ? null : (
+              <Text color="$fg-warning" flexShrink={0}>
+                {freshRows} new
+              </Text>
+            )}
             {updated}
           </Box>
         ) : (
@@ -3344,6 +3353,7 @@ export function QueueTimelineView({
   fillHeight = false,
   visibleBuckets,
   onToggleBucket,
+  freshRows,
 }: {
   projection?: QueueTimelineProjection
   results?: readonly QueueStatusResult[]
@@ -3359,6 +3369,7 @@ export function QueueTimelineView({
   fillHeight?: boolean
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
+  freshRows?: number
 }) {
   if (projection !== undefined) {
     // 15e: the list is left-flush — no gutter, no centering; the surface
@@ -3376,6 +3387,7 @@ export function QueueTimelineView({
         fillHeight={fillHeight}
         visibleBuckets={visibleBuckets}
         onToggleBucket={onToggleBucket}
+        freshRows={freshRows}
       />
     )
   }
@@ -3843,19 +3855,56 @@ function QueueShowMembersLine({ data, highlightPr }: { data: QueueShowData; high
 }
 
 function QueueStepLifecycleView({ row }: { row: QueueShowRow }) {
+  const identity = [["JOB", presentFact(row.uuid)] as const, ["RUNNER", presentFact(row.runner)] as const].filter(
+    ([, value]) => value !== undefined,
+  )
+  const lease = [
+    ["LEASE", presentFact(row.lease) === undefined ? undefined : detailClock(row.lease)] as const,
+    ["CHANGED", presentFact(row.changed) === undefined ? undefined : detailClock(row.changed)] as const,
+  ].filter(([, value]) => value !== undefined)
+  const clocks = [
+    ["REQ", presentFact(row.requested) === undefined ? undefined : detailClock(row.requested)] as const,
+    ["START", presentFact(row.started) === undefined ? undefined : detailClock(row.started)] as const,
+    ["END", presentFact(row.finished) === undefined ? undefined : detailClock(row.finished)] as const,
+  ].filter(([, value]) => value !== undefined)
+  const factRow = (facts: readonly (readonly [string, string | undefined])[]): string =>
+    facts.map(([label, value]) => `${label} ${value}`).join(" ")
   return (
     <Box flexDirection="column">
-      <Text wrap="truncate">
-        JOB {row.uuid} RUNNER {row.runner}
-      </Text>
-      <Text wrap="truncate">
-        LEASE {row.lease} CHANGED {row.changed}
-      </Text>
-      <Text wrap="truncate">
-        TIME REQUESTED {row.requested} STARTED {row.started} FINISHED {row.finished}
-      </Text>
+      {identity.length === 0 ? null : <Text wrap="truncate">{factRow(identity)}</Text>}
+      {lease.length === 0 ? null : <Text wrap="truncate">{factRow(lease)}</Text>}
+      {clocks.length === 0 ? null : <Text wrap="truncate">TIME {factRow(clocks)}</Text>}
     </Box>
   )
+}
+
+/**
+ * Detail facts render only PRESENT facts (user respec 2026-07-15) — the same
+ * non-default-only rule as the FILTER row. `-` placeholders never render.
+ */
+function presentFact(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const trimmed = value.trim()
+  return trimmed === "" || trimmed === "-" ? undefined : trimmed
+}
+
+/** Dedupe `X@X` landings (commit == landing sha) to one SHA. */
+export function queueLandingLabel(landing: string): string {
+  const [commit, base, ...rest] = landing.split("@")
+  if (rest.length === 0 && commit !== undefined && base !== undefined && commit === base) return commit
+  return landing
+}
+
+/**
+ * Detail timestamps share the timeline's clock convention: local HH:MM:SS,
+ * date-qualified only across day boundaries (relative to the local today).
+ */
+function detailClock(value: string): string {
+  if (presentFact(value) === undefined) return value
+  const when = new Date(value)
+  if (Number.isNaN(when.getTime())) return value
+  const includeDate = when.toDateString() !== new Date().toDateString()
+  return queueLogClock(value, false, includeDate)
 }
 
 function QueueProofView({ data }: { data: QueueShowData }) {
@@ -3864,21 +3913,31 @@ function QueueProofView({ data }: { data: QueueShowData }) {
       {data.steps.length === 0 ? (
         <Text color="$fg-muted">No step evidence recorded.</Text>
       ) : (
-        data.steps.map((row) => (
-          <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
-            <Text wrap="truncate">
-              {`PROOF ${row.step}#${row.attempt} ART `}
-              <QueueLogLocationLinks entries={row.locations} compact={false} />
-              {` EVIDENCE ${singleQueue(
-                typeof row.evidence === "string" ? row.evidence : safeText(row.evidence),
-              )} CHECKPOINT ${singleQueue(row.checkpoint)}`}
-            </Text>
-          </Box>
-        ))
+        data.steps.map((row) => {
+          const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
+          const checkpoint = presentFact(row.checkpoint)
+          return (
+            <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
+              <Text wrap="truncate">
+                {`PROOF ${row.step}#${row.attempt}`}
+                {row.locations.length === 0 ? null : (
+                  <>
+                    {" ART "}
+                    <QueueLogLocationLinks entries={row.locations} compact={false} />
+                  </>
+                )}
+                {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
+                {checkpoint === undefined ? "" : ` CHECKPOINT ${checkpoint}`}
+              </Text>
+            </Box>
+          )
+        })
       )}
-      <Text>
-        LANDING <Text color="$fg-muted">{data.landing}</Text>
-      </Text>
+      {presentFact(data.landing) === undefined ? null : (
+        <Text>
+          LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+        </Text>
+      )}
     </Box>
   )
 }
@@ -3892,7 +3951,16 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
   )
 }
 
+// The watch detail pane's vertical facts layout (user respec 2026-07-15):
+// stacked label/value rows that always fit the pane width — never a
+// horizontally sprawling table. Only present facts render; timestamps share
+// the timeline's local clock convention; `X@X` landings dedupe to one SHA.
 function CompactQueueShowView({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
+  const durations = [
+    ["TOTAL", presentFact(data.totalDuration)] as const,
+    ["ACTIVE", presentFact(data.activeDuration)] as const,
+    ["WAIT", presentFact(data.waitDuration)] as const,
+  ].filter(([, value]) => value !== undefined)
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate">
@@ -3902,26 +3970,43 @@ function CompactQueueShowView({ data, highlightPr }: { data: QueueShowData; high
         BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
       </Text>
       <Text wrap="truncate">
-        START {data.started} END {data.finished}
+        START {detailClock(data.started)}
+        {presentFact(data.finished) === undefined ? "" : ` END ${detailClock(data.finished)}`}
       </Text>
-      <Text wrap="truncate">
-        TOTAL {data.totalDuration} ACTIVE {data.activeDuration} WAIT {data.waitDuration}
-      </Text>
-      {data.steps.map((row) => (
-        <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
-          <Text wrap="truncate">
-            STEP {row.step}#{row.attempt} {row.status} DUR {row.duration} ERROR {row.errorCode}
-          </Text>
-          <QueueStepLifecycleView row={row} />
-          <Text wrap="truncate">
-            PROOF ART <QueueLogLocationLinks entries={row.locations} compact={false} /> EVIDENCE{" "}
-            {singleQueue(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))}
-          </Text>
-        </Box>
-      ))}
-      <Text wrap="truncate">
-        LANDING <Text color="$fg-muted">{data.landing}</Text>
-      </Text>
+      {durations.length === 0 ? null : (
+        <Text wrap="truncate">{durations.map(([label, value]) => `${label} ${value}`).join(" ")}</Text>
+      )}
+      {data.steps.map((row) => {
+        const error = presentFact(row.errorCode)
+        const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
+        return (
+          <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
+            <Text wrap="truncate">
+              STEP {row.step}#{row.attempt} {row.status}
+              {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
+              {error === undefined ? "" : ` ERROR ${error}`}
+            </Text>
+            <QueueStepLifecycleView row={row} />
+            {row.locations.length === 0 && evidence === undefined ? null : (
+              <Text wrap="truncate">
+                PROOF
+                {row.locations.length === 0 ? null : (
+                  <>
+                    {" ART "}
+                    <QueueLogLocationLinks entries={row.locations} compact={false} />
+                  </>
+                )}
+                {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
+              </Text>
+            )}
+          </Box>
+        )
+      })}
+      {presentFact(data.landing) === undefined ? null : (
+        <Text wrap="truncate">
+          LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+        </Text>
+      )}
       <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
     </Box>
   )

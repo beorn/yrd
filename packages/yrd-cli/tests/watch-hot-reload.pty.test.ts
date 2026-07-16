@@ -130,7 +130,9 @@ describe("yrd watch hot reload (installed)", () => {
         roots.push(repo)
         const running = await launchInstalledWatch(repo)
         try {
-          await running.terminal.waitFor("LIVE", 10_000)
+          // The 2026-07-15 footer respec removed the LIVE indicator; the
+          // exact keybinding footer is the stable liveness sentinel.
+          await running.terminal.waitFor("q quit", 10_000)
           expect(running.terminal.alive).toBe(true)
           const members = processGroupMembers(running.pid)
           expect(members).toContain(running.pid)

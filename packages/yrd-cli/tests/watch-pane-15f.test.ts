@@ -8,7 +8,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
   it("keeps j/k on runs while h/l, arrows, and pointer select one workflow-step tab", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
-    const app = render(createElement(QueueWatchFrame, { snapshot, paused: false }))
+    const app = render(createElement(QueueWatchFrame, { snapshot }))
 
     try {
       await app.waitForLayoutStable()
@@ -23,7 +23,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       expect(app.text).toContain("125 tests collected")
       expect(app.text).toContain("v LOG")
       expect(app.text.match(/(?:>|v) LOG/gu)).toHaveLength(1)
-      expect(app.text).toContain("h/l steps")
+      expect(app.text).toContain("h/j/k/l navigate")
 
       await app.press("h")
       await waitFor(() => app.text.includes("ACTIVE STEP prepare"))

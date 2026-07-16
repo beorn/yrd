@@ -316,7 +316,7 @@ describe("queue timeline 21106 contract", () => {
     if (projection === undefined) throw new Error("paused story is missing its projection")
     const rows = await renderTimeline(projection, 120)
     const statusLine = rowIndex(rows, "HOLD THE LINE")
-    // Title-in-border chrome: the STATUS name sits on the border line above.
+    // Title-in-border chrome: the STATUS name sits on the border row above.
     expect(rows[statusLine - 1]).toContain("STATUS")
     expect(rows[statusLine]).toContain("operator freeze")
     expect(rows[statusLine]).toContain("allowed PR2")
@@ -382,7 +382,7 @@ describe("queue timeline 21106 contract", () => {
     const story = queueTimelineStories["anchored-new"]
     if (story.nextSnapshot === undefined) throw new Error("anchored-new is missing its next snapshot")
     const render = createRenderer({ cols: 200, rows: 50 })
-    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }))
+    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
       // No running rows: the newest finished run R12 is the default.
@@ -393,7 +393,7 @@ describe("queue timeline 21106 contract", () => {
       await handle.press("j")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PRs PR11")
-      handle.rerender(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot, paused: false }))
+      handle.rerender(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PRs PR11")
       expect(handle.text).not.toContain("PRs PR13")
@@ -403,7 +403,7 @@ describe("queue timeline 21106 contract", () => {
 
     // A fresh view over the same newer snapshot follows the default again.
     const fresh = createRenderer({ cols: 200, rows: 50 })
-    const reopened = fresh(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot, paused: false }))
+    const reopened = fresh(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
     try {
       await reopened.waitForLayoutStable()
       expect(reopened.text).toContain("PRs PR13")
@@ -415,14 +415,16 @@ describe("queue timeline 21106 contract", () => {
   it("keeps the keybindings footer last and the batched detail highlighting the selected member", async () => {
     const story = queueTimelineStories["contract-overview"]
     const render = createRenderer({ cols: 200, rows: 50 })
-    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }))
+    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
       const rows = handle.text.split("\n")
       const footer = rows.findLastIndex((row) => row.includes("q quit"))
       expect(footer).toBeGreaterThan(0)
       expect(rows.slice(footer + 1).every((row) => row.trim() === "")).toBe(true)
-      expect(rows[footer]).toContain("p pause")
+      expect(rows[footer]?.trim()).toBe(
+        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
+      )
       const statistics = rows.findIndex((row) => row.includes("STATS"))
       expect(statistics).toBeGreaterThan(0)
       expect(statistics).toBeLessThan(footer)
@@ -534,7 +536,7 @@ describe("queue timeline 21106 contract", () => {
   it("selects whole rows through the canonical primitive with no textual cursor", async () => {
     const story = queueTimelineStories["contract-overview"]
     const render = createRenderer({ cols: 200, rows: 50 })
-    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }))
+    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
       const frame = handle.text.split("\n")
