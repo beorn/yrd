@@ -479,16 +479,31 @@ async function failureEvidence(
   })
 }
 
-type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
+type GitResult = Readonly<{ code: number; stdout: string; stderr: string; timedOut: boolean }>
 type Git = ReturnType<typeof createGit>
 
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
-  const run = async (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> => {
-    const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
-    const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+  const run = async (
+    repo: string,
+    args: readonly string[],
+    allowFailure = false,
+    timeoutMs?: number,
+  ): Promise<GitResult> => {
+    const result = await process.run({
+      argv: ["git", "-C", repo, ...args],
+      cwd: repo,
+      env,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    })
+    const completed = {
+      code: result.exitCode,
+      stdout: result.stdout.trim(),
+      stderr: result.stderr.trim(),
+      timedOut: result.timedOut,
+    }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
     }
@@ -1482,6 +1497,135 @@ async function changedPaths(git: Git, repo: string, from: string, to: string): P
   return nulPaths(result.stdout)
 }
 
+const SUBMODULE_REACHABILITY_TIMEOUT_MS = 90_000
+
+type CandidateSubmodulePin = Readonly<{ path: string; sha: string }>
+type CandidateSubmoduleProof = Readonly<{
+  root: string
+  path: string
+  pins: ReadonlyMap<string, Readonly<{ sha: string; origin: string }>>
+}>
+
+async function changedCandidateSubmodulePins(
+  git: Git,
+  repo: string,
+  baseSha: string,
+  candidateSha: string,
+): Promise<CandidateSubmodulePin[]> {
+  const pins: CandidateSubmodulePin[] = []
+  for (const path of await changedPaths(git, repo, baseSha, candidateSha)) {
+    const basePin = await readGitlink(git, repo, baseSha, path)
+    const candidatePin = await readGitlink(git, repo, candidateSha, path)
+    if (candidatePin !== undefined && candidatePin !== basePin) pins.push({ path, sha: candidatePin })
+  }
+  return pins
+}
+
+async function submoduleNameForPath(git: Git, repo: string, path: string): Promise<string | undefined> {
+  const configured = await git.run(
+    repo,
+    ["config", "-z", "--file", ".gitmodules", "--get-regexp", "^submodule\\..*\\.path$"],
+    true,
+  )
+  if (configured.code !== 0) return undefined
+  for (const record of configured.stdout.split("\0")) {
+    const separator = record.indexOf("\n")
+    if (separator === -1 || record.slice(separator + 1) !== path) continue
+    const key = record.slice(0, separator)
+    if (!key.startsWith("submodule.") || !key.endsWith(".path")) continue
+    return key.slice("submodule.".length, -".path".length)
+  }
+  return undefined
+}
+
+function unreachableSubmodulePin<Output extends JsonValue>(
+  pin: CandidateSubmodulePin,
+  origin: string,
+  detail: string,
+): JobResult<Output> {
+  return failed(
+    "submodule-pin-unreachable",
+    `candidate submodule '${pin.path}' pin '${pin.sha}' is unreachable from '${origin}' in a clean store ` +
+      `(branch not pushed, remote unavailable, authentication failed, or fetch timed out): ${detail}`,
+  )
+}
+
+async function withReachableCandidateSubmodules<Output extends JsonValue>(
+  git: Git,
+  repo: string,
+  baseSha: string,
+  checked: PinnedCandidate,
+  runWithProof: (proof: CandidateSubmoduleProof | undefined) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
+  const candidatePins = await changedCandidateSubmodulePins(git, repo, baseSha, checked.candidateSha)
+  if (candidatePins.length === 0) return runWithProof(undefined)
+
+  const root = await mkdtemp(join(tmpdir(), "yrd-submodule-proof-"))
+  const path = join(root, "candidate")
+  let outcome: JobResult<Output> | undefined
+  let operationFailure: unknown
+  try {
+    await mkdir(path, { recursive: true })
+    await git.run(path, ["init", "--quiet"])
+    await git.run(
+      path,
+      ["-c", "protocol.file.allow=always", "fetch", "--quiet", "--no-tags", repo, checked.candidateRef],
+      false,
+      SUBMODULE_REACHABILITY_TIMEOUT_MS,
+    )
+    await git.run(path, ["checkout", "--quiet", "--detach", checked.candidateSha])
+    const configuredOrigin = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+    await git.run(path, ["remote", "add", "origin", configuredOrigin.stdout || repo])
+
+    const provenPins = new Map<string, Readonly<{ sha: string; origin: string }>>()
+    for (const pin of candidatePins) {
+      const name = await submoduleNameForPath(git, path, pin.path)
+      const initialized = await git.run(path, ["submodule", "init", "--", pin.path], true)
+      const configuredUrl =
+        name === undefined ? undefined : await git.run(path, ["config", "--get", `submodule.${name}.url`], true)
+      const origin = configuredUrl?.stdout || "<missing .gitmodules URL>"
+      if (name === undefined || initialized.code !== 0 || configuredUrl?.code !== 0 || configuredUrl.stdout === "") {
+        const detail = initialized.stderr || initialized.stdout || "candidate tree has no usable submodule URL"
+        outcome = unreachableSubmodulePin(pin, origin, detail)
+        break
+      }
+
+      const materialized = await git.run(
+        path,
+        ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive", "--", pin.path],
+        true,
+        SUBMODULE_REACHABILITY_TIMEOUT_MS,
+      )
+      const materializedSha =
+        materialized.code === 0 ? await git.optionalCommit(join(path, pin.path), "HEAD") : undefined
+      if (materialized.code !== 0 || materializedSha !== pin.sha) {
+        const detail = materialized.timedOut
+          ? `fetch exceeded ${SUBMODULE_REACHABILITY_TIMEOUT_MS}ms`
+          : materialized.stderr ||
+            materialized.stdout ||
+            `clean checkout resolved '${materializedSha ?? "no commit"}' instead of '${pin.sha}'`
+        outcome = unreachableSubmodulePin(pin, origin, detail)
+        break
+      }
+      provenPins.set(pin.path, { sha: pin.sha, origin })
+    }
+    if (outcome === undefined) outcome = await runWithProof({ root, path, pins: provenPins })
+  } catch (cause) {
+    operationFailure = cause
+  }
+
+  let cleanupFailure: string | undefined
+  try {
+    await rm(root, { recursive: true, force: true })
+  } catch (cause) {
+    cleanupFailure = messageOf(cause)
+  }
+  if (operationFailure !== undefined) throw operationFailure
+  if (outcome === undefined) throw new Error("submodule reachability proof produced no result")
+  if (outcome.status === "failed" || cleanupFailure === undefined) return outcome
+  return failed("submodule-proof-cleanup-failed", cleanupFailure)
+}
+
 async function changedPayloadIdentity(
   git: Git,
   repo: string,
@@ -2103,12 +2247,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const remote = base.remote
       if (remote !== undefined) {
         const branchRef = `refs/heads/${branch}`
-        const attempted = await withScratch(
-          git,
-          repo,
-          checked.candidateSha,
-          tmpdir(),
-          async (path): Promise<JobResult<IntegrationProof>> => {
+        const attempted = await withReachableCandidateSubmodules(git, repo, baseSha, checked, () =>
+          withScratch(git, repo, checked.candidateSha, tmpdir(), async (path): Promise<JobResult<IntegrationProof>> => {
             const submodules = await git.run(path, ["submodule", "update", "--init", "--recursive"], true)
             if (submodules.code !== 0) {
               return failed(
@@ -2133,7 +2273,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
               status: "passed",
               output: integrationProof(checked.candidateSha, checked),
             }
-          },
+          }),
         )
         const landing = await authoritativeQueueBase(git, repo, branch)
         const missing = await landingError(git, repo, input, checked, landing.sha)
@@ -2159,61 +2299,63 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if (attempted.status === "waiting") throw new Error("native merge cannot wait")
         return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
       }
-      const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
-      if (checkedOut !== undefined) {
-        const status = await git.run(checkedOut, ["status", "--porcelain"])
-        if (status.stdout !== "") return failed("dirty-base", status.stdout)
-        if ((await git.commit(checkedOut, "HEAD")) !== baseSha) return failed("stale-base", `${branch} moved`)
-        const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
-        if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
-        const aligned = await git.run(
-          checkedOut,
-          ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
-          true,
-        )
-        if (aligned.code !== 0) {
-          const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
-          const restored = await git.run(
+      return await withReachableCandidateSubmodules(git, repo, baseSha, checked, async () => {
+        const checkedOut = await checkedOutWorktree(git, repo, base.branchRef)
+        if (checkedOut !== undefined) {
+          const status = await git.run(checkedOut, ["status", "--porcelain"])
+          if (status.stdout !== "") return failed("dirty-base", status.stdout)
+          if ((await git.commit(checkedOut, "HEAD")) !== baseSha) return failed("stale-base", `${branch} moved`)
+          const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
+          if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
+          const aligned = await git.run(
             checkedOut,
             ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
             true,
           )
-          if (rolledBack.code !== 0 || restored.code !== 0) {
+          if (aligned.code !== 0) {
+            const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
+            const restored = await git.run(
+              checkedOut,
+              ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+              true,
+            )
+            if (rolledBack.code !== 0 || restored.code !== 0) {
+              return failed(
+                "merge-rollback-failed",
+                [aligned.stderr, rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
+              )
+            }
             return failed(
-              "merge-rollback-failed",
-              [aligned.stderr, rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
+              "candidate-submodules-failed",
+              aligned.stderr || aligned.stdout || "could not align landed candidate submodules",
             )
           }
-          return failed(
-            "candidate-submodules-failed",
-            aligned.stderr || aligned.stdout || "could not align landed candidate submodules",
-          )
-        }
-        const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
-        if (sourceRefError !== undefined) {
-          const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
-          const restored = await git.run(
-            checkedOut,
-            ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
-            true,
-          )
-          if (rolledBack.code !== 0 || restored.code !== 0) {
-            return failed(
-              "merge-rollback-failed",
-              [rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
+          const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
+          if (sourceRefError !== undefined) {
+            const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
+            const restored = await git.run(
+              checkedOut,
+              ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
+              true,
             )
+            if (rolledBack.code !== 0 || restored.code !== 0) {
+              return failed(
+                "merge-rollback-failed",
+                [rolledBack.stderr, restored.stderr].filter((detail) => detail !== "").join("\n"),
+              )
+            }
+            return failed("invalid-candidate", sourceRefError)
           }
-          return failed("invalid-candidate", sourceRefError)
+        } else {
+          const expected = base.local ? baseSha : "0".repeat(baseSha.length)
+          const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
+          if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
         }
-      } else {
-        const expected = base.local ? baseSha : "0".repeat(baseSha.length)
-        const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
-        if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
-      }
-      return {
-        status: "passed",
-        output: integrationProof(checked.candidateSha, checked),
-      }
+        return {
+          status: "passed",
+          output: integrationProof(checked.candidateSha, checked),
+        }
+      })
     } catch (cause) {
       const refusal = queueAuthorityRefusal(cause)
       if (refusal !== undefined) {
@@ -2252,7 +2394,13 @@ export function configuredMergeStep<Shape extends PRShape>(
         }),
       })
 
-      const outcome = await command(input, context)
+      const outcome = await withReachableCandidateSubmodules(
+        git,
+        repo,
+        candidate.base.sha,
+        candidate.checked,
+        async () => command(input, context),
+      )
       let landing: GitQueueTarget
       try {
         landing = await authoritativeQueueBase(git, repo, branch)

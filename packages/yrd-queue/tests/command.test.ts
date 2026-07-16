@@ -81,32 +81,68 @@ async function hookedSubmoduleRepository(options: {
   baseVersion: string
   candidateVersion: string
   requiredVersion: string
-}): Promise<{ repo: string; remote: string; baseSha: string; featureSha: string; moduleSha: string }> {
+  candidatePublication?: "tip" | "non-tip" | "unpushed"
+  candidateModuleUrl?: string | null
+  seedCandidateLocally?: boolean
+}): Promise<{
+  repo: string
+  remote: string
+  moduleOrigin: string
+  baseSha: string
+  featureSha: string
+  moduleSha: string
+}> {
   const { repo } = await repository()
+  const moduleOrigin = join(repo, "..", "module-origin.git")
+  await Bun.$`git init -q --bare ${moduleOrigin}`
   const module = join(repo, "..", "module")
   await Bun.$`git init -q -b main ${module}`
   await git(module, ["config", "user.name", "Yrd Test"])
   await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await git(module, ["remote", "add", "origin", moduleOrigin])
   await writeFile(join(module, "version.txt"), `${options.baseVersion}\n`)
   await git(module, ["add", "version.txt"])
   await git(module, ["commit", "-qm", "base"])
+  await git(module, ["push", "-q", "-u", "origin", "main"])
   await git(repo, ["config", "protocol.file.allow", "always"])
-  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleOrigin, "dep"])
   await git(repo, ["commit", "-qam", "add dependency"])
   const baseSha = await git(repo, ["rev-parse", "HEAD"])
 
   await writeFile(join(module, "version.txt"), `${options.candidateVersion}\n`)
   await git(module, ["commit", "-qam", "candidate"])
   const moduleSha = await git(module, ["rev-parse", "HEAD"])
+  const publication = options.candidatePublication ?? "tip"
+  if (publication !== "unpushed") {
+    await git(module, ["push", "-q", "origin", `HEAD:refs/heads/issue/candidate`])
+  }
+  if (publication === "non-tip") {
+    await writeFile(join(module, "successor.txt"), "keeps candidate reachable\n")
+    await git(module, ["add", "successor.txt"])
+    await git(module, ["commit", "-qm", "advance candidate branch"])
+    await git(module, ["push", "-q", "origin", `HEAD:refs/heads/issue/candidate`])
+  }
   await git(repo, ["switch", "-qc", "issue/feature"])
-  await git(join(repo, "dep"), ["fetch", "-q", "origin"])
+  if (options.candidateModuleUrl !== undefined) {
+    if (options.candidateModuleUrl === null) {
+      await git(repo, ["config", "--file", ".gitmodules", "--unset", "submodule.dep.url"])
+    } else {
+      await git(repo, ["config", "--file", ".gitmodules", "submodule.dep.url", options.candidateModuleUrl])
+    }
+  }
+  await git(join(repo, "dep"), ["-c", "protocol.file.allow=always", "fetch", "-q", module, moduleSha])
   await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
   await writeFile(join(repo, "feature.txt"), "feature\n")
-  await git(repo, ["add", "dep", "feature.txt"])
+  await git(repo, ["add", ".gitmodules", "dep", "feature.txt"])
   await git(repo, ["commit", "-qm", "feature"])
   const featureSha = await git(repo, ["rev-parse", "HEAD"])
   await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["submodule", "--quiet", "deinit", "--force", "--", "dep"])
+  await rm(join(repo, ".git", "modules", "dep"), { recursive: true, force: true })
   await git(repo, ["submodule", "update", "--init", "--recursive"])
+  if (options.seedCandidateLocally === true) {
+    await git(join(repo, "dep"), ["-c", "protocol.file.allow=always", "fetch", "-q", module, moduleSha])
+  }
 
   const remote = join(repo, "..", "origin.git")
   await Bun.$`git init -q --bare ${remote}`
@@ -118,7 +154,7 @@ async function hookedSubmoduleRepository(options: {
     `#!/bin/sh\nroot=$(git rev-parse --show-toplevel)\ntest "$(cat "$root/dep/version.txt")" = ${options.requiredVersion}\n`,
   )
   await chmod(hook, 0o755)
-  return { repo, remote, baseSha, featureSha, moduleSha }
+  return { repo, remote, moduleOrigin, baseSha, featureSha, moduleSha }
 }
 
 async function restackSubmoduleRepository(
@@ -247,6 +283,83 @@ function expectedCandidateRef(run: string, step: string, job: string, attempt: n
     .update(sha)
     .digest("hex")
   return `refs/yrd/candidates/${run}/${step}/attempt-${attempt}-${identity}`
+}
+
+function isCandidateSubmoduleMaterialization(request: ProcessRequest): boolean {
+  return (
+    request.argv[0] === "git" &&
+    request.argv[1] === "-C" &&
+    request.argv[2]?.includes("yrd-queue-") === true &&
+    request.argv.includes("submodule") &&
+    request.argv.includes("update")
+  )
+}
+
+function submoduleProofRoots(requests: readonly ProcessRequest[]): string[] {
+  return [
+    ...new Set(
+      requests
+        .map((request) => request.cwd)
+        .filter((cwd): cwd is string => cwd?.includes("yrd-submodule-proof-") === true),
+    ),
+  ]
+}
+
+function recordSubmoduleProof(
+  process: Pick<Process, "run">,
+  options: Readonly<{ timeOutProofUpdate?: boolean }> = {},
+): Readonly<{
+  process: Pick<Process, "run">
+  evidence: {
+    requests: ProcessRequest[]
+    alternateChecks: number
+    alternatesSeen: boolean
+    proofAliveDuringCandidateMaterialization: boolean
+  }
+}> {
+  const evidence = {
+    requests: [] as ProcessRequest[],
+    alternateChecks: 0,
+    alternatesSeen: false,
+    proofAliveDuringCandidateMaterialization: false,
+  }
+  const proofPaths = new Set<string>()
+  return {
+    evidence,
+    process: {
+      async run(request): Promise<ProcessResult> {
+        evidence.requests.push(request)
+        const cwd = request.cwd
+        const proofUpdate =
+          cwd?.includes("yrd-submodule-proof-") === true &&
+          request.argv.includes("submodule") &&
+          request.argv.includes("update")
+        if (cwd?.includes("yrd-submodule-proof-") === true) proofPaths.add(cwd)
+        if (isCandidateSubmoduleMaterialization(request)) {
+          evidence.proofAliveDuringCandidateMaterialization = [...proofPaths].some((path) => existsSync(path))
+        }
+        if (proofUpdate && options.timeOutProofUpdate === true) {
+          return {
+            exitCode: 124,
+            signal: "SIGTERM",
+            stdout: "",
+            stderr: "",
+            durationMs: request.timeoutMs ?? 0,
+            timedOut: true,
+            verdict: "TIMED_OUT",
+          }
+        }
+        const result = await process.run(request)
+        if (proofUpdate && cwd !== undefined) {
+          evidence.alternateChecks += 1
+          evidence.alternatesSeen ||=
+            existsSync(join(cwd, ".git", "objects", "info", "alternates")) ||
+            existsSync(join(cwd, ".git", "modules", "dep", "objects", "info", "alternates"))
+        }
+        return result
+      },
+    },
+  }
 }
 
 describe("Queue command adapters", () => {
@@ -2268,6 +2381,169 @@ describe("Queue command adapters", () => {
     expect(await git(remote, ["rev-parse", "main"])).toBe(checked.candidateSha)
     expect(await git(repo, ["rev-parse", "main"])).toBe(localMain)
     expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
+  })
+
+  it("refuses an unpushed candidate submodule pin from an empty store before materialization", async () => {
+    const { repo, moduleOrigin, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "unpushed",
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process)
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "submodule-pin-unreachable",
+        message: expect.stringContaining("branch not pushed"),
+      },
+    })
+    expect(run.error?.message).toContain("dep")
+    expect(run.error?.message).toContain(moduleSha)
+    expect(run.error?.message).toContain(moduleOrigin)
+    expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
+    expect(recording.evidence.alternateChecks).toBeGreaterThan(0)
+    expect(recording.evidence.alternatesSeen).toBe(false)
+    const proofRoots = submoduleProofRoots(recording.evidence.requests)
+    expect(proofRoots.length).toBeGreaterThan(0)
+    expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
+  })
+
+  it("refuses the same unpushed pin when the operator submodule store is pre-seeded", async () => {
+    const { repo, moduleOrigin, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "unpushed",
+      seedCandidateLocally: true,
+    })
+    expect(await git(join(repo, "dep"), ["cat-file", "-t", moduleSha])).toBe("commit")
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process)
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "submodule-pin-unreachable",
+        message: expect.stringContaining("branch not pushed"),
+      },
+    })
+    expect(run.error?.message).toContain("dep")
+    expect(run.error?.message).toContain(moduleSha)
+    expect(run.error?.message).toContain(moduleOrigin)
+    expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
+    expect(recording.evidence.alternateChecks).toBeGreaterThan(0)
+    expect(recording.evidence.alternatesSeen).toBe(false)
+    const proofRoots = submoduleProofRoots(recording.evidence.requests)
+    expect(proofRoots.length).toBeGreaterThan(0)
+    expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
+  })
+
+  it("refuses a candidate submodule pin whose candidate tree has no origin URL", async () => {
+    const { repo, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidateModuleUrl: null,
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process)
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "submodule-pin-unreachable",
+        message: expect.stringContaining("<missing .gitmodules URL>"),
+      },
+    })
+    expect(run.error?.message).toContain("dep")
+    expect(run.error?.message).toContain(moduleSha)
+    expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
+    const proofRoots = submoduleProofRoots(recording.evidence.requests)
+    expect(proofRoots.length).toBeGreaterThan(0)
+    expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
+  })
+
+  it("bounds a clean-store candidate submodule reachability probe", async () => {
+    const { repo, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process, { timeOutProofUpdate: true })
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "submodule-pin-unreachable",
+        message: expect.stringContaining("fetch exceeded 90000ms"),
+      },
+    })
+    expect(run.error?.message).toContain("dep")
+    expect(run.error?.message).toContain(moduleSha)
+    expect(
+      recording.evidence.requests.some(
+        (request) => request.cwd?.includes("yrd-submodule-proof-") === true && request.timeoutMs === 90_000,
+      ),
+    ).toBe(true)
+    expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
+    const proofRoots = submoduleProofRoots(recording.evidence.requests)
+    expect(proofRoots.length).toBeGreaterThan(0)
+    expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
+  })
+
+  it("accepts a candidate submodule pin that is reachable but no longer a ref tip", async () => {
+    const { repo, remote, moduleOrigin, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "non-tip",
+    })
+    expect(await git(moduleOrigin, ["rev-parse", "refs/heads/issue/candidate"])).not.toBe(moduleSha)
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process)
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "passed" })
+    expect(await git(remote, ["ls-tree", "main", "dep"])).toContain(moduleSha)
+    expect(recording.evidence.alternateChecks).toBeGreaterThan(0)
+    expect(recording.evidence.alternatesSeen).toBe(false)
+    expect(recording.evidence.proofAliveDuringCandidateMaterialization).toBe(true)
+    const proofRoots = submoduleProofRoots(recording.evidence.requests)
+    expect(proofRoots.length).toBeGreaterThan(0)
+    expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
   })
 
   it("runs remote push hooks from the checked candidate tree and submodule pins", async () => {
