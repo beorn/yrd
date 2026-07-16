@@ -149,6 +149,18 @@ const SubmoduleReachabilityRefusalEvidenceSchema = z
   .strict()
 type SubmoduleReachabilityRefusalEvidence = Readonly<z.infer<typeof SubmoduleReachabilityRefusalEvidenceSchema>>
 
+const SubmoduleCompositionRefusalEvidenceSchema = z
+  .object({
+    kind: z.literal("submodule-composition-refusal"),
+    operation: z.literal("compose"),
+    repository: z.string().min(1),
+    path: z.string().min(1),
+    detail: z.string().min(1),
+    retryable: z.literal(true),
+  })
+  .strict()
+type SubmoduleCompositionRefusalEvidence = Readonly<z.infer<typeof SubmoduleCompositionRefusalEvidenceSchema>>
+
 export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
   CommandEvidenceSchema,
@@ -1917,7 +1929,7 @@ type CandidateSubmoduleConflictResult =
   | Readonly<{ status: "composed"; output: readonly QueueSubmoduleResolutionEvidence[] }>
   | Readonly<{
       status: "refused"
-      code: "candidate-conflict" | "submodule-composition-conflict" | "submodule-composition-unavailable"
+      code: "candidate-conflict" | "submodule-composition-conflict"
       message: string
     }>
 
@@ -1934,6 +1946,22 @@ async function resolveCandidateSubmoduleConflict(
     conflicts.map((conflict) => ({ ...conflict, origin: "yrd://structural-validation" })),
   )
   if (structural.status === "refused") return structural
+
+  const metadata = await git.run(path, ["diff", "--cached", "--quiet", "HEAD", "--", ".gitmodules"], true)
+  if (!probeSettled(metadata) || (metadata.code !== 0 && metadata.code !== 1)) {
+    throw createSubmoduleCompositionRefusal(
+      repo,
+      ".gitmodules",
+      `could not inspect effective submodule metadata: ${fetchDetail(metadata)}`,
+    )
+  }
+  if (metadata.code === 1) {
+    return {
+      status: "refused",
+      code: "candidate-conflict",
+      message: "queue-native composition refuses a concurrent .gitmodules change before publishing a composition",
+    }
+  }
 
   const pins = await candidateSubmodulePins(git, repo, path, "HEAD")
   const origins = new Map(pins.map((pin) => [pin.path, pin.origin]))
@@ -1960,7 +1988,12 @@ async function resolveCandidateSubmoduleConflict(
     },
     env: git.env,
   })
-  if (executed.status === "refused") return executed
+  if (executed.status === "refused") {
+    if (executed.code === "submodule-composition-unavailable") {
+      throw createSubmoduleCompositionRefusal(repo, executed.path, executed.message)
+    }
+    return { status: "refused", code: "submodule-composition-conflict", message: executed.message }
+  }
 
   for (const resolution of executed.resolutions) {
     const staged = await git.run(
@@ -1969,11 +2002,11 @@ async function resolveCandidateSubmoduleConflict(
       true,
     )
     if (staged.code !== 0) {
-      return {
-        status: "refused",
-        code: "submodule-composition-unavailable",
-        message: `could not stage composed pin for '${resolution.path}': ${fetchDetail(staged)}`,
-      }
+      throw createSubmoduleCompositionRefusal(
+        repo,
+        resolution.path,
+        `could not stage composed pin for '${resolution.path}': ${fetchDetail(staged)}`,
+      )
     }
   }
   const unresolved = await unmergedPaths(git, path)
@@ -1986,11 +2019,11 @@ async function resolveCandidateSubmoduleConflict(
   }
   const committed = await git.run(path, ["commit", "--no-edit"], true)
   if (committed.code !== 0) {
-    return {
-      status: "refused",
-      code: "submodule-composition-unavailable",
-      message: `could not finalize the root composition commit: ${fetchDetail(committed)}`,
-    }
+    throw createSubmoduleCompositionRefusal(
+      repo,
+      ".git",
+      `could not finalize the root composition commit: ${fetchDetail(committed)}`,
+    )
   }
   return {
     status: "composed",
@@ -2324,7 +2357,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
       )
     } catch (cause) {
-      const refusal = queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause)
+      const refusal =
+        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
@@ -2416,7 +2450,9 @@ async function validatePinnedCandidate(
       }
     }
   }
-  for (const resolution of checked.submoduleResolutions ?? []) {
+  const finalResolutions = new Map<string, QueueSubmoduleResolutionEvidence>()
+  for (const resolution of checked.submoduleResolutions ?? []) finalResolutions.set(resolution.path, resolution)
+  for (const resolution of finalResolutions.values()) {
     if ((await readGitlink(git, repo, checked.candidateSha, resolution.path)) !== resolution.sha) {
       return {
         error: {
@@ -2571,6 +2607,31 @@ function createSubmoduleReachabilityRefusal(
   )
 }
 
+type SubmoduleCompositionFailure = YrdFailure & Readonly<{ evidence: SubmoduleCompositionRefusalEvidence }>
+
+function createSubmoduleCompositionRefusal(
+  repository: string,
+  path: string,
+  detail: string,
+): SubmoduleCompositionFailure {
+  const evidence = SubmoduleCompositionRefusalEvidenceSchema.parse({
+    kind: "submodule-composition-refusal",
+    operation: "compose",
+    repository,
+    path,
+    detail,
+    retryable: true,
+  })
+  return Object.assign(
+    createFailure({
+      kind: "infrastructure",
+      code: "queue-environment-refused",
+      message: `yrd: submodule composition is temporarily unavailable for '${path}': ${detail}`,
+    }),
+    { evidence },
+  )
+}
+
 function queueAuthorityRefusal(cause: unknown): QueueAuthorityRefusalEvidence | undefined {
   if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
     return undefined
@@ -2584,6 +2645,14 @@ function submoduleReachabilityRefusal(cause: unknown): SubmoduleReachabilityRefu
     return undefined
   }
   const parsed = SubmoduleReachabilityRefusalEvidenceSchema.safeParse(cause.evidence)
+  return parsed.success ? parsed.data : undefined
+}
+
+function submoduleCompositionRefusal(cause: unknown): SubmoduleCompositionRefusalEvidence | undefined {
+  if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
+    return undefined
+  }
+  const parsed = SubmoduleCompositionRefusalEvidenceSchema.safeParse(cause.evidence)
   return parsed.success ? parsed.data : undefined
 }
 
@@ -2794,7 +2863,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         output: integrationProof(checked.candidateSha, checked),
       }
     } catch (cause) {
-      const refusal = queueAuthorityRefusal(cause)
+      const refusal =
+        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
@@ -2868,7 +2938,8 @@ export function configuredMergeStep<Shape extends PRShape>(
         `merge command exited successfully but '${branch}' does not contain '${missing}'`,
       )
     } catch (cause) {
-      const refusal = queueAuthorityRefusal(cause)
+      const refusal =
+        queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause) ?? submoduleCompositionRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }

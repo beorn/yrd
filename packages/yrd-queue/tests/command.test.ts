@@ -126,6 +126,8 @@ async function hookedSubmoduleRepository(options: {
 async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise<{
   repo: string
   module: string
+  moduleBaseSha: string
+  rootBaseSha: string
   rootCurrentSha: string
   featureSha: string
 }> {
@@ -174,7 +176,7 @@ async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise
   const featureSha = await git(repo, ["rev-parse", "HEAD"])
   await git(repo, ["switch", "-q", "main"])
   await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
-  return { repo, module, rootCurrentSha, featureSha }
+  return { repo, module, moduleBaseSha: baseSha, rootBaseSha, rootCurrentSha, featureSha }
 }
 
 async function restackSubmoduleRepository(
@@ -2899,6 +2901,94 @@ describe("Queue command adapters", () => {
     expect(run).toMatchObject({ status: "failed", error: { code: "submodule-composition-conflict" } })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
+    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
+  }, 20_000)
+
+  it("keeps a divergent submodule PR submitted when its full local store is unavailable", async () => {
+    const fixture = await divergentSubmoduleRepository("clean")
+    await rm(join(fixture.repo, "dep"), { recursive: true, force: true })
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "submodule-composition-refusal",
+          operation: "compose",
+          path: "dep",
+          retryable: true,
+        },
+      },
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
+    expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
+    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
+  }, 20_000)
+
+  it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
+    const fixture = await divergentSubmoduleRepository("clean")
+    await git(fixture.module, ["switch", "-qc", "incoming-two", fixture.moduleBaseSha])
+    await writeFile(join(fixture.module, "second.md"), "second incoming\n")
+    await git(fixture.module, ["add", "second.md"])
+    await git(fixture.module, ["commit", "-qm", "second incoming"])
+    const secondIncomingSha = await git(fixture.module, ["rev-parse", "HEAD"])
+    await git(fixture.module, ["switch", "-q", "main"])
+    await git(fixture.repo, ["switch", "-qc", "issue/feature-two", fixture.rootBaseSha])
+    await git(join(fixture.repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+    await git(join(fixture.repo, "dep"), ["checkout", "-q", secondIncomingSha])
+    await git(fixture.repo, ["add", "dep"])
+    await git(fixture.repo, ["commit", "-qm", "advance second incoming dependency"])
+    const secondFeatureSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await git(fixture.repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { batch: 2, env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/feature-two", headSha: secondFeatureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1", "PR2"] }, runtime))[0]!
+    const check = run.steps[0]?.job
+    if (check?.status !== "passed") throw new Error(`check was ${check?.status ?? "missing"}`)
+    const evidence = GitCheckEvidenceSchema.parse(check.output)
+    const resolutions = evidence.submoduleResolutions ?? []
+
+    expect(run.status, run.error?.message).toBe("passed")
+    expect(resolutions).toHaveLength(2)
+    expect(resolutions.map(({ path }) => path)).toEqual(["dep", "dep"])
+    const final = resolutions.at(-1)
+    if (final === undefined) throw new Error("missing final submodule resolution")
+    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(final.sha)
+  }, 30_000)
+
+  it("refuses a concurrent gitmodules origin change before publishing a composition", async () => {
+    const fixture = await divergentSubmoduleRepository("clean")
+    const unavailableOrigin = join(fixture.repo, "..", "replacement-module.git")
+    await git(fixture.repo, ["switch", "-q", "issue/feature"])
+    await git(fixture.repo, ["config", "-f", ".gitmodules", "submodule.dep.url", unavailableOrigin])
+    await git(fixture.repo, ["add", ".gitmodules"])
+    await git(fixture.repo, ["commit", "-qm", "change dependency origin"])
+    const changedFeatureSha = await git(fixture.repo, ["rev-parse", "HEAD"])
+    await git(fixture.repo, ["switch", "-q", "main"])
+    await git(fixture.repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: changedFeatureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "candidate-conflict", message: expect.stringContaining(".gitmodules") },
+    })
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
   }, 20_000)
 
