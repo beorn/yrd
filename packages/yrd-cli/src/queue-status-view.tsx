@@ -2163,7 +2163,9 @@ export type PRDetailData = Readonly<{
 }>
 
 export function prDetailData(pr: PR, runs: readonly QueueRun[], attempts: readonly QueueAttempt[] = []): PRDetailData {
-  const details = runs.map((run) => queueShowData(run, runs, attempts))
+  const details = runs
+    .filter((run) => run.prs.some((member) => member.id === pr.id))
+    .map((run) => queueShowData(run, runs, attempts))
   const latest = latestPRRun(pr, runs)
   const run = latest === undefined ? undefined : details.find((detail) => detail.run === latest.id)
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
