@@ -1,7 +1,8 @@
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { readFile, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import * as z from "zod"
 import { raiseFailure } from "@yrd/core"
+import { createExclusive } from "@yrd/persistence"
 import { InstalledStepSchema, type InstalledStep, type QueueAuditFinding } from "@yrd/queue"
 
 /** The installed baseline: the queue installation baseline written by `yrd queue
@@ -61,26 +62,51 @@ export async function readInstalledBaselines(stateDir: string): Promise<Readonly
   return result.data.baselines
 }
 
+/** Per-write uniquifier for the temp file name so an atomic replace never
+ * clobbers a sibling write's staging file. */
+let baselineTempSequence = 0
+
+/** Serialize every read-modify-write of the installed baseline authority behind
+ * one exclusive writer lock so concurrent provision/deprovision on different
+ * bases cannot lose either update. The lock is cross-process (POSIX flock) and
+ * intra-process (shared held-set), scoped to its own directory under stateDir. */
+function withBaselineWriteLock<Result>(stateDir: string, operation: () => Promise<Result>): Promise<Result> {
+  return createExclusive(join(stateDir, "installed-baseline.lock"), { timeoutMs: 30_000 }).run(operation)
+}
+
+/** Publish the whole baseline authority through a unique temp file + rename so a
+ * partially written or interrupted write can never corrupt the live file. */
+async function replaceBaselineFile(stateDir: string, baselines: Record<string, InstalledBaseline>): Promise<void> {
+  const path = installedBaselinePath(stateDir)
+  const file = InstalledBaselineFileSchema.parse({ version: 1, baselines })
+  const temporary = `${path}.${process.pid}.${baselineTempSequence++}.tmp`
+  try {
+    await writeFile(temporary, `${JSON.stringify(file, undefined, 2)}\n`, "utf8")
+    await rename(temporary, path)
+  } finally {
+    await rm(temporary, { force: true })
+  }
+}
+
 export async function writeInstalledBaseline(stateDir: string, baseline: InstalledBaseline): Promise<void> {
-  const baselines = await readInstalledBaselines(stateDir)
-  const file = InstalledBaselineFileSchema.parse({ version: 1, baselines: { ...baselines, [baseline.base]: baseline } })
-  await writeFile(installedBaselinePath(stateDir), `${JSON.stringify(file, undefined, 2)}\n`, "utf8")
+  await withBaselineWriteLock(stateDir, async () => {
+    const baselines = await readInstalledBaselines(stateDir)
+    await replaceBaselineFile(stateDir, { ...baselines, [baseline.base]: baseline })
+  })
 }
 
 export async function removeInstalledBaseline(stateDir: string, base: string): Promise<boolean> {
-  const baselines = await readInstalledBaselines(stateDir)
-  if (baselines[base] === undefined) return false
-  const rest = Object.fromEntries(Object.entries(baselines).filter(([key]) => key !== base))
-  if (Object.keys(rest).length === 0) {
-    await rm(installedBaselinePath(stateDir), { force: true })
+  return withBaselineWriteLock(stateDir, async () => {
+    const baselines = await readInstalledBaselines(stateDir)
+    if (baselines[base] === undefined) return false
+    const rest = Object.fromEntries(Object.entries(baselines).filter(([key]) => key !== base))
+    if (Object.keys(rest).length === 0) {
+      await rm(installedBaselinePath(stateDir), { force: true })
+    } else {
+      await replaceBaselineFile(stateDir, rest)
+    }
     return true
-  }
-  await writeFile(
-    installedBaselinePath(stateDir),
-    `${JSON.stringify({ version: 1, baselines: rest }, undefined, 2)}\n`,
-    "utf8",
-  )
-  return true
+  })
 }
 
 export function installedBaselineRemedy(base: string): string {
@@ -124,6 +150,14 @@ export function installedBaselineDrift(
     if (!installedNames.has(live.name)) {
       deltas.push(`step '${live.name}' (current revision '${shortRevision(live.revision)}') is not in the installed baseline`)
     }
+  }
+  // Step revisions intentionally exclude sequence, so a pure reorder of the same
+  // steps leaves every per-step delta empty. Compare the ORDERED plan (restricted
+  // to steps present on both sides) so a reorder is still caught as drift.
+  const installedSequence = baseline.steps.map((step) => step.name).filter((name) => currentByName.has(name))
+  const currentSequence = current.map((step) => step.name).filter((name) => installedNames.has(name))
+  if (installedSequence.length > 0 && installedSequence.join(">") !== currentSequence.join(">")) {
+    deltas.push(`step order changed: installed ${installedSequence.join("→")}, current ${currentSequence.join("→")}`)
   }
   if (deltas.length === 0) return undefined
   return {
