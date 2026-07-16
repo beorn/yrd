@@ -399,7 +399,14 @@ function validateEnvironmentDeclaration(
       throw new Error(`yrd: ${purpose} environment name '${name}' uses a reserved prefix`)
     }
   }
-  return Object.freeze({ passthrough: new Set(passthrough), overrides })
+  // Snapshot BOTH declarations: retaining the caller-owned overrides object by
+  // reference would let a post-construction mutation bypass the validation
+  // above (a TOCTOU) — the null-prototype frozen copy is what commandEnvironment
+  // applies, so only construction-time-validated entries can ever ship.
+  return Object.freeze({
+    passthrough: new Set(passthrough),
+    overrides: Object.freeze(Object.assign(Object.create(null) as Record<string, string>, overrides)),
+  })
 }
 
 function commandEnvironment(
