@@ -56,7 +56,7 @@ function processGroupMembers(pgid: number): number[] {
     .toString()
     .trim()
     .split("\n")
-    .map((line) => line.trim().split(/\s+/u).map(Number))
+    .map((raw) => raw.trim().split(/\s+/u).map(Number))
     .filter((fields) => fields[1] === pgid)
     .map((fields) => fields[0]!)
 }
