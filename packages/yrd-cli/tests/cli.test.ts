@@ -3299,14 +3299,14 @@ describe("runYrd", () => {
       activeMs: 0,
       waitMs: 10 * minute,
     })
-    expect(JSON.parse(JSON.stringify(projection.rows)).find((row: { run?: string }) => row.run === "R1")).toMatchObject(
-      {
-        ageMs: 110 * minute,
-        totalMs: 10 * minute,
-        activeMs: 0,
-        waitMs: 10 * minute,
-      },
-    )
+    expect(
+      (JSON.parse(JSON.stringify(projection.rows)) as Array<{ run?: string }>).find((row) => row.run === "R1"),
+    ).toMatchObject({
+      ageMs: 110 * minute,
+      totalMs: 10 * minute,
+      activeMs: 0,
+      waitMs: 10 * minute,
+    })
     expect(projection.display).toEqual({ limit: 4, shown: 4, hidden: 3 })
     expect(projection.coverage).toEqual({
       requestedSince: "2026-07-13T06:00:00.000Z",
