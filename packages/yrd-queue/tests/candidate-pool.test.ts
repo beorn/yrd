@@ -7,7 +7,7 @@ import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
 import type { JobResult } from "@yrd/job"
@@ -17,6 +17,10 @@ import {
   type CandidatePool,
   type CandidatePoolGit,
 } from "../src/candidate-pool.ts"
+
+// Real-git integration with file-protocol submodules; generous bound so heavy
+// worktree/submodule fixtures do not flake near the default 5s under fleet load.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 })
 
 const roots: string[] = []
 const disposers: Array<() => Promise<void>> = []
@@ -51,6 +55,22 @@ async function repository(): Promise<{ repo: string; baseSha: string; baysRoot: 
   const baysRoot = join(root, "bays")
   await mkdir(baysRoot, { recursive: true })
   return { repo, baseSha, baysRoot }
+}
+
+async function submoduleRepository(): Promise<{ repo: string; baysRoot: string; ref: string }> {
+  const { repo, baysRoot } = await repository()
+  const module = join(repo, "..", "module")
+  await Bun.$`git init -q -b main ${module}`.quiet()
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(module, "version.txt"), "1\n")
+  await git(module, ["add", "version.txt"])
+  await git(module, ["commit", "-qm", "module"])
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["commit", "-qam", "add dep"])
+  const ref = await git(repo, ["rev-parse", "HEAD"])
+  return { repo, baysRoot, ref }
 }
 
 type CapturingLog = Readonly<{ log: ReturnType<typeof createLogger>; events: LogEvent[] }>
@@ -376,6 +396,59 @@ describe("warm candidate pool", () => {
     expect(existsSync(warmPath)).toBe(false)
     const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
     expect(worktrees).not.toContain(warmPath)
+  })
+
+  it("retains and surfaces both causes when creation fails and its worktree cannot be cleaned up", async () => {
+    const { repo, baysRoot, ref } = await submoduleRepository()
+    const { log } = capturingLog()
+    // The worktree ADD succeeds, but materialization fails AND the cleanup
+    // `worktree remove` also fails — the dual fault the reviewer flagged.
+    const fault: { current: GitFault } = {
+      current: (args) =>
+        (args.includes("submodule") && args.includes("update")) || (args[0] === "worktree" && args[1] === "remove"),
+    }
+    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
+
+    const error = await pool.withCandidate(ref, async () => passed).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+    expect(error).toBeInstanceOf(AggregateError)
+    const aggregate = error as AggregateError
+    const detail = aggregate.errors.map((cause) => String((cause as Error).message)).join(" | ")
+    expect(detail).toContain("submodule update") // primary cause visible
+    expect(detail).toContain("worktree remove") // cleanup failure visible
+    expect(String((aggregate.cause as Error | undefined)?.message)).toContain("submodule update") // primary stays primary
+
+    // Residue is NOT orphaned: the worktree is retained so a later close retries it.
+    const before = await git(repo, ["worktree", "list", "--porcelain"])
+    expect(before).toContain("bays/yrd-warm-")
+
+    fault.current = () => false
+    await pool.close()
+    const after = await git(repo, ["worktree", "list", "--porcelain"])
+    expect(after).not.toContain("bays/yrd-warm-")
+  })
+
+  it("cleans up and raises only the primary cause when creation fails but removal succeeds", async () => {
+    const { repo, baysRoot, ref } = await submoduleRepository()
+    const { log } = capturingLog()
+    // Control: materialization fails but the cleanup removal succeeds.
+    const fault: { current: GitFault } = { current: (args) => args.includes("submodule") && args.includes("update") }
+    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
+
+    const error = await pool.withCandidate(ref, async () => passed).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    )
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(AggregateError)
+    expect(String((error as Error).message)).toContain("submodule update")
+
+    // Removal succeeded: no retained entry, no orphan worktree.
+    const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
+    expect(worktrees).not.toContain("bays/yrd-warm-")
+    expect(pool.stats()).toEqual({ hits: 0, misses: 0, evictions: 0 })
   })
 
   it("measures cold versus warm candidate setup and reports p50/p95", async () => {

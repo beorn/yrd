@@ -257,12 +257,34 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     await mkdir(parent, { recursive: true })
     const root = await mkdtemp(join(await realpath(parent), "yrd-warm-"))
     const path = join(root, "worktree")
+    let added = false
     try {
       await git.run(repo, ["worktree", "add", "--detach", path, ref])
+      added = true
       await materialize(path, ref)
     } catch (cause) {
-      // Leave no half-built worktree or orphan root behind, then raise loud.
-      await git.run(repo, ["worktree", "remove", "--force", path], true)
+      if (added) {
+        const removed = await git.run(repo, ["worktree", "remove", "--force", path], true)
+        if (removed.code !== 0) {
+          // The worktree was created but neither materialized nor removed. RETAIN
+          // the entry so a later close()/evict retries the removal (retry-safe,
+          // like removeWorktree), and surface the cleanup failure AGGREGATED with
+          // the primary cause — never orphan Git worktree-admin residue silently.
+          entry.root = root
+          entry.path = path
+          const cleanup = new Error(
+            removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${path}'`,
+          )
+          const detail = cause instanceof Error ? cause.message : String(cause)
+          throw new AggregateError(
+            [cause, cleanup],
+            `yrd: candidate creation failed and its worktree could not be cleaned up: ${detail}`,
+            { cause },
+          )
+        }
+      }
+      // Add never happened, or the removal succeeded: no worktree-admin residue
+      // remains, so drop the orphan root and raise the primary cause.
       await rm(root, { recursive: true, force: true })
       throw cause
     }
