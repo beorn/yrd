@@ -255,6 +255,7 @@ describe("queue timeline chrome 21106", () => {
         const topY = lines.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = lines[topY]
+        if (topLine === undefined) throw new Error(`${label} top border row missing`)
         const titleX = topLine.indexOf(label)
         // A rounded top-right corner closes this box's border row after the
         // label (nested/side-by-side boxes still close with `╮`; search from the
