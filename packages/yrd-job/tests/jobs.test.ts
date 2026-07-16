@@ -630,7 +630,7 @@ describe("Jobs", () => {
     await app.close()
   })
 
-  it.fails("settles a progress-gated runner even when its handler never returns after abort", async () => {
+  it("settles a progress-gated runner even when its handler never returns after abort", async () => {
     const started = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     let aborted = false
