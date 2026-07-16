@@ -272,7 +272,11 @@ const PRTerminalIdentitySchema = PRRevisionIdentitySchema.extend({
   correlation: CorrelationSchema.optional(),
 }).strict()
 const PRQueueTerminalIdentitySchema = PRTerminalIdentitySchema.extend({ run: TextSchema }).strict()
-const PRWithdrawnSchema = PRTerminalIdentitySchema.extend({ reason: TextSchema.optional() }).strict()
+export const PRWithdrawnSchema = PRTerminalIdentitySchema.extend({
+  reason: TextSchema.optional(),
+  /** Submitter of the withdrawn revision — carried so terminal ball closures can route back to the author. */
+  actor: TextSchema.optional(),
+}).strict()
 const LegacyPRWithdrawnSchema = z
   .object({
     pr: PRIdSchema,
@@ -316,9 +320,11 @@ const LegacyPRIntegratedSchema = z
     correlation: CorrelationSchema.optional(),
   })
   .strict()
-const PRCanceledSchema = PRQueueTerminalIdentitySchema.extend({
+export const PRCanceledSchema = PRQueueTerminalIdentitySchema.extend({
   by: TextSchema,
   reason: TextSchema,
+  /** Submitter of the canceled revision — carried so terminal ball closures can route back to the author. */
+  actor: TextSchema.optional(),
 }).strict()
 const LegacyPRCanceledSchema = PRRevisionIdentitySchema.extend({
   correlation: CorrelationSchema.optional(),
@@ -1200,10 +1206,16 @@ function revisionIdentity(pr: DeepReadonly<PR>) {
   }
 }
 
+function currentRevisionActor(pr: DeepReadonly<PR>): string | undefined {
+  return pr.revisions.find((revision) => revision.revision === pr.revision && revision.headSha === pr.headSha)?.actor
+}
+
 function terminalIdentity(pr: DeepReadonly<PR>) {
+  const actor = currentRevisionActor(pr)
   return {
     ...revisionIdentity(pr),
     ...(pr.issue === undefined ? {} : { issueRef: pr.issue }),
+    ...(actor === undefined ? {} : { actor }),
   }
 }
 
