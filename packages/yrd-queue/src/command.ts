@@ -428,10 +428,15 @@ function commandEnvironment(
  * embeds the job id, attempt, and collision suffix. Every other variable —
  * including YRD_ENVIRONMENT and configured YRD_* values — is applied
  * environment and MUST move the hash. Additions here are deliberate, never a
- * prefix rule. */
-export const VOLATILE_COMMAND_COORDINATES: ReadonlySet<string> = Object.freeze(
-  new Set(["YRD_JOB", "YRD_RUN", "YRD_ATTEMPT", "YRD_RUNNER", "YRD_CANDIDATE_REF"]),
-)
+ * prefix rule. Module-private on purpose: hash policy must not be a mutable
+ * public seam (a frozen Set's internal slots are still mutable). Consumers
+ * observe policy only through {@link isVolatileCommandCoordinate}. */
+const VOLATILE_COMMAND_COORDINATES = ["YRD_JOB", "YRD_RUN", "YRD_ATTEMPT", "YRD_RUNNER", "YRD_CANDIDATE_REF"] as const
+
+/** Read-only predicate over the volatile-coordinate policy above. */
+export function isVolatileCommandCoordinate(name: string): boolean {
+  return (VOLATILE_COMMAND_COORDINATES as readonly string[]).includes(name)
+}
 
 /** Evidence identity of the APPLIED child environment. Only the volatile
  * per-execution coordinates above are excluded, so the SAME inputs produce the
@@ -439,7 +444,7 @@ export const VOLATILE_COMMAND_COORDINATES: ReadonlySet<string> = Object.freeze(
  * or YRD_* — is visible. */
 function environmentHash(env: Readonly<Record<string, string>>): string {
   const applied = Object.entries(env)
-    .filter(([key]) => !VOLATILE_COMMAND_COORDINATES.has(key))
+    .filter(([key]) => !isVolatileCommandCoordinate(key))
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
   return createHash("sha256").update(JSON.stringify(applied)).digest("hex")
 }
