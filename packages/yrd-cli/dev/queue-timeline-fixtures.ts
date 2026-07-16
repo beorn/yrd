@@ -40,7 +40,7 @@ type FixturePrOptions = Readonly<{
   integration?: NonNullable<PR["integration"]>
 }>
 
-function fixturePr(
+export function fixturePr(
   id: string,
   status: PRStatus,
   submittedAt: string,
@@ -147,7 +147,7 @@ type FixtureJobOptions = Readonly<{
   cancelReason?: string
 }>
 
-function fixtureJob(id: string, status: Job["status"], options: FixtureJobOptions = {}): Job {
+export function fixtureJob(id: string, status: Job["status"], options: FixtureJobOptions = {}): Job {
   const requestedAt = options.requestedAt ?? "2026-07-13T11:30:00.000Z"
   const base = {
     id,
@@ -222,7 +222,7 @@ function fixtureJob(id: string, status: Job["status"], options: FixtureJobOption
       }
 }
 
-function fixtureStep(
+export function fixtureStep(
   name: string,
   job: Job,
   options: Readonly<{
@@ -244,7 +244,7 @@ function fixtureStep(
   }
 }
 
-function fixtureRun(
+export function fixtureRun(
   id: string,
   prs: readonly PR[],
   status: QueueRun["status"],
@@ -288,7 +288,7 @@ function fixtureRun(
   }
 }
 
-function fixtureResult(
+export function fixtureResult(
   prs: readonly PR[],
   runs: readonly QueueRun[],
   pause?: QueueStatusResult["pause"],
@@ -335,7 +335,7 @@ function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions
   })
 }
 
-function fixtureSnapshot(
+export function fixtureSnapshot(
   result: QueueStatusResult,
   options: ProjectionOptions = {},
   outputs?: readonly QueueArtifactOutput[],

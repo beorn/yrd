@@ -9,6 +9,7 @@ import {
   TabPanel,
   Tabs,
   Text,
+  clampSplitPaneRatio,
   resolveSplitPaneLayout,
   useInput,
   useScopeEffect,
@@ -30,7 +31,10 @@ import {
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
-const LIST_NATURAL_HEIGHT = 12
+// Queue chrome is 13 fixed rows at the production cap (tabs, clocks, filter,
+// header, STATS, spacer). Reserve enough primary height to keep useful rows
+// visible before selecting the persistent-below tier.
+const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.52
@@ -56,6 +60,22 @@ export function queueDetailTier(columns: number, rows: number): QueueDetailTier 
     preferredDirection: "row",
   })
   return layout === "row" ? "right" : layout === "column" ? "below" : "full"
+}
+
+export function queueTimelineColumns(
+  columns: number,
+  tier: QueueDetailTier,
+  detailOpen: boolean,
+  splitRatio: number,
+): number {
+  if (tier !== "right" || !detailOpen) return columns
+  const visibleRatio = clampSplitPaneRatio(splitRatio, {
+    containerSize: columns,
+    dividerSize: DIVIDER_SIZE,
+    minPrimarySize: LIST_NATURAL_WIDTH,
+    minSecondarySize: DETAIL_NATURAL_WIDTH,
+  })
+  return Math.round(visibleRatio * Math.max(0, columns - DIVIDER_SIZE))
 }
 
 export type QueueWatchSnapshot = Readonly<{
@@ -126,6 +146,13 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
     previousLineCount.current = lines.length
     if (atEnd) setUnseenLines(0)
     else if (addedLines > 0) setUnseenLines((count) => count + addedLines)
+  }, [atEnd, lines.length])
+
+  // Reassert the tail after new output is committed. ListView's follow
+  // authority observes the prior viewport during the same render; without
+  // this post-commit scroll, an End-resumed pane can miss the next append.
+  useEffect(() => {
+    if (atEnd) listRef.current?.scrollToBottom()
   }, [atEnd, lines.length])
 
   useInput((_input, key) => {
@@ -211,11 +238,13 @@ function QueueWorkflowStepTabs({
   outputs,
   compact,
   active,
+  highlightPr,
 }: {
   data: QueueShowData
   outputs: readonly QueueArtifactOutput[]
   compact: boolean
   active: boolean
+  highlightPr?: string
 }) {
   const names = useMemo(() => queueStepNames(data), [data])
   const fallbackStep = defaultQueueStep(data, names)
@@ -228,7 +257,7 @@ function QueueWorkflowStepTabs({
   if (activeStep === undefined) {
     return (
       <Box flexDirection="column" flexGrow={1} minHeight={0}>
-        <QueueShowView data={data} compact={compact} />
+        <QueueShowView data={data} compact={compact} highlightPr={highlightPr} />
         <QueueArtifactOutputView outputs={outputs} />
       </Box>
     )
@@ -253,7 +282,7 @@ function QueueWorkflowStepTabs({
             <Text color="$fg-muted">
               ACTIVE STEP <Text bold>{name}</Text>
             </Text>
-            <QueueShowView data={stepData} compact={compact} />
+            <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} />
             <Accordion
               title="LOG"
               expanded={logExpanded}
@@ -398,12 +427,13 @@ export function QueueWatchFrame({
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
+  const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
         results={snapshot.results}
         now={snapshot.now}
-        columns={columns}
+        columns={timelineColumns}
         nav
         cursorKey={cursor}
         onCursor={selectRow}
@@ -412,7 +442,7 @@ export function QueueWatchFrame({
     ) : (
       <QueueTimelineView
         projection={snapshot.projection}
-        columns={columns}
+        columns={timelineColumns}
         nav
         cursorKey={cursor}
         onCursor={selectRow}
@@ -433,6 +463,7 @@ export function QueueWatchFrame({
         outputs={detailOutputs}
         compact={tier === "full"}
         active={detailOpen && detailMode === "detail"}
+        highlightPr={selectedRow?.pr}
       />
     )
   if (snapshot.projection === undefined) {

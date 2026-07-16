@@ -9,9 +9,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
   QueueTimelineView,
+  PRDetailView,
   queueTimelineAdmissionTimes,
   queueTimelineDefaultCursorId,
   queueTimelineProjection,
+  prDetailData,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -122,7 +124,7 @@ describe("queue timeline 21106 contract", () => {
     const filterLine = rowIndex(rows, "FILTER ")
     const headerLine = rowIndex(rows, "TIME")
     const lastRowLine = rowIndex(rows, "PR4.1 Land the durable patch")
-    const statisticsLine = rowIndex(rows, "STATISTICS")
+    const statisticsLine = rowIndex(rows, "STATS")
     const flowLine = rowIndex(rows, "FLOW ")
 
     expect(queueLine).toBeLessThan(updatedLine)
@@ -137,13 +139,13 @@ describe("queue timeline 21106 contract", () => {
     // ACTIVE/WAIT moved out of the per-row columns into the statistics box.
     const header = rows[headerLine]
     if (header === undefined) throw new Error("expected the table header row")
-    expect(header.trim()).toMatch(/^TIME\s+RUN·PR\s+STEP\s+BY\s+AGE\s+RUN$/u)
+    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN·PR\s+STEP\s+BY\s+AGE\s+RUN$/u)
     expect(header).not.toContain("ACTIVE")
     expect(header).not.toContain("WAIT")
     expect(header).not.toContain("SUBJECT")
     expect(header).not.toContain("DETAIL")
     expect(header).not.toContain("TOTAL")
-    expect(header).not.toContain("STATUS")
+    expect(header).toContain("STATUS")
     // A healthy heartbeat renders no runner fact anywhere — the STATUS box
     // owns the loud exception states and is omitted when normal (15d).
     expect(rows.join("\n")).not.toContain("RUNNER")
@@ -161,18 +163,18 @@ describe("queue timeline 21106 contract", () => {
     const rejected = rows[rowIndex(rows, "PR5.1")]
     const integrated = rows[rowIndex(rows, "PR4.1")]
 
-    expect(pending?.trim()).toMatch(/^○ 16:40:00 pending PR1\.1 Prepare release notes\s+@cto\s+50:00$/u)
+    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend pending PR1\.1 Prepare release notes\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
-      /^● 17:10:00 main#42 PR42\.1 Align host navigation keybindings without disturbing internal pane controls\s+2:check @agent\/3 36:00 ◷20:00$/u,
+      /^17:10:00 ● run\s+main#42 PR42\.1 Align host navigation keybindings without disturbing internal pane controls\s+2:check @agent\/3 36:00 ◷20:00$/u,
     )
     expect(partner?.trim()).toMatch(
-      /^● 17:10:00 main#42 PR43\.1 Carry the production split-pane contract into the queue detail surface\s+2:check @agent\/5 34:00 ◷20:00$/u,
+      /^17:10:00 ● run\s+main#42 PR43\.1 Carry the production split-pane contract into the queue detail surface\s+2:check @agent\/5 34:00 ◷20:00$/u,
     )
     expect(rejected?.trim()).toMatch(
-      /^× 16:42:00 main#5\s+PR5\.1 Reject broken payload\s+typecheck-failed @agent\/2 27:00 ◷12:00$/u,
+      /^16:42:00 × rej\s+main#5\s+PR5\.1 Reject broken payload\s+typecheck-failed @agent\/2 27:00 ◷12:00$/u,
     )
     expect(integrated?.trim()).toMatch(
-      /^✓ 16:25:00 main#4\s+PR4\.1 Land the durable patch\s+integrated @agent\/7 25:00 ◷15:00$/u,
+      /^16:25:00 ✓ ok\s+main#4\s+PR4\.1 Land the durable patch\s+@agent\/7 25:00 ◷15:00$/u,
     )
 
     // Fixed cells stay aligned: the clock glyph column is shared by every
@@ -196,7 +198,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead).toContain("◷20:00")
     // The BY column is the first casualty on narrow tiers — dropped before
     // any identity, clock, or measurement column.
-    expect(lead?.trimStart().startsWith("●")).toBe(true)
+    expect(lead?.trimStart().startsWith("17:10:00 ● run")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
     const rejected = rows[rowIndex(rows, "PR5.1")]
@@ -243,7 +245,7 @@ describe("queue timeline 21106 contract", () => {
       const info = cell("pending", "PR1.1").fg
       const runningMarker = cell("●", "PR42.1").fg
       const successMarker = cell("✓", "PR4.1").fg
-      const successText = cell("integrated", "PR4.1").fg
+      const successText = cell("ok", "PR4.1").fg
       const failureText = cell("typecheck-failed", "PR5.1").fg
       const mutedTime = cell("16:40:00", "PR1.1").fg
       const mutedAge = cell("50:00", "PR1.1").fg
@@ -271,23 +273,22 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
-    const wideBorder = wide[rowIndex(wide, "╭")]
+    const wideBorder = wide[rowIndex(wide, "STATS")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
-    expect(wideBorder.startsWith("╭")).toBe(true)
+    expect(wideBorder.startsWith("─")).toBe(true)
     expect(wideBorder.trimEnd().length).toBe(160)
     for (const row of wide) expect(Array.from(row.trimEnd()).length).toBeLessThanOrEqual(160)
-    // Left-anchored surfaces start at column 0 (the header's first cell is
-    // the one-column marker gutter); only right-aligned facts (FILTER,
-    // updated) carry leading padding.
-    for (const anchor of ["QUEUE", "○ 16:40:00", "╭", "│ STATISTICS"]) {
+    // Left-anchored surfaces start at column 0; only right-aligned facts
+    // (FILTER, updated) carry leading padding.
+    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "─", "│ ROWS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
-    expect(wide[rowIndex(wide, "RUN·PR")]?.indexOf("TIME")).toBe(2)
+    expect(wide[rowIndex(wide, "RUN·PR")]?.indexOf("TIME")).toBe(0)
 
     const narrow = await renderTimeline(contractProjection(), 100)
-    const narrowBorder = narrow[rowIndex(narrow, "╭")]
+    const narrowBorder = narrow[rowIndex(narrow, "STATS")]
     if (narrowBorder === undefined) throw new Error("expected the statistics border row")
-    expect(narrowBorder.startsWith("╭")).toBe(true)
+    expect(narrowBorder.startsWith("─")).toBe(true)
     expect(narrowBorder.trimEnd().length).toBe(100)
   })
 
@@ -353,7 +354,7 @@ describe("queue timeline 21106 contract", () => {
     const canceled = rows[rowIndex(rows, "PR7.1")]
     expect(canceled).toContain("queue-canceled")
     const integrated = rows[rowIndex(rows, "PR4.1")]
-    expect(integrated).toContain("integrated")
+    expect(integrated).toContain("✓ ok")
   })
 
   it("defaults the cursor to the first running row, else the newest finished row", () => {
@@ -415,7 +416,7 @@ describe("queue timeline 21106 contract", () => {
       expect(footer).toBeGreaterThan(0)
       expect(rows.slice(footer + 1).every((row) => row.trim() === "")).toBe(true)
       expect(rows[footer]).toContain("p pause")
-      const statistics = rows.findIndex((row) => row.includes("STATISTICS"))
+      const statistics = rows.findIndex((row) => row.includes("STATS"))
       expect(statistics).toBeGreaterThan(0)
       expect(statistics).toBeLessThan(footer)
 
@@ -423,9 +424,33 @@ describe("queue timeline 21106 contract", () => {
       // step-tabs composition) names every member of the batch.
       expect(handle.text).toContain("PRs PR42@r1")
       expect(handle.text).toContain("PR43@r1")
+      const members = rows.findIndex((row) => row.includes("PRs PR42@r1"))
+      const lead = rows[members]?.indexOf("PR42") ?? -1
+      const sibling = rows[members]?.indexOf("PR43") ?? -1
+      expect(handle.cell(lead, members).bold).toBe(true)
+      expect(handle.cell(sibling, members).bold).toBe(false)
     } finally {
       handle.unmount()
     }
+  })
+
+  it("scopes PR detail to member runs and omits unavailable pending placeholders", async () => {
+    const result = queueTimelineStories["contract-overview"].snapshot.results[0]
+    if (result === undefined) throw new Error("contract-overview is missing its queue result")
+    const runs = [...result.running, ...result.waiting, ...result.finished]
+    const running = result.prs.find((pr) => pr.id === "PR42")
+    const pending = result.prs.find((pr) => pr.id === "PR1")
+    if (running === undefined || pending === undefined) throw new Error("contract fixture is missing expected PRs")
+
+    expect(prDetailData(running, runs).runs.map((run) => run.run)).toEqual(["R42"])
+    const rendered = await renderString(createElement(PRDetailView, { pr: pending, runs, now: 0, position: 1 }), {
+      width: 100,
+      height: 20,
+      plain: true,
+    })
+    expect(rendered).not.toContain("RELATED RUNS")
+    expect(rendered).not.toContain("No run recorded.")
+    expect(rendered).not.toContain("LANDING -")
   })
   it("freezes AGE at the first terminal outcome while open rows keep aging", () => {
     const results = queueTimelineStories["contract-overview"].snapshot.results
