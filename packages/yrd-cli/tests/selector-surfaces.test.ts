@@ -88,11 +88,11 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp() {
+async function createCliApp(overrides: { check?: () => JobResult<JsonValue> } = {}) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep(
     "check",
-    (): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } }),
+    overrides.check ?? ((): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } })),
     { revision: "check-v1", output: JsonSchema, classification: "carrier" },
   )
   const merge = withMerge(
@@ -177,6 +177,11 @@ describe("case-insensitive CLI selector surfaces", () => {
       expected: { command: "queue.run", results: [{ prs: [{ id: "PR1" }] }] },
     },
     {
+      surface: "pr checks",
+      args: ["pr", "checks", "pr1", "--json"],
+      expected: { kind: "pr.check", pr: "PR1" },
+    },
+    {
       surface: "pr list base filter",
       args: ["pr", "list", "--base", "MAIN", "--json"],
       expected: { command: "pr.list", prs: [{ id: "PR1", base: "main" }] },
@@ -236,5 +241,142 @@ describe("case-insensitive CLI selector surfaces", () => {
 
     expect(await runYrd(app, yrd("queue", "--base", "MAIN", "--json"), output.io)).toBe(1)
     expect(output.stderr()).toContain("base selector 'MAIN' is ambiguous: Main, main")
+  })
+
+  it("applies canonical PR and base scopes to log projections", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const setup = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), setup.io), setup.stderr()).toBe(0)
+
+    for (const scope of [
+      ["--pr", "pr1"],
+      ["--base", "MAIN"],
+    ] as const) {
+      const output = outputIO()
+      expect(await runYrd(app, yrd("log", ...scope, "--json"), output.io), output.stderr()).toBe(0)
+      const log = JSON.parse(output.stdout()) as { command: string; rows: readonly { prs?: readonly string[] }[] }
+      expect(log.command).toBe("log")
+      expect(log.rows.length).toBeGreaterThan(0)
+      expect(JSON.stringify(log.rows)).toContain("PR1")
+    }
+
+    const missing = outputIO()
+    expect(await runYrd(app, yrd("log", "--pr", "missing", "--json"), missing.io)).toBe(1)
+    expect(missing.stderr()).toContain("no PR 'missing'")
+  })
+
+  /** A recutter whose output never depends on selector casing. */
+  function stubRecutter(): { recut: YrdCliServices["recut"] } {
+    return {
+      recut: {
+        recut: async () => ({
+          headSha: "f".repeat(40),
+          baseSha: BASE_SHA,
+          treeSha: "d".repeat(40),
+          patchId: "e".repeat(40),
+          unchanged: false,
+        }),
+      },
+    }
+  }
+
+  it("recuts through the folded selector and echoes the canonical PR", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "recut", "pr1", "--json"), output.io, stubRecutter()), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({ pr: "PR1" })
+  })
+
+  it("retries a rejected PR through folded selectors without renaming it", async () => {
+    let attempts = 0
+    const app = await createCliApp({
+      check: (): JobResult<JsonValue> =>
+        ++attempts === 1
+          ? { status: "failed", error: { code: "check-failed", message: "first attempt fails" } }
+          : { status: "passed", output: { checked: true } },
+    })
+    await submitOnePR(app)
+
+    const rejected = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), rejected.io)).toBe(1)
+    expect(JSON.parse(rejected.stdout())).toMatchObject({
+      command: "queue.run",
+      results: [{ status: "failed", prs: [{ id: "PR1" }] }],
+    })
+
+    // A direct re-run refuses, but the refusal proves the folded selector
+    // resolved to the canonical identity on the retry path.
+    const refused = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "pr1", "--json"), refused.io)).not.toBe(0)
+    expect(refused.stderr()).toContain("PR 'PR1' is rejected")
+
+    // The sanctioned retry: recut the folded selector back into the queue.
+    const requeued = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "recut", "pr1", "--queue", "--json"), requeued.io, stubRecutter()),
+      requeued.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(requeued.stdout())).toMatchObject({ pr: "PR1" })
+
+    // The retried run passes and still names the canonical PR; the exit code
+    // reflects the historical rejected run that the projection also returns.
+    const retried = outputIO()
+    await runYrd(app, yrd("queue", "run", "pr1", "--json"), retried.io)
+    const parsed = JSON.parse(retried.stdout()) as {
+      command: string
+      results: readonly { status: string; prs: readonly { id: string }[] }[]
+    }
+    expect(parsed.command).toBe("queue.run")
+    expect(parsed.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "passed", prs: [expect.objectContaining({ id: "PR1" })] }),
+      ]),
+    )
+  })
+
+  it("records a regression through folded PR and run selectors", async () => {
+    const app = await createCliApp()
+    await app.bays.submit({ branch: "Topic/One", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA, issue: "km:1" })
+    await app.bays.submit({
+      branch: "Topic/Two",
+      headSha: "2".repeat(40),
+      base: "main",
+      baseSha: BASE_SHA,
+      issue: "km:1",
+    })
+    const setup = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "PR2", "--json"), setup.io), setup.stderr()).toBe(0)
+
+    const output = outputIO()
+    const args = [
+      "pr",
+      "regression",
+      "pr1",
+      "--run",
+      "r1",
+      "--detected-at",
+      "2026-07-09T12:00:00.000Z",
+      "--severity",
+      "low",
+      "--evidence",
+      "evidence-1",
+      "--implementation-run",
+      "impl-1",
+      "--review",
+      "review-1",
+      "--repair-pr",
+      "pr2",
+      "--repair-run",
+      "r2",
+      "--json",
+    ]
+    expect(await runYrd(app, yrd(...args), output.io), output.stderr()).toBe(0)
+    expect(JSON.parse(output.stdout())).toMatchObject({
+      command: "pr.regression",
+      regression: { pr: "PR1", run: "R1", repairPr: "PR2", repairRun: "R2" },
+    })
   })
 })

@@ -618,6 +618,7 @@ describe("entity selector resolution", () => {
   const candidates: readonly Core.SelectorCandidate<{ readonly id: string }>[] = [
     { canonical: "PR13", aliases: ["Topic/Alpha", "B13"], value: { id: "PR13" } },
     { canonical: "PR14", aliases: ["Topic/Beta", "B14"], value: { id: "PR14" } },
+    { canonical: "R4", value: { id: "R4" } },
   ]
 
   it.each([
@@ -625,6 +626,7 @@ describe("entity selector resolution", () => {
     ["pr13", "PR13"],
     ["TOPIC/ALPHA", "PR13"],
     ["b14", "PR14"],
+    ["r4", "R4"],
     ["missing", undefined],
   ])("resolves %s without changing canonical identity", (selector, expected) => {
     expect(Core.resolveSelector(selector, candidates, { kind: "PR" })?.id).toBe(expected)
