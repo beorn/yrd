@@ -176,6 +176,48 @@ export type Bay = Readonly<{
 
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
+const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set(["integrated", "withdrawn", "canceled"])
+
+/** A PR can only accept new check requests while pushed/submitted/rejected; once
+ * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer
+ * checkable. */
+export function isNonCheckablePRStatus(status: PRStatus): boolean {
+  return NON_CHECKABLE_PR_STATUSES.has(status)
+}
+
+/**
+ * A check request was refused because the PR's current status does not permit
+ * it. Always thrown, never returned, so a genuine caller error still fails
+ * loud. The carried `prId`/`status` let a resident, multi-tenant runner tell a
+ * losable concurrent-terminal race (a peer withdrew/canceled/integrated the PR
+ * between the runner's compose snapshot and its check request — see
+ * isConcurrentCheckabilityConflict) apart from a real caller error, without
+ * matching on the message text.
+ */
+export class PrCheckabilityConflict extends Error {
+  readonly prId: string
+  readonly status: PRStatus
+
+  constructor(prId: string, status: PRStatus) {
+    super(`yrd: PR '${prId}' is ${status}, not checkable`)
+    this.name = "PrCheckabilityConflict"
+    this.prId = prId
+    this.status = status
+  }
+}
+
+/**
+ * True when an error is a PrCheckabilityConflict whose PR had already reached a
+ * terminal status — i.e. a concurrent writer withdrew/canceled/integrated the
+ * PR between a runtime's compose snapshot and its check request. This is a
+ * normal, losable race for a long-lived resident runner: skip this cycle and
+ * continue; the next cycle re-snapshots without the departed PR and composes
+ * the remaining runnable ones.
+ */
+export function isConcurrentCheckabilityConflict(error: unknown): error is PrCheckabilityConflict {
+  return error instanceof PrCheckabilityConflict && isNonCheckablePRStatus(error.status)
+}
+
 export type PRRevisionTerminal = Readonly<{
   status: Extract<PRStatus, "rejected" | "integrated" | "withdrawn" | "canceled">
   at: string

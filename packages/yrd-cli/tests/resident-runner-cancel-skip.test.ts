@@ -66,13 +66,14 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
 
     // Survived the race AND reached the next interval's work.
     expect(h.runCalls()).toBe(2)
-    // The skip is LOUD and typed — structured log + operator-visible stderr.
+    // The skip is LOUD and typed — a structured loggily warn only. In resident
+    // watch mode output is loggily-only: no bare 'yrd: ' stderr duplicate.
     expect(h.warnings).toContainEqual(
       expect.objectContaining({
         props: expect.objectContaining({ action: "resident-cancel-skip", job: JOB_ID, status: "canceled" }),
       }),
     )
-    expect(h.stderr.join("")).toContain(`peer settled job '${JOB_ID}' (canceled) mid-pickup`)
+    expect(h.stderr.join("")).toBe("")
   })
 
   it("still dies on a conflict against a still-LIVE Job — narrow catch, no blanket swallow", async () => {

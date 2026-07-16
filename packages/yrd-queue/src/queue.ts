@@ -81,6 +81,35 @@ import {
   type PRSnapshot,
 } from "./model.ts"
 
+/**
+ * A queue command refused to compose because a peer's Queue run already holds
+ * the base branch. Always thrown, never returned, so a genuine caller error
+ * still fails loud. The carried `base`/`runId` let a resident, multi-tenant
+ * runner tell this losable "the queue is busy right now" race apart from other
+ * failures — without matching on the message text. For a long-lived resident
+ * watch this is losable: the peer's run settles and frees the base by the next
+ * interval, so defer and retry (see isQueueRunningConflict). A one-shot
+ * targeted `queue run <selector>` still sees it propagate — it has no next
+ * interval.
+ */
+export class QueueRunningConflict extends Error {
+  readonly base: string
+  readonly runId: string
+
+  constructor(base: string, runId: string) {
+    super(`yrd: queue '${base}' is running '${runId}'`)
+    this.name = "QueueRunningConflict"
+    this.base = base
+    this.runId = runId
+  }
+}
+
+/** True when an error is a QueueRunningConflict — a peer already holds the base.
+ * A losable race for a resident runner: defer this cycle and retry next. */
+export function isQueueRunningConflict(error: unknown): error is QueueRunningConflict {
+  return error instanceof QueueRunningConflict
+}
+
 const StepNameSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/iu)
 const QueueRequirementSchema = z.enum(["review"])
 const QueueRunIdSchema = z.string().trim().min(1)
@@ -1323,7 +1352,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
           ? active
           : undefined
       if (active !== undefined && superseded === undefined) {
-        throw new Error(`yrd: queue '${base}' is running '${active.id}'`)
+        throw new QueueRunningConflict(base, active.id)
       }
       const integrated = integratedPRShape(prs)
       validateSequence(selected, integrated !== undefined)
@@ -1373,7 +1402,7 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       if (childQueue(state.queues, state.jobs, parent.id, args.part) !== undefined) return { events: [] }
       if (!bisectable(parent)) throw new Error(`yrd: queue run '${parent.id}' is not a failed pre-merge batch`)
       const active = runningQueue(state.queues, state.jobs, parent.base)
-      if (active !== undefined) throw new Error(`yrd: queue '${parent.base}' is running '${active.id}'`)
+      if (active !== undefined) throw new QueueRunningConflict(parent.base, active.id)
 
       const pivot = Math.ceil(parent.prs.length / 2)
       const prs = args.part === 0 ? parent.prs.slice(0, pivot) : parent.prs.slice(pivot)
