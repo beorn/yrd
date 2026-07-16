@@ -17,10 +17,13 @@ import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
 import {
+  PROJECTION_CHECKPOINT_FILE,
   SNAPSHOT_FILE,
   SNAPSHOT_REFRESH_FRAMES,
+  encodeProjectionCheckpointFile,
   encodeSnapshotFile,
   joinValuesJson,
+  parseProjectionCheckpointFile,
   parseSnapshotFile,
   type SnapshotBindingView,
   type SnapshotCheckpoint,
@@ -262,62 +265,99 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
       const snapshot = await exclusive.run(() => acquireReadSnapshot(runtime, 0))
       try {
         if (snapshot.active === null) return undefined
-        const cache = await loadSnapshotCache(runtime, snapshot, false)
-        if (cache.kind !== "hit" || cache.checkpoint === undefined) return undefined
-        if (cache.checkpoint.identity !== identity) {
+        const path = join(runtime.dir, PROJECTION_CHECKPOINT_FILE)
+        let text: string
+        try {
+          text = await readFile(path, "utf8")
+        } catch (error) {
+          if (isMissing(error)) return undefined
+          log.warn?.("journal projection checkpoint unreadable; replaying journal authority", {
+            action: "full-replay",
+            reason: "checkpoint-unreadable",
+            path,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return undefined
+        }
+        const parsed = parseProjectionCheckpointFile(text, snapshotBindingView(snapshot.active))
+        if (!parsed.ok) {
+          log.warn?.("journal projection checkpoint invalid; replaying journal authority", {
+            action: "full-replay",
+            reason: parsed.reason,
+            path,
+            ...(parsed.expected === undefined ? {} : { expected: parsed.expected }),
+            ...(parsed.observed === undefined ? {} : { observed: parsed.observed }),
+          })
+          return undefined
+        }
+        if (
+          !(await verifyProjectionCheckpointAuthority(
+            runtime,
+            snapshot,
+            parsed.checkpoint.cursor,
+            parsed.tailPrefixSha256,
+          ))
+        ) {
+          return undefined
+        }
+        if (parsed.checkpoint.identity !== identity) {
           log.warn?.("journal projection checkpoint identity changed; replaying journal authority", {
             action: "full-replay",
             reason: "checkpoint-identity-mismatch",
-            path: join(runtime.dir, SNAPSHOT_FILE),
+            path,
             expected: identity,
-            observed: cache.checkpoint.identity,
+            observed: parsed.checkpoint.identity,
           })
           return undefined
         }
         log.debug?.("journal projection checkpoint served the cold projection", {
           action: "snapshot-hit",
-          path: join(runtime.dir, SNAPSHOT_FILE),
-          cursor: cache.checkpoint.cursor,
-          cachedFrames: cache.frames,
+          path,
+          cursor: parsed.checkpoint.cursor,
           replayedFrames: 0,
         })
-        return structuredClone(cache.checkpoint)
+        return structuredClone(parsed.checkpoint)
       } finally {
         await closeParts(snapshot.parts)
       }
     },
     async save(checkpoint) {
       assertCursor(checkpoint.cursor)
-      const load = async () => {
-        const snapshot = await exclusive.run(() => acquireReadSnapshot(runtime, 0, checkpoint.cursor))
-        if (snapshot.active === null) {
-          await closeParts(snapshot.parts)
-          return undefined
-        }
-        const cache = await loadSnapshotCache(runtime, snapshot, false)
-        return { snapshot, cache }
-      }
-
-      let loaded = await load()
-      if (loaded === undefined) return false
-      if (loaded.cache.kind !== "hit" || loaded.cache.cursor !== checkpoint.cursor) {
-        await closeParts(loaded.snapshot.parts)
-        for await (const _batch of journal.read(0, checkpoint.cursor)) {
-          // Drain once so a missing/invalid decoded-frame cache is rebuilt from journal authority.
-        }
-        loaded = await load()
-        if (loaded === undefined) return false
-      }
+      const snapshot = await exclusive.run(() => acquireReadSnapshot(runtime, 0, checkpoint.cursor))
       try {
-        if (loaded.cache.kind !== "hit" || loaded.cache.cursor !== checkpoint.cursor) return false
-        return await writeSnapshotCache(runtime, loaded.snapshot.active!, loaded.snapshot.parts, checkpoint.cursor, {
-          base: loaded.cache,
-          chunks: [],
-          replayed: 0,
-          checkpoint,
+        if (snapshot.active === null) return false
+        const view = snapshotBindingView(snapshot.active)
+        if (checkpoint.cursor < view.tailLogicalStart || checkpoint.cursor > view.logicalEnd) return false
+        const coveredTailBytes = checkpoint.cursor - view.tailLogicalStart
+        let tailPrefixSha256 = EMPTY_DIGEST
+        if (coveredTailBytes > 0) {
+          const tail = snapshot.parts.find((part) => part.kind === "tail")
+          if (tail === undefined || tail.kind !== "tail") {
+            throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
+          }
+          tailPrefixSha256 = sha256(await readExactly(tail.file, 0, coveredTailBytes, runtime.io))
+        }
+        const current = await loadManifestRecord(runtime.dir)
+        if (current === null || current.manifest.digest !== snapshot.active.manifest.digest) return false
+        const path = join(runtime.dir, PROJECTION_CHECKPOINT_FILE)
+        const text = encodeProjectionCheckpointFile({ view, cursor: checkpoint.cursor, tailPrefixSha256, checkpoint })
+        await replaceDurable(runtime, PROJECTION_CHECKPOINT_FILE, Buffer.from(text))
+        log.debug?.("journal projection checkpoint written", {
+          action: "checkpoint-written",
+          path,
+          cursor: checkpoint.cursor,
         })
+        return true
+      } catch (error) {
+        log.error?.("journal projection checkpoint write failed; journal remains authoritative", {
+          action: "skipped",
+          reason: "checkpoint-write-failed",
+          path: join(runtime.dir, PROJECTION_CHECKPOINT_FILE),
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return false
       } finally {
-        await closeParts(loaded.snapshot.parts)
+        await closeParts(snapshot.parts)
       }
     },
   }
@@ -818,6 +858,7 @@ async function finalizeGeneration(runtime: Runtime, recovery: Recovery, manifest
   // The snapshot cache is bound to the replaced generation; remove it deliberately so
   // the next replay reseeds quietly instead of tripping the loud staleness fallback.
   await removeIfExists(join(runtime.dir, SNAPSHOT_FILE))
+  await removeIfExists(join(runtime.dir, PROJECTION_CHECKPOINT_FILE))
 }
 
 async function sealMigratedV3(runtime: Runtime, recovery: Recovery, manifest: Manifest): Promise<void> {
@@ -1016,6 +1057,48 @@ function snapshotBindingView(active: ActiveState): SnapshotBindingView {
       compressedSha256: segment.compressedSha256,
     })),
   }
+}
+
+async function verifyProjectionCheckpointAuthority(
+  runtime: Runtime,
+  snapshot: ReadSnapshot,
+  cursor: number,
+  tailPrefixSha256: string,
+): Promise<boolean> {
+  const path = join(runtime.dir, PROJECTION_CHECKPOINT_FILE)
+  for (const part of snapshot.parts) {
+    if (part.kind !== "segment") continue
+    const compressed = await readWhole(part.file, runtime.io)
+    const observed = sha256(compressed)
+    if (observed !== part.descriptor.compressedSha256) {
+      runtime.log.warn?.("journal projection checkpoint rejected: covered segment bytes changed on disk", {
+        action: "full-replay",
+        reason: "checkpoint-covered-segment-checksum",
+        path,
+        segment: part.descriptor.path,
+        expected: part.descriptor.compressedSha256,
+        observed,
+      })
+      return false
+    }
+  }
+  const view = snapshotBindingView(snapshot.active!)
+  const coveredTailBytes = Math.max(0, cursor - view.tailLogicalStart)
+  if (coveredTailBytes === 0) return true
+  const tail = snapshot.parts.find((part) => part.kind === "tail")
+  if (tail === undefined || tail.kind !== "tail")
+    throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
+  const observed = sha256(await readExactly(tail.file, 0, coveredTailBytes, runtime.io))
+  if (observed === tailPrefixSha256) return true
+  runtime.log.warn?.("journal projection checkpoint rejected: covered tail bytes changed on disk", {
+    action: "full-replay",
+    reason: "checkpoint-covered-tail-checksum",
+    path,
+    expected: tailPrefixSha256,
+    observed,
+    coveredBytes: coveredTailBytes,
+  })
+  return false
 }
 
 /**

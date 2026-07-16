@@ -247,6 +247,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const active = new Set<Promise<unknown>>()
   const checkpointStore = journal.checkpoint
   let checkpointIdentity: string | undefined
+  let checkpointCursor: Cursor | undefined
   let checkpointWarning = false
 
   const warnCheckpoint = (message: string, error: unknown): void => {
@@ -382,7 +383,10 @@ export async function createYrd<State extends object, Commands extends CommandTr
     let checkpoint: JournalCheckpoint | undefined
     try {
       checkpoint = await checkpointStore.load(checkpointIdentity)
-      return checkpoint === undefined ? undefined : restoreProjection(checkpoint)
+      if (checkpoint === undefined) return undefined
+      const restored = restoreProjection(checkpoint)
+      checkpointCursor = checkpoint.cursor
+      return restored
     } catch (error) {
       warnCheckpoint("projection checkpoint is invalid; replaying journal authority", error)
       return undefined
@@ -390,10 +394,12 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const saveProjection = async (next: Projection): Promise<void> => {
-    if (checkpointStore === undefined || checkpointIdentity === undefined) return
+    if (checkpointStore === undefined || checkpointIdentity === undefined || checkpointCursor === next.cursor) {
+      return
+    }
     try {
       const stateValue = JsonSchema.parse(next.state)
-      await checkpointStore.save({
+      const saved = await checkpointStore.save({
         identity: checkpointIdentity,
         cursor: next.cursor,
         value: {
@@ -405,6 +411,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
           eventIds: [...next.eventIds],
         },
       })
+      if (saved) checkpointCursor = next.cursor
     } catch (error) {
       coreLog.error?.("projection checkpoint write failed; journal remains authoritative", {
         action: "skipped",
@@ -574,10 +581,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     dispatch,
     async *events() {
       await refresh()
-      const before = projection.cursor
-      for await (const batch of journal.read(0, before)) {
-        for (const value of batch.values) yield* parseJournalFrame(value).events
-      }
+      for (const frame of projection.receiptsById.values()) yield* frame.events
     },
     close,
     [Symbol.asyncDispose]: close,
@@ -591,6 +595,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       try {
         projection = await fold(restored)
       } catch (error) {
+        checkpointCursor = undefined
         warnCheckpoint("projection checkpoint tail replay failed; replaying journal authority", error)
         projection = await fold(emptyProjection())
       }

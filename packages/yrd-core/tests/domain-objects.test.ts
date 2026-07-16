@@ -48,6 +48,7 @@ function withCounter() {
       events: {
         "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }),
       },
+      projectionVersion: "counter-v1",
       project(state, applied) {
         if (applied.name !== "counter/changed") return { counter: state.counter }
         const { by } = applied.data as { by: number }
