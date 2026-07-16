@@ -69,8 +69,17 @@ export type QueueAuthorityRefusalEvidence = Readonly<z.infer<typeof QueueAuthori
 const SubmoduleReachabilityRefusalEvidenceSchema = z
   .object({
     kind: z.literal("submodule-reachability-refusal"),
-    operation: z.enum(["initialize", "filtered-fetch", "fallback-fetch", "verify"]),
-    origin: z.string().min(1),
+    operation: z.enum([
+      "read-tree",
+      "read-gitmodules",
+      "read-superproject-origin",
+      "initialize",
+      "filtered-fetch",
+      "fallback-fetch",
+      "verify",
+    ]),
+    repository: z.string().min(1),
+    origin: z.string().min(1).optional(),
     sha: z.string().regex(/^[0-9a-f]{40,64}$/iu).optional(),
     paths: z.array(z.string().min(1)).min(1).optional(),
     exitCode: z.number().int().optional(),
@@ -567,8 +576,7 @@ type MutableSubmoduleConfig = { path?: string; url?: string }
 const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
 const FILTER_UNSUPPORTED =
   /filtering not recognized by server|server does not support filter|filter(?:ing)? (?:is )?not supported|unsupported[^\n]*filter/iu
-const DEFINITIVE_EXACT_SHA_ABSENCE =
-  /not our ref|could(?: not|n't) find remote ref|does not allow request for unadvertised object/iu
+const DEFINITIVE_EXACT_SHA_ABSENCE = /not our ref/iu
 const DEFINITIVE_LOCAL_OBJECT_ABSENCE =
   /not a valid object name|bad object|unknown revision|needed a single revision/iu
 
@@ -622,7 +630,15 @@ async function candidateSubmodulePins(
   path: string,
   candidateSha: string,
 ): Promise<CandidateSubmodulePin[]> {
-  const tree = await git.raw(path, ["ls-tree", "-r", "-z", "--full-tree", candidateSha])
+  const treeContext = { operation: "read-tree", repository: path } as const
+  const tree = await runSubmoduleProbe(
+    git,
+    path,
+    ["ls-tree", "-r", "-z", "--full-tree", candidateSha],
+    treeContext,
+    true,
+  )
+  if (tree.code !== 0) throw createSubmoduleReachabilityRefusal(treeContext, tree)
   const gitlinks: ReadonlyArray<Readonly<{ path: string; sha: string }>> = tree.stdout
     .split("\0")
     .filter((entry) => entry !== "")
@@ -638,7 +654,9 @@ async function candidateSubmodulePins(
     })
   if (gitlinks.length === 0) return []
 
-  const configured = await git.raw(
+  const configuredContext = { operation: "read-gitmodules", repository: path } as const
+  const configured = await runSubmoduleProbe(
+    git,
     path,
     [
       "config",
@@ -648,12 +666,16 @@ async function candidateSubmodulePins(
       "--get-regexp",
       "^submodule\\..*\\.(path|url)$",
     ],
+    configuredContext,
     true,
   )
   if (configured.code !== 0) {
-    throw new Error(
-      `yrd: candidate contains gitlinks but .gitmodules is missing or invalid: ${configured.stderr.trim() || configured.stdout.trim() || "no submodule metadata"}`,
-    )
+    if (definitiveCandidateMetadataFailure(configured)) {
+      throw new Error(
+        `yrd: candidate contains gitlinks but .gitmodules is missing or invalid: ${configured.stderr.trim() || configured.stdout.trim() || "no submodule metadata"}`,
+      )
+    }
+    throw createSubmoduleReachabilityRefusal(configuredContext, configured)
   }
   const modules = parseSubmoduleConfig(configured.stdout)
   const urlsByPath = new Map<string, string>()
@@ -666,7 +688,11 @@ async function candidateSubmodulePins(
     }
     urlsByPath.set(module.path, module.url)
   }
-  const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  const remoteContext = { operation: "read-superproject-origin", repository: repo } as const
+  const remote = await runSubmoduleProbe(git, repo, ["config", "--get", "remote.origin.url"], remoteContext)
+  if (remote.code !== 0 && (remote.timedOut || remote.signal !== null || fetchDetail(remote) !== `git exited ${remote.code}`)) {
+    throw createSubmoduleReachabilityRefusal(remoteContext, remote)
+  }
   const superOrigin = remote.code === 0 && remote.stdout !== "" ? remote.stdout : undefined
   return gitlinks.map((gitlink) => {
     const url = urlsByPath.get(gitlink.path)
@@ -683,8 +709,16 @@ function fetchDetail(result: GitResult): string {
 }
 
 type SubmoduleProbeContext = Readonly<{
-  operation: "initialize" | "filtered-fetch" | "fallback-fetch" | "verify"
-  origin: string
+  operation:
+    | "read-tree"
+    | "read-gitmodules"
+    | "read-superproject-origin"
+    | "initialize"
+    | "filtered-fetch"
+    | "fallback-fetch"
+    | "verify"
+  repository: string
+  origin?: string
   sha?: string
   paths?: readonly string[]
 }>
@@ -694,9 +728,10 @@ async function runSubmoduleProbe(
   repo: string,
   args: readonly string[],
   context: SubmoduleProbeContext,
+  raw = false,
 ): Promise<GitResult> {
   try {
-    return await git.run(repo, args, true)
+    return await (raw ? git.raw(repo, args, true) : git.run(repo, args, true))
   } catch (cause) {
     throw createSubmoduleReachabilityRefusal(context, undefined, messageOf(cause))
   }
@@ -704,6 +739,12 @@ async function runSubmoduleProbe(
 
 function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
   return !result.timedOut && result.signal === null && pattern.test(`${result.stderr}\n${result.stdout}`)
+}
+
+function definitiveCandidateMetadataFailure(result: GitResult): boolean {
+  if (result.timedOut || result.signal !== null) return false
+  const detail = `${result.stderr}\n${result.stdout}`.trim()
+  return detail === "" || /\.gitmodules.*does not exist|bad config line|invalid config|invalid key/iu.test(detail)
 }
 
 function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResult): never {
@@ -737,7 +778,7 @@ async function proveCandidateSubmoduleReachability(
 
   for (const [origin, shas] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
     const store = join(proofParent, createHash("sha256").update(origin).digest("hex"))
-    const initializedContext = { operation: "initialize", origin } as const
+    const initializedContext = { operation: "initialize", repository: proofParent, origin } as const
     const initialized = await runSubmoduleProbe(
       git,
       proofParent,
@@ -748,7 +789,7 @@ async function proveCandidateSubmoduleReachability(
       throw createSubmoduleReachabilityRefusal(initializedContext, initialized)
     }
     for (const [sha, paths] of [...shas].sort(([left], [right]) => left.localeCompare(right))) {
-      const filteredContext = { operation: "filtered-fetch", origin, sha, paths } as const
+      const filteredContext = { operation: "filtered-fetch", repository: store, origin, sha, paths } as const
       const filtered = await runSubmoduleProbe(
         git,
         store,
@@ -763,7 +804,7 @@ async function proveCandidateSubmoduleReachability(
         if (!canFallback) {
           throwFetchProbeFailure(filteredContext, filtered)
         }
-        const fallbackContext = { operation: "fallback-fetch", origin, sha, paths } as const
+        const fallbackContext = { operation: "fallback-fetch", repository: store, origin, sha, paths } as const
         const fallback = await runSubmoduleProbe(
           git,
           store,
@@ -774,7 +815,7 @@ async function proveCandidateSubmoduleReachability(
           throwFetchProbeFailure(fallbackContext, fallback)
         }
       }
-      const verifyContext = { operation: "verify", origin, sha, paths } as const
+      const verifyContext = { operation: "verify", repository: store, origin, sha, paths } as const
       const fetched = await runSubmoduleProbe(git, store, ["cat-file", "-e", `${sha}^{commit}`], verifyContext)
       if (fetched.code !== 0) {
         if (definitiveProbeFailure(fetched, DEFINITIVE_LOCAL_OBJECT_ABSENCE)) {
@@ -1052,7 +1093,8 @@ function createSubmoduleReachabilityRefusal(
   const evidence = SubmoduleReachabilityRefusalEvidenceSchema.parse({
     kind: "submodule-reachability-refusal",
     operation: context.operation,
-    origin: context.origin,
+    repository: context.repository,
+    ...(context.origin === undefined ? {} : { origin: context.origin }),
     ...(context.sha === undefined ? {} : { sha: context.sha }),
     ...(context.paths === undefined ? {} : { paths: [...context.paths] }),
     ...(result === undefined
@@ -1069,7 +1111,7 @@ function createSubmoduleReachabilityRefusal(
     createFailure({
       kind: "infrastructure",
       code: "queue-environment-refused",
-      message: `yrd: could not prove candidate submodule reachability from '${context.origin}': ${detail}`,
+      message: `yrd: could not prove candidate submodule reachability from '${context.origin ?? context.repository}': ${detail}`,
     }),
     { evidence },
   )

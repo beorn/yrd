@@ -1224,6 +1224,20 @@ describe("Queue command adapters", () => {
       stderr: "",
       timedOut: false,
     },
+    {
+      name: "unadvertised-object policy refusal",
+      exitCode: 1,
+      signal: null,
+      stderr: "fatal: Server does not allow request for unadvertised object",
+      timedOut: false,
+    },
+    {
+      name: "unadvertised remote-ref refusal",
+      exitCode: 1,
+      signal: null,
+      stderr: "fatal: couldn't find remote ref deadbeef",
+      timedOut: false,
+    },
   ] as const)("keeps the candidate submitted after a cannot-probe $name", async (failure) => {
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -1272,6 +1286,81 @@ describe("Queue command adapters", () => {
     })
     expect(configuredCheckRan).toBe(false)
     expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+  }, 15_000)
+
+  it.each([
+    {
+      name: "candidate tree timeout",
+      operation: "read-tree",
+      matches: (argv: readonly string[]) => argv.includes("ls-tree") && argv.includes("--full-tree"),
+      exitCode: 124,
+      signal: null,
+      stderr: "candidate tree read timed out",
+      timedOut: true,
+    },
+    {
+      name: "gitmodules tool failure",
+      operation: "read-gitmodules",
+      matches: (argv: readonly string[]) => argv.includes("--blob"),
+      exitCode: 128,
+      signal: null,
+      stderr: "fatal: could not read object database",
+      timedOut: false,
+    },
+    {
+      name: "superproject origin signal termination",
+      operation: "read-superproject-origin",
+      matches: (argv: readonly string[]) => argv.at(-1) === "remote.origin.url",
+      exitCode: 143,
+      signal: "SIGTERM",
+      stderr: "",
+      timedOut: false,
+    },
+  ] as const)("keeps the candidate submitted after a $name", async (failure) => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    let configuredCheckRan = false
+    const unavailable: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "true") configuredCheckRan = true
+        if (failure.matches(request.argv)) {
+          return Promise.resolve({
+            exitCode: failure.exitCode,
+            signal: failure.signal,
+            stdout: "",
+            stderr: failure.stderr,
+            durationMs: 1,
+            timedOut: failure.timedOut,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailable, fixture.repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "submodule-reachability-refusal",
+          operation: failure.operation,
+          exitCode: failure.exitCode,
+          timedOut: failure.timedOut,
+          signal: failure.signal,
+          retryable: true,
+        },
+      },
+    })
+    expect(configuredCheckRan).toBe(false)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
   }, 15_000)
 
