@@ -1,3 +1,7 @@
+// @failure QueueWatchFrame formats the timeline for a width that diverges from its rendered SplitPane allocation
+// @level l1
+// @consumer @yrd/cli
+
 import { describe, expect, test } from "vitest"
 import { queueTimelineColumns } from "../src/watch-pane.tsx"
 
