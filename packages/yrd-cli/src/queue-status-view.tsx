@@ -4080,7 +4080,7 @@ function prCommentLine(comment: PR["comments"][number]): string {
 // PR-level facts (item J, 2026-07-16): the batched members' subject, review /
 // comment / check-request activity, and revision history — none of which live
 // on the run's `PRSnapshot`, so they are threaded from the full status PRs.
-// Timestamps use the local detail clock; only present facts render; every line
+// Timestamps use the local detail clock; only present facts render; every row
 // carrying an author-authored string sets `bgConflict="ignore"`.
 export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
   if (prs.length === 0) return null
@@ -4200,7 +4200,7 @@ function CompactQueueShowView({
             const revision = presentFact(row.revision)
             const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
             // Item J completeness: the artifacts label + checkpoint join the
-            // step's PROOF line so the whole step record is on-screen.
+            // step's PROOF row so the whole step record is on-screen.
             const artifacts = presentFact(row.artifacts)
             const checkpoint = presentFact(row.checkpoint)
             const hasProof =

@@ -56,7 +56,7 @@ function integratedRunData(): QueueShowData {
 }
 
 describe("watch detail completeness — run-level integration proof detail (item J)", () => {
-  it("appends REWRITES to the LANDING line, no raw ISO", () => {
+  it("appends REWRITES to the LANDING row, no raw ISO", () => {
     const app = createRenderer({ cols: 120, rows: 30 })(
       createElement(QueueShowView, { data: integratedRunData(), compact: true, section: "run" }),
     )
@@ -71,12 +71,12 @@ describe("watch detail completeness — run-level integration proof detail (item
 })
 
 describe("watch detail completeness — step artifacts + checkpoint (item J)", () => {
-  it("renders the artifacts label and checkpoint on the step PROOF line", () => {
+  it("renders the artifacts label and checkpoint on the step PROOF row", () => {
     const data = integratedRunData()
     const [row] = data.steps
     if (row === undefined) throw new Error("fixture run produced no step rows")
     // Isolate the artifacts/checkpoint cells: no ART links or EVIDENCE JSON, so
-    // the single truncate PROOF line has room to show both new fields.
+    // the single truncate PROOF row has room to show both new fields.
     const stepData: QueueShowData = {
       ...data,
       steps: [{ ...row, artifacts: "vitest-report", checkpoint: "tests=125 failures=0", evidence: "-", locations: [] }],
