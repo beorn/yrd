@@ -134,6 +134,16 @@ function percentile(values: readonly number[], p: number): number {
   return sorted[index] ?? 0
 }
 
+function deferred<T = void>(): Readonly<{ promise: Promise<T>; resolve: (value: T) => void; reject: (cause: unknown) => void }> {
+  let resolve!: (value: T) => void
+  let reject!: (cause: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 const passed: JobResult<{ ok: true }> = { status: "passed", output: { ok: true } }
 
 describe("warm candidate pool", () => {
@@ -449,6 +459,95 @@ describe("warm candidate pool", () => {
     const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
     expect(worktrees).not.toContain("bays/yrd-warm-")
     expect(pool.stats()).toEqual({ hits: 0, misses: 0, evictions: 0 })
+  })
+
+  it("waits for an in-flight check to settle before removing its worktree on close", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    const started = deferred()
+    const gate = deferred()
+    let checkPath = ""
+    let worktreeAliveDuringCheck = false
+    const run = pool.withCandidate(baseSha, async (path) => {
+      checkPath = path
+      started.resolve()
+      await gate.promise
+      worktreeAliveDuringCheck = existsSync(path) // the worktree is still present mid-run
+      return passed
+    })
+    await started.promise
+
+    const closing = pool.close()
+    // close must NOT tear the worktree down while the check is still running.
+    expect(existsSync(checkPath)).toBe(true)
+
+    gate.resolve()
+    expect(await run).toEqual(passed)
+    await closing
+
+    expect(worktreeAliveDuringCheck).toBe(true)
+    expect(existsSync(checkPath)).toBe(false) // removed only after the check settled
+  })
+
+  it("rejects a queued waiter loud on close without ever handing it a worktree", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    const started = deferred()
+    const gate = deferred()
+    const holder = pool.withCandidate(baseSha, async () => {
+      started.resolve()
+      await gate.promise
+      return passed
+    })
+    await started.promise
+
+    // Capacity 1 and the holder is in-flight, so this one queues as a waiter.
+    let waiterSawPath = false
+    const waiter = pool.withCandidate(baseSha, async () => {
+      waiterSawPath = true
+      return passed
+    })
+
+    const closing = pool.close()
+    await expect(waiter).rejects.toThrow(/candidate pool is closed/u)
+    expect(waiterSawPath).toBe(false) // never woken into a torn-down worktree
+
+    gate.resolve()
+    expect(await holder).toEqual(passed)
+    await closing
+  })
+
+  it("refuses new acquires loud after close", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    await pool.withCandidate(baseSha, async () => passed)
+    await pool.close()
+
+    await expect(pool.withCandidate(baseSha, async () => passed)).rejects.toThrow(/candidate pool is closed/u)
+  })
+
+  it("is idempotent when close is called again after draining", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    let path = ""
+    await pool.withCandidate(baseSha, async (worktree) => {
+      path = worktree
+      return passed
+    })
+
+    await pool.close()
+    await pool.close() // second close is a clean no-op
+    await pool.close()
+
+    expect(existsSync(path)).toBe(false)
   })
 
   it("measures cold versus warm candidate setup and reports p50/p95", async () => {

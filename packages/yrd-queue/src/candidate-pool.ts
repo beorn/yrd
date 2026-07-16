@@ -97,11 +97,30 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
   const log = options.log
   const capacity = Math.max(1, options.capacity ?? DEFAULT_CAPACITY)
   const entries: PoolEntry[] = []
-  const waiters: Array<(entry: PoolEntry) => void> = []
+  const waiters: Array<Readonly<{ resolve: (entry: PoolEntry) => void; reject: (cause: unknown) => void }>> = []
   let hits = 0
   let misses = 0
   let evictions = 0
+  let closing = false
   let closed = false
+  let closePromise: Promise<void> | undefined
+
+  // In-flight accounting so a draining close waits for active checks to settle
+  // before removing their worktrees. `active` counts entries currently checked
+  // out to a running withCandidate; idleWaiters wake when it reaches zero.
+  let active = 0
+  const idleWaiters: Array<() => void> = []
+  function whenIdle(): Promise<void> {
+    if (active === 0) return Promise.resolve()
+    return new Promise<void>((resolve) => idleWaiters.push(resolve))
+  }
+  function releaseHold(): void {
+    active -= 1
+    if (active === 0) {
+      for (const wake of idleWaiters.splice(0)) wake()
+    }
+  }
+  const closedError = (): Error => new Error("yrd: candidate pool is closed")
 
   // `git worktree add/remove/reset` all lock the shared repository, so the pool
   // serializes its Git mutations onto one chain. Checks (the caller's `run`)
@@ -116,24 +135,30 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     return result
   }
 
+  // Hand out an entry and record the hold in one synchronous step (no await gap
+  // between the hand-off and the `active` bump), so a concurrent close cannot
+  // observe a stale zero and tear down a worktree an about-to-run check owns.
   function takeEntry(): PoolEntry | Promise<PoolEntry> {
     const free = entries.find((entry) => !entry.busy)
     if (free !== undefined) {
       free.busy = true
+      active += 1
       return free
     }
     if (entries.length < capacity) {
       const entry: PoolEntry = { busy: true }
       entries.push(entry)
+      active += 1
       return entry
     }
-    return new Promise<PoolEntry>((resolve) => waiters.push(resolve))
+    return new Promise<PoolEntry>((resolve, reject) => waiters.push({ resolve, reject }))
   }
 
   function returnEntry(entry: PoolEntry): void {
     const waiter = waiters.shift()
     if (waiter !== undefined) {
-      waiter(entry)
+      active += 1 // hand the hold straight to the queued caller
+      waiter.resolve(entry)
       return
     }
     entry.busy = false
@@ -314,11 +339,21 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     })
   }
 
-  async function close(): Promise<void> {
-    if (closed) return
-    // Retry-safe: an entry whose worktree removal raises is retained so a later
-    // close retries it. `closed` is set only once every worktree is gone, and
-    // the first failure is re-raised loud rather than swallowed.
+  // Draining close: (1) refuse new acquires loud, (2) reject queued waiters loud
+  // so none wake into torn-down state, (3) WAIT for in-flight checks to settle so
+  // no active run loses its worktree mid-check, (4) then remove worktrees with the
+  // loud retry-safe semantics. Idempotent; a failed removal stays retryable.
+  function close(): Promise<void> {
+    if (closed) return Promise.resolve()
+    if (closePromise !== undefined) return closePromise
+    closing = true
+    for (const waiter of waiters.splice(0)) waiter.reject(closedError())
+    closePromise = drainAndRemove()
+    return closePromise
+  }
+
+  async function drainAndRemove(): Promise<void> {
+    await whenIdle()
     const survivors: PoolEntry[] = []
     let failure: unknown
     for (const entry of entries) {
@@ -332,7 +367,12 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     }
     entries.length = 0
     entries.push(...survivors)
-    if (failure !== undefined) throw failure
+    if (failure !== undefined) {
+      // Retain the un-removed entries and re-open close for a later retry.
+      closing = false
+      closePromise = undefined
+      throw failure
+    }
     closed = true
   }
 
@@ -341,7 +381,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       ref: string,
       use: (path: string, scratch: string) => Promise<JobResult<Output>>,
     ): Promise<JobResult<Output>> {
-      if (closed) throw new Error("yrd: candidate pool is closed")
+      if (closing || closed) throw closedError()
       const entry = await takeEntry()
       try {
         let outcome: AcquireOutcome
@@ -371,6 +411,7 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
       } finally {
         using _releaseSpan = log?.span?.("release", { repo, ref, outcome: "warm" })
         returnEntry(entry)
+        releaseHold()
       }
     },
     stats(): CandidateAcquisition {
