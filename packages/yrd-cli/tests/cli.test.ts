@@ -3307,10 +3307,11 @@ describe("runYrd", () => {
       }),
     )
     const lines = rendered.split("\n").filter(Boolean)
-    const header = lines.find((line) => line.includes("TIME") && line.includes("TOTAL"))
+    const header = lines.find((line) => line.includes("TIME") && line.includes("RUN·PR"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "STATUS", "RUN", "BY", "PR", "STEP", "AGE", "TOTAL"]) expect(header).toContain(label)
-    for (const removed of ["SUBJECT", "DETAIL", "ACTIVE", "WAIT"]) expect(header).not.toContain(removed)
+    for (const label of ["TIME", "RUN·PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
+    for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
+      expect(header).not.toContain(removed)
     const first = lines.find((line) => line.includes("PR1.1"))
     const second = lines.find((line) => line.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -3595,10 +3596,8 @@ describe("runYrd", () => {
       { width: 200, height: 32, plain: true },
     )
     expect(rendered).toContain("TIME")
-    expect(rendered).toContain("STATUS")
-    expect(rendered).toContain("RUN")
+    expect(rendered).toContain("RUN·PR")
     expect(rendered).toContain("AGE")
-    expect(rendered).toContain("TOTAL")
     expect(rendered).toContain("main#4")
     expect(rendered).toContain("PR5.1")
     expect(rendered).toContain("typecheck-failed")
@@ -3623,11 +3622,12 @@ describe("runYrd", () => {
       const flow = lines.find((line) => line.includes("FLOW "))
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
-      const header = lines.find((line) => line.includes("TOTAL") && line.includes("TIME"))
-      expect(header).toContain("STATUS")
+      const header = lines.find((line) => line.includes("RUN·PR") && line.includes("TIME"))
       expect(header).toContain("STEP")
       expect(header).toContain("AGE")
-      expect(header).toContain("TOTAL")
+      expect(header?.trimEnd()).toMatch(/RUN$/u)
+      expect(header).not.toContain("TOTAL")
+      expect(header).not.toContain("STATUS")
       expect(header).not.toContain("ACTIVE")
       expect(header).not.toContain("WAIT")
       expect(header).not.toContain("SUBJECT")
@@ -3637,8 +3637,9 @@ describe("runYrd", () => {
       else expect(header).toContain("BY")
       const integratedLine = lines.find((line) => line.includes("PR1.1"))
       expect(integratedLine).toBeDefined()
-      // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00.
-      expect(integratedLine).toContain("2026-07-13T15:40")
+      // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
+      // date-qualified but never truncated below seconds.
+      expect(integratedLine).toContain("2026-07-13T15:40:00")
       expect(integratedLine).toContain("integrated")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 ◷10:00$/u)
     }
@@ -5406,7 +5407,7 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    expect(laterQueue.stdout()).toContain("oldest open 1:00")
+    expect(laterQueue.stdout()).toContain("oldest=1:00")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)

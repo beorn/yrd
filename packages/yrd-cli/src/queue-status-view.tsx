@@ -910,7 +910,7 @@ function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean
   const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
   if (includeDate) {
     const day = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
-    return `${day}T${compact ? clock.slice(0, 5) : clock}`
+    return `${day}T${clock}`
   }
   return compact ? clock.slice(0, 5) : clock
 }
@@ -2571,22 +2571,25 @@ const TIMELINE_TOTAL_GLYPH = "◷"
 
 type TimelineCellLayout = Readonly<{
   timeWidth: number
-  statusWidth: number
   runWidth: number
   /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
   byWidth: number
   stepWidth: number
   ageWidth: number
-  totalWidth: number
+  runDurationWidth: number
   compact: boolean
   includeDate: boolean
 }>
 
-function timelineRunLabel(row: QueueTimelineProjectedRow, compact: boolean): string {
-  if (row.run === undefined) return ""
+type TimelineRunCell = Readonly<{ text: string; color?: string }>
+
+// The RUN(id) part of the RUN·PR identity cell: main#N (or #N on the compact
+// tier); run-less rows render `pending` in blue — colored, never blank (15d).
+function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): TimelineRunCell {
+  if (row.run === undefined) return { text: "pending", color: "$fg-info" }
   const match = /^R(\d+)$/u.exec(row.run)
-  if (match === null) return row.run
-  return compact ? `#${match[1]}` : `${row.base}#${match[1]}`
+  if (match === null) return { text: row.run }
+  return { text: compact ? `#${match[1]}` : `${row.base}#${match[1]}` }
 }
 
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
@@ -2596,28 +2599,25 @@ function fitTimelineLabel(label: string, max: number): string {
   return boundary > 0 ? label.slice(0, boundary) : label.slice(0, max)
 }
 
-type TimelineStatusCell = Readonly<{ word: string; color: string; bold?: boolean }>
-
-// The STATUS cell between TIME and RUN: marker glyph + concise colorized
-// status word (15e). Run-less pending rows render `pending` in blue;
-// integrated stays grey-bold with the muted marker — never green.
-function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
-  if (row.status === "running") return { word: "running", color: "$fg-info" }
-  if (row.status === "pending") return { word: "pending", color: "$fg-info" }
-  if (row.status === "integrated") return { word: "integrated", color: "$fg-muted", bold: true }
-  if (row.status === "canceled") return { word: "canceled", color: "$fg-muted" }
-  if (row.status === "environment-refused") return { word: "env-refused", color: "$fg-warning" }
-  return { word: "rejected", color: "$fg-error" }
+// Marker + state colors (15d screenshot re-rule): running pulses blue,
+// success is GREEN semantic, pending is blue, failures keep semantic reds.
+function timelineStatusColor(row: QueueTimelineProjectedRow): string {
+  if (row.status === "running" || row.status === "pending") return "$fg-info"
+  if (row.status === "integrated") return "$fg-success"
+  if (row.status === "canceled") return "$fg-muted"
+  if (row.status === "environment-refused") return "$fg-warning"
+  return "$fg-error"
 }
 
 type TimelineStepCell = Readonly<{ text: string; color?: string }>
 
-// The STEP cell carries the current `ordinal:name` while running and the
-// failure CODE (the cause) on failed terminals; the status word itself
-// lives in the STATUS column.
+// The STEP cell carries the current `ordinal:name` while running, semantic
+// GREEN `integrated` on success (15d), or the failure CODE (the cause) on
+// failed terminals.
 function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
-  if (row.failure !== undefined && row.status !== "integrated") {
+  if (row.status === "integrated") return { text: "integrated", color: "$fg-success" }
+  if (row.failure !== undefined) {
     return {
       text: fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP),
       color:
@@ -2636,9 +2636,7 @@ function timelineTotalCell(row: QueueTimelineProjectedRow): string {
 }
 
 function timelineClockCell(row: QueueTimelineProjectedRow, layout: TimelineCellLayout): string {
-  return row.timestamp === null
-    ? "-"
-    : queueLogClock(row.timestamp, layout.compact && layout.includeDate, layout.includeDate)
+  return row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, layout.includeDate)
 }
 
 function timelineByCell(row: QueueTimelineProjectedRow): string {
@@ -2652,13 +2650,12 @@ function timelineCellLayout(
 ): TimelineCellLayout {
   const compact = columns <= 80
   return {
-    timeWidth: includeDate ? (compact ? 16 : 19) : 8,
-    statusWidth: Math.max(6, ...rows.map((row) => timelineStatusCell(row).word.length + 2)),
-    runWidth: Math.max(3, ...rows.map((row) => timelineRunLabel(row, compact).length)),
+    timeWidth: includeDate ? 19 : 8,
+    runWidth: Math.max(3, ...rows.map((row) => timelineRunCell(row, compact).text.length)),
     byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
     stepWidth: Math.max(4, ...rows.map((row) => timelineStepCell(row).text.length)),
     ageWidth: Math.max(3, ...rows.map((row) => timelineAgeCell(row).length)),
-    totalWidth: Math.max(5, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length + 1))),
+    runDurationWidth: Math.max(3, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length + 1))),
     compact,
     includeDate,
   }
@@ -2691,49 +2688,45 @@ function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: b
     if (live) return <Pulse colors={["$fg-info", "$fg-muted"]}>{row.glyph}</Pulse>
     return <Text color="$fg-info">{row.glyph}</Text>
   }
-  return <Text color={timelineStatusCell(row).color}>{row.glyph}</Text>
+  return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
 }
 
+// 15c header: `TIME | RUN·PR | STEP | BY | AGE | RUN` — the identity pair
+// (run id + PR) shares the RUN·PR label; the bare RUN header belongs to the
+// run-duration column that replaced TOTAL.
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
+      <Box width={1} flexShrink={0}>
+        <Text color="$fg-muted"> </Text>
+      </Box>
       <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           TIME
         </Text>
       </Box>
-      <Box width={layout.statusWidth} flexShrink={0} minWidth={0}>
+      <Box flexGrow={1} flexBasis={0} minWidth={layout.runWidth + 13}>
         <Text color="$fg-muted" wrap="truncate">
-          STATUS
+          RUN·PR
         </Text>
       </Box>
-      <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
+      <Box width={layout.stepWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
         <Text color="$fg-muted" wrap="truncate">
-          RUN
+          STEP
         </Text>
       </Box>
       {layout.byWidth === 0 ? null : (
-        <Box width={layout.byWidth} flexShrink={0} minWidth={0}>
+        <Box width={layout.byWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
           <Text color="$fg-muted" wrap="truncate">
             BY
           </Text>
         </Box>
       )}
-      <Box flexGrow={1} flexBasis={0} minWidth={12}>
-        <Text color="$fg-muted" wrap="truncate">
-          PR
-        </Text>
-      </Box>
-      <Box width={layout.stepWidth} flexShrink={0} minWidth={0}>
-        <Text color="$fg-muted" wrap="truncate">
-          STEP
-        </Text>
-      </Box>
       <Box width={layout.ageWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
         <Text color="$fg-muted">AGE</Text>
       </Box>
-      <Box width={layout.totalWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
-        <Text color="$fg-muted">TOTAL</Text>
+      <Box width={layout.runDurationWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">RUN</Text>
       </Box>
     </Box>
   )
@@ -2751,9 +2744,9 @@ function TimelineProjectedRow({
   live: boolean
 }) {
   const active = row.status === "running"
-  const status = timelineStatusCell(row)
+  const runCell = timelineRunCell(row, layout.compact)
   const step = timelineStepCell(row)
-  const total = timelineTotalCell(row)
+  const runDuration = timelineTotalCell(row)
   return (
     <Box
       height={1}
@@ -2763,31 +2756,21 @@ function TimelineProjectedRow({
       overflow="hidden"
       backgroundColor={cursor ? "$bg-accent" : undefined}
     >
+      <Box width={1} flexShrink={0}>
+        <TimelineMarker row={row} live={live} />
+      </Box>
       <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           {timelineClockCell(row, layout)}
         </Text>
       </Box>
-      <Box width={layout.statusWidth} flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
-        <Box width={1} flexShrink={0}>
-          <TimelineMarker row={row} live={live} />
-        </Box>
-        <Text color={status.color} bold={status.bold ?? false} wrap="truncate">
-          {" "}
-          {status.word}
-        </Text>
-      </Box>
-      <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
-        <Text wrap="truncate">{timelineRunLabel(row, layout.compact)}</Text>
-      </Box>
-      {layout.byWidth === 0 ? null : (
-        <Box width={layout.byWidth} flexShrink={0} minWidth={0}>
-          <Text color="$fg-muted" wrap="truncate">
-            {timelineByCell(row)}
+      <Box flexDirection="row" flexGrow={1} flexBasis={0} minWidth={layout.runWidth + 13} overflow="hidden">
+        <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
+          <Text color={runCell.color} wrap="truncate">
+            {runCell.text}
           </Text>
         </Box>
-      )}
-      <Box flexDirection="row" flexGrow={1} flexBasis={0} minWidth={12} overflow="hidden">
+        <Text flexShrink={0}> </Text>
         <Text bold={active} flexShrink={0}>
           {row.pr}.{row.revision}{" "}
         </Text>
@@ -2795,21 +2778,28 @@ function TimelineProjectedRow({
           {row.subject}
         </Text>
       </Box>
-      <Box width={layout.stepWidth} flexShrink={0} minWidth={0}>
+      <Box width={layout.stepWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
         <Text color={step.color} wrap="truncate">
           {step.text}
         </Text>
       </Box>
+      {layout.byWidth === 0 ? null : (
+        <Box width={layout.byWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+          <Text color="$fg-muted" wrap="truncate">
+            {timelineByCell(row)}
+          </Text>
+        </Box>
+      )}
       <Box width={layout.ageWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
         <Text color="$fg-muted">{timelineAgeCell(row)}</Text>
       </Box>
-      <Box width={layout.totalWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
-        {total === "" ? (
+      <Box width={layout.runDurationWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        {runDuration === "" ? (
           <Text> </Text>
         ) : (
           <Text>
             <Text color="$fg-muted">{TIMELINE_TOTAL_GLYPH}</Text>
-            {total}
+            {runDuration}
           </Text>
         )}
       </Box>
@@ -2857,50 +2847,42 @@ function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: nu
   return { ageMs: Math.max(0, now - lastTickAt), uptimeMs: Math.max(0, now - startedAt) }
 }
 
-// Runner liveness is a header fact fed by the resident runner's heartbeat
-// (21172). A missing or stale heartbeat renders loudly — nothing drains this
-// queue — never blank.
-function TimelineRunnerFact({ projection }: { projection: QueueTimelineProjection }) {
+// The STATUS box owns every queue exception (15d): pause, and the runner's
+// loud absent/stale heartbeat states (moved here from the metadata header —
+// the runner fact renders exactly once). Healthy + unpaused renders no box.
+function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection }) {
+  const pause = projection.pause
   const runner = projection.runner
   const timing = runnerTiming(projection)
-  if (runner === null || timing === null) {
-    return (
-      <Text color="$fg-error" bold wrap="truncate">
-        RUNNER none — nothing drains this queue
-      </Text>
-    )
-  }
-  if (timing.ageMs > RUNNER_STALE_MS) {
-    return (
-      <Text color="$fg-error" bold wrap="truncate">
-        RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago (yrd-cli:{runner.pid})
-      </Text>
-    )
-  }
+  const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
+  if (pause === undefined && runner !== null && !runnerStale) return null
+  const allowed = pause?.allowedPRs.length === 0 ? "none" : pause?.allowedPRs.join(",")
   return (
-    <Text wrap="truncate">
-      <Text color="$fg-muted">RUNNER </Text>
-      yrd-cli:{runner.pid}
-      <Text color="$fg-muted"> up </Text>
-      {mediaDuration(timing.uptimeMs)}
-      <Text color="$fg-muted">
-        {" · tick "}
-        {mediaDuration(timing.ageMs)}
-        {" ago"}
-      </Text>
-    </Text>
-  )
-}
-
-function TimelineStatusBox({ pause }: { pause: NonNullable<QueueTimelineProjection["pause"]> }) {
-  const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
-  return (
-    <Box borderStyle="round" borderColor="$fg-warning" width="100%" paddingX={1} flexShrink={0} minWidth={0}>
-      <Text color="$fg-warning" wrap="truncate">
-        <Text bold>STATUS</Text>
-        {"  HOLD THE LINE — "}
-        {pause.reason} · allowed {allowed}
-      </Text>
+    <Box
+      borderStyle="round"
+      borderColor="$fg-warning"
+      width="100%"
+      paddingX={1}
+      flexShrink={0}
+      minWidth={0}
+      flexDirection="column"
+    >
+      {runner === null ? (
+        <Text color="$fg-error" bold wrap="truncate">
+          RUNNER none — nothing drains this queue
+        </Text>
+      ) : runnerStale ? (
+        <Text color="$fg-error" bold wrap="truncate">
+          RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago (yrd-cli:{runner.pid})
+        </Text>
+      ) : null}
+      {pause === undefined ? null : (
+        <Text color="$fg-warning" wrap="truncate">
+          <Text bold>STATUS</Text>
+          {"  HOLD THE LINE — "}
+          {pause.reason} · allowed {allowed}
+        </Text>
+      )}
     </Box>
   )
 }
@@ -2946,6 +2928,7 @@ function TimelineStatistics({ projection }: { projection: QueueTimelineProjectio
           ["pending", count("pending")],
           ["running", count("running")],
           ["completed", count("completed")],
+          ["oldest", projection.oldestOpenMs === null ? "-" : mediaDuration(projection.oldestOpenMs)],
         ]}
       />
       <TimelineStatLine
@@ -2992,23 +2975,14 @@ function ProjectedQueueTimeline({
     <Box width="100%" minWidth={0}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0}>
         <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
-        <Box height={1} flexDirection="row" justifyContent="space-between" gap={1} minWidth={0}>
-          <Box flexDirection="row" gap={2} minWidth={0} overflow="hidden">
-            <TimelineRunnerFact projection={projection} />
-            {projection.oldestOpenMs === null ? null : (
-              <Text wrap="truncate">
-                <Text color="$fg-muted">oldest open </Text>
-                {mediaDuration(projection.oldestOpenMs)}
-              </Text>
-            )}
-          </Box>
+        <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
           <Text color="$fg-muted" flexShrink={0}>
             {/* The one temporal-trust cue is always `updated HH:MM:SS` — the
                 snapshot clock is now, so day qualification never applies. */}
             updated {queueLogClock(projection.now, false, false)}
           </Text>
         </Box>
-        {projection.pause === undefined ? null : <TimelineStatusBox pause={projection.pause} />}
+        <TimelineStatusBox projection={projection} />
         <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0}>
           <Text color="$fg-muted" wrap="truncate">
             FILTER since={mediaDuration(projection.filters.windowMs)} status={statusFilter} terms=
