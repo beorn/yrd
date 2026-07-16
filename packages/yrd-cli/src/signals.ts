@@ -157,10 +157,37 @@ export function createSignalObserver(
               if (state.sent[signal.id]?.includes(recipient) === true) continue
               await options.adapter.send({ recipient, event: signal })
               state = addSent(state, signal.id, recipient)
+              // Record the request ball we just opened so a later terminal signal can close this
+              // exact id + recipient, even if the actor or routes drift before then.
+              state = recordOpened(state, signal, recipient)
               await writeCursor(cursorPath, state)
             }
             if (isTerminalSignal(signal) && options.adapter.close !== undefined) {
+              const settledPRs = new Set(terminalPRs(signal).map((pr) => pr.pr))
+              const ledgerSettled = new Set<string>()
+              // Authoritative: close the EXACT balls the opened-ledger recorded for these PRs — every
+              // revision, both kinds — using the recipient captured at open time. Drift-immune.
+              for (const ball of openedBallsFor(state, settledPRs)) {
+                const key = `close:${ball.recipient}:${ball.requestId}`
+                if (state.sent[signal.id]?.includes(key) !== true) {
+                  await options.adapter.close({
+                    recipient: ball.recipient,
+                    request: ball.requestId,
+                    pr: ball.pr,
+                    revision: ball.revision,
+                    kind: ball.kind,
+                  })
+                  state = addSent(state, signal.id, key)
+                }
+                state = forgetOpened(state, ball.requestId, ball.recipient)
+                ledgerSettled.add(coverageKey(ball.pr, ball.revision, ball.kind))
+                await writeCursor(cursorPath, state)
+              }
+              // Secondary legacy drain: best-effort close of PRE-ledger balls (the backlog opened
+              // before this ledger existed) via ids synthesized from current routes. Skips anything
+              // the ledger already settled; a synthesized id that was never opened is a no-op close.
               for (const closure of closuresFor(signal, options.routes)) {
+                if (ledgerSettled.has(coverageKey(closure.pr, closure.revision, closure.kind))) continue
                 const key = `close:${closure.recipient}:${closure.request}`
                 if (state.sent[signal.id]?.includes(key) === true) continue
                 await options.adapter.close(closure)
@@ -263,11 +290,27 @@ export function createTribeSignalAdapter(process: Pick<Process, "run">): SignalD
   })
 }
 
+const OpenedBallSchema = z
+  .object({
+    pr: TextSchema,
+    revision: RevisionSchema,
+    kind: z.enum(["pr/rejected", "pr/needs-review"]),
+    recipient: TextSchema,
+    requestId: TextSchema,
+  })
+  .strict()
+type OpenedBall = z.infer<typeof OpenedBallSchema>
+
 const CursorStateSchema = z
   .object({
     version: z.literal(1),
     cursor: z.number().int().nonnegative(),
     sent: z.record(z.string().min(1), z.array(TextSchema)),
+    // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
+    // was rejected or put up for review. A terminal signal closes precisely these — immune to the
+    // actor/route drift that makes an id synthesized from current config miss the real ball. Optional
+    // and defaulted so cursor files written before the ledger existed still load.
+    opened: z.array(OpenedBallSchema).default([]),
   })
   .strict()
 type CursorState = z.infer<typeof CursorStateSchema>
@@ -439,7 +482,7 @@ async function readCursor(path: string): Promise<CursorState> {
     return CursorStateSchema.parse(JSON.parse(await readFile(path, "utf8")))
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-      return { version: 1, cursor: 0, sent: {} }
+      return { version: 1, cursor: 0, sent: {}, opened: [] }
     }
     throw new Error(`yrd: notification cursor is invalid (${path}): ${errorDetail(error)}`, { cause: error })
   }
@@ -465,7 +508,31 @@ function addSent(state: CursorState, event: string, recipient: string): CursorSt
 function advance(state: CursorState, cursor: number, completed: ReadonlySet<string>): CursorState {
   const sent = { ...state.sent }
   for (const event of completed) delete sent[event]
-  return { version: 1, cursor, sent }
+  // The opened-ledger is durable across batches — a ball opened in one batch is closed by a terminal
+  // signal in a later one — so it survives the per-batch `sent` cursor GC.
+  return { version: 1, cursor, sent, opened: state.opened }
+}
+
+function coverageKey(pr: string, revision: number, kind: "pr/rejected" | "pr/needs-review"): string {
+  return `${pr} ${revision} ${kind}`
+}
+
+function recordOpened(state: CursorState, signal: RoutableSignal, recipient: string): CursorState {
+  if (signal.kind !== "pr/rejected" && signal.kind !== "pr/needs-review") return state
+  const requestId = requestIdForPR(signal.kind, signal.pr, signal.revision, recipient)
+  if (state.opened.some((ball) => ball.requestId === requestId && ball.recipient === recipient)) return state
+  const ball: OpenedBall = { pr: signal.pr, revision: signal.revision, kind: signal.kind, recipient, requestId }
+  return { ...state, opened: [...state.opened, ball] }
+}
+
+function openedBallsFor(state: CursorState, prs: ReadonlySet<string>): readonly OpenedBall[] {
+  return state.opened.filter((ball) => prs.has(ball.pr))
+}
+
+function forgetOpened(state: CursorState, requestId: string, recipient: string): CursorState {
+  const opened = state.opened.filter((ball) => !(ball.requestId === requestId && ball.recipient === recipient))
+  if (opened.length === state.opened.length) return state
+  return { ...state, opened }
 }
 
 function deliveryText(delivery: SignalDelivery): string {
