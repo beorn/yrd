@@ -3553,7 +3553,7 @@ describe("runYrd", () => {
       },
     ])
     expect(
-      JSON.parse(JSON.stringify(projection.rows)).filter((row: { run?: string }) => row.run === "R1"),
+      (JSON.parse(JSON.stringify(projection.rows)) as typeof projection.rows).filter((row) => row.run === "R1"),
     ).toMatchObject([
       { pr: "PR1", ageMs: 15 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
       { pr: "PR2", ageMs: 25 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
@@ -3783,7 +3783,6 @@ describe("runYrd", () => {
     const handle = await run(
       createElement(QueueWatchFrame, {
         snapshot: { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") },
-        paused: false,
       }),
       { writable: { write: () => {} }, cols: 120, rows: 30 },
     )

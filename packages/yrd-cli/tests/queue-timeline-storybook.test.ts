@@ -447,7 +447,6 @@ describe("queue timeline storybook", () => {
     const right = createRenderer({ cols: 160, rows: 50 })(
       createElement(QueueWatchFrame, {
         snapshot: queueTimelineStories["production-overview"].snapshot,
-        paused: false,
       }),
     )
     try {

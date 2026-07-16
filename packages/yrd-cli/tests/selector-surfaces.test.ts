@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { runYrd, type YrdCliIO } from "@yrd/cli"
+import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import {
