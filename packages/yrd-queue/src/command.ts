@@ -938,17 +938,46 @@ async function recutDirectPR(
       ],
       true,
     )
+    // Gitlink paths whose conflict was fast-forward resolved to the carrier's
+    // descendant pin. Their authored diff legitimately changes from-side
+    // (the base advanced the same submodule), so the strict patch-id
+    // equivalence is certified per-pin for these paths instead.
+    const ffCarrierGitlinks = new Set<string>()
     while (rebased.code !== 0) {
       const conflicts = await unmergedPaths(git, path)
-      if (conflicts.length === 0 || conflicts.some((conflict) => !absorbedSet.has(conflict))) break
+      if (conflicts.length === 0) break
       for (const conflict of conflicts) {
-        const currentPin = await readGitlink(git, repo, target.sha, conflict)
-        if (currentPin === undefined) break
-        const staged = await git.run(path, ["update-index", "--cacheinfo", `160000,${currentPin},${conflict}`], true)
+        if (absorbedSet.has(conflict)) {
+          const currentPin = await readGitlink(git, repo, target.sha, conflict)
+          if (currentPin === undefined) break
+          const staged = await git.run(path, ["update-index", "--cacheinfo", `160000,${currentPin},${conflict}`], true)
+          if (staged.code !== 0) {
+            rebased = staged
+            break
+          }
+          continue
+        }
+        const resolution = await resolveGitlinkFastForward(git, repo, path, conflict)
+        if (resolution.kind === "unresolved") break
+        if (resolution.kind === "refuse") {
+          await git.run(path, ["rebase", "--abort"], true)
+          throw createFailure({
+            kind: "refusal",
+            code: "recut-gitlink-conflict",
+            message: `yrd: PR '${input.id}' could not recut onto '${target.sha}': ${resolution.message}`,
+          })
+        }
+        const staged = await git.run(
+          path,
+          ["update-index", "--cacheinfo", `160000,${resolution.sha},${conflict}`],
+          true,
+        )
         if (staged.code !== 0) {
           rebased = staged
           break
         }
+        if (resolution.side === "carrier") ffCarrierGitlinks.add(conflict)
+        else ffCarrierGitlinks.delete(conflict)
       }
       if (rebased.code !== 0 && (await unmergedPaths(git, path)).length > 0) break
       rebased = await git.run(path, ["-c", "core.editor=true", "rebase", "--continue"], true)
@@ -992,17 +1021,53 @@ async function recutDirectPR(
         message: `yrd: PR '${input.id}' recut has no stable patch identity`,
       })
     }
-    if (
-      materializedPatchId !== effectiveSourcePatchId &&
-      !(overlap.length > 0 && (await usesUnionMerge(git, path, overlap)))
-    ) {
-      throw createFailure({
-        kind: "refusal",
-        code: "payload-certificate",
-        message: `yrd: PR '${input.id}' recut changed stable patch identity`,
-      })
+    // Fast-forward-resolved carrier gitlinks legitimately change their diff
+    // from-side (the base advanced the same submodule to an ancestor of the
+    // carrier's pin), so exclude them from the strict patch-id equivalence and
+    // certify each one by its exact authored end pin below.
+    const certifyPayload =
+      ffCarrierGitlinks.size === 0 ? effectivePayload : effectivePayload.filter((step) => !ffCarrierGitlinks.has(step))
+    const certifyOverlap =
+      ffCarrierGitlinks.size === 0 ? overlap : overlap.filter((step) => !ffCarrierGitlinks.has(step))
+    const certifySourcePatchId =
+      ffCarrierGitlinks.size === 0
+        ? effectiveSourcePatchId
+        : await git.stablePatchId(repo, sourceBase, input.headSha, certifyPayload)
+    const certifyMaterializedPatchId =
+      ffCarrierGitlinks.size === 0
+        ? materializedPatchId
+        : await git.stablePatchId(path, target.sha, headSha, certifyPayload)
+    if (certifyPayload.length > 0) {
+      if (certifySourcePatchId === undefined || certifyMaterializedPatchId === undefined) {
+        throw createFailure({
+          kind: "refusal",
+          code: "payload-certificate",
+          message: `yrd: PR '${input.id}' recut has no stable patch identity`,
+        })
+      }
+      if (
+        certifyMaterializedPatchId !== certifySourcePatchId &&
+        !(certifyOverlap.length > 0 && (await usesUnionMerge(git, path, certifyOverlap)))
+      ) {
+        throw createFailure({
+          kind: "refusal",
+          code: "payload-certificate",
+          message: `yrd: PR '${input.id}' recut changed stable patch identity`,
+        })
+      }
     }
-    if (absorbedGitlinks.length === 0) {
+    for (const gitlink of ffCarrierGitlinks) {
+      const authoredPin = await readGitlink(git, repo, input.headSha, gitlink)
+      const recutPin = await readGitlink(git, path, headSha, gitlink)
+      if (authoredPin === undefined || recutPin === undefined || recutPin !== authoredPin) {
+        throw createFailure({
+          kind: "refusal",
+          code: "payload-certificate",
+          message: `yrd: PR '${input.id}' recut did not preserve authored submodule pin for '${gitlink}'`,
+        })
+      }
+    }
+    if (absorbedGitlinks.length === 0 && ffCarrierGitlinks.size === 0) {
       const rangeDiff = await git.rangeDiff(path, sourceBase, input.headSha, target.sha, headSha)
       if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
         throw createFailure({
@@ -1664,6 +1729,90 @@ async function readGitlink(git: Git, repo: string, ref: string, path: string): P
   const end = result.stdout.indexOf("\0", header[0].length)
   const recordPath = result.stdout.slice(header[0].length, end === -1 ? undefined : end)
   return recordPath === path ? header[1] : undefined
+}
+
+type GitlinkFastForward =
+  | Readonly<{ kind: "resolved"; side: "carrier" | "base"; sha: string }>
+  | Readonly<{ kind: "refuse"; message: string }>
+  | Readonly<{ kind: "unresolved" }>
+
+/**
+ * Resolve a single unmerged path in `worktree` when it is a three-stage gitlink
+ * conflict and one side is an ancestor of the other. Ancestry is proved in the
+ * submodule's local store (`repo/<path>`) — exactly what a human merge does when
+ * fast-forwarding a submodule. Returns:
+ *  - `resolved` (side `carrier` = stage 3 descendant, `base` = stage 2 descendant),
+ *  - `refuse` with a loud reason for true divergence, a missing object, or an
+ *    uninitialized submodule (never guess a pin), or
+ *  - `unresolved` when the conflict is not a plain gitlink modify/modify (a
+ *    non-gitlink content conflict must keep failing the recut loudly).
+ */
+async function resolveGitlinkFastForward(
+  git: Git,
+  repo: string,
+  worktree: string,
+  path: string,
+): Promise<GitlinkFastForward> {
+  const stages = await readGitlinkConflictStages(git, worktree, path)
+  if (stages === undefined) return { kind: "unresolved" }
+  const { ours, theirs } = stages
+  if (ours === theirs) return { kind: "resolved", side: "base", sha: ours }
+  const submodule = join(repo, path)
+  try {
+    await realpath(submodule)
+  } catch {
+    return {
+      kind: "refuse",
+      message: `submodule '${path}' is not initialized locally; run git submodule update --init and retry`,
+    }
+  }
+  for (const oid of [ours, theirs]) {
+    const present = await git.run(submodule, ["cat-file", "-e", `${oid}^{commit}`], true)
+    if (present.code !== 0) {
+      return {
+        kind: "refuse",
+        message: `submodule '${path}' commit '${oid}' is not present in its local store; fetch it and retry`,
+      }
+    }
+  }
+  if (await isAncestor(git, submodule, ours, theirs)) return { kind: "resolved", side: "carrier", sha: theirs }
+  if (await isAncestor(git, submodule, theirs, ours)) return { kind: "resolved", side: "base", sha: ours }
+  return {
+    kind: "refuse",
+    message: `submodule '${path}' pins '${ours}' and '${theirs}' have diverged; neither is an ancestor of the other — resolve it in the submodule and resubmit`,
+  }
+}
+
+/**
+ * Read the ours (stage 2) and theirs (stage 3) pins of an unmerged path, but
+ * only when every present stage is a gitlink (mode 160000) for exactly `path`.
+ * Any non-gitlink stage, missing side, or malformed record returns undefined so
+ * the caller leaves the conflict unresolved.
+ */
+async function readGitlinkConflictStages(
+  git: Git,
+  repo: string,
+  path: string,
+): Promise<Readonly<{ base?: string; ours: string; theirs: string }> | undefined> {
+  const result = await git.run(repo, ["ls-files", "-u", "-z", "--", path], true)
+  if (result.code !== 0 || result.stdout === "") return undefined
+  const stages = new Map<number, string>()
+  for (const record of result.stdout.split("\0")) {
+    if (record === "") continue
+    const tab = record.indexOf("\t")
+    if (tab === -1 || record.slice(tab + 1) !== path) return undefined
+    const match = /^([0-7]{6}) ([0-9a-f]{40,64}) ([123])$/u.exec(record.slice(0, tab))
+    const mode = match?.[1]
+    const oid = match?.[2]
+    const stage = match?.[3]
+    if (mode === undefined || oid === undefined || stage === undefined || mode !== "160000") return undefined
+    stages.set(Number(stage), oid)
+  }
+  const ours = stages.get(2)
+  const theirs = stages.get(3)
+  if (ours === undefined || theirs === undefined) return undefined
+  const base = stages.get(1)
+  return base === undefined ? { ours, theirs } : { base, ours, theirs }
 }
 
 async function changedPaths(git: Git, repo: string, from: string, to: string): Promise<string[]> {

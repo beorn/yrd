@@ -544,7 +544,9 @@ describe("Queue command adapters", () => {
       headSha: authoredHead,
       baseSha: currentBase,
     }
-    await expect(recutter.recut(input)).rejects.toThrow(/could not recut.+at \[[^\]]*dep/u)
+    await expect(recutter.recut(input)).rejects.toThrow(
+      /could not recut onto .+ submodule 'dep' pins .+ have diverged; neither is an ancestor of the other/u,
+    )
 
     const result = await recutter.recut({
       ...input,
