@@ -2563,3 +2563,85 @@ describe("Queue", () => {
     })
   })
 })
+
+describe("Queue — a peer-canceled Job mid-execution never kills the composing runner (merge-queue R43)", () => {
+  it("records the raced settlement as a visible typed skip and keeps composing", async () => {
+    const journal = createMemoryJournal()
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const executing = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<JobResult<{ checked: boolean }>>()
+    let checks = 0
+    await using app = await createQueueApp(
+      {
+        check: () => {
+          checks += 1
+          if (checks > 1) return { status: "passed", output: { checked: true } }
+          executing.resolve()
+          return release.promise
+        },
+      },
+      journal,
+      undefined,
+      undefined,
+      log,
+    )
+    const pr = await submitBranch(app, "issue/peer-canceled")
+    const running = app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    await executing.promise
+
+    // A peer runtime over the same journal (a separate process in production)
+    // cancels the PR while this runtime's step executes. This runtime's
+    // projection stays stale until its settlement commit re-folds the journal,
+    // where the finish transition meets the already-canceled Job.
+    await using peer = await createQueueApp({}, journal, undefined, ids(1000))
+    await peer.queue.cancel({ prs: [pr.id], by: "@peer", reason: "superseded" })
+
+    release.resolve({ status: "passed", output: { checked: true } })
+    const runs = await running
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ steps: [{ job: { status: "canceled" } }] })
+
+    // The skip is LOUD and typed — never a silent swallow.
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:queue",
+        level: "warn",
+        props: expect.objectContaining({
+          action: "canceled-skip",
+          run: runs[0]!.id,
+          status: "canceled",
+        }),
+      }),
+    )
+
+    // The runner keeps processing subsequent work after the raced skip.
+    const next = await submitBranch(app, "issue/after-cancel")
+    await expect(app.queue.run({ prs: [next.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+      { status: "passed" },
+    ])
+  })
+
+  it("still propagates settlement failures of a live Job loudly — the skip is terminal-state-verified, not a blanket catch", async () => {
+    // Refuse exactly the finish-settlement append while the Job stays RUNNING:
+    // a genuine infrastructure failure must escape the R43 skip and reject the
+    // composing caller — proving the catch is narrow.
+    const inner = createMemoryJournal()
+    const journal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = value as { events?: readonly { name?: string; data?: { type?: string } }[] }
+        if (frame.events?.some((event) => event.name === "job/transitioned" && event.data?.type === "finish")) {
+          throw new Error("yrd: journal write refused (injected)")
+        }
+        return inner.append(value, cursor)
+      },
+    }
+    await using app = await createQueueApp({}, journal)
+    const pr = await submitBranch(app, "issue/journal-refused")
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+      "journal write refused (injected)",
+    )
+  })
+})
