@@ -2528,21 +2528,29 @@ describe("Queue command adapters", () => {
           requests.push(request)
           if (request.argv[0] === "true") configuredCheckRan = true
           if (request.argv.includes("--filter=tree:0")) {
-            return Promise.resolve({
+            const refusal = {
               exitCode: failure.exitCode,
               signal: failure.signal,
               stdout: "",
               stderr: failure.stderr,
               durationMs: 1,
-              timedOut: failure.timedOut,
-              ...("stalled" in failure
-                ? {
-                    stalled: failure.stalled,
-                    verdict: failure.verdict,
-                    sweepFailure: failure.sweepFailure,
-                  }
-                : {}),
-            })
+            }
+            if ("stalled" in failure) {
+              return Promise.resolve({
+                ...refusal,
+                timedOut: false,
+                stalled: true,
+                verdict: "STALLED",
+                sweepFailure: failure.sweepFailure,
+                lastProgressAtMs: 0,
+                lastProgressBytes: 0,
+              } satisfies ProcessResult)
+            }
+            return Promise.resolve(
+              failure.timedOut
+                ? ({ ...refusal, timedOut: true } satisfies ProcessResult)
+                : ({ ...refusal, timedOut: false } satisfies ProcessResult),
+            )
           }
           return process.run(request)
         },
@@ -2650,14 +2658,18 @@ describe("Queue command adapters", () => {
         run(request) {
           if (request.argv[0] === "true") configuredCheckRan = true
           if (failure.matches(request.argv)) {
-            return Promise.resolve({
+            const refusal = {
               exitCode: failure.exitCode,
               signal: failure.signal,
               stdout: "",
               stderr: failure.stderr,
               durationMs: 1,
-              timedOut: failure.timedOut,
-            })
+            }
+            return Promise.resolve(
+              failure.timedOut
+                ? ({ ...refusal, timedOut: true } satisfies ProcessResult)
+                : ({ ...refusal, timedOut: false } satisfies ProcessResult),
+            )
           }
           return process.run(request)
         },

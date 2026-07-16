@@ -41,7 +41,7 @@ describe("queue timeline visible-row selection", () => {
     const hiddenRunning = projectedRow("running-3", "running", "running")
     const projection = {
       rows: [pendingOne, pendingTwo, hiddenRunning],
-      display: { shown: 2, hidden: 1 },
+      display: { limit: 2, shown: 2, hidden: 1 },
     }
 
     const visibleRows = queueTimelineVisibleRows(projection)

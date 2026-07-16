@@ -3557,7 +3557,7 @@ describe("runYrd", () => {
       },
     ])
     expect(
-      JSON.parse(JSON.stringify(projection.rows)).filter((row: { run?: string }) => row.run === "R1"),
+      (JSON.parse(JSON.stringify(projection.rows)) as readonly { run?: string }[]).filter((row) => row.run === "R1"),
     ).toMatchObject([
       { pr: "PR1", ageMs: 15 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
       { pr: "PR2", ageMs: 25 * minute, totalMs: 10 * minute, activeMs: 0, waitMs: 10 * minute },
