@@ -110,8 +110,8 @@ function terminalFixturePr(
         baseSha: BASE_SHA,
         pushedAt: submittedAt,
         submittedAt,
-        terminal: { status, at: terminalAt, run },
         ...(options.actor === undefined ? {} : { actor: options.actor }),
+        terminal: { status, at: terminalAt, run },
       },
     ],
     ...(status === "rejected" ? { rejectedAt: terminalAt } : {}),
@@ -311,6 +311,7 @@ type ProjectionOptions = Readonly<{
   rowLimit?: number
   retainedSinceMs?: number
   attempts?: readonly QueueAttempt[]
+  runner?: Readonly<{ pid: number; startedAt: string; lastTickAt: string }> | null
 }>
 
 function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions = {}): QueueTimelineProjection {
@@ -327,6 +328,10 @@ function fixtureProjection(result: QueueStatusResult, options: ProjectionOptions
     retainedSinceMs: options.retainedSinceMs ?? Date.parse("2026-07-13T05:00:00.000Z"),
     siblingBases: ["release/next"],
     base: "main",
+    runner:
+      options.runner === undefined
+        ? { pid: 84042, startedAt: "2026-07-13T11:00:00.000Z", lastTickAt: "2026-07-13T11:59:58.000Z" }
+        : options.runner,
   })
 }
 
@@ -345,8 +350,8 @@ function fixtureSnapshot(
 
 const pendingOneHead = "1".repeat(40)
 const pendingOne = fixturePr("PR1", "submitted", "2026-07-13T11:10:00.000Z", "Prepare release notes", {
-  issue: "@yrd/core/21120-pr-state-notifications",
   actor: "@cto",
+  issue: "@yrd/core/21120-pr-state-notifications",
   note: "Keep the operator-facing notification contract visible during review.",
   reviews: [
     {
@@ -387,7 +392,7 @@ const integratedPr = terminalFixturePr(
   "2026-07-13T10:55:00.000Z",
   "R4",
   "Land the durable patch",
-  { actor: "@ci" },
+  { actor: "@agent/7" },
 )
 const rejectedPr = terminalFixturePr(
   "PR5",
@@ -396,7 +401,7 @@ const rejectedPr = terminalFixturePr(
   "2026-07-13T11:12:00.000Z",
   "R5",
   "Reject broken payload",
-  { detail: "typecheck-failed: packages/yrd-cli/src/run.ts:1428" },
+  { actor: "@agent/2", detail: "typecheck-failed: packages/yrd-cli/src/run.ts:1428" },
 )
 const environmentPr = fixturePr("PR6", "submitted", "2026-07-13T10:50:00.000Z", "Retry stale environment")
 const canceledPr = terminalFixturePr(
@@ -417,7 +422,7 @@ const batchLeadPr = fixturePr(
   "Align host navigation keybindings without disturbing internal pane controls",
   {
     headSha: batchLeadHead,
-    actor: "@ci",
+    actor: "@agent/3",
     issue: "@hab/super/21135-herdr-keybindings",
     reviews: [
       {
@@ -456,6 +461,7 @@ const batchPartnerPr = fixturePr(
   "Carry the production split-pane contract into the queue detail surface",
   {
     headSha: batchPartnerHead,
+    actor: "@agent/5",
     issue: "@si/ui/21119-split-pane",
     checkRequests: [
       {
@@ -884,6 +890,7 @@ function advanceSnapshotClock(
 
 export const QUEUE_TIMELINE_STORY_NAMES = [
   "production-overview",
+  "contract-overview",
   "idle",
   "multiple-queues",
   "pending-only",
@@ -928,6 +935,18 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     selectedStatus: "running",
     viewport: { columns: 200, rows: 50 },
   },
+  // The user-settled 21106 mockup shape: one pending PR, one batched running
+  // Run rendered one row per member, one rejected and one integrated Run.
+  "contract-overview": {
+    snapshot: fixtureSnapshot(
+      fixtureResult(
+        [pendingOne, batchLeadPr, batchPartnerPr, integratedPr, rejectedPr],
+        [batchRun, integratedRun, rejectedRun],
+      ),
+    ),
+    widths: [80, 120, 160, 200],
+    viewport: { columns: 200, rows: 50 },
+  },
   idle: { snapshot: fixtureSnapshot(fixtureResult([], [])), widths: [100] },
   "multiple-queues": {
     snapshot: multipleQueuesSnapshot,
@@ -940,7 +959,7 @@ export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, Queue
     selectedStatus: "running",
   },
   "mixed-completed": { snapshot: fixtureSnapshot(mixedResult), widths: [120] },
-  paused: { snapshot: fixtureSnapshot(pausedResult), widths: [100] },
+  paused: { snapshot: fixtureSnapshot(pausedResult, { runner: null }), widths: [100] },
   "honest-cap": { snapshot: fixtureSnapshot(mixedResult, { rowLimit: 2 }), widths: [100] },
   "non-default-filters": {
     snapshot: fixtureSnapshot(mixedResult, { statuses: ["rejected"], terms: ["typecheck"] }),

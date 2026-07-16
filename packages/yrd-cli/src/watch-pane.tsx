@@ -15,6 +15,7 @@ import {
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
+  queueTimelineDefaultCursorId,
   queueTimelineRows,
   type QueueStatusResult,
   type QueueTimelineProjection,
@@ -200,13 +201,21 @@ export function QueueWatchFrame({
           }))
         : snapshot.projection.rows.map((row) => ({
             key: row.id,
-            pr: row.prs[0],
+            pr: row.pr,
             ...(row.run === undefined ? {} : { run: row.run }),
           })),
     [snapshot],
   )
-  const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => rows[0]?.key)
-  const [selectedPr, setSelectedPr] = useState<string | undefined>(() => pr ?? rows[0]?.pr)
+  // Default cursor: first RUNNING row, else the newest FINISHED row. A manual
+  // cursor move is sticky — default-follow stops until the pinned row leaves
+  // the window or the view is reopened.
+  const defaultCursorKey =
+    snapshot.projection === undefined ? rows[0]?.key : queueTimelineDefaultCursorId(snapshot.projection.rows)
+  const [manualCursor, setManualCursor] = useState(false)
+  const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
+  const [selectedPr, setSelectedPr] = useState<string | undefined>(
+    () => pr ?? rows.find((row) => row.key === defaultCursorKey)?.pr ?? rows[0]?.pr,
+  )
   const [detailOpen, setDetailOpen] = useState(() => snapshot.projection === undefined || tier !== "full")
   const [detailMode, setDetailMode] = useState<QueueDetailMode>("detail")
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
@@ -224,11 +233,14 @@ export function QueueWatchFrame({
       setSelectedPr(pr)
       return
     }
-    const selected = rows.find((row) => row.key === cursorRowKey) ?? rows[0]
+    const pinned = manualCursor ? rows.find((row) => row.key === cursorRowKey) : undefined
+    if (pinned === undefined && manualCursor) setManualCursor(false)
+    const selected =
+      pinned ?? rows.find((row) => row.key === (manualCursor ? cursorRowKey : defaultCursorKey)) ?? rows[0]
     if (selected === undefined) return
     if (selected.key !== cursorRowKey) setCursorRowKey(selected.key)
     if (selected.pr !== selectedPr) setSelectedPr(selected.pr)
-  }, [cursorRowKey, pr, rows, selectedPr])
+  }, [cursorRowKey, defaultCursorKey, manualCursor, pr, rows, selectedPr])
 
   useEffect(() => {
     const previous = new Set(previousRowKeys.current)
@@ -271,6 +283,7 @@ export function QueueWatchFrame({
   const selectRow = (index: number): void => {
     const row = rows[index]
     if (row === undefined) return
+    setManualCursor(true)
     setCursorRowKey(row.key)
     setSelectedPr(row.pr)
     setNewRows(0)
@@ -314,7 +327,11 @@ export function QueueWatchFrame({
       )
     ) : (
       <Box flexDirection="column" flexGrow={1} minHeight={0}>
-        <QueueShowView data={detailData} compact={tier === "full"} />
+        <QueueShowView
+          data={detailData}
+          compact={tier === "full"}
+          {...(selectedRow?.pr === undefined ? {} : { highlightPr: selectedRow.pr })}
+        />
         <QueueArtifactOutputView key={selectedRow?.run} outputs={detailOutputs} />
       </Box>
     )
