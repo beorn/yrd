@@ -3,10 +3,11 @@
  * @level l2
  * @consumer @yrd/bay Git workspace adapter
  */
+import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, relative } from "node:path"
+import { join, relative, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs } from "@yrd/job"
@@ -92,6 +93,24 @@ describe("createGitWorkspace", () => {
 
     expect(app.bays.get("B1")).toMatchObject({ status: "active" })
     expect(await git(repo, ["status", "--porcelain"])).toMatchObject({ stdout: "" })
+  })
+
+  it("bumps the definition revision so pending v3 jobs fence across the heal-semantics change", async () => {
+    const { root, repo } = await repository()
+    await using process = createProcess()
+    const baysRoot = join(root, "bays")
+    const adapter = await workspace(process, { repo, baysRoot })
+
+    const digest = (implementation: string) =>
+      createHash("sha256")
+        .update(JSON.stringify({ implementation, repo: resolve(repo), baysRoot: resolve(baysRoot) }))
+        .digest("hex")
+
+    // 52764ddd..4a69136f changed provision semantics (worktreeConfig heal / core.bare relocation)
+    // without bumping the tag, so ProvisionBay jobs queued under v3 could execute under the new
+    // semantics unfenced. The revision must pin the CURRENT tag and never match the v3 definition.
+    expect(adapter.revision).toBe(digest("yrd-git-workspace-v4"))
+    expect(adapter.revision).not.toBe(digest("yrd-git-workspace-v3"))
   })
 
   it("does not inherit ambient Git control variables", async () => {

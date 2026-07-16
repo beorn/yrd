@@ -210,9 +210,11 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
   // worktreeConfig + core.bare=true state before provisioning anything on top of it.
   await healPoisonedWorktreeConfig(git, repo)
   return {
+    // Any provision-semantics change must bump this tag: queued jobs carry the revision and must
+    // not execute across a definition change (v4 = worktreeConfig heal / core.bare relocation).
     revision: createHash("sha256")
       .update(
-        JSON.stringify({ implementation: "yrd-git-workspace-v3", repo, baysRoot, intakeRemote: options.intakeRemote }),
+        JSON.stringify({ implementation: "yrd-git-workspace-v4", repo, baysRoot, intakeRemote: options.intakeRemote }),
       )
       .digest("hex"),
 
