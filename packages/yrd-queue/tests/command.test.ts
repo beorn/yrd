@@ -19,6 +19,7 @@ import {
   CommandEvidenceSchema,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
+  IntegrationProofSchema,
   configuredCommandStep,
   configuredMergeStep,
   createGitPRRecutter,
@@ -2931,6 +2932,47 @@ describe("Queue command adapters", () => {
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
   }, 20_000)
 
+  it("keeps a divergent submodule PR submitted when reading conflict stages times out", async () => {
+    const fixture = await divergentSubmoduleRepository("clean")
+    await using process = createProcess()
+    let injected = false
+    const unavailable: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv.includes("ls-files") && request.argv.includes("--unmerged")) {
+          injected = true
+          return Promise.resolve({
+            exitCode: 124,
+            signal: "SIGTERM",
+            stdout: "",
+            stderr: "conflict index read timed out",
+            durationMs: 1,
+            timedOut: true,
+            stalled: false,
+            verdict: "TIMED_OUT",
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(injected).toBe(true)
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: { kind: "submodule-composition-refusal", operation: "compose", retryable: true },
+      },
+    })
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
+    expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
+    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
+  }, 20_000)
+
   it("lands the final gitlink after composing the same submodule twice in one batch", async () => {
     const fixture = await divergentSubmoduleRepository("clean")
     await git(fixture.module, ["switch", "-qc", "incoming-two", fixture.moduleBaseSha])
@@ -2990,6 +3032,43 @@ describe("Queue command adapters", () => {
     })
     expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
     expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
+  }, 20_000)
+
+  it("preserves reviewed submodule blobs in a merge-only integration proof", async () => {
+    const fixture = await divergentSubmoduleRepository("clean")
+    await using process = createProcess()
+    const bayJobs = createBayJobDefs(unusedWorkspace)
+    const merge = withMerge(
+      gitMergeStep<PRShape>({ inject: { process }, repo: fixture.repo, env: authoredGitlinksEnv }),
+      { revision: "git-merge-v1" },
+    )
+    const queue = withQueue({ steps: [merge] as const })
+    const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+    await using app = await createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const proof = IntegrationProofSchema.parse(run.integration)
+
+    expect(run.status, run.error?.message).toBe("passed")
+    expect(proof.submoduleResolutions).toEqual([
+      {
+        kind: "compose",
+        path: "dep",
+        sha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        ref: expect.stringMatching(/^refs\/yrd\/compositions\/[0-9a-f]{64}$/u),
+        reviewedBlobs: [
+          {
+            path: "notes.md",
+            oid: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            content: "top-current\nmiddle\nbottom-incoming\n",
+          },
+        ],
+      },
+    ])
+    const resolution = proof.submoduleResolutions?.[0]
+    if (resolution === undefined) throw new Error("missing durable submodule resolution")
+    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
   }, 20_000)
 
   it("runs remote push hooks from the checked candidate tree and submodule pins", async () => {

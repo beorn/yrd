@@ -6,8 +6,15 @@ import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yr
 import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
-import type { IntegratedShape, IntegrationProof, PRShape, PRSnapshot, SourceRewrite } from "./model.ts"
-import { IntegrationProofSchema, SourceRewriteSchema } from "./model.ts"
+import type {
+  IntegratedShape,
+  IntegrationProof,
+  PRShape,
+  PRSnapshot,
+  QueueSubmoduleResolutionEvidence,
+  SourceRewrite,
+} from "./model.ts"
+import { IntegrationProofSchema, QueueSubmoduleResolutionEvidenceSchema, SourceRewriteSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
 import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import { executeQueueSubmoduleComposition } from "./submodule-composition-git.ts"
@@ -51,34 +58,6 @@ export const CommandEvidenceSchema = z
   })
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
-
-export const QueueSubmoduleResolutionEvidenceSchema = z.discriminatedUnion("kind", [
-  z
-    .object({
-      kind: z.literal("pin"),
-      path: z.string().min(1),
-      sha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("compose"),
-      path: z.string().min(1),
-      sha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
-      ref: z.string().min(1),
-      reviewedBlobs: z.array(
-        z
-          .object({
-            path: z.string().min(1),
-            oid: z.string().regex(/^[0-9a-f]{40,64}$/iu),
-            content: z.string(),
-          })
-          .strict(),
-      ),
-    })
-    .strict(),
-])
-export type QueueSubmoduleResolutionEvidence = Readonly<z.infer<typeof QueueSubmoduleResolutionEvidenceSchema>>
 
 export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
@@ -1896,8 +1875,9 @@ async function candidateSubmodulePins(
   const urlsByPath = new Map<string, string>()
   for (const [name, module] of modules) {
     if (module.path === undefined) continue
-    if (module.url === undefined)
+    if (module.url === undefined) {
       throw new Error(`yrd: candidate submodule '${module.path}' has no URL (section '${name}')`)
+    }
     const previous = urlsByPath.get(module.path)
     if (previous !== undefined && previous !== module.url) {
       throw new Error(`yrd: candidate submodule path '${module.path}' resolves to conflicting URLs`)
@@ -2034,7 +2014,11 @@ async function resolveCandidateSubmoduleConflict(
 async function readQueueTreeConflicts(git: Git, repo: string): Promise<QueueTreeConflict[]> {
   const listed = await git.raw(repo, ["ls-files", "--unmerged", "-z"], true)
   if (!probeSettled(listed) || listed.code !== 0) {
-    throw new Error(`yrd: could not read candidate conflict stages: ${fetchDetail(listed)}`)
+    throw createSubmoduleCompositionRefusal(
+      repo,
+      ".git/index",
+      `could not read candidate conflict stages: ${fetchDetail(listed)}`,
+    )
   }
   const grouped = new Map<string, QueueConflictStage[]>()
   for (const entry of listed.stdout.split("\0")) {
@@ -2974,6 +2958,7 @@ function integrationProof(commit: string, checked: PinnedCandidate): Integration
     commit,
     baseSha: commit,
     ...(checked.sourceRewrites === undefined ? {} : { sourceRewrites: checked.sourceRewrites }),
+    ...(checked.submoduleResolutions === undefined ? {} : { submoduleResolutions: checked.submoduleResolutions }),
   })
 }
 
