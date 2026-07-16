@@ -501,7 +501,7 @@ type RuntimeBootstrap = Readonly<{
   env: NodeJS.ProcessEnv
   load(
     context: YrdContext,
-    options: Readonly<{ resident: boolean }>,
+    options: Readonly<{ resident: boolean; settleSignals: boolean }>,
   ): Promise<
     Readonly<{
       app: YrdCliApp
@@ -2802,6 +2802,12 @@ function addAuthoredCarrierWorkflow<
   ])
 }
 
+function commandSettlesSignals(action: CliCommand): boolean {
+  const name = action.name()
+  if (name === "watch") return false
+  return action.parent?.name() !== "queue" || (name !== "_list" && name !== "list")
+}
+
 function buildProgram(
   app: YrdCliApp | undefined,
   services: YrdCliServices,
@@ -2840,7 +2846,7 @@ function buildProgram(
         action.name() === "run" &&
         action.parent?.name() === "queue" &&
         (action.opts() as Readonly<{ watch?: boolean }>).watch === true
-      const loaded = await bootstrap.load(selected, { resident })
+      const loaded = await bootstrap.load(selected, { resident, settleSignals: commandSettlesSignals(action) })
       runtimeApp = loaded.app
       runtimeServices = loaded.services
       Object.assign(io, loaded.io)

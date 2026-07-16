@@ -518,6 +518,52 @@ notify:
     }
   })
 
+  it("keeps queue viewers read-only when submitter notification identity is absent", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    vi.stubEnv("TRIBE_NAME", "")
+
+    try {
+      for (const args of [
+        ["watch", "--json"],
+        ["queue", "list", "--watch", "--json"],
+      ]) {
+        const controller = new AbortController()
+        controller.abort()
+        let stdout = ""
+        let stderr = ""
+        expect(
+          await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", ...args], {
+            cwd: repo,
+            scope: { signal: controller.signal, sleep: async () => undefined },
+            stdout: (text) => {
+              stdout += text
+            },
+            stderr: (text) => {
+              stderr += text
+            },
+          }),
+          stderr,
+        ).toBe(0)
+        expect(JSON.parse(stdout)).toMatchObject({ command: "queue.list" })
+        expect(stderr).not.toContain("TRIBE_NAME")
+      }
+
+      expect(existsSync(join(repo, ".git", "yrd", "notifications", "cursor-v1.json"))).toBe(false)
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  })
+
   it("refuses a submitter route at startup when no Tribe identity can resolve it", async () => {
     const { repo } = await repository()
     await writeFile(
