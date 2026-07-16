@@ -3,7 +3,7 @@
  * @level l2
  * @consumer @yrd/cli host
  */
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -121,6 +121,53 @@ describe("installed baseline persistence", () => {
     expect(Object.keys(baselines).sort()).toEqual(["release/2.0", "release/3.0"])
     const raw = await readFile(installedBaselinePath(stateDir), "utf8")
     expect(() => JSON.parse(raw) as unknown).not.toThrow()
+  })
+
+  async function expectNoBaselineTempFiles(stateDir: string): Promise<void> {
+    const entries = await readdir(stateDir)
+    expect(
+      entries.filter((name) => name.startsWith("installed-baseline.json.") && name.endsWith(".tmp")),
+    ).toEqual([])
+  }
+
+  it("leaves the prior authority byte-identical and cleans temp when the staging write fails", async () => {
+    const stateDir = await tempDir("yrd-baseline-")
+    await writeInstalledBaseline(stateDir, baseline([step("check", "check-v1")], "main"))
+    const before = await readFile(installedBaselinePath(stateDir), "utf8")
+    // Inject a staging write that throws after the authority already exists: the
+    // rename never runs, so the live file must be untouched and still parse, and
+    // no partial temp may linger. (A non-atomic direct-write impl would corrupt it.)
+    await expect(
+      writeInstalledBaseline(stateDir, baseline([step("check", "check-v2")], "release/2.0"), {
+        writeFile: async () => {
+          throw new Error("simulated staging write failure")
+        },
+      }),
+    ).rejects.toThrow(/simulated staging write failure/u)
+    const after = await readFile(installedBaselinePath(stateDir), "utf8")
+    expect(after).toBe(before)
+    expect(() => JSON.parse(after) as unknown).not.toThrow()
+    await expectNoBaselineTempFiles(stateDir)
+  })
+
+  it("leaves the prior authority byte-identical and cleans temp when the rename fails", async () => {
+    const stateDir = await tempDir("yrd-baseline-")
+    await writeInstalledBaseline(stateDir, baseline([step("check", "check-v1")], "main"))
+    const before = await readFile(installedBaselinePath(stateDir), "utf8")
+    // Inject a rename that throws AFTER the temp file was fully written: the live
+    // file must still be the prior authority (rename is what would swap it in),
+    // parse cleanly, and the written-but-unrenamed temp must be swept.
+    await expect(
+      writeInstalledBaseline(stateDir, baseline([step("check", "check-v2")], "release/2.0"), {
+        rename: async () => {
+          throw new Error("simulated rename failure")
+        },
+      }),
+    ).rejects.toThrow(/simulated rename failure/u)
+    const after = await readFile(installedBaselinePath(stateDir), "utf8")
+    expect(after).toBe(before)
+    expect(() => JSON.parse(after) as unknown).not.toThrow()
+    await expectNoBaselineTempFiles(stateDir)
   })
 })
 
