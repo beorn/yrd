@@ -9,7 +9,9 @@ import { describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
   QueueTimelineView,
+  queueTimelineAdmissionTimes,
   queueTimelineDefaultCursorId,
+  queueTimelineProjection,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -356,6 +358,102 @@ describe("queue timeline 21106 contract", () => {
       const partnerRow = handle.text.split("\n").findIndex((row) => row.includes("PR43@r1"))
       const partnerColumn = handle.text.split("\n")[partnerRow]?.indexOf("PR43@r1") ?? -1
       expect(handle.cell(partnerColumn, partnerRow).bold).toBe(true)
+    } finally {
+      handle.unmount()
+    }
+  })
+  it("freezes AGE at the first terminal outcome while open rows keep aging", () => {
+    const results = queueTimelineStories["contract-overview"].snapshot.results
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const minute = 60_000
+    const at = (snapshotNow: number) =>
+      queueTimelineProjection(results, {
+        now: snapshotNow,
+        windowMs: 6 * 60 * minute,
+        statuses: ["pending", "running", "rejected", "integrated", "other"],
+        terms: [],
+        latest: false,
+        rowLimit: 20,
+        submissionTimes: queueTimelineAdmissionTimes(results),
+      })
+    const before = at(now)
+    const after = at(now + 5 * minute)
+    const facts = (projection: QueueTimelineProjection) =>
+      new Map(projection.rows.map((row) => [row.id, { ageMs: row.ageMs, totalMs: row.totalMs }]))
+    const b = facts(before)
+    const a = facts(after)
+
+    // Terminal rows are frozen at their outcome.
+    for (const id of ["main:run:R5:PR5:1", "main:run:R4:PR4:1"]) {
+      expect(a.get(id), id).toEqual(b.get(id))
+    }
+    // Pending and running rows keep aging with canonical start semantics.
+    const growing = before.rows.filter((row) => row.group !== "completed").map((row) => row.id)
+    expect(growing).toHaveLength(3)
+    for (const id of growing) {
+      expect(a.get(id)?.ageMs, id).toBe((b.get(id)?.ageMs ?? Number.NaN) + 5 * minute)
+    }
+    // A running Run's TOTAL is elapsed-so-far; terminal totals never move.
+    expect(a.get("main:run:R42:PR42:1")?.totalMs).toBe(
+      (b.get("main:run:R42:PR42:1")?.totalMs ?? Number.NaN) + 5 * minute,
+    )
+  })
+
+  it("keeps fixed-time human and JSON values byte-identical", async () => {
+    const projection = contractProjection()
+    const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
+    // The documented duration format, reimplemented independently so the test
+    // pins the byte contract rather than sharing the implementation.
+    const duration = (ms: number): string => {
+      const seconds = Math.round(ms / 1_000)
+      const hours = Math.floor(seconds / 3_600)
+      const minutes = Math.floor((seconds % 3_600) / 60)
+      const remainder = String(seconds % 60).padStart(2, "0")
+      return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`
+    }
+    const frame = rows.join("\n")
+    expect(frame).toContain(`updated ${projection.now.slice(11, 19)}`)
+    const runner = projection.runner
+    if (runner === undefined || runner === null || runner.pid === undefined || runner.startedAt === undefined) {
+      throw new Error("contract-overview must carry a live runner fixture")
+    }
+    expect(frame).toContain(`yrd-cli:${runner.pid}`)
+    expect(frame).toContain(`up ${duration(Date.parse(projection.now) - Date.parse(runner.startedAt))}`)
+
+    for (const row of projection.rows) {
+      const rendered = rows[rowIndex(rows, `${row.pr}.${row.revision}`)]
+      if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
+      if (row.timestamp !== null) expect(rendered, row.id).toContain(row.timestamp.slice(11, 19))
+      if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
+      if (row.step !== undefined) expect(rendered, row.id).toContain(row.step)
+      if (row.ageMs !== null) expect(rendered, row.id).toContain(duration(row.ageMs))
+      if (row.totalMs !== null) expect(rendered, row.id).toContain(`\u25f7${duration(row.totalMs)}`)
+    }
+  })
+
+  it("selects whole rows through the canonical primitive with no textual cursor", async () => {
+    const story = queueTimelineStories["contract-overview"]
+    const render = createRenderer({ cols: 200, rows: 50 })
+    const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot, paused: false }))
+    try {
+      await handle.waitForLayoutStable()
+      const frame = handle.text.split("\n")
+      expect(frame.some((row) => row.trimStart().startsWith("> "))).toBe(false)
+
+      // Default cursor row (running batch lead) carries the selection
+      // background across the whole row; its sibling does not.
+      const cursorRow = frame.findIndex((row) => row.includes("PR42.1"))
+      const siblingRow = frame.findIndex((row) => row.includes("PR43.1"))
+      expect(cursorRow).toBeGreaterThan(0)
+      expect(siblingRow).toBe(cursorRow + 1)
+      const cursorText = frame[cursorRow] ?? ""
+      for (const anchor of ["\u25cf", "PR42.1", "2:check"]) {
+        const column = cursorText.indexOf(anchor)
+        expect(column, anchor).toBeGreaterThanOrEqual(0)
+        expect(handle.cell(column, cursorRow).bg, `selection bg under ${anchor}`).not.toBeNull()
+      }
+      const siblingColumn = (frame[siblingRow] ?? "").indexOf("PR43.1")
+      expect(handle.cell(siblingColumn, siblingRow).bg).toBeNull()
     } finally {
       handle.unmount()
     }
