@@ -163,15 +163,13 @@ describe("Queue", () => {
       )
       let enumerations = 0
       const originalValues = Object.values
-      const values = vi.spyOn(Object, "values").mockImplementation(
-        ((value: object) => {
-          if (value === records) {
-            enumerations += 1
-            return [target, ...history]
-          }
-          return originalValues(value)
-        }) as typeof Object.values,
-      )
+      const values = vi.spyOn(Object, "values").mockImplementation(((value: object) => {
+        if (value === records) {
+          enumerations += 1
+          return [target, ...history]
+        }
+        return originalValues(value)
+      }) as typeof Object.values)
       try {
         await app.dispatch(app.commands.queue.advance, { run: "R1" })
       } finally {
@@ -1892,7 +1890,7 @@ describe("Queue", () => {
   })
 
   it.each(["pr/withdrawn", "pr/canceled"] as const)(
-    "does not let stale revision-one %s invalidate revision-two authority",
+    "refuses stale revision-one %s before projecting a terminal receipt",
     async (terminal) => {
       const journal = createMemoryJournal<unknown>()
       const original = await createQueueApp({}, journal)
@@ -1939,13 +1937,9 @@ describe("Queue", () => {
         ),
       ).toMatchObject({ appended: true })
 
-      await using app = await createQueueApp({}, journal, undefined, ids(500))
-      expect(app.state().bays.prs[stale.id]).toMatchObject({ status: "submitted", revision: 2, headSha: UPDATED })
-      expect(app.state().queues.authority).toMatchObject({
-        statuses: { [stale.id]: "submitted" },
-        submits: { [stale.id]: { revision: 2, headSha: UPDATED } },
-        checks: { [stale.id]: { revision: 2, headSha: UPDATED } },
-      })
+      await expect(createQueueApp({}, journal, undefined, ids(500))).rejects.toThrow(
+        new RegExp(`stale terminal '${terminal}'.*${stale.id}`, "iu"),
+      )
     },
   )
 

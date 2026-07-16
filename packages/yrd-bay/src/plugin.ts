@@ -1187,12 +1187,19 @@ function correlationPatch(pr: DeepReadonly<PR>, correlation: DeepReadonly<Correl
   }
 }
 
-function terminalApplies(
+function assertTerminalApplies(
   pr: DeepReadonly<PR>,
   terminal: Readonly<{ revision?: number; headSha?: string; issueRef?: string; correlation?: Correlation }>,
-): boolean {
-  if (terminal.revision !== undefined && terminal.revision !== pr.revision) return false
-  if (terminal.headSha !== undefined && terminal.headSha !== pr.headSha) return false
+  eventName: string,
+): void {
+  if (
+    (terminal.revision !== undefined && terminal.revision !== pr.revision) ||
+    (terminal.headSha !== undefined && terminal.headSha !== pr.headSha)
+  ) {
+    throw new Error(
+      `yrd: stale terminal '${eventName}' for PR '${pr.id}' targets ${terminal.revision ?? "unknown"}@${terminal.headSha ?? "unknown"}; current is ${pr.revision}@${pr.headSha}`,
+    )
+  }
   if (terminal.issueRef !== undefined && terminal.issueRef !== pr.issue) {
     throw new Error(`yrd: terminal issue '${terminal.issueRef}' does not match PR '${pr.id}'`)
   }
@@ -1202,7 +1209,6 @@ function terminalApplies(
   ) {
     throw new Error(`yrd: terminal correlation does not match PR '${pr.id}'`)
   }
-  return true
 }
 
 function associateRejectedTerminalRun(
@@ -1798,18 +1804,19 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const parsed = PRWithdrawnSchema.safeParse(data)
       const changed = parsed.success ? parsed.data : LegacyPRWithdrawnSchema.parse(data)
       const pr = current.prs[changed.pr]
-      return pr === undefined || !terminalApplies(pr, changed)
-        ? state
-        : patchPR(pr, {
-            status: "withdrawn",
-            withdrawnAt: applied.ts,
-            revisions: patchRevisionClock(pr, { terminal: { status: "withdrawn", at: applied.ts } }),
-          })
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
+      return patchPR(pr, {
+        status: "withdrawn",
+        withdrawnAt: applied.ts,
+        revisions: patchRevisionClock(pr, { terminal: { status: "withdrawn", at: applied.ts } }),
+      })
     }
     case "pr/rejected": {
       const changed = PRReplayRejectedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || !terminalApplies(pr, changed)) return state
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
       const rejected: PR = {
         ...pr,
         status: "rejected",
@@ -1832,7 +1839,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const parsed = PRIntegratedSchema.safeParse(data)
       const changed = parsed.success ? parsed.data : LegacyPRIntegratedSchema.parse(data)
       const pr = current.prs[changed.pr]
-      if (pr === undefined || !terminalApplies(pr, changed)) return state
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
       const run = parsed.success ? parsed.data.run : undefined
       return patchPR(pr, {
         status: "integrated",
@@ -1849,18 +1857,18 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const changed = parsed.success ? parsed.data : LegacyPRCanceledSchema.parse(data)
       const pr = current.prs[changed.pr]
       const run = parsed.success ? parsed.data.run : undefined
-      return pr === undefined || !terminalApplies(pr, changed)
-        ? state
-        : patchPR(pr, {
-            status: "canceled",
-            canceledAt: applied.ts,
-            canceledBy: changed.by,
-            cancelReason: changed.reason,
-            terminalRun: run,
-            revisions: patchRevisionClock(pr, {
-              terminal: { status: "canceled", at: applied.ts, ...(run === undefined ? {} : { run }) },
-            }),
-          })
+      if (pr === undefined) throw new Error(`yrd: terminal '${applied.name}' names missing PR '${changed.pr}'`)
+      assertTerminalApplies(pr, changed, applied.name)
+      return patchPR(pr, {
+        status: "canceled",
+        canceledAt: applied.ts,
+        canceledBy: changed.by,
+        cancelReason: changed.reason,
+        terminalRun: run,
+        revisions: patchRevisionClock(pr, {
+          terminal: { status: "canceled", at: applied.ts, ...(run === undefined ? {} : { run }) },
+        }),
+      })
     }
     case "pr/regression-recorded": {
       const fact = PRRegressionSchema.parse(data)
