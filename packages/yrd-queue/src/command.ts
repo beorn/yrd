@@ -430,11 +430,11 @@ function commandEnvironment(
  * environment and MUST move the hash. Additions here are deliberate, never a
  * prefix rule. Module-private on purpose: hash policy must not be a mutable
  * public seam (a frozen Set's internal slots are still mutable). Consumers
- * observe policy only through {@link isVolatileCommandCoordinate}. */
+ * observe policy only through environmentHash behavior. */
 const VOLATILE_COMMAND_COORDINATES = ["YRD_JOB", "YRD_RUN", "YRD_ATTEMPT", "YRD_RUNNER", "YRD_CANDIDATE_REF"] as const
 
 /** Read-only predicate over the volatile-coordinate policy above. */
-export function isVolatileCommandCoordinate(name: string): boolean {
+function isVolatileCommandCoordinate(name: string): boolean {
   return (VOLATILE_COMMAND_COORDINATES as readonly string[]).includes(name)
 }
 

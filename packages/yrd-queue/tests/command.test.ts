@@ -25,7 +25,6 @@ import {
   createGitPRRecutter,
   gitCheckStep,
   gitMergeStep,
-  isVolatileCommandCoordinate,
   withQueue,
   withMerge,
   withStep,
@@ -2539,11 +2538,9 @@ describe("Queue command adapters", () => {
 
       // The volatile set is the ONLY YRD_ exclusion: any non-listed YRD_X
       // participates in the hash.
-      expect(isVolatileCommandCoordinate("YRD_X")).toBe(false)
       const nonListed = await runCapture({ ...options, variables: () => ({ YRD_X: "1" }) })
       expect(nonListed.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
       // ...while a listed coordinate (e.g. YRD_CANDIDATE_REF) does not.
-      expect(isVolatileCommandCoordinate("YRD_CANDIDATE_REF")).toBe(true)
       const volatileOnly = await runCapture({
         ...options,
         variables: () => ({ YRD_CANDIDATE_REF: "refs/yrd/candidates/R1/check/attempt-9-feed" }),
