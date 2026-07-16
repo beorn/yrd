@@ -17,6 +17,7 @@ import {
   installedBaselineRemedy,
   readInstalledBaselines,
   removeInstalledBaseline,
+  runtimeBaselineDrift,
   writeInstalledBaseline,
   type InstalledBaseline,
 } from "../src/installed-baseline.ts"
@@ -69,6 +70,19 @@ describe("installed baseline drift", () => {
     expect(installedBaselineDrift(baseline(installed), current)?.message).toContain(
       "step 'merge' integration contract changed",
     )
+  })
+
+  it("names the runtime leg with the restart remedy when the running process diverges from the baseline (merge-queue R41b)", () => {
+    const installed = [step("check", "v2"), step("merge", "v2", { integrates: true })]
+    expect(runtimeBaselineDrift(baseline(installed), installed)).toBeUndefined()
+    const finding = runtimeBaselineDrift(baseline(installed), [
+      step("check", "v1"),
+      step("merge", "v2", { integrates: true }),
+    ])
+    expect(finding).toMatchObject({ code: "runtime-drift" })
+    expect(finding?.message).toContain("resident runtime diverges from the installed baseline")
+    expect(finding?.message).toContain("step 'check' revision 'v2' installed, runtime 'v1'")
+    expect(finding?.message).toContain("Restart this queue runner process")
   })
 
   it("reports drift when the same steps are reordered (revisions exclude order)", () => {

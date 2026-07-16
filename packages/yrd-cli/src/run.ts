@@ -2127,8 +2127,10 @@ async function logRuns(
 }
 
 /** Refuse to start expensive queue Runs while the installed baseline is stale.
- * Non-drift environment findings stay audit-only; config drift blocks the run
- * with the one actionable migration remedy. */
+ * Non-drift environment findings stay audit-only; drift on EITHER audited leg
+ * blocks the run — config drift with the migration remedy, runtime drift
+ * (merge-queue R41b: this process's installed steps diverge from the migrated
+ * baseline) with the restart remedy. */
 export async function requireFreshInstalledBaseline(services: YrdCliServices): Promise<void> {
   const administration = services.queue
   // No queue administration is wired (embedded / no-administration host) → the
@@ -2141,7 +2143,9 @@ export async function requireFreshInstalledBaseline(services: YrdCliServices): P
     configuration("queue.audit capability is not installed")
   }
   const result = await administration.auditEnvironment()
-  const drift = result.findings.filter((finding) => finding.code === "config-drift")
+  const drift = result.findings.filter(
+    (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
+  )
   if (drift.length === 0) return
   refusal(drift.map((finding) => finding.message).join("\n"))
 }

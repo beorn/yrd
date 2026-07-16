@@ -50,7 +50,13 @@ import {
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
-import { installedBaselineDrift, readInstalledBaselines, removeInstalledBaseline, writeInstalledBaseline } from "./installed-baseline.ts"
+import {
+  installedBaselineDrift,
+  readInstalledBaselines,
+  removeInstalledBaseline,
+  runtimeBaselineDrift,
+  writeInstalledBaseline,
+} from "./installed-baseline.ts"
 import { createExclusive, createJournal, importOrphanJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
@@ -620,6 +626,7 @@ function queueAdministration(
   repository: YrdRepository,
   defaultBase: string,
   deriveConfiguredSteps: () => Promise<readonly InstalledStep[]>,
+  runtimeSteps: () => readonly InstalledStep[],
 ): YrdCliQueueAdministration {
   const inspect = async (base = defaultBase) => {
     const baseSha = await resolveCommit(process, repository.repo, base)
@@ -630,13 +637,24 @@ function queueAdministration(
     async auditEnvironment(): Promise<QueueAuditResult> {
       // Re-derive the selected config's steps from disk on EVERY audit so a
       // config change after startup is proven, not masked by a stale snapshot.
+      // The audit proves THREE-WAY equality (merge-queue R41b): runtime
+      // installed revisions == persisted baseline == fresh disk derivation.
+      // Legs form a remedy ladder per base: a baseline-vs-disk delta names the
+      // deinit/init migration first (migrating the baseline may make the
+      // runtime leg moot or freshly actionable); only when baseline and disk
+      // agree is the runtime leg proven, so a resident built before another
+      // process's migration fails loud instead of certifying baseline == disk
+      // while it still executes the old steps.
       const [baselines, current] = await Promise.all([
         readInstalledBaselines(repository.stateDir),
         deriveConfiguredSteps(),
       ])
+      const runtime = runtimeSteps()
       const findings = Object.values(baselines).flatMap((baseline) => {
-        const finding = installedBaselineDrift(baseline, current)
-        return finding === undefined ? [] : [finding]
+        const configDrift = installedBaselineDrift(baseline, current)
+        if (configDrift !== undefined) return [configDrift]
+        const runtimeDrift = runtimeBaselineDrift(baseline, runtime)
+        return runtimeDrift === undefined ? [] : [runtimeDrift]
       })
       return { findings }
     },
@@ -927,8 +945,14 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     }
     await drain()
     const services = Object.freeze({
-      queue: queueAdministration(process, repository, loaded.config.base, () =>
-        reloadConfiguredStepDescriptors(repository),
+      queue: queueAdministration(
+        process,
+        repository,
+        loaded.config.base,
+        () => reloadConfiguredStepDescriptors(repository),
+        // The RUNTIME leg must come from the live runtime object — the steps
+        // this process actually installed — never re-derived from config.
+        () => runtimeApp.queue.steps(),
       ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
