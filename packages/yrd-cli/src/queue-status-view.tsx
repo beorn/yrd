@@ -3349,6 +3349,41 @@ export function queueTimelineVisibleDefaultCursorId(
   return queueTimelineDefaultCursorId(rows) ?? rows[0]?.id
 }
 
+/** The operator's own wall-clock YYYY-MM-DD, matching the local `getFullYear`
+ * / `getMonth` / `getDate` treatment `queueLogClock` already uses for its
+ * inline date fallback (UTC is never shown to the operator). */
+function timelineLocalCalendarDay(timestamp: string): string {
+  const when = new Date(timestamp)
+  if (Number.isNaN(when.getTime())) throw new Error(`yrd: invalid queue timeline timestamp '${timestamp}'`)
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
+}
+
+/**
+ * The YYYY-MM-DD (local time) date-header label to show above `current`, or
+ * `null` when no header belongs there. A header appears strictly BETWEEN two
+ * adjacent visible entries whose local calendar day differs: pass the entry
+ * immediately above `current` in on-screen order as `previous`.
+ *
+ * Design call: `previous === undefined` (the very first visible entry) always
+ * returns `null` — there is no leading header above day one. The per-row TIME
+ * cell already grows to carry an inline date once the visible window spans
+ * more than one day (`includeDate` in `timelineCellLayout`), so the top entry
+ * is never ambiguous about which day it belongs to, and a pairwise "only
+ * BETWEEN entries" rule needs no special top-of-list case. Either side
+ * missing a `timestamp` also suppresses the header — an untimed pending
+ * entry carries no day to anchor a boundary to.
+ */
+export function queueTimelineDateSeparatorLabel(
+  previous: QueueTimelineProjectedRow | undefined,
+  current: QueueTimelineProjectedRow,
+): string | null {
+  if (previous === undefined || previous.timestamp === null || current.timestamp === null) return null
+  const previousDay = timelineLocalCalendarDay(previous.timestamp)
+  const currentDay = timelineLocalCalendarDay(current.timestamp)
+  return previousDay === currentDay ? null : currentDay
+}
+
 /**
  * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
@@ -3496,10 +3531,26 @@ function ProjectedQueueTimeline({
               onItemHover={NO_HOVER_SELECT}
               active={true}
               getKey={(row) => row.id}
-              estimateHeight={1}
-              renderItem={(row, _index, meta) => (
-                <TimelineProjectedRow row={row} cursor={meta.isCursor} layout={layout} live={nav} />
-              )}
+              // A date-header entry grows one cell to two: the separator sits
+              // ABOVE the row inside the same list item, so `items`/`getKey`/
+              // `cursorKey`/`onCursor`/`onSelect` all keep their existing
+              // one-entry-per-row index contract with the caller (watch-pane's
+              // externally computed `cursor` indexes this exact `rows` array).
+              estimateHeight={(index) =>
+                queueTimelineDateSeparatorLabel(rows[index - 1], rows[index]!) === null ? 1 : 2
+              }
+              renderItem={(row, index, meta) => {
+                const dateSeparator = queueTimelineDateSeparatorLabel(rows[index - 1], row)
+                const entry = <TimelineProjectedRow row={row} cursor={meta.isCursor} layout={layout} live={nav} />
+                return dateSeparator === null ? (
+                  entry
+                ) : (
+                  <Box flexDirection="column">
+                    <Text variant="h1">{dateSeparator}</Text>
+                    {entry}
+                  </Box>
+                )
+              }}
             />
           </Box>
         )}
