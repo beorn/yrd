@@ -16,8 +16,10 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
+import type { PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
+  QueueDetailPrFacts,
   QueueEvidenceView,
   QueueShowView,
   QueueTimelineView,
@@ -220,12 +222,14 @@ function QueueWorkflowStepTabs({
   compact,
   active,
   highlightPr,
+  prs,
 }: {
   data: QueueShowData
   outputs: readonly QueueArtifactOutput[]
   compact: boolean
   active: boolean
   highlightPr?: string
+  prs: readonly PR[]
 }) {
   const names = useMemo(() => queueStepNames(data), [data])
   const fallbackStep = defaultQueueStep(data, names)
@@ -233,12 +237,31 @@ function QueueWorkflowStepTabs({
   const [expandedLogs, setExpandedLogs] = useState<Readonly<Record<string, boolean>>>(() =>
     Object.fromEntries(names.map((name) => [name, stepLogStartsExpanded(data, name)])),
   )
+  const [prsExpanded, setPrsExpanded] = useState(false)
   const activeStep = selectedStep !== undefined && names.includes(selectedStep) ? selectedStep : fallbackStep
+
+  // The batched members' review/comment/check-request/revision history (item J)
+  // is a collapsed disclosure so it never pushes the step body past a short
+  // viewport; its subject/activity live behind the "PRS" header.
+  const prFacts =
+    prs.length === 0 ? null : (
+      <Accordion
+        title="PRS"
+        expanded={prsExpanded}
+        onToggle={setPrsExpanded}
+        marginTop={1}
+        flexShrink={0}
+        minWidth={0}
+      >
+        <QueueDetailPrFacts prs={prs} />
+      </Accordion>
+    )
 
   if (activeStep === undefined) {
     return (
       <Box flexDirection="column" flexGrow={1} minHeight={0}>
         <QueueShowView data={data} compact={compact} highlightPr={highlightPr} />
+        {prFacts}
         <QueueArtifactOutputView outputs={outputs} />
       </Box>
     )
@@ -266,6 +289,7 @@ function QueueWorkflowStepTabs({
     // one grouped unit.
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <QueueShowView data={data} compact={compact} highlightPr={highlightPr} section="run" />
+      {prFacts}
       <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
         <TabList>
           {names.map((name) => (
@@ -441,6 +465,15 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
+  // The batched members' full PRs (reviews/comments/check-requests/revision
+  // history) are not on the run's `PRSnapshot` — resolve them from the status
+  // results by id so the detail's PR facts (item J) can render.
+  const detailFullPrs =
+    detailData === undefined
+      ? []
+      : snapshot.results
+          .flatMap((result) => result.prs)
+          .filter((candidate) => detailData.prs.some((member) => member.id === candidate.id))
   const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
@@ -483,6 +516,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
           key={detailData.run}
           data={detailData}
           outputs={detailOutputs}
+          prs={detailFullPrs}
           // Detail facts always stack vertically (user respec 2026-07-15):
           // label/value rows that fit the pane width, never a sprawling table.
           compact

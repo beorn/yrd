@@ -49,7 +49,10 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       )
       const tabsLine = lines[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
-      const checkX = tabsLine.indexOf("check")
+      // The tab bar sits below the run header + PRS disclosure, so it can share a
+      // text row with a left-pane timeline cell that also reads `…:check`. Anchor
+      // on the tab bar's own `check`, which follows its `prepare` tab.
+      const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       expect(tabsY).toBeGreaterThanOrEqual(0)
       expect(checkX).toBeGreaterThanOrEqual(0)
       await app.click(checkX, tabsY)
@@ -91,8 +94,10 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       // least one duration token, which the old bare name-only labels lacked.
       expect(tabsLine, tabsLine).toMatch(/\d+(?:m|s|:\d{2})/u)
       // The glyph immediately left of a step name is colorized by status, so its
-      // fg differs from the plain (uncolored) space separating labels.
-      const checkX = tabsLine.indexOf("check")
+      // fg differs from the plain (uncolored) space separating labels. Anchor on
+      // the tab bar's own `check` (after `prepare`), not a left-pane `…:check`
+      // cell the tab bar now shares a row with.
+      const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       const glyphCell = app.cell(checkX - 2, tabsY)
       const nameCell = app.cell(checkX, tabsY)
       expect(glyphCell.fg, "step glyph is status-colored, not the plain label fg").not.toEqual(nameCell.fg)

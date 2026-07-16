@@ -3973,7 +3973,7 @@ function QueueStepLifecycleView({ row }: { row: QueueShowRow }) {
   const factRow = (facts: readonly (readonly [string, string | undefined])[]): string =>
     facts.map(([label, value]) => `${label} ${value}`).join(" ")
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" minWidth={0}>
       {identity.length === 0 ? null : <Text wrap="truncate">{factRow(identity)}</Text>}
       {lease.length === 0 ? null : <Text wrap="truncate">{factRow(lease)}</Text>}
       {clocks.length === 0 ? null : <Text wrap="truncate">TIME {factRow(clocks)}</Text>}
@@ -4054,6 +4054,83 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
   )
 }
 
+// Integration proof beyond the landed SHA (item J, 2026-07-16): the count of
+// source rewrites + submodule resolutions the queue carried into the merge.
+function integrationProofDetail(integration: IntegrationProof): string | undefined {
+  const parts: string[] = []
+  if (integration.sourceRewrites !== undefined && integration.sourceRewrites.length > 0) {
+    parts.push(`REWRITES ${integration.sourceRewrites.length}`)
+  }
+  if (integration.submoduleResolutions !== undefined && integration.submoduleResolutions.length > 0) {
+    parts.push(`SUBMODULES ${integration.submoduleResolutions.length}`)
+  }
+  return parts.length === 0 ? undefined : parts.join(" ")
+}
+
+function prReviewLine(review: PR["reviews"][number]): string {
+  const note = presentFact(review.note)
+  return `REVIEW ${review.decision} ${review.actor} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
+}
+
+function prCommentLine(comment: PR["comments"][number]): string {
+  const note = presentFact(comment.note)
+  return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
+}
+
+// PR-level facts (item J, 2026-07-16): the batched members' subject, review /
+// comment / check-request activity, and revision history — none of which live
+// on the run's `PRSnapshot`, so they are threaded from the full status PRs.
+// Timestamps use the local detail clock; only present facts render; every line
+// carrying an author-authored string sets `bgConflict="ignore"`.
+export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
+  if (prs.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {prs.map((pr, index) => {
+        const name = presentFact(pr.name)
+        const issue = presentFact(pr.issue)
+        const note = presentFact(pr.note)
+        const clocks = prRevisionClocks(pr)
+        return (
+          <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
+            <Text bold wrap="truncate" bgConflict="ignore">
+              PR {pr.id}@r{pr.revision}
+              {name === undefined ? "" : ` ${name}`}
+            </Text>
+            {issue === undefined ? null : <Text wrap="truncate">ISSUE {issue}</Text>}
+            {note === undefined ? null : (
+              <Text wrap="truncate" bgConflict="ignore">
+                NOTE {note}
+              </Text>
+            )}
+            {pr.reviews.map((review, reviewIndex) => (
+              <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">
+                {prReviewLine(review)}
+              </Text>
+            ))}
+            {pr.comments.map((comment, commentIndex) => (
+              <Text key={`comment:${commentIndex}`} wrap="truncate" bgConflict="ignore">
+                {prCommentLine(comment)}
+              </Text>
+            ))}
+            {pr.checkRequests.map((request, requestIndex) => (
+              <Text key={`check:${requestIndex}`} wrap="truncate">
+                CHECK REQUESTED {detailClock(request.at)}
+              </Text>
+            ))}
+            {clocks.map((clock, clockIndex) => (
+              <Text key={`rev:${clockIndex}`} wrap="truncate">
+                REV {clock.revision} {clock.terminal?.status ?? "open"}{" "}
+                {detailClock(clock.terminal?.at ?? clock.submittedAt ?? clock.pushedAt)}
+              </Text>
+            ))}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
 // The watch detail pane's vertical facts layout (user respec 2026-07-15):
 // stacked label/value rows that always fit the pane width — never a
 // horizontally sprawling table. Only present facts render; timestamps share
@@ -4086,8 +4163,11 @@ function CompactQueueShowView({
   const stepFacts = section !== "run"
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
+  const proofDetail = data.integration === undefined ? undefined : integrationProofDetail(data.integration)
   return (
-    <Box flexDirection="column">
+    // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
+    // detail pane instead of overflowing it (canonical CSS escape hatch).
+    <Box flexDirection="column" minWidth={0}>
       {runFacts ? (
         <>
           <Text bold wrap="truncate">
@@ -4119,8 +4199,14 @@ function CompactQueueShowView({
             const lost = presentFact(row.lost)
             const revision = presentFact(row.revision)
             const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
+            // Item J completeness: the artifacts label + checkpoint join the
+            // step's PROOF line so the whole step record is on-screen.
+            const artifacts = presentFact(row.artifacts)
+            const checkpoint = presentFact(row.checkpoint)
+            const hasProof =
+              row.locations.length > 0 || evidence !== undefined || artifacts !== undefined || checkpoint !== undefined
             return (
-              <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
+              <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column" minWidth={0}>
                 <Text wrap="truncate">
                   STEP {row.step}#{row.attempt} {row.status}
                   {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
@@ -4142,7 +4228,7 @@ function CompactQueueShowView({
                   </Text>
                 )}
                 <QueueStepLifecycleView row={row} />
-                {row.locations.length === 0 && evidence === undefined ? null : (
+                {!hasProof ? null : (
                   <Text wrap="truncate" bgConflict="ignore">
                     PROOF
                     {row.locations.length === 0 ? null : (
@@ -4151,7 +4237,9 @@ function CompactQueueShowView({
                         <QueueLogLocationLinks entries={row.locations} compact={false} />
                       </>
                     )}
+                    {artifacts === undefined ? "" : ` ARTIFACTS ${artifacts}`}
                     {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
+                    {checkpoint === undefined ? "" : ` CHECKPOINT ${checkpoint}`}
                   </Text>
                 )}
               </Box>
@@ -4163,6 +4251,8 @@ function CompactQueueShowView({
           {presentFact(data.landing) === undefined ? null : (
             <Text wrap="truncate">
               LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+              {/* Item J: surface the integration proof beyond the landed SHA. */}
+              {proofDetail === undefined ? "" : ` ${proofDetail}`}
             </Text>
           )}
           <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
