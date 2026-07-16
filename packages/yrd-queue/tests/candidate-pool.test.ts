@@ -400,12 +400,20 @@ describe("warm candidate pool", () => {
     await expect(pool.close()).rejects.toThrow(/injected fault: worktree remove/u)
     expect(existsSync(warmPath)).toBe(true) // retained, retry-safe
 
+    // A failed close stays CLOSED to new work — the retained/half-removed
+    // worktree is never re-admitted; only a close() retry may proceed.
+    await expect(pool.withCandidate(baseSha, async () => passed)).rejects.toThrow(/candidate pool is closed/u)
+    expect(existsSync(warmPath)).toBe(true)
+
     // Retry with the fault cleared: the removal now succeeds and state is clean.
     fault.current = () => false
     await pool.close()
     expect(existsSync(warmPath)).toBe(false)
     const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
     expect(worktrees).not.toContain(warmPath)
+
+    // Closed reached true: a further close is a clean no-op.
+    await pool.close()
   })
 
   it("retains and surfaces both causes when creation fails and its worktree cannot be cleaned up", async () => {

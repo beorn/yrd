@@ -368,8 +368,9 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     entries.length = 0
     entries.push(...survivors)
     if (failure !== undefined) {
-      // Retain the un-removed entries and re-open close for a later retry.
-      closing = false
+      // `closing` stays true forever once close begins — new withCandidate/acquire
+      // keep refusing loud, never re-admitted into teardown-failed state with
+      // retained/half-removed worktrees. Only the close() retry path re-opens.
       closePromise = undefined
       throw failure
     }
