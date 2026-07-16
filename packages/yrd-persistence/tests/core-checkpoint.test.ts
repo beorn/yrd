@@ -3,7 +3,7 @@
  * @level l1
  * @consumer @yrd/core + @yrd/persistence checkpoint seam
  */
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { access, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { command, createYrd, createYrdDef, event, type CommandTree, type YrdDef } from "@yrd/core"
@@ -31,7 +31,7 @@ function ids() {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-function counterDefinition(offset = false) {
+function counterDefinition(offset = 0, projectionVersion: string | null = `counter-v${offset}`) {
   const add = command({
     title: "Add",
     visibility: "public",
@@ -40,25 +40,16 @@ function counterDefinition(offset = false) {
       events: [event("counter/changed", { from: state.counter.value, by: args.by })],
     }),
   })
-  const contribution = offset
-    ? {
-        initialState: { counter: { value: 0 } },
-        commands: { counter: { add } },
-        events: { "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }) },
-        project(state: CounterState, applied: { name: string; data: unknown }) {
-          const by = (applied.data as { by: number }).by
-          return { counter: { value: state.counter.value + by + 1 } }
-        },
-      }
-    : {
-        initialState: { counter: { value: 0 } },
-        commands: { counter: { add } },
-        events: { "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }) },
-        project(state: CounterState, applied: { name: string; data: unknown }) {
-          const by = (applied.data as { by: number }).by
-          return { counter: { value: state.counter.value + by } }
-        },
-      }
+  const contribution = {
+    initialState: { counter: { value: 0 } },
+    commands: { counter: { add } },
+    events: { "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }) },
+    ...(projectionVersion === null ? {} : { projectionVersion }),
+    project(state: CounterState, applied: { name: string; data: unknown }) {
+      const by = (applied.data as { by: number }).by
+      return { counter: { value: state.counter.value + by + offset } }
+    },
+  }
   return createYrdDef().extend(contribution) as YrdDef<CounterState, CommandTree, object>
 }
 
@@ -111,7 +102,7 @@ describe("persistent Core projection checkpoint", () => {
       { level: "trace" },
       { write: (value: unknown) => events.push(value as LogEvent) },
     ])
-    await using changed = await createYrd(counterDefinition(true), {
+    await using changed = await createYrd(counterDefinition(1), {
       inject: { journal: createJournal({ dir, inject: { log } }), log, id: ids() },
     })
 
@@ -124,5 +115,22 @@ describe("persistent Core projection checkpoint", () => {
       checkpoint: { identity: string }
     }
     expect(after.checkpoint.identity).not.toBe(before.checkpoint.identity)
+  })
+
+  it("disables projection checkpoints when reducer semantics are not explicitly versioned", async () => {
+    const dir = await stateDir()
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
+    const runtime = await createYrd(counterDefinition(0, null), {
+      inject: { journal: createJournal({ dir }), log, id: ids() },
+    })
+    await runtime.dispatch({ op: "counter.add", args: { by: 2 } })
+    await runtime.close()
+
+    await expect(access(join(dir, "snapshot-v4.json"))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(events.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(1)
   })
 })

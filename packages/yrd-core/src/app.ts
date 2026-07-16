@@ -73,7 +73,7 @@ export type CommandDef<State extends object, Args extends JsonValue | undefined>
 type EventSchemas = Readonly<Record<string, z.ZodType<JsonValue>>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
-const projectionSources = Symbol("yrd.projectionSources")
+const projectionVersions = Symbol("yrd.projectionVersions")
 const PROJECTION_CHECKPOINT_VERSION = 1
 const ProjectionCheckpointSchema = z
   .object({
@@ -126,6 +126,7 @@ type Contribution<
   commands?: AddedCommands
   events?: EventSchemas
   replayEvents?: EventSchemas
+  projectionVersion?: string
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
   create?(yrd: Yrd<State & AddedState, Commands & AddedCommands> & Features): AddedFeatures
 }>
@@ -140,7 +141,7 @@ export type YrdDef<
   events: EventSchemas
   replayEvents: EventSchemas
   project: Project<State>
-  readonly [projectionSources]: readonly string[]
+  readonly [projectionVersions]: readonly (string | undefined)[]
   create(yrd: Yrd<State, Commands>): Features
   extend<
     AddedState extends object = Empty,
@@ -193,7 +194,7 @@ export function createYrdDef(): YrdDef {
     events: {},
     replayEvents: {},
     project: (state) => state,
-    [projectionSources]: [],
+    [projectionVersions]: [],
     create: () => ({}),
   })
 }
@@ -611,7 +612,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   events: EventSchemas
   replayEvents: EventSchemas
   project: Project<State>
-  readonly [projectionSources]: readonly string[]
+  readonly [projectionVersions]: readonly (string | undefined)[]
   create(yrd: Yrd<State, Commands>): Features
 }): YrdDef<State, Commands, Features> {
   const definition: YrdDef<State, Commands, Features> = {
@@ -639,10 +640,10 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
         commands,
         events,
         replayEvents,
-        [projectionSources]:
+        [projectionVersions]:
           contribution.project === undefined
-            ? values[projectionSources]
-            : [...values[projectionSources], Function.prototype.toString.call(contribution.project)],
+            ? values[projectionVersions]
+            : [...values[projectionVersions], contribution.projectionVersion],
         project(state, applied, cause) {
           const previousState = selectFields(state, previousFields) as DeepReadonly<State>
           const projected = {
@@ -673,6 +674,10 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
 function projectionCheckpointIdentity<State extends object, Commands extends CommandTree, Features extends object>(
   definition: YrdDef<State, Commands, Features>,
 ): string {
+  const versions = definition[projectionVersions]
+  if (versions.some((version) => version === undefined || version.trim() === "")) {
+    throw new TypeError("yrd: every projector must declare a non-empty projectionVersion to enable checkpoints")
+  }
   const schemaIdentity = (schemas: EventSchemas) =>
     Object.fromEntries(
       Object.keys(schemas)
@@ -684,7 +689,7 @@ function projectionCheckpointIdentity<State extends object, Commands extends Com
     initialState: definition.initialState,
     events: schemaIdentity(definition.events),
     replayEvents: schemaIdentity(definition.replayEvents),
-    projectors: definition[projectionSources],
+    projectionVersions: versions,
   })
   if (encoded === undefined) throw new TypeError("yrd: projection checkpoint identity must be canonical JSON")
   return createHash("sha256").update(encoded).digest("hex")
