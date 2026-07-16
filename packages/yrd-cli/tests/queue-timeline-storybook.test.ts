@@ -90,7 +90,7 @@ describe("queue timeline storybook", () => {
       term.screen
         .getText()
         .split("\n")
-        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("STEP"))
+        .find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("PR"))
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
@@ -284,7 +284,7 @@ describe("queue timeline storybook", () => {
         })
         expect(rendered, name).toContain(`QUEUE ${projection.base}`)
         expect(
-          Math.max(...rendered.split("\n").map((line) => line.length)),
+          Math.max(...rendered.split("\n").map((row) => row.length)),
           `${name} at ${width} columns`,
         ).toBeLessThanOrEqual(width)
       }
@@ -305,7 +305,7 @@ describe("queue timeline storybook", () => {
   it("surfaces the latest revision submitter in the wide BY column and hides it on the narrow tier", async () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
-      frame.split("\n").find((line) => line.includes("TIME") && line.includes("RUN") && line.includes("PR"))
+      frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
       height: 24,
@@ -343,19 +343,20 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          // Right-docked: the framed DETAIL pane title shares the top row
-          // with the QUEUE pane title, and the split divider is the lone
-          // vertical glyph on that row.
+          // Right-docked: the DETAIL pane's identity title (item M — the
+          // selected `PR.rev`) shares the top row with the QUEUE tab, and the
+          // split divider is the lone vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
           const topRow = term.screen.getText().split("\n")[0] ?? ""
-          expect(topRow, name).toContain("DETAIL")
+          expect(topRow, name).toMatch(/PR\d+\.\d+/u)
           expect(findGlyphColumn(term, "│", 0), name).toBeGreaterThan(0)
           expect(term.screen.getText(), name).toContain("PRs PR4")
         } else if (divider === "horizontal") {
-          // Below-docked: DETAIL renders under the list, not on the top row.
-          await waitFor(() => term.screen.getText().includes("DETAIL"))
+          // Below-docked: the detail renders under the list, so the identity
+          // title is not on the top row (which holds only the QUEUE tab).
+          await waitFor(() => term.screen.getText().includes("PRs PR4"))
           const topRow = term.screen.getText().split("\n")[0] ?? ""
-          expect(topRow, name).not.toContain("DETAIL")
+          expect(topRow, name).not.toMatch(/PR\d+\.\d+/u)
           expect(term.screen.getText(), name).toContain("PRs PR4")
         } else {
           expect(term.screen.getText(), name).not.toContain("PRs PR4")
@@ -451,11 +452,11 @@ describe("queue timeline storybook", () => {
     )
     try {
       await right.waitForLayoutStable()
-      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("STEP"))
+      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).toContain("STATUS")
       expect(header).not.toContain("BY")
       expect(right.text).toContain("PR42.1")
-      expect(right.text).toContain("◷20:00")
+      expect(right.text).toContain("20:00")
     } finally {
       right.unmount()
     }
@@ -572,10 +573,10 @@ describe("queue timeline storybook", () => {
       await handle.press("d")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("[ ] done")
-      expect(handle.text).not.toContain("PR4.1 Land the durable patch")
+      expect(handle.text).not.toContain("PR4.1")
       await handle.press("d")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR4.1 Land the durable patch")
+      expect(handle.text).toContain("PR4.1")
 
       // `o` expands the EVIDENCE section inside the detail body.
       await handle.press("o")

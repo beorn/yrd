@@ -16,13 +16,15 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
+import type { PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
+  QueueDetailPrFacts,
   QueueEvidenceView,
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
-  TitledBox,
+  queueRowIdentity,
   queueTimelineFilterBuckets,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
@@ -226,12 +228,14 @@ function QueueWorkflowStepTabs({
   compact,
   active,
   highlightPr,
+  prs,
 }: {
   data: QueueShowData
   outputs: readonly QueueArtifactOutput[]
   compact: boolean
   active: boolean
   highlightPr?: string
+  prs: readonly PR[]
 }) {
   const names = useMemo(() => queueStepNames(data), [data])
   const fallbackStep = defaultQueueStep(data, names)
@@ -239,12 +243,31 @@ function QueueWorkflowStepTabs({
   const [expandedLogs, setExpandedLogs] = useState<Readonly<Record<string, boolean>>>(() =>
     Object.fromEntries(names.map((name) => [name, stepLogStartsExpanded(data, name)])),
   )
+  const [prsExpanded, setPrsExpanded] = useState(false)
   const activeStep = selectedStep !== undefined && names.includes(selectedStep) ? selectedStep : fallbackStep
+
+  // The batched members' review/comment/check-request/revision history (item J)
+  // is a collapsed disclosure so it never pushes the step body past a short
+  // viewport; its subject/activity live behind the "PRS" header.
+  const prFacts =
+    prs.length === 0 ? null : (
+      <Accordion
+        title="PRS"
+        expanded={prsExpanded}
+        onToggle={setPrsExpanded}
+        marginTop={1}
+        flexShrink={0}
+        minWidth={0}
+      >
+        <QueueDetailPrFacts prs={prs} />
+      </Accordion>
+    )
 
   if (activeStep === undefined) {
     return (
       <Box flexDirection="column" flexGrow={1} minHeight={0}>
         <QueueShowView data={data} compact={compact} highlightPr={highlightPr} />
+        {prFacts}
         <QueueArtifactOutputView outputs={outputs} />
       </Box>
     )
@@ -253,7 +276,7 @@ function QueueWorkflowStepTabs({
   // Each step tab label carries the step's status glyph + duration (item I,
   // #undead re-report 2026-07-16): e.g. `✓ check 55s`. The glyph is colorized by
   // status; the name + duration inherit the Tab's own active/inactive highlight
-  // so the selected step stays visible (the removed `ACTIVE STEP` line, item G).
+  // so the selected step stays visible (the removed `ACTIVE STEP` row, item G).
   const stepTabLabel = (name: string) => {
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
@@ -266,44 +289,52 @@ function QueueWorkflowStepTabs({
     )
   }
   return (
-    <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
-      <TabList>
-        {names.map((name) => (
-          <Tab key={name} value={name}>
-            {stepTabLabel(name)}
-          </Tab>
-        ))}
-      </TabList>
-      {names.map((name) => {
-        const stepRows = data.steps.filter((row) => row.step === name)
-        const stepOutputs = outputs.filter((output) => output.step === name)
-        const stepData: QueueShowData = { ...data, steps: stepRows }
-        const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
-        return (
-          <TabPanel key={name} value={name}>
-            {/* The selected tab is the step's title (item G, 2026-07-16): the
-                old `ACTIVE STEP <name>` line was redundant with the tab. */}
-            <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} />
-            <Accordion
-              title="LOG"
-              expanded={logExpanded}
-              onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
-              marginTop={1}
-              flexGrow={1}
-              minHeight={0}
-            >
-              {stepOutputs.length === 0 ? (
-                <Text color="$fg-muted">Waiting for first output…</Text>
-              ) : (
-                <Box minHeight={8} flexGrow={1}>
-                  <QueueArtifactOutputView outputs={stepOutputs} />
-                </Box>
-              )}
-            </Accordion>
-          </TabPanel>
-        )
-      })}
-    </Tabs>
+    // Detail order (item H, 2026-07-16): run-level facts at the TOP, then the
+    // step TABS row, then the selected step's content BELOW — the tab is the
+    // visual title of the step section, so step title + step contents read as
+    // one grouped unit.
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      <QueueShowView data={data} compact={compact} highlightPr={highlightPr} section="run" />
+      {prFacts}
+      <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
+        <TabList>
+          {names.map((name) => (
+            <Tab key={name} value={name}>
+              {stepTabLabel(name)}
+            </Tab>
+          ))}
+        </TabList>
+        {names.map((name) => {
+          const stepRows = data.steps.filter((row) => row.step === name)
+          const stepOutputs = outputs.filter((output) => output.step === name)
+          const stepData: QueueShowData = { ...data, steps: stepRows }
+          const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
+          return (
+            <TabPanel key={name} value={name}>
+              {/* Only the step-level facts here (item H); the run-level facts
+                  render once above the tabs. */}
+              <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} section="steps" />
+              <Accordion
+                title="LOG"
+                expanded={logExpanded}
+                onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
+                marginTop={1}
+                flexGrow={1}
+                minHeight={0}
+              >
+                {stepOutputs.length === 0 ? (
+                  <Text color="$fg-muted">Waiting for first output…</Text>
+                ) : (
+                  <Box minHeight={8} flexGrow={1}>
+                    <QueueArtifactOutputView outputs={stepOutputs} />
+                  </Box>
+                )}
+              </Accordion>
+            </TabPanel>
+          )
+        })}
+      </Tabs>
+    </Box>
   )
 }
 
@@ -440,6 +471,15 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
+  // The batched members' full PRs (reviews/comments/check-requests/revision
+  // history) are not on the run's `PRSnapshot` — resolve them from the status
+  // results by id so the detail's PR facts (item J) can render.
+  const detailFullPrs =
+    detailData === undefined
+      ? []
+      : snapshot.results
+          .flatMap((result) => result.prs)
+          .filter((candidate) => detailData.prs.some((member) => member.id === candidate.id))
   const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
@@ -482,6 +522,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
           key={detailData.run}
           data={detailData}
           outputs={detailOutputs}
+          prs={detailFullPrs}
           // Detail facts always stack vertically (user respec 2026-07-15):
           // label/value rows that fit the pane width, never a sprawling table.
           compact
@@ -514,21 +555,31 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
 
   const detail = selectedDetail
 
-  // Both panes carry the one title-in-border chrome idiom with one cell of
-  // outer padding (user directive 2026-07-15); content, headers, and the
-  // FILTER/STATS rows all sit inside that padding. The QUEUE pane is `flushTop`
-  // (no top padding) so its `updated` clock reads flush against the title
-  // border rather than below an offset gap (user directive 2026-07-16).
-  const queuePaneTitle = `QUEUE ${snapshot.projection.base}`
+  // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
+  // L/M) — no surrounding rounded border; the SplitPane divider separates them.
+  // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
+  // is headed by a plain flush-top identity title naming the selected row
+  // (`<run> <PR>.<rev> <branch>`), never the word "DETAIL". One cell of
+  // horizontal padding keeps content off the pane edge; the header rows sit
+  // flush at the top.
   const framedTimeline = (
-    <TitledBox title={queuePaneTitle} padding={1} fill flushTop>
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
       {timeline}
-    </TitledBox>
+    </Box>
   )
+  // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity needs the
+  // full row (base/revision/branch) from `projectedRows` at the same index.
+  const selectedProjectedRow = projectedRows?.[cursor]
+  const detailIdentity = selectedProjectedRow === undefined ? undefined : queueRowIdentity(selectedProjectedRow)
   const framedDetail = (
-    <TitledBox title="DETAIL" padding={1} fill>
-      {detail}
-    </TitledBox>
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
+      <Text bold wrap="truncate">
+        {detailIdentity ?? "No queue row selected."}
+      </Text>
+      <Box flexGrow={1} minWidth={0} minHeight={0}>
+        {detail}
+      </Box>
+    </Box>
   )
   return (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>

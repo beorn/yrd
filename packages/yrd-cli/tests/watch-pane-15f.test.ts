@@ -16,7 +16,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
       const tabLine = app.text
         .split("\n")
-        .find((line) => line.includes("prepare") && line.includes("check") && line.includes("integrate"))
+        .find((row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"))
       expect(tabLine, app.text).toBeDefined()
       expect(app.text).toContain("STEP check#")
       expect(app.text).not.toContain("STEP prepare#")
@@ -43,13 +43,16 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.press("ArrowRight")
       await waitFor(() => app.text.includes("STEP integrate#"))
 
-      const lines = app.text.split("\n")
-      const tabsY = lines.findIndex(
-        (line) => line.includes("prepare") && line.includes("check") && line.includes("integrate"),
+      const rows = app.text.split("\n")
+      const tabsY = rows.findIndex(
+        (row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"),
       )
-      const tabsLine = lines[tabsY]
+      const tabsLine = rows[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
-      const checkX = tabsLine.indexOf("check")
+      // The tab bar sits below the run header + PRS disclosure, so it can share a
+      // text row with a left-pane timeline cell that also reads `…:check`. Anchor
+      // on the tab bar's own `check`, which follows its `prepare` tab.
+      const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       expect(tabsY).toBeGreaterThanOrEqual(0)
       expect(checkX).toBeGreaterThanOrEqual(0)
       await app.click(checkX, tabsY)
@@ -82,20 +85,45 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STEP check#"))
-      const lines = app.text.split("\n")
-      const tabsY = lines.findIndex(
-        (line) => line.includes("prepare") && line.includes("check") && line.includes("integrate"),
+      const rows = app.text.split("\n")
+      const tabsY = rows.findIndex(
+        (row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"),
       )
-      const tabsLine = lines[tabsY] ?? ""
+      const tabsLine = rows[tabsY] ?? ""
       // Durations ride the tab labels (e.g. `check 7m`) — the tab bar carries at
       // least one duration token, which the old bare name-only labels lacked.
       expect(tabsLine, tabsLine).toMatch(/\d+(?:m|s|:\d{2})/u)
       // The glyph immediately left of a step name is colorized by status, so its
-      // fg differs from the plain (uncolored) space separating labels.
-      const checkX = tabsLine.indexOf("check")
+      // fg differs from the plain (uncolored) space separating labels. Anchor on
+      // the tab bar's own `check` (after `prepare`), not a left-pane `…:check`
+      // cell the tab bar now shares a row with.
+      const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       const glyphCell = app.cell(checkX - 2, tabsY)
       const nameCell = app.cell(checkX, tabsY)
       expect(glyphCell.fg, "step glyph is status-colored, not the plain label fg").not.toEqual(nameCell.fg)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("orders the detail as run facts → step tabs → step content, with extra step fields (items H/J)", async () => {
+    const snapshot = queueTimelineStories["detail-full"].snapshot
+    const app = createRenderer({ cols: 120, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      app.press("\r")
+      await app.waitForLayoutStable()
+      await waitFor(() => app.text.includes("STEP integrate#"))
+      const rows = app.text.split("\n")
+      const runFactsY = rows.findIndex((l) => l.includes("RUN R") && l.includes("OUTCOME"))
+      const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("integrate") && !l.includes("STEP"))
+      const stepContentY = rows.findIndex((l) => l.includes("STEP integrate#"))
+      // H: run-level facts sit ABOVE the step tabs, which sit ABOVE the step content.
+      expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
+      expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
+      expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
+      // J: the per-step row surfaces the revision field (REV).
+      expect(rows[stepContentY]).toContain("REV")
     } finally {
       app.unmount()
     }
