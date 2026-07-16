@@ -3860,8 +3860,9 @@ describe("runYrd", () => {
 
     try {
       expect(wide.text).toContain("│")
-      // Right-docked: the DETAIL pane title shares the top row with the list.
-      expect(wide.text.split("\n")[0]).toContain("DETAIL")
+      // Right-docked: the DETAIL pane's identity title (item M — the selected
+      // `PR.rev`) shares the top row with the QUEUE tab.
+      expect(wide.text.split("\n")[0]).toMatch(/PR\d+\.\d+/u)
       expect(wide.text).toContain("PR PR1 STATUS")
       await wide.press("Escape")
       await wide.waitForLayoutStable()
@@ -3871,8 +3872,8 @@ describe("runYrd", () => {
       expect(wide.text).toContain("PR PR1 STATUS")
 
       expect(below.text).toContain("─")
-      // Below-docked: the DETAIL title is not on the top row.
-      expect(below.text.split("\n")[0]).not.toContain("DETAIL")
+      // Below-docked: the detail identity title is not on the top row.
+      expect(below.text.split("\n")[0]).not.toMatch(/PR\d+\.\d+/u)
       expect(below.text).toContain("PR PR1 STATUS")
 
       expect(compact.text).toContain("QUEUE main")

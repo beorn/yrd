@@ -293,18 +293,19 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("draws every watch box with full rounded corners, a left label, and a label color matching its border", async () => {
+  it("draws the compact info boxes with full rounded corners, a left label, and a label color matching its border", async () => {
     // Reworked title-in-border chrome (user directives 1+2, 2026-07-16):
     // `╭─ TITLE ─…─╮` on top with the label punched into the LEFT of the top
     // edge, `╰─…─╯` on the bottom (rounded corners everywhere), and the label
-    // sharing the border's resolved color.
+    // sharing the border's resolved color. Only the compact info boxes get this
+    // — QUEUE and DETAIL are unboxed panes (items L/M).
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
       const lines = app.text.split("\n")
-      for (const label of ["QUEUE main", "RUNNER", "STATS", "DETAIL"]) {
+      for (const label of ["RUNNER", "STATS"]) {
         const topY = lines.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = lines[topY]
@@ -324,25 +325,21 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("floats the QUEUE chrome flush against the title, not below an offset gap", async () => {
-    // Directive 3 (2026-07-16): the QUEUE pane drops its top padding so the
-    // first content row — the sibling tabs on the left and the `updated` clock
-    // on the right — sits flush directly beneath the QUEUE title border, instead
-    // of the temporal cue floating below a blank offset row.
+  it("heads the QUEUE pane with a tab line carrying the updated clock and sibling tabs (items L + C)", async () => {
+    // The QUEUE pane is headed by its tab-style label (item L); the `updated`
+    // clock rides that same tab line (item C — flush with the QUEUE tab), and
+    // sibling bases render as their own tabs — no surrounding box border.
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
-      const queueY = rowIndexOf(app.text, "QUEUE main")
-      const firstContent = rowAt(app.text, queueY + 1)
-      // The row directly under the title is real chrome (sibling tabs), not a
-      // blank padding gap.
-      expect(
-        firstContent.replace(/[│\s]/gu, "").length,
-        "first content row is flush chrome, not a blank gap",
-      ).toBeGreaterThan(0)
-      expect(firstContent, "flush header carries the queue sibling tabs").toContain("release/")
+      const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
+      // The QUEUE tab line itself carries the sibling tab and the updated clock.
+      expect(queueLine, "QUEUE tab line carries the sibling tab").toContain("release/")
+      expect(queueLine, "updated rides the QUEUE tab line").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+      // No rounded box border around the QUEUE pane.
+      expect(app.text).not.toContain("╭─ QUEUE")
     } finally {
       app.unmount()
     }
@@ -381,7 +378,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("frames both watch panes with padded title-in-border chrome and bottom-aligned STATS", async () => {
+  it("renders QUEUE + DETAIL as unboxed panes with bottom-aligned STATS", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
@@ -389,12 +386,16 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
       const text = app.text
-      expect(rowIndexOf(text, "QUEUE main"), "list pane title").toBeGreaterThanOrEqual(0)
-      expect(rowIndexOf(text, "DETAIL"), "detail pane title").toBeGreaterThanOrEqual(0)
-      // Padded content: the TIME header sits inside border + padding.
+      // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
+      // identity (`RUN R42` detail), not the word "DETAIL" — neither is boxed.
+      expect(rowIndexOf(text, "QUEUE main"), "QUEUE pane tab").toBeGreaterThanOrEqual(0)
+      expect(text, "DETAIL pane shows the run identity, not a DETAIL box").toContain("RUN R42")
+      expect(text).not.toContain("╭─ DETAIL")
+      expect(text).not.toContain("╭─ QUEUE")
+      // Padded content: the TIME header sits inside the pane's horizontal padding.
       const timeHeader = app.locator("#th-time").boundingBox()
       expect(timeHeader).not.toBeNull()
-      expect(timeHeader!.x).toBeGreaterThanOrEqual(2)
+      expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(2)
       // Bottom-aligned STATS: the STATS block sits in the bottom band of the
       // pane, directly above the footer, not right under the list rows.

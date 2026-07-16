@@ -343,19 +343,20 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          // Right-docked: the framed DETAIL pane title shares the top row
-          // with the QUEUE pane title, and the split divider is the lone
-          // vertical glyph on that row.
+          // Right-docked: the DETAIL pane's identity title (item M — the
+          // selected `PR.rev`) shares the top row with the QUEUE tab, and the
+          // split divider is the lone vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
           const topRow = term.screen.getText().split("\n")[0] ?? ""
-          expect(topRow, name).toContain("DETAIL")
+          expect(topRow, name).toMatch(/PR\d+\.\d+/u)
           expect(findGlyphColumn(term, "│", 0), name).toBeGreaterThan(0)
           expect(term.screen.getText(), name).toContain("PRs PR4")
         } else if (divider === "horizontal") {
-          // Below-docked: DETAIL renders under the list, not on the top row.
-          await waitFor(() => term.screen.getText().includes("DETAIL"))
+          // Below-docked: the detail renders under the list, so the identity
+          // title is not on the top row (which holds only the QUEUE tab).
+          await waitFor(() => term.screen.getText().includes("PRs PR4"))
           const topRow = term.screen.getText().split("\n")[0] ?? ""
-          expect(topRow, name).not.toContain("DETAIL")
+          expect(topRow, name).not.toMatch(/PR\d+\.\d+/u)
           expect(term.screen.getText(), name).toContain("PRs PR4")
         } else {
           expect(term.screen.getText(), name).not.toContain("PRs PR4")

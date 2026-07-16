@@ -22,7 +22,7 @@ import {
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
-  TitledBox,
+  queueRowIdentity,
   queueTimelineFilterBuckets,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
@@ -508,21 +508,31 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
 
   const detail = selectedDetail
 
-  // Both panes carry the one title-in-border chrome idiom with one cell of
-  // outer padding (user directive 2026-07-15); content, headers, and the
-  // FILTER/STATS rows all sit inside that padding. The QUEUE pane is `flushTop`
-  // (no top padding) so its `updated` clock reads flush against the title
-  // border rather than below an offset gap (user directive 2026-07-16).
-  const queuePaneTitle = `QUEUE ${snapshot.projection.base}`
+  // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
+  // L/M) — no surrounding rounded border; the SplitPane divider separates them.
+  // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
+  // is headed by a plain flush-top identity line naming the selected row
+  // (`<run> <PR>.<rev> <branch>`), never the word "DETAIL". One cell of
+  // horizontal padding keeps content off the pane edge; the header rows sit
+  // flush at the top.
   const framedTimeline = (
-    <TitledBox title={queuePaneTitle} padding={1} fill flushTop>
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
       {timeline}
-    </TitledBox>
+    </Box>
   )
+  // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity needs the
+  // full row (base/revision/branch) from `projectedRows` at the same index.
+  const selectedProjectedRow = projectedRows?.[cursor]
+  const detailIdentity = selectedProjectedRow === undefined ? undefined : queueRowIdentity(selectedProjectedRow)
   const framedDetail = (
-    <TitledBox title="DETAIL" padding={1} fill>
-      {detail}
-    </TitledBox>
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
+      <Text bold wrap="truncate">
+        {detailIdentity ?? "No queue row selected."}
+      </Text>
+      <Box flexGrow={1} minWidth={0} minHeight={0}>
+        {detail}
+      </Box>
+    </Box>
   )
   return (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>

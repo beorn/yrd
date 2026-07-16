@@ -547,9 +547,12 @@ describe("queue timeline 21106 contract", () => {
       expect(frame.some((row) => row.trimStart().startsWith("> "))).toBe(false)
 
       // Default cursor row (running batch lead) carries the selection
-      // background across the whole row; its sibling does not.
-      const cursorRow = frame.findIndex((row) => row.includes("PR42.1"))
-      const siblingRow = frame.findIndex((row) => row.includes("PR43.1"))
+      // background across the whole row; its sibling does not. Scope to actual
+      // list rows (they start with a clock) so the DETAIL pane's identity title
+      // — which also names the selected PR (item M) — isn't mistaken for a row.
+      const isListRow = (row: string): boolean => /^\s*\d{2}:\d{2}:\d{2}/u.test(row)
+      const cursorRow = frame.findIndex((row) => row.includes("PR42.1") && isListRow(row))
+      const siblingRow = frame.findIndex((row) => row.includes("PR43.1") && isListRow(row))
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""

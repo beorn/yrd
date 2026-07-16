@@ -129,7 +129,11 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).toContain("PR1.1")
       expect(app.text).not.toContain("PR24.1")
 
-      const listY = rowIndexOf(app.text, "PR1.1")
+      // Scope to the QUEUE list row (starts with a clock) — the DETAIL pane's
+      // identity title also names PR1.1 (item M) and must not be wheeled.
+      const listY = app.text
+        .split("\n")
+        .findIndex((row) => row.includes("PR1.1") && /^\s*\d{2}:\d{2}:\d{2}/u.test(row))
       const listX = (app.text.split("\n")[listY]?.indexOf("PR1.1") ?? 0) + 2
       for (let index = 0; index < 12; index += 1) await app.wheel(listX, listY, 3)
       await waitFor(() => app.text.includes("PR24.1"))
@@ -243,15 +247,17 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("DETAIL"))
+      // The detail pane is identity-headed now (item M), so its presence is
+      // marked by the run detail body (`OUTCOME`), not the word "DETAIL".
+      await waitFor(() => app.text.includes("OUTCOME"))
 
       await app.press("Escape")
-      await waitFor(() => !app.text.includes("DETAIL"))
+      await waitFor(() => !app.text.includes("OUTCOME"))
       // Esc at top never quits; the list is still live.
       expect(app.text).toContain("QUEUE main")
 
       await app.press("Enter")
-      await waitFor(() => app.text.includes("DETAIL"))
+      await waitFor(() => app.text.includes("OUTCOME"))
     } finally {
       app.unmount()
     }

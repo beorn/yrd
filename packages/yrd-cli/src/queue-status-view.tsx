@@ -2624,6 +2624,15 @@ function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): Time
   return { text: compact ? `#${match[1]}` : `${row.base}#${match[1]}` }
 }
 
+/**
+ * The DETAIL pane's flush-top identity line for a selected row (item M,
+ * 2026-07-16): `<run> <PR>.<rev> <branch-glyph> <branch>` — e.g.
+ * `main#488 PR359.2  task/rss…`. Reads like the row, not the word "DETAIL".
+ */
+export function queueRowIdentity(row: QueueTimelineProjectedRow): string {
+  return `${timelineRunCell(row, false).text} ${row.pr}.${row.revision} ${branchLabel(row.branch)}`
+}
+
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
 function fitTimelineLabel(label: string, max: number): string {
   if (label.length <= max) return label
@@ -2952,6 +2961,10 @@ function TimelineProjectedRow({
   )
 }
 
+// The QUEUE pane is headed by a TAB, not a titled box (user directive
+// 2026-07-16, item L): the primary tab reads `QUEUE <base>` and any sibling
+// bases follow as their own tabs, all in the canonical Silvery Tabs idiom the
+// detail step tabs use.
 function QueueTabsLine({
   base,
   siblings,
@@ -2961,30 +2974,17 @@ function QueueTabsLine({
   siblings: readonly string[]
   showLabel?: boolean
 }) {
-  if (siblings.length === 0) {
-    return (
-      <Text bold wrap="truncate">
-        {showLabel ? `QUEUE ${base}` : base}
-      </Text>
-    )
-  }
   return (
-    <Box flexDirection="row" flexShrink={0} minWidth={0}>
-      {showLabel ? (
-        <Box paddingRight={1} flexShrink={0}>
-          <Text bold>QUEUE</Text>
-        </Box>
-      ) : null}
-      <Tabs value={base} isActive={false}>
-        <TabList>
-          {[base, ...siblings].map((value) => (
-            <Tab key={value} value={value}>
-              {value}
-            </Tab>
-          ))}
-        </TabList>
-      </Tabs>
-    </Box>
+    <Tabs value={base} isActive={false}>
+      <TabList>
+        <Tab value={base}>{showLabel ? `QUEUE ${base}` : base}</Tab>
+        {siblings.map((value) => (
+          <Tab key={value} value={value}>
+            {value}
+          </Tab>
+        ))}
+      </TabList>
+    </Tabs>
   )
 }
 
@@ -3377,16 +3377,12 @@ function ProjectedQueueTimeline({
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
         {paneChrome ? (
-          // Pane chrome: the QUEUE box's title-in-border already names the
-          // queue on its top edge; this first content row sits flush beneath it
-          // (the QUEUE pane drops its top padding) and carries the sibling tabs
-          // on the left and the `updated` clock on the right — so the temporal
-          // cue reads as flush-aligned with the QUEUE title (user directive
-          // 2026-07-16), not floating below an offset gap.
+          // Pane chrome (item L, 2026-07-16): the QUEUE pane is headed by its
+          // tab-style label (no surrounding box); the `updated` clock rides the
+          // right of that same tab line (item C — flush with the QUEUE tab),
+          // and the anchored-freshness `N new` cue sits between them.
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-            {projection.siblingBases.length === 0 ? null : (
-              <QueueTabsLine base={projection.base} siblings={projection.siblingBases} showLabel={false} />
-            )}
+            <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
             {freshRows === 0 ? null : (
               <Text color="$fg-warning" flexShrink={0}>
