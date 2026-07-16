@@ -11,7 +11,12 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
 import type { JobResult } from "@yrd/job"
-import { createCandidatePool, createCandidatePoolGit, type CandidatePool } from "../src/candidate-pool.ts"
+import {
+  createCandidatePool,
+  createCandidatePoolGit,
+  type CandidatePool,
+  type CandidatePoolGit,
+} from "../src/candidate-pool.ts"
 
 const roots: string[] = []
 const disposers: Array<() => Promise<void>> = []
@@ -59,6 +64,36 @@ function capturingLog(): CapturingLog {
 function makePool(repo: string, baysRoot: string, capacity: number, log: CapturingLog["log"]): CandidatePool {
   const process = createProcess({ cwd: repo })
   const pool = createCandidatePool({ repo, parent: baysRoot, capacity, git: createCandidatePoolGit(process), log })
+  disposers.push(async () => {
+    await pool.close()
+    await process.close()
+  })
+  return pool
+}
+
+type GitFault = (args: readonly string[]) => boolean
+
+/** Wrap a real pool Git so specific argv return a nonzero result — a deterministic
+ * stand-in for a clean/foreach/remove that fails on a real repository. */
+function faultingGit(base: CandidatePoolGit, fault: { current: GitFault }): CandidatePoolGit {
+  return {
+    run: async (repo, args, allowFailure) => {
+      if (fault.current(args)) return { code: 1, stdout: "", stderr: `injected fault: ${args.join(" ")}` }
+      return base.run(repo, args, allowFailure)
+    },
+  }
+}
+
+function makeFaultingPool(
+  repo: string,
+  baysRoot: string,
+  capacity: number,
+  log: CapturingLog["log"],
+  fault: { current: GitFault },
+): CandidatePool {
+  const process = createProcess({ cwd: repo })
+  const git = faultingGit(createCandidatePoolGit(process), fault)
+  const pool = createCandidatePool({ repo, parent: baysRoot, capacity, git, log })
   disposers.push(async () => {
     await pool.close()
     await process.close()
@@ -231,6 +266,116 @@ describe("warm candidate pool", () => {
     for (const path of seen) expect(existsSync(path)).toBe(false)
     const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
     for (const path of seen) expect(worktrees).not.toContain(path)
+  })
+
+  it("fails closed when a warm reset cannot clean the tree — evicts and recreates, never reuses", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log, events } = capturingLog()
+    const fault: { current: GitFault } = { current: () => false }
+    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
+
+    let firstPath = ""
+    await pool.withCandidate(baseSha, async (path) => {
+      firstPath = path
+      return passed
+    })
+
+    // Every top-level `clean -fdx` now fails: the warm tree cannot be PROVEN
+    // clean, so the reused path must be discarded and a fresh one created.
+    fault.current = (args) => args[0] === "clean" && args[1] === "-fdx"
+
+    let secondPath = ""
+    const result = await pool.withCandidate(baseSha, async (path) => {
+      secondPath = path
+      return passed
+    })
+    fault.current = () => false
+
+    expect(result).toEqual(passed)
+    expect(secondPath).not.toBe(firstPath) // the dirty path was NEVER handed to run
+    expect(existsSync(firstPath)).toBe(false) // evicted
+    expect(pool.stats()).toEqual({ hits: 0, misses: 2, evictions: 1 })
+    expect(spans(events, "acquire").map((span) => span.props?.outcome)).toEqual(["miss", "residue-evicted"])
+    const reset = spans(events, "reset").at(-1)
+    expect(reset?.props?.outcome).toBe("unclean")
+    expect(String(reset?.props?.reason)).toContain("clean")
+  })
+
+  it("fails closed when a submodule cannot be reset clean — evicts and recreates", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const module = join(repo, "..", "module")
+    await Bun.$`git init -q -b main ${module}`.quiet()
+    await git(module, ["config", "user.name", "Yrd Test"])
+    await git(module, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(module, "version.txt"), "1\n")
+    await git(module, ["add", "version.txt"])
+    await git(module, ["commit", "-qm", "module"])
+    await git(repo, ["config", "protocol.file.allow", "always"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    await git(repo, ["commit", "-qam", "add dep"])
+    const ref = await git(repo, ["rev-parse", "HEAD"])
+    void baseSha
+
+    const { log, events } = capturingLog()
+    let foreachCleanFailsLeft = 0
+    const fault: { current: GitFault } = {
+      current: (args) => {
+        if (args[0] === "submodule" && args[1] === "foreach" && args[3] === "git clean -fdx" && foreachCleanFailsLeft > 0) {
+          foreachCleanFailsLeft -= 1
+          return true
+        }
+        return false
+      },
+    }
+    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
+
+    let firstPath = ""
+    await pool.withCandidate(ref, async (path) => {
+      firstPath = path
+      return passed
+    })
+
+    // The next warm reset hits one failed submodule clean; recreation then
+    // succeeds (the fault is one-shot), so the check still runs on a clean tree.
+    foreachCleanFailsLeft = 1
+    let secondPath = ""
+    await pool.withCandidate(ref, async (path) => {
+      secondPath = path
+      return passed
+    })
+
+    expect(secondPath).not.toBe(firstPath)
+    expect(existsSync(firstPath)).toBe(false)
+    expect(pool.stats()).toEqual({ hits: 0, misses: 2, evictions: 1 })
+    expect(spans(events, "acquire").map((span) => span.props?.outcome)).toEqual(["miss", "residue-evicted"])
+  })
+
+  it("raises loud and stays retryable when a worktree removal fails, then succeeds on retry", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const fault: { current: GitFault } = { current: () => false }
+    const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
+
+    let warmPath = ""
+    await pool.withCandidate(baseSha, async (path) => {
+      warmPath = path
+      return passed
+    })
+    expect(existsSync(warmPath)).toBe(true)
+
+    // The Git worktree-admin removal fails: close must raise loud and leave the
+    // worktree intact so a later close retries it — never a silent success.
+    fault.current = (args) => args[0] === "worktree" && args[1] === "remove"
+    // Loud: the reject surfaces the underlying Git failure detail, not a swallow.
+    await expect(pool.close()).rejects.toThrow(/injected fault: worktree remove/u)
+    expect(existsSync(warmPath)).toBe(true) // retained, retry-safe
+
+    // Retry with the fault cleared: the removal now succeeds and state is clean.
+    fault.current = () => false
+    await pool.close()
+    expect(existsSync(warmPath)).toBe(false)
+    const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
+    expect(worktrees).not.toContain(warmPath)
   })
 
   it("measures cold versus warm candidate setup and reports p50/p95", async () => {
