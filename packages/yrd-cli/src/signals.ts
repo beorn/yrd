@@ -514,7 +514,7 @@ function advance(state: CursorState, cursor: number, completed: ReadonlySet<stri
 }
 
 function coverageKey(pr: string, revision: number, kind: "pr/rejected" | "pr/needs-review"): string {
-  return `${pr} ${revision} ${kind}`
+  return `${pr}:${revision}:${kind}`
 }
 
 function recordOpened(state: CursorState, signal: RoutableSignal, recipient: string): CursorState {
