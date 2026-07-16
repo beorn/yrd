@@ -30,7 +30,10 @@ import {
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
-const LIST_NATURAL_HEIGHT = 12
+// Queue chrome is 13 fixed rows at the production cap (tabs, clocks, filter,
+// header, STATS, spacer). Reserve enough primary height to keep useful rows
+// visible before selecting the persistent-below tier.
+const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
 const DEFAULT_SPLIT_RATIO = 0.52
@@ -211,11 +214,13 @@ function QueueWorkflowStepTabs({
   outputs,
   compact,
   active,
+  highlightPr,
 }: {
   data: QueueShowData
   outputs: readonly QueueArtifactOutput[]
   compact: boolean
   active: boolean
+  highlightPr?: string
 }) {
   const names = useMemo(() => queueStepNames(data), [data])
   const fallbackStep = defaultQueueStep(data, names)
@@ -228,7 +233,7 @@ function QueueWorkflowStepTabs({
   if (activeStep === undefined) {
     return (
       <Box flexDirection="column" flexGrow={1} minHeight={0}>
-        <QueueShowView data={data} compact={compact} />
+        <QueueShowView data={data} compact={compact} highlightPr={highlightPr} />
         <QueueArtifactOutputView outputs={outputs} />
       </Box>
     )
@@ -253,7 +258,7 @@ function QueueWorkflowStepTabs({
             <Text color="$fg-muted">
               ACTIVE STEP <Text bold>{name}</Text>
             </Text>
-            <QueueShowView data={stepData} compact={compact} />
+            <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} />
             <Accordion
               title="LOG"
               expanded={logExpanded}
@@ -398,12 +403,19 @@ export function QueueWatchFrame({
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
+  const timelineColumns =
+    tier === "right"
+      ? Math.max(
+          LIST_NATURAL_WIDTH,
+          Math.min(columns - DIVIDER_SIZE - DETAIL_NATURAL_WIDTH, Math.floor((columns - DIVIDER_SIZE) * splitRatio)),
+        )
+      : columns
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
         results={snapshot.results}
         now={snapshot.now}
-        columns={columns}
+        columns={timelineColumns}
         nav
         cursorKey={cursor}
         onCursor={selectRow}
@@ -412,7 +424,7 @@ export function QueueWatchFrame({
     ) : (
       <QueueTimelineView
         projection={snapshot.projection}
-        columns={columns}
+        columns={timelineColumns}
         nav
         cursorKey={cursor}
         onCursor={selectRow}
@@ -433,6 +445,7 @@ export function QueueWatchFrame({
         outputs={detailOutputs}
         compact={tier === "full"}
         active={detailOpen && detailMode === "detail"}
+        highlightPr={selectedRow?.pr}
       />
     )
   if (snapshot.projection === undefined) {

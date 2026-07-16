@@ -13,7 +13,7 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
+import { Box, Divider, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -2163,8 +2163,9 @@ export type PRDetailData = Readonly<{
 }>
 
 export function prDetailData(pr: PR, runs: readonly QueueRun[], attempts: readonly QueueAttempt[] = []): PRDetailData {
-  const details = runs.map((run) => queueShowData(run, runs, attempts))
-  const latest = latestPRRun(pr, runs)
+  const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
+  const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts))
+  const latest = latestPRRun(pr, matchingRuns)
   const run = latest === undefined ? undefined : details.find((detail) => detail.run === latest.id)
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
 }
@@ -2231,22 +2232,15 @@ export function PRDetailView({
       <Text>
         <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>LINEAGE</Text> {revisionLineage}
       </Text>
-      <Text>
-        <Text bold>RELATED RUNS</Text> {detail.runs.length === 0 ? "-" : detail.runs.map((run) => run.run).join(",")}
-      </Text>
-      {detail.run === undefined ? (
-        <Text color="$fg-muted">No run recorded.</Text>
-      ) : (
-        <QueueShowView data={detail.run} compact />
-      )}
+      {detail.run === undefined ? null : <QueueShowView data={detail.run} compact highlightPr={pr.id} />}
       {blocker === undefined ? null : (
         <Text color="$fg-warning">
           <Text bold>BLOCKER</Text> {blocker}
         </Text>
       )}
-      {detail.run === undefined ? (
+      {detail.run === undefined && landing !== undefined ? (
         <Text>
-          <Text bold>LANDING</Text> {landing === undefined ? "-" : `${landing.commit}@${landing.baseSha}`}
+          <Text bold>LANDING</Text> {landing.commit}@{landing.baseSha}
         </Text>
       ) : null}
     </Box>
@@ -2573,6 +2567,7 @@ const TIMELINE_TOTAL_GLYPH = "◷"
 
 type TimelineCellLayout = Readonly<{
   timeWidth: number
+  statusWidth: number
   runWidth: number
   /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
   byWidth: number
@@ -2611,6 +2606,26 @@ function timelineStatusColor(row: QueueTimelineProjectedRow): string {
   return "$fg-error"
 }
 
+type TimelineStatusCell = Readonly<{ word: string; color: string }>
+
+// 15e is later than 15c/15d: STATUS remains a fixed column between TIME
+// and RUN·PR, while 15d supplies its semantic foreground colors.
+function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
+  const word =
+    row.status === "running"
+      ? "run"
+      : row.status === "pending"
+        ? "pend"
+        : row.status === "integrated"
+          ? "ok"
+          : row.status === "environment-refused"
+            ? "env"
+            : row.status === "canceled"
+              ? "can"
+              : "rej"
+  return { word, color: timelineStatusColor(row) }
+}
+
 type TimelineStepCell = Readonly<{ text: string; color?: string }>
 
 // The STEP cell carries the current `ordinal:name` while running, semantic
@@ -2618,7 +2633,6 @@ type TimelineStepCell = Readonly<{ text: string; color?: string }>
 // failed terminals.
 function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
-  if (row.status === "integrated") return { text: "integrated", color: "$fg-success" }
   if (row.failure !== undefined) {
     return {
       text: fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP),
@@ -2653,6 +2667,7 @@ function timelineCellLayout(
   const compact = columns <= 80
   return {
     timeWidth: includeDate ? 19 : 8,
+    statusWidth: Math.max(6, ...rows.map((row) => timelineStatusCell(row).word.length + 2)),
     runWidth: Math.max(3, ...rows.map((row) => timelineRunCell(row, compact).text.length)),
     byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
     stepWidth: Math.max(4, ...rows.map((row) => timelineStepCell(row).text.length)),
@@ -2699,12 +2714,14 @@ function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: b
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={1} flexShrink={0}>
-        <Text color="$fg-muted"> </Text>
-      </Box>
       <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           TIME
+        </Text>
+      </Box>
+      <Box width={layout.statusWidth} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted" wrap="truncate">
+          STATUS
         </Text>
       </Box>
       <Box flexGrow={1} flexBasis={0} minWidth={layout.runWidth + 13}>
@@ -2746,6 +2763,7 @@ function TimelineProjectedRow({
   live: boolean
 }) {
   const active = row.status === "running"
+  const status = timelineStatusCell(row)
   const runCell = timelineRunCell(row, layout.compact)
   const step = timelineStepCell(row)
   const runDuration = timelineTotalCell(row)
@@ -2758,12 +2776,18 @@ function TimelineProjectedRow({
       overflow="hidden"
       backgroundColor={cursor ? "$bg-accent" : undefined}
     >
-      <Box width={1} flexShrink={0}>
-        <TimelineMarker row={row} live={live} />
-      </Box>
       <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           {timelineClockCell(row, layout)}
+        </Text>
+      </Box>
+      <Box width={layout.statusWidth} flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
+        <Box width={1} flexShrink={0}>
+          <TimelineMarker row={row} live={live} />
+        </Box>
+        <Text color={status.color} wrap="truncate">
+          {" "}
+          {status.word}
         </Text>
       </Box>
       <Box flexDirection="row" flexGrow={1} flexBasis={0} minWidth={layout.runWidth + 13} overflow="hidden">
@@ -2920,33 +2944,41 @@ function TimelineStatistics({ projection }: { projection: QueueTimelineProjectio
     ["max", timelineMetric(values.maxMs)],
   ]
   return (
-    <Box borderStyle="round" width="100%" flexDirection="column" flexShrink={0} minWidth={0} paddingX={1}>
-      <Text color="$fg-muted" bold>
-        STATISTICS
-      </Text>
-      <TimelineStatLine
-        label="ROWS"
-        facts={[
-          ["pending", count("pending")],
-          ["running", count("running")],
-          ["completed", count("completed")],
-          ["oldest", projection.oldestOpenMs === null ? "-" : mediaDuration(projection.oldestOpenMs)],
-        ]}
-      />
-      <TimelineStatLine
-        label="FLOW"
-        facts={[
-          ["attempts", String(metrics.terminalAttempts)],
-          ["integrated", String(metrics.outcomes.integrated)],
-          ["rejected", String(metrics.outcomes.rejected)],
-          ["decision", decision === null ? "-" : `${(decision * 100).toFixed(1)}%`],
-          ["env", String(metrics.outcomes.environmentRefused)],
-          ["canceled", String(metrics.outcomes.canceled)],
-        ]}
-      />
-      <TimelineStatLine label="ACTIVE ALL" facts={distribution(all)} />
-      <TimelineStatLine label="ACTIVE INTEGRATED" facts={distribution(integrated)} />
-      <TimelineStatLine label="WAIT" facts={distribution(wait)} />
+    <Box width="100%" flexDirection="column" flexShrink={0} minWidth={0} marginTop={1}>
+      <Divider title="STATS" titleColor="$fg-muted" />
+      <Box
+        borderStyle="round"
+        borderTop={false}
+        width="100%"
+        flexDirection="column"
+        flexShrink={0}
+        minWidth={0}
+        paddingX={1}
+      >
+        <TimelineStatLine
+          label="ROWS"
+          facts={[
+            ["pending", count("pending")],
+            ["running", count("running")],
+            ["completed", count("completed")],
+            ["oldest", projection.oldestOpenMs === null ? "-" : mediaDuration(projection.oldestOpenMs)],
+          ]}
+        />
+        <TimelineStatLine
+          label="FLOW"
+          facts={[
+            ["attempts", String(metrics.terminalAttempts)],
+            ["integrated", String(metrics.outcomes.integrated)],
+            ["rejected", String(metrics.outcomes.rejected)],
+            ["decision", decision === null ? "-" : `${(decision * 100).toFixed(1)}%`],
+            ["env", String(metrics.outcomes.environmentRefused)],
+            ["canceled", String(metrics.outcomes.canceled)],
+          ]}
+        />
+        <TimelineStatLine label="ACTIVE ALL" facts={distribution(all)} />
+        <TimelineStatLine label="ACTIVE INTEGRATED" facts={distribution(integrated)} />
+        <TimelineStatLine label="WAIT" facts={distribution(wait)} />
+      </Box>
     </Box>
   )
 }
@@ -3511,8 +3543,17 @@ function queueShowNextAction(data: QueueShowData): string {
   return "fix the branch, then run yrd pr submit again"
 }
 
-function queueShowMembers(data: QueueShowData): string {
-  return data.prs.map((pr) => `${pr.id}@r${pr.revision}:${pr.headSha.slice(0, 12)}`).join(",")
+function QueueShowMembersValue({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
+  return (
+    <>
+      {data.prs.map((pr, index) => (
+        <Text key={pr.id} bold={pr.id === highlightPr}>
+          {index === 0 ? "" : ","}
+          {pr.id}@r{pr.revision}:{pr.headSha.slice(0, 12)}
+        </Text>
+      ))}
+    </>
+  )
 }
 
 // The batched-members group is called `PRs`, never `MEMBERS`. The list-selected
@@ -3521,13 +3562,7 @@ function queueShowMembers(data: QueueShowData): string {
 function QueueShowMembersLine({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
   return (
     <Text wrap="truncate">
-      PRs{" "}
-      {data.prs.map((pr, index) => (
-        <Text key={pr.id} bold={pr.id === highlightPr}>
-          {index === 0 ? "" : ","}
-          {pr.id}@r{pr.revision}:{pr.headSha.slice(0, 12)}
-        </Text>
-      ))}
+      PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} />
     </Text>
   )
 }
@@ -3582,14 +3617,14 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
   )
 }
 
-function CompactQueueShowView({ data }: { data: QueueShowData }) {
+function CompactQueueShowView({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
   return (
     <Box flexDirection="column">
       <Text bold wrap="truncate">
         RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
       </Text>
       <Text wrap="truncate">
-        BASE {data.base} PRs {queueShowMembers(data)} RETRY {data.retries}
+        BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
       </Text>
       <Text wrap="truncate">
         START {data.started} END {data.finished}
@@ -3626,7 +3661,7 @@ export function QueueShowView({
   compact?: boolean
   highlightPr?: string
 }) {
-  if (compact) return <CompactQueueShowView data={data} />
+  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} />
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />
