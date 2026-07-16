@@ -32,7 +32,7 @@ function ScrollSurface() {
     Box,
     { flexDirection: "column", width: 40, height: 10 },
     createElement(ListView<{ id: string; label: string }>, {
-      items: Array.from({ length: 200 }, (_, i) => ({ id: `r${i}`, label: `Line ${i}` })),
+      items: Array.from({ length: 200 }, (_, i) => ({ id: `r${i}`, label: `Row ${i}` })),
       height: 10,
       estimateHeight: 1,
       nav: true,

@@ -11,7 +11,7 @@ import { Box } from "silvery"
 import { describe, expect, it } from "vitest"
 import { QueueArtifactOutputView, type QueueArtifactOutput } from "../src/watch-pane.tsx"
 
-// The exact line from the user-reproduced crash: vitest's run banner with a
+// The exact row from the user-reproduced crash: vitest's run banner with a
 // bold + black-fg + cyan-bg ` RUN ` segment, then version + path in fg colors.
 const VITEST_BANNER =
   "\x1b[1m\x1b[30m\x1b[46m RUN \x1b[49m\x1b[39m\x1b[22m \x1b[36mv4.1.10 \x1b[39m\x1b[90m/Users/beorn/Code/hh/vendor/yrd\x1b[39m"
@@ -28,7 +28,7 @@ function bannerOutput(text: string): QueueArtifactOutput {
 
 function rowContaining(app: { text: string }, needle: string): { row: number; col: number } {
   const rows = app.text.split("\n")
-  const row = rows.findIndex((line) => line.includes(needle))
+  const row = rows.findIndex((text) => text.includes(needle))
   if (row === -1) throw new Error(`no rendered row contains ${JSON.stringify(needle)}`)
   return { row, col: rows[row]!.indexOf(needle.trimStart()) }
 }
@@ -39,7 +39,7 @@ describe("QueueArtifactOutputView foreign ANSI", () => {
   // trips silvery's background-conflict guard (default mode: throw). The fix
   // marks these rows as foreign content (`bgConflict="ignore"`) so the colors
   // render and the guard cannot fire.
-  it("renders a background-SGR log line over a dark pane without crashing", async () => {
+  it("renders a background-SGR log row over a dark pane without crashing", async () => {
     const render = createRenderer({ cols: 120, rows: 14 })
     const app = render(
       createElement(

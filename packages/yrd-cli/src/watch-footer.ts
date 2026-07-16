@@ -23,7 +23,7 @@ export const SELECTION_FOOTER_HINT = " - ⇧-drag to select"
 
 /**
  * Append the selection hint only when the whole footer still fits on its single
- * (`height={1}`) line at `columns`. Silvery `Text` word-wraps, so an over-width
+ * (`height={1}`) row at `columns`. Silvery `Text` word-wraps, so an over-width
  * hint would wrap a keybinding label onto the clipped second row — dropping
  * `navigate` on an 80-col terminal. On narrow terminals the hint is omitted
  * entirely (not clipped), so the user-specced keybindings are never disturbed.
