@@ -598,6 +598,7 @@ export function withJobs(options: JobsOptions = {}) {
         "job/requested": JobRequestSchema,
         "job/transitioned": JobTransitionSchema,
       },
+      projectionVersion: "jobs-v1",
       project: projectJobs,
       create(yrd) {
         return {
