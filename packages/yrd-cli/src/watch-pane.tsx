@@ -131,6 +131,13 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
     else if (addedLines > 0) setUnseenLines((count) => count + addedLines)
   }, [atEnd, lines.length])
 
+  // Reassert the tail after new output is committed. ListView's follow
+  // authority observes the prior viewport during the same render; without
+  // this post-commit scroll, an End-resumed pane can miss the next append.
+  useEffect(() => {
+    if (atEnd) listRef.current?.scrollToBottom()
+  }, [atEnd, lines.length])
+
   useInput((_input, key) => {
     if (!key.end) return
     listRef.current?.scrollToBottom()
