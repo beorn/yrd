@@ -16,7 +16,6 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import { stripAnsi } from "./ansi.ts"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueEvidenceView,
@@ -103,45 +102,38 @@ type QueueArtifactOutputLine = Readonly<{
   kind: "heading" | "muted" | "body"
 }>
 
-/**
- * Flatten step artifact tails into renderable lines. Body lines carry the raw
- * subprocess `output.log` tail, so every line is ANSI-stripped here — the sole
- * boundary before this text reaches a `<Text>` node. Without it, a background
- * SGR code in the log (e.g. vitest's ` RUN ` cyan banner) trips silvery's
- * background-conflict guard and crashes the whole `yrd watch` loop.
- */
-export function artifactOutputLines(outputs: readonly QueueArtifactOutput[]): readonly QueueArtifactOutputLine[] {
-  return outputs.flatMap((output) => {
-    const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
-    const textLines = stripAnsi(output.text).split("\n")
-    if (textLines.at(-1) === "") textLines.pop()
-    return [
-      { key: `${outputKey}:heading`, text: `OUTPUT ${output.step}#${output.attempt}`, kind: "heading" },
-      ...(output.truncatedBytes === undefined
-        ? []
-        : [
-            {
-              key: `${outputKey}:truncated`,
-              text: `... ${output.truncatedBytes} earlier bytes`,
-              kind: "muted" as const,
-            },
-          ]),
-      ...(textLines.length === 0
-        ? [{ key: `${outputKey}:waiting`, text: "Waiting for output...", kind: "body" as const }]
-        : textLines.map((text, index) => ({
-            key: `${outputKey}:line:${index}`,
-            text,
-            kind: "body" as const,
-          }))),
-    ] satisfies readonly QueueArtifactOutputLine[]
-  })
-}
-
 export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
   const listRef = useRef<ListViewHandle | null>(null)
   const [atEnd, setAtEnd] = useState(true)
   const [unseenLines, setUnseenLines] = useState(0)
-  const lines = useMemo<readonly QueueArtifactOutputLine[]>(() => artifactOutputLines(outputs), [outputs])
+  const lines = useMemo<readonly QueueArtifactOutputLine[]>(
+    () =>
+      outputs.flatMap((output) => {
+        const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
+        const textLines = output.text.split("\n")
+        if (textLines.at(-1) === "") textLines.pop()
+        return [
+          { key: `${outputKey}:heading`, text: `OUTPUT ${output.step}#${output.attempt}`, kind: "heading" },
+          ...(output.truncatedBytes === undefined
+            ? []
+            : [
+                {
+                  key: `${outputKey}:truncated`,
+                  text: `... ${output.truncatedBytes} earlier bytes`,
+                  kind: "muted" as const,
+                },
+              ]),
+          ...(textLines.length === 0
+            ? [{ key: `${outputKey}:waiting`, text: "Waiting for output...", kind: "body" as const }]
+            : textLines.map((text, index) => ({
+                key: `${outputKey}:line:${index}`,
+                text,
+                kind: "body" as const,
+              }))),
+        ] satisfies readonly QueueArtifactOutputLine[]
+      }),
+    [outputs],
+  )
   const previousLineCount = useRef(lines.length)
 
   useEffect(() => {
@@ -194,7 +186,13 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
           ) : line.kind === "muted" ? (
             <Text color="$fg-muted">{line.text}</Text>
           ) : (
-            <Text>{line.text}</Text>
+            // Body lines mirror a step's raw `output.log` tail — foreign terminal
+            // output whose embedded ANSI (colors AND backgrounds, e.g. vitest's
+            // cyan ` RUN ` banner) is intentional. `bgConflict="ignore"` renders
+            // those colors and stops silvery's background-conflict guard (default
+            // `throw`) from killing the watch loop; the global throw stays a
+            // safety net for silvery's own pipeline bugs everywhere else.
+            <Text bgConflict="ignore">{line.text}</Text>
           )
         }
       />
