@@ -4,6 +4,7 @@ export * from "./repository.ts"
 export * from "./signals.ts"
 export { runYrd } from "./run.ts"
 export type {
+  PruneGitFacts,
   QueueAuditFinding,
   QueueAuditResult,
   YrdCliApp,

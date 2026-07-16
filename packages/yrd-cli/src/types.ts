@@ -34,6 +34,18 @@ export type YrdCliServices = Readonly<{
   recut?: GitPRRecutter
 }>
 
+/** Read-only Git facts `pr prune` proves its superseded verdicts with. The
+ * default implementation shells out to Git plumbing in the invocation
+ * repository; tests inject deterministic facts through YrdCliIO.pruneGit. */
+export type PruneGitFacts = Readonly<{
+  /** Full commit SHA for a ref or SHA, or undefined when it is not a commit here. */
+  resolveCommit(ref: string): string | undefined | Promise<string | undefined>
+  isAncestor(ancestor: string, descendant: string): boolean | Promise<boolean>
+  /** Tree OID of a conflict-free merge of base and head, or undefined when the merge conflicts. */
+  mergeTree(baseSha: string, headSha: string): string | undefined | Promise<string | undefined>
+  treeOf(sha: string): string | Promise<string>
+}>
+
 export type YrdCliIO = {
   stdout(text: string): void
   stderr(text: string): void
@@ -56,6 +68,8 @@ export type YrdCliIO = {
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
   resolveQueueTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
   currentBranch?(cwd: string): string | undefined
+  /** Git facts for `pr prune`; defaults to real Git plumbing in `cwd`. */
+  pruneGit?(cwd: string): PruneGitFacts
   scope?: Pick<Scope, "signal" | "sleep">
   drainSignal?: AbortSignal
 }

@@ -66,6 +66,7 @@ import {
   type QueueStatusResult,
 } from "./queue-status-view.tsx"
 import { submittedPrPositions } from "./queue-position.ts"
+import { prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
 import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
@@ -3007,6 +3008,16 @@ function buildProgram(
     .description("close a live PR without merging (leaves it out of the queue)")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closePrs(installed(), selectors, options, io))
+  pr.command("withdraw <selector...>")
+    .description("withdraw live PRs from delivery, recording the reason")
+    .option("--reason <text>", "withdrawal rationale recorded on each pr/withdrawn event")
+    .option("--json", "emit stable JSON")
+    .action(async (selectors, options) => withdrawPrs(installed(), selectors, options, io))
+  pr.command("prune")
+    .description("withdraw live PRs whose content their base branch already contains")
+    .option("--dry-run", "print every checked verdict without withdrawing")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => prunePrs(installed(), options, io))
   pr.command("merge <selector>")
     .description("teach that the queue is the only merger")
     .option("--json", "emit stable JSON")
