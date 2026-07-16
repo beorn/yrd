@@ -2090,6 +2090,30 @@ async function queueAudit(
   return result.findings.length === 0 ? 0 : 1
 }
 
+async function journalImportOrphan(
+  services: YrdCliServices,
+  sourcePath: string,
+  options: JsonOption,
+  io: YrdCliIO,
+): Promise<void> {
+  const capability = services.journal?.importOrphan
+  if (capability === undefined) configuration("journal.import-orphan capability is not installed")
+  const source = resolve(io.cwd ?? process.cwd(), sourcePath)
+  const result = await capability(source)
+  if (result.status === "live-collision") {
+    const identities = result.collisions.map((collision) => `${collision.kind}:${collision.id}`).join(", ")
+    refusal(`orphan import has a live journal identity collision (${identities})`)
+  }
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "journal.import-orphan", source, ...result },
+    result.status === "already-imported"
+      ? `${result.records} orphan journal rows were already archived from ${source}`
+      : `archived ${result.records} orphan journal rows from ${source}`,
+  )
+}
+
 async function queueAdministration(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -3021,6 +3045,14 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => setExit(await migrateTerminalAssociations(installed(), options, io)))
 
+  const journal = program.command("journal").description("inspect and recover the durable journal")
+  journal.helpCommand(false)
+  journal
+    .command("import-orphan <source>")
+    .description("archive preserved v3 rows without replaying them as live entries")
+    .option("--json", "emit stable JSON")
+    .action(async (source, options) => journalImportOrphan(installedServices(), source, options, io))
+
   const issue = program.command("issue").description("inspect tracker-neutral issue delivery")
   issue.helpCommand(false)
   issue
@@ -3088,7 +3120,7 @@ function buildProgram(
     .action(async (contestId, options) => setExit(await promoteContest(installed(), contestId, options, io)))
 
   const order = new Map(
-    ["pr", "bay", "issue", "contest", "queue", "migrate", "log", "watch", "prime"].map((command, index) => [
+    ["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime"].map((command, index) => [
       command,
       index,
     ]),

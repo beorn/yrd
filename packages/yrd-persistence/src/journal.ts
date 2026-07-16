@@ -46,7 +46,7 @@ const EMPTY_DIGEST = sha256(Buffer.alloc(0))
  * FORMAT_VERSION bump MUST bump the trailing revision here — otherwise an old
  * cache silently serves values decoded under the previous rules.
  */
-const JOURNAL_DECODER = `journal-v${FORMAT_VERSION}/frame-v${VERSION}/decode-r1`
+const JOURNAL_DECODER = `journal-v${FORMAT_VERSION}/frame-v${VERSION}/decode-r2`
 const DigestSchema = z.string().regex(/^[0-9a-f]{64}$/)
 const IntegerSchema = z.number().int().nonnegative()
 const PrivatePathSchema = z.string().regex(/^events-v4\.[a-zA-Z0-9._-]+$/)
@@ -136,6 +136,27 @@ const StoredFrameSchema = z
   })
   .strict()
 const JournalFrameSchema = StoredFrameSchema.omit({ v: true, checksum: true })
+const ArchivedOrphanRecordSchema = z
+  .object({
+    kind: z.literal("archived-orphan"),
+    provenance: z
+      .object({
+        "origin-lane": z.literal("v3-phantom"),
+        "origin-file": z.string().min(1),
+        "origin-row": z.uuidv7(),
+        "imported-at": z.iso.datetime({ offset: true }),
+        "imported-by": z.string().min(1),
+        "collision-policy": z.literal("refuse"),
+      })
+      .strict(),
+    frame: StoredFrameSchema,
+  })
+  .strict()
+const StoredArchivedOrphanSchema = ArchivedOrphanRecordSchema.extend({
+  v: z.literal(VERSION),
+  checksum: DigestSchema,
+}).strict()
+const StoredRecordSchema = z.union([StoredFrameSchema, StoredArchivedOrphanSchema])
 const FreshSummarySchema = z.object({ cursor: IntegerSchema, frames: IntegerSchema, digest: DigestSchema }).strict()
 
 type Segment = z.infer<typeof SegmentSchema>
@@ -143,6 +164,34 @@ type Manifest = z.infer<typeof ManifestSchema>
 type TailState = z.infer<typeof TailStateSchema>
 type Recovery = z.infer<typeof RecoverySchema>
 type JournalFrame = z.infer<typeof JournalFrameSchema>
+type DecodedRecord =
+  | Readonly<{ kind: "live"; value: JournalFrame }>
+  | Readonly<{ kind: "archived-orphan"; value: ArchivedOrphanRecord }>
+type EncodedRecords = Readonly<{ bytes: Buffer; checksum: string; records: number }>
+
+export type ArchivedOrphanRecord = z.infer<typeof ArchivedOrphanRecordSchema>
+export type ArchivedOrphanSnapshot = Readonly<{
+  cursor: number
+  records: readonly ArchivedOrphanRecord[]
+}>
+export type ArchivedOrphanCollision = Readonly<{
+  kind: "cause" | "command" | "event" | "payload"
+  id: string
+}>
+export type OrphanJournalImportResult =
+  | Readonly<{
+      status: "imported" | "already-imported"
+      cursor: number
+      records: number
+      sourceSha256: string
+    }>
+  | Readonly<{
+      status: "live-collision"
+      cursor: number
+      records: number
+      sourceSha256: string
+      collisions: readonly ArchivedOrphanCollision[]
+    }>
 
 type JournalIO = Readonly<{
   write(
@@ -234,13 +283,21 @@ type SnapshotCache =
   | Readonly<{ kind: "invalid" }>
   | Readonly<{ kind: "bypass" }>
 
+type JournalContext = Readonly<{
+  runtime: Runtime
+  exclusive: Exclusive
+  thresholds: Readonly<{ bytes: number; frames: number; snapshotFrames: number }>
+  platform: string
+  log: ConditionalLogger
+}>
+
 const defaultIO: JournalIO = {
   write: (file, bytes, offset, length, position) => file.write(bytes, offset, length, position),
   read: (file, bytes, offset, length, position) => file.read(bytes, offset, length, position),
   datasync: (file) => file.datasync(),
 }
 
-export function createJournal(options: JournalOptions): Journal<unknown> {
+function createJournalContext(options: JournalOptions): JournalContext {
   const inject = (options.inject ?? {}) as InternalInject
   const log = inject.log?.child("journal") ?? createLogger("yrd:journal", [{ level: "warn" }])
   const exclusive = inject.exclusive ?? createExclusive(options.dir, options.lock, { log })
@@ -259,6 +316,11 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
       await inject.phase?.(name, details)
     },
   }
+  return { runtime, exclusive, thresholds, platform, log }
+}
+
+export function createJournal(options: JournalOptions): Journal<unknown> {
+  const { runtime, exclusive, thresholds, platform, log } = createJournalContext(options)
 
   const checkpoint: NonNullable<Journal<unknown>["checkpoint"]> = {
     async load(identity) {
@@ -382,7 +444,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
         let served = after
         if (cache.kind === "hit") {
           served = Math.max(after, cache.cursor)
-          if (cache.values.length > 0 && cache.cursor > after) {
+          if (cache.cursor > after) {
             frames += cache.values.length
             yield { cursor: cache.cursor, values: cache.values }
           }
@@ -401,13 +463,19 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
           // actually overlaps them.
           const slice =
             part.kind === "tail"
-              ? await readExactly(part.file, start - logicalStart, end - start, io)
-              : (await readSegment(part.descriptor, part.file, io)).subarray(start - logicalStart, end - logicalStart)
+              ? await readExactly(part.file, start - logicalStart, end - start, runtime.io)
+              : (await readSegment(part.descriptor, part.file, runtime.io)).subarray(
+                  start - logicalStart,
+                  end - logicalStart,
+                )
           for await (const batch of decode([slice], start, join(runtime.dir, partPath(part)))) {
-            frames += batch.values.length
-            replayed += batch.values.length
-            if (collect !== null) for (const value of batch.values) collect.push(JSON.stringify(value))
-            yield batch
+            const values = batch.records
+              .filter((record): record is Extract<DecodedRecord, { kind: "live" }> => record.kind === "live")
+              .map((record) => record.value)
+            frames += values.length
+            replayed += values.length
+            if (collect !== null) for (const value of values) collect.push(JSON.stringify(value))
+            yield { cursor: batch.cursor, values }
           }
         }
 
@@ -501,7 +569,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
             })
             throw new Error("yrd: journal v4 mutation refused: unsupported platform win32")
           }
-          return append(runtime, exclusive, frame, encoded, expectedCursor, thresholds)
+          return append(runtime, exclusive, encoded, expectedCursor, thresholds)
         },
       )
     },
@@ -510,11 +578,192 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
   return journal
 }
 
+export async function readArchivedOrphans(options: Readonly<{ dir: string }>): Promise<ArchivedOrphanSnapshot> {
+  const snapshot = await readRecordSnapshot(createJournalContext({ dir: options.dir }))
+  return {
+    cursor: snapshot.cursor,
+    records: snapshot.records
+      .filter(
+        (record): record is Extract<DecodedRecord, { kind: "archived-orphan" }> => record.kind === "archived-orphan",
+      )
+      .map((record) => record.value),
+  }
+}
+
+export async function importOrphanJournal(
+  options: Readonly<{ dir: string; sourcePath: string; importedBy: string; importedAt?: string }>,
+): Promise<OrphanJournalImportResult> {
+  const source = await readOrphanSource(options)
+  const context = createJournalContext({ dir: options.dir })
+  const encoded = encodeArchivedOrphans(source.records)
+
+  while (true) {
+    const snapshot = await readRecordSnapshot(context)
+    const archivedByOriginRow = new Map(
+      snapshot.records.flatMap((record) =>
+        record.kind === "archived-orphan" ? [[record.value.provenance["origin-row"], record.value] as const] : [],
+      ),
+    )
+    let existing = 0
+    for (const record of source.records) {
+      const archived = archivedByOriginRow.get(record.provenance["origin-row"])
+      if (archived === undefined) continue
+      if (digest(archived.frame) !== digest(record.frame)) {
+        throw new Error(`yrd: archived origin row '${record.provenance["origin-row"]}' has different payload`)
+      }
+      existing += 1
+    }
+    if (existing === source.records.length) {
+      return {
+        status: "already-imported",
+        cursor: snapshot.cursor,
+        records: source.records.length,
+        sourceSha256: source.sourceSha256,
+      }
+    }
+    if (existing > 0) throw new Error("yrd: orphan journal source was only partially archived")
+
+    const collisions = liveCollisions(snapshot.records, source.records)
+    if (collisions.length > 0) {
+      return {
+        status: "live-collision",
+        cursor: snapshot.cursor,
+        records: source.records.length,
+        sourceSha256: source.sourceSha256,
+        collisions,
+      }
+    }
+
+    if (context.platform === "win32") {
+      throw new Error("yrd: journal v4 mutation refused: unsupported platform win32")
+    }
+    const appended = await append(context.runtime, context.exclusive, encoded, snapshot.cursor, context.thresholds)
+    if (!appended.appended) continue
+    return {
+      status: "imported",
+      cursor: appended.cursor,
+      records: source.records.length,
+      sourceSha256: source.sourceSha256,
+    }
+  }
+}
+
+async function readRecordSnapshot(
+  context: JournalContext,
+): Promise<Readonly<{ cursor: number; records: readonly DecodedRecord[] }>> {
+  const snapshot = await context.exclusive.run(() => acquireReadSnapshot(context.runtime, 0))
+  const records: DecodedRecord[] = []
+  try {
+    for (const part of snapshot.parts) {
+      const logicalStart = part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart
+      const end = Math.min(snapshot.before, part.kind === "segment" ? part.descriptor.logicalEnd : part.logicalEnd)
+      if (logicalStart >= end) continue
+      const bytes =
+        part.kind === "tail"
+          ? await readExactly(part.file, 0, end - logicalStart, context.runtime.io)
+          : (await readSegment(part.descriptor, part.file, context.runtime.io)).subarray(0, end - logicalStart)
+      for await (const batch of decode([bytes], logicalStart, join(context.runtime.dir, partPath(part)))) {
+        records.push(...batch.records)
+      }
+    }
+    return { cursor: snapshot.before, records }
+  } finally {
+    await closeParts(snapshot.parts)
+  }
+}
+
+async function readOrphanSource(
+  options: Readonly<{ sourcePath: string; importedBy: string; importedAt?: string }>,
+): Promise<Readonly<{ records: readonly ArchivedOrphanRecord[]; sourceSha256: string }>> {
+  const bytes = await readFile(options.sourcePath)
+  if (bytes.length === 0) throw new Error("yrd: orphan journal source is empty")
+  if (bytes.at(-1) !== 10) throw new Error("yrd: orphan journal source must be newline-terminated")
+
+  const records: ArchivedOrphanRecord[] = []
+  const identities = new Set<string>()
+  const importedAt = options.importedAt ?? new Date().toISOString()
+  let start = 0
+  while (start < bytes.length) {
+    const newline = bytes.indexOf(10, start)
+    if (newline < 0) throw new Error("yrd: orphan journal source must be newline-terminated")
+    const end = newline + 1
+    let raw: unknown
+    try {
+      raw = JSON.parse(bytes.subarray(start, newline).toString("utf8"))
+    } catch (cause) {
+      throw new Error(`yrd: invalid orphan journal JSON at byte ${start}`, { cause })
+    }
+    const stored = StoredFrameSchema.parse(raw)
+    const frame = decodeStoredFrame(stored)
+    for (const identity of frameIdentities(frame)) {
+      if (identities.has(identity.id)) {
+        throw new Error(`yrd: orphan journal source contains duplicate identity '${identity.id}'`)
+      }
+      identities.add(identity.id)
+    }
+    records.push(
+      ArchivedOrphanRecordSchema.parse({
+        kind: "archived-orphan",
+        provenance: {
+          "origin-lane": "v3-phantom",
+          "origin-file": options.sourcePath,
+          "origin-row": frame.command.id,
+          "imported-at": importedAt,
+          "imported-by": options.importedBy,
+          "collision-policy": "refuse",
+        },
+        frame: stored,
+      }),
+    )
+    start = end
+  }
+  return { records, sourceSha256: sha256(bytes) }
+}
+
+function frameIdentities(frame: JournalFrame): ArchivedOrphanCollision[] {
+  return [
+    { kind: "command", id: frame.command.id },
+    { kind: "cause", id: frame.cause.id },
+    ...frame.events.map((event) => ({ kind: "event" as const, id: event.id })),
+  ]
+}
+
+function payloadIdentity(frame: JournalFrame): string {
+  return digest({
+    command: {
+      op: frame.command.op,
+      ...(frame.command.args === undefined ? {} : { args: frame.command.args }),
+    },
+    events: frame.events.map((event) => ({ name: event.name, data: event.data })),
+    ...(frame.value === undefined ? {} : { value: frame.value }),
+  })
+}
+
+function liveCollisions(
+  records: readonly DecodedRecord[],
+  archive: readonly ArchivedOrphanRecord[],
+): ArchivedOrphanCollision[] {
+  const liveIds = new Set(
+    records.flatMap((record) => (record.kind === "live" ? frameIdentities(record.value).map((value) => value.id) : [])),
+  )
+  const livePayloads = new Set(
+    records.flatMap((record) => (record.kind === "live" ? [payloadIdentity(record.value)] : [])),
+  )
+  const collisions = archive.flatMap((record) => {
+    const frame = decodeStoredFrame(record.frame)
+    const identities = frameIdentities(frame).filter((identity) => liveIds.has(identity.id))
+    const payload = payloadIdentity(frame)
+    return livePayloads.has(payload) ? [...identities, { kind: "payload" as const, id: payload }] : identities
+  })
+  return [
+    ...new Map(collisions.map((collision) => [`${collision.kind}:${collision.id}`, collision])).values(),
+  ].toSorted((left, right) => left.kind.localeCompare(right.kind) || left.id.localeCompare(right.id))
+}
+
 async function append(
   runtime: Runtime,
   exclusive: Exclusive,
-  frame: JournalFrame,
-  encoded: Readonly<{ bytes: Buffer; checksum: string }>,
+  encoded: EncodedRecords,
   expectedCursor: number,
   thresholds: Readonly<{ bytes: number; frames: number }>,
 ) {
@@ -625,12 +874,7 @@ async function writableState(
   return { active }
 }
 
-async function appendFrame(
-  runtime: Runtime,
-  active: ActiveState,
-  encoded: Readonly<{ bytes: Buffer; checksum: string }>,
-  expectedCursor: number,
-) {
+async function appendFrame(runtime: Runtime, active: ActiveState, encoded: EncodedRecords, expectedCursor: number) {
   if (active.state.logicalEnd !== expectedCursor) {
     return { appended: false as const, cursor: active.state.logicalEnd }
   }
@@ -645,7 +889,7 @@ async function appendFrame(
       tailIdentity: active.manifest.tail.identity,
       committedBytes: active.state.committedBytes + encoded.bytes.length,
       logicalEnd: active.state.logicalEnd + encoded.bytes.length,
-      frames: active.state.frames + 1,
+      frames: active.state.frames + encoded.records,
       lastChecksum: encoded.checksum,
     })
     await runtime.phase("before-tail-state-replace", {
@@ -695,7 +939,10 @@ async function buildCandidate(
     }
   }
   if (raw.at(-1) !== 10) throw new Error("yrd: committed journal tail is not newline-terminated")
-  const values = await decodeValues(raw, logicalStart, sourceTailIdentity)
+  const records = await decodeRecords(raw, logicalStart, sourceTailIdentity)
+  const values = records
+    .filter((record): record is Extract<DecodedRecord, { kind: "live" }> => record.kind === "live")
+    .map((record) => record.value)
   const compressed = gzipSync(raw, { level: 9 })
   const rawSha256 = sha256(raw)
   const compressedSha256 = sha256(compressed)
@@ -709,7 +956,7 @@ async function buildCandidate(
     logicalStart,
     logicalEnd: logicalStart + raw.length,
     rawBytes: raw.length,
-    frames: values.length,
+    frames: records.length,
     generationCreated,
     sourceGeneration,
     sourceTailIdentity,
@@ -1027,7 +1274,7 @@ async function rollbackGeneration(runtime: Runtime, recovery: Recovery, cause: u
     await loadActive(runtime)
   } else if (recovery.sourceV3Path !== null) {
     const legacy = await readLegacy(runtime, false)
-    await decodeValues(legacy.raw, 0, recovery.sourceV3Path)
+    await decodeRecords(legacy.raw, 0, recovery.sourceV3Path)
   }
 
   runtime.log.error?.("journal generation verification failed; previous authority restored", {
@@ -1691,7 +1938,7 @@ async function* decode(
   chunks: AsyncIterable<Uint8Array> | Iterable<Uint8Array>,
   start: number,
   path: string,
-): AsyncIterable<{ cursor: number; values: readonly unknown[] }> {
+): AsyncIterable<{ cursor: number; records: readonly DecodedRecord[] }> {
   let buffer = Buffer.alloc(0)
   let cursor = start
   for await (const chunk of chunks) {
@@ -1705,26 +1952,26 @@ async function* decode(
       throw corrupt(path, cursor + parsed.read, "invalid JSON", parsed.error ?? undefined)
     }
 
-    let values: unknown[]
+    let records: DecodedRecord[]
     try {
-      values = parsed.values.map(decodeFrame)
+      records = parsed.values.map(decodeRecord)
     } catch (cause) {
-      const detail = cause instanceof Error ? cause.message : "invalid frame"
+      const detail = cause instanceof Error ? cause.message : "invalid record"
       throw corrupt(path, cursor, detail, cause)
     }
     cursor += committed.length
     buffer = buffer.subarray(newline + 1)
-    if (values.length > 0) yield { cursor, values }
+    if (records.length > 0) yield { cursor, records }
   }
 }
 
-async function decodeValues(raw: Buffer, start: number, path: string): Promise<unknown[]> {
-  const values: unknown[] = []
-  for await (const batch of decode([raw], start, path)) values.push(...batch.values)
-  return values
+async function decodeRecords(raw: Buffer, start: number, path: string): Promise<DecodedRecord[]> {
+  const records: DecodedRecord[] = []
+  for await (const batch of decode([raw], start, path)) records.push(...batch.records)
+  return records
 }
 
-function encode(value: JournalFrame): Readonly<{ bytes: Buffer; checksum: string }> {
+function encode(value: JournalFrame): EncodedRecords {
   const data = {
     v: VERSION,
     cause: value.cause,
@@ -1733,10 +1980,36 @@ function encode(value: JournalFrame): Readonly<{ bytes: Buffer; checksum: string
     ...(value.value === undefined ? {} : { value: value.value }),
   }
   const checksum = digest(data)
-  return { bytes: Buffer.from(`${JSON.stringify({ ...data, checksum })}\n`), checksum }
+  return { bytes: Buffer.from(`${JSON.stringify({ ...data, checksum })}\n`), checksum, records: 1 }
 }
 
-function decodeFrame(value: unknown) {
+function encodeArchivedOrphan(value: ArchivedOrphanRecord): EncodedRecords {
+  const data = { v: VERSION, ...value }
+  const checksum = digest(data)
+  return { bytes: Buffer.from(`${JSON.stringify({ ...data, checksum })}\n`), checksum, records: 1 }
+}
+
+function encodeArchivedOrphans(values: readonly ArchivedOrphanRecord[]): EncodedRecords {
+  const encoded = values.map(encodeArchivedOrphan)
+  const last = encoded.at(-1)
+  if (last === undefined) throw new Error("yrd: orphan journal source contains no records")
+  return { bytes: Buffer.concat(encoded.map((value) => value.bytes)), checksum: last.checksum, records: encoded.length }
+}
+
+function decodeRecord(value: unknown): DecodedRecord {
+  const stored = StoredRecordSchema.parse(value)
+  if ("kind" in stored) {
+    const { v: _version, checksum, ...record } = stored
+    if (checksum !== digest({ v: VERSION, ...record })) {
+      throw new Error("yrd: archived orphan record checksum mismatch")
+    }
+    validateArchivedOrphan(record)
+    return { kind: "archived-orphan", value: record }
+  }
+  return { kind: "live", value: decodeStoredFrame(stored) }
+}
+
+function decodeStoredFrame(value: unknown): JournalFrame {
   const stored = StoredFrameSchema.parse(value)
   const { checksum, ...data } = stored
   if (checksum !== digest(data)) throw new Error("yrd: journal frame checksum mismatch")
@@ -1746,6 +2019,13 @@ function decodeFrame(value: unknown) {
     events: stored.events,
     ...(stored.value === undefined ? {} : { value: stored.value }),
   })
+}
+
+function validateArchivedOrphan(record: ArchivedOrphanRecord): void {
+  const frame = decodeStoredFrame(record.frame)
+  if (record.provenance["origin-row"] !== frame.command.id) {
+    throw new Error("yrd: archived orphan origin row does not match the source command")
+  }
 }
 
 function parseFrame(value: unknown): JournalFrame {

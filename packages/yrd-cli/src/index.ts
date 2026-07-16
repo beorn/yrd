@@ -9,6 +9,7 @@ export type {
   YrdCliApp,
   YrdCliExitCode,
   YrdCliIO,
+  YrdCliJournalAdministration,
   YrdCliQueueAdministration,
   YrdCliServices,
   YrdCliState,
