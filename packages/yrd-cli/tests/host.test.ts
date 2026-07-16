@@ -119,6 +119,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       name: "check",
       config: { run: "bun run check", runner: "local" as const },
       timeoutMs: 60_000,
+      noProgressMs: 600_000,
       toolchain,
     }
     const baseline = queueStepRevision(input)
@@ -2067,6 +2068,32 @@ notify:
     expect(await git(repo, "status", "--porcelain")).toBe("")
   })
 
+  it("fails a check that emits then goes silent as a stall instead of wedging the queue behind a live child", async () => {
+    const { repo, featureSha } = await repository()
+    // Emit one banner line (arms the progress lease), then hold silent far
+    // longer than the declared no-progress bound while still well under the
+    // wall-clock bound: the wedge signature from the 2026-07-16 R423 incident,
+    // where the candidate vitest printed its RUN header then produced nothing.
+    const command = "printf 'RUN v1\\n'; sleep 30"
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  noProgressMs: 400\n  timeoutMs: 30000\n`,
+    )
+
+    await using host = await createYrdHost({ cwd: repo })
+    await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
+
+    expect(run.status).toBe("failed")
+    const failedJob = run.steps.find((step) => step.job?.status === "failed")?.job
+    if (failedJob?.status !== "failed") throw new Error("expected a stalled check job")
+    expect(failedJob.error).toMatchObject({ code: "check-stalled" })
+    const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
+    expect(evidence).toMatchObject({ stageVerdict: "STALLED" })
+    // A stall must not merge: the wedged candidate never reached the queue tip.
+    expect(await git(repo, "rev-parse", "main")).not.toBe(featureSha)
+  }, 20_000)
+
   it("reports a failed queue against origin when the operator HEAD is detached", async () => {
     const { repo, featureSha } = await repository()
     await writeFile(
@@ -2404,5 +2431,34 @@ describe("stepTimeoutMs — the ONE default wall-clock bound for local step comm
     expect(stepTimeoutMs({ run: "x", runner: "local" })).toBe(DEFAULT_STEP_TIMEOUT_MS)
     expect(stepTimeoutMs({ run: "x", runner: "waiting" })).toBe(DEFAULT_STEP_TIMEOUT_MS)
     expect(stepTimeoutMs({ run: "x", runner: "local", timeoutMs: 1_234 })).toBe(1_234)
+  })
+})
+
+describe("stepNoProgressMs — the no-output-progress bound that stalls a silent child (queue wedge guard)", () => {
+  it("applies the default when a step declares no bound, and the declared bound when it does", async () => {
+    const { DEFAULT_STEP_NO_PROGRESS_MS, stepNoProgressMs } = await import("../src/host.ts")
+    expect(stepNoProgressMs({ run: "x", runner: "local" })).toBe(DEFAULT_STEP_NO_PROGRESS_MS)
+    expect(stepNoProgressMs({ run: "x", runner: "waiting" })).toBe(DEFAULT_STEP_NO_PROGRESS_MS)
+    expect(stepNoProgressMs({ run: "x", runner: "local", noProgressMs: 4_321 })).toBe(4_321)
+  })
+
+  it("defaults strictly below the wall-clock bound so silence fails as a stall before the coarse timeout", async () => {
+    const { DEFAULT_STEP_NO_PROGRESS_MS, DEFAULT_STEP_TIMEOUT_MS } = await import("../src/host.ts")
+    expect(DEFAULT_STEP_NO_PROGRESS_MS).toBeLessThan(DEFAULT_STEP_TIMEOUT_MS)
+  })
+
+  it("binds the no-progress bound into the queue step revision identity", () => {
+    const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
+    const input = {
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "check",
+      config: { run: "bun run check", runner: "local" as const },
+      timeoutMs: 60_000,
+      noProgressMs: 600_000,
+      toolchain,
+    }
+    const baseline = queueStepRevision(input)
+    expect(queueStepRevision({ ...input, noProgressMs: 120_000 })).not.toBe(baseline)
   })
 })

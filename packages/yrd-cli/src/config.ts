@@ -44,6 +44,9 @@ const StepObjectSchema = z
     environment: TextSchema.optional(),
     /** Declarative per-step wall-clock bound; absent = the host default applies (21012 S1 — never silently unbounded). */
     timeoutMs: z.number().int().min(1).optional(),
+    /** Declarative per-step no-output-progress bound; absent = the host default applies. A child that emits its banner
+     * then goes SILENT for this long fails LOUDLY as `<step>-stalled` instead of wedging the queue behind a live child. */
+    noProgressMs: z.number().int().min(1).optional(),
   })
   .strict()
 const StepSchema = z.preprocess((value) => (typeof value === "string" ? { run: value } : value), StepObjectSchema)

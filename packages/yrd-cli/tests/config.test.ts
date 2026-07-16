@@ -123,3 +123,24 @@ check: { run: bun run check, timeoutMs: 0 }
     ).toThrow()
   })
 })
+
+describe("Yrd config — step noProgressMs (a silent child must stall, never wedge the queue)", () => {
+  it("accepts a declarative per-step noProgressMs and threads it through parsing", () => {
+    const parsed = parseYrdConfig(
+      Bun.YAML.parse(`
+check: { run: bun run check, noProgressMs: 600000 }
+`),
+    )
+    expect(parsed.definitions.check).toEqual({ run: "bun run check", runner: "local", noProgressMs: 600_000 })
+  })
+
+  it("rejects a nonsense no-progress bound instead of silently accepting it", () => {
+    expect(() =>
+      parseYrdConfig(
+        Bun.YAML.parse(`
+check: { run: bun run check, noProgressMs: 0 }
+`),
+      ),
+    ).toThrow()
+  })
+})
