@@ -260,44 +260,51 @@ function QueueWorkflowStepTabs({
     )
   }
   return (
-    <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
-      <TabList>
-        {names.map((name) => (
-          <Tab key={name} value={name}>
-            {stepTabLabel(name)}
-          </Tab>
-        ))}
-      </TabList>
-      {names.map((name) => {
-        const stepRows = data.steps.filter((row) => row.step === name)
-        const stepOutputs = outputs.filter((output) => output.step === name)
-        const stepData: QueueShowData = { ...data, steps: stepRows }
-        const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
-        return (
-          <TabPanel key={name} value={name}>
-            {/* The selected tab is the step's title (item G, 2026-07-16): the
-                old `ACTIVE STEP <name>` line was redundant with the tab. */}
-            <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} />
-            <Accordion
-              title="LOG"
-              expanded={logExpanded}
-              onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
-              marginTop={1}
-              flexGrow={1}
-              minHeight={0}
-            >
-              {stepOutputs.length === 0 ? (
-                <Text color="$fg-muted">Waiting for first output…</Text>
-              ) : (
-                <Box minHeight={8} flexGrow={1}>
-                  <QueueArtifactOutputView outputs={stepOutputs} />
-                </Box>
-              )}
-            </Accordion>
-          </TabPanel>
-        )
-      })}
-    </Tabs>
+    // Detail order (item H, 2026-07-16): run-level facts at the TOP, then the
+    // step TABS row, then the selected step's content BELOW — the tab is the
+    // visual title of the step section, so step title + step contents read as
+    // one grouped unit.
+    <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+      <QueueShowView data={data} compact={compact} highlightPr={highlightPr} section="run" />
+      <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
+        <TabList>
+          {names.map((name) => (
+            <Tab key={name} value={name}>
+              {stepTabLabel(name)}
+            </Tab>
+          ))}
+        </TabList>
+        {names.map((name) => {
+          const stepRows = data.steps.filter((row) => row.step === name)
+          const stepOutputs = outputs.filter((output) => output.step === name)
+          const stepData: QueueShowData = { ...data, steps: stepRows }
+          const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
+          return (
+            <TabPanel key={name} value={name}>
+              {/* Only the step-level facts here (item H); the run-level facts
+                  render once above the tabs. */}
+              <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} section="steps" />
+              <Accordion
+                title="LOG"
+                expanded={logExpanded}
+                onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
+                marginTop={1}
+                flexGrow={1}
+                minHeight={0}
+              >
+                {stepOutputs.length === 0 ? (
+                  <Text color="$fg-muted">Waiting for first output…</Text>
+                ) : (
+                  <Box minHeight={8} flexGrow={1}>
+                    <QueueArtifactOutputView outputs={stepOutputs} />
+                  </Box>
+                )}
+              </Accordion>
+            </TabPanel>
+          )
+        })}
+      </Tabs>
+    </Box>
   )
 }
 

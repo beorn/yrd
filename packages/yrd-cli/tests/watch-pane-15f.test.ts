@@ -100,4 +100,27 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       app.unmount()
     }
   })
+
+  it("orders the detail as run facts → step tabs → step content, with extra step fields (items H/J)", async () => {
+    const snapshot = queueTimelineStories["detail-full"].snapshot
+    const app = createRenderer({ cols: 120, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      app.press("\r")
+      await app.waitForLayoutStable()
+      await waitFor(() => app.text.includes("STEP integrate#"))
+      const lines = app.text.split("\n")
+      const runFactsY = lines.findIndex((l) => l.includes("RUN R") && l.includes("OUTCOME"))
+      const tabsY = lines.findIndex((l) => l.includes("check") && l.includes("integrate") && !l.includes("STEP"))
+      const stepContentY = lines.findIndex((l) => l.includes("STEP integrate#"))
+      // H: run-level facts sit ABOVE the step tabs, which sit ABOVE the step content.
+      expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
+      expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
+      expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
+      // J: the per-step line surfaces the revision field (REV).
+      expect(lines[stepContentY]).toContain("REV")
+    } finally {
+      app.unmount()
+    }
+  })
 })

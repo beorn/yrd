@@ -4058,59 +4058,116 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
 // stacked label/value rows that always fit the pane width — never a
 // horizontally sprawling table. Only present facts render; timestamps share
 // the timeline's local clock convention; `X@X` landings dedupe to one SHA.
-function CompactQueueShowView({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
+/**
+ * The compact run/step detail. `section` splits it for the workflow-step tabs
+ * (user directive 2026-07-16, item H): `"run"` renders the run-level facts (+
+ * LANDING/NEXT) once above the tabs, `"steps"` renders per-step facts under the
+ * selected tab, `"all"` (default) renders everything in order for non-tab
+ * contexts. Field completeness (item J): PARENT/ISO run facts and per-step
+ * REV/DETAIL/LOST are surfaced; subprocess-derived strings (ERROR, DETAIL,
+ * LOST, EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data keeps its
+ * colors without crashing the event loop.
+ */
+function CompactQueueShowView({
+  data,
+  highlightPr,
+  section = "all",
+}: {
+  data: QueueShowData
+  highlightPr?: string
+  section?: "run" | "steps" | "all"
+}) {
   const durations = [
     ["TOTAL", presentFact(data.totalDuration)] as const,
     ["ACTIVE", presentFact(data.activeDuration)] as const,
     ["WAIT", presentFact(data.waitDuration)] as const,
   ].filter(([, value]) => value !== undefined)
+  const runFacts = section !== "steps"
+  const stepFacts = section !== "run"
+  const parent = presentFact(data.parent)
+  const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   return (
     <Box flexDirection="column">
-      <Text bold wrap="truncate">
-        RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
-      </Text>
-      <Text wrap="truncate">
-        BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
-      </Text>
-      <Text wrap="truncate">
-        START {detailClock(data.started)}
-        {presentFact(data.finished) === undefined ? "" : ` END ${detailClock(data.finished)}`}
-      </Text>
-      {durations.length === 0 ? null : (
-        <Text wrap="truncate">{durations.map(([label, value]) => `${label} ${value}`).join(" ")}</Text>
-      )}
-      {data.steps.map((row) => {
-        const error = presentFact(row.errorCode)
-        const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
-        return (
-          <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
-            <Text wrap="truncate">
-              STEP {row.step}#{row.attempt} {row.status}
-              {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
-              {error === undefined ? "" : ` ERROR ${error}`}
+      {runFacts ? (
+        <>
+          <Text bold wrap="truncate">
+            RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
+          </Text>
+          <Text wrap="truncate">
+            BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
+          </Text>
+          <Text wrap="truncate">
+            START {detailClock(data.started)}
+            {presentFact(data.finished) === undefined ? "" : ` END ${detailClock(data.finished)}`}
+          </Text>
+          {durations.length === 0 ? null : (
+            <Text wrap="truncate">{durations.map(([label, value]) => `${label} ${value}`).join(" ")}</Text>
+          )}
+          {parent === undefined && isolation === undefined ? null : (
+            <Text wrap="truncate" color="$fg-muted">
+              {parent === undefined ? "" : `PARENT ${parent}`}
+              {parent !== undefined && isolation !== undefined ? " " : ""}
+              {isolation === undefined ? "" : `ISO ${isolation}`}
             </Text>
-            <QueueStepLifecycleView row={row} />
-            {row.locations.length === 0 && evidence === undefined ? null : (
-              <Text wrap="truncate">
-                PROOF
-                {row.locations.length === 0 ? null : (
-                  <>
-                    {" ART "}
-                    <QueueLogLocationLinks entries={row.locations} compact={false} />
-                  </>
+          )}
+        </>
+      ) : null}
+      {stepFacts
+        ? data.steps.map((row) => {
+            const error = presentFact(row.errorCode)
+            const detail = presentFact(row.detail)
+            const lost = presentFact(row.lost)
+            const revision = presentFact(row.revision)
+            const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
+            return (
+              <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
+                <Text wrap="truncate">
+                  STEP {row.step}#{row.attempt} {row.status}
+                  {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
+                  {revision === undefined ? "" : ` REV ${revision.slice(0, 12)}`}
+                </Text>
+                {error === undefined ? null : (
+                  <Text wrap="truncate" color="$fg-error" bgConflict="ignore">
+                    ERROR {error}
+                  </Text>
                 )}
-                {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
-              </Text>
-            )}
-          </Box>
-        )
-      })}
-      {presentFact(data.landing) === undefined ? null : (
-        <Text wrap="truncate">
-          LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
-        </Text>
-      )}
-      <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+                {detail === undefined ? null : (
+                  <Text wrap="truncate" color="$fg-muted" bgConflict="ignore">
+                    DETAIL {detail}
+                  </Text>
+                )}
+                {lost === undefined ? null : (
+                  <Text wrap="truncate" color="$fg-warning" bgConflict="ignore">
+                    LOST {lost}
+                  </Text>
+                )}
+                <QueueStepLifecycleView row={row} />
+                {row.locations.length === 0 && evidence === undefined ? null : (
+                  <Text wrap="truncate" bgConflict="ignore">
+                    PROOF
+                    {row.locations.length === 0 ? null : (
+                      <>
+                        {" ART "}
+                        <QueueLogLocationLinks entries={row.locations} compact={false} />
+                      </>
+                    )}
+                    {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
+                  </Text>
+                )}
+              </Box>
+            )
+          })
+        : null}
+      {runFacts ? (
+        <>
+          {presentFact(data.landing) === undefined ? null : (
+            <Text wrap="truncate">
+              LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+            </Text>
+          )}
+          <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+        </>
+      ) : null}
     </Box>
   )
 }
@@ -4119,12 +4176,15 @@ export function QueueShowView({
   data,
   compact = false,
   highlightPr,
+  section = "all",
 }: {
   data: QueueShowData
   compact?: boolean
   highlightPr?: string
+  /** Compact-only: split run-level vs step-level facts for the step tabs (item H). */
+  section?: "run" | "steps" | "all"
 }) {
-  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} />
+  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} section={section} />
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />
