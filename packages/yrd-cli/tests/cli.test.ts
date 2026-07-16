@@ -3231,7 +3231,7 @@ describe("runYrd", () => {
     ])
   })
 
-  it("renders every batched PR revision as its own settled queue line", async () => {
+  it("renders every batched PR revision as its own settled queue row", async () => {
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const submittedAt = "2026-07-13T11:30:00.000Z"
     const finishedAt = "2026-07-13T11:50:00.000Z"
@@ -3311,24 +3311,24 @@ describe("runYrd", () => {
         plain: true,
       }),
     )
-    const lines = rendered.split("\n").filter(Boolean)
-    const header = lines.find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("PR"))
+    const rows = rendered.split("\n").filter(Boolean)
+    const header = rows.find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("PR"))
     expect(header).toBeDefined()
     for (const label of ["TIME", "STATUS", "RUN", "PR", "BY", "AGE"]) expect(header).toContain(label)
     // STEP folded into the PR cell (item Q), so it is no longer a header column.
     for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) expect(header).not.toContain(removed)
-    const first = lines.find((line) => line.includes("PR1.1"))
-    const second = lines.find((line) => line.includes("PR2.1"))
+    const first = rows.find((row) => row.includes("PR1.1"))
+    const second = rows.find((row) => row.includes("PR2.1"))
     expect(first).toContain("main#1")
     expect(first).toContain("@cto")
     expect(second).toContain("main#1")
     expect(second).toContain("@agent/3")
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
-    expect(lines.indexOf(lines.find((line) => line.trimStart().startsWith("FILTER "))!)).toBe(
-      lines.indexOf(header!) - 1,
+    expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(
+      rows.indexOf(header!) - 1,
     )
-    expect(lines.findIndex((line) => line.includes("STATS"))).toBeGreaterThan(lines.indexOf(second!))
+    expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(rows.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3623,13 +3623,13 @@ describe("runYrd", () => {
           { width, height: 30, plain: true },
         ),
       )
-      const lines = fixed.split("\n")
-      const filter = lines.find((line) => line.includes("FILTER "))
+      const rows = fixed.split("\n")
+      const filter = rows.find((row) => row.includes("FILTER "))
       expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
-      const flow = lines.find((line) => line.includes("FLOW "))
+      const flow = rows.find((row) => row.includes("FLOW "))
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
-      expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
-      const header = lines.find((line) => line.includes("TIME") && line.includes("PR"))
+      expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
+      const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).not.toContain("STEP")
       expect(header).toContain("AGE")
       expect(header?.trimEnd()).toMatch(/RUN$/u)
@@ -3642,7 +3642,7 @@ describe("runYrd", () => {
       // The BY submitter column drops first on the narrow tier.
       if (width === 80) expect(header).not.toContain("BY")
       else expect(header).toContain("BY")
-      const integratedLine = lines.find((line) => line.includes("PR1.1"))
+      const integratedLine = rows.find((row) => row.includes("PR1.1"))
       expect(integratedLine).toBeDefined()
       // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
       // date-qualified but never truncated below seconds.
@@ -3668,7 +3668,7 @@ describe("runYrd", () => {
         ["×", "PR3.1"],
         ["✓", "PR2.1"],
       ] as const) {
-        const row = styled.lines.findIndex((line) => line.includes(anchor))
+        const row = styled.lines.findIndex((row) => row.includes(anchor))
         expect(row, anchor).toBeGreaterThan(0)
         const column = styled.lines[row]?.indexOf(glyph) ?? -1
         expect(column, `${anchor} marker`).toBeGreaterThanOrEqual(0)
@@ -4085,7 +4085,7 @@ describe("runYrd", () => {
           .stdout()
           .trimEnd()
           .split("\n")
-          .map((line) => JSON.parse(line) as Record<string, unknown>),
+          .map((row) => JSON.parse(row) as Record<string, unknown>),
       ).toEqual([expected])
     }
 
@@ -6211,7 +6211,7 @@ describe("runYrd", () => {
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((line) => /\bPR2[23]\b/u.test(line))
+      const physicalRows = human.split("\n").filter((row) => /\bPR2[23]\b/u.test(row))
       expect(physicalRows).toHaveLength(2)
       // Rendered in Asia/Kolkata (+5:30): 11:01:16Z → 16:31:16, 23:59:58Z → next local day 05:29:58.
       expect(physicalRows[0]).toContain("2026-07-12T16:31:16")

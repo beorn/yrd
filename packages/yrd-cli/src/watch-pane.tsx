@@ -270,7 +270,7 @@ function QueueWorkflowStepTabs({
   // Each step tab label carries the step's status glyph + duration (item I,
   // #undead re-report 2026-07-16): e.g. `✓ check 55s`. The glyph is colorized by
   // status; the name + duration inherit the Tab's own active/inactive highlight
-  // so the selected step stays visible (the removed `ACTIVE STEP` line, item G).
+  // so the selected step stays visible (the removed `ACTIVE STEP` row, item G).
   const stepTabLabel = (name: string) => {
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
@@ -552,7 +552,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by a plain flush-top identity line naming the selected row
+  // is headed by a plain flush-top identity title naming the selected row
   // (`<run> <PR>.<rev> <branch>`), never the word "DETAIL". One cell of
   // horizontal padding keeps content off the pane edge; the header rows sit
   // flush at the top.

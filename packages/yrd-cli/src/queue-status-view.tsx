@@ -2625,9 +2625,9 @@ function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): Time
 }
 
 /**
- * The DETAIL pane's flush-top identity line for a selected row (item M,
+ * The DETAIL pane's flush-top identity title for a selected row (item M,
  * 2026-07-16): `<run> <PR>.<rev> <branch-glyph> <branch>` — e.g.
- * `main#488 PR359.2  task/rss…`. Reads like the row, not the word "DETAIL".
+ * `main#488 PR359.2  topic/rss…`. Reads like the row, not the word "DETAIL".
  */
 export function queueRowIdentity(row: QueueTimelineProjectedRow): string {
   return `${timelineRunCell(row, false).text} ${row.pr}.${row.revision} ${branchLabel(row.branch)}`
@@ -3379,7 +3379,7 @@ function ProjectedQueueTimeline({
         {paneChrome ? (
           // Pane chrome (item L, 2026-07-16): the QUEUE pane is headed by its
           // tab-style label (no surrounding box); the `updated` clock rides the
-          // right of that same tab line (item C — flush with the QUEUE tab),
+          // right of that same tab row (item C — flush with the QUEUE tab),
           // and the anchored-freshness `N new` cue sits between them.
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
             <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
@@ -3401,7 +3401,7 @@ function ProjectedQueueTimeline({
         )}
         <TimelineRunnerBox projection={projection} />
         <TimelineStatusBox projection={projection} />
-        {/* A blank line sets the FILTER row apart from the boxes above it
+        {/* A blank row sets the FILTER row apart from the boxes above it
             (user directive 2026-07-16). */}
         <Box height={1} flexShrink={0} />
         <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />

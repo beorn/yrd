@@ -90,7 +90,7 @@ describe("queue timeline storybook", () => {
       term.screen
         .getText()
         .split("\n")
-        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("PR"))
+        .find((row) => row.includes("TIME") && row.includes("STATUS") && row.includes("PR"))
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
@@ -284,7 +284,7 @@ describe("queue timeline storybook", () => {
         })
         expect(rendered, name).toContain(`QUEUE ${projection.base}`)
         expect(
-          Math.max(...rendered.split("\n").map((line) => line.length)),
+          Math.max(...rendered.split("\n").map((row) => row.length)),
           `${name} at ${width} columns`,
         ).toBeLessThanOrEqual(width)
       }
@@ -305,7 +305,7 @@ describe("queue timeline storybook", () => {
   it("surfaces the latest revision submitter in the wide BY column and hides it on the narrow tier", async () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
-      frame.split("\n").find((line) => line.includes("TIME") && line.includes("RUN") && line.includes("PR"))
+      frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
       height: 24,

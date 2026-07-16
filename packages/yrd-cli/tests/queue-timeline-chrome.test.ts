@@ -97,7 +97,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("renders the column header white+bold, the PR id always bold, and a blank line above FILTER", async () => {
+  it("renders the column header white+bold, the PR id always bold, and a blank row above FILTER", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -119,7 +119,7 @@ describe("queue timeline chrome 21106", () => {
       expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
       // D: the row directly above FILTER is blank.
       const filterY = rowIndexOf(text, "FILTER ")
-      expect(rowAt(text, filterY - 1).trim(), "blank line above FILTER").toBe("")
+      expect(rowAt(text, filterY - 1).trim(), "blank row above FILTER").toBe("")
     } finally {
       app.unmount()
     }
@@ -304,11 +304,11 @@ describe("queue timeline chrome 21106", () => {
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
-      const lines = app.text.split("\n")
+      const rows = app.text.split("\n")
       for (const label of ["RUNNER", "STATS"]) {
-        const topY = lines.findIndex((l) => l.includes(`╭─ ${label} `))
+        const topY = rows.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
-        const topLine = lines[topY]
+        const topLine = rows[topY]
         if (topLine === undefined) throw new Error(`${label} top border row missing`)
         const titleX = topLine.indexOf(label)
         // A rounded top-right corner closes this box's border row after the
@@ -325,9 +325,9 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("heads the QUEUE pane with a tab line carrying the updated clock and sibling tabs (items L + C)", async () => {
+  it("heads the QUEUE pane with a tab row carrying the updated clock and sibling tabs (items L + C)", async () => {
     // The QUEUE pane is headed by its tab-style label (item L); the `updated`
-    // clock rides that same tab line (item C — flush with the QUEUE tab), and
+    // clock rides that same tab row (item C — flush with the QUEUE tab), and
     // sibling bases render as their own tabs — no surrounding box border.
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
@@ -335,9 +335,9 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
       const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
-      // The QUEUE tab line itself carries the sibling tab and the updated clock.
-      expect(queueLine, "QUEUE tab line carries the sibling tab").toContain("release/")
-      expect(queueLine, "updated rides the QUEUE tab line").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+      // The QUEUE tab row itself carries the sibling tab and the updated clock.
+      expect(queueLine, "QUEUE tab row carries the sibling tab").toContain("release/")
+      expect(queueLine, "updated rides the QUEUE tab row").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
       // No rounded box border around the QUEUE pane.
       expect(app.text).not.toContain("╭─ QUEUE")
     } finally {

@@ -16,7 +16,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
       const tabLine = app.text
         .split("\n")
-        .find((line) => line.includes("prepare") && line.includes("check") && line.includes("integrate"))
+        .find((row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"))
       expect(tabLine, app.text).toBeDefined()
       expect(app.text).toContain("STEP check#")
       expect(app.text).not.toContain("STEP prepare#")
@@ -43,11 +43,11 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       await app.press("ArrowRight")
       await waitFor(() => app.text.includes("STEP integrate#"))
 
-      const lines = app.text.split("\n")
-      const tabsY = lines.findIndex(
-        (line) => line.includes("prepare") && line.includes("check") && line.includes("integrate"),
+      const rows = app.text.split("\n")
+      const tabsY = rows.findIndex(
+        (row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"),
       )
-      const tabsLine = lines[tabsY]
+      const tabsLine = rows[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
       // The tab bar sits below the run header + PRS disclosure, so it can share a
       // text row with a left-pane timeline cell that also reads `…:check`. Anchor
@@ -85,11 +85,11 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STEP check#"))
-      const lines = app.text.split("\n")
-      const tabsY = lines.findIndex(
-        (line) => line.includes("prepare") && line.includes("check") && line.includes("integrate"),
+      const rows = app.text.split("\n")
+      const tabsY = rows.findIndex(
+        (row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"),
       )
-      const tabsLine = lines[tabsY] ?? ""
+      const tabsLine = rows[tabsY] ?? ""
       // Durations ride the tab labels (e.g. `check 7m`) — the tab bar carries at
       // least one duration token, which the old bare name-only labels lacked.
       expect(tabsLine, tabsLine).toMatch(/\d+(?:m|s|:\d{2})/u)
@@ -114,16 +114,16 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       app.press("\r")
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STEP integrate#"))
-      const lines = app.text.split("\n")
-      const runFactsY = lines.findIndex((l) => l.includes("RUN R") && l.includes("OUTCOME"))
-      const tabsY = lines.findIndex((l) => l.includes("check") && l.includes("integrate") && !l.includes("STEP"))
-      const stepContentY = lines.findIndex((l) => l.includes("STEP integrate#"))
+      const rows = app.text.split("\n")
+      const runFactsY = rows.findIndex((l) => l.includes("RUN R") && l.includes("OUTCOME"))
+      const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("integrate") && !l.includes("STEP"))
+      const stepContentY = rows.findIndex((l) => l.includes("STEP integrate#"))
       // H: run-level facts sit ABOVE the step tabs, which sit ABOVE the step content.
       expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
       expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
       expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
-      // J: the per-step line surfaces the revision field (REV).
-      expect(lines[stepContentY]).toContain("REV")
+      // J: the per-step row surfaces the revision field (REV).
+      expect(rows[stepContentY]).toContain("REV")
     } finally {
       app.unmount()
     }
