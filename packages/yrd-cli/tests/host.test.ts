@@ -135,6 +135,71 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     }
   })
 
+  it("activates projection checkpoints for the complete built-in projector stack", async () => {
+    const { repo, featureSha } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const checkpointPath = join(stateDir, "projection-checkpoint-v1.json")
+    const events: unknown[] = []
+    const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => events.push(value) }])
+    const messages = () =>
+      events.flatMap((value) =>
+        typeof value === "object" && value !== null && "message" in value ? [String(value.message)] : [],
+      )
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 1,
+      steps: ["check", "merge"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" }, merge: { runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const createApp = () =>
+      createDefaultYrdApp({
+        repo,
+        stateDir,
+        baysRoot: join(repo, ".bays"),
+        journal: createJournal({ dir: stateDir, inject: { log } }),
+        process: runtimeProcess,
+        config,
+        log,
+      })
+
+    try {
+      const first = await createApp()
+      await first.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await first.close()
+
+      expect(messages()).not.toContain(
+        "projection checkpoint identity could not be derived; replaying journal authority",
+      )
+      expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
+      expect(existsSync(checkpointPath)).toBe(true)
+      const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8")) as { checkpoint: { cursor: number } }
+
+      events.length = 0
+      const restored = await createApp()
+      try {
+        expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature", headSha: featureSha })
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            kind: "span",
+            namespace: "test:core:replay",
+            props: expect.objectContaining({ fromCursor: checkpoint.checkpoint.cursor }),
+          }),
+        )
+      } finally {
+        await restored.close()
+      }
+      expect(messages()).not.toContain(
+        "projection checkpoint identity could not be derived; replaying journal authority",
+      )
+      expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
+    } finally {
+      log.end()
+    }
+  })
+
   it("composes the final plugin stack and integrates through configured typed steps", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {

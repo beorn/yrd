@@ -123,6 +123,7 @@ export function withContests(options: WithContestsOptions): ContestPlugin {
         "contest/promotion/requested": PromotionRequestSchema,
         "contest/promoted": PromotedSchema,
       },
+      projectionVersion: "contests-v1",
       project: projectContests,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
