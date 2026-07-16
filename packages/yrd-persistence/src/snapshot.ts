@@ -25,6 +25,7 @@ import * as z from "zod"
 
 export const SNAPSHOT_FILE = "snapshot-v4.json"
 export const SNAPSHOT_SCHEMA_VERSION = 1
+export const CORE_CHECKPOINT_SCHEMA_VERSION = 1
 /** Rewrite the snapshot only once this many frames were replayed beyond it. */
 export const SNAPSHOT_REFRESH_FRAMES = 200
 
@@ -60,6 +61,15 @@ const SnapshotBindingSchema = z
   })
   .strict()
 
+const CoreCheckpointHeaderSchema = z
+  .object({
+    v: z.literal(CORE_CHECKPOINT_SCHEMA_VERSION),
+    identity: z.string().min(1),
+    cursor: IntegerSchema,
+    valueSha256: DigestSchema,
+  })
+  .strict()
+
 const SnapshotHeaderPayloadSchema = z
   .object({
     v: z.literal(SNAPSHOT_SCHEMA_VERSION),
@@ -67,12 +77,14 @@ const SnapshotHeaderPayloadSchema = z
     cursor: IntegerSchema,
     frames: IntegerSchema,
     valuesSha256: DigestSchema,
+    checkpoint: CoreCheckpointHeaderSchema.optional(),
   })
   .strict()
 
 const SnapshotFileSchema = SnapshotHeaderPayloadSchema.extend({
   digest: DigestSchema,
   values: z.array(z.unknown()),
+  checkpointValue: z.unknown().optional(),
 }).strict()
 
 /** The journal identity a snapshot must match, derived from the active manifest + tail state. */
@@ -91,6 +103,12 @@ export type SnapshotBindingView = Readonly<{
   }>[]
 }>
 
+export type SnapshotCheckpoint = Readonly<{
+  identity: string
+  cursor: number
+  value: unknown
+}>
+
 export type SnapshotParseResult =
   | Readonly<{
       ok: true
@@ -99,6 +117,7 @@ export type SnapshotParseResult =
       values: readonly unknown[]
       valuesJson: string
       tailPrefixSha256: string
+      checkpoint?: SnapshotCheckpoint
     }>
   | Readonly<{ ok: false; reason: string; expected?: unknown; observed?: unknown }>
 
@@ -124,7 +143,7 @@ export function parseSnapshotFile(text: string, view: SnapshotBindingView): Snap
   if (!parsed.success) {
     return { ok: false, reason: "snapshot-envelope-invalid", observed: parsed.error.message }
   }
-  const { digest: checksum, values, ...payload } = parsed.data
+  const { digest: checksum, values, checkpointValue, ...payload } = parsed.data
   const expectedChecksum = digestOf(payload)
   if (checksum !== expectedChecksum) {
     return { ok: false, reason: "snapshot-header-checksum", expected: expectedChecksum, observed: checksum }
@@ -136,6 +155,37 @@ export function parseSnapshotFile(text: string, view: SnapshotBindingView): Snap
   }
   if (values.length !== payload.frames) {
     return { ok: false, reason: "snapshot-frame-count", expected: payload.frames, observed: values.length }
+  }
+  const hasCheckpointValue = Object.hasOwn(parsed.data, "checkpointValue")
+  if ((payload.checkpoint === undefined) !== !hasCheckpointValue) {
+    return { ok: false, reason: "snapshot-checkpoint-envelope" }
+  }
+  let checkpoint: SnapshotCheckpoint | undefined
+  if (payload.checkpoint !== undefined) {
+    const checkpointJson = JSON.stringify(checkpointValue)
+    if (checkpointJson === undefined) return { ok: false, reason: "snapshot-checkpoint-json" }
+    const observed = sha256Utf8(checkpointJson)
+    if (observed !== payload.checkpoint.valueSha256) {
+      return {
+        ok: false,
+        reason: "snapshot-checkpoint-checksum",
+        expected: payload.checkpoint.valueSha256,
+        observed,
+      }
+    }
+    if (payload.checkpoint.cursor > payload.cursor) {
+      return {
+        ok: false,
+        reason: "snapshot-checkpoint-ahead",
+        expected: `<= ${payload.cursor}`,
+        observed: payload.checkpoint.cursor,
+      }
+    }
+    checkpoint = {
+      identity: payload.checkpoint.identity,
+      cursor: payload.checkpoint.cursor,
+      value: checkpointValue,
+    }
   }
   const binding = payload.binding
   if (binding.decoder !== view.decoder) {
@@ -209,6 +259,7 @@ export function parseSnapshotFile(text: string, view: SnapshotBindingView): Snap
     values,
     valuesJson,
     tailPrefixSha256: binding.tailPrefixSha256,
+    ...(checkpoint === undefined ? {} : { checkpoint }),
   }
 }
 
@@ -219,6 +270,7 @@ export function encodeSnapshotFile(
     frames: number
     valuesJson: string
     tailPrefixSha256: string
+    checkpoint?: SnapshotCheckpoint
   }>,
 ): string {
   const binding = SnapshotBindingSchema.parse({
@@ -236,16 +288,31 @@ export function encodeSnapshotFile(
       compressedSha256: segment.compressedSha256,
     })),
   })
+  let checkpointJson: string | undefined
+  const checkpoint =
+    input.checkpoint === undefined
+      ? undefined
+      : (() => {
+          checkpointJson = JSON.stringify(input.checkpoint.value)
+          if (checkpointJson === undefined) throw new TypeError("yrd: snapshot checkpoint must be JSON data")
+          return CoreCheckpointHeaderSchema.parse({
+            v: CORE_CHECKPOINT_SCHEMA_VERSION,
+            identity: input.checkpoint.identity,
+            cursor: input.checkpoint.cursor,
+            valueSha256: sha256Utf8(checkpointJson),
+          })
+        })()
   const payload = SnapshotHeaderPayloadSchema.parse({
     v: SNAPSHOT_SCHEMA_VERSION,
     binding,
     cursor: input.cursor,
     frames: input.frames,
     valuesSha256: sha256Utf8(input.valuesJson),
+    ...(checkpoint === undefined ? {} : { checkpoint }),
   })
   const header = JSON.stringify({ ...payload, digest: digestOf(payload) })
   // Splice the pre-serialized values in so large payloads are stringified exactly once.
-  return `${header.slice(0, -1)},"values":${input.valuesJson}}\n`
+  return `${header.slice(0, -1)},"values":${input.valuesJson}${checkpointJson === undefined ? "" : `,"checkpointValue":${checkpointJson}`}}\n`
 }
 
 /** Extend a serialized values array ("[...]") with additional pre-serialized values. */

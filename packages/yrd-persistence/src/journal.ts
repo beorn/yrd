@@ -23,6 +23,7 @@ import {
   joinValuesJson,
   parseSnapshotFile,
   type SnapshotBindingView,
+  type SnapshotCheckpoint,
 } from "./snapshot.ts"
 
 const VERSION = 3
@@ -218,7 +219,14 @@ type ReadSnapshot = Readonly<{
 }>
 
 type SnapshotCache =
-  | Readonly<{ kind: "hit"; cursor: number; frames: number; values: readonly unknown[]; valuesJson: string }>
+  | Readonly<{
+      kind: "hit"
+      cursor: number
+      frames: number
+      values: readonly unknown[]
+      valuesJson: string
+      checkpoint?: SnapshotCheckpoint
+    }>
   | Readonly<{ kind: "miss" }>
   | Readonly<{ kind: "invalid" }>
   | Readonly<{ kind: "bypass" }>
@@ -249,7 +257,71 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
     },
   }
 
-  return {
+  const checkpoint: NonNullable<Journal<unknown>["checkpoint"]> = {
+    async load(identity) {
+      const snapshot = await exclusive.run(() => acquireReadSnapshot(runtime, 0))
+      try {
+        if (snapshot.active === null) return undefined
+        const cache = await loadSnapshotCache(runtime, snapshot, false)
+        if (cache.kind !== "hit" || cache.checkpoint === undefined) return undefined
+        if (cache.checkpoint.identity !== identity) {
+          log.warn?.("journal projection checkpoint identity changed; replaying journal authority", {
+            action: "full-replay",
+            reason: "checkpoint-identity-mismatch",
+            path: join(runtime.dir, SNAPSHOT_FILE),
+            expected: identity,
+            observed: cache.checkpoint.identity,
+          })
+          return undefined
+        }
+        log.debug?.("journal projection checkpoint served the cold projection", {
+          action: "snapshot-hit",
+          path: join(runtime.dir, SNAPSHOT_FILE),
+          cursor: cache.checkpoint.cursor,
+          cachedFrames: cache.frames,
+          replayedFrames: 0,
+        })
+        return structuredClone(cache.checkpoint)
+      } finally {
+        await closeParts(snapshot.parts)
+      }
+    },
+    async save(checkpoint) {
+      assertCursor(checkpoint.cursor)
+      const load = async () => {
+        const snapshot = await exclusive.run(() => acquireReadSnapshot(runtime, 0, checkpoint.cursor))
+        if (snapshot.active === null) {
+          await closeParts(snapshot.parts)
+          return undefined
+        }
+        const cache = await loadSnapshotCache(runtime, snapshot, false)
+        return { snapshot, cache }
+      }
+
+      let loaded = await load()
+      if (loaded === undefined) return false
+      if (loaded.cache.kind !== "hit" || loaded.cache.cursor !== checkpoint.cursor) {
+        await closeParts(loaded.snapshot.parts)
+        for await (const _batch of journal.read(0, checkpoint.cursor)) {
+          // Drain once so a missing/invalid decoded-frame cache is rebuilt from journal authority.
+        }
+        loaded = await load()
+        if (loaded === undefined) return false
+      }
+      try {
+        if (loaded.cache.kind !== "hit" || loaded.cache.cursor !== checkpoint.cursor) return false
+        return await writeSnapshotCache(runtime, loaded.snapshot.active!, loaded.snapshot.parts, checkpoint.cursor, {
+          base: loaded.cache,
+          chunks: [],
+          replayed: 0,
+          checkpoint,
+        })
+      } finally {
+        await closeParts(loaded.snapshot.parts)
+      }
+    },
+  }
+  const journal: Journal<unknown> = {
     async *read(after = 0, before) {
       assertCursor(after)
       if (before !== undefined) assertCursor(before)
@@ -394,6 +466,8 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
       )
     },
   }
+  Object.defineProperty(journal, "checkpoint", { value: checkpoint, enumerable: false })
+  return journal
 }
 
 async function append(
@@ -950,7 +1024,11 @@ function snapshotBindingView(active: ActiveState): SnapshotBindingView {
  * make the caller fall back to a full replay plus an atomic rewrite; only a
  * plain missing file (normal first run) stays quiet at debug level.
  */
-async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Promise<SnapshotCache> {
+async function loadSnapshotCache(
+  runtime: Runtime,
+  snapshot: ReadSnapshot,
+  reportInvalid = true,
+): Promise<SnapshotCache> {
   const active = snapshot.active
   if (active === null) throw new Error("yrd: the journal snapshot cache requires an active v4 generation")
   const path = join(runtime.dir, SNAPSHOT_FILE)
@@ -965,25 +1043,29 @@ async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Prom
       })
       return { kind: "miss" }
     }
-    runtime.log.warn?.("journal snapshot cache unreadable; falling back to full replay", {
-      action: "full-replay",
-      reason: "snapshot-unreadable",
-      path,
-      error: error instanceof Error ? error.message : String(error),
-    })
+    if (reportInvalid) {
+      runtime.log.warn?.("journal snapshot cache unreadable; falling back to full replay", {
+        action: "full-replay",
+        reason: "snapshot-unreadable",
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
     return { kind: "invalid" }
   }
 
   const view = snapshotBindingView(active)
   const parsed = parseSnapshotFile(text, view)
   if (!parsed.ok) {
-    runtime.log.warn?.("journal snapshot cache invalid; falling back to full replay and rewriting", {
-      action: "full-replay",
-      reason: parsed.reason,
-      path,
-      ...(parsed.expected === undefined ? {} : { expected: parsed.expected }),
-      ...(parsed.observed === undefined ? {} : { observed: parsed.observed }),
-    })
+    if (reportInvalid) {
+      runtime.log.warn?.("journal snapshot cache invalid; falling back to full replay and rewriting", {
+        action: "full-replay",
+        reason: parsed.reason,
+        path,
+        ...(parsed.expected === undefined ? {} : { expected: parsed.expected }),
+        ...(parsed.observed === undefined ? {} : { observed: parsed.observed }),
+      })
+    }
     return { kind: "invalid" }
   }
   if (parsed.cursor > snapshot.before) {
@@ -1004,14 +1086,16 @@ async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Prom
     if (part.kind !== "segment") continue
     const compressed = await readWhole(part.file, runtime.io)
     if (sha256(compressed) !== part.descriptor.compressedSha256) {
-      runtime.log.warn?.("journal snapshot cache rejected: covered segment bytes changed on disk", {
-        action: "full-replay",
-        reason: "snapshot-covered-segment-checksum",
-        path,
-        segment: part.descriptor.path,
-        expected: part.descriptor.compressedSha256,
-        observed: sha256(compressed),
-      })
+      if (reportInvalid) {
+        runtime.log.warn?.("journal snapshot cache rejected: covered segment bytes changed on disk", {
+          action: "full-replay",
+          reason: "snapshot-covered-segment-checksum",
+          path,
+          segment: part.descriptor.path,
+          expected: part.descriptor.compressedSha256,
+          observed: sha256(compressed),
+        })
+      }
       return { kind: "invalid" }
     }
   }
@@ -1024,14 +1108,16 @@ async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Prom
     const prefix = await readExactly(tail.file, 0, coveredTailBytes, runtime.io)
     const observed = sha256(prefix)
     if (observed !== parsed.tailPrefixSha256) {
-      runtime.log.warn?.("journal snapshot cache rejected: covered tail bytes changed on disk", {
-        action: "full-replay",
-        reason: "snapshot-covered-tail-checksum",
-        path,
-        expected: parsed.tailPrefixSha256,
-        observed,
-        coveredBytes: coveredTailBytes,
-      })
+      if (reportInvalid) {
+        runtime.log.warn?.("journal snapshot cache rejected: covered tail bytes changed on disk", {
+          action: "full-replay",
+          reason: "snapshot-covered-tail-checksum",
+          path,
+          expected: parsed.tailPrefixSha256,
+          observed,
+          coveredBytes: coveredTailBytes,
+        })
+      }
       return { kind: "invalid" }
     }
   }
@@ -1041,6 +1127,7 @@ async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Prom
     frames: parsed.frames,
     values: parsed.values,
     valuesJson: parsed.valuesJson,
+    ...(parsed.checkpoint === undefined ? {} : { checkpoint: parsed.checkpoint }),
   }
 }
 
@@ -1057,11 +1144,12 @@ async function writeSnapshotCache(
   parts: readonly ReadPart[],
   before: number,
   input: Readonly<{
-    base: Readonly<{ frames: number; valuesJson: string }> | null
+    base: Readonly<{ frames: number; valuesJson: string; checkpoint?: SnapshotCheckpoint }> | null
     chunks: readonly string[]
     replayed: number
+    checkpoint?: SnapshotCheckpoint
   }>,
-): Promise<void> {
+): Promise<boolean> {
   const path = join(runtime.dir, SNAPSHOT_FILE)
   try {
     const view = snapshotBindingView(active)
@@ -1077,7 +1165,15 @@ async function writeSnapshotCache(
     const valuesJson =
       input.base === null ? `[${input.chunks.join(",")}]` : joinValuesJson(input.base.valuesJson, input.chunks)
     const frames = (input.base?.frames ?? 0) + input.replayed
-    const text = encodeSnapshotFile({ view, cursor: before, frames, valuesJson, tailPrefixSha256 })
+    const checkpoint = input.checkpoint ?? input.base?.checkpoint
+    const text = encodeSnapshotFile({
+      view,
+      cursor: before,
+      frames,
+      valuesJson,
+      tailPrefixSha256,
+      ...(checkpoint === undefined ? {} : { checkpoint }),
+    })
     // A reader pinned across a concurrent compaction would bind to the replaced
     // generation; skip the write when the on-disk authority moved on (best effort —
     // a raced stale write is still caught loudly by binding validation on next read).
@@ -1089,7 +1185,7 @@ async function writeSnapshotCache(
         expectedGeneration: active.manifest.generation,
         observedGeneration: current?.manifest.generation ?? null,
       })
-      return
+      return false
     }
     await replaceDurable(runtime, SNAPSHOT_FILE, Buffer.from(text))
     runtime.log.debug?.("journal snapshot cache written", {
@@ -1099,6 +1195,7 @@ async function writeSnapshotCache(
       frames,
       replayedFrames: input.replayed,
     })
+    return true
   } catch (error) {
     // Loud but non-fatal by design: the read already returned correct data and the
     // journal stays authoritative; a failed cache write must not fail the caller.
@@ -1108,6 +1205,7 @@ async function writeSnapshotCache(
       path,
       error: error instanceof Error ? error.message : String(error),
     })
+    return false
   }
 }
 
