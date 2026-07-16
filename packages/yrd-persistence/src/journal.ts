@@ -599,6 +599,17 @@ export async function importOrphanJournal(
 
   while (true) {
     const snapshot = await readRecordSnapshot(context)
+    const collisions = liveCollisions(snapshot.records, source.records)
+    if (collisions.length > 0) {
+      return {
+        status: "live-collision",
+        cursor: snapshot.cursor,
+        records: source.records.length,
+        sourceSha256: source.sourceSha256,
+        collisions,
+      }
+    }
+
     const archivedByOriginRow = new Map(
       snapshot.records.flatMap((record) =>
         record.kind === "archived-orphan" ? [[record.value.provenance["origin-row"], record.value] as const] : [],
@@ -622,17 +633,6 @@ export async function importOrphanJournal(
       }
     }
     if (existing > 0) throw new Error("yrd: orphan journal source was only partially archived")
-
-    const collisions = liveCollisions(snapshot.records, source.records)
-    if (collisions.length > 0) {
-      return {
-        status: "live-collision",
-        cursor: snapshot.cursor,
-        records: source.records.length,
-        sourceSha256: source.sourceSha256,
-        collisions,
-      }
-    }
 
     if (context.platform === "win32") {
       throw new Error("yrd: journal v4 mutation refused: unsupported platform win32")

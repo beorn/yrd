@@ -126,6 +126,9 @@ describe("orphan journal import", () => {
           },
         ],
       })
+      const checkpoint = { identity: "test/archive-aware-v1", cursor: imported.cursor, value: { live: 1 } }
+      await expect(createJournal({ dir: f.dir }).checkpoint?.save(checkpoint)).resolves.toBe(true)
+      await expect(createJournal({ dir: f.dir }).checkpoint?.load(checkpoint.identity)).resolves.toEqual(checkpoint)
       await expect(readFile(f.sourcePath, "utf8")).resolves.toBe(source)
     } finally {
       await rm(f.root, { recursive: true, force: true })
@@ -217,7 +220,8 @@ describe("orphan journal import", () => {
   it("treats an exact source digest as an idempotent import", async () => {
     const f = await fixture()
     try {
-      await writeFile(f.sourcePath, v3Line(frame("idempotent")))
+      const orphan = frame("idempotent")
+      await writeFile(f.sourcePath, v3Line(orphan))
       const options = {
         dir: f.dir,
         sourcePath: f.sourcePath,
@@ -236,7 +240,12 @@ describe("orphan journal import", () => {
       })
       await expect(readArchivedOrphans({ dir: f.dir })).resolves.toMatchObject({
         cursor: first.cursor,
-        records: [{ provenance: { "origin-row": frame("idempotent").command.id } }],
+        records: [{ provenance: { "origin-row": orphan.command.id } }],
+      })
+      await accepted(createJournal({ dir: f.dir }), orphan, first.cursor)
+      await expect(importOrphanJournal(options)).resolves.toMatchObject({
+        status: "live-collision",
+        collisions: expect.arrayContaining([{ kind: "command", id: orphan.command.id }]),
       })
     } finally {
       await rm(f.root, { recursive: true, force: true })
