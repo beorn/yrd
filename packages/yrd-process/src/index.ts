@@ -11,6 +11,14 @@ export type ProcessRequest = Readonly<{
   /** Explicit inter-output silence lease. It starts with the first observed
    * byte, so queue or scheduler startup latency is not child-stall evidence. */
   noProgressTimeoutMs?: number
+  /** Bounded wait for the stdout/stderr pipe to reach EOF AFTER the direct
+   * child has EXITED. A descendant that escaped the process-group sweep (a
+   * setsid session leader the `-pid` signal cannot reach) can hold the pipe
+   * open past the child's death; awaiting that EOF is the queue wedge (run()
+   * never returns). Past this grace run() abandons the drain LOUDLY instead of
+   * hanging on a pipe only SIGKILL can free. Default:
+   * {@link DEFAULT_POST_EXIT_DRAIN_GRACE_MS}. */
+  postExitDrainGraceMs?: number
   signal?: AbortSignal
 }>
 
@@ -26,8 +34,18 @@ type ProcessResultBase = Readonly<{
   /**
    * Set when a settlement signal could not reach the process GROUP (non-ESRCH
    * kill failure) — descendants may survive; loud, never swallowed (21012 S1).
+   * Also set when the direct child never reaped after SIGKILL (a D-state or
+   * fully escaped tree) so run() had to stop awaiting its exit.
    */
   sweepFailure?: string
+  /**
+   * Set when the direct child EXITED yet a surviving descendant held the
+   * stdout/stderr pipe open past {@link ProcessRequest.postExitDrainGraceMs},
+   * so run() abandoned the drain rather than wedge on an EOF only SIGKILL can
+   * free. Loud, never swallowed — the queue surfaces it distinctly (the
+   * `<step>-stalled-escaped-descendant` blocker) from a plain output stall.
+   */
+  escapedDescendant?: boolean
 }>
 
 export type ProcessResult = ProcessResultBase &
@@ -79,12 +97,40 @@ type Spawned = Readonly<{
 
 export type Spawn = (argv: readonly string[], options: SpawnOptions) => Spawned
 
+/**
+ * Default bounded wait for the output pipe to reach EOF after the DIRECT child
+ * exits. A child's own buffered bytes are already in the pipe and read in a
+ * tight loop the moment it exits, so the ONLY thing that keeps a stream open
+ * past child exit is a SURVIVING DESCENDANT — the documented setsid-escapee
+ * residual class the `-pid` group sweep cannot reach. Awaiting that pipe
+ * unboundedly is the live queue wedge (50–56min hangs, 2026-07-15/16): run()
+ * binds its completion to the PID exit and abandons a still-open pipe after
+ * this grace. Generous enough that OS scheduling jitter never clips a real
+ * child's trailing bytes; tiny beside the wall-clock bound it backstops.
+ */
+export const DEFAULT_POST_EXIT_DRAIN_GRACE_MS = 2_000
+
+/**
+ * Default bound on how long run() awaits the DIRECT child's reap AFTER it has
+ * been SIGKILLed. The other way run() can wedge is `child.exited` never
+ * resolving — a child stuck in uninterruptible sleep (D-state) or a tree that
+ * fully escaped the signal. Generous by design: a real child reaps in
+ * microseconds after SIGKILL, so this only fires on a genuinely stuck one, at
+ * which point run() returns with a LOUD sweepFailure instead of hanging on a
+ * PID exit that is never coming. Deliberately decoupled from `killGraceMs` (the
+ * SIGTERM→SIGKILL escalation grace) so a tiny escalation grace cannot make the
+ * reap backstop fire on ordinary reap latency.
+ */
+export const DEFAULT_POST_KILL_REAP_GRACE_MS = 10_000
+
 export function createProcess(
   options: Readonly<{
     cwd?: string
     env?: NodeJS.ProcessEnv
     maxOutputBytes?: number
     killGraceMs?: number
+    postExitDrainGraceMs?: number
+    postKillReapGraceMs?: number
     inject?: Readonly<{
       scope?: Scope
       log?: ConditionalLogger
@@ -106,6 +152,14 @@ export function createProcess(
   const env = definedEnv(options.env ?? process.env)
   const maxOutputBytes = positiveInteger(options.maxOutputBytes ?? 16 * 1024 * 1024, "maxOutputBytes")
   const killGraceMs = positiveInteger(options.killGraceMs ?? 5_000, "killGraceMs")
+  const defaultPostExitDrainGraceMs = positiveInteger(
+    options.postExitDrainGraceMs ?? DEFAULT_POST_EXIT_DRAIN_GRACE_MS,
+    "postExitDrainGraceMs",
+  )
+  const postKillReapGraceMs = positiveInteger(
+    options.postKillReapGraceMs ?? DEFAULT_POST_KILL_REAP_GRACE_MS,
+    "postKillReapGraceMs",
+  )
   const closingSignal = new AbortController()
   const active = new Set<Promise<void>>()
   let closing = false
@@ -143,6 +197,13 @@ export function createProcess(
       ) {
         throw new RangeError("yrd: Process noProgressTimeoutMs must be a positive integer")
       }
+      if (
+        request.postExitDrainGraceMs !== undefined &&
+        (!Number.isSafeInteger(request.postExitDrainGraceMs) || request.postExitDrainGraceMs < 1)
+      ) {
+        throw new RangeError("yrd: Process postExitDrainGraceMs must be a positive integer")
+      }
+      const postExitDrainGraceMs = request.postExitDrainGraceMs ?? defaultPostExitDrainGraceMs
 
       // Keep the run scope independent: parent Scope disposal is child-first,
       // which would cancel this run's SIGKILL grace before close can drain it.
@@ -160,6 +221,8 @@ export function createProcess(
       let cancelTimeout: (() => void) | undefined
       let cancelProgressLease: (() => void) | undefined
       let cancelKill: (() => void) | undefined
+      let cancelReap: (() => void) | undefined
+      let cancelDrainGrace: (() => void) | undefined
       using span = log.span?.("run", { argv, cwd: request.cwd ?? cwd })
       try {
         const child = spawn(argv, {
@@ -206,11 +269,26 @@ export function createProcess(
             }
           }
         }
+        // Belt-and-suspenders backstop: `child.exited` never resolving is the
+        // OTHER way run() can wedge — a direct child stuck in uninterruptible
+        // sleep (D-state) or a tree that fully escaped SIGKILL. Once we have
+        // decided to kill it, bound how long we await its reap: after SIGKILL,
+        // one more grace, then stop awaiting the PID exit so run() returns with
+        // a LOUD sweepFailure instead of hanging on a child that never settles.
+        const forcedExit = Promise.withResolvers<number>()
+        let childSettled = false
         const terminate = (): void => {
           if (terminating) return
           terminating = true
           signalTree("SIGTERM")
-          cancelKill = runScope.timeout(() => signalTree("SIGKILL"), killGraceMs)
+          cancelKill = runScope.timeout(() => {
+            signalTree("SIGKILL")
+            cancelReap = runScope.timeout(() => {
+              if (childSettled) return
+              sweepFailure ??= `direct child did not exit within ${postKillReapGraceMs}ms after SIGKILL — may survive pid ${child.pid}; inspect and kill manually`
+              forcedExit.resolve(-1)
+            }, postKillReapGraceMs)
+          }, killGraceMs)
         }
         const onAbort = () => terminate()
         signal.addEventListener("abort", onAbort, { once: true })
@@ -227,9 +305,20 @@ export function createProcess(
           }
         }
         let outputError: unknown
+        // A stream drain we can abandon: aborted when a descendant holds the
+        // pipe open past the child's exit so the bounded reads stop waiting for
+        // an EOF that is never coming, returning the bytes captured so far.
+        const drainAbort = new AbortController()
         const capture = async (stream: ReadableStream<Uint8Array>, name: "stdout" | "stderr"): Promise<string> => {
           try {
-            return await readBounded(stream, maxOutputBytes, name, renewProgressLease, request.onOutput)
+            return await readBounded(
+              stream,
+              maxOutputBytes,
+              name,
+              renewProgressLease,
+              request.onOutput,
+              drainAbort.signal,
+            )
           } catch (error) {
             outputError ??= error
             terminate()
@@ -242,14 +331,60 @@ export function createProcess(
             terminate()
           }, request.timeoutMs)
         }
-        const [stdout, stderr, exitCode] = await Promise.all([
-          capture(child.stdout, "stdout"),
-          capture(child.stderr, "stderr"),
-          child.exited,
+        const capturesDone = Promise.all([capture(child.stdout, "stdout"), capture(child.stderr, "stderr")])
+
+        // Bind run()'s completion to the DIRECT child's PID exit — NOT to stream
+        // close. A descendant that escaped the group sweep can hold the pipe
+        // open indefinitely past the child's death; awaiting that EOF inside
+        // Promise.all is the wedge. The reap backstop guarantees this settles.
+        const exitCode = await Promise.race([
+          child.exited.then((code) => {
+            childSettled = true
+            return code
+          }),
+          forcedExit.promise,
         ])
+
+        // The command has settled (real exit, or forced after an unkillable
+        // child). Bound any residual pipe drain: a still-open stream now means a
+        // surviving descendant, so wait a bounded grace for a clean EOF, then
+        // abandon the read LOUDLY rather than hang.
+        let escapedDescendant = false
+        if (childSettled) {
+          const drainedCleanly = await new Promise<boolean>((resolve) => {
+            cancelDrainGrace = runScope.timeout(() => resolve(false), postExitDrainGraceMs)
+            void capturesDone.then(
+              () => resolve(true),
+              () => resolve(true),
+            )
+          })
+          cancelDrainGrace?.()
+          if (!drainedCleanly) {
+            escapedDescendant = true
+            stalled = true
+            log.warn?.("descendant held the output pipe open past child exit — abandoning drain", {
+              argv,
+              pid: child.pid,
+              postExitDrainGraceMs,
+            })
+            // The child is already dead; SIGKILL the leaked in-group descendants
+            // now (best-effort — a setsid escapee survives, which is why we also
+            // release our own read end below so run() returns regardless).
+            signalTree("SIGKILL")
+            drainAbort.abort()
+          }
+        } else {
+          // Forced settle: the child never reaped (sweepFailure already loud);
+          // the pipe is held by the live tree, so release our read end.
+          log.warn?.("abandoning output drain — direct child never settled after SIGKILL", { argv, pid: child.pid })
+          drainAbort.abort()
+        }
+        const [stdout, stderr] = await capturesDone
         signal.removeEventListener("abort", onAbort)
         cancelProgressLease?.()
+        cancelDrainGrace?.()
         cancelKill?.()
+        cancelReap?.()
         if (outputError !== undefined) throw outputError
         const result: ProcessResult = {
           exitCode,
@@ -263,6 +398,7 @@ export function createProcess(
           lastProgressAtMs,
           lastProgressBytes,
           ...(sweepFailure === undefined ? {} : { sweepFailure }),
+          ...(escapedDescendant ? { escapedDescendant: true } : {}),
         } as ProcessResult
         log.debug?.("process exited", {
           argv,
@@ -297,7 +433,9 @@ export function createProcess(
       } finally {
         cancelTimeout?.()
         cancelProgressLease?.()
+        cancelDrainGrace?.()
         cancelKill?.()
+        cancelReap?.()
         await runScope[Symbol.asyncDispose]()
       }
     },
@@ -306,19 +444,39 @@ export function createProcess(
   }
 }
 
+const ABANDONED = Symbol("drain-abandoned")
+
 async function readBounded(
   stream: ReadableStream<Uint8Array>,
   limit: number,
   name: "stdout" | "stderr",
   onProgress: (bytes: number) => void = () => {},
   onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => void = () => {},
+  abandon?: AbortSignal,
 ): Promise<string> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
+  // When the caller abandons the drain (a descendant is holding this pipe open
+  // past the child's exit), race each read against the abort so the loop stops
+  // waiting on an EOF that is never coming; cancel() releases our read end and
+  // resolves the pending read, keeping releaseLock() safe.
+  const abandoned: Promise<typeof ABANDONED> | undefined =
+    abandon === undefined
+      ? undefined
+      : new Promise((resolve) => {
+          if (abandon.aborted) return resolve(ABANDONED)
+          abandon.addEventListener("abort", () => resolve(ABANDONED), { once: true })
+        })
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      const next = reader.read()
+      const outcome = abandoned === undefined ? await next : await Promise.race([next, abandoned])
+      if (outcome === ABANDONED) {
+        await reader.cancel().catch(() => {})
+        return new TextDecoder().decode(Buffer.concat(chunks, size))
+      }
+      const { done, value } = outcome
       if (done) return new TextDecoder().decode(Buffer.concat(chunks, size))
       if (size + value.byteLength > limit) {
         await reader.cancel()
