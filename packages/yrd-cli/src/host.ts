@@ -421,7 +421,7 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
     defaultBase: options.config.base,
   })
   const base = pipe(
-    createYrdDef(),
+    createYrdDef({ projectionVersion: "yrd-cli-v1" }),
     withJobs({ definitions: [bayJobs, queue.jobDefs, contests.jobDefs] }),
     withIssues({
       sources: options.issueSources ?? [createKmIssueSource({ process: options.process, cwd: options.repo })],

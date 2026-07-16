@@ -1,7 +1,15 @@
-import { createHash } from "node:crypto"
-import { open, stat, type FileHandle } from "node:fs/promises"
+import { createHash, randomUUID } from "node:crypto"
+import { open, readFile, rename, stat, unlink, type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
-import { CauseSchema, Command, CommandSchema, EventSchema, JsonSchema, type Journal } from "@yrd/core"
+import {
+  CauseSchema,
+  Command,
+  CommandSchema,
+  EventSchema,
+  JsonSchema,
+  type Journal,
+  type JournalCheckpointStore,
+} from "@yrd/core"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
@@ -11,8 +19,18 @@ const VERSION = 3
 const SCAN_BYTES = 64 * 1024
 const WARN_BYTES = 10 * 1024 * 1024
 const WARN_FRAMES = 10_000
+const CHECKPOINT_VERSION = 1
+const CHECKPOINT_FILE = "projection-checkpoint-v1.json"
+const HexDigestSchema = z.string().regex(/^[0-9a-f]{64}$/)
 
 type JournalIO = Readonly<{
+  read(
+    file: FileHandle,
+    bytes: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<Readonly<{ bytesRead: number }>>
   write(
     file: FileHandle,
     bytes: Uint8Array,
@@ -24,6 +42,7 @@ type JournalIO = Readonly<{
 }>
 
 const defaultIO: JournalIO = {
+  read: (file, bytes, offset, length, position) => file.read(bytes, offset, length, position),
   write: (file, bytes, offset, length, position) => file.write(bytes, offset, length, position),
   datasync: (file) => file.datasync(),
 }
@@ -41,6 +60,17 @@ const StoredFrameSchema = z
 
 const JournalFrameSchema = StoredFrameSchema.omit({ v: true, checksum: true })
 type JournalFrame = z.infer<typeof JournalFrameSchema>
+const StoredCheckpointSchema = z
+  .object({
+    v: z.literal(CHECKPOINT_VERSION),
+    journalVersion: z.literal(VERSION),
+    identity: z.string().min(1),
+    cursor: z.number().int().nonnegative().refine(Number.isSafeInteger),
+    prefixSha256: HexDigestSchema,
+    value: JsonSchema,
+    digest: HexDigestSchema,
+  })
+  .strict()
 
 export function createJournal(
   options: Readonly<{
@@ -54,11 +84,43 @@ export function createJournal(
   }>,
 ): Journal<unknown> {
   const path = join(options.dir, "events-v3.jsonl")
+  const checkpointPath = join(options.dir, CHECKPOINT_FILE)
   const exclusive = options.inject?.exclusive ?? createExclusive(options.dir, options.lock)
   const io: JournalIO = { ...defaultIO, ...options.inject?.io }
   const log = options.inject?.log?.child("journal") ?? createLogger("yrd:journal")
 
-  return {
+  const checkpoint: JournalCheckpointStore = {
+    load(identity) {
+      return exclusive.run(async () => {
+        const stored = await readCheckpoint(checkpointPath)
+        if (stored === undefined) return undefined
+        if (stored.identity !== identity) throw new Error("yrd: projection checkpoint identity mismatch")
+        const prefixSha256 = await hashPrefix(path, stored.cursor, io)
+        if (prefixSha256 !== stored.prefixSha256) {
+          throw new Error("yrd: projection checkpoint journal binding mismatch")
+        }
+        return { identity: stored.identity, cursor: stored.cursor, value: stored.value }
+      })
+    },
+    save(value) {
+      return exclusive.run(async () => {
+        assertCursor(value.cursor)
+        const payload = {
+          v: CHECKPOINT_VERSION as const,
+          journalVersion: VERSION as const,
+          identity: value.identity,
+          cursor: value.cursor,
+          prefixSha256: await hashPrefix(path, value.cursor, io),
+          value: JsonSchema.parse(value.value),
+        }
+        const bytes = Buffer.from(JSON.stringify({ ...payload, digest: canonicalDigest(payload, "checkpoint") }))
+        await replaceDurable(checkpointPath, bytes, io)
+        await syncDirectory(options.dir)
+      })
+    },
+  }
+
+  const journal = {
     async *read(after = 0, before) {
       assertCursor(after)
       if (before !== undefined) assertCursor(before)
@@ -120,6 +182,67 @@ export function createJournal(
         }
       })
     },
+  }
+  Object.defineProperty(journal, "checkpoint", { value: checkpoint, enumerable: false })
+  return Object.freeze(journal) as Journal<unknown>
+}
+
+async function readCheckpoint(path: string): Promise<z.infer<typeof StoredCheckpointSchema> | undefined> {
+  let bytes: Buffer
+  try {
+    bytes = await readFile(path)
+  } catch (error) {
+    if (isMissing(error)) return undefined
+    throw error
+  }
+  const stored = StoredCheckpointSchema.parse(JSON.parse(bytes.toString("utf8")))
+  const { digest: expected, ...payload } = stored
+  if (canonicalDigest(payload, "checkpoint") !== expected) {
+    throw new Error("yrd: projection checkpoint metadata checksum mismatch")
+  }
+  return stored
+}
+
+async function hashPrefix(path: string, cursor: number, io: JournalIO): Promise<string> {
+  assertCursor(cursor)
+  const hash = createHash("sha256")
+  if (cursor === 0) return hash.digest("hex")
+  const file = await open(path, "r")
+  try {
+    const { size } = await file.stat()
+    if (size < cursor) throw new Error(`yrd: projection checkpoint cursor ${cursor} is past journal size ${size}`)
+    const bytes = Buffer.allocUnsafe(Math.min(SCAN_BYTES, cursor))
+    let position = 0
+    while (position < cursor) {
+      const length = Math.min(bytes.length, cursor - position)
+      const { bytesRead } = await io.read(file, bytes, 0, length, position)
+      if (bytesRead <= 0 || bytesRead > length) throw new Error("yrd: projection checkpoint hash made invalid progress")
+      hash.update(bytes.subarray(0, bytesRead))
+      position += bytesRead
+    }
+    return hash.digest("hex")
+  } finally {
+    await file.close()
+  }
+}
+
+async function replaceDurable(path: string, bytes: Buffer, io: JournalIO): Promise<void> {
+  const temp = `${path}.tmp-${randomUUID()}`
+  const file = await open(temp, "wx")
+  try {
+    await writeAll(file, bytes, 0, io)
+    await io.datasync(file)
+  } catch (error) {
+    await file.close().catch(() => undefined)
+    await unlink(temp).catch(() => undefined)
+    throw error
+  }
+  await file.close()
+  try {
+    await rename(temp, path)
+  } catch (error) {
+    await unlink(temp).catch(() => undefined)
+    throw error
   }
 }
 
@@ -184,8 +307,12 @@ function parseFrame(value: unknown): JournalFrame {
 }
 
 function digest(value: unknown): string {
+  return canonicalDigest(value, "journal frame")
+}
+
+function canonicalDigest(value: unknown, kind: string): string {
   const encoded = canonicalize(value)
-  if (encoded === undefined) throw new TypeError("yrd: journal frame must be canonical JSON data")
+  if (encoded === undefined) throw new TypeError(`yrd: ${kind} must be canonical JSON data`)
   return createHash("sha256").update(encoded).digest("hex")
 }
 

@@ -1,3 +1,5 @@
+import type { JsonValue } from "./domain.ts"
+
 export type Cursor = number
 
 export type JournalBatch<Value> = Readonly<{
@@ -7,9 +9,21 @@ export type JournalBatch<Value> = Readonly<{
 
 export type JournalAppend = Readonly<{ appended: true; cursor: Cursor }> | Readonly<{ appended: false; cursor: Cursor }>
 
+export type JournalCheckpoint = Readonly<{
+  identity: string
+  cursor: Cursor
+  value: JsonValue
+}>
+
+export type JournalCheckpointStore = Readonly<{
+  load(identity: string): Promise<JournalCheckpoint | undefined>
+  save(checkpoint: JournalCheckpoint): Promise<void>
+}>
+
 export type Journal<Value> = Readonly<{
   read(after?: Cursor, before?: Cursor): AsyncIterable<JournalBatch<Value>>
   append(value: Value, expectedCursor: Cursor): Promise<JournalAppend>
+  checkpoint?: JournalCheckpointStore
 }>
 
 export function createMemoryJournal<Value>(initial: readonly Value[] = []): Journal<Value> {
