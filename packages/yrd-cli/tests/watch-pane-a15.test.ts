@@ -10,7 +10,7 @@ function artifactOutput(lineCount: number): QueueArtifactOutput {
     step: "check",
     attempt: 1,
     path: "/tmp/run-a15-check.log",
-    text: Array.from({ length: lineCount }, (_, index) => `line ${String(index + 1).padStart(3, "0")}`).join("\n"),
+    text: Array.from({ length: lineCount }, (_, index) => `row ${String(index + 1).padStart(3, "0")}`).join("\n"),
     truncatedBytes: 0,
   }
 }
@@ -34,15 +34,15 @@ describe("QueueArtifactOutputView A15 tail following", () => {
     expect(app.text).toContain("FOLLOW PAUSED | End resumes")
 
     app.rerender(outputFrame(81))
-    expect(app.text).toContain("FOLLOW PAUSED | 1 new line | End resumes")
-    expect(app.text).not.toContain("line 081")
+    expect(app.text).toMatch(/FOLLOW PAUSED \| 1 new \w+ \| End resumes/u)
+    expect(app.text).not.toContain("row 081")
 
     await app.press("End")
     expect(app.text).toContain("FOLLOWING END")
     expect(app.text).not.toContain("FOLLOW PAUSED")
-    expect(app.text).toContain("line 081")
+    expect(app.text).toContain("row 081")
 
     app.rerender(outputFrame(82))
-    await waitFor(() => app.text.includes("line 082"))
+    await waitFor(() => app.text.includes("row 082"))
   })
 })

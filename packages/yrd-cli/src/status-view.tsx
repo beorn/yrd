@@ -62,7 +62,7 @@ export function StatusValue({ value, href }: { value: string; href?: string }) {
   )
 }
 
-function taskStatusColor(taskStatus: TaskStatus): string {
+export function taskStatusColor(taskStatus: TaskStatus): string {
   if (taskStatus === "wip") return "$fg-info"
   if (taskStatus === "blocked") return "$fg-error"
   if (taskStatus === "done") return "$fg-success"

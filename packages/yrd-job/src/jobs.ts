@@ -256,9 +256,50 @@ export const Job = Object.freeze({
   },
 
   terminal(job: DeepReadonly<Job>): boolean {
-    return job.status === "passed" || job.status === "failed" || job.status === "lost" || job.status === "canceled"
+    return isTerminalJobStatus(job.status)
   },
 })
+
+const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set(["passed", "failed", "lost", "canceled"])
+
+/** A Job status is terminal once no further transition can run: passed/failed/lost/canceled. */
+export function isTerminalJobStatus(status: Job["status"]): boolean {
+  return TERMINAL_JOB_STATUSES.has(status)
+}
+
+/**
+ * A transition guard rejected a Job change because the Job's current status did
+ * not permit it. Always thrown, never returned, so an invalid single-writer
+ * transition still fails loud. The carried `actual`/`expected` let a resident,
+ * multi-tenant runner tell a losable concurrent-settlement race (a peer moved
+ * the Job to a terminal state under it — see isConcurrentSettlementConflict)
+ * apart from a genuine programmer error, without matching on the message text.
+ */
+export class JobStateConflict extends Error {
+  readonly jobId: string
+  readonly actual: Job["status"]
+  readonly expected: string
+
+  constructor(jobId: string, actual: Job["status"], expected: string) {
+    super(`yrd: job '${jobId}' is ${actual}, not ${expected}`)
+    this.name = "JobStateConflict"
+    this.jobId = jobId
+    this.actual = actual
+    this.expected = expected
+  }
+}
+
+/**
+ * True when an error is a JobStateConflict whose Job had already reached a
+ * terminal status — i.e. a concurrent writer settled (canceled/passed/failed/
+ * lost) the Job between a runtime's snapshot and its action. This is a normal,
+ * losable race for a long-lived resident runner: skip and continue. A conflict
+ * against a still-live status (requested/running/waiting) is NOT losable — it
+ * signals a real invalid transition and must keep propagating (fail-loud).
+ */
+export function isConcurrentSettlementConflict(error: unknown): error is JobStateConflict {
+  return error instanceof JobStateConflict && isTerminalJobStatus(error.actual)
+}
 
 export type RunJobOptions = Readonly<{
   runner: string
@@ -789,7 +830,7 @@ function requireStatus<Status extends Job["status"]>(
   ...allowed: readonly Status[]
 ): asserts job is Extract<Job, { status: Status }> {
   if (!(allowed as readonly Job["status"][]).includes(job.status)) {
-    throw new Error(`yrd: job '${job.id}' is ${job.status}, not ${expected}`)
+    throw new JobStateConflict(job.id, job.status, expected)
   }
 }
 

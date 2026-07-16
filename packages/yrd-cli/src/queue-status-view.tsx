@@ -14,7 +14,7 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Divider, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
+import { Box, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -1319,6 +1319,15 @@ const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
   "other",
 ]
 
+/**
+ * The default timeline window is unbounded — show everything, no `since=`
+ * filter, unless the operator passes `--since` (user directive 2026-07-16).
+ * 100 years dwarfs any real queue history while keeping `now - window` inside
+ * the valid `Date` range (unlike `MAX_SAFE_INTEGER`, which overflows it). The
+ * FILTER row hides `since=` and coverage reads complete at this window.
+ */
+export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
+
 function terminalOutcome(run: QueueRun): QueueTerminalOutcome {
   if (run.status === "passed") return "integrated"
   const status = run.status as string
@@ -1698,7 +1707,13 @@ export function queueTimelineProjection(
     coverage: {
       requestedSince: since,
       ...(retainedSince === undefined ? {} : { retainedSince }),
-      complete: options.retainedSinceMs === undefined || options.retainedSinceMs <= sinceMs,
+      // An unbounded window shows every retained row, so coverage is complete
+      // by definition (the `now - window` cutoff would otherwise read as older
+      // than any retained record and falsely trip the incompleteness warning).
+      complete:
+        options.windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS ||
+        options.retainedSinceMs === undefined ||
+        options.retainedSinceMs <= sinceMs,
     },
     display: { limit, shown: Math.min(rows.length, limit), hidden: Math.max(0, rows.length - limit) },
     rows,
@@ -2226,7 +2241,8 @@ export function PRDetailView({
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
       <Text>
-        <Text bold>SOURCE</Text> {pr.branch} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text> {pr.headSha}
+        <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
+        {pr.headSha}
       </Text>
       <Text>
         <Text bold>BASE</Text> {pr.base}
@@ -2567,7 +2583,23 @@ const TIMELINE_CONTENT_CAP = 160
 // Fixed cells never clip arbitrarily; labels longer than this shorten at a
 // semantic boundary via fitTimelineLabel.
 const TIMELINE_STATE_CAP = 20
-const TIMELINE_TOTAL_GLYPH = "◷"
+/**
+ * Powerline branch glyph (U+E0A0), prefixed on every rendered branch name in
+ * the watch UI (user directive 2026-07-16), matching ag-code's `BRANCH_ICON`.
+ */
+const BRANCH_ICON = ""
+
+/** A branch name prefixed with the Powerline branch glyph. */
+function branchLabel(branch: string): string {
+  return `${BRANCH_ICON} ${branch}`
+}
+
+/**
+ * Stable no-op passed as ListView `onItemHover` so hovering a queue row does
+ * NOT move the cursor/selection (item P, 2026-07-16) — it overrides ListView's
+ * default hover→cursor. Click still selects via the default onSelect path.
+ */
+const NO_HOVER_SELECT = (): void => {}
 
 type TimelineCellLayout = Readonly<{
   timeWidth: number
@@ -2575,7 +2607,6 @@ type TimelineCellLayout = Readonly<{
   runWidth: number
   /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
   byWidth: number
-  stepWidth: number
   ageWidth: number
   runDurationWidth: number
   compact: boolean
@@ -2591,6 +2622,15 @@ function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): Time
   const match = /^R(\d+)$/u.exec(row.run)
   if (match === null) return { text: row.run }
   return { text: compact ? `#${match[1]}` : `${row.base}#${match[1]}` }
+}
+
+/**
+ * The DETAIL pane's flush-top identity title for a selected row (item M,
+ * 2026-07-16): `<run> <PR>.<rev> <branch-glyph> <branch>` — e.g.
+ * `main#488 PR359.2  topic/rss…`. Reads like the row, not the word "DETAIL".
+ */
+export function queueRowIdentity(row: QueueTimelineProjectedRow): string {
+  return `${timelineRunCell(row, false).text} ${row.pr}.${row.revision} ${branchLabel(row.branch)}`
 }
 
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
@@ -2676,9 +2716,8 @@ function timelineCellLayout(
     statusWidth: Math.max(6, ...rows.map((row) => timelineStatusCell(row).word.length + 2)),
     runWidth: Math.max(3, ...rows.map((row) => timelineRunCell(row, compact).text.length)),
     byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
-    stepWidth: Math.max(4, ...rows.map((row) => timelineStepCell(row).text.length)),
     ageWidth: Math.max(3, ...rows.map((row) => timelineAgeCell(row).length)),
-    runDurationWidth: Math.max(3, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length + 1))),
+    runDurationWidth: Math.max(3, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length))),
     compact,
     includeDate,
   }
@@ -2706,9 +2745,26 @@ export function queueTimelineDefaultCursorId(
 // The working disc pulses only in the live pane; the one-shot projection has
 // no app scope (and a static print cannot pulse), so it renders the same
 // glyph statically — byte-identical plain output either way.
+/**
+ * Live-activity pulse cadence, matched to ag-code's activity indicator (item O,
+ * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
+ * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
+ * period (900 ms) reproduces ag's blink. (ag additionally synchronizes every
+ * indicator to one global phase via `useSynchronizedPulse`; silvery's per-node
+ * timer is a close, primitive-native approximation — a shared-phase Pulse would
+ * be the exact match, tracked as a silvery follow-up.)
+ */
+const AG_PULSE_INTERVAL_MS = 900
+
 function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
   if (row.status === "running") {
-    if (live) return <Pulse colors={["$fg-info", "$fg-muted"]}>{row.glyph}</Pulse>
+    if (live) {
+      return (
+        <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS}>
+          {row.glyph}
+        </Pulse>
+      )
+    }
     return <Text color="$fg-info">{row.glyph}</Text>
   }
   return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
@@ -2731,7 +2787,6 @@ function TimelineCells({
   status,
   run,
   pr,
-  step,
   by,
   age,
   runDuration,
@@ -2743,7 +2798,6 @@ function TimelineCells({
   status: React.ReactNode
   run: React.ReactNode
   pr: React.ReactNode
-  step: React.ReactNode
   by: React.ReactNode
   age: React.ReactNode
   runDuration: React.ReactNode
@@ -2778,11 +2832,10 @@ function TimelineCells({
       <Box id={id("pr")} flexDirection="row" flexGrow={1} flexBasis={0} minWidth={12} overflow="hidden">
         {pr}
       </Box>
-      <Box id={id("step")} width={layout.stepWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
-        {step}
-      </Box>
       {layout.byWidth === 0 ? null : (
-        <Box id={id("by")} width={layout.byWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        // BY is left-aligned — header and cells (user directive 2026-07-16,
+        // supersedes the 15c right-aligned BY clause).
+        <Box id={id("by")} width={layout.byWidth} flexShrink={0} minWidth={0}>
           {by}
         </Box>
       )}
@@ -2797,13 +2850,15 @@ function TimelineCells({
   )
 }
 
-// Header (15c, split-label respec 2026-07-15): TIME | STATUS | RUN | PR |
-// STEP | BY | AGE | RUN — RUN(id) and PR are separate labels, each exactly
-// over its own column; the trailing bare RUN header belongs to the
-// run-duration column that replaced TOTAL.
+// Header: TIME | STATUS | RUN | PR | BY | AGE | RUN — RUN(id) and PR are
+// separate labels, each exactly over its own column; the trailing bare RUN
+// header belongs to the run-duration column. STEP was folded into the PR cell
+// (user directive 2026-07-16, item Q).
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
+  // The column header reads white + bold (user directive 2026-07-16) so it
+  // stands out above the muted row cells.
   const label = (text: string): React.ReactElement => (
-    <Text color="$fg-muted" wrap="truncate">
+    <Text color="$fg" bold wrap="truncate">
       {text}
     </Text>
   )
@@ -2814,7 +2869,6 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
       status={label("STATUS")}
       run={label("RUN")}
       pr={label("PR")}
-      step={label("STEP")}
       by={label("BY")}
       age={label("AGE")}
       runDuration={label("RUN")}
@@ -2871,21 +2925,26 @@ function TimelineProjectedRow({
         </Text>
       }
       pr={
+        // The flexible cell folds the removed STEP column in (user directive
+        // 2026-07-16, item Q): `PR.rev  <branch-glyph> <branch> (<status>)`.
+        // The PR+revision id stays bold (item F); the parenthesized suffix is
+        // the live step (running) or terminal failure code, colorized by state.
         <>
-          <Text bold={active} color={forcedFg} flexShrink={0}>
+          <Text bold color={forcedFg} flexShrink={0}>
             {row.pr}.{row.revision}
           </Text>
-          <Box paddingLeft={1} minWidth={0} overflow="hidden">
-            <Text bold={active} color={forcedFg} wrap="truncate" minWidth={0}>
-              {row.subject}
+          <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Text color={forcedFg} wrap="truncate" minWidth={0}>
+              {branchLabel(row.branch)}
             </Text>
+            {step.text === "" ? null : (
+              <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
+                {" "}
+                ({step.text})
+              </Text>
+            )}
           </Box>
         </>
-      }
-      step={
-        <Text color={forcedFg ?? step.color} wrap="truncate">
-          {step.text}
-        </Text>
       }
       by={
         <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
@@ -2894,19 +2953,18 @@ function TimelineProjectedRow({
       }
       age={<Text color={forcedFg ?? "$fg-muted"}>{timelineAgeCell(row)}</Text>}
       runDuration={
-        runDuration === "" ? (
-          <Text> </Text>
-        ) : (
-          <Text color={forcedFg}>
-            <Text color={forcedFg ?? "$fg-muted"}>{TIMELINE_TOTAL_GLYPH}</Text>
-            {runDuration}
-          </Text>
-        )
+        // Run duration: no clock glyph, just the dimmed time (user directive
+        // 2026-07-16, supersedes the 15c `◷`-carries-onto-RUN clause).
+        runDuration === "" ? <Text> </Text> : <Text color={forcedFg ?? "$fg-muted"}>{runDuration}</Text>
       }
     />
   )
 }
 
+// The QUEUE pane is headed by a TAB, not a titled box (user directive
+// 2026-07-16, item L): the primary tab reads `QUEUE <base>` and any sibling
+// bases follow as their own tabs, all in the canonical Silvery Tabs idiom the
+// detail step tabs use.
 function QueueTabsLine({
   base,
   siblings,
@@ -2916,30 +2974,17 @@ function QueueTabsLine({
   siblings: readonly string[]
   showLabel?: boolean
 }) {
-  if (siblings.length === 0) {
-    return (
-      <Text bold wrap="truncate">
-        {showLabel ? `QUEUE ${base}` : base}
-      </Text>
-    )
-  }
   return (
-    <Box flexDirection="row" flexShrink={0} minWidth={0}>
-      {showLabel ? (
-        <Box paddingRight={1} flexShrink={0}>
-          <Text bold>QUEUE</Text>
-        </Box>
-      ) : null}
-      <Tabs value={base} isActive={false}>
-        <TabList>
-          {[base, ...siblings].map((value) => (
-            <Tab key={value} value={value}>
-              {value}
-            </Tab>
-          ))}
-        </TabList>
-      </Tabs>
-    </Box>
+    <Tabs value={base} isActive={false}>
+      <TabList>
+        <Tab value={base}>{showLabel ? `QUEUE ${base}` : base}</Tab>
+        {siblings.map((value) => (
+          <Tab key={value} value={value}>
+            {value}
+          </Tab>
+        ))}
+      </TabList>
+    </Tabs>
   )
 }
 
@@ -2959,10 +3004,13 @@ function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: nu
 
 /**
  * The one title-in-border chrome idiom every watch box uses (user directive
- * 2026-07-15): a name-in-border title over a round box with no top edge —
- * the same style the STATS box established. `fill` makes the frame stretch to
- * its parent (pane usage); `padding` widens the inner content padding from the
- * single-row default (`paddingX=1`).
+ * 2026-07-16): a FULL round border (all four corners) with a LEFT-aligned name
+ * label punched into the top edge — `╭─ TITLE ──────╮`. The label inherits the
+ * effective border color, so a stale/error box turns border and title red
+ * together. `fill` stretches the frame to its parent (pane usage); `padding`
+ * widens the inner content padding from the single-row default (`paddingX=1`);
+ * `flushTop` drops the top padding so the first content row (e.g. the QUEUE
+ * pane's `updated` clock) reads flush beneath the title instead of below a gap.
  */
 export function TitledBox({
   title,
@@ -2970,6 +3018,7 @@ export function TitledBox({
   padding,
   fill = false,
   marginTop,
+  flushTop = false,
   children,
 }: Readonly<{
   title: string
@@ -2977,8 +3026,18 @@ export function TitledBox({
   padding?: number
   fill?: boolean
   marginTop?: number
+  flushTop?: boolean
   children: React.ReactNode
 }>) {
+  // One resolved border value drives both the border glyphs and the label so
+  // they are provably the same color (the default, or the error-red override).
+  const border = borderColor ?? "$border-default"
+  const bodyPadding =
+    padding === undefined
+      ? { paddingX: 1, paddingTop: flushTop ? 0 : undefined }
+      : flushTop
+        ? { paddingLeft: padding, paddingRight: padding, paddingBottom: padding, paddingTop: 0 }
+        : { padding }
   return (
     <Box
       width="100%"
@@ -2990,17 +3049,43 @@ export function TitledBox({
       flexGrow={fill ? 1 : undefined}
       marginTop={marginTop}
     >
-      <Divider title={title} titleColor="$fg-muted" color={borderColor} />
+      <Box flexDirection="row" width="100%" flexShrink={0} minWidth={0}>
+        <Text color={border} flexShrink={0}>
+          {"╭─ "}
+        </Text>
+        <Text color={border} bold flexShrink={0}>
+          {title}
+        </Text>
+        <Text color={border} flexShrink={0}>
+          {" "}
+        </Text>
+        {/* Flex-grow fill: a top-only round border renders the `─` run that
+            stretches from the label to the rounded top-right corner. */}
+        <Box
+          height={1}
+          flexGrow={1}
+          flexShrink={1}
+          minWidth={0}
+          borderStyle="round"
+          borderColor={border}
+          borderLeft={false}
+          borderRight={false}
+          borderBottom={false}
+        />
+        <Text color={border} flexShrink={0}>
+          {"╮"}
+        </Text>
+      </Box>
       <Box
         borderStyle="round"
         borderTop={false}
-        borderColor={borderColor}
+        borderColor={border}
         width="100%"
         flexDirection="column"
         flexGrow={fill ? 1 : undefined}
         minWidth={0}
         minHeight={0}
-        {...(padding === undefined ? { paddingX: 1 } : { padding })}
+        {...bodyPadding}
       >
         {children}
       </Box>
@@ -3208,10 +3293,14 @@ function TimelineFilterLine({
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
 }) {
   const filters = projection.filters
+  // `since=` renders only when the operator bounded the window; the default
+  // unbounded window shows everything and prints no `since=` (user directive
+  // 2026-07-16).
+  const bounded = filters.windowMs < QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
   return (
     <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0} overflow="hidden">
       <Text color="$fg-muted" flexShrink={0}>
-        FILTER since={mediaDuration(filters.windowMs)}
+        FILTER{bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}
       </Text>
       {filters.terms.length === 0 ? null : (
         <Text color="$fg-muted" flexShrink={0} wrap="truncate">
@@ -3235,6 +3324,21 @@ function TimelineFilterLine({
         </Box>
       ))}
     </Box>
+  )
+}
+
+/**
+ * The one temporal-trust cue, `updated HH:MM:SS`. The snapshot clock is always
+ * "now", so day qualification never applies. The QUEUE pane renders it flush
+ * against the title border (its `flushTop` drops the top padding) so it reads
+ * as aligned with the QUEUE title rather than floating below an offset gap
+ * (user directive 2026-07-16).
+ */
+function QueueUpdatedClock({ now }: { now: string }) {
+  return (
+    <Text color="$fg-muted" flexShrink={0}>
+      updated {queueLogClock(now, false, false)}
+    </Text>
   )
 }
 
@@ -3269,43 +3373,37 @@ function ProjectedQueueTimeline({
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
   )
   const layout = timelineCellLayout(rows, includeDate, columns)
-  const updated = (
-    <Text color="$fg-muted" flexShrink={0}>
-      {/* The one temporal-trust cue is always `updated HH:MM:SS` — the
-          snapshot clock is now, so day qualification never applies. */}
-      updated {queueLogClock(projection.now, false, false)}
-    </Text>
-  )
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
         {paneChrome ? (
-          // Pane chrome: the pane's title-in-border already names the queue,
-          // so the header row carries the sibling tabs (when any) on the left
-          // and the `updated` clock in the top-right corner.
+          // Pane chrome (item L, 2026-07-16): the QUEUE pane is headed by its
+          // tab-style label (no surrounding box); the `updated` clock rides the
+          // right of that same tab row (item C — flush with the QUEUE tab),
+          // and the anchored-freshness `N new` cue sits between them.
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-            {projection.siblingBases.length === 0 ? null : (
-              <QueueTabsLine base={projection.base} siblings={projection.siblingBases} showLabel={false} />
-            )}
+            <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
-            {/* Anchored-freshness cue: arrivals above a pinned cursor. */}
             {freshRows === 0 ? null : (
               <Text color="$fg-warning" flexShrink={0}>
                 {freshRows} new
               </Text>
             )}
-            {updated}
+            <QueueUpdatedClock now={projection.now} />
           </Box>
         ) : (
           <>
             <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
-              {updated}
+              <QueueUpdatedClock now={projection.now} />
             </Box>
           </>
         )}
         <TimelineRunnerBox projection={projection} />
         <TimelineStatusBox projection={projection} />
+        {/* A blank row sets the FILTER row apart from the boxes above it
+            (user directive 2026-07-16). */}
+        <Box height={1} flexShrink={0} />
         <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>
@@ -3318,6 +3416,11 @@ function ProjectedQueueTimeline({
               cursorKey={cursorKey}
               onCursor={onCursor}
               onSelect={onSelect}
+              // Hover must NOT move the selection / detail pane (user directive
+              // 2026-07-16, item P). Overriding onItemHover suppresses ListView's
+              // default hover→cursor (which fires onCursor and switches the
+              // detail); CLICK still selects via the default onSelect path.
+              onItemHover={NO_HOVER_SELECT}
               active={true}
               getKey={(row) => row.id}
               estimateHeight={1}
@@ -3870,7 +3973,7 @@ function QueueStepLifecycleView({ row }: { row: QueueShowRow }) {
   const factRow = (facts: readonly (readonly [string, string | undefined])[]): string =>
     facts.map(([label, value]) => `${label} ${value}`).join(" ")
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" minWidth={0}>
       {identity.length === 0 ? null : <Text wrap="truncate">{factRow(identity)}</Text>}
       {lease.length === 0 ? null : <Text wrap="truncate">{factRow(lease)}</Text>}
       {clocks.length === 0 ? null : <Text wrap="truncate">TIME {factRow(clocks)}</Text>}
@@ -3951,63 +4054,210 @@ export function QueueEvidenceView({ data }: { data: QueueShowData }) {
   )
 }
 
+// Integration proof beyond the landed SHA (item J, 2026-07-16): the count of
+// source rewrites + submodule resolutions the queue carried into the merge.
+function integrationProofDetail(integration: IntegrationProof): string | undefined {
+  const parts: string[] = []
+  if (integration.sourceRewrites !== undefined && integration.sourceRewrites.length > 0) {
+    parts.push(`REWRITES ${integration.sourceRewrites.length}`)
+  }
+  if (integration.submoduleResolutions !== undefined && integration.submoduleResolutions.length > 0) {
+    parts.push(`SUBMODULES ${integration.submoduleResolutions.length}`)
+  }
+  return parts.length === 0 ? undefined : parts.join(" ")
+}
+
+function prReviewLine(review: PR["reviews"][number]): string {
+  const note = presentFact(review.note)
+  return `REVIEW ${review.decision} ${review.actor} ${detailClock(review.at)}${note === undefined ? "" : ` — ${note}`}`
+}
+
+function prCommentLine(comment: PR["comments"][number]): string {
+  const note = presentFact(comment.note)
+  return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
+}
+
+// PR-level facts (item J, 2026-07-16): the batched members' subject, review /
+// comment / check-request activity, and revision history — none of which live
+// on the run's `PRSnapshot`, so they are threaded from the full status PRs.
+// Timestamps use the local detail clock; only present facts render; every row
+// carrying an author-authored string sets `bgConflict="ignore"`.
+export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
+  if (prs.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {prs.map((pr, index) => {
+        const name = presentFact(pr.name)
+        const issue = presentFact(pr.issue)
+        const note = presentFact(pr.note)
+        const clocks = prRevisionClocks(pr)
+        return (
+          <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
+            <Text bold wrap="truncate" bgConflict="ignore">
+              PR {pr.id}@r{pr.revision}
+              {name === undefined ? "" : ` ${name}`}
+            </Text>
+            {issue === undefined ? null : <Text wrap="truncate">ISSUE {issue}</Text>}
+            {note === undefined ? null : (
+              <Text wrap="truncate" bgConflict="ignore">
+                NOTE {note}
+              </Text>
+            )}
+            {pr.reviews.map((review, reviewIndex) => (
+              <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">
+                {prReviewLine(review)}
+              </Text>
+            ))}
+            {pr.comments.map((comment, commentIndex) => (
+              <Text key={`comment:${commentIndex}`} wrap="truncate" bgConflict="ignore">
+                {prCommentLine(comment)}
+              </Text>
+            ))}
+            {pr.checkRequests.map((request, requestIndex) => (
+              <Text key={`check:${requestIndex}`} wrap="truncate">
+                CHECK REQUESTED {detailClock(request.at)}
+              </Text>
+            ))}
+            {clocks.map((clock, clockIndex) => (
+              <Text key={`rev:${clockIndex}`} wrap="truncate">
+                REV {clock.revision} {clock.terminal?.status ?? "open"}{" "}
+                {detailClock(clock.terminal?.at ?? clock.submittedAt ?? clock.pushedAt)}
+              </Text>
+            ))}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
 // The watch detail pane's vertical facts layout (user respec 2026-07-15):
 // stacked label/value rows that always fit the pane width — never a
 // horizontally sprawling table. Only present facts render; timestamps share
 // the timeline's local clock convention; `X@X` landings dedupe to one SHA.
-function CompactQueueShowView({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
+/**
+ * The compact run/step detail. `section` splits it for the workflow-step tabs
+ * (user directive 2026-07-16, item H): `"run"` renders the run-level facts (+
+ * LANDING/NEXT) once above the tabs, `"steps"` renders per-step facts under the
+ * selected tab, `"all"` (default) renders everything in order for non-tab
+ * contexts. Field completeness (item J): PARENT/ISO run facts and per-step
+ * REV/DETAIL/LOST are surfaced; subprocess-derived strings (ERROR, DETAIL,
+ * LOST, EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data keeps its
+ * colors without crashing the event loop.
+ */
+function CompactQueueShowView({
+  data,
+  highlightPr,
+  section = "all",
+}: {
+  data: QueueShowData
+  highlightPr?: string
+  section?: "run" | "steps" | "all"
+}) {
   const durations = [
     ["TOTAL", presentFact(data.totalDuration)] as const,
     ["ACTIVE", presentFact(data.activeDuration)] as const,
     ["WAIT", presentFact(data.waitDuration)] as const,
   ].filter(([, value]) => value !== undefined)
+  const runFacts = section !== "steps"
+  const stepFacts = section !== "run"
+  const parent = presentFact(data.parent)
+  const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
+  const proofDetail = data.integration === undefined ? undefined : integrationProofDetail(data.integration)
   return (
-    <Box flexDirection="column">
-      <Text bold wrap="truncate">
-        RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
-      </Text>
-      <Text wrap="truncate">
-        BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
-      </Text>
-      <Text wrap="truncate">
-        START {detailClock(data.started)}
-        {presentFact(data.finished) === undefined ? "" : ` END ${detailClock(data.finished)}`}
-      </Text>
-      {durations.length === 0 ? null : (
-        <Text wrap="truncate">{durations.map(([label, value]) => `${label} ${value}`).join(" ")}</Text>
-      )}
-      {data.steps.map((row) => {
-        const error = presentFact(row.errorCode)
-        const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
-        return (
-          <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column">
-            <Text wrap="truncate">
-              STEP {row.step}#{row.attempt} {row.status}
-              {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
-              {error === undefined ? "" : ` ERROR ${error}`}
+    // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
+    // detail pane instead of overflowing it (canonical CSS escape hatch).
+    <Box flexDirection="column" minWidth={0}>
+      {runFacts ? (
+        <>
+          <Text bold wrap="truncate">
+            RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
+          </Text>
+          <Text wrap="truncate">
+            BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
+          </Text>
+          <Text wrap="truncate">
+            START {detailClock(data.started)}
+            {presentFact(data.finished) === undefined ? "" : ` END ${detailClock(data.finished)}`}
+          </Text>
+          {durations.length === 0 ? null : (
+            <Text wrap="truncate">{durations.map(([label, value]) => `${label} ${value}`).join(" ")}</Text>
+          )}
+          {parent === undefined && isolation === undefined ? null : (
+            <Text wrap="truncate" color="$fg-muted">
+              {parent === undefined ? "" : `PARENT ${parent}`}
+              {parent !== undefined && isolation !== undefined ? " " : ""}
+              {isolation === undefined ? "" : `ISO ${isolation}`}
             </Text>
-            <QueueStepLifecycleView row={row} />
-            {row.locations.length === 0 && evidence === undefined ? null : (
-              <Text wrap="truncate">
-                PROOF
-                {row.locations.length === 0 ? null : (
-                  <>
-                    {" ART "}
-                    <QueueLogLocationLinks entries={row.locations} compact={false} />
-                  </>
+          )}
+        </>
+      ) : null}
+      {stepFacts
+        ? data.steps.map((row) => {
+            const error = presentFact(row.errorCode)
+            const detail = presentFact(row.detail)
+            const lost = presentFact(row.lost)
+            const revision = presentFact(row.revision)
+            const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
+            // Item J completeness: the artifacts label + checkpoint join the
+            // step's PROOF row so the whole step record is on-screen.
+            const artifacts = presentFact(row.artifacts)
+            const checkpoint = presentFact(row.checkpoint)
+            const hasProof =
+              row.locations.length > 0 || evidence !== undefined || artifacts !== undefined || checkpoint !== undefined
+            return (
+              <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column" minWidth={0}>
+                <Text wrap="truncate">
+                  STEP {row.step}#{row.attempt} {row.status}
+                  {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
+                  {revision === undefined ? "" : ` REV ${revision.slice(0, 12)}`}
+                </Text>
+                {error === undefined ? null : (
+                  <Text wrap="truncate" color="$fg-error" bgConflict="ignore">
+                    ERROR {error}
+                  </Text>
                 )}
-                {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
-              </Text>
-            )}
-          </Box>
-        )
-      })}
-      {presentFact(data.landing) === undefined ? null : (
-        <Text wrap="truncate">
-          LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
-        </Text>
-      )}
-      <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+                {detail === undefined ? null : (
+                  <Text wrap="truncate" color="$fg-muted" bgConflict="ignore">
+                    DETAIL {detail}
+                  </Text>
+                )}
+                {lost === undefined ? null : (
+                  <Text wrap="truncate" color="$fg-warning" bgConflict="ignore">
+                    LOST {lost}
+                  </Text>
+                )}
+                <QueueStepLifecycleView row={row} />
+                {!hasProof ? null : (
+                  <Text wrap="truncate" bgConflict="ignore">
+                    PROOF
+                    {row.locations.length === 0 ? null : (
+                      <>
+                        {" ART "}
+                        <QueueLogLocationLinks entries={row.locations} compact={false} />
+                      </>
+                    )}
+                    {artifacts === undefined ? "" : ` ARTIFACTS ${artifacts}`}
+                    {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
+                    {checkpoint === undefined ? "" : ` CHECKPOINT ${checkpoint}`}
+                  </Text>
+                )}
+              </Box>
+            )
+          })
+        : null}
+      {runFacts ? (
+        <>
+          {presentFact(data.landing) === undefined ? null : (
+            <Text wrap="truncate">
+              LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+              {/* Item J: surface the integration proof beyond the landed SHA. */}
+              {proofDetail === undefined ? "" : ` ${proofDetail}`}
+            </Text>
+          )}
+          <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+        </>
+      ) : null}
     </Box>
   )
 }
@@ -4016,12 +4266,15 @@ export function QueueShowView({
   data,
   compact = false,
   highlightPr,
+  section = "all",
 }: {
   data: QueueShowData
   compact?: boolean
   highlightPr?: string
+  /** Compact-only: split run-level vs step-level facts for the step tabs (item H). */
+  section?: "run" | "steps" | "all"
 }) {
-  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} />
+  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} section={section} />
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />

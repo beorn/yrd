@@ -18,7 +18,15 @@ export type {
   JobResult,
   JobWaiting,
 } from "./job.ts"
-export { createJobs, Job, JobTransitionSchema, withJobs } from "./jobs.ts"
+export {
+  createJobs,
+  isConcurrentSettlementConflict,
+  isTerminalJobStatus,
+  Job,
+  JobStateConflict,
+  JobTransitionSchema,
+  withJobs,
+} from "./jobs.ts"
 export type {
   CreateJobsOptions,
   HasJobs,

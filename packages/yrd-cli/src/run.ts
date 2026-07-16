@@ -22,6 +22,7 @@ import {
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
+import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
 import { Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -58,6 +59,7 @@ import {
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   runRevisionClock,
   queueShowData,
   type QueueTimelineProjection,
@@ -354,7 +356,6 @@ type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
 
-const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
 const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "pending",
   "running",
@@ -371,7 +372,7 @@ function queueTimelineRowLimit(io: YrdCliIO): number {
 }
 
 function queueTimelineWindow(value: string | undefined): number {
-  if (value === undefined) return QUEUE_TIMELINE_DEFAULT_WINDOW_MS
+  if (value === undefined) return QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/iu.exec(value.trim())
   if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
   const amount = Number(match?.[1])
@@ -2346,14 +2347,51 @@ export async function watchQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
-      const runs = await runQueues(app, selectors, options, io)
+      let runs: readonly QueueRun[]
+      try {
+        runs = await runQueues(app, selectors, options, io)
+      } catch (error) {
+        // A peer session canceled or otherwise settled a Job between this
+        // resident runner's snapshot and its action — a normal multi-tenant
+        // race. For the long-lived watch loop that is losable: log LOUD, skip
+        // this cycle, and stay alive for the next interval. Anything else —
+        // including a conflict against a still-live Job, which signals a real
+        // single-writer bug — propagates and still stops the runner (fail-loud).
+        // A one-shot targeted run (selectors present) also propagates: it has no
+        // next interval to skip to.
+        if (selectors.length > 0 || !isConcurrentSettlementConflict(error)) throw error
+        app.log.warn?.("resident runner skipped a cycle lost to a concurrent Job settlement", {
+          action: "resident-cancel-skip",
+          job: error.jobId,
+          status: error.actual,
+          reason: error.message,
+        })
+        if (!jsonEnabled(options)) {
+          io.stderr(
+            `yrd: resident runner skipped a cycle — a peer settled job '${error.jobId}' (${error.actual}) mid-pickup; continuing.\n`,
+          )
+        }
+        heartbeat?.check()
+        if (drainRequested()) {
+          await scope.sleep(interval)
+          continue
+        }
+        if (scope.signal.aborted) return 0
+        await sleepUntilDrain(scope.sleep(interval), drainSignal)
+        heartbeat?.check()
+        if (scope.signal.aborted) return 0
+        continue
+      }
       heartbeat?.check()
+      // The runner is a service; its stdout is a log stream. Human output is
+      // loggily-only (--json still streams the structured record). The
+      // QueueRunsView table (RUN/PRS/STATE/STEPS) is the interactive
+      // `queue watch` viewer's surface — it must never be dumped into the
+      // runner's log. (#undead: runner-loggily-only)
       if (jsonEnabled(options)) {
         for (const run of runs) {
           io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
         }
-      } else if (runs.length > 0) {
-        await printHuman(io, createElement(QueueRunsView, { runs }))
       }
       const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
       if (drainRequested()) {
@@ -2896,7 +2934,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window", "6h")
+    .option("--since <duration>", "timeline window (default: everything)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
@@ -2916,7 +2954,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window", "6h")
+    .option("--since <duration>", "timeline window (default: everything)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
@@ -2933,7 +2971,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window", "6h")
+    .option("--since <duration>", "timeline window (default: everything)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")

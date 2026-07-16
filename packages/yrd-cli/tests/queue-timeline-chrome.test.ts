@@ -13,7 +13,11 @@ import { createElement } from "react"
 import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
-import { QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
+import {
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  QueueTimelineView,
+  type QueueTimelineProjection,
+} from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
@@ -44,7 +48,7 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: true, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      for (const cell of ["time", "status", "run", "pr", "step", "by", "age", "dur"]) {
+      for (const cell of ["time", "status", "run", "pr", "by", "age", "dur"]) {
         const header = app.locator(`#th-${cell}`).boundingBox()
         expect(header, `header cell th-${cell}`).not.toBeNull()
         const cells = app.locator(`[id^='td-${cell}-']`)
@@ -72,7 +76,7 @@ describe("queue timeline chrome 21106", () => {
       )
       try {
         await oneShot.waitForLayoutStable()
-        for (const cell of ["time", "status", "run", "pr", "step", "by", "age", "dur"]) {
+        for (const cell of ["time", "status", "run", "pr", "by", "age", "dur"]) {
           const live = app.locator(`#th-${cell}`).boundingBox()
           const plain = oneShot.locator(`#th-${cell}`).boundingBox()
           expect(plain?.x, `one-shot '${cell}' header x`).toBe(live?.x)
@@ -93,6 +97,34 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
+  it("renders the column header white+bold, the PR id always bold, and a blank row above FILTER", async () => {
+    const projection = queueTimelineStories["contract-overview"].snapshot.projection
+    const render = createRenderer({ cols: 160, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
+    try {
+      await app.waitForLayoutStable()
+      const text = app.text
+      // E: the column header is white (default fg, not muted) AND bold.
+      const headerY = rowIndexOf(text, "STATUS")
+      const timeHeaderX = rowAt(text, headerY).indexOf("TIME")
+      expect(app.cell(timeHeaderX, headerY).bold, "header TIME is bold").toBe(true)
+      const mutedRowY = rowIndexOf(text, "PR4.1")
+      const mutedTimeX = rowAt(text, mutedRowY).search(/\d{2}:\d{2}:\d{2}/u)
+      expect(app.cell(timeHeaderX, headerY).fg, "header fg is brighter than the muted row TIME").not.toEqual(
+        app.cell(mutedTimeX, mutedRowY).fg,
+      )
+      // F: an integrated (non-running) PR id is still bold.
+      const doneRow = rowAt(text, mutedRowY)
+      const prX = doneRow.indexOf("PR4.1")
+      expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
+      // D: the row directly above FILTER is blank.
+      const filterY = rowIndexOf(text, "FILTER ")
+      expect(rowAt(text, filterY - 1).trim(), "blank row above FILTER").toBe("")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("mutes real run ids like TIME while pending keeps its own color", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
@@ -105,13 +137,15 @@ describe("queue timeline chrome 21106", () => {
       const runRow = rowAt(text, runRowY)
       const runX = runRow.indexOf("main#4 ") >= 0 ? runRow.indexOf("main#4 ") : runRow.indexOf("main#4")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
-      const subjectX = runRow.indexOf("Land the durable patch")
-      expect(subjectX).toBeGreaterThan(0)
+      // The flexible cell now holds the branch (item Q); its `/` marks a branch
+      // char rendered in the default (non-muted) fg.
+      const branchX = runRow.indexOf("/")
+      expect(branchX).toBeGreaterThan(0)
       const runFg = app.cell(runX, runRowY).fg
       const timeFg = app.cell(timeX, runRowY).fg
-      const subjectFg = app.cell(subjectX, runRowY).fg
+      const branchFg = app.cell(branchX, runRowY).fg
       expect(runFg, "run id shares TIME's muted fg").toEqual(timeFg)
-      expect(runFg, "run id is not default fg").not.toEqual(subjectFg)
+      expect(runFg, "run id is not default fg").not.toEqual(branchFg)
 
       const pendingRowY = rowIndexOf(text, " pend ")
       const pendingRow = rowAt(text, pendingRowY)
@@ -204,6 +238,25 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
+  it("omits since= from FILTER when the window is unbounded (the new default)", async () => {
+    const base = queueTimelineStories["contract-overview"].snapshot.projection
+    const unbounded: QueueTimelineProjection = {
+      ...base,
+      filters: { ...base.filters, windowMs: QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS },
+    }
+    const app = createRenderer({ cols: 160, rows: 40 })(
+      createElement(QueueTimelineView, { projection: unbounded, nav: false, columns: 160 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const filterLine = rowAt(app.text, rowIndexOf(app.text, "FILTER"))
+      expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
+      expect(filterLine).toContain("[x] pending")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("renders only non-default FILTER dimensions plus the four status checkboxes", async () => {
     const defaults = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
@@ -240,7 +293,92 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("frames both watch panes with padded title-in-border chrome and bottom-aligned STATS", async () => {
+  it("draws the compact info boxes with full rounded corners, a left label, and a label color matching its border", async () => {
+    // Reworked title-in-border chrome (user directives 1+2, 2026-07-16):
+    // `╭─ TITLE ─…─╮` on top with the label punched into the LEFT of the top
+    // edge, `╰─…─╯` on the bottom (rounded corners everywhere), and the label
+    // sharing the border's resolved color. Only the compact info boxes get this
+    // — QUEUE and DETAIL are unboxed panes (items L/M).
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      await waitFor(() => app.text.includes("STATS"))
+      const rows = app.text.split("\n")
+      for (const label of ["RUNNER", "STATS"]) {
+        const topY = rows.findIndex((l) => l.includes(`╭─ ${label} `))
+        expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
+        const topLine = rows[topY]
+        if (topLine === undefined) throw new Error(`${label} top border row missing`)
+        const titleX = topLine.indexOf(label)
+        // A rounded top-right corner closes this box's border row after the
+        // label (nested/side-by-side boxes still close with `╮`; search from the
+        // label so a neighbouring box's corner to the left is not mistaken).
+        expect(topLine.indexOf("╮", titleX), `${label} rounded top-right corner`).toBeGreaterThan(titleX)
+        // The label color equals the border-fill color on the same row.
+        const fillX = topLine.indexOf("─", titleX + label.length + 1)
+        expect(fillX, `${label} border fill after the label`).toBeGreaterThan(titleX)
+        expect(app.cell(titleX, topY).fg, `${label} label fg == border fg`).toEqual(app.cell(fillX, topY).fg)
+      }
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("heads the QUEUE pane with a tab row carrying the updated clock and sibling tabs (items L + C)", async () => {
+    // The QUEUE pane is headed by its tab-style label (item L); the `updated`
+    // clock rides that same tab row (item C — flush with the QUEUE tab), and
+    // sibling bases render as their own tabs — no surrounding box border.
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      await waitFor(() => app.text.includes("STATS"))
+      const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
+      // The QUEUE tab row itself carries the sibling tab and the updated clock.
+      expect(queueLine, "QUEUE tab row carries the sibling tab").toContain("release/")
+      expect(queueLine, "updated rides the QUEUE tab row").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
+      // No rounded box border around the QUEUE pane.
+      expect(app.text).not.toContain("╭─ QUEUE")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("turns the RUNNER label and border red together when the heartbeat is stale", async () => {
+    // Directive 2 (2026-07-16): the error-red case colors both the border AND
+    // the label, matching the STALE banner's error fg.
+    const story = queueTimelineStories["contract-overview"].snapshot.projection
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 60_000).toISOString(),
+        command: "resident runner",
+      },
+    }
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const titleY = rowIndexOf(app.text, "RUNNER")
+      const titleLine = rowAt(app.text, titleY)
+      const titleX = titleLine.indexOf("RUNNER")
+      const fillX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
+      expect(app.cell(titleX, titleY).fg, "stale RUNNER label fg == border fg").toEqual(app.cell(fillX, titleY).fg)
+      const staleY = rowIndexOf(app.text, "RUNNER STALE")
+      expect(staleY, "stale banner present").toBeGreaterThan(titleY)
+      const staleLine = rowAt(app.text, staleY)
+      const staleX = staleLine.indexOf("RUNNER STALE")
+      expect(app.cell(titleX, titleY).fg, "label red == stale-banner error red").toEqual(app.cell(staleX, staleY).fg)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("renders QUEUE + DETAIL as unboxed panes with bottom-aligned STATS", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
@@ -248,12 +386,16 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("STATS"))
       const text = app.text
-      expect(rowIndexOf(text, "QUEUE main"), "list pane title").toBeGreaterThanOrEqual(0)
-      expect(rowIndexOf(text, "DETAIL"), "detail pane title").toBeGreaterThanOrEqual(0)
-      // Padded content: the TIME header sits inside border + padding.
+      // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
+      // identity (`RUN R42` detail), not the word "DETAIL" — neither is boxed.
+      expect(rowIndexOf(text, "QUEUE main"), "QUEUE pane tab").toBeGreaterThanOrEqual(0)
+      expect(text, "DETAIL pane shows the run identity, not a DETAIL box").toContain("RUN R42")
+      expect(text).not.toContain("╭─ DETAIL")
+      expect(text).not.toContain("╭─ QUEUE")
+      // Padded content: the TIME header sits inside the pane's horizontal padding.
       const timeHeader = app.locator("#th-time").boundingBox()
       expect(timeHeader).not.toBeNull()
-      expect(timeHeader!.x).toBeGreaterThanOrEqual(2)
+      expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(2)
       // Bottom-aligned STATS: the STATS block sits in the bottom band of the
       // pane, directly above the footer, not right under the list rows.
@@ -289,11 +431,22 @@ describe("queue timeline chrome 21106", () => {
       for (const x of [timeX, statusX]) {
         expect(app.cell(x, cursorY).fg).toEqual(cursorFg)
       }
-      // The selection band spans the FULL row width: the run-duration glyph
-      // near the right edge AND the inter-cell gap next to it carry the same
-      // selection background as the left-edge cells.
-      const durX = cursorLine.indexOf("◷")
-      expect(durX, "cursor row run-duration glyph").toBeGreaterThan(statusX)
+      // The selection band spans the FULL row width: the run-duration cell at
+      // the right edge (now a bare dimmed time, no glyph — item S) AND the
+      // inter-cell gap next to it carry the same selection background as the
+      // left-edge cells. Locate the cursor row's `td-dur` cell (robust across
+      // the split layout, where a text scan would catch a DETAIL-pane time).
+      const durCells = app.locator("[id^='td-dur-']")
+      let durBox: { x: number; y: number; width: number } | null = null
+      for (let index = 0; index < durCells.count(); index += 1) {
+        const box = durCells.nth(index).boundingBox()
+        if (box?.y === cursorY) {
+          durBox = box
+          break
+        }
+      }
+      expect(durBox, "cursor row run-duration cell").not.toBeNull()
+      const durX = durBox!.x + durBox!.width - 1
       expect(app.cell(durX, cursorY).bg, "selection bg at the right edge").toEqual(cursorBg)
       expect(app.cell(durX - 1, cursorY).bg, "selection bg across cell gaps").toEqual(cursorBg)
       // Unselected rejected row keeps its own colorization: status fg differs

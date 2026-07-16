@@ -16,7 +16,18 @@ import {
   type Event,
   type YrdDef,
 } from "@yrd/core"
-import { createJobDef, withJobs, type JobContext, type JobDef, type JobHandler } from "@yrd/job"
+import {
+  createJobDef,
+  isConcurrentSettlementConflict,
+  isTerminalJobStatus,
+  Job,
+  JobStateConflict,
+  withJobs,
+  type JobContext,
+  type JobDef,
+  type JobHandler,
+  type JobTransition,
+} from "@yrd/job"
 
 type Delivery = {
   message: string
@@ -837,5 +848,101 @@ describe("Jobs", () => {
       vi.useRealTimers()
     }
     await app.close()
+  })
+})
+
+describe("JobStateConflict — transition guards stay loud but carry a losable-race signal", () => {
+  const at = "2026-01-01T00:00:00.000Z"
+  const requested = () => Job.requested(JOB_ID, at, { definition: "d", revision: "r", input: {} })
+  const running = () =>
+    Job.apply(requested(), { type: "start", id: JOB_ID, attempt: 1, runner: "w", leaseExpiresAt: at }, at)
+  const canceled = () =>
+    Job.apply(running(), { type: "cancel", id: JOB_ID, attempt: 1, by: "@peer", reason: "superseded" }, at)
+  const finish: JobTransition = {
+    type: "finish",
+    id: JOB_ID,
+    attempt: 1,
+    runner: "w",
+    result: { status: "passed", output: { receipt: "ok" } },
+  }
+
+  it("throws a typed JobStateConflict — same message — when a finish meets an already-canceled Job", () => {
+    let thrown: unknown
+    try {
+      Job.apply(canceled(), finish, at)
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(JobStateConflict)
+    expect(thrown).toMatchObject({ jobId: JOB_ID, actual: "canceled", expected: "running or waiting" })
+    // Message byte-identical to the pre-typed Error so existing catchers/logs are unaffected.
+    expect((thrown as Error).message).toBe(`yrd: job '${JOB_ID}' is canceled, not running or waiting`)
+    // The canceled Job is terminal → a peer settled it under us → losable race.
+    expect(isConcurrentSettlementConflict(thrown)).toBe(true)
+  })
+
+  it("classifies a conflict against a still-LIVE Job as fatal, never losable", () => {
+    // Trying to start a running Job is a real invalid transition, not a race.
+    let thrown: unknown
+    try {
+      Job.apply(running(), { type: "start", id: JOB_ID, attempt: 2, runner: "w", leaseExpiresAt: at }, at)
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(JobStateConflict)
+    expect((thrown as JobStateConflict).actual).toBe("running")
+    // running is NOT terminal → must keep propagating (fail-loud).
+    expect(isConcurrentSettlementConflict(thrown)).toBe(false)
+  })
+
+  it("only treats JobStateConflict against a terminal status as a losable race", () => {
+    expect(isConcurrentSettlementConflict(new Error("unrelated"))).toBe(false)
+    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "requested", "running"))).toBe(false)
+    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "waiting", "requested"))).toBe(false)
+    for (const status of ["passed", "failed", "lost", "canceled"] as const) {
+      expect(isTerminalJobStatus(status)).toBe(true)
+      expect(isConcurrentSettlementConflict(new JobStateConflict("J", status, "running"))).toBe(true)
+    }
+    for (const status of ["requested", "running", "waiting"] as const) {
+      expect(isTerminalJobStatus(status)).toBe(false)
+    }
+  })
+
+  it("reproduces the genuine race: a peer cancels between a runner's ownership check and its settlement", async () => {
+    // Two runtimes over ONE journal (separate processes in production). The runner
+    // starts the Job and blocks in execute; a peer cancels the Job; the runner's
+    // stale projection still shows it owning a running Job, so it commits a finish
+    // that re-folds the journal and meets the canceled Job — the escaping throw
+    // that killed the resident runner on 2026-07-15.
+    const journal = createMemoryJournal()
+    const executing = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<{ status: "passed"; output: Receipt }>()
+    const job = delivery(() => {
+      executing.resolve()
+      return release.promise
+    })
+    const runnerApp = await jobsApp(job, { journal })
+    const peerApp = await jobsApp(job, { journal })
+
+    const dispatched = await runnerApp.dispatch(runnerApp.commands.sender.send, { message: "hello" })
+    const [id] = runnerApp.jobs.requested(dispatched)
+    const running = runnerApp.jobs.run(id!, { runner: "worker-1", leaseMs: 60_000 })
+    await executing.promise
+
+    await peerApp.jobs.cancel({ id: id!, attempt: 1, by: "@peer", reason: "superseded" })
+    release.resolve({ status: "passed", output: { receipt: "ok:hello" } })
+
+    const outcome = await running.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    )
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("unreachable")
+    expect(outcome.error).toBeInstanceOf(JobStateConflict)
+    expect((outcome.error as JobStateConflict).actual).toBe("canceled")
+    expect(isConcurrentSettlementConflict(outcome.error)).toBe(true)
+
+    await runnerApp.close()
+    await peerApp.close()
   })
 })
