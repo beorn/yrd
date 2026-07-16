@@ -1789,6 +1789,56 @@ describe("Queue command adapters", () => {
     },
   )
 
+  it("surfaces an escaped-descendant stall as its OWN blocker, even with no output-progress lease configured", async () => {
+    // The direct child exited (code 0) but a descendant held the output pipe
+    // open past the post-exit drain grace, so @yrd/process abandoned the drain
+    // and set `escapedDescendant`. This must fail DISTINCTLY from a plain stall,
+    // and — unlike the output-progress stall — it must NOT depend on a
+    // configured noProgressTimeoutMs (the drain grace is always armed).
+    const result: ProcessResult = {
+      exitCode: 0,
+      signal: null,
+      stdout: "started\n",
+      stderr: "",
+      durationMs: 2_345,
+      timedOut: false,
+      stalled: true,
+      verdict: "STALLED",
+      escapedDescendant: true,
+      lastProgressAtMs: 12,
+      lastProgressBytes: 8,
+    } as ProcessResult
+    const cwd = await mkdtemp(join(tmpdir(), "yrd-command-escaped-"))
+    roots.push(cwd)
+    const step = configuredCommandStep<PRShape>({
+      inject: { process: { run: () => Promise.resolve(result) } },
+      command: ["bun", "run", "check"],
+      cwd,
+      purpose: "check",
+      // Deliberately NO noProgressTimeoutMs — proves the escaped branch is
+      // independent of the output-progress lease.
+    })
+    const outcome = await step(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: "a".repeat(40) }],
+        shape: { results: {} },
+      },
+      { id: "J1", attempt: 1, runner: "test", signal: new AbortController().signal },
+    )
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      error: { code: "check-stalled-escaped-descendant" },
+    })
+    if (outcome.status !== "failed") throw new Error(`configured command was ${outcome.status}`)
+    expect(outcome.error.message).toContain("descendant held its output pipe open")
+    const evidence = CommandEvidenceSchema.parse(outcome.output)
+    expect(evidence).toMatchObject({ escapedDescendant: true, stageVerdict: "STALLED", exitCode: 0 })
+  })
+
   it("retains failed configured-check output after Git candidate wrapping", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
@@ -2551,16 +2601,11 @@ describe("Queue command adapters", () => {
     it("gives check children the declared environment, never the runner's ambient junk", async () => {
       const { repo, feature: featureSha } = await repository("feature")
       await using process = createProcess()
-      await using app = await checkedQueue(
-        process,
-        repo,
-        shellCommand("env | grep -E '^CHECK_' | sort || true"),
-        {
-          env: { ...globalThis.process.env, CHECK_JUNK: "must-not-leak", CHECK_TOKEN: "ambient-token" },
-          environmentOverrides: { CHECK_DECLARED: "yes" },
-          environmentPassthrough: ["CHECK_TOKEN"],
-        },
-      )
+      await using app = await checkedQueue(process, repo, shellCommand("env | grep -E '^CHECK_' | sort || true"), {
+        env: { ...globalThis.process.env, CHECK_JUNK: "must-not-leak", CHECK_TOKEN: "ambient-token" },
+        environmentOverrides: { CHECK_DECLARED: "yes" },
+        environmentPassthrough: ["CHECK_TOKEN"],
+      })
       await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
       const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!

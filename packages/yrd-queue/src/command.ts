@@ -64,6 +64,10 @@ export const CommandEvidenceSchema = z
     lastProgressAtMs: z.number().nonnegative().optional(),
     lastProgressBytes: z.number().int().nonnegative().optional(),
     sweepFailure: z.string().min(1).optional(),
+    /** The direct child exited but a descendant held its output pipe open past
+     * the post-exit drain grace (a process-group escapee); run() abandoned the
+     * drain rather than wedge. Distinct from a plain output-progress stall. */
+    escapedDescendant: z.boolean().optional(),
   })
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
@@ -160,6 +164,9 @@ type ProcessDependency = Readonly<{ inject: Readonly<{ process: Pick<Process, "r
 type ProgressResult = Readonly<{
   verdict?: "EXITED" | "TIMED_OUT" | "STALLED"
   stalled?: boolean
+  /** The direct child exited but a descendant held its output pipe open past
+   * the drain grace — surfaced distinctly from a plain output stall. */
+  escapedDescendant?: boolean
   lastProgressAtMs?: number
   lastProgressBytes?: number
 }>
@@ -288,7 +295,20 @@ function configuredCommand<Shape extends PRShape>(
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
       ...(progress.lastProgressBytes === undefined ? {} : { lastProgressBytes: progress.lastProgressBytes }),
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+      ...(progress.escapedDescendant === true ? { escapedDescendant: true } : {}),
     })
+    // A descendant that outlived the command and held its output pipe open is a
+    // distinct, more-actionable failure than a plain output stall (a process
+    // leaked, and it wedged the queue until run() abandoned the drain). Surface
+    // it FIRST, and independently of noProgressTimeoutMs — the post-exit drain
+    // grace fires even when no output-progress lease is configured.
+    if (progress.escapedDescendant === true) {
+      return failed(
+        `${options.purpose}-stalled-escaped-descendant`,
+        `${options.purpose} exited but a descendant held its output pipe open past the drain grace; the drain was abandoned to un-wedge the queue — inspect and kill the leaked process tree`,
+        evidence,
+      )
+    }
     if (progress.stalled === true) {
       if (options.noProgressTimeoutMs === undefined) {
         throw new Error(`${options.purpose} reported an unconfigured output-progress stall`)
