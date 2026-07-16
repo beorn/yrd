@@ -80,7 +80,7 @@ export function planQueueSubmoduleComposition(conflicts: readonly QueueTreeConfl
       origin,
       ...stages,
       ref: compositionRef(conflict.path, origin, stages),
-      message: compositionMessage(conflict.path, stages.currentSha, stages.incomingSha),
+      message: compositionMessage(conflict.path, stages.baseSha, stages.currentSha, stages.incomingSha),
     })
   }
   return { status: "planned", resolutions }
@@ -162,11 +162,12 @@ function compositionRef(path: string, origin: string, stages: GitlinkStages): st
   return `refs/yrd/compositions/${identity}`
 }
 
-function compositionMessage(path: string, currentSha: string, incomingSha: string): string {
+function compositionMessage(path: string, baseSha: string, currentSha: string, incomingSha: string): string {
   const escapedPath = path.replaceAll("\\", "\\\\").replaceAll("\r", "\\r").replaceAll("\n", "\\n")
   return (
     `yrd: compose ${escapedPath}\n\n` +
     `Yrd-Composition-Path: ${escapedPath}\n` +
+    `Yrd-Composition-Base: ${baseSha}\n` +
     `Yrd-Composition-Parents: ${currentSha} ${incomingSha}`
   )
 }
