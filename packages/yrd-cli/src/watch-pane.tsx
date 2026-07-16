@@ -287,26 +287,44 @@ export function QueueWatchFrame({
 }) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
-  const rows = useMemo(
+  // ProjectedQueueTimeline renders only projection.rows.slice(0, display.shown).
+  // Cursor math, default-cursor selection, and detail resolution MUST share that
+  // SAME visible-row set — otherwise a numeric cursor or the mandated first-
+  // running default can name a row the ListView never renders, leaving nothing
+  // highlighted while the detail pane resolves a hidden row (21106 r5).
+  const visibleProjectedRows = useMemo(
     () =>
       snapshot.projection === undefined
+        ? undefined
+        : snapshot.projection.rows.slice(0, snapshot.projection.display.shown),
+    [snapshot.projection],
+  )
+  const rows = useMemo(
+    () =>
+      visibleProjectedRows === undefined
         ? queueTimelineRows(snapshot.results, snapshot.now, false).map((row) => ({
             key: row.key,
             pr: row.pr,
             ...(row.run === undefined ? {} : { run: row.run }),
           }))
-        : snapshot.projection.rows.map((row) => ({
+        : visibleProjectedRows.map((row) => ({
             key: row.id,
             pr: row.pr,
             ...(row.run === undefined ? {} : { run: row.run }),
           })),
-    [snapshot],
+    [snapshot, visibleProjectedRows],
   )
-  // Default cursor: first RUNNING row, else the newest FINISHED row. A manual
-  // cursor move is sticky — default-follow stops until the pinned row leaves
-  // the window or the view is reopened.
+  // Default cursor (design (b) — visible-fallback): the first RUNNING row within
+  // the visible slice, else the newest FINISHED visible row, else the first
+  // visible row — never an unrendered one. When pending rows fill the row cap
+  // ahead of running (timelineSort order), the 15c/15d first-running default is
+  // unreachable, so it degrades to the first visible row rather than pointing
+  // off-window (the slice is a hard cap with a "... N more" overflow, not a
+  // scroll viewport, so scroll-to-include is not available). A manual cursor
+  // move is sticky — default-follow stops until the pinned row leaves the window
+  // or the view is reopened.
   const defaultCursorKey =
-    snapshot.projection === undefined ? rows[0]?.key : queueTimelineDefaultCursorId(snapshot.projection.rows)
+    visibleProjectedRows === undefined ? rows[0]?.key : queueTimelineDefaultCursorId(visibleProjectedRows)
   const [manualCursor, setManualCursor] = useState(false)
   const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
   const [selectedPr, setSelectedPr] = useState<string | undefined>(
