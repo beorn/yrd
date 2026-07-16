@@ -2291,7 +2291,7 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
     <Box height={1}>
       <Text wrap="truncate">
         <Text bold>ACTIVE</Text> {active.run} {active.pr} {active.subject}{" "}
-        <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.step} {active.elapsed}
+        <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps} {active.elapsed}
       </Text>
     </Box>
   )
@@ -2455,6 +2455,7 @@ export type WatchActiveRow = Readonly<{
   pr: string
   subject: string
   step: string
+  steps: string
   status: QueueRun["status"]
   taskStatus: TaskStatus
   glyph: StatusGlyph
@@ -2481,6 +2482,7 @@ export function activeWatchRow(
     pr: member.id,
     subject: boundedQueue(pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
+    steps: queueRunSteps(run),
     status: run.status,
     ...taskStatusFields(taskStatus),
     elapsed: age(run.startedAt, now, `run '${run.id}' elapsed`),
