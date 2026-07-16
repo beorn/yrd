@@ -99,7 +99,7 @@ describe("queue timeline storybook", () => {
       term.screen
         .getText()
         .split("\n")
-        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("RUN·PR"))
+        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("STEP"))
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
@@ -344,12 +344,19 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          await waitFor(() => findGlyphColumn(term, "│") >= 0)
-          expect(findGlyphColumn(term, "│"), name).toBeGreaterThan(0)
+          // Right-docked: the framed DETAIL pane title shares the top row
+          // with the QUEUE pane title, and the split divider is the lone
+          // vertical glyph on that row.
+          await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
+          const topRow = term.screen.getText().split("\n")[0] ?? ""
+          expect(topRow, name).toContain("DETAIL")
+          expect(findGlyphColumn(term, "│", 0), name).toBeGreaterThan(0)
           expect(term.screen.getText(), name).toContain("PRs PR4")
         } else if (divider === "horizontal") {
-          await waitFor(() => findGlyphRow(term, "─") >= 0)
-          expect(findGlyphRow(term, "─"), name).toBeGreaterThan(0)
+          // Below-docked: DETAIL renders under the list, not on the top row.
+          await waitFor(() => term.screen.getText().includes("DETAIL"))
+          const topRow = term.screen.getText().split("\n")[0] ?? ""
+          expect(topRow, name).not.toContain("DETAIL")
           expect(term.screen.getText(), name).toContain("PRs PR4")
         } else {
           expect(term.screen.getText(), name).not.toContain("PRs PR4")
@@ -376,18 +383,20 @@ describe("queue timeline storybook", () => {
     })
     try {
       await waitFor(() => term.screen.getText().includes("PRs PR3@r1"))
-      const initialDivider = findGlyphColumn(term, "│")
+      // Row 0 carries the two pane titles; the only vertical glyph there is
+      // the SplitPane divider (pane side walls start below the title rows).
+      const initialDivider = findGlyphColumn(term, "│", 0)
       expect(initialDivider).toBeGreaterThan(0)
       const draggedDivider = initialDivider + 12
 
       await term.mouse.down(initialDivider, 1)
       await term.mouse.move(draggedDivider, 1)
-      await waitFor(() => findGlyphColumn(term, "│") === draggedDivider)
+      await waitFor(() => findGlyphColumn(term, "│", 0) === draggedDivider)
       await term.mouse.up(draggedDivider, 1)
 
       await handle.press("j")
       await waitFor(() => term.screen.getText().includes("PRs PR7@r1"))
-      expect(findGlyphColumn(term, "│")).toBe(draggedDivider)
+      expect(findGlyphColumn(term, "│", 0)).toBe(draggedDivider)
     } finally {
       handle.unmount()
     }
@@ -442,7 +451,7 @@ describe("queue timeline storybook", () => {
     )
     try {
       await right.waitForLayoutStable()
-      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("RUN·PR"))
+      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("STEP"))
       expect(header).toContain("STATUS")
       expect(header).not.toContain("BY")
       expect(right.text).toContain("PR42.1")

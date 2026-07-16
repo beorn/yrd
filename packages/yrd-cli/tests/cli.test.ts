@@ -3308,9 +3308,9 @@ describe("runYrd", () => {
       }),
     )
     const lines = rendered.split("\n").filter(Boolean)
-    const header = lines.find((line) => line.includes("TIME") && line.includes("RUN·PR"))
+    const header = lines.find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("STEP"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "STATUS", "RUN·PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
+    for (const label of ["TIME", "STATUS", "RUN", "PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
     for (const removed of ["SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) expect(header).not.toContain(removed)
     const first = lines.find((line) => line.includes("PR1.1"))
     const second = lines.find((line) => line.includes("PR2.1"))
@@ -3362,7 +3362,7 @@ describe("runYrd", () => {
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
-      expect(absent.stdout()).toContain("RUNNER none — nothing drains this queue")
+      expect(absent.stdout()).toContain("NO RUNNER - no drained run in window")
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
@@ -3383,6 +3383,8 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-13T12:00:00.000Z",
           lastTickAt: "2026-07-13T12:00:00.000Z",
+          // The RUNNER box renders this verbatim as `[pid] <command>`.
+          command: expect.any(String),
         })
         now += 1_000
         await new Promise((resolve) => setTimeout(resolve, 20))
@@ -3596,7 +3598,7 @@ describe("runYrd", () => {
       { width: 200, height: 32, plain: true },
     )
     expect(rendered).toContain("TIME")
-    expect(rendered).toContain("RUN·PR")
+    expect(rendered).toContain("STATUS")
     expect(rendered).toContain("AGE")
     expect(rendered).toContain("main#4")
     expect(rendered).toContain("PR5.1")
@@ -3618,11 +3620,11 @@ describe("runYrd", () => {
       )
       const lines = fixed.split("\n")
       const filter = lines.find((line) => line.includes("FILTER "))
-      expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 status=all terms=none latest=no")
+      expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
       const flow = lines.find((line) => line.includes("FLOW "))
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
-      const header = lines.find((line) => line.includes("RUN·PR") && line.includes("TIME"))
+      const header = lines.find((line) => line.includes("TIME") && line.includes("STEP"))
       expect(header).toContain("STEP")
       expect(header).toContain("AGE")
       expect(header?.trimEnd()).toMatch(/RUN$/u)
@@ -3640,7 +3642,7 @@ describe("runYrd", () => {
       // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
       // date-qualified but never truncated below seconds.
       expect(integratedLine).toContain("2026-07-13T15:40:00")
-      expect(integratedLine).toContain("✓ ok")
+      expect(integratedLine).toContain("✓ done")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 ◷10:00$/u)
     }
     const renderStyledTimeline = createRenderer({ cols: 200, rows: 30 })
@@ -3743,7 +3745,7 @@ describe("runYrd", () => {
     expect(frame).not.toContain("position 1")
     expect(frame).toContain("AGE")
     expect(frame).toContain("WAIT")
-    expect(frame).toContain("RUNNER none — nothing drains this queue")
+    expect(frame).toContain("NO RUNNER - no drained run in window")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
@@ -3855,7 +3857,9 @@ describe("runYrd", () => {
 
     try {
       expect(wide.text).toContain("│")
-      expect(wide.text.split("\n")[0]).toContain("PR PR1 STATUS")
+      // Right-docked: the DETAIL pane title shares the top row with the list.
+      expect(wide.text.split("\n")[0]).toContain("DETAIL")
+      expect(wide.text).toContain("PR PR1 STATUS")
       await wide.press("Escape")
       await wide.waitForLayoutStable()
       expect(wide.text).not.toContain("PR PR1 STATUS")
@@ -3864,7 +3868,8 @@ describe("runYrd", () => {
       expect(wide.text).toContain("PR PR1 STATUS")
 
       expect(below.text).toContain("─")
-      expect(below.text.split("\n")[0]).not.toContain("PR PR1 STATUS")
+      // Below-docked: the DETAIL title is not on the top row.
+      expect(below.text.split("\n")[0]).not.toContain("DETAIL")
       expect(below.text).toContain("PR PR1 STATUS")
 
       expect(compact.text).toContain("QUEUE main")
@@ -3961,8 +3966,10 @@ describe("runYrd", () => {
     expect(plain.stdout()).toContain("pending")
     expect(latest.stdout()).toContain("PR1.1")
     expect(latest.stdout()).toContain("PR2.1")
-    expect(plain.stdout()).toContain("latest=no")
-    expect(latest.stdout()).toContain("latest=yes")
+    // Non-default-only FILTER line (user respec 2026-07-15): `latest` renders
+    // only when the collapse is on — no `latest=no` placeholder.
+    expect(plain.stdout()).not.toContain("latest")
+    expect(latest.stdout()).toContain("latest")
   })
 
   it("renders queue --watch identically to root watch", async () => {

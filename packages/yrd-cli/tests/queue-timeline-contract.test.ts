@@ -139,16 +139,20 @@ describe("queue timeline 21106 contract", () => {
     // ACTIVE/WAIT moved out of the per-row columns into the statistics box.
     const header = rows[headerLine]
     if (header === undefined) throw new Error("expected the table header row")
-    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN·PR\s+STEP\s+BY\s+AGE\s+RUN$/u)
+    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+PR\s+STEP\s+BY\s+AGE\s+RUN$/u)
     expect(header).not.toContain("ACTIVE")
     expect(header).not.toContain("WAIT")
     expect(header).not.toContain("SUBJECT")
     expect(header).not.toContain("DETAIL")
     expect(header).not.toContain("TOTAL")
     expect(header).toContain("STATUS")
-    // A healthy heartbeat renders no runner fact anywhere — the STATUS box
-    // owns the loud exception states and is omitted when normal (15d).
-    expect(rows.join("\n")).not.toContain("RUNNER")
+    // The standing RUNNER box (user respec 2026-07-15) renders the healthy
+    // runner fact exactly once: `[pid] <command>` plus a right-aligned uptime.
+    const runnerLine = rowIndex(rows, "[84042]")
+    expect(rows[runnerLine]).toContain("uptime 01:00")
+    expect(rowIndex(rows, "RUNNER")).toBeLessThan(runnerLine)
+    expect(rows.join("\n")).not.toContain("NO RUNNER")
+    expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
     expect(rows[statisticsLine + 1]).toContain("oldest=50:00")
     expect(rows[statisticsLine + 3]).toContain("ACTIVE ALL")
@@ -171,10 +175,10 @@ describe("queue timeline 21106 contract", () => {
       /^17:10:00 ● run\s+main#42 PR43\.1 Carry the production split-pane contract into the queue detail surface\s+2:check @agent\/5 34:00 ◷20:00$/u,
     )
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × rej\s+main#5\s+PR5\.1 Reject broken payload\s+typecheck-failed @agent\/2 27:00 ◷12:00$/u,
+      /^16:42:00 × fail\s+main#5\s+PR5\.1 Reject broken payload\s+typecheck-failed @agent\/2 27:00 ◷12:00$/u,
     )
     expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ ok\s+main#4\s+PR4\.1 Land the durable patch\s+@agent\/7 25:00 ◷15:00$/u,
+      /^16:25:00 ✓ done\s+main#4\s+PR4\.1 Land the durable patch\s+@agent\/7 25:00 ◷15:00$/u,
     )
 
     // Fixed cells stay aligned: the clock glyph column is shared by every
@@ -206,19 +210,21 @@ describe("queue timeline 21106 contract", () => {
     expect(rejected).toContain("◷12:00")
   })
 
-  it("renders runner exceptions once, loudly, in the STATUS box", async () => {
+  it("renders runner states once, loudly, in the RUNNER box", async () => {
     const projection = contractProjection()
-    // Healthy heartbeat: no runner fact anywhere; JSON stays lossless.
+    // Healthy heartbeat: the RUNNER box carries `[pid]` + uptime, no alarms.
     const healthy = (await renderTimeline(projection, 120)).join("\n")
-    expect(healthy).not.toContain("RUNNER")
+    expect(healthy).toContain("[84042]")
+    expect(healthy).toContain("uptime 01:00")
+    expect(healthy).not.toContain("NO RUNNER")
 
     // No heartbeat at all: loud, never blank, in the box above the filter.
     const paused = queueTimelineStories.paused.snapshot.projection
     if (paused === undefined) throw new Error("paused story is missing its projection")
     expect(paused.runner).toBeNull()
     const absentRows = await renderTimeline(paused, 120)
-    expect(absentRows.join("\n")).toContain("RUNNER none — nothing drains this queue")
-    expect(rowIndex(absentRows, "RUNNER none")).toBeLessThan(rowIndex(absentRows, "FILTER "))
+    expect(absentRows.join("\n")).toMatch(/NO RUNNER - (queue last drained .+ ago|no drained run in window)/u)
+    expect(rowIndex(absentRows, "NO RUNNER")).toBeLessThan(rowIndex(absentRows, "FILTER "))
 
     // A heartbeat older than the stale threshold is equally loud.
     const stale = {
@@ -245,7 +251,7 @@ describe("queue timeline 21106 contract", () => {
       const info = cell("pending", "PR1.1").fg
       const runningMarker = cell("●", "PR42.1").fg
       const successMarker = cell("✓", "PR4.1").fg
-      const successText = cell("ok", "PR4.1").fg
+      const successText = cell("done", "PR4.1").fg
       const failureText = cell("typecheck-failed", "PR5.1").fg
       const mutedTime = cell("16:40:00", "PR1.1").fg
       const mutedAge = cell("50:00", "PR1.1").fg
@@ -283,7 +289,7 @@ describe("queue timeline 21106 contract", () => {
     for (const anchor of ["QUEUE", "16:40:00 ○ pend", "─", "│ ROWS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
-    expect(wide[rowIndex(wide, "RUN·PR")]?.indexOf("TIME")).toBe(0)
+    expect(wide[rowIndex(wide, "STEP")]?.indexOf("TIME")).toBe(0)
 
     const narrow = await renderTimeline(contractProjection(), 100)
     const narrowBorder = narrow[rowIndex(narrow, "STATS")]
@@ -300,7 +306,7 @@ describe("queue timeline 21106 contract", () => {
       expect(header, `width ${width}`).toContain("TIME")
       const filter = rows[filterLine]
       if (filter === undefined) throw new Error("expected the FILTER row")
-      expect(filter.trim()).toBe("FILTER since=6:00:00 status=all terms=none latest=no")
+      expect(filter.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
@@ -310,7 +316,8 @@ describe("queue timeline 21106 contract", () => {
     if (projection === undefined) throw new Error("paused story is missing its projection")
     const rows = await renderTimeline(projection, 120)
     const statusLine = rowIndex(rows, "HOLD THE LINE")
-    expect(rows[statusLine]).toContain("STATUS")
+    // Title-in-border chrome: the STATUS name sits on the border line above.
+    expect(rows[statusLine - 1]).toContain("STATUS")
     expect(rows[statusLine]).toContain("operator freeze")
     expect(rows[statusLine]).toContain("allowed PR2")
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
@@ -354,7 +361,7 @@ describe("queue timeline 21106 contract", () => {
     const canceled = rows[rowIndex(rows, "PR7.1")]
     expect(canceled).toContain("queue-canceled")
     const integrated = rows[rowIndex(rows, "PR4.1")]
-    expect(integrated).toContain("✓ ok")
+    expect(integrated).toContain("✓ done")
   })
 
   it("defaults the cursor to the first running row, else the newest finished row", () => {
@@ -509,10 +516,9 @@ describe("queue timeline 21106 contract", () => {
     }
     const frame = rows.join("\n")
     expect(frame).toContain(`updated ${wallClock(projection.now)}`)
-    // A healthy runner is JSON-only (15d: the fact renders once, in the
-    // STATUS box, and only for exception states).
+    // The healthy runner fact renders once, in the standing RUNNER box.
     expect(projection.runner).not.toBeNull()
-    expect(frame).not.toContain("RUNNER")
+    expect(frame).toContain("[84042]")
 
     for (const row of projection.rows) {
       const rendered = rows[rowIndex(rows, `${row.pr}.${row.revision}`)]

@@ -21,6 +21,7 @@ import {
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
+  TitledBox,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
   queueTimelineVisibleRows,
@@ -447,6 +448,8 @@ export function QueueWatchFrame({
         cursorKey={cursor}
         onCursor={selectRow}
         onSelect={selectRow}
+        paneChrome
+        fillHeight
       />
     )
   const selectedDetail =
@@ -505,12 +508,26 @@ export function QueueWatchFrame({
       ? " · h/l steps"
       : ""
 
+  // Both panes carry the one title-in-border chrome idiom with one cell of
+  // outer padding on all sides (user directive 2026-07-15); content, headers,
+  // and the FILTER/STATS lines all sit inside that padding.
+  const queuePaneTitle = `QUEUE ${snapshot.projection.base}`
+  const framedTimeline = (
+    <TitledBox title={queuePaneTitle} padding={1} fill>
+      {timeline}
+    </TitledBox>
+  )
+  const framedDetail = (
+    <TitledBox title="DETAIL" padding={1} fill>
+      {detail}
+    </TitledBox>
+  )
   return (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>
-            {detailOpen ? detail : timeline}
+            {detailOpen ? framedDetail : framedTimeline}
           </Box>
         ) : (
           <SplitPane
@@ -521,8 +538,8 @@ export function QueueWatchFrame({
             minSecondarySize={tier === "right" ? DETAIL_NATURAL_WIDTH : DETAIL_NATURAL_HEIGHT}
             dividerSize={DIVIDER_SIZE}
             secondaryCollapsed={!detailOpen}
-            primary={timeline}
-            secondary={detail}
+            primary={framedTimeline}
+            secondary={framedDetail}
           />
         )}
       </Box>

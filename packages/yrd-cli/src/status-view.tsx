@@ -40,7 +40,7 @@ export function StatusValue({ value, href }: { value: string; href?: string }) {
       <Link
         href={href}
         bold
-        color={variant === "default" ? "$fg" : `$fg-${variant}`}
+        color={variant === "default" ? undefined : `$fg-${variant}`}
         minWidth={0}
         maxWidth="100%"
         wrap="truncate"
@@ -50,7 +50,13 @@ export function StatusValue({ value, href }: { value: string; href?: string }) {
     )
   }
   return (
-    <Text bold color={variant === "default" ? "$fg" : `$fg-${variant}`} minWidth={0} maxWidth="100%" wrap="truncate">
+    <Text
+      bold
+      color={variant === "default" ? undefined : `$fg-${variant}`}
+      minWidth={0}
+      maxWidth="100%"
+      wrap="truncate"
+    >
       {value}
     </Text>
   )
