@@ -52,6 +52,7 @@ import {
 import {
   QueueShowView,
   QueueLogView,
+  QueueRunsView,
   PRListView,
   QueueTimelineView,
   QueueWatchView,
@@ -4137,6 +4138,52 @@ describe("runYrd", () => {
       step: "review",
       elapsed: "1m",
     })
+  })
+
+  it("labels skipped checks consistently in queue and watch summaries", async () => {
+    const run = {
+      id: "R1",
+      status: "running",
+      startedAt: "2026-07-09T12:09:00.000Z",
+      prs: [{ id: "PR1", revision: 1, headSha: HEAD_SHA }],
+      stepSelection: {
+        authority: "explicit",
+        steps: ["merge"],
+        omittedSteps: [{ name: "check", index: 0, status: "skipped", reason: "not-selected" }],
+      },
+      steps: [{ name: "merge", job: { status: "running" } }],
+    } as unknown as QueueRun
+    const result = {
+      base: "main",
+      prs: [
+        {
+          id: "PR1",
+          name: "Merge without checks",
+          branch: "issue/merge-only",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+      ],
+      running: [run],
+      waiting: [],
+      finished: [],
+    } as unknown as QueueStatusResult
+    const queueFrame = await renderString(createElement(QueueRunsView, { runs: [run] }), {
+      width: 120,
+      plain: true,
+    })
+    const watchFrame = await renderString(
+      createElement(QueueWatchView, { results: [result], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+      { width: 120, plain: true },
+    )
+
+    expect(queueFrame).toContain("check=skipped merge=running")
+    expect(watchFrame).toContain("check=skipped merge=running")
+    expect(watchFrame).not.toContain("not-selected")
   })
 
   it("orders queue timeline rows status-major and collapses to the latest row per PR", () => {
