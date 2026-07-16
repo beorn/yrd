@@ -295,6 +295,7 @@ export type PR = Readonly<{
   integratedAt?: string
   integration?: Readonly<{ commit: string; baseSha: string }>
   withdrawnAt?: string
+  withdrawReason?: string
   canceledAt?: string
   canceledBy?: string
   cancelReason?: string
