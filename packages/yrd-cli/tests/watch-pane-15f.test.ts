@@ -57,20 +57,20 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
       await app.press("j")
       await app.press("j")
-      await waitFor(() => app.text.includes("MEMBERS PR7"))
+      await waitFor(() => app.text.includes("PRs PR7"))
       expect(app.text).toContain("ACTIVE STEP check")
 
       await app.press("k")
       await app.press("k")
-      await waitFor(() => app.text.includes("MEMBERS PR42"))
+      await waitFor(() => app.text.includes("PRs PR42"))
       expect(app.text).toContain("ACTIVE STEP check")
 
       await app.press("ArrowDown")
       await app.press("ArrowDown")
-      await waitFor(() => app.text.includes("MEMBERS PR7"))
+      await waitFor(() => app.text.includes("PRs PR7"))
       await app.press("ArrowUp")
       await app.press("ArrowUp")
-      await waitFor(() => app.text.includes("MEMBERS PR42"))
+      await waitFor(() => app.text.includes("PRs PR42"))
     } finally {
       app.unmount()
     }

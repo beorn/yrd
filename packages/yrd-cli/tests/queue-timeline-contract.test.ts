@@ -137,11 +137,18 @@ describe("queue timeline 21106 contract", () => {
     // ACTIVE/WAIT moved out of the per-row columns into the statistics box.
     const header = rows[headerLine]
     if (header === undefined) throw new Error("expected the table header row")
-    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+BY\s+PR\s+STEP\s+AGE\s+TOTAL$/u)
+    expect(header.trim()).toMatch(/^TIME\s+RUN·PR\s+STEP\s+BY\s+AGE\s+RUN$/u)
     expect(header).not.toContain("ACTIVE")
     expect(header).not.toContain("WAIT")
     expect(header).not.toContain("SUBJECT")
     expect(header).not.toContain("DETAIL")
+    expect(header).not.toContain("TOTAL")
+    expect(header).not.toContain("STATUS")
+    // A healthy heartbeat renders no runner fact anywhere — the STATUS box
+    // owns the loud exception states and is omitted when normal (15d).
+    expect(rows.join("\n")).not.toContain("RUNNER")
+    expect(rows.join("\n")).not.toContain("oldest open")
+    expect(rows[statisticsLine + 1]).toContain("oldest=50:00")
     expect(rows[statisticsLine + 3]).toContain("ACTIVE ALL")
     expect(rows[statisticsLine + 5]).toContain("WAIT")
   })
@@ -154,25 +161,26 @@ describe("queue timeline 21106 contract", () => {
     const rejected = rows[rowIndex(rows, "PR5.1")]
     const integrated = rows[rowIndex(rows, "PR4.1")]
 
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pending\s+@cto\s+PR1\.1 Prepare release notes\s+50:00$/u)
+    expect(pending?.trim()).toMatch(/^○ 16:40:00 pending PR1\.1 Prepare release notes\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● running\s+main#42 @agent\/3 PR42\.1 Align host navigation keybindings without disturbing internal pane controls\s+2:check\s+36:00 ◷20:00$/u,
+      /^● 17:10:00 main#42 PR42\.1 Align host navigation keybindings without disturbing internal pane controls\s+2:check @agent\/3 36:00 ◷20:00$/u,
     )
     expect(partner?.trim()).toMatch(
-      /^17:10:00 ● running\s+main#42 @agent\/5 PR43\.1 Carry the production split-pane contract into the queue detail surface\s+2:check\s+34:00 ◷20:00$/u,
+      /^● 17:10:00 main#42 PR43\.1 Carry the production split-pane contract into the queue detail surface\s+2:check @agent\/5 34:00 ◷20:00$/u,
     )
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × rejected\s+main#5\s+@agent\/2 PR5\.1 Reject broken payload\s+typecheck-failed\s+27:00 ◷12:00$/u,
+      /^× 16:42:00 main#5\s+PR5\.1 Reject broken payload\s+typecheck-failed @agent\/2 27:00 ◷12:00$/u,
     )
     expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ integrated\s+main#4\s+@agent\/7 PR4\.1 Land the durable patch\s+25:00 ◷15:00$/u,
+      /^✓ 16:25:00 main#4\s+PR4\.1 Land the durable patch\s+integrated @agent\/7 25:00 ◷15:00$/u,
     )
 
     // Fixed cells stay aligned: the clock glyph column is shared by every
     // row that has a total.
     const glyphColumns = [lead, partner, rejected, integrated].map((row) => row?.indexOf("◷"))
     expect(new Set(glyphColumns).size).toBe(1)
-    // The pending row has no Run yet: no run id, no step, no total.
+    // The pending row has no Run yet: blue `pending` instead of a run id,
+    // no step, no run duration.
     expect(pending).not.toContain("#")
     expect(pending).not.toContain("◷")
   })
@@ -187,8 +195,8 @@ describe("queue timeline 21106 contract", () => {
     expect(lead).toContain("36:00")
     expect(lead).toContain("◷20:00")
     // The BY column is the first casualty on narrow tiers — dropped before
-    // any identity, clock, status, or measurement column.
-    expect(lead).toContain("● running")
+    // any identity, clock, or measurement column.
+    expect(lead?.trimStart().startsWith("●")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
     const rejected = rows[rowIndex(rows, "PR5.1")]
@@ -196,21 +204,19 @@ describe("queue timeline 21106 contract", () => {
     expect(rejected).toContain("◷12:00")
   })
 
-  it("shows runner heartbeat liveness in the header with loud absent and stale states", async () => {
+  it("renders runner exceptions once, loudly, in the STATUS box", async () => {
     const projection = contractProjection()
-    const present = (await renderTimeline(projection, 120)).map((row) => row.trimEnd())
-    const runnerRow = present[rowIndex(present, "RUNNER")]
-    expect(runnerRow).toContain("RUNNER yrd-cli:84042")
-    expect(runnerRow).toContain("up 1:00:00")
-    expect(runnerRow).toContain("tick 0:02 ago")
-    expect(runnerRow).toContain("updated 17:30:00")
+    // Healthy heartbeat: no runner fact anywhere; JSON stays lossless.
+    const healthy = (await renderTimeline(projection, 120)).join("\n")
+    expect(healthy).not.toContain("RUNNER")
 
-    // No heartbeat at all: loud, never blank.
+    // No heartbeat at all: loud, never blank, in the box above the filter.
     const paused = queueTimelineStories.paused.snapshot.projection
     if (paused === undefined) throw new Error("paused story is missing its projection")
     expect(paused.runner).toBeNull()
-    const absent = (await renderTimeline(paused, 120)).join("\n")
-    expect(absent).toContain("RUNNER none — nothing drains this queue")
+    const absentRows = await renderTimeline(paused, 120)
+    expect(absentRows.join("\n")).toContain("RUNNER none — nothing drains this queue")
+    expect(rowIndex(absentRows, "RUNNER none")).toBeLessThan(rowIndex(absentRows, "FILTER "))
 
     // A heartbeat older than the stale threshold is equally loud.
     const stale = {
@@ -221,6 +227,48 @@ describe("queue timeline 21106 contract", () => {
     expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
   })
 
+  it("pins the 15d semantic colors on markers, states, and identity cells", async () => {
+    const render = createRenderer({ cols: 160, rows: 45 })
+    const styled = render(createElement(QueueTimelineView, { projection: contractProjection(), columns: 160 }))
+    try {
+      await styled.waitForLayoutStable()
+      const frame = styled.text.split("\n")
+      const cell = (needle: string, anchor: string) => {
+        const row = frame.findIndex((text) => text.includes(anchor))
+        if (row < 0) throw new Error(`missing rendered row for '${anchor}'`)
+        const column = frame[row]?.indexOf(needle) ?? -1
+        if (column < 0) throw new Error(`missing '${needle}' in the '${anchor}' row`)
+        return styled.cell(column, row)
+      }
+      const info = cell("pending", "PR1.1").fg
+      const runningMarker = cell("●", "PR42.1").fg
+      const successMarker = cell("✓", "PR4.1").fg
+      const successText = cell("integrated", "PR4.1").fg
+      const failureText = cell("typecheck-failed", "PR5.1").fg
+      const mutedTime = cell("16:40:00", "PR1.1").fg
+      const mutedAge = cell("50:00", "PR1.1").fg
+
+      for (const pinned of [info, runningMarker, successMarker, successText, failureText, mutedTime, mutedAge]) {
+        expect(pinned).not.toBeNull()
+      }
+      // Blue pending identity matches the pulsing blue working disc.
+      expect(info).toEqual(runningMarker)
+      // GREEN success marker + semantic success text (15d re-rule).
+      expect(successMarker).toEqual(successText)
+      expect(successMarker).not.toEqual(info)
+      expect(successMarker).not.toEqual(mutedTime)
+      // Failure code keeps its own semantic foreground.
+      expect(failureText).not.toEqual(successMarker)
+      expect(failureText).not.toEqual(info)
+      expect(failureText).not.toEqual(mutedTime)
+      // TIME and AGE share the muted foreground.
+      expect(mutedTime).toEqual(mutedAge)
+      expect(mutedTime).not.toEqual(info)
+    } finally {
+      styled.unmount()
+    }
+  })
+
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
     const wideBorder = wide[rowIndex(wide, "╭")]
@@ -228,11 +276,13 @@ describe("queue timeline 21106 contract", () => {
     expect(wideBorder.startsWith("╭")).toBe(true)
     expect(wideBorder.trimEnd().length).toBe(160)
     for (const row of wide) expect(Array.from(row.trimEnd()).length).toBeLessThanOrEqual(160)
-    // Left-anchored surfaces start at column 0; only right-aligned facts
-    // (FILTER) may carry leading padding.
-    for (const anchor of ["QUEUE", "TIME", "16:40:00", "╭", "│ STATISTICS"]) {
+    // Left-anchored surfaces start at column 0 (the header's first cell is
+    // the one-column marker gutter); only right-aligned facts (FILTER,
+    // updated) carry leading padding.
+    for (const anchor of ["QUEUE", "○ 16:40:00", "╭", "│ STATISTICS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
+    expect(wide[rowIndex(wide, "RUN·PR")]?.indexOf("TIME")).toBe(2)
 
     const narrow = await renderTimeline(contractProjection(), 100)
     const narrowBorder = narrow[rowIndex(narrow, "╭")]
@@ -369,18 +419,10 @@ describe("queue timeline 21106 contract", () => {
       expect(statistics).toBeGreaterThan(0)
       expect(statistics).toBeLessThan(footer)
 
-      // Default cursor is the batch lead; the shared Run detail names every
-      // member and highlights the selected one.
+      // Default cursor is the batch lead; the shared Run detail (agent8's
+      // step-tabs composition) names every member of the batch.
       expect(handle.text).toContain("PRs PR42@r1")
-      const detailRow = handle.text.split("\n").findIndex((row) => row.includes("PRs PR42@r1"))
-      const leadColumn = handle.text.split("\n")[detailRow]?.indexOf("PR42@r1") ?? -1
-      expect(handle.cell(leadColumn, detailRow).bold).toBe(true)
-
-      await handle.press("j")
-      await handle.waitForLayoutStable()
-      const partnerRow = handle.text.split("\n").findIndex((row) => row.includes("PR43@r1"))
-      const partnerColumn = handle.text.split("\n")[partnerRow]?.indexOf("PR43@r1") ?? -1
-      expect(handle.cell(partnerColumn, partnerRow).bold).toBe(true)
+      expect(handle.text).toContain("PR43@r1")
     } finally {
       handle.unmount()
     }
@@ -442,11 +484,10 @@ describe("queue timeline 21106 contract", () => {
     }
     const frame = rows.join("\n")
     expect(frame).toContain(`updated ${wallClock(projection.now)}`)
-    const runner = projection.runner
-    if (runner === null) throw new Error("contract-overview must carry a live runner fixture")
-    expect(frame).toContain(`yrd-cli:${runner.pid}`)
-    expect(frame).toContain(`up ${duration(Date.parse(projection.now) - Date.parse(runner.startedAt))}`)
-    expect(frame).toContain(`tick ${duration(Date.parse(projection.now) - Date.parse(runner.lastTickAt))} ago`)
+    // A healthy runner is JSON-only (15d: the fact renders once, in the
+    // STATUS box, and only for exception states).
+    expect(projection.runner).not.toBeNull()
+    expect(frame).not.toContain("RUNNER")
 
     for (const row of projection.rows) {
       const rendered = rows[rowIndex(rows, `${row.pr}.${row.revision}`)]
