@@ -331,7 +331,7 @@ export type QueueAuditFinding = Readonly<{
 
 export type QueueAuditResult = Readonly<{ findings: readonly QueueAuditFinding[] }>
 
-const InstalledStepSchema = z
+export const InstalledStepSchema = z
   .object({
     name: z.string().regex(/^[a-z][a-z0-9_-]*$/iu),
     title: z.string().trim().min(1),

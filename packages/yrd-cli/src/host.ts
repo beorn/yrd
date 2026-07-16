@@ -39,12 +39,15 @@ import {
   withMerge,
   withStep,
   type CommandEvidence,
+  type InstalledStep,
   type IntegratedShape,
   type PRShape,
+  type QueueAuditResult,
   type StepDef,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
+import { installedBaselineDrift, readInstalledBaselines, removeInstalledBaseline, writeInstalledBaseline } from "./installed-baseline.ts"
 import { createExclusive, createJournal, importOrphanJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
@@ -518,6 +521,7 @@ function queueAdministration(
   process: Pick<Process, "run">,
   repository: YrdRepository,
   config: ResolvedYrdProjectConfig,
+  installedSteps: () => readonly InstalledStep[],
 ): YrdCliQueueAdministration {
   const inspect = async (base = config.base) => {
     const baseSha = await resolveCommit(process, repository.repo, base)
@@ -525,11 +529,27 @@ function queueAdministration(
     return { base, baseSha }
   }
   return Object.freeze({
+    async auditEnvironment(): Promise<QueueAuditResult> {
+      const baselines = await readInstalledBaselines(repository.stateDir)
+      const findings = Object.values(baselines).flatMap((baseline) => {
+        const finding = installedBaselineDrift(baseline, installedSteps())
+        return finding === undefined ? [] : [finding]
+      })
+      return { findings }
+    },
     async provision(base) {
-      return { ...(await inspect(base)), steps: config.steps, persistentResources: false }
+      const inspected = await inspect(base)
+      await writeInstalledBaseline(repository.stateDir, {
+        ...inspected,
+        installedAt: new Date().toISOString(),
+        steps: installedSteps(),
+      })
+      return { ...inspected, steps: config.steps, persistentResources: false }
     },
     async deprovision(base) {
-      return { ...(await inspect(base)), released: [], persistentResources: false }
+      const inspected = await inspect(base)
+      const released = (await removeInstalledBaseline(repository.stateDir, inspected.base)) ? ["installed-baseline"] : []
+      return { ...inspected, released, persistentResources: false }
     },
   })
 }
@@ -782,7 +802,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     }
     await drain()
     const services = Object.freeze({
-      queue: queueAdministration(process, repository, loaded.config),
+      queue: queueAdministration(process, repository, loaded.config, () => runtimeApp.queue.steps()),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
