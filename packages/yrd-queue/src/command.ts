@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { parseJobLaunch, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
@@ -355,21 +355,34 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
-  const run = async (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> => {
+  const execute = async (
+    repo: string,
+    args: readonly string[],
+    allowFailure: boolean,
+    trim: boolean,
+  ): Promise<GitResult> => {
     const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
-    const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+    const completed = {
+      code: result.exitCode,
+      stdout: trim ? result.stdout.trim() : result.stdout,
+      stderr: trim ? result.stderr.trim() : result.stderr,
+    }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
     }
     return completed
   }
+  const run = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
+    execute(repo, args, allowFailure, true)
+  const raw = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
+    execute(repo, args, allowFailure, false)
   const commit = async (repo: string, ref: string): Promise<string> =>
     (await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).stdout
   const optionalCommit = async (repo: string, ref: string): Promise<string | undefined> => {
     const result = await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], true)
     return result.code === 0 ? result.stdout : undefined
   }
-  return Object.freeze({ run, commit, optionalCommit })
+  return Object.freeze({ run, raw, commit, optionalCommit })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -442,7 +455,7 @@ async function withScratch<Output extends JsonValue>(
   repo: string,
   ref: string,
   parent: string,
-  run: (path: string) => Promise<JobResult<Output>>,
+  run: (path: string, root: string) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   await mkdir(parent, { recursive: true })
   const root = await mkdtemp(join(await realpath(parent), "yrd-queue-"))
@@ -453,7 +466,7 @@ async function withScratch<Output extends JsonValue>(
   try {
     await git.run(repo, ["worktree", "add", "--detach", path, ref])
     added = true
-    outcome = await run(path)
+    outcome = await run(path, root)
   } catch (cause) {
     operationFailure = cause
   }
@@ -521,6 +534,185 @@ async function prepareCandidate(
   return { status: "passed", output: await git.commit(path, "HEAD") }
 }
 
+type CandidateSubmodulePin = Readonly<{ path: string; sha: string; origin: string }>
+type MutableSubmoduleConfig = { path?: string; url?: string }
+
+const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
+const FILTER_UNSUPPORTED =
+  /filtering not recognized by server|server does not support filter|filter(?:ing)? (?:is )?not supported|unsupported[^\n]*filter/iu
+
+function scpRemote(value: string): RegExpExecArray | null {
+  return /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u.exec(value)
+}
+
+import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
+
+function canonicalRemote(repo: string, value: string): string {
+  if (isAbsolute(value) || REMOTE_SCHEME.test(value) || scpRemote(value) !== null) return value
+  return resolve(repo, value)
+}
+
+function resolveSubmoduleOrigin(repo: string, superOrigin: string | undefined, value: string): string {
+  if (!value.startsWith("./") && !value.startsWith("../")) return canonicalRemote(repo, value)
+  if (superOrigin === undefined) {
+    throw new Error(`yrd: relative submodule URL '${value}' has no superproject origin`)
+  }
+  const base = canonicalRemote(repo, superOrigin)
+  try {
+    return resolveRelativeSubmoduleOrigin(base, value)
+  } catch (cause) {
+    throw new Error(`yrd: could not resolve submodule URL '${value}' against '${base}': ${messageOf(cause)}`)
+  }
+}
+
+function parseSubmoduleConfig(output: string): Map<string, MutableSubmoduleConfig> {
+  const modules = new Map<string, MutableSubmoduleConfig>()
+  for (const entry of output.split("\0")) {
+    if (entry === "") continue
+    const separator = entry.indexOf("\n")
+    if (separator < 1) throw new Error("yrd: candidate .gitmodules emitted an invalid NUL record")
+    const key = entry.slice(0, separator)
+    const value = entry.slice(separator + 1)
+    const match = /^submodule\.(.+)\.(path|url)$/iu.exec(key)
+    if (match?.[1] === undefined) continue
+    const property = match[2]
+    if (property !== "path" && property !== "url") continue
+    const current = modules.get(match[1]) ?? {}
+    if (current[property] !== undefined && current[property] !== value) {
+      throw new Error(`yrd: candidate .gitmodules defines conflicting ${property} values for '${match[1]}'`)
+    }
+    current[property] = value
+    modules.set(match[1], current)
+  }
+  return modules
+}
+
+async function candidateSubmodulePins(
+  git: Git,
+  repo: string,
+  path: string,
+  candidateSha: string,
+): Promise<CandidateSubmodulePin[]> {
+  const tree = await git.raw(path, ["ls-tree", "-r", "-z", "--full-tree", candidateSha])
+  const gitlinks: ReadonlyArray<Readonly<{ path: string; sha: string }>> = tree.stdout
+    .split("\0")
+    .filter((entry) => entry !== "")
+    .flatMap((entry) => {
+      const separator = entry.indexOf("\t")
+      if (separator < 1) throw new Error("yrd: candidate tree emitted an invalid NUL record")
+      const [mode, type, sha] = entry.slice(0, separator).split(" ")
+      if (mode !== "160000") return []
+      if (type !== "commit" || sha === undefined || !/^[0-9a-f]{40,64}$/iu.test(sha)) {
+        throw new Error(`yrd: candidate gitlink '${entry.slice(separator + 1)}' has an invalid object identity`)
+      }
+      return [{ path: entry.slice(separator + 1), sha }]
+    })
+  if (gitlinks.length === 0) return []
+
+  const configured = await git.raw(
+    path,
+    [
+      "config",
+      "--null",
+      "--blob",
+      `${candidateSha}:.gitmodules`,
+      "--get-regexp",
+      "^submodule\\..*\\.(path|url)$",
+    ],
+    true,
+  )
+  if (configured.code !== 0) {
+    throw new Error(
+      `yrd: candidate contains gitlinks but .gitmodules is missing or invalid: ${configured.stderr.trim() || configured.stdout.trim() || "no submodule metadata"}`,
+    )
+  }
+  const modules = parseSubmoduleConfig(configured.stdout)
+  const urlsByPath = new Map<string, string>()
+  for (const [name, module] of modules) {
+    if (module.path === undefined) continue
+    if (module.url === undefined) throw new Error(`yrd: candidate submodule '${module.path}' has no URL (section '${name}')`)
+    const previous = urlsByPath.get(module.path)
+    if (previous !== undefined && previous !== module.url) {
+      throw new Error(`yrd: candidate submodule path '${module.path}' resolves to conflicting URLs`)
+    }
+    urlsByPath.set(module.path, module.url)
+  }
+  const remote = await git.run(repo, ["config", "--get", "remote.origin.url"], true)
+  const superOrigin = remote.code === 0 && remote.stdout !== "" ? remote.stdout : undefined
+  return gitlinks.map((gitlink) => {
+    const url = urlsByPath.get(gitlink.path)
+    if (url === undefined) throw new Error(`yrd: candidate submodule '${gitlink.path}' has no URL`)
+    return { ...gitlink, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
+  })
+}
+
+function fetchDetail(result: GitResult): string {
+  return result.stderr.trim() || result.stdout.trim() || `git exited ${result.code}`
+}
+
+async function proveCandidateSubmoduleReachability(
+  git: Git,
+  repo: string,
+  path: string,
+  candidateSha: string,
+  proofParent: string,
+): Promise<void> {
+  const pins = await candidateSubmodulePins(git, repo, path, candidateSha)
+  if (pins.length === 0) return
+
+  const groups = new Map<string, Map<string, string[]>>()
+  for (const pin of pins) {
+    const shas = groups.get(pin.origin) ?? new Map<string, string[]>()
+    shas.set(pin.sha, [...(shas.get(pin.sha) ?? []), pin.path])
+    groups.set(pin.origin, shas)
+  }
+  await mkdir(proofParent, { recursive: true })
+  const template = join(proofParent, "empty-template")
+  await mkdir(template, { recursive: true })
+
+  for (const [origin, shas] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+    const store = join(proofParent, createHash("sha256").update(origin).digest("hex"))
+    const initialized = await git.run(
+      proofParent,
+      ["init", "--bare", "--quiet", `--template=${template}`, store],
+      true,
+    )
+    if (initialized.code !== 0) {
+      throw new Error(`yrd: could not create fresh submodule proof store for '${origin}': ${fetchDetail(initialized)}`)
+    }
+    for (const [sha, paths] of [...shas].sort(([left], [right]) => left.localeCompare(right))) {
+      const filtered = await git.run(
+        store,
+        ["-c", "protocol.version=2", "fetch", "--depth=1", "--filter=tree:0", origin, sha],
+        true,
+      )
+      if (filtered.code !== 0) {
+        if (!FILTER_UNSUPPORTED.test(`${filtered.stderr}\n${filtered.stdout}`)) {
+          throw new Error(
+            `yrd: candidate submodule pin '${sha}' for ${paths.join(", ")} is not reachable from '${origin}': ${fetchDetail(filtered)}`,
+          )
+        }
+        const fallback = await git.run(
+          store,
+          ["-c", "protocol.version=2", "fetch", "--depth=1", origin, sha],
+          true,
+        )
+        if (fallback.code !== 0) {
+          throw new Error(
+            `yrd: candidate submodule pin '${sha}' for ${paths.join(", ")} is not reachable from '${origin}': ${fetchDetail(fallback)}`,
+          )
+        }
+      }
+      const fetched = await git.run(store, ["cat-file", "-e", `${sha}^{commit}`], true)
+      if (fetched.code !== 0) {
+        throw new Error(
+          `yrd: exact fetch from '${origin}' did not produce candidate submodule pin '${sha}' for ${paths.join(", ")}`,
+        )
+      }
+    }
+  }
+}
+
 export type GitCheckOptions = ProcessDependency &
   Readonly<{
     repo: string
@@ -582,7 +774,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         repo,
         baseSha,
         options.checkoutParent ?? tmpdir(),
-        async (path): Promise<JobResult<GitCheckResultEvidence>> => {
+        async (path, scratchRoot): Promise<JobResult<GitCheckResultEvidence>> => {
           const candidate = await prepareCandidate(
             git,
             path,
@@ -591,6 +783,13 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
           )
           if (candidate.status === "failed") return candidate
+          await proveCandidateSubmoduleReachability(
+            git,
+            repo,
+            path,
+            candidate.output,
+            join(scratchRoot, "submodule-proof"),
+          )
           const pinned = await pinCandidate(
             git,
             repo,
