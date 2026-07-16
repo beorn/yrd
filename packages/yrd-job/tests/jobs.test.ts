@@ -557,6 +557,62 @@ describe("Jobs", () => {
     await app.close()
   })
 
+  it("reclaims the union on a named dead-runner recovery — other runners' cutoff-expired leases are never skipped (merge-queue R40a2)", async () => {
+    const app = await jobsApp(delivery())
+    await app.dispatch(app.commands.sender.send, { message: "one" })
+    await app.dispatch(app.commands.sender.send, { message: "two" })
+    await app.dispatch(app.commands.sender.send, { message: "three" })
+    const [dead, expired, live] = Object.keys(app.jobs.state().byId)
+    // Named runner: LIVE lease — reclaimed because the caller asserts it died.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: dead!,
+      attempt: 1,
+      runner: "yrd-cli:111",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+    // A DIFFERENT runner whose lease already lapsed past the cutoff: the
+    // lease-cutoff recovery contract (R40a) says a startup reclaim naming the
+    // dead runner must still recover this one.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: expired!,
+      attempt: 1,
+      runner: "yrd-cli:222",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+    // A third runner with a LIVE lease: untouched.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: live!,
+      attempt: 1,
+      runner: "yrd-cli:333",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+
+    await expect(
+      app.jobs.recover({
+        now: "2026-01-01T00:00:02.000Z",
+        runner: "yrd-cli:111",
+        reason: "previous resident runner disappeared",
+      }),
+    ).resolves.toEqual([dead, expired])
+
+    // Per-job reasons stay TRUTHFUL: the caller's dead-runner reason applies
+    // only to the named runner's job; the other runner's job was reclaimed for
+    // lease expiry and must say so.
+    expect(app.jobs.state().byId[dead!]).toMatchObject({
+      status: "lost",
+      lostReason: "previous resident runner disappeared",
+    })
+    expect(app.jobs.state().byId[expired!]).toMatchObject({
+      status: "lost",
+      lostReason: "runner lease expired",
+    })
+    expect(app.jobs.state().byId[live!]).toMatchObject({ status: "running", runner: "yrd-cli:333" })
+    await app.close()
+  })
+
   it("emits the dead-runner reclaim reason and identity at WARN", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
