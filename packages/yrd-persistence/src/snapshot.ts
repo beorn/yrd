@@ -43,6 +43,14 @@ const SnapshotSegmentSchema = z
 const SnapshotBindingSchema = z
   .object({
     formatVersion: z.literal(4),
+    /**
+     * Identity of the decoder that produced the cached values. Cached frames are
+     * served without per-frame re-validation, so any change to frame decoding or
+     * validation semantics MUST change this string (see JOURNAL_DECODER in
+     * journal.ts) — a mismatch invalidates the cache loudly instead of silently
+     * serving stale-shaped values.
+     */
+    decoder: z.string().min(1),
     generation: IntegerSchema,
     manifestDigest: DigestSchema,
     tailIdentity: z.string().uuid(),
@@ -69,6 +77,7 @@ const SnapshotFileSchema = SnapshotHeaderPayloadSchema.extend({
 
 /** The journal identity a snapshot must match, derived from the active manifest + tail state. */
 export type SnapshotBindingView = Readonly<{
+  decoder: string
   generation: number
   manifestDigest: string
   tailIdentity: string
@@ -129,6 +138,9 @@ export function parseSnapshotFile(text: string, view: SnapshotBindingView): Snap
     return { ok: false, reason: "snapshot-frame-count", expected: payload.frames, observed: values.length }
   }
   const binding = payload.binding
+  if (binding.decoder !== view.decoder) {
+    return { ok: false, reason: "snapshot-decoder-mismatch", expected: view.decoder, observed: binding.decoder }
+  }
   if (binding.generation !== view.generation) {
     return {
       ok: false,
@@ -169,6 +181,19 @@ export function parseSnapshotFile(text: string, view: SnapshotBindingView): Snap
       observed: binding.segments,
     }
   }
+  if (payload.cursor < binding.tailLogicalStart) {
+    // A cursor inside the segment range would leave a partially covered segment
+    // outside physical verification, letting a repeated bounded read serve cached
+    // frames over corrupted covered bytes. Snapshots may only end at or beyond the
+    // tail start (all segments fully covered), so reject anything else loudly —
+    // including files seeded by pre-fix builds.
+    return {
+      ok: false,
+      reason: "snapshot-covers-partial-segment",
+      expected: `>= ${binding.tailLogicalStart}`,
+      observed: payload.cursor,
+    }
+  }
   if (payload.cursor > view.logicalEnd) {
     return {
       ok: false,
@@ -198,6 +223,7 @@ export function encodeSnapshotFile(
 ): string {
   const binding = SnapshotBindingSchema.parse({
     formatVersion: 4,
+    decoder: input.view.decoder,
     generation: input.view.generation,
     manifestDigest: input.view.manifestDigest,
     tailIdentity: input.view.tailIdentity,
