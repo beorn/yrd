@@ -10,10 +10,14 @@
  * selector-surfaces.test.ts; Git facts for `pr prune` are injected through
  * YrdCliIO.pruneGit so every verdict is deterministic.
  */
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { createBayJobDefs, withBays } from "@yrd/bay"
-import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type JsonValue } from "@yrd/core"
+import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
+import { createJournal } from "@yrd/persistence"
 import { runYrd, type PruneGitFacts, type YrdCliIO } from "@yrd/cli"
 import { withMerge, withQueue, withStep, type PRShape, type SourceRewrite, type StepExecution } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
@@ -90,7 +94,7 @@ function contestAdapters() {
   return { runner, evaluator, git }
 }
 
-async function createCliApp() {
+async function createCliApp(options: { journal?: Journal<unknown> } = {}) {
   const bayJobs = createBayJobDefs(workspace())
   const check = withStep("check", (): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } }), {
     revision: "check-v1",
@@ -116,7 +120,7 @@ async function createCliApp() {
     withBays({ jobs: bayJobs, defaultBase: "main", resolveBase: (ref) => ({ base: ref, baseSha: BASE_SHA }) }),
   )
   return createYrd(contests(queue(base)), {
-    inject: { journal: createMemoryJournal(), clock: () => "2026-07-15T12:00:00.000Z", id: ids() },
+    inject: { journal: options.journal ?? createMemoryJournal(), clock: () => "2026-07-15T12:00:00.000Z", id: ids() },
   })
 }
 
@@ -238,6 +242,47 @@ describe("pr withdraw", () => {
     expect(mixed.stderr()).toContain("PR 'PR2' is withdrawn")
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
+  })
+})
+
+describe("pr withdraw journal replay", () => {
+  it("replays reason-bearing and reason-less withdrawals through a fresh session", async () => {
+    // A second yrd invocation in a real repository is a FRESH app replaying the
+    // persisted journal (projectFrame source="replay"), not the appending app.
+    // This is the path where a strict pr/withdrawn schema without `reason`
+    // would refuse the journal with the version-skew guidance.
+    const dir = mkdtempSync(join(tmpdir(), "yrd-withdraw-replay-"))
+    try {
+      const first = await createCliApp({ journal: createJournal({ dir }) })
+      await first.bays.submit({ branch: "topic/reasoned", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+      await first.bays.submit({ branch: "topic/reasonless", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
+      const withdraw = outputIO()
+      expect(
+        await runYrd(first, yrd("pr", "withdraw", "PR1", "--reason", "superseded by rework"), withdraw.io),
+        withdraw.stderr(),
+      ).toBe(0)
+      expect(await runYrd(first, yrd("pr", "close", "PR2"), outputIO().io)).toBe(0)
+      await first.close()
+
+      const second = await createCliApp({ journal: createJournal({ dir }) })
+      try {
+        expect(second.state().bays.prs.PR1).toMatchObject({
+          status: "withdrawn",
+          withdrawReason: "superseded by rework",
+        })
+        expect(second.state().bays.prs.PR2).toMatchObject({ status: "withdrawn" })
+        expect(second.state().bays.prs.PR2?.withdrawReason).toBeUndefined()
+        const log = outputIO()
+        expect(await runYrd(second, yrd("log", "--pr", "PR1", "--json"), log.io), log.stderr()).toBe(0)
+        expect((JSON.parse(log.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
+          expect.objectContaining({ pr: "PR1", run: "-", outcome: "retired", glyph: "[-]" }),
+        ])
+      } finally {
+        await second.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
