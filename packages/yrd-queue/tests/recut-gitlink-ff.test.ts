@@ -160,9 +160,9 @@ describe("recut fast-forward gitlink resolution", () => {
 
   it("refuses loudly when the carrier and base pins have truly diverged", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
-    const moduleB = await moduleCommit(module, "carrier-line", moduleA, "b")
-    const moduleC = await moduleCommit(module, "base-line", moduleA, "c")
-    await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-line", "base-line"])
+    const moduleB = await moduleCommit(module, "carrier-row", moduleA, "b")
+    const moduleC = await moduleCommit(module, "base-row", moduleA, "c")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "carrier-row", "base-row"])
     expect(await isAncestor(join(repo, "dep"), moduleB, moduleC)).toBe(false)
     expect(await isAncestor(join(repo, "dep"), moduleC, moduleB)).toBe(false)
 

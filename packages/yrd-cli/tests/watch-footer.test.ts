@@ -10,12 +10,12 @@ import {
 // drag-select; the footer advertises the Shift-drag native-selection escape
 // hatch. Silvery `Text` word-wraps and the footer Box is height={1}, so the
 // hint must be dropped (not clipped) when it would push a keybinding label onto
-// a wrapped, invisible second line. These pin the width gate.
+// a wrapped, invisible second row. These pin the width gate.
 describe("footerWithSelectionHint", () => {
   const full = QUEUE_FOOTER_KEYS + SELECTION_FOOTER_HINT
   const threshold = QUEUE_FOOTER_KEYS.length + SELECTION_FOOTER_HINT.length + 1
 
-  it("appends the selection hint when the whole line fits", () => {
+  it("appends the selection hint when the whole row fits", () => {
     expect(footerWithSelectionHint(QUEUE_FOOTER_KEYS, 200)).toBe(full)
     // Exactly at the threshold width the hint still fits.
     expect(footerWithSelectionHint(QUEUE_FOOTER_KEYS, threshold)).toBe(full)

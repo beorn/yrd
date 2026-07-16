@@ -186,21 +186,21 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
           if (nextAtEnd) setUnseenLines(0)
         }}
         scrollbarVisibility="always"
-        renderItem={(line) =>
-          line.kind === "heading" ? (
+        renderItem={(row) =>
+          row.kind === "heading" ? (
             <Text bold wrap="truncate">
-              {line.text}
+              {row.text}
             </Text>
-          ) : line.kind === "muted" ? (
-            <Text color="$fg-muted">{line.text}</Text>
+          ) : row.kind === "muted" ? (
+            <Text color="$fg-muted">{row.text}</Text>
           ) : (
-            // Body lines mirror a step's raw `output.log` tail — foreign terminal
+            // Body rows mirror a step's raw `output.log` tail — foreign terminal
             // output whose embedded ANSI (colors AND backgrounds, e.g. vitest's
             // cyan ` RUN ` banner) is intentional. `bgConflict="ignore"` keeps
             // those colors and stops silvery's background-conflict guard (default
             // `throw`) from killing the watch loop, while the global throw stays a
             // safety net for silvery's own pipeline bugs everywhere else.
-            <Text bgConflict="ignore">{line.text}</Text>
+            <Text bgConflict="ignore">{row.text}</Text>
           )
         }
       />
