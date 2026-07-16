@@ -587,8 +587,6 @@ const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
 const FILTER_UNSUPPORTED =
   /filtering not recognized by server|server does not support filter|filter(?:ing)? (?:is )?not supported|unsupported[^\n]*filter/iu
 const DEFINITIVE_EXACT_SHA_ABSENCE = /not our ref/iu
-const DEFINITIVE_LOCAL_OBJECT_ABSENCE =
-  /not a valid object name|bad object|unknown revision|needed a single revision/iu
 
 function scpRemote(value: string): RegExpExecArray | null {
   return /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u.exec(value)
@@ -769,7 +767,7 @@ function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
 function definitiveCandidateMetadataFailure(result: GitResult): boolean {
   if (!probeSettled(result)) return false
   const detail = `${result.stderr}\n${result.stdout}`.trim()
-  return detail === "" || /\.gitmodules.*does not exist|bad config line|invalid config|invalid key/iu.test(detail)
+  return /\.gitmodules.*does not exist|bad config line|invalid config|invalid key/iu.test(detail)
 }
 
 function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResult): never {
@@ -840,11 +838,6 @@ async function proveCandidateSubmoduleReachability(
       const verifyContext = { operation: "verify", repository: store, origin, sha, paths } as const
       const fetched = await runSubmoduleProbe(git, store, ["cat-file", "-e", `${sha}^{commit}`], verifyContext)
       if (fetched.code !== 0) {
-        if (definitiveProbeFailure(fetched, DEFINITIVE_LOCAL_OBJECT_ABSENCE)) {
-          throw new Error(
-            `yrd: exact fetch from '${origin}' did not produce candidate submodule pin '${sha}' for ${paths.join(", ")}`,
-          )
-        }
         throw createSubmoduleReachabilityRefusal(verifyContext, fetched)
       }
     }
