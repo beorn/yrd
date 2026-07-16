@@ -21,6 +21,8 @@ import {
 
 type CounterState = { counter: { value: number } }
 
+type StoredCheckpoint = Readonly<{ identity: string; cursor: number; value: unknown }>
+
 let idSequence = 0
 function ids(..._labels: string[]) {
   return () => `00000000-0000-7000-8000-${(++idSequence).toString(16).padStart(12, "0")}`
@@ -46,6 +48,7 @@ function withCounter() {
       events: {
         "counter/changed": z.object({ from: z.number().int(), by: z.number().int() }),
       },
+      projectionVersion: "counter-v1",
       project(state, applied) {
         if (applied.name !== "counter/changed") return { counter: state.counter }
         const { by } = applied.data as { by: number }
@@ -61,6 +64,37 @@ function withCounter() {
         }
       },
     })
+}
+
+function createCheckpointJournal(base: Journal<unknown>) {
+  const reads: number[] = []
+  let stored: StoredCheckpoint | undefined
+  const journal = {
+    read(after = 0, before?: number) {
+      reads.push(after)
+      return base.read(after, before)
+    },
+    append: (value: unknown, expectedCursor: number) => base.append(value, expectedCursor),
+    checkpoint: {
+      load(identity: string) {
+        return Promise.resolve(stored?.identity === identity ? structuredClone(stored) : undefined)
+      },
+      save(checkpoint: StoredCheckpoint) {
+        stored = structuredClone(checkpoint)
+        return Promise.resolve(true)
+      },
+    },
+  } as Journal<unknown>
+
+  return {
+    journal,
+    reads,
+    stored: () => stored,
+    corrupt() {
+      if (stored === undefined) throw new Error("expected a stored projection checkpoint")
+      stored = { ...stored, value: { v: 999, state: null } }
+    },
+  }
 }
 
 describe("Yrd domain objects", () => {
@@ -190,6 +224,67 @@ describe("Yrd domain objects", () => {
     expect(Object.isFrozen(first)).toBe(true)
     expect(Object.isFrozen(first.state)).toBe(true)
     expect(Object.isFrozen(first.asOf)).toBe(true)
+  })
+
+  it("restores projection registries and folds only journal frames after the checkpoint cursor", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const definition = withCounter()(createYrdDef())
+    const first = await createYrd(definition, {
+      inject: { journal: cache.journal, id: ids("first-command", "first-event") },
+    })
+    const receipt = await first.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })
+    await first.close()
+
+    const saved = cache.stored()
+    expect(saved).toMatchObject({ cursor: 1, value: { v: 1 } })
+
+    await using tailWriter = await createYrd(definition, {
+      inject: { journal: backing, id: ids("tail-command", "tail-event") },
+    })
+    await tailWriter.dispatch({ op: "counter.add", args: { by: 2 } })
+    await tailWriter.close()
+
+    cache.reads.length = 0
+    await using warm = await createYrd(definition, {
+      inject: { journal: cache.journal, id: ids("retry-command", "retry-cause") },
+    })
+
+    expect(cache.reads[0]).toBe(saved?.cursor)
+    expect(warm.state().counter.value).toBe(3)
+    await expect(warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })).resolves.toEqual(
+      receipt,
+    )
+    expect(warm.state().counter.value).toBe(3)
+  })
+
+  it("warns once, full-replays, and rewrites a corrupt projection checkpoint", async () => {
+    const backing = createMemoryJournal<unknown>()
+    const cache = createCheckpointJournal(backing)
+    const definition = withCounter()(createYrdDef())
+    const writer = await createYrd(definition, {
+      inject: { journal: cache.journal, id: ids("writer-command", "writer-event") },
+    })
+    await writer.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "preserved-retry" })
+    await writer.close()
+    cache.corrupt()
+    cache.reads.length = 0
+
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
+    await using recovered = await createYrd(definition, { inject: { journal: cache.journal, log } })
+
+    expect(cache.reads[0]).toBe(0)
+    expect(recovered.state().counter.value).toBe(4)
+    expect(cache.stored()).toMatchObject({ cursor: 1, value: { v: 1 } })
+    expect(events.filter((entry) => JSON.stringify(entry).includes("projection checkpoint"))).toHaveLength(1)
+    await expect(
+      recovered.dispatch({ op: "counter.add", args: { by: 4 } }, { key: "preserved-retry" }),
+    ).resolves.toMatchObject({ events: [{ name: "counter/changed" }] })
+    expect(recovered.state().counter.value).toBe(4)
   })
 
   it("allows legacy payloads only while replaying and never widens current appends", async () => {

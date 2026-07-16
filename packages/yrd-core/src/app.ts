@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import {
   commandNode as createCommandNode,
   createCommandRegistry as createCommandTreeRegistry,
@@ -9,6 +10,7 @@ import {
 } from "@silvery/command"
 import { createScope, type Scope } from "@silvery/scope"
 import { signal, type ReadSignal } from "@silvery/signals"
+import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { v7 as uuidv7 } from "uuid"
 import * as z from "zod"
@@ -29,7 +31,7 @@ import {
 import { asFailure, raiseFailure } from "./failure.ts"
 import { parseJournalFrame, type JournalFrame } from "./frame.ts"
 import { cloneFrozen, freeze, type DeepReadonly } from "./immutable.ts"
-import type { Cursor, Journal } from "./journal.ts"
+import type { Cursor, Journal, JournalCheckpoint } from "./journal.ts"
 
 export type { DeepReadonly } from "./immutable.ts"
 
@@ -71,6 +73,18 @@ export type CommandDef<State extends object, Args extends JsonValue | undefined>
 type EventSchemas = Readonly<Record<string, z.ZodType<JsonValue>>>
 type Project<State extends object> = (state: DeepReadonly<State>, event: Event, cause: Cause) => State
 type Empty = Readonly<Record<never, never>>
+const projectionVersions = Symbol("yrd.projectionVersions")
+const PROJECTION_CHECKPOINT_VERSION = 1
+const ProjectionCheckpointSchema = z
+  .object({
+    v: z.literal(PROJECTION_CHECKPOINT_VERSION),
+    state: JsonSchema,
+    at: z.string().optional(),
+    receipts: z.array(z.unknown()),
+    causeIds: z.array(z.string()),
+    eventIds: z.array(z.string()),
+  })
+  .strict()
 
 export type JournalAsOf = Readonly<{ cursor: Cursor; at?: string }>
 export type JournalSnapshot<State extends object> = Readonly<{
@@ -112,6 +126,7 @@ type Contribution<
   commands?: AddedCommands
   events?: EventSchemas
   replayEvents?: EventSchemas
+  projectionVersion?: string
   project?(state: DeepReadonly<AddedState>, event: Event, cause: Cause): AddedState
   create?(yrd: Yrd<State & AddedState, Commands & AddedCommands> & Features): AddedFeatures
 }>
@@ -126,6 +141,7 @@ export type YrdDef<
   events: EventSchemas
   replayEvents: EventSchemas
   project: Project<State>
+  readonly [projectionVersions]: readonly (string | undefined)[]
   create(yrd: Yrd<State, Commands>): Features
   extend<
     AddedState extends object = Empty,
@@ -178,6 +194,7 @@ export function createYrdDef(): YrdDef {
     events: {},
     replayEvents: {},
     project: (state) => state,
+    [projectionVersions]: [],
     create: () => ({}),
   })
 }
@@ -216,17 +233,40 @@ export async function createYrd<State extends object, Commands extends CommandTr
     eventIds: ReadonlySet<string>
   }>
 
-  let projection: Projection = {
+  const emptyProjection = (): Projection => ({
     cursor: 0,
     state: state(),
     receiptsById: new Map(),
     receiptsByKey: new Map(),
     causeIds: new Set(),
     eventIds: new Set(),
-  }
+  })
+  let projection = emptyProjection()
   let closing = false
   let closePromise: Promise<void> | undefined
   const active = new Set<Promise<unknown>>()
+  const checkpointStore = journal.checkpoint
+  let checkpointIdentity: string | undefined
+  let checkpointCursor: Cursor | undefined
+  let checkpointWarning = false
+
+  const warnCheckpoint = (message: string, error: unknown): void => {
+    if (checkpointWarning) return
+    checkpointWarning = true
+    coreLog.warn?.(message, {
+      action: "full-replay",
+      reason: "projection-checkpoint-invalid",
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+
+  if (checkpointStore !== undefined) {
+    try {
+      checkpointIdentity = projectionCheckpointIdentity(definition)
+    } catch (error) {
+      warnCheckpoint("projection checkpoint identity could not be derived; replaying journal authority", error)
+    }
+  }
 
   const fold = async (base: Projection): Promise<Projection> => {
     using span = coreLog.span?.("replay", { after: base.cursor })
@@ -286,6 +326,98 @@ export async function createYrd<State extends object, Commands extends CommandTr
       causeIds,
       eventIds,
       ...(at === undefined ? {} : { at }),
+    }
+  }
+
+  const restoreProjection = (checkpoint: JournalCheckpoint): Projection => {
+    if (checkpoint.identity !== checkpointIdentity)
+      throw new Error("checkpoint identity does not match this projection")
+    if (!Number.isSafeInteger(checkpoint.cursor) || checkpoint.cursor < 0) {
+      throw new Error("checkpoint cursor must be a non-negative safe integer")
+    }
+    const parsed = ProjectionCheckpointSchema.parse(checkpoint.value)
+    if (typeof parsed.state !== "object" || parsed.state === null || Array.isArray(parsed.state)) {
+      throw new Error("checkpoint state must be a JSON object")
+    }
+
+    const receiptsById = new Map<string, JournalFrame>()
+    const receiptsByKey = new Map<string, JournalFrame>()
+    const expectedCauseIds = new Set<string>()
+    const expectedEventIds = new Set<string>()
+    let expectedAt: string | undefined
+    for (const value of parsed.receipts) {
+      const frame = parseJournalFrame(value)
+      if (receiptsById.has(frame.command.id)) throw new Error(`checkpoint repeats command id '${frame.command.id}'`)
+      receiptsById.set(frame.command.id, frame)
+      if (frame.cause.key !== undefined) {
+        if (receiptsByKey.has(frame.cause.key)) throw new Error(`checkpoint repeats command key '${frame.cause.key}'`)
+        receiptsByKey.set(frame.cause.key, frame)
+      }
+      if (expectedCauseIds.has(frame.cause.id)) throw new Error(`checkpoint repeats cause id '${frame.cause.id}'`)
+      expectedCauseIds.add(frame.cause.id)
+      for (const applied of frame.events) {
+        if (expectedEventIds.has(applied.id)) throw new Error(`checkpoint repeats event id '${applied.id}'`)
+        expectedEventIds.add(applied.id)
+        expectedAt = applied.ts
+      }
+    }
+    const causeIds = new Set(parsed.causeIds)
+    const eventIds = new Set(parsed.eventIds)
+    if (!setsEqual(causeIds, expectedCauseIds)) throw new Error("checkpoint cause registry does not match receipts")
+    if (!setsEqual(eventIds, expectedEventIds)) throw new Error("checkpoint event registry does not match receipts")
+    if (parsed.at !== expectedAt) throw new Error("checkpoint event-order timestamp does not match receipts")
+
+    return {
+      cursor: checkpoint.cursor,
+      ...(parsed.at === undefined ? {} : { at: parsed.at }),
+      state: cloneFrozen(parsed.state as State) as DeepReadonly<State>,
+      receiptsById,
+      receiptsByKey,
+      causeIds,
+      eventIds,
+    }
+  }
+
+  const loadProjection = async (): Promise<Projection | undefined> => {
+    if (checkpointStore === undefined || checkpointIdentity === undefined) return undefined
+    let checkpoint: JournalCheckpoint | undefined
+    try {
+      checkpoint = await checkpointStore.load(checkpointIdentity)
+      if (checkpoint === undefined) return undefined
+      const restored = restoreProjection(checkpoint)
+      checkpointCursor = checkpoint.cursor
+      return restored
+    } catch (error) {
+      warnCheckpoint("projection checkpoint is invalid; replaying journal authority", error)
+      return undefined
+    }
+  }
+
+  const saveProjection = async (next: Projection): Promise<void> => {
+    if (checkpointStore === undefined || checkpointIdentity === undefined || checkpointCursor === next.cursor) {
+      return
+    }
+    try {
+      const stateValue = JsonSchema.parse(next.state)
+      const saved = await checkpointStore.save({
+        identity: checkpointIdentity,
+        cursor: next.cursor,
+        value: {
+          v: PROJECTION_CHECKPOINT_VERSION,
+          state: stateValue,
+          ...(next.at === undefined ? {} : { at: next.at }),
+          receipts: [...next.receiptsById.values()],
+          causeIds: [...next.causeIds],
+          eventIds: [...next.eventIds],
+        },
+      })
+      if (saved) checkpointCursor = next.cursor
+    } catch (error) {
+      coreLog.error?.("projection checkpoint write failed; journal remains authoritative", {
+        action: "skipped",
+        reason: "projection-checkpoint-write-failed",
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 
@@ -420,6 +552,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
         await scope[Symbol.asyncDispose]()
       } finally {
         await Promise.allSettled(active)
+        await saveProjection(projection)
       }
     })()
     return closePromise
@@ -448,18 +581,27 @@ export async function createYrd<State extends object, Commands extends CommandTr
     dispatch,
     async *events() {
       await refresh()
-      const before = projection.cursor
-      for await (const batch of journal.read(0, before)) {
-        for (const value of batch.values) yield* parseJournalFrame(value).events
-      }
+      for (const frame of projection.receiptsById.values()) yield* frame.events
     },
     close,
     [Symbol.asyncDispose]: close,
   })
 
   try {
-    projection = await fold(projection)
+    const restored = await loadProjection()
+    if (restored === undefined) {
+      projection = await fold(emptyProjection())
+    } else {
+      try {
+        projection = await fold(restored)
+      } catch (error) {
+        checkpointCursor = undefined
+        warnCheckpoint("projection checkpoint tail replay failed; replaying journal authority", error)
+        projection = await fold(emptyProjection())
+      }
+    }
     state(projection.state)
+    await saveProjection(projection)
     const features = definition.create(core)
     return mergeFields(core, features, "feature")
   } catch (error) {
@@ -475,6 +617,7 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
   events: EventSchemas
   replayEvents: EventSchemas
   project: Project<State>
+  readonly [projectionVersions]: readonly (string | undefined)[]
   create(yrd: Yrd<State, Commands>): Features
 }): YrdDef<State, Commands, Features> {
   const definition: YrdDef<State, Commands, Features> = {
@@ -502,6 +645,10 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
         commands,
         events,
         replayEvents,
+        [projectionVersions]:
+          contribution.project === undefined
+            ? values[projectionVersions]
+            : [...values[projectionVersions], contribution.projectionVersion],
         project(state, applied, cause) {
           const previousState = selectFields(state, previousFields) as DeepReadonly<State>
           const projected = {
@@ -527,6 +674,34 @@ function buildDef<State extends object, Commands extends CommandTree, Features e
     },
   }
   return Object.freeze(definition)
+}
+
+function projectionCheckpointIdentity<State extends object, Commands extends CommandTree, Features extends object>(
+  definition: YrdDef<State, Commands, Features>,
+): string {
+  const versions = definition[projectionVersions]
+  if (versions.some((version) => version === undefined || version.trim() === "")) {
+    throw new TypeError("yrd: every projector must declare a non-empty projectionVersion to enable checkpoints")
+  }
+  const schemaIdentity = (schemas: EventSchemas) =>
+    Object.fromEntries(
+      Object.keys(schemas)
+        .sort()
+        .map((name) => [name, z.toJSONSchema(schemas[name]!)]),
+    )
+  const encoded = canonicalize({
+    v: PROJECTION_CHECKPOINT_VERSION,
+    initialState: definition.initialState,
+    events: schemaIdentity(definition.events),
+    replayEvents: schemaIdentity(definition.replayEvents),
+    projectionVersions: versions,
+  })
+  if (encoded === undefined) throw new TypeError("yrd: projection checkpoint identity must be canonical JSON")
+  return createHash("sha256").update(encoded).digest("hex")
+}
+
+function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value))
 }
 
 function mergeFields<Left extends object, Right extends object>(left: Left, right: Right, kind: string): Left & Right {
