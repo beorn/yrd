@@ -9,6 +9,7 @@ import {
   baseIdentity,
   prRevisionLineage,
   prSourceReadyAt,
+  isConcurrentCheckabilityConflict,
   resolveBay,
   resolveBase,
   resolvePR,
@@ -24,7 +25,7 @@ import type { Contest } from "@yrd/contest"
 import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
-import { Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
+import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
   canonicalizeYrdCommandAliases,
@@ -2313,6 +2314,39 @@ async function finishQueue(
   )
 }
 
+type ResidentCycleRecovery = Readonly<{ message: string; props: Record<string, unknown> }>
+
+/**
+ * Classify a mid-compose error as a losable resident-runner race worth skipping
+ * this cycle for, or `undefined` to propagate (fail-loud). Narrow and typed —
+ * never message-matching: a concurrent Job settlement, a peer already running
+ * the queue, or a candidate PR that reached a terminal status mid-compose. Each
+ * returns a single structured (loggily) warn; the resident emits no bare stderr
+ * duplicate. The next cycle re-snapshots — the busy queue frees, the departed
+ * PR is gone from the submitted set — so the loop makes progress on what remains.
+ */
+function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefined {
+  if (isConcurrentSettlementConflict(error)) {
+    return {
+      message: "resident runner skipped a cycle lost to a concurrent Job settlement",
+      props: { action: "resident-cancel-skip", job: error.jobId, status: error.actual, reason: error.message },
+    }
+  }
+  if (isQueueRunningConflict(error)) {
+    return {
+      message: "resident runner deferred a cycle — the queue is already running",
+      props: { action: "resident-busy-defer", base: error.base, run: error.runId, reason: error.message },
+    }
+  }
+  if (isConcurrentCheckabilityConflict(error)) {
+    return {
+      message: "resident runner skipped a cycle — a candidate PR left the checkable set mid-compose",
+      props: { action: "resident-withdraw-skip", pr: error.prId, status: error.status, reason: error.message },
+    }
+  }
+  return undefined
+}
+
 export async function watchQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -2351,26 +2385,20 @@ export async function watchQueueRuns(
       try {
         runs = await runQueues(app, selectors, options, io)
       } catch (error) {
-        // A peer session canceled or otherwise settled a Job between this
-        // resident runner's snapshot and its action — a normal multi-tenant
-        // race. For the long-lived watch loop that is losable: log LOUD, skip
-        // this cycle, and stay alive for the next interval. Anything else —
-        // including a conflict against a still-live Job, which signals a real
-        // single-writer bug — propagates and still stops the runner (fail-loud).
-        // A one-shot targeted run (selectors present) also propagates: it has no
-        // next interval to skip to.
-        if (selectors.length > 0 || !isConcurrentSettlementConflict(error)) throw error
-        app.log.warn?.("resident runner skipped a cycle lost to a concurrent Job settlement", {
-          action: "resident-cancel-skip",
-          job: error.jobId,
-          status: error.actual,
-          reason: error.message,
-        })
-        if (!jsonEnabled(options)) {
-          io.stderr(
-            `yrd: resident runner skipped a cycle — a peer settled job '${error.jobId}' (${error.actual}) mid-pickup; continuing.\n`,
-          )
-        }
+        // A narrow, typed set of mid-compose conditions is a normal multi-tenant
+        // race for the long-lived selectorless watch loop: a peer settled a Job,
+        // a peer already holds the queue, or a peer withdrew/canceled/integrated
+        // a candidate PR — all between this runner's snapshot and its action. For
+        // the resident that is losable: log LOUD (loggily-only — the runner's
+        // stdout is a log stream, so NO bare 'yrd: ' stderr echo), skip this
+        // cycle, and stay alive for the next interval. Anything else — including
+        // a conflict against a still-live Job, which signals a real single-writer
+        // bug — propagates and still stops the runner (fail-loud). A one-shot
+        // targeted run (selectors present) also propagates every one of them: it
+        // has no next interval to skip to.
+        const recovery = selectors.length === 0 ? residentCycleRecovery(error) : undefined
+        if (recovery === undefined) throw error
+        app.log.warn?.(recovery.message, recovery.props)
         heartbeat?.check()
         if (drainRequested()) {
           await scope.sleep(interval)

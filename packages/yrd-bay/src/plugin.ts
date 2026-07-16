@@ -48,6 +48,7 @@ import {
   emptyBaysState,
   isLivePR,
   prForBay,
+  PrCheckabilityConflict,
   reviewState,
   resolveBay,
   resolvePR,
@@ -1343,7 +1344,7 @@ function commentPr(state: DeepReadonly<BayState>, args: PrCommentArgs) {
 function requestPrChecks(state: DeepReadonly<BayState>, args: PrRequestChecksArgs) {
   const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
   if (pr.status !== "pushed" && pr.status !== "submitted" && pr.status !== "rejected") {
-    throw new Error(`yrd: PR '${pr.id}' is ${pr.status}, not checkable`)
+    throw new PrCheckabilityConflict(pr.id, pr.status)
   }
   const baseSha = args.baseSha ?? pr.baseSha
   return {
