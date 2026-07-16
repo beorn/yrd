@@ -8068,3 +8068,34 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(rendered).not.toContain("]8;;")
   })
 })
+
+describe("watch viewer — frozen projection under a live clock (task #64)", () => {
+  it("queueListSnapshot tails out-of-process journal appends instead of serving the mount-time projection", async () => {
+    // `queue watch` builds ONE long-lived app and reloads on a timer, while a
+    // separate resident-runner process appends to the shared journal. The viewer
+    // must see those appends each tick — otherwise its rows freeze at mount while
+    // `now`/`runner` keep ticking (the reported "live clock over hours-old rows").
+    const journal = createMemoryJournal()
+    const runner = await createApp({ journal })
+    const viewer = await createApp({ journal })
+    try {
+      // The runner submits a PR AFTER the viewer app has already mounted.
+      await openAndSubmit(runner)
+      expect(Object.keys(runner.state().bays.prs)).toEqual(["PR1"])
+
+      // The viewer's mount-time journal projection never tails cross-process
+      // appends on its own — app.state() alone stays frozen-empty:
+      expect(Object.keys(viewer.state().bays.prs)).toEqual([])
+
+      // queueListSnapshot refreshes before reading, so its rows reflect the
+      // out-of-process submission (stale WITHOUT refresh, fresh WITH it):
+      const snapshot = await runInternals.queueListSnapshot(viewer, [], {}, outputIO().io)
+      expect(snapshot.results.flatMap((result) => result.prs.map((pr) => pr.id))).toContain("PR1")
+
+      // The refresh also published, so subsequent plain reads are fresh too:
+      expect(Object.keys(viewer.state().bays.prs)).toEqual(["PR1"])
+    } finally {
+      await Promise.all([runner.close(), viewer.close()])
+    }
+  })
+})

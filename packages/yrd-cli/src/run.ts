@@ -1927,13 +1927,18 @@ export async function queueArtifactOutputs(
   return outputs
 }
 
-async function queueListSnapshot(
+export async function queueListSnapshot(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
   includeOutputs = false,
 ): Promise<QueueListSnapshot> {
+  // The watch loop reuses one app across ticks, and app.state() is the mount-time
+  // journal projection — it never tails cross-process runner appends on its own.
+  // Fold new frames first so each snapshot's rows are as fresh as its clock;
+  // otherwise `now`/`runner` tick over frozen rows (running shows 0 while active).
+  await app.refresh()
   const state = stateOf(app)
   const requestedBase = options.base ?? "main"
   const target = resolveQueueTargets(state, [], requestedBase, options.pr)
