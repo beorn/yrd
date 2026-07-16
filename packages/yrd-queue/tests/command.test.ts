@@ -2493,6 +2493,33 @@ describe("Queue command adapters", () => {
       expect(env.NODE_ENV).toBe("test")
     })
 
+    it("snapshots declared overrides at construction so later mutation is never applied", async () => {
+      const { requests, process } = capturingProcess()
+      const overrides: Record<string, string> = { SAFE_DECLARED: "yes" }
+      const step = configuredCommandStep<PRShape>({
+        inject: { process },
+        command: ["check-env"],
+        cwd: ".",
+        purpose: "check",
+        env: ambient,
+        environmentOverrides: overrides,
+      })
+      // Post-construction mutation of the caller-owned object must not reach
+      // the child: reserved prefixes would have been refused at construction,
+      // and undeclared names never went through validation at all.
+      overrides.GIT_DIR = "/evil"
+      overrides.YRD_ENVIRONMENT = "evil"
+      overrides.SNEAKED = "in"
+      overrides.SAFE_DECLARED = "mutated"
+      const result = await step(execution(), jobContext())
+      if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
+      const env = requests[0]?.env ?? {}
+      expect(env.SAFE_DECLARED).toBe("yes")
+      expect(env.GIT_DIR).toBeUndefined()
+      expect(env.YRD_ENVIRONMENT).toBeUndefined()
+      expect(env.SNEAKED).toBeUndefined()
+    })
+
     it("copies only declared passthrough names from the ambient environment", async () => {
       const { env } = await runCapture({
         env: { ...ambient, CHECK_TOKEN: "declared", CHECK_OTHER: "undeclared" },

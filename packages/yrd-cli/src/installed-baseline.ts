@@ -143,6 +143,61 @@ export function installedBaselineRemedy(base: string): string {
 const shortRevision = (revision: string): string =>
   /^[0-9a-f]{16,}$/iu.test(revision) ? revision.slice(0, 8) : revision
 
+/** Vocabulary for the live side of a step-plan comparison: the same delta
+ * engine proves both audit legs, but each leg must NAME its live side so the
+ * operator can tell WHICH leg diverged (merge-queue R41b). */
+type StepPlanVocabulary = Readonly<{ live: string; missingLive: string }>
+const CONFIG_VOCABULARY: StepPlanVocabulary = { live: "current", missingLive: "is no longer configured" }
+const RUNTIME_VOCABULARY: StepPlanVocabulary = { live: "runtime", missingLive: "is not installed in this running process" }
+
+function stepPlanDeltas(
+  baseline: InstalledBaseline,
+  live: readonly InstalledStep[],
+  vocabulary: StepPlanVocabulary,
+): string[] {
+  const liveByName = new Map(live.map((step) => [step.name, step] as const))
+  const deltas: string[] = []
+  for (const installed of baseline.steps) {
+    const liveStep = liveByName.get(installed.name)
+    if (liveStep === undefined) {
+      deltas.push(
+        `step '${installed.name}' (installed revision '${shortRevision(installed.revision)}') ${vocabulary.missingLive}`,
+      )
+      continue
+    }
+    if (liveStep.revision !== installed.revision) {
+      deltas.push(
+        `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, ${vocabulary.live} '${shortRevision(liveStep.revision)}'`,
+      )
+    } else if (
+      liveStep.integrates !== installed.integrates ||
+      liveStep.needsIntegration !== installed.needsIntegration ||
+      liveStep.classification !== installed.classification
+    ) {
+      deltas.push(`step '${installed.name}' integration contract changed`)
+    }
+  }
+  const installedNames = new Set(baseline.steps.map((step) => step.name))
+  for (const liveStep of live) {
+    if (!installedNames.has(liveStep.name)) {
+      deltas.push(
+        `step '${liveStep.name}' (${vocabulary.live} revision '${shortRevision(liveStep.revision)}') is not in the installed baseline`,
+      )
+    }
+  }
+  // Step revisions intentionally exclude sequence, so a pure reorder of the same
+  // steps leaves every per-step delta empty. Compare the ORDERED plan (restricted
+  // to steps present on both sides) so a reorder is still caught as drift.
+  const installedSequence = baseline.steps.map((step) => step.name).filter((name) => liveByName.has(name))
+  const liveSequence = live.map((step) => step.name).filter((name) => installedNames.has(name))
+  if (installedSequence.length > 0 && installedSequence.join(">") !== liveSequence.join(">")) {
+    deltas.push(
+      `step order changed: installed ${installedSequence.join("→")}, ${vocabulary.live} ${liveSequence.join("→")}`,
+    )
+  }
+  return deltas
+}
+
 /** Compare the persisted installed baseline against the selected current
  * config-derived steps. Any delta collapses into ONE actionable finding so the
  * operator gets exactly one deinit/init migration remedy per base. */
@@ -150,43 +205,27 @@ export function installedBaselineDrift(
   baseline: InstalledBaseline,
   current: readonly InstalledStep[],
 ): QueueAuditFinding | undefined {
-  const currentByName = new Map(current.map((step) => [step.name, step] as const))
-  const deltas: string[] = []
-  for (const installed of baseline.steps) {
-    const live = currentByName.get(installed.name)
-    if (live === undefined) {
-      deltas.push(`step '${installed.name}' (installed revision '${shortRevision(installed.revision)}') is no longer configured`)
-      continue
-    }
-    if (live.revision !== installed.revision) {
-      deltas.push(
-        `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, current '${shortRevision(live.revision)}'`,
-      )
-    } else if (
-      live.integrates !== installed.integrates ||
-      live.needsIntegration !== installed.needsIntegration ||
-      live.classification !== installed.classification
-    ) {
-      deltas.push(`step '${installed.name}' integration contract changed`)
-    }
-  }
-  const installedNames = new Set(baseline.steps.map((step) => step.name))
-  for (const live of current) {
-    if (!installedNames.has(live.name)) {
-      deltas.push(`step '${live.name}' (current revision '${shortRevision(live.revision)}') is not in the installed baseline`)
-    }
-  }
-  // Step revisions intentionally exclude sequence, so a pure reorder of the same
-  // steps leaves every per-step delta empty. Compare the ORDERED plan (restricted
-  // to steps present on both sides) so a reorder is still caught as drift.
-  const installedSequence = baseline.steps.map((step) => step.name).filter((name) => currentByName.has(name))
-  const currentSequence = current.map((step) => step.name).filter((name) => installedNames.has(name))
-  if (installedSequence.length > 0 && installedSequence.join(">") !== currentSequence.join(">")) {
-    deltas.push(`step order changed: installed ${installedSequence.join("→")}, current ${currentSequence.join("→")}`)
-  }
+  const deltas = stepPlanDeltas(baseline, current, CONFIG_VOCABULARY)
   if (deltas.length === 0) return undefined
   return {
     code: "config-drift",
     message: `queue base '${baseline.base}' installed baseline is stale: ${deltas.join("; ")}. ${installedBaselineRemedy(baseline.base)}`,
+  }
+}
+
+/** Compare the persisted installed baseline against the RUNTIME's actually
+ * installed steps — the third audit leg (merge-queue R41b). A resident built
+ * before a deinit/init migration keeps executing its construction-time steps,
+ * so baseline == disk alone would certify a lie; the remedy is restarting the
+ * process, not another baseline migration. */
+export function runtimeBaselineDrift(
+  baseline: InstalledBaseline,
+  runtime: readonly InstalledStep[],
+): QueueAuditFinding | undefined {
+  const deltas = stepPlanDeltas(baseline, runtime, RUNTIME_VOCABULARY)
+  if (deltas.length === 0) return undefined
+  return {
+    code: "runtime-drift",
+    message: `queue base '${baseline.base}' resident runtime diverges from the installed baseline: ${deltas.join("; ")}. Restart this queue runner process so it loads the installed baseline before starting runs.`,
   }
 }
