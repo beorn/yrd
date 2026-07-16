@@ -143,7 +143,7 @@ export type SubmitSelectionOptions = Readonly<{
 const CloseBayArgsSchema = z.object({ bay: TextSchema, withdraw: z.boolean().optional() }).strict()
 export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 
-const PrCloseArgsSchema = z.object({ pr: TextSchema }).strict()
+const PrCloseArgsSchema = z.object({ pr: TextSchema, reason: TextSchema.optional() }).strict()
 export type PrCloseArgs = z.infer<typeof PrCloseArgsSchema>
 const PrEditArgsSchema = z
   .object({ pr: TextSchema, issue: TextSchema.optional(), note: TextSchema.optional() })
@@ -260,7 +260,7 @@ const PRTerminalIdentitySchema = PRRevisionIdentitySchema.extend({
   correlation: CorrelationSchema.optional(),
 }).strict()
 const PRQueueTerminalIdentitySchema = PRTerminalIdentitySchema.extend({ run: TextSchema }).strict()
-const PRWithdrawnSchema = PRTerminalIdentitySchema
+const PRWithdrawnSchema = PRTerminalIdentitySchema.extend({ reason: TextSchema.optional() }).strict()
 const LegacyPRWithdrawnSchema = z
   .object({
     pr: PRIdSchema,
@@ -1516,7 +1516,15 @@ function closePr(state: DeepReadonly<BayState>, args: PrCloseArgs) {
   if (!isLivePR(pr.status)) {
     throw new Error(`yrd: PR '${pr.id}' is ${pr.status}; only a live PR can be closed`)
   }
-  return { events: [event("pr/withdrawn", { pr: pr.id, ...terminalIdentity(pr) })] }
+  return {
+    events: [
+      event("pr/withdrawn", {
+        pr: pr.id,
+        ...terminalIdentity(pr),
+        ...(args.reason === undefined ? {} : { reason: args.reason }),
+      }),
+    ],
+  }
 }
 
 function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
@@ -1640,6 +1648,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               integratedAt: undefined,
               integration: undefined,
               withdrawnAt: undefined,
+              withdrawReason: undefined,
               canceledAt: undefined,
               canceledBy: undefined,
               cancelReason: undefined,
@@ -1735,6 +1744,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         withdrawnAt: undefined,
+        withdrawReason: undefined,
         canceledAt: undefined,
         canceledBy: undefined,
         cancelReason: undefined,
@@ -1772,6 +1782,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         integratedAt: undefined,
         integration: undefined,
         withdrawnAt: undefined,
+        withdrawReason: undefined,
         canceledAt: undefined,
         canceledBy: undefined,
         cancelReason: undefined,
@@ -1803,6 +1814,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         : patchPR(pr, {
             status: "withdrawn",
             withdrawnAt: applied.ts,
+            ...(parsed.success && parsed.data.reason !== undefined ? { withdrawReason: parsed.data.reason } : {}),
             revisions: patchRevisionClock(pr, { terminal: { status: "withdrawn", at: applied.ts } }),
           })
     }
