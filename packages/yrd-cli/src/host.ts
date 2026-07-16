@@ -995,6 +995,24 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
   }
 }
 
+/**
+ * Silvery `run()` options for the live, interactive watch UI (`yrd watch`,
+ * `yrd queue ls --watch`, …).
+ *
+ * `mouse: true` is load-bearing, not cosmetic. The watch UI is a fullscreen
+ * (alternate-screen) app whose primary surface is a scrollable `ListView`.
+ * When mouse tracking is NOT enabled, terminals (Ghostty, xterm-family) fall
+ * back to "alternate scroll": they translate the trackpad/mouse wheel into
+ * cursor arrow-key sequences (ESC[A / ESC[B). Those arrows reach silvery as
+ * ordinary keyboard input, and the ListView's built-in navigation consumes
+ * them to move the selection cursor — so scrolling the trackpad moves the
+ * highlighted row instead of scrolling the viewport. Enabling mouse tracking
+ * (silvery emits CSI ?1003h / ?1006h) makes the terminal deliver the wheel as
+ * SGR mouse reports, which the ListView scrolls the viewport with while
+ * leaving the cursor put. Regression: @km/code/trackpad-wheel-not-scrolling.
+ */
+export const WATCH_LIVE_RENDER_OPTIONS = { mode: "fullscreen", mouse: true } as const
+
 function defaultIO(): YrdCliIO {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)
   const interactive = process.stdin.isTTY && process.stdout.isTTY
@@ -1015,7 +1033,7 @@ function defaultIO(): YrdCliIO {
   }
   if (!interactive) return io
   return withLiveRenderer(io, async (element, options) => {
-    using handle = await run(element, { signal: options.signal, mode: "fullscreen", mouse: false })
+    using handle = await run(element, { ...WATCH_LIVE_RENDER_OPTIONS, signal: options.signal })
     await handle.waitUntilExit()
   })
 }
