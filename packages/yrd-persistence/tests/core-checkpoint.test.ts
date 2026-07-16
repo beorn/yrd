@@ -258,4 +258,102 @@ describe("persistent Core projection checkpoint", () => {
     expect(Object.hasOwn(warm.state().values, "__proto__")).toBe(true)
     expect(warm.state().values.__proto__).toBe("preserved")
   })
+
+  it("stays checkpoint-warm on the invocation after an identity-mismatch replay rewrites the checkpoint", async () => {
+    const dir = await stateDir()
+    const seed = await createYrd(counterDefinition(), { inject: { journal: createJournal({ dir }), id: ids() } })
+    await seed.dispatch({ op: "counter.add", args: { by: 2 } })
+    await seed.close()
+    const stale = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
+      checkpoint: { identity: string }
+    }
+
+    // A projector-semantics change shifts the derived identity; the stored checkpoint now carries the old one.
+    const mismatchEvents: LogEvent[] = []
+    const mismatchLog = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => mismatchEvents.push(value as LogEvent) },
+    ])
+    const rewritten = await createYrd(counterDefinition(1), {
+      inject: { journal: createJournal({ dir, inject: { log: mismatchLog } }), log: mismatchLog, id: ids() },
+    })
+    // Read the checkpoint after activation but before close: a read-only invocation that never closes must still heal.
+    const refreshed = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
+      checkpoint: { identity: string; cursor: number }
+    }
+    await rewritten.close()
+    expect(mismatchEvents.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(1)
+    expect(refreshed.checkpoint.identity).not.toBe(stale.checkpoint.identity)
+    expect(refreshed.checkpoint.cursor).toBeGreaterThan(0)
+
+    // The very next invocation under the new identity must load warm: no warning, replay only from the fresh checkpoint.
+    const warmEvents: LogEvent[] = []
+    const warmLog = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => warmEvents.push(value as LogEvent) },
+    ])
+    await using warm = await createYrd(counterDefinition(1), {
+      inject: { journal: createJournal({ dir, inject: { log: warmLog } }), log: warmLog, id: ids() },
+    })
+    expect(warm.state().counter.value).toBe(3)
+    expect(warmEvents.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(0)
+    expect(warmEvents.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
+      props: { fromCursor: refreshed.checkpoint.cursor },
+    })
+  })
+
+  it("never writes a checkpoint and warns on every open while the projector identity is underivable", async () => {
+    const dir = await stateDir()
+    const checkpointPath = join(dir, "projection-checkpoint-v1.json")
+    const firstEvents: LogEvent[] = []
+    const firstLog = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => firstEvents.push(value as LogEvent) },
+    ])
+    const first = await createYrd(counterDefinition(0, null), {
+      inject: { journal: createJournal({ dir }), log: firstLog, id: ids() },
+    })
+    await first.dispatch({ op: "counter.add", args: { by: 2 } })
+    await first.close()
+    expect(firstEvents.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(
+      1,
+    )
+    await expect(access(checkpointPath)).rejects.toMatchObject({ code: "ENOENT" })
+
+    const secondEvents: LogEvent[] = []
+    const secondLog = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => secondEvents.push(value as LogEvent) },
+    ])
+    await using second = await createYrd(counterDefinition(0, null), {
+      inject: { journal: createJournal({ dir }), log: secondLog, id: ids() },
+    })
+    expect(second.state().counter.value).toBe(2)
+    expect(
+      secondEvents.filter((entry) => JSON.stringify(entry).includes("identity could not be derived")),
+    ).toHaveLength(1)
+    await expect(access(checkpointPath)).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  it("does not warn or rewrite the checkpoint when the projector identity is unchanged", async () => {
+    const dir = await stateDir()
+    const definition = counterDefinition()
+    const seed = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    await seed.dispatch({ op: "counter.add", args: { by: 2 } })
+    await seed.close()
+    const checkpointPath = join(dir, "projection-checkpoint-v1.json")
+    const stored = await readFile(checkpointPath, "utf8")
+
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
+    await using warm = await createYrd(definition, {
+      inject: { journal: createJournal({ dir, inject: { log } }), log, id: ids() },
+    })
+    expect(warm.state().counter.value).toBe(2)
+    expect(events.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(0)
+    expect(await readFile(checkpointPath, "utf8")).toBe(stored)
+  })
 })
