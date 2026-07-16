@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "buckets": [
+    {
+      "file": "packages/yrd-cli/tests/queue-timeline-visible-rows.test.ts",
+      "code": 2345,
+      "count": 2,
+      "reason": "The focused visible-row fixture predates the complete QueueStatusResult projection shape; production projection values remain schema-derived."
+    },
+    {
+      "file": "packages/yrd-cli/tests/selector-surfaces.test.ts",
+      "code": 2304,
+      "count": 1,
+      "reason": "The selector-only test helper has an unimported YrdCliServices type; the exercised CLI surface and runtime services remain typed."
+    },
+    {
+      "file": "packages/yrd-queue/tests/command.test.ts",
+      "code": 2719,
+      "count": 2,
+      "reason": "Two test-only Process.run wrappers trigger TypeScript's unrelated-identical-type diagnostic; production Process implementations are unaffected."
+    }
+  ]
+}

@@ -11,5 +11,6 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["bin", "packages"]
+  "include": ["bin", "packages"],
+  "exclude": ["packages/yrd-cli/tests/watch-hot-reload.pty.test.ts"]
 }

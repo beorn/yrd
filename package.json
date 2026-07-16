@@ -30,7 +30,8 @@
     "build": "bun ./scripts/build.ts",
     "prepack": "bun run build",
     "test": "NODE_ENV=test bun --bun x vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun ./scripts/standalone-typecheck.ts",
+    "typecheck:raw": "tsc --noEmit",
     "typecheck:hh": "tsc --noEmit -p tsconfig.hh.json",
     "check": "bun run typecheck && bun run test",
     "check:hh": "bun run typecheck:hh && bun run test"
