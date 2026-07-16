@@ -113,7 +113,7 @@ export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
 export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
-export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string }>
+export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
 const PauseQueueArgsSchema = z
   .object({
     base: GitRefSchema,
@@ -1047,6 +1047,7 @@ function createQueue<Shape extends PRShape>(
           attributes: {
             recoveryTime: recoverOptions.recoveryTime,
             ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+            ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
           },
           outcome: (runs) => (runs.length === 0 ? "succeeded" : "recovered"),
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
@@ -1056,6 +1057,7 @@ function createQueue<Shape extends PRShape>(
             await jobs.recover({
               now: recoverOptions.recoveryTime,
               ...(recoverOptions.reason === undefined ? {} : { reason: recoverOptions.reason }),
+              ...(recoverOptions.runner === undefined ? {} : { runner: recoverOptions.runner }),
             }),
           )
           const affected = new Set<QueueRunId>()
