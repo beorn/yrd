@@ -7,7 +7,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createProcess } from "@yrd/process"
+import { createProcess, type ProcessRequest } from "@yrd/process"
 import { afterEach, describe, expect, it } from "vitest"
 import { executeQueueSubmoduleComposition } from "../src/submodule-composition-git.ts"
 import { planQueueSubmoduleComposition, type QueueSubmoduleCompositionPlan } from "../src/submodule-composition.ts"
@@ -99,6 +99,27 @@ function compositionPlan(repo: Repository): Extract<QueueSubmoduleCompositionPla
   return plan
 }
 
+function afterInitialRemoteRead(
+  process: ReturnType<typeof createProcess>,
+  ref: string,
+  race: () => Promise<void>,
+): Readonly<{ process: Pick<ReturnType<typeof createProcess>, "run">; raced(): boolean }> {
+  let complete = false
+  return {
+    process: {
+      async run(request: ProcessRequest) {
+        const result = await process.run(request)
+        if (!complete && request.argv.includes("ls-remote") && request.argv.at(-1) === ref) {
+          complete = true
+          await race()
+        }
+        return result
+      },
+    },
+    raced: () => complete,
+  }
+}
+
 describe("queue-native submodule composition Git executor", () => {
   it("publishes one deterministic two-parent commit and surfaces the composed Markdown", async () => {
     const repo = await repository()
@@ -146,8 +167,35 @@ describe("queue-native submodule composition Git executor", () => {
       "top-current\nmiddle\nbottom-incoming",
     )
     expect((await git(repo.store, ["show", "-s", "--format=%B", composed.sha])).stdout).toContain(
+      `Yrd-Composition-Base: ${repo.baseSha}`,
+    )
+    expect((await git(repo.store, ["show", "-s", "--format=%B", composed.sha])).stdout).toContain(
       `Yrd-Composition-Parents: ${repo.currentSha} ${repo.incomingSha}`,
     )
+  })
+
+  it("refuses a planned base that is not an ancestor of both parents", async () => {
+    const repo = await repository()
+    const plan = compositionPlan(repo)
+    const resolution = plan.resolutions[0]
+    if (resolution?.kind !== "compose") throw new Error("expected a composition resolution")
+    const invalid = {
+      ...plan,
+      resolutions: [{ ...resolution, baseSha: repo.currentSha }],
+    } satisfies Extract<QueueSubmoduleCompositionPlan, { status: "planned" }>
+    await using process = createProcess()
+
+    const result = await executeQueueSubmoduleComposition(invalid, {
+      inject: { process, storeForOrigin: () => repo.store },
+    })
+
+    expect(result).toMatchObject({
+      status: "refused",
+      code: "submodule-composition-unavailable",
+      path: "vendor/dependency",
+      message: expect.stringContaining("planned merge base"),
+    })
+    expect((await git(repo.origin, ["show-ref", "--verify", "--quiet", resolution.ref], true)).code).toBe(1)
   })
 
   it("refuses a real content conflict without publishing a composition ref", async () => {
@@ -187,6 +235,57 @@ describe("queue-native submodule composition Git executor", () => {
       message: expect.stringContaining("will not be moved"),
     })
     expect((await git(repo.origin, ["rev-parse", resolution.ref])).stdout).toBe(repo.baseSha)
+  })
+
+  it("atomically refuses a different ref created after the initial remote read", async () => {
+    const repo = await repository()
+    const plan = compositionPlan(repo)
+    const resolution = plan.resolutions[0]
+    if (resolution?.kind !== "compose") throw new Error("expected a composition resolution")
+    await using process = createProcess()
+    const interleaving = afterInitialRemoteRead(process, resolution.ref, async () => {
+      await git(repo.store, ["push", "-q", "origin", `${repo.baseSha}:${resolution.ref}`])
+    })
+
+    const result = await executeQueueSubmoduleComposition(plan, {
+      inject: { process: interleaving.process, storeForOrigin: () => repo.store },
+    })
+
+    expect(interleaving.raced()).toBe(true)
+    expect(result).toMatchObject({
+      status: "refused",
+      code: "submodule-composition-unavailable",
+      path: "vendor/dependency",
+      message: expect.stringContaining("will not be moved"),
+    })
+    expect((await git(repo.origin, ["rev-parse", resolution.ref])).stdout).toBe(repo.baseSha)
+  })
+
+  it("accepts a concurrent creator that publishes the same deterministic SHA", async () => {
+    const repo = await repository()
+    const plan = compositionPlan(repo)
+    const resolution = plan.resolutions[0]
+    if (resolution?.kind !== "compose") throw new Error("expected a composition resolution")
+    await using process = createProcess()
+    const initial = await executeQueueSubmoduleComposition(plan, {
+      inject: { process, storeForOrigin: () => repo.store },
+    })
+    if (initial.status !== "composed" || initial.resolutions[0]?.kind !== "compose") {
+      throw new Error("expected a composed resolution")
+    }
+    const sha = initial.resolutions[0].sha
+    await git(repo.origin, ["update-ref", "-d", resolution.ref])
+    const interleaving = afterInitialRemoteRead(process, resolution.ref, async () => {
+      await git(repo.store, ["push", "-q", "origin", `${sha}:${resolution.ref}`])
+    })
+
+    const result = await executeQueueSubmoduleComposition(plan, {
+      inject: { process: interleaving.process, storeForOrigin: () => repo.store },
+    })
+
+    expect(interleaving.raced()).toBe(true)
+    expect(result).toEqual(initial)
+    expect((await git(repo.origin, ["rev-parse", resolution.ref])).stdout).toBe(sha)
   })
 
   it("refuses a shallow store as retryable composition unavailability", async () => {

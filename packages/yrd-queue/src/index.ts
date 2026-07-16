@@ -1,3 +1,5 @@
 export * from "./model.ts"
 export * from "./queue.ts"
 export * from "./command.ts"
+export * from "./submodule-composition.ts"
+export * from "./submodule-composition-git.ts"

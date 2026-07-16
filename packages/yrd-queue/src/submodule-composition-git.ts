@@ -89,9 +89,21 @@ async function executeComposition(
       )
     }
 
-    operation = "verify parent commits"
+    operation = "verify planned commits"
+    await requiredGit(context, store, ["cat-file", "-e", `${resolution.baseSha}^{commit}`], operation)
     await requiredGit(context, store, ["cat-file", "-e", `${resolution.currentSha}^{commit}`], operation)
     await requiredGit(context, store, ["cat-file", "-e", `${resolution.incomingSha}^{commit}`], operation)
+
+    operation = "verify the planned merge base"
+    for (const parent of [resolution.currentSha, resolution.incomingSha]) {
+      if (!(await isAncestor(context, store, resolution.baseSha, parent))) {
+        return unavailable(
+          resolution.path,
+          `planned merge base '${resolution.baseSha}' for '${resolution.path}' is not an ancestor of parent '${parent}'; ` +
+            "refresh the root conflict stages and retry",
+        )
+      }
+    }
 
     operation = "find a merge base"
     const mergeBaseResult = await runGit(context, store, ["merge-base", resolution.currentSha, resolution.incomingSha])
@@ -103,7 +115,7 @@ async function executeComposition(
       )
     }
     if (mergeBaseResult.exitCode !== 0) throw new Error(gitDetail(mergeBaseResult))
-    const mergeBase = objectId(mergeBaseResult.stdout, operation)
+    objectId(mergeBaseResult.stdout, operation)
 
     operation = "materialize the composed tree"
     const merged = await runGit(context, store, [
@@ -128,7 +140,7 @@ async function executeComposition(
     const tree = objectId(merged.stdout.split(/\r?\n/u)[0] ?? "", operation)
 
     operation = "read both-changed Markdown from the composed tree"
-    const reviewedBlobs = await readBothChangedMarkdown(context, store, mergeBase, resolution, tree)
+    const reviewedBlobs = await readBothChangedMarkdown(context, store, resolution.baseSha, resolution, tree)
 
     operation = "create the queue-authored composition commit"
     const sha = await createCompositionCommit(context, store, resolution, tree)
@@ -214,6 +226,14 @@ function objectId(output: string, operation: string): string {
   return oid
 }
 
+async function isAncestor(context: GitContext, store: string, base: string, tip: string): Promise<boolean> {
+  const result = await runGit(context, store, ["merge-base", "--is-ancestor", base, tip])
+  if (!settled(result)) throw new Error(gitDetail(result))
+  if (result.exitCode === 0) return true
+  if (result.exitCode === 1) return false
+  throw new Error(gitDetail(result))
+}
+
 async function readBothChangedMarkdown(
   context: GitContext,
   store: string,
@@ -296,7 +316,6 @@ async function publishComposition(
   resolution: QueueSubmoduleCommitResolution,
   sha: string,
 ): Promise<void> {
-  // The repository-scoped resident lease makes this read-before-create a single-writer boundary.
   const existing = await remoteRef(context, store, resolution)
   if (existing !== undefined) {
     if (existing === sha) return
@@ -306,13 +325,17 @@ async function publishComposition(
     "push",
     "--porcelain",
     "--no-verify",
+    `--force-with-lease=${resolution.ref}:`,
     resolution.origin,
     `${sha}:${resolution.ref}`,
   ])
-  if (!settled(pushed)) throw new Error(gitDetail(pushed))
   const published = await remoteRef(context, store, resolution)
-  if (pushed.exitCode !== 0 && published !== sha) throw new Error(gitDetail(pushed))
-  if (published !== sha) throw new Error(`published composition ref '${resolution.ref}' resolves to '${published}'`)
+  if (published === sha) return
+  if (published !== undefined) {
+    throw new Error(`remote composition ref '${resolution.ref}' already names '${published}' and will not be moved`)
+  }
+  if (!settled(pushed) || pushed.exitCode !== 0) throw new Error(gitDetail(pushed))
+  throw new Error(`published composition ref '${resolution.ref}' is missing`)
 }
 
 async function remoteRef(
