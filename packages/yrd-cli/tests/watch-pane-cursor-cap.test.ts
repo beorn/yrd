@@ -64,10 +64,10 @@ describe("QueueWatchFrame capped-timeline cursor", () => {
       expect(app.text, "detail must resolve the first rendered (pending) row").toContain("PR PRA STATUS")
 
       // Regression — pre-fix the cursor pointed at the unrendered running row, so
-      // the detail pane rendered the running run's workflow step tabs
-      // ("ACTIVE STEP ...") and its "PRs PRR..." header for a row the list never
+      // the detail pane rendered the running run's workflow view (its run-level
+      // OUTCOME facts) and its "PRs PRR..." header for a row the list never
       // showed. Selection must never resolve an unrendered row.
-      expect(app.text, "detail must not resolve the hidden running run").not.toContain("ACTIVE STEP")
+      expect(app.text, "detail must not resolve the hidden running run").not.toContain("OUTCOME")
       expect(app.text, "detail must not resolve the hidden running PR").not.toContain("PRs PRR")
     } finally {
       app.unmount()

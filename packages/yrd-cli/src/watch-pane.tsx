@@ -32,6 +32,7 @@ import {
   type QueueTimelineProjection,
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
+import { taskStatusColor } from "./status-view.tsx"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
@@ -243,12 +244,27 @@ function QueueWorkflowStepTabs({
     )
   }
 
+  // Each step tab label carries the step's status glyph + duration (item I,
+  // #undead re-report 2026-07-16): e.g. `✓ check 55s`. The glyph is colorized by
+  // status; the name + duration inherit the Tab's own active/inactive highlight
+  // so the selected step stays visible (the removed `ACTIVE STEP` line, item G).
+  const stepTabLabel = (name: string) => {
+    const stepRows = data.steps.filter((row) => row.step === name)
+    const rep = stepRows.at(-1)
+    if (rep === undefined) return name
+    return (
+      <>
+        <Text color={taskStatusColor(rep.taskStatus)}>{rep.glyph}</Text> {name}
+        {rep.duration ? ` ${rep.duration}` : ""}
+      </>
+    )
+  }
   return (
     <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
       <TabList>
         {names.map((name) => (
           <Tab key={name} value={name}>
-            {name}
+            {stepTabLabel(name)}
           </Tab>
         ))}
       </TabList>
@@ -259,9 +275,8 @@ function QueueWorkflowStepTabs({
         const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
         return (
           <TabPanel key={name} value={name}>
-            <Text color="$fg-muted">
-              ACTIVE STEP <Text bold>{name}</Text>
-            </Text>
+            {/* The selected tab is the step's title (item G, 2026-07-16): the
+                old `ACTIVE STEP <name>` line was redundant with the tab. */}
             <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} />
             <Accordion
               title="LOG"
