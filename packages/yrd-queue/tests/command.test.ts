@@ -1359,6 +1359,15 @@ describe("Queue command adapters", () => {
       stderr: "",
       timedOut: false,
     },
+    {
+      name: "silent superproject origin tool failure",
+      operation: "read-superproject-origin",
+      matches: (argv: readonly string[]) => argv.at(-1) === "remote.origin.url",
+      exitCode: 128,
+      signal: null,
+      stderr: "",
+      timedOut: false,
+    },
   ] as const)("keeps the candidate submitted after a $name", async (failure) => {
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -1398,6 +1407,88 @@ describe("Queue command adapters", () => {
           exitCode: failure.exitCode,
           timedOut: failure.timedOut,
           signal: failure.signal,
+          retryable: true,
+        },
+      },
+    })
+    expect(configuredCheckRan).toBe(false)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+  }, 15_000)
+
+  it("allows an absolute submodule URL after an exact no-value origin lookup", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const noOrigin: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv.at(-1) === "remote.origin.url") {
+          return Promise.resolve({
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status).toBe("passed")
+  }, 15_000)
+
+  it("keeps a relative submodule URL submitted when the origin lookup has no value", async () => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    let configuredCheckRan = false
+    const noOrigin: Pick<Process, "run"> = {
+      async run(request) {
+        if (request.argv[0] === "true") configuredCheckRan = true
+        if (request.argv.includes("--blob")) {
+          const result = await process.run(request)
+          return {
+            ...result,
+            stdout: result.stdout.replace(/(submodule\.[^\0\n]+\.url\n)[^\0]*/u, "$1../dep.git"),
+          }
+        }
+        if (request.argv.at(-1) === "remote.origin.url") {
+          return {
+            exitCode: 1,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          }
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(noOrigin, fixture.repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "submodule-reachability-refusal",
+          operation: "read-superproject-origin",
+          exitCode: 1,
           retryable: true,
         },
       },

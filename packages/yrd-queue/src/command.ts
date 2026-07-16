@@ -698,13 +698,21 @@ async function candidateSubmodulePins(
   }
   const remoteContext = { operation: "read-superproject-origin", repository: repo } as const
   const remote = await runSubmoduleProbe(git, repo, ["config", "--get", "remote.origin.url"], remoteContext)
-  if (remote.code !== 0 && (remote.timedOut || remote.signal !== null || fetchDetail(remote) !== `git exited ${remote.code}`)) {
+  const originNotConfigured = remote.code === 1 && remote.stdout === "" && remote.stderr === ""
+  if (remote.code !== 0 && !originNotConfigured) {
     throw createSubmoduleReachabilityRefusal(remoteContext, remote)
   }
   const superOrigin = remote.code === 0 && remote.stdout !== "" ? remote.stdout : undefined
   return gitlinks.map((gitlink) => {
     const url = urlsByPath.get(gitlink.path)
     if (url === undefined) throw new Error(`yrd: candidate submodule '${gitlink.path}' has no URL`)
+    if (superOrigin === undefined && (url.startsWith("./") || url.startsWith("../"))) {
+      throw createSubmoduleReachabilityRefusal(
+        remoteContext,
+        remote,
+        `candidate submodule '${gitlink.path}' uses relative URL '${url}' but the superproject origin is not configured`,
+      )
+    }
     return { ...gitlink, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
   })
 }
