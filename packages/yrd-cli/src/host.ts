@@ -179,6 +179,26 @@ export function stepTimeoutMs(config: YrdStepConfig): number {
   return config.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS
 }
 
+/**
+ * The default no-output-progress bound for a queue step's local command. A
+ * step that emits its banner then goes SILENT — a wedged child that neither
+ * progresses nor exits, the 2026-07-16 R423 failure — is caught here: sooner
+ * and more specifically than the coarse wall-clock DEFAULT_STEP_TIMEOUT_MS,
+ * and it fails LOUDLY as `<step>-stalled` with a STALLED verdict in the
+ * evidence instead of leaving the queue awaiting a pipe only SIGKILL can free.
+ * Kept strictly below the wall-clock bound so silence stalls before it times
+ * out, yet generous enough that a legitimately slow-but-progressing gate
+ * (which resets the lease on every byte) never trips it. Declarative override:
+ * `noProgressMs` on the step config. Policy lives HERE (host); mechanism lives
+ * in @yrd/process — never bound inside the lib.
+ */
+export const DEFAULT_STEP_NO_PROGRESS_MS = 10 * 60_000
+
+/** Effective no-output-progress bound for a step: declared, else the host default. */
+export function stepNoProgressMs(config: YrdStepConfig): number {
+  return config.noProgressMs ?? DEFAULT_STEP_NO_PROGRESS_MS
+}
+
 function stepCommand(name: string, config: YrdStepConfig): string {
   if (config.run === undefined) throw new Error(`yrd: queue step '${name}' has no command`)
   return config.run
@@ -205,6 +225,7 @@ function candidateStep(
         runner: config.runner,
         classification: config.classification ?? "carrier",
         timeoutMs: stepTimeoutMs(config),
+        noProgressTimeoutMs: stepNoProgressMs(config),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
       {
@@ -214,6 +235,7 @@ function candidateStep(
           name,
           config,
           timeoutMs: stepTimeoutMs(config),
+          noProgressMs: stepNoProgressMs(config),
           toolchain: hostToolchainFingerprint(),
           checkoutParent,
         }),
@@ -236,6 +258,7 @@ function integratedRunner(
     cwd: repo,
     purpose: name,
     timeoutMs: stepTimeoutMs(config),
+    noProgressTimeoutMs: stepNoProgressMs(config),
     artifactRoot: join(stateDir, "artifacts"),
     variables: (input: StepExecution<IntegratedShape>) => ({
       YRD_INTEGRATED_SHA: input.shape.integration.commit,
@@ -273,6 +296,7 @@ function configuredQueueSteps(
               name,
               config,
               timeoutMs: stepTimeoutMs(config),
+              noProgressMs: stepNoProgressMs(config),
               toolchain: hostToolchainFingerprint(),
               resolvedCommand: mergeCommand,
             }),
@@ -291,6 +315,7 @@ function configuredQueueSteps(
           name,
           config,
           timeoutMs: stepTimeoutMs(config),
+          noProgressMs: stepNoProgressMs(config),
           toolchain: hostToolchainFingerprint(),
         }),
         needsIntegration: true,

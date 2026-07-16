@@ -14,6 +14,7 @@ export type QueueStepRevisionInput = Readonly<{
   name: string
   config: YrdStepConfig
   timeoutMs: number
+  noProgressMs: number
   toolchain: ToolchainFingerprint
   checkoutParent?: string
   resolvedCommand?: readonly string[]
@@ -40,6 +41,7 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
         environment: input.config.environment,
         classification: input.config.classification ?? "carrier",
         timeoutMs: input.timeoutMs,
+        noProgressMs: input.noProgressMs,
         toolchain: input.toolchain,
       }),
     )
