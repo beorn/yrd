@@ -2226,7 +2226,8 @@ export function PRDetailView({
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
       <Text>
-        <Text bold>SOURCE</Text> {pr.branch} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text> {pr.headSha}
+        <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
+        {pr.headSha}
       </Text>
       <Text>
         <Text bold>BASE</Text> {pr.base}
@@ -2569,6 +2570,17 @@ const TIMELINE_CONTENT_CAP = 160
 const TIMELINE_STATE_CAP = 20
 const TIMELINE_TOTAL_GLYPH = "◷"
 
+/**
+ * Powerline branch glyph (U+E0A0), prefixed on every rendered branch name in
+ * the watch UI (user directive 2026-07-16), matching ag-code's `BRANCH_ICON`.
+ */
+const BRANCH_ICON = ""
+
+/** A branch name prefixed with the Powerline branch glyph. */
+function branchLabel(branch: string): string {
+  return `${BRANCH_ICON} ${branch}`
+}
+
 type TimelineCellLayout = Readonly<{
   timeWidth: number
   statusWidth: number
@@ -2802,8 +2814,10 @@ function TimelineCells({
 // over its own column; the trailing bare RUN header belongs to the
 // run-duration column that replaced TOTAL.
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
+  // The column header reads white + bold (user directive 2026-07-16) so it
+  // stands out above the muted row cells.
   const label = (text: string): React.ReactElement => (
-    <Text color="$fg-muted" wrap="truncate">
+    <Text color="$fg" bold wrap="truncate">
       {text}
     </Text>
   )
@@ -2872,7 +2886,8 @@ function TimelineProjectedRow({
       }
       pr={
         <>
-          <Text bold={active} color={forcedFg} flexShrink={0}>
+          {/* The PR+revision id is always bold (user directive 2026-07-16). */}
+          <Text bold color={forcedFg} flexShrink={0}>
             {row.pr}.{row.revision}
           </Text>
           <Box paddingLeft={1} minWidth={0} overflow="hidden">
@@ -3356,6 +3371,9 @@ function ProjectedQueueTimeline({
         )}
         <TimelineRunnerBox projection={projection} />
         <TimelineStatusBox projection={projection} />
+        {/* A blank line sets the FILTER row apart from the boxes above it
+            (user directive 2026-07-16). */}
+        <Box height={1} flexShrink={0} />
         <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>

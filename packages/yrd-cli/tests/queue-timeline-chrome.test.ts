@@ -93,6 +93,34 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
+  it("renders the column header white+bold, the PR id always bold, and a blank line above FILTER", async () => {
+    const projection = queueTimelineStories["contract-overview"].snapshot.projection
+    const render = createRenderer({ cols: 160, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
+    try {
+      await app.waitForLayoutStable()
+      const text = app.text
+      // E: the column header is white (default fg, not muted) AND bold.
+      const headerY = rowIndexOf(text, "STATUS")
+      const timeHeaderX = rowAt(text, headerY).indexOf("TIME")
+      expect(app.cell(timeHeaderX, headerY).bold, "header TIME is bold").toBe(true)
+      const mutedRowY = rowIndexOf(text, "PR4.1")
+      const mutedTimeX = rowAt(text, mutedRowY).search(/\d{2}:\d{2}:\d{2}/u)
+      expect(app.cell(timeHeaderX, headerY).fg, "header fg is brighter than the muted row TIME").not.toEqual(
+        app.cell(mutedTimeX, mutedRowY).fg,
+      )
+      // F: an integrated (non-running) PR id is still bold.
+      const doneRow = rowAt(text, mutedRowY)
+      const prX = doneRow.indexOf("PR4.1")
+      expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
+      // D: the row directly above FILTER is blank.
+      const filterY = rowIndexOf(text, "FILTER ")
+      expect(rowAt(text, filterY - 1).trim(), "blank line above FILTER").toBe("")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("mutes real run ids like TIME while pending keeps its own color", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
