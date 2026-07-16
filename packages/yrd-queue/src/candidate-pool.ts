@@ -139,14 +139,22 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     entry.busy = false
   }
 
+  /** Remove a warm worktree. Fail closed and retry-safe (mirrors the cold
+   * withScratch cleanup contract): a nonzero `worktree remove` raises loud and
+   * leaves the entry state INTACT so a later close/evict retries the removal —
+   * it never claims success while leaving Git worktree-admin residue behind. */
   async function removeWorktree(entry: PoolEntry): Promise<void> {
     const path = entry.path
     const root = entry.root
+    if (path !== undefined) {
+      const removed = await git.run(repo, ["worktree", "remove", "--force", path], true)
+      if (removed.code !== 0) {
+        throw new Error(removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${path}'`)
+      }
+    }
+    // Only clear pool state after the Git admin removal succeeded.
     entry.path = undefined
     entry.root = undefined
-    if (path !== undefined) {
-      await git.run(repo, ["worktree", "remove", "--force", path], true)
-    }
     if (root !== undefined) {
       await rm(root, { recursive: true, force: true })
     }
@@ -165,8 +173,16 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     if (updated.code !== 0) {
       throw new Error(updated.stderr || updated.stdout || `could not materialize submodules for '${ref}'`)
     }
-    await git.run(worktree, ["submodule", "foreach", "--recursive", "git reset --hard"], true)
-    await git.run(worktree, ["submodule", "foreach", "--recursive", "git clean -fdx"], true)
+    // Fail closed: an unreset or unclean submodule is residue. Never swallow it —
+    // resetEntry treats any throw here as "cannot prove clean" and evicts.
+    const reset = await git.run(worktree, ["submodule", "foreach", "--recursive", "git reset --hard"], true)
+    if (reset.code !== 0) {
+      throw new Error(reset.stderr || reset.stdout || `could not reset submodules for '${ref}'`)
+    }
+    const cleaned = await git.run(worktree, ["submodule", "foreach", "--recursive", "git clean -fdx"], true)
+    if (cleaned.code !== 0) {
+      throw new Error(cleaned.stderr || cleaned.stdout || `could not clean submodules for '${ref}'`)
+    }
   }
 
   async function resolveCommit(worktree: string, ref: string): Promise<string> {
@@ -174,21 +190,40 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     return parsed.stdout
   }
 
-  /** Reset a warm worktree to `ref` and prove it is residue-free. Resolves true
-   * when the entry is clean and pinned; false when it must be evicted. */
+  /** Reset a warm worktree to `ref` and PROVE it is residue-free. Fail closed:
+   * any reset/clean/materialize failure, a moved HEAD, or a non-empty status
+   * (submodules included) resolves false so the caller evicts and recreates —
+   * a tree that cannot be proven clean is NEVER reused. The span records the
+   * outcome and the reason, so a failure is loud, not silent. */
   async function resetEntry(entry: PoolEntry, ref: string): Promise<boolean> {
     const worktree = entry.path
     if (worktree === undefined) return false
-    using _span = log?.span?.("reset", { repo, ref })
-    const target = await resolveCommit(repo, ref)
-    const reset = await git.run(worktree, ["reset", "--hard", target], true)
-    if (reset.code !== 0) return false
-    await git.run(worktree, ["clean", "-fdx"], true)
-    await materialize(worktree, ref)
-    const head = await git.run(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD"], true)
-    if (head.code !== 0 || head.stdout !== target) return false
-    const dirty = await git.run(worktree, ["status", "--porcelain", "--untracked-files=all"], true)
-    return dirty.code === 0 && dirty.stdout === ""
+    using span = log?.span?.("reset", { repo, ref })
+    const record = (clean: boolean, reason?: string): boolean => {
+      if (span !== undefined) {
+        Object.assign(span.spanData, { outcome: clean ? "clean" : "unclean", ...(reason === undefined ? {} : { reason }) })
+      }
+      return clean
+    }
+    try {
+      const target = await resolveCommit(repo, ref)
+      const reset = await git.run(worktree, ["reset", "--hard", target], true)
+      if (reset.code !== 0) return record(false, reset.stderr || reset.stdout || "reset --hard failed")
+      const cleaned = await git.run(worktree, ["clean", "-fdx"], true)
+      if (cleaned.code !== 0) return record(false, cleaned.stderr || cleaned.stdout || "clean -fdx failed")
+      await materialize(worktree, ref)
+      const head = await git.run(worktree, ["rev-parse", "--verify", "--end-of-options", "HEAD"], true)
+      if (head.code !== 0 || head.stdout !== target) return record(false, "HEAD does not match the candidate")
+      const dirty = await git.run(
+        worktree,
+        ["status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"],
+        true,
+      )
+      if (dirty.code !== 0 || dirty.stdout !== "") return record(false, dirty.stdout || "status probe failed")
+      return record(true)
+    } catch (cause) {
+      return record(false, cause instanceof Error ? cause.message : String(cause))
+    }
   }
 
   // When the warm-worktree parent lives inside the repository working tree, a
@@ -222,10 +257,18 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     await mkdir(parent, { recursive: true })
     const root = await mkdtemp(join(await realpath(parent), "yrd-warm-"))
     const path = join(root, "worktree")
+    try {
+      await git.run(repo, ["worktree", "add", "--detach", path, ref])
+      await materialize(path, ref)
+    } catch (cause) {
+      // Leave no half-built worktree or orphan root behind, then raise loud.
+      await git.run(repo, ["worktree", "remove", "--force", path], true)
+      await rm(root, { recursive: true, force: true })
+      throw cause
+    }
+    // Publish the entry only once it is a fully materialized, clean worktree.
     entry.root = root
     entry.path = path
-    await git.run(repo, ["worktree", "add", "--detach", path, ref])
-    await materialize(path, ref)
   }
 
   async function acquire(entry: PoolEntry, ref: string): Promise<AcquireOutcome> {
@@ -251,12 +294,24 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
 
   async function close(): Promise<void> {
     if (closed) return
-    closed = true
+    // Retry-safe: an entry whose worktree removal raises is retained so a later
+    // close retries it. `closed` is set only once every worktree is gone, and
+    // the first failure is re-raised loud rather than swallowed.
+    const survivors: PoolEntry[] = []
+    let failure: unknown
     for (const entry of entries) {
       using _span = log?.span?.("release", { repo, outcome: "closed" })
-      await serializeGit(() => removeWorktree(entry))
+      try {
+        await serializeGit(() => removeWorktree(entry))
+      } catch (cause) {
+        survivors.push(entry)
+        failure ??= cause
+      }
     }
     entries.length = 0
+    entries.push(...survivors)
+    if (failure !== undefined) throw failure
+    closed = true
   }
 
   return Object.freeze({
