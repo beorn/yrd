@@ -591,10 +591,19 @@ export async function readArchivedOrphans(options: Readonly<{ dir: string }>): P
 }
 
 export async function importOrphanJournal(
-  options: Readonly<{ dir: string; sourcePath: string; importedBy: string; importedAt?: string }>,
+  options: Readonly<{
+    dir: string
+    sourcePath: string
+    importedBy: string
+    importedAt?: string
+    log?: ConditionalLogger
+  }>,
 ): Promise<OrphanJournalImportResult> {
   const source = await readOrphanSource(options)
-  const context = createJournalContext({ dir: options.dir })
+  const context = createJournalContext({
+    dir: options.dir,
+    ...(options.log === undefined ? {} : { inject: { log: options.log } }),
+  })
   const encoded = encodeArchivedOrphans(source.records)
 
   while (true) {

@@ -761,7 +761,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
-          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor }),
+          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor, log }),
       }),
     })
     let closePromise: Promise<void> | undefined
