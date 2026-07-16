@@ -20,8 +20,9 @@ import {
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
-  queueTimelineDefaultCursorId,
   queueTimelineRows,
+  queueTimelineVisibleDefaultCursorId,
+  queueTimelineVisibleRows,
   type QueueShowData,
   type QueueStatusResult,
   type QueueTimelineProjection,
@@ -287,6 +288,10 @@ export function QueueWatchFrame({
 }) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
+  const projectedRows = useMemo(
+    () => (snapshot.projection === undefined ? undefined : queueTimelineVisibleRows(snapshot.projection)),
+    [snapshot.projection],
+  )
   const rows = useMemo(
     () =>
       snapshot.projection === undefined
@@ -295,18 +300,18 @@ export function QueueWatchFrame({
             pr: row.pr,
             ...(row.run === undefined ? {} : { run: row.run }),
           }))
-        : snapshot.projection.rows.map((row) => ({
+        : (projectedRows ?? []).map((row) => ({
             key: row.id,
             pr: row.pr,
             ...(row.run === undefined ? {} : { run: row.run }),
           })),
-    [snapshot],
+    [projectedRows, snapshot],
   )
   // Default cursor: first RUNNING row, else the newest FINISHED row. A manual
   // cursor move is sticky — default-follow stops until the pinned row leaves
   // the window or the view is reopened.
   const defaultCursorKey =
-    snapshot.projection === undefined ? rows[0]?.key : queueTimelineDefaultCursorId(snapshot.projection.rows)
+    snapshot.projection === undefined ? rows[0]?.key : queueTimelineVisibleDefaultCursorId(snapshot.projection)
   const [manualCursor, setManualCursor] = useState(false)
   const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
   const [selectedPr, setSelectedPr] = useState<string | undefined>(

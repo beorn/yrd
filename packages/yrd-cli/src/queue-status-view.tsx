@@ -2949,6 +2949,19 @@ function TimelineStatistics({ projection }: { projection: QueueTimelineProjectio
   )
 }
 
+export function queueTimelineVisibleRows(
+  projection: Pick<QueueTimelineProjection, "rows" | "display">,
+): readonly QueueTimelineProjectedRow[] {
+  return projection.rows.slice(0, projection.display.shown)
+}
+
+export function queueTimelineVisibleDefaultCursorId(
+  projection: Pick<QueueTimelineProjection, "rows" | "display">,
+): string | undefined {
+  const rows = queueTimelineVisibleRows(projection)
+  return queueTimelineDefaultCursorId(rows) ?? rows[0]?.id
+}
+
 function ProjectedQueueTimeline({
   projection,
   nav,
@@ -2964,8 +2977,7 @@ function ProjectedQueueTimeline({
   onSelect?: (index: number) => void
   columns: number
 }) {
-  const compact = columns <= 80
-  const rows = projection.rows.slice(0, projection.display.shown)
+  const rows = queueTimelineVisibleRows(projection)
   const statusFilter = projection.filters.statuses.length === 5 ? "all" : projection.filters.statuses.join(",")
   const includeDate = rows.some(
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
