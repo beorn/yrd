@@ -4,9 +4,9 @@
  * @consumer @yrd/queue warm candidate pool
  */
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createProcess } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
@@ -414,6 +414,39 @@ describe("warm candidate pool", () => {
 
     // Closed reached true: a further close is a clean no-op.
     await pool.close()
+  })
+
+  it("retries the root removal after a failed close — a reported-closed pool never leaves root residue (merge-queue R40c)", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    let warmPath = ""
+    await pool.withCandidate(baseSha, async (path) => {
+      warmPath = path
+      return passed
+    })
+    const root = dirname(warmPath)
+    expect(existsSync(root)).toBe(true)
+
+    // fs fault injection: the Git worktree-admin removal succeeds (root's own
+    // permissions allow deleting `worktree/`), but the root directory itself
+    // cannot be unlinked from the read-only Bays root.
+    await chmod(baysRoot, 0o555)
+    try {
+      // Loud and retry-safe: the failed rm re-raises; the root stays for retry.
+      await expect(pool.close()).rejects.toThrow()
+      expect(existsSync(root)).toBe(true)
+      // The Git admin removal DID succeed — only the filesystem residue remains.
+      expect(await git(repo, ["worktree", "list", "--porcelain"])).not.toContain(warmPath)
+    } finally {
+      await chmod(baysRoot, 0o755)
+    }
+
+    // Fault cleared: the close RETRY must actually remove the residue and only
+    // then report closed — never `closed` with the root still on disk.
+    await pool.close()
+    expect(existsSync(root)).toBe(false)
   })
 
   it("retains and surfaces both causes when creation fails and its worktree cannot be cleaned up", async () => {
