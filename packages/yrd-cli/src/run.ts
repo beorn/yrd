@@ -843,13 +843,25 @@ async function recutPr(
   app: YrdCliApp,
   services: YrdCliServices,
   selector: string,
-  options: JsonOption & Readonly<{ revision?: number; queue?: boolean }>,
+  options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
   const service = services.recut ?? configuration("pr.recut capability is not installed")
   const pr = requiredPr(app, selector)
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
+  }
+  // Refuse to silently discard a green check: if the PR's current head already
+  // holds a passing check for its current revision, recutting supersedes that
+  // revision and throws the passing result away. Require an explicit --force so
+  // the discard is a deliberate operator choice, never a mechanical accident.
+  if (options.force !== true && app.queue.eligibility(pr.id).checks.status === "passed") {
+    raiseFailure(
+      "refusal",
+      "recut-would-discard-green",
+      `yrd: PR '${pr.id}' revision ${pr.revision} already holds a passing check; recut would discard it. ` +
+        "Re-run with --force to override.",
+    )
   }
   if (options.revision !== undefined && (!Number.isInteger(options.revision) || options.revision < 1)) {
     usage("--revision must be a positive integer")
@@ -3109,6 +3121,7 @@ function buildProgram(
     .description("mechanically recut an immutable PR revision onto authoritative current base")
     .option("--revision <number>", "select an older immutable PR revision", int)
     .option("--queue", "ready the fresh revision and admit its configured checks")
+    .option("--force", "recut even when the current revision already holds a passing check")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) =>
       setExit(await recutPr(installed(), installedServices(), selector, options, io)),

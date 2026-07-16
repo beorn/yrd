@@ -1574,6 +1574,51 @@ describe("runYrd", () => {
     expect(app.bays.pr("PR1")?.revisions).toHaveLength(2)
   })
 
+  it("refuses to recut a PR whose current head already holds a passing check unless forced", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    if (!app.bays.checksRequested("PR1")) await app.bays.requestChecks({ pr: "PR1" })
+    // Drive the current revision's check to green: admit runs the pre-integration
+    // check step (leaseMs/runner => the admission is drained, not just enqueued).
+    await app.queue.admit({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
+
+    let recutCalls = 0
+    const services = {
+      recut: {
+        recut() {
+          recutCalls += 1
+          return Promise.resolve({
+            headSha: "2".repeat(40),
+            baseSha: "b".repeat(40),
+            treeSha: "c".repeat(40),
+            patchId: "d".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+
+    // Without --force the recut is refused so nobody mechanically discards the green check.
+    const refused = outputIO()
+    expect(await runYrd(app, yrd("pr", "recut", "PR1"), refused.io, services)).toBe(1)
+    expect(refused.stderr()).toContain("passing check")
+    expect(refused.stderr()).toContain("--force")
+    expect(recutCalls).toBe(0)
+    // The passing check survives and the current revision is untouched.
+    expect(app.queue.eligibility("PR1").checks.status).toBe("passed")
+    expect(app.bays.pr("PR1")).toMatchObject({ revision: 1, headSha: HEAD_SHA })
+
+    // With --force the recut proceeds exactly as before the guard.
+    const forced = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "recut", "PR1", "--force", "--json"), forced.io, services),
+      forced.stderr(),
+    ).toBe(0)
+    expect(recutCalls).toBe(1)
+    expect(JSON.parse(forced.stdout())).toMatchObject({ pr: "PR1", revision: 2, unchanged: false })
+  })
+
   it("renders one shared PR projection at 80 and 120 columns without cropped semantic headers", async () => {
     const revision = (
       headSha: string,
