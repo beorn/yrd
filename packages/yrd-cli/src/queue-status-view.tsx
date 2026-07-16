@@ -1319,6 +1319,15 @@ const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
   "other",
 ]
 
+/**
+ * The default timeline window is unbounded — show everything, no `since=`
+ * filter, unless the operator passes `--since` (user directive 2026-07-16).
+ * 100 years dwarfs any real queue history while keeping `now - window` inside
+ * the valid `Date` range (unlike `MAX_SAFE_INTEGER`, which overflows it). The
+ * FILTER row hides `since=` and coverage reads complete at this window.
+ */
+export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
+
 function terminalOutcome(run: QueueRun): QueueTerminalOutcome {
   if (run.status === "passed") return "integrated"
   const status = run.status as string
@@ -1698,7 +1707,13 @@ export function queueTimelineProjection(
     coverage: {
       requestedSince: since,
       ...(retainedSince === undefined ? {} : { retainedSince }),
-      complete: options.retainedSinceMs === undefined || options.retainedSinceMs <= sinceMs,
+      // An unbounded window shows every retained row, so coverage is complete
+      // by definition (the `now - window` cutoff would otherwise read as older
+      // than any retained record and falsely trip the incompleteness warning).
+      complete:
+        options.windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS ||
+        options.retainedSinceMs === undefined ||
+        options.retainedSinceMs <= sinceMs,
     },
     display: { limit, shown: Math.min(rows.length, limit), hidden: Math.max(0, rows.length - limit) },
     rows,
@@ -3263,10 +3278,14 @@ function TimelineFilterLine({
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
 }) {
   const filters = projection.filters
+  // `since=` renders only when the operator bounded the window; the default
+  // unbounded window shows everything and prints no `since=` (user directive
+  // 2026-07-16).
+  const bounded = filters.windowMs < QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
   return (
     <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0} overflow="hidden">
       <Text color="$fg-muted" flexShrink={0}>
-        FILTER since={mediaDuration(filters.windowMs)}
+        FILTER{bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}
       </Text>
       {filters.terms.length === 0 ? null : (
         <Text color="$fg-muted" flexShrink={0} wrap="truncate">

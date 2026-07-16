@@ -13,7 +13,11 @@ import { createElement } from "react"
 import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
-import { QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
+import {
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  QueueTimelineView,
+  type QueueTimelineProjection,
+} from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
@@ -227,6 +231,25 @@ describe("queue timeline chrome 21106", () => {
       const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("omits since= from FILTER when the window is unbounded (the new default)", async () => {
+    const base = queueTimelineStories["contract-overview"].snapshot.projection
+    const unbounded: QueueTimelineProjection = {
+      ...base,
+      filters: { ...base.filters, windowMs: QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS },
+    }
+    const app = createRenderer({ cols: 160, rows: 40 })(
+      createElement(QueueTimelineView, { projection: unbounded, nav: false, columns: 160 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const filterLine = rowAt(app.text, rowIndexOf(app.text, "FILTER"))
+      expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
+      expect(filterLine).toContain("[x] pending")
     } finally {
       app.unmount()
     }
