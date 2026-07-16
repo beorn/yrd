@@ -234,7 +234,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("ACTIVE STEP check"))
+      await waitFor(() => app.text.includes("STEP check#"))
       // Evidence lives INSIDE the scrollable detail body as a collapsed
       // section; `o` expands it (and opens the detail when hidden).
       expect(app.text).not.toContain("EVIDENCE R42")
@@ -243,14 +243,14 @@ describe("QueueWatchFrame 21106 interaction", () => {
       await waitFor(() => app.text.includes("EVIDENCE R42"))
       // A section of the detail body, not a replacement surface: the step
       // tabs stay visible alongside the evidence.
-      expect(app.text).toContain("ACTIVE STEP check")
+      expect(app.text).toContain("STEP check#")
 
       // Esc still only hides the detail pane; o reopens straight to evidence.
       await app.press("Escape")
       await waitFor(() => !app.text.includes("EVIDENCE R42"))
       await app.press("o")
       await waitFor(() => app.text.includes("EVIDENCE R42"))
-      expect(app.text).toContain("ACTIVE STEP check")
+      expect(app.text).toContain("STEP check#")
     } finally {
       app.unmount()
     }

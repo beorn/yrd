@@ -59,6 +59,7 @@ import {
   queueRunRevisionClocks,
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   runRevisionClock,
   queueShowData,
   type QueueTimelineProjection,
@@ -355,7 +356,6 @@ type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
 
-const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
 const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "pending",
   "running",
@@ -372,7 +372,7 @@ function queueTimelineRowLimit(io: YrdCliIO): number {
 }
 
 function queueTimelineWindow(value: string | undefined): number {
-  if (value === undefined) return QUEUE_TIMELINE_DEFAULT_WINDOW_MS
+  if (value === undefined) return QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/iu.exec(value.trim())
   if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
   const amount = Number(match?.[1])
@@ -2927,7 +2927,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window", "6h")
+    .option("--since <duration>", "timeline window (default: everything)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
@@ -2947,7 +2947,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window", "6h")
+    .option("--since <duration>", "timeline window (default: everything)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
@@ -2964,7 +2964,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window", "6h")
+    .option("--since <duration>", "timeline window (default: everything)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")

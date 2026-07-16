@@ -308,7 +308,7 @@ describe("queue timeline storybook", () => {
       frame.split("\n").find((line) => line.includes("TIME") && line.includes("RUN") && line.includes("PR"))
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
-      height: 20,
+      height: 24,
       plain: true,
     })
     expect(header(wide), "wide header").toContain("BY")
@@ -320,7 +320,7 @@ describe("queue timeline storybook", () => {
 
     const narrow = await renderString(createElement(QueueTimelineView, { projection, columns: 90 }), {
       width: 90,
-      height: 20,
+      height: 24,
       plain: true,
     })
     expect(header(narrow), "narrow header").not.toContain("BY")

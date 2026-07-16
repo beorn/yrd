@@ -1319,6 +1319,15 @@ const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
   "other",
 ]
 
+/**
+ * The default timeline window is unbounded — show everything, no `since=`
+ * filter, unless the operator passes `--since` (user directive 2026-07-16).
+ * 100 years dwarfs any real queue history while keeping `now - window` inside
+ * the valid `Date` range (unlike `MAX_SAFE_INTEGER`, which overflows it). The
+ * FILTER row hides `since=` and coverage reads complete at this window.
+ */
+export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
+
 function terminalOutcome(run: QueueRun): QueueTerminalOutcome {
   if (run.status === "passed") return "integrated"
   const status = run.status as string
@@ -1698,7 +1707,13 @@ export function queueTimelineProjection(
     coverage: {
       requestedSince: since,
       ...(retainedSince === undefined ? {} : { retainedSince }),
-      complete: options.retainedSinceMs === undefined || options.retainedSinceMs <= sinceMs,
+      // An unbounded window shows every retained row, so coverage is complete
+      // by definition (the `now - window` cutoff would otherwise read as older
+      // than any retained record and falsely trip the incompleteness warning).
+      complete:
+        options.windowMs >= QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS ||
+        options.retainedSinceMs === undefined ||
+        options.retainedSinceMs <= sinceMs,
     },
     display: { limit, shown: Math.min(rows.length, limit), hidden: Math.max(0, rows.length - limit) },
     rows,
@@ -2226,7 +2241,8 @@ export function PRDetailView({
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
       <Text>
-        <Text bold>SOURCE</Text> {pr.branch} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text> {pr.headSha}
+        <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
+        {pr.headSha}
       </Text>
       <Text>
         <Text bold>BASE</Text> {pr.base}
@@ -2569,6 +2585,17 @@ const TIMELINE_CONTENT_CAP = 160
 const TIMELINE_STATE_CAP = 20
 const TIMELINE_TOTAL_GLYPH = "◷"
 
+/**
+ * Powerline branch glyph (U+E0A0), prefixed on every rendered branch name in
+ * the watch UI (user directive 2026-07-16), matching ag-code's `BRANCH_ICON`.
+ */
+const BRANCH_ICON = ""
+
+/** A branch name prefixed with the Powerline branch glyph. */
+function branchLabel(branch: string): string {
+  return `${BRANCH_ICON} ${branch}`
+}
+
 type TimelineCellLayout = Readonly<{
   timeWidth: number
   statusWidth: number
@@ -2706,9 +2733,26 @@ export function queueTimelineDefaultCursorId(
 // The working disc pulses only in the live pane; the one-shot projection has
 // no app scope (and a static print cannot pulse), so it renders the same
 // glyph statically — byte-identical plain output either way.
+/**
+ * Live-activity pulse cadence, matched to ag-code's activity indicator (item O,
+ * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
+ * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
+ * period (900 ms) reproduces ag's blink. (ag additionally synchronizes every
+ * indicator to one global phase via `useSynchronizedPulse`; silvery's per-node
+ * timer is a close, primitive-native approximation — a shared-phase Pulse would
+ * be the exact match, tracked as a silvery follow-up.)
+ */
+const AG_PULSE_INTERVAL_MS = 900
+
 function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
   if (row.status === "running") {
-    if (live) return <Pulse colors={["$fg-info", "$fg-muted"]}>{row.glyph}</Pulse>
+    if (live) {
+      return (
+        <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS}>
+          {row.glyph}
+        </Pulse>
+      )
+    }
     return <Text color="$fg-info">{row.glyph}</Text>
   }
   return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
@@ -2802,8 +2846,10 @@ function TimelineCells({
 // over its own column; the trailing bare RUN header belongs to the
 // run-duration column that replaced TOTAL.
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
+  // The column header reads white + bold (user directive 2026-07-16) so it
+  // stands out above the muted row cells.
   const label = (text: string): React.ReactElement => (
-    <Text color="$fg-muted" wrap="truncate">
+    <Text color="$fg" bold wrap="truncate">
       {text}
     </Text>
   )
@@ -2872,7 +2918,8 @@ function TimelineProjectedRow({
       }
       pr={
         <>
-          <Text bold={active} color={forcedFg} flexShrink={0}>
+          {/* The PR+revision id is always bold (user directive 2026-07-16). */}
+          <Text bold color={forcedFg} flexShrink={0}>
             {row.pr}.{row.revision}
           </Text>
           <Box paddingLeft={1} minWidth={0} overflow="hidden">
@@ -3248,10 +3295,14 @@ function TimelineFilterLine({
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
 }) {
   const filters = projection.filters
+  // `since=` renders only when the operator bounded the window; the default
+  // unbounded window shows everything and prints no `since=` (user directive
+  // 2026-07-16).
+  const bounded = filters.windowMs < QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
   return (
     <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0} overflow="hidden">
       <Text color="$fg-muted" flexShrink={0}>
-        FILTER since={mediaDuration(filters.windowMs)}
+        FILTER{bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}
       </Text>
       {filters.terms.length === 0 ? null : (
         <Text color="$fg-muted" flexShrink={0} wrap="truncate">
@@ -3356,6 +3407,9 @@ function ProjectedQueueTimeline({
         )}
         <TimelineRunnerBox projection={projection} />
         <TimelineStatusBox projection={projection} />
+        {/* A blank line sets the FILTER row apart from the boxes above it
+            (user directive 2026-07-16). */}
+        <Box height={1} flexShrink={0} />
         <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>

@@ -13,7 +13,11 @@ import { createElement } from "react"
 import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
-import { QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
+import {
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  QueueTimelineView,
+  type QueueTimelineProjection,
+} from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const NOW = Date.parse("2026-07-13T12:00:00.000Z")
@@ -88,6 +92,34 @@ describe("queue timeline chrome 21106", () => {
       } finally {
         oneShot.unmount()
       }
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("renders the column header white+bold, the PR id always bold, and a blank line above FILTER", async () => {
+    const projection = queueTimelineStories["contract-overview"].snapshot.projection
+    const render = createRenderer({ cols: 160, rows: 40 })
+    const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
+    try {
+      await app.waitForLayoutStable()
+      const text = app.text
+      // E: the column header is white (default fg, not muted) AND bold.
+      const headerY = rowIndexOf(text, "STATUS")
+      const timeHeaderX = rowAt(text, headerY).indexOf("TIME")
+      expect(app.cell(timeHeaderX, headerY).bold, "header TIME is bold").toBe(true)
+      const mutedRowY = rowIndexOf(text, "PR4.1")
+      const mutedTimeX = rowAt(text, mutedRowY).search(/\d{2}:\d{2}:\d{2}/u)
+      expect(app.cell(timeHeaderX, headerY).fg, "header fg is brighter than the muted row TIME").not.toEqual(
+        app.cell(mutedTimeX, mutedRowY).fg,
+      )
+      // F: an integrated (non-running) PR id is still bold.
+      const doneRow = rowAt(text, mutedRowY)
+      const prX = doneRow.indexOf("PR4.1")
+      expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
+      // D: the row directly above FILTER is blank.
+      const filterY = rowIndexOf(text, "FILTER ")
+      expect(rowAt(text, filterY - 1).trim(), "blank line above FILTER").toBe("")
     } finally {
       app.unmount()
     }
@@ -199,6 +231,25 @@ describe("queue timeline chrome 21106", () => {
       const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("omits since= from FILTER when the window is unbounded (the new default)", async () => {
+    const base = queueTimelineStories["contract-overview"].snapshot.projection
+    const unbounded: QueueTimelineProjection = {
+      ...base,
+      filters: { ...base.filters, windowMs: QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS },
+    }
+    const app = createRenderer({ cols: 160, rows: 40 })(
+      createElement(QueueTimelineView, { projection: unbounded, nav: false, columns: 160 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const filterLine = rowAt(app.text, rowIndexOf(app.text, "FILTER"))
+      expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
+      expect(filterLine).toContain("[x] pending")
     } finally {
       app.unmount()
     }
