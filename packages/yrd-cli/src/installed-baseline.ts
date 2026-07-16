@@ -62,6 +62,15 @@ export async function readInstalledBaselines(stateDir: string): Promise<Readonly
   return result.data.baselines
 }
 
+/** Minimal filesystem seam for the atomic replace. Explicit DI so a test can
+ * inject a staging-write or rename failure and prove the prior authority file is
+ * left byte-identical + parseable and no temp residue survives. Defaults to
+ * node:fs/promises. */
+type BaselineFsOps = Readonly<{
+  writeFile?: (path: string, data: string, encoding: "utf8") => Promise<void>
+  rename?: (from: string, to: string) => Promise<void>
+}>
+
 /** Per-write uniquifier for the temp file name so an atomic replace never
  * clobbers a sibling write's staging file. */
 let baselineTempSequence = 0
@@ -75,27 +84,43 @@ function withBaselineWriteLock<Result>(stateDir: string, operation: () => Promis
 }
 
 /** Publish the whole baseline authority through a unique temp file + rename so a
- * partially written or interrupted write can never corrupt the live file. */
-async function replaceBaselineFile(stateDir: string, baselines: Record<string, InstalledBaseline>): Promise<void> {
+ * partially written or interrupted write can never corrupt the live file. On any
+ * failure the temp file is removed in `finally`, so the authority is untouched
+ * (rename never ran) and no `.tmp` residue survives. */
+async function replaceBaselineFile(
+  stateDir: string,
+  baselines: Record<string, InstalledBaseline>,
+  fs: BaselineFsOps = {},
+): Promise<void> {
+  const writeFileOp = fs.writeFile ?? writeFile
+  const renameOp = fs.rename ?? rename
   const path = installedBaselinePath(stateDir)
   const file = InstalledBaselineFileSchema.parse({ version: 1, baselines })
   const temporary = `${path}.${process.pid}.${baselineTempSequence++}.tmp`
   try {
-    await writeFile(temporary, `${JSON.stringify(file, undefined, 2)}\n`, "utf8")
-    await rename(temporary, path)
+    await writeFileOp(temporary, `${JSON.stringify(file, undefined, 2)}\n`, "utf8")
+    await renameOp(temporary, path)
   } finally {
     await rm(temporary, { force: true })
   }
 }
 
-export async function writeInstalledBaseline(stateDir: string, baseline: InstalledBaseline): Promise<void> {
+export async function writeInstalledBaseline(
+  stateDir: string,
+  baseline: InstalledBaseline,
+  fs: BaselineFsOps = {},
+): Promise<void> {
   await withBaselineWriteLock(stateDir, async () => {
     const baselines = await readInstalledBaselines(stateDir)
-    await replaceBaselineFile(stateDir, { ...baselines, [baseline.base]: baseline })
+    await replaceBaselineFile(stateDir, { ...baselines, [baseline.base]: baseline }, fs)
   })
 }
 
-export async function removeInstalledBaseline(stateDir: string, base: string): Promise<boolean> {
+export async function removeInstalledBaseline(
+  stateDir: string,
+  base: string,
+  fs: BaselineFsOps = {},
+): Promise<boolean> {
   return withBaselineWriteLock(stateDir, async () => {
     const baselines = await readInstalledBaselines(stateDir)
     if (baselines[base] === undefined) return false
@@ -103,7 +128,7 @@ export async function removeInstalledBaseline(stateDir: string, base: string): P
     if (Object.keys(rest).length === 0) {
       await rm(installedBaselinePath(stateDir), { force: true })
     } else {
-      await replaceBaselineFile(stateDir, rest)
+      await replaceBaselineFile(stateDir, rest, fs)
     }
     return true
   })
