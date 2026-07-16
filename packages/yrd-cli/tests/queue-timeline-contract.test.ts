@@ -279,14 +279,17 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
+    // The STATS box top border spans the full capped width. Title-in-border
+    // chrome (2026-07-16) opens it with a rounded top-left corner `╭─ STATS `.
     const wideBorder = wide[rowIndex(wide, "STATS")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
-    expect(wideBorder.startsWith("─")).toBe(true)
+    expect(wideBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(wideBorder.trimEnd().length).toBe(160)
     for (const row of wide) expect(Array.from(row.trimEnd()).length).toBeLessThanOrEqual(160)
     // Left-anchored surfaces start at column 0; only right-aligned facts
-    // (FILTER, updated) carry leading padding.
-    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "─", "│ ROWS"]) {
+    // (the updated clock, the bucket checkboxes) carry leading padding. Box
+    // borders anchor at column 0 with their rounded corner glyph.
+    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ RUNNER", "│ ROWS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "STEP")]?.indexOf("TIME")).toBe(0)
@@ -294,7 +297,7 @@ describe("queue timeline 21106 contract", () => {
     const narrow = await renderTimeline(contractProjection(), 100)
     const narrowBorder = narrow[rowIndex(narrow, "STATS")]
     if (narrowBorder === undefined) throw new Error("expected the statistics border row")
-    expect(narrowBorder.startsWith("─")).toBe(true)
+    expect(narrowBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(narrowBorder.trimEnd().length).toBe(100)
   })
 
