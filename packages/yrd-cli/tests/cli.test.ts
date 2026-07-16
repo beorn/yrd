@@ -5629,7 +5629,8 @@ describe("runYrd", () => {
     await openAndSubmit(coverageApp)
     const liveLog = outputIO({ cwd: temp })
     expect(await runYrd(coverageApp, yrd("log", "--json"), liveLog.io), liveLog.stderr()).toBe(0)
-    expect((JSON.parse(liveLog.stdout()) as { coverage: QueueLogCoverage }).coverage).toMatchObject({
+    const liveCoverage = (JSON.parse(liveLog.stdout()) as { coverage: QueueLogCoverage }).coverage
+    expect(liveCoverage).toMatchObject({
       since: "2026-07-09T12:00:00.000Z",
       completeness: "queue-only",
       legacy: [
@@ -5670,11 +5671,14 @@ describe("runYrd", () => {
     expect(ttyLog).toContain(pathToFileURL(attemptTwo).href)
     expect(ttyLog).toContain("https://ci.invalid/check")
     expect(plainLog).not.toContain("\u001b]8;;")
-    const coverageOnlyTty = await renderString(createElement(QueueLogView, { rows: [], coverage: withCoverage }), {
+    const coverageOnlyTty = await renderString(createElement(QueueLogView, { rows: [], coverage: liveCoverage }), {
       width: 140,
       height: 4,
       plain: false,
     })
+    expect(coverageOnlyTty).toContain("No matching terminal log rows.")
+    expect(coverageOnlyTty).toContain("Legacy queue coverage: 186 frames across 2 journals")
+    expect(coverageOnlyTty).toContain(`since ${liveCoverage.since}`)
     expect(coverageOnlyTty).not.toContain("\u001b]8;;")
     expect(JSON.parse(JSON.stringify({ command: "log", rows, coverage: withCoverage }))).toEqual({
       command: "log",

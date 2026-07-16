@@ -3336,7 +3336,12 @@ export function QueueLogView({
     { header: "WAIT", key: "waitValue" as const, align: "right" as const },
   ]
   const hidden = Math.max(0, rows.length - visibleRows.length)
-  void coverage
+  const legacyFrames = coverage?.legacy.reduce((total, journal) => total + journal.frames, 0) ?? 0
+  const legacyJournals = coverage?.legacy.length ?? 0
+  const legacyCoverage =
+    rows.length === 0 && coverage !== undefined && legacyFrames > 0
+      ? `Legacy queue coverage: ${legacyFrames} frames across ${legacyJournals} ${legacyJournals === 1 ? "journal" : "journals"} (not projected; since ${coverage.since}).`
+      : undefined
   return (
     <Box flexDirection="column">
       {rows.length === 0 ? (
@@ -3344,6 +3349,7 @@ export function QueueLogView({
       ) : (
         <Table data={tableRows} columns={logColumns} padding={1} showHeader={false} />
       )}
+      {legacyCoverage === undefined ? null : <Text color="$fg-warning">{legacyCoverage}</Text>}
       {hidden === 0 ? null : <Text color="$fg-muted">... {hidden} more</Text>}
     </Box>
   )
