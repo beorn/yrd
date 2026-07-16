@@ -525,6 +525,73 @@ describe("Jobs", () => {
     log.end()
   })
 
+  it("reclaims a named dead runner's live-leased jobs and leaves other runners untouched", async () => {
+    const app = await jobsApp(delivery())
+    await app.dispatch(app.commands.sender.send, { message: "one" })
+    await app.dispatch(app.commands.sender.send, { message: "two" })
+    const [dead, alive] = Object.keys(app.jobs.state().byId)
+    // Both leases are LIVE (far in the future): the caller asserts the first
+    // runner is dead, so its live lease is reclaimed regardless of expiry.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: dead!,
+      attempt: 1,
+      runner: "yrd-cli:111",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: alive!,
+      attempt: 1,
+      runner: "yrd-cli:222",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+
+    expect(await app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "yrd-cli:111" })).toEqual([dead])
+    expect(app.jobs.state().byId[dead!]).toMatchObject({
+      status: "lost",
+      attempt: 1,
+      lostReason: "runner disappeared",
+    })
+    expect(app.jobs.state().byId[alive!]).toMatchObject({ status: "running", runner: "yrd-cli:222" })
+    await app.close()
+  })
+
+  it("emits the dead-runner reclaim reason and identity at WARN", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const app = await jobsApp(delivery(), { id: ids("send", "C-send", JOB_ID), log })
+    await app.dispatch(app.commands.sender.send, { message: "reclaim" })
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: JOB_ID,
+      attempt: 1,
+      runner: "yrd-cli:333",
+      leaseExpiresAt: "2026-01-01T00:05:00.000Z",
+    })
+
+    await expect(app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "yrd-cli:333" })).resolves.toEqual([
+      JOB_ID,
+    ])
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        namespace: "yrd:jobs:recover",
+        level: "warn",
+        props: expect.objectContaining({
+          lifecycle: "recover",
+          outcome: "recovered",
+          job: JOB_ID,
+          runner: "yrd-cli:333",
+          reason: "runner disappeared",
+        }),
+      }),
+    )
+    await app.close()
+    log.end()
+  })
+
   it("renews a lease through the Job run scope", async () => {
     const gate = Promise.withResolvers<void>()
     const started = Promise.withResolvers<void>()

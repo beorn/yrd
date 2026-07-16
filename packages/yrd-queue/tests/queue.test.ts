@@ -284,7 +284,9 @@ describe("Queue", () => {
   it("composes one immutable typed plan and rejects a pre-merge deploy", async () => {
     await using app = await createQueueApp()
     expectTypeOf(app.queue).toMatchTypeOf<Queue<DeployedShape>>()
-    expectTypeOf(app.queue.recover).parameter(0).toEqualTypeOf<Readonly<{ recoveryTime: string; reason?: string }>>()
+    expectTypeOf(app.queue.recover)
+      .parameter(0)
+      .toEqualTypeOf<Readonly<{ recoveryTime: string; reason?: string; runner?: string }>>()
     expect(app.queue.steps().map((step) => step.name)).toEqual(["check", "review", "merge", "deploy"])
 
     const check = withStep(
@@ -819,6 +821,46 @@ describe("Queue", () => {
     const settled = await Array.fromAsync(app.events())
     await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([])
     expect(await Array.fromAsync(app.events())).toEqual(settled)
+  })
+
+  it("reconciles a named dead runner's live-leased run and ignores other runners", async () => {
+    let checkCalls = 0
+    await using app = await createQueueApp({
+      check: () => {
+        checkCalls += 1
+        return { status: "passed", output: { checked: true } }
+      },
+    })
+    const pr = await submitBranch(app, "issue/dead-resident")
+    await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
+    const job = app.queue.get("R1")?.steps[0]?.job
+    if (job === undefined) throw new Error("expected requested check")
+    // A LIVE lease far in the future: only the named-runner reclaim releases it.
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job.id,
+      attempt: 1,
+      runner: "yrd-cli:4242",
+      leaseExpiresAt: "2026-01-01T01:00:00.000Z",
+    })
+
+    // A different runner's reclaim leaves the live lease alone.
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z", runner: "yrd-cli:9999" }),
+    ).resolves.toEqual([])
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "running", runner: "yrd-cli:4242" })
+
+    // The dead runner's reclaim releases the run and advances it to a terminal failure.
+    await expect(
+      app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z", runner: "yrd-cli:4242" }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "R1",
+        status: "failed",
+        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+      }),
+    ])
+    expect(checkCalls).toBe(0)
   })
 
   it("releases a replayed lost job before an explicit same-revision retry", async () => {

@@ -164,6 +164,51 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
   }
 }
 
+export type ResidentRunnerReclaim = Readonly<{ reclaim: false }> | Readonly<{ reclaim: true; runner: string }>
+
+/**
+ * Decide whether an incoming resident runner should reclaim the leases of the
+ * prior resident recorded in `status.json`. The prior resident is reclaimable
+ * only when it is a different process that is no longer alive; a live prior pid
+ * (or an absent status file) yields no reclaim. `isProcessAlive` is injected so
+ * the decision is unit-testable without spawning a process.
+ */
+export function planResidentRunnerReclaim(
+  prior: QueueTimelineRunner | null,
+  currentPid: number,
+  isProcessAlive: (pid: number) => boolean,
+): ResidentRunnerReclaim {
+  if (prior === null || prior.pid === currentPid) return { reclaim: false }
+  if (isProcessAlive(prior.pid)) return { reclaim: false }
+  return { reclaim: true, runner: `yrd-cli:${prior.pid}` }
+}
+
+function residentRunnerProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (cause) {
+    // ESRCH means no such process — dead, safe to reclaim. Any other error
+    // (EPERM in particular) means the process exists but we cannot signal it;
+    // treat it as alive and skip reclaim.
+    return (cause as NodeJS.ErrnoException).code !== "ESRCH"
+  }
+}
+
+async function reclaimDeadResidentRunner(app: YrdCliApp, io: YrdCliIO): Promise<void> {
+  const cwd = io.cwd ?? process.cwd()
+  const prior = await residentRunnerStatus(cwd)
+  const decision = planResidentRunnerReclaim(prior, process.pid, residentRunnerProcessAlive)
+  if (!decision.reclaim) return
+  const runs = await app.queue.recover({
+    recoveryTime: new Date(io.now?.() ?? Date.now()).toISOString(),
+    reason: "previous resident runner disappeared",
+    runner: decision.runner,
+  })
+  if (runs.length === 0) return
+  io.stderr(`Reclaimed ${runs.length} run(s) from a departed resident runner ${decision.runner}.\n`)
+}
+
 type ResidentRunnerHeartbeat = Readonly<{
   check(): void
   close(): Promise<void>
@@ -2278,7 +2323,12 @@ export async function watchQueueRuns(
   const scope = io.scope ?? app.scope
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
-  const heartbeat = io.runner?.startsWith("yrd-cli:") === true ? await startResidentRunnerHeartbeat(io) : undefined
+  const resident = io.runner?.startsWith("yrd-cli:") === true
+  // Reclaim a prior resident's leases BEFORE the heartbeat overwrites status.json —
+  // once it writes, the departed pid is lost. The exclusive resident lock guarantees
+  // that prior resident is not concurrently running as a resident.
+  if (resident) await reclaimDeadResidentRunner(app, io)
+  const heartbeat = resident ? await startResidentRunnerHeartbeat(io) : undefined
   try {
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
