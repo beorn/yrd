@@ -25,6 +25,7 @@ import {
   createGitPRRecutter,
   gitCheckStep,
   gitMergeStep,
+  VOLATILE_COMMAND_COORDINATES,
   withQueue,
   withMerge,
   withStep,
@@ -2354,11 +2355,12 @@ describe("Queue command adapters", () => {
         prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha }],
         shape: { results: {} },
       }) as StepExecution<PRShape>
-    const jobContext = (attempt = 1) => ({
+    const jobContext = (overrides: Readonly<{ id?: string; attempt?: number; runner?: string }> = {}) => ({
       id: "J1",
-      attempt,
+      attempt: 1,
       runner: "test",
       signal: new AbortController().signal,
+      ...overrides,
     })
     const capturingProcess = () => {
       const requests: ProcessRequest[] = []
@@ -2395,8 +2397,9 @@ describe("Queue command adapters", () => {
         env: NodeJS.ProcessEnv
         environmentOverrides?: Readonly<Record<string, string>>
         environmentPassthrough?: readonly string[]
+        variables?: () => Readonly<Record<string, string | undefined>>
       }>,
-      attempt = 1,
+      context = jobContext(),
     ) => {
       const { requests, process } = capturingProcess()
       const step = configuredCommandStep<PRShape>({
@@ -2406,7 +2409,7 @@ describe("Queue command adapters", () => {
         purpose: "check",
         ...options,
       })
-      const result = await step(execution(), jobContext(attempt))
+      const result = await step(execution(), context)
       if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
       const request = requests[0]
       if (request === undefined) throw new Error("configured command spawned no child")
@@ -2477,8 +2480,12 @@ describe("Queue command adapters", () => {
       expect(first.evidence.environmentHash).toMatch(/^[0-9a-f]{64}$/u)
       expect(second.evidence.environmentHash).toBe(first.evidence.environmentHash)
 
-      // Per-execution YRD_* coordinates (job, attempt, run) never move the identity.
-      const retried = await runCapture({ env: passthroughEnv, environmentPassthrough: ["CHECK_TOKEN"] }, 2)
+      // Volatile per-execution coordinates (job id, attempt, runner) never move
+      // the identity across retries of identical inputs.
+      const retried = await runCapture(
+        { env: passthroughEnv, environmentPassthrough: ["CHECK_TOKEN"] },
+        jobContext({ id: "J2", attempt: 2, runner: "other" }),
+      )
       expect(retried.evidence.environmentHash).toBe(first.evidence.environmentHash)
 
       // Dropped ambient junk never moves the identity.
@@ -2505,6 +2512,43 @@ describe("Queue command adapters", () => {
         environmentOverrides: { CHECK_MODE: "strict" },
       })
       expect(declaredMoved.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+    })
+
+    it("treats applied YRD_* variables as environment, excluding only the enumerated volatile coordinates", async () => {
+      const options = { env: ambient }
+      const first = await runCapture(options)
+
+      // Semantic config.environment flows in as YRD_ENVIRONMENT — an APPLIED
+      // value, so changing it moves the identity.
+      const staging = await runCapture({
+        ...options,
+        variables: () => ({ YRD_ENVIRONMENT: "staging" }),
+      })
+      expect(staging.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+      const production = await runCapture({
+        ...options,
+        variables: () => ({ YRD_ENVIRONMENT: "production" }),
+      })
+      expect(production.evidence.environmentHash).not.toBe(staging.evidence.environmentHash)
+
+      // A configured YRD_CUSTOM callback value is APPLIED environment too.
+      const customA = await runCapture({ ...options, variables: () => ({ YRD_CUSTOM: "a" }) })
+      const customB = await runCapture({ ...options, variables: () => ({ YRD_CUSTOM: "b" }) })
+      expect(customA.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+      expect(customA.evidence.environmentHash).not.toBe(customB.evidence.environmentHash)
+
+      // The volatile set is the ONLY YRD_ exclusion: any non-listed YRD_X
+      // participates in the hash.
+      expect(VOLATILE_COMMAND_COORDINATES.has("YRD_X")).toBe(false)
+      const nonListed = await runCapture({ ...options, variables: () => ({ YRD_X: "1" }) })
+      expect(nonListed.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+      // ...while a listed coordinate (e.g. YRD_CANDIDATE_REF) does not.
+      expect(VOLATILE_COMMAND_COORDINATES.has("YRD_CANDIDATE_REF")).toBe(true)
+      const volatileOnly = await runCapture({
+        ...options,
+        variables: () => ({ YRD_CANDIDATE_REF: "refs/yrd/candidates/R1/check/attempt-9-feed" }),
+      })
+      expect(volatileOnly.evidence.environmentHash).toBe(first.evidence.environmentHash)
     })
 
     it("gives check children the declared environment, never the runner's ambient junk", async () => {

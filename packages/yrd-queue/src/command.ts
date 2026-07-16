@@ -47,8 +47,9 @@ export const CommandEvidenceSchema = z
     durationMs: z.number().nonnegative(),
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
     /** Identity of the APPLIED child environment (merge-queue R42): allowlisted
-     * ambient + declared passthrough + declared overrides, excluding per-execution
-     * YRD_* coordinates so identical inputs hash identically across attempts. */
+     * ambient + declared passthrough + declared overrides + applied YRD_*
+     * variables, excluding ONLY the enumerated VOLATILE_COMMAND_COORDINATES so
+     * identical inputs hash identically across attempts. */
     environmentHash: z
       .string()
       .regex(/^[0-9a-f]{64}$/u)
@@ -420,13 +421,25 @@ function commandEnvironment(
   return env
 }
 
-/** Evidence identity of the APPLIED child environment. Per-execution YRD_*
- * coordinates (job, attempt, run, candidate) are excluded so the SAME inputs
- * produce the SAME identity; any allowlisted, passthrough, or declared change
- * is visible. */
+/** The ONLY names excluded from environmentHash. Membership criterion: the
+ * value legitimately differs between retries/re-runs of IDENTICAL inputs —
+ * a per-execution coordinate, never applied configuration. YRD_JOB, YRD_RUN,
+ * YRD_ATTEMPT, and YRD_RUNNER are execution ids/lease facts; YRD_CANDIDATE_REF
+ * embeds the job id, attempt, and collision suffix. Every other variable —
+ * including YRD_ENVIRONMENT and configured YRD_* values — is applied
+ * environment and MUST move the hash. Additions here are deliberate, never a
+ * prefix rule. */
+export const VOLATILE_COMMAND_COORDINATES: ReadonlySet<string> = Object.freeze(
+  new Set(["YRD_JOB", "YRD_RUN", "YRD_ATTEMPT", "YRD_RUNNER", "YRD_CANDIDATE_REF"]),
+)
+
+/** Evidence identity of the APPLIED child environment. Only the volatile
+ * per-execution coordinates above are excluded, so the SAME inputs produce the
+ * SAME identity and any applied change — allowlisted, passthrough, declared,
+ * or YRD_* — is visible. */
 function environmentHash(env: Readonly<Record<string, string>>): string {
   const applied = Object.entries(env)
-    .filter(([key]) => !key.startsWith("YRD_"))
+    .filter(([key]) => !VOLATILE_COMMAND_COORDINATES.has(key))
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
   return createHash("sha256").update(JSON.stringify(applied)).digest("hex")
 }
