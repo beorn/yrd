@@ -1,0 +1,275 @@
+/**
+ * @failure Warm candidate worktrees leak, run checks over cross-run residue, or exceed their bound.
+ * @level l2
+ * @consumer @yrd/queue warm candidate pool
+ */
+import { existsSync } from "node:fs"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
+import { createProcess } from "@yrd/process"
+import { createLogger, type Event as LogEvent } from "loggily"
+import type { JobResult } from "@yrd/job"
+import { createCandidatePool, createCandidatePoolGit, type CandidatePool } from "../src/candidate-pool.ts"
+
+const roots: string[] = []
+const disposers: Array<() => Promise<void>> = []
+
+afterEach(async () => {
+  await Promise.all(disposers.splice(0).map((dispose) => dispose()))
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+async function git(repo: string, args: string[]): Promise<string> {
+  const child = Bun.spawn(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" })
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (code !== 0) throw new Error(stderr || stdout)
+  return stdout.trim()
+}
+
+async function repository(): Promise<{ repo: string; baseSha: string; baysRoot: string }> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-warm-pool-"))
+  roots.push(root)
+  const repo = join(root, "repo")
+  await Bun.$`git init -q -b main ${repo}`
+  await git(repo, ["config", "user.name", "Yrd Test"])
+  await git(repo, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(repo, "README.md"), "main\n")
+  await git(repo, ["add", "README.md"])
+  await git(repo, ["commit", "-qm", "main"])
+  const baseSha = await git(repo, ["rev-parse", "HEAD"])
+  const baysRoot = join(root, "bays")
+  await mkdir(baysRoot, { recursive: true })
+  return { repo, baseSha, baysRoot }
+}
+
+type CapturingLog = Readonly<{ log: ReturnType<typeof createLogger>; events: LogEvent[] }>
+
+function capturingLog(): CapturingLog {
+  const events: LogEvent[] = []
+  const log = createLogger("yrd", [{ level: "trace", spans: true }, { write: (event: LogEvent) => events.push(event) }])
+  return { log, events }
+}
+
+function makePool(repo: string, baysRoot: string, capacity: number, log: CapturingLog["log"]): CandidatePool {
+  const process = createProcess({ cwd: repo })
+  const pool = createCandidatePool({ repo, parent: baysRoot, capacity, git: createCandidatePoolGit(process), log })
+  disposers.push(async () => {
+    await pool.close()
+    await process.close()
+  })
+  return pool
+}
+
+function spans(events: LogEvent[], name: string): Array<Extract<LogEvent, { kind: "span" }>> {
+  return events.filter(
+    (event): event is Extract<LogEvent, { kind: "span" }> => event.kind === "span" && event.name.endsWith(`:${name}`),
+  )
+}
+
+function percentile(values: readonly number[], p: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].toSorted((a, b) => a - b)
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[index] ?? 0
+}
+
+const passed: JobResult<{ ok: true }> = { status: "passed", output: { ok: true } }
+
+describe("warm candidate pool", () => {
+  it("reuses one warm worktree across candidate cycles and resets dirt between runs", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log, events } = capturingLog()
+    const pool = makePool(repo, baysRoot, 2, log)
+
+    const paths: string[] = []
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const result = await pool.withCandidate(baseSha, async (path) => {
+        paths.push(path)
+        // A real check mutates the tree: an untracked artifact plus a tracked edit.
+        await writeFile(join(path, "artifact.txt"), `cycle ${cycle}\n`)
+        await writeFile(join(path, "README.md"), `edited ${cycle}\n`)
+        return passed
+      })
+      expect(result).toEqual(passed)
+    }
+
+    expect(new Set(paths).size).toBe(1)
+    expect(pool.stats()).toEqual({ hits: 2, misses: 1, evictions: 0 })
+
+    const acquire = spans(events, "acquire")
+    expect(acquire.map((span) => span.props?.outcome)).toEqual(["miss", "hit", "hit"])
+    for (const span of acquire) expect(span.duration).toEqual(expect.any(Number))
+    expect(spans(events, "check").map((span) => span.props?.outcome)).toEqual(["succeeded", "succeeded", "succeeded"])
+    expect(spans(events, "reset")).toHaveLength(2)
+    expect(spans(events, "release").length).toBeGreaterThanOrEqual(3)
+  })
+
+  it("rejects cross-run residue by evicting the dirty worktree and checking a fresh one", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log, events } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    // Cycle 1 leaves an untracked nested repository — `git clean -fdx` refuses to
+    // remove it, so the warm worktree cannot be reset clean and must be evicted.
+    const first = await pool.withCandidate(baseSha, async (path) => {
+      await Bun.$`git init -q ${join(path, "leftover")}`.quiet()
+      return passed
+    })
+    expect(first).toEqual(passed)
+
+    let secondPath = ""
+    let sawResidue = true
+    const second = await pool.withCandidate(baseSha, async (path) => {
+      secondPath = path
+      // The evicted-and-recreated worktree must be pristine.
+      sawResidue = existsSync(join(path, "leftover"))
+      const dirty = await git(path, ["status", "--porcelain", "--untracked-files=all"])
+      expect(dirty).toBe("")
+      return passed
+    })
+    expect(second).toEqual(passed)
+    expect(sawResidue).toBe(false)
+    expect(secondPath).not.toBe("")
+
+    expect(pool.stats()).toEqual({ hits: 0, misses: 2, evictions: 1 })
+    expect(spans(events, "acquire").map((span) => span.props?.outcome)).toEqual(["miss", "residue-evicted"])
+  })
+
+  it("bounds concurrent candidates to the configured capacity", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 2, log)
+
+    let active = 0
+    let peak = 0
+    let releaseGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve
+    })
+    const livePaths = new Set<string>()
+
+    const cycles = Array.from({ length: 4 }, () =>
+      pool.withCandidate(baseSha, async (path) => {
+        active += 1
+        peak = Math.max(peak, active)
+        livePaths.add(path)
+        await gate
+        active -= 1
+        return passed
+      }),
+    )
+    // Wait until the first wave saturates capacity (both worktrees created and
+    // in-flight), then release everyone. Polling avoids depending on setup speed.
+    for (let waited = 0; active < 2 && waited < 200; waited += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(peak).toBe(2)
+    releaseGate()
+    const results = await Promise.all(cycles)
+
+    expect(results).toEqual([passed, passed, passed, passed])
+    expect(peak).toBe(2)
+    expect(livePaths.size).toBeLessThanOrEqual(2)
+    expect(pool.stats().misses).toBe(2)
+  })
+
+  it("materializes submodules on a warm worktree and keeps them pinned across reuse", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const module = join(repo, "..", "module")
+    await Bun.$`git init -q -b main ${module}`.quiet()
+    await git(module, ["config", "user.name", "Yrd Test"])
+    await git(module, ["config", "user.email", "yrd@example.invalid"])
+    await writeFile(join(module, "version.txt"), "1\n")
+    await git(module, ["add", "version.txt"])
+    await git(module, ["commit", "-qm", "module"])
+    await git(repo, ["config", "protocol.file.allow", "always"])
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    await git(repo, ["commit", "-qam", "add dep"])
+    const withSubmodule = await git(repo, ["rev-parse", "HEAD"])
+
+    const { log, events } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+
+    for (const ref of [withSubmodule, withSubmodule]) {
+      await pool.withCandidate(ref, async (path) => {
+        expect(existsSync(join(path, "dep", "version.txt"))).toBe(true)
+        return passed
+      })
+    }
+
+    expect(pool.stats()).toEqual({ hits: 1, misses: 1, evictions: 0 })
+    expect(spans(events, "materialize").length).toBeGreaterThanOrEqual(2)
+    void baseSha
+  })
+
+  it("removes every warm worktree on close", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 2, log)
+
+    const seen: string[] = []
+    await Promise.all(
+      [0, 1].map(() =>
+        pool.withCandidate(baseSha, async (path) => {
+          seen.push(path)
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          return passed
+        }),
+      ),
+    )
+    expect(new Set(seen).size).toBe(2)
+    for (const path of seen) expect(existsSync(path)).toBe(true)
+
+    await pool.close()
+
+    for (const path of seen) expect(existsSync(path)).toBe(false)
+    const worktrees = await git(repo, ["worktree", "list", "--porcelain"])
+    for (const path of seen) expect(worktrees).not.toContain(path)
+  })
+
+  it("measures cold versus warm candidate setup and reports p50/p95", async () => {
+    const { repo, baseSha, baysRoot } = await repository()
+    const cycles = 4
+    const check = async (): Promise<JobResult<{ ok: true }>> => passed
+
+    // Cold: a fresh pool per cycle forces full worktree creation every time.
+    const cold: number[] = []
+    let coldCreations = 0
+    for (let cycle = 0; cycle < cycles; cycle += 1) {
+      const { log } = capturingLog()
+      const pool = makePool(repo, baysRoot, 1, log)
+      const started = performance.now()
+      await pool.withCandidate(baseSha, check)
+      cold.push(performance.now() - started)
+      coldCreations += pool.stats().misses
+      await pool.close()
+    }
+
+    // Warm: one pool reused — only the first cycle creates a worktree.
+    const { log } = capturingLog()
+    const pool = makePool(repo, baysRoot, 1, log)
+    const warm: number[] = []
+    for (let cycle = 0; cycle < cycles; cycle += 1) {
+      const started = performance.now()
+      await pool.withCandidate(baseSha, check)
+      warm.push(performance.now() - started)
+    }
+
+    expect(pool.stats()).toEqual({ hits: cycles - 1, misses: 1, evictions: 0 })
+    // Warm reuse avoids worktree creation; the evidence is span hit/miss counts,
+    // not wall-clock (asserting timings flakes under load — we PRINT them only).
+    const report = {
+      cycles,
+      worktreeCreations: { cold: coldCreations, warm: pool.stats().misses },
+      cold: { p50: percentile(cold, 50), p95: percentile(cold, 95) },
+      warm: { p50: percentile(warm, 50), p95: percentile(warm, 95) },
+    }
+    console.log(`[R40] candidate setup ms ${JSON.stringify(report)}`)
+  })
+})

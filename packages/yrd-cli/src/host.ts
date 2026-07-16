@@ -30,6 +30,8 @@ import {
   configuredCommandStep,
   configuredMergeStep,
   configuredWaitingCommandStep,
+  createCandidatePool,
+  createCandidatePoolGit,
   createGitPRRecutter,
   gitCheckStep,
   gitMergeStep,
@@ -38,6 +40,7 @@ import {
   withQueue,
   withMerge,
   withStep,
+  type CandidatePool,
   type CommandEvidence,
   type InstalledStep,
   type IntegratedShape,
@@ -90,6 +93,8 @@ export type DefaultYrdAppOptions = Readonly<{
   defaultActor?: string
   scope?: Scope
   log?: ConditionalLogger
+  /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
+  candidatePool?: CandidatePool
 }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
@@ -215,6 +220,7 @@ function candidateStep(
   name: string,
   config: YrdStepConfig,
   revision: string,
+  candidatePool: CandidatePool | undefined,
 ): RuntimeStep {
   return eraseStep(
     withStep(
@@ -224,6 +230,7 @@ function candidateStep(
         repo,
         command: shellCommand(stepCommand(name, config)),
         checkoutParent,
+        ...(candidatePool === undefined ? {} : { candidatePool }),
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
         runner: config.runner,
@@ -386,7 +393,16 @@ function configuredQueueSteps(
       )
     }
     if (!integrated) {
-      return candidateStep(options.process, options.repo, options.stateDir, options.baysRoot, name, config, revision)
+      return candidateStep(
+        options.process,
+        options.repo,
+        options.stateDir,
+        options.baysRoot,
+        name,
+        config,
+        revision,
+        options.candidatePool,
+      )
     }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
@@ -706,20 +722,27 @@ async function closeRuntime(
   scope: Scope,
   resident?: ResidentRunnerLease,
   signals?: SignalObserver,
+  candidatePool?: CandidatePool,
 ): Promise<void> {
   try {
     await app?.close()
   } finally {
     try {
-      await signals?.close()
+      // Warm worktrees are removed via Git BEFORE the Process closes — a closed
+      // Process rejects every run(), which would strand the pool's worktrees.
+      await candidatePool?.close()
     } finally {
       try {
-        await process.close()
+        await signals?.close()
       } finally {
         try {
-          await scope[Symbol.asyncDispose]()
+          await process.close()
         } finally {
-          await resident?.close()
+          try {
+            await scope[Symbol.asyncDispose]()
+          } finally {
+            await resident?.close()
+          }
         }
       }
     }
@@ -815,6 +838,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
   let app: YrdCliApp | undefined
   let residentLease: ResidentRunnerLease | undefined
   let signals: SignalObserver | undefined
+  let candidatePool: CandidatePool | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
     if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
@@ -853,6 +877,12 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
         log,
       })
     }
+    candidatePool = createCandidatePool({
+      repo: repository.repo,
+      parent: repository.baysRoot,
+      git: createCandidatePoolGit(process, env),
+      log,
+    })
     app = await createDefaultYrdApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
@@ -864,6 +894,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
       defaultActor,
       scope,
       log,
+      candidatePool,
     })
     signals?.start()
     const runtimeApp = app
@@ -895,7 +926,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
-      (closePromise ??= closeRuntime(app, process, scope, residentLease, signals).finally(() => {
+      (closePromise ??= closeRuntime(app, process, scope, residentLease, signals, candidatePool).finally(() => {
         if (ownsLog) log.end()
       }))
     return Object.freeze({
@@ -910,7 +941,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
       [Symbol.asyncDispose]: close,
     })
   } catch (error) {
-    await closeRuntime(app, process, scope, residentLease, signals)
+    await closeRuntime(app, process, scope, residentLease, signals, candidatePool)
     if (ownsLog) log.end()
     throw error
   }
