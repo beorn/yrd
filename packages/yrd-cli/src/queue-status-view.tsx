@@ -2594,6 +2594,13 @@ function branchLabel(branch: string): string {
   return `${BRANCH_ICON} ${branch}`
 }
 
+/**
+ * Stable no-op passed as ListView `onItemHover` so hovering a queue row does
+ * NOT move the cursor/selection (item P, 2026-07-16) — it overrides ListView's
+ * default hover→cursor. Click still selects via the default onSelect path.
+ */
+const NO_HOVER_SELECT = (): void => {}
+
 type TimelineCellLayout = Readonly<{
   timeWidth: number
   statusWidth: number
@@ -3413,6 +3420,11 @@ function ProjectedQueueTimeline({
               cursorKey={cursorKey}
               onCursor={onCursor}
               onSelect={onSelect}
+              // Hover must NOT move the selection / detail pane (user directive
+              // 2026-07-16, item P). Overriding onItemHover suppresses ListView's
+              // default hover→cursor (which fires onCursor and switches the
+              // detail); CLICK still selects via the default onSelect path.
+              onItemHover={NO_HOVER_SELECT}
               active={true}
               getKey={(row) => row.id}
               estimateHeight={1}

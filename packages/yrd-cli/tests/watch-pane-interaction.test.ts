@@ -86,6 +86,35 @@ describe("QueueWatchFrame 21106 interaction", () => {
     }
   })
 
+  it("hovering a row does not switch the detail selection; clicking does (item P)", async () => {
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    using term = createTermless({ cols: 200, rows: 50 })
+    const handle = await run(createElement(QueueWatchFrame, { snapshot }), term, { mouse: true, selection: false })
+    try {
+      // Default cursor is the first running row (PR42), so the detail opens on it.
+      await waitFor(() => term.screen.getText().includes("PRs PR42@r1"))
+      const text = term.screen.getText()
+      const row4Y = rowIndexOf(text, "PR4.1")
+      const row4X = text.split("\n")[row4Y]?.indexOf("PR4.1") ?? -1
+      expect(row4Y).toBeGreaterThan(0)
+      expect(row4X).toBeGreaterThan(0)
+
+      // Hover over PR4.1's row — the detail must STAY on PR42, not follow the pointer.
+      await term.mouse.move(row4X, row4Y)
+      await handle.waitForLayoutStable()
+      expect(term.screen.getText(), "hover must not switch the detail selection").toContain("PRs PR42@r1")
+      expect(term.screen.getText()).not.toContain("PRs PR4@r1")
+
+      // Click PR4.1's row — NOW the detail follows the click to PR4.
+      await term.mouse.down(row4X, row4Y)
+      await term.mouse.up(row4X, row4Y)
+      await waitFor(() => term.screen.getText().includes("PRs PR4@r1"))
+      expect(term.screen.getText()).not.toContain("PRs PR42@r1")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("wheel-scrolls the list viewport without moving the selection", async () => {
     const prs = Array.from({ length: 24 }, (_, index) =>
       fixturePr(`PR${index + 1}`, "submitted", `2026-07-13T11:${String(10 + index).padStart(2, "0")}:00.000Z`),
