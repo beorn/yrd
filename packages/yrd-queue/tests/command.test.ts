@@ -296,6 +296,28 @@ async function groupedSubmoduleRepository(): Promise<{
   return { repo, remote, featureSha, origin, pins: [first, second] }
 }
 
+const payloadLines = (five: string, three = "3"): string =>
+  `${["1", "2", three, "4", five, "6", "7", "8", "9", "10"].join("\n")}\n`
+
+/**
+ * A plain (non-submodule) repository whose reviewed head changes one line in the
+ * middle of `payload.txt`. Returned `baseSha` is the base the reviewed head was cut
+ * from; callers advance `main` afterwards to exercise the recut base-chase gate.
+ */
+async function directRecutBaseChaseRepository(): Promise<{ repo: string; baseSha: string; featureSha: string }> {
+  const { repo } = await repository()
+  await writeFile(join(repo, "payload.txt"), payloadLines("5"))
+  await git(repo, ["add", "payload.txt"])
+  await git(repo, ["commit", "-qm", "payload base"])
+  const baseSha = await git(repo, ["rev-parse", "main"])
+  await git(repo, ["switch", "-qc", "issue/feature"])
+  await writeFile(join(repo, "payload.txt"), payloadLines("FIVE"))
+  await git(repo, ["commit", "-qam", "reviewed change on line five"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  return { repo, baseSha, featureSha }
+}
+
 const unusedWorkspace: BayWorkspace = {
   revision: "unused-workspace-v1",
   provision: () => ({ status: "failed", error: { code: "unused", message: "not used" } }),
@@ -808,6 +830,183 @@ describe("Queue command adapters", () => {
       expect(errors).toHaveBeenCalled()
     }
     errors.mockRestore()
+  })
+
+  it("admits a direct recut whose base advanced with a disjoint merge (base-chase re-anchors clean)", async () => {
+    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    await using process = createProcess()
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha,
+    })
+    // Advance the authoritative base with a change that does not touch payload.txt.
+    await writeFile(join(repo, "other.txt"), "advanced\n")
+    await git(repo, ["add", "other.txt"])
+    await git(repo, ["commit", "-qm", "advance base disjoint"])
+    expect(await git(repo, ["rev-parse", "main"])).not.toBe(baseSha)
+
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    // The reviewed change re-anchored onto the advanced base and landed alongside it.
+    expect(await git(repo, ["show", "main:payload.txt"])).toContain("FIVE")
+    expect(await git(repo, ["show", "main:other.txt"])).toContain("advanced")
+  })
+
+  it("rejects a direct recut whose advanced base conflicts with the reviewed change", async () => {
+    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    await using process = createProcess()
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha,
+    })
+    // Advance the base by re-editing the same line the reviewed change touches.
+    await writeFile(join(repo, "payload.txt"), payloadLines("BASE5"))
+    await git(repo, ["commit", "-qam", "advance base conflicting"])
+    expect(await git(repo, ["rev-parse", "main"])).not.toBe(baseSha)
+
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    errors.mockRestore()
+
+    expect(run.status).toBe("failed")
+    expect(run.error).toMatchObject({ code: "recut-certificate" })
+    // The conflicting change never landed.
+    expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
+  })
+
+  it("rejects a direct recut whose advanced base cleanly drifts the reviewed patch identity", async () => {
+    const { repo, baseSha, featureSha } = await directRecutBaseChaseRepository()
+    await using process = createProcess()
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha: featureSha,
+      baseSha,
+    })
+    // Advance the base by editing an adjacent line: the merge is clean, but the
+    // reviewed change re-anchors with different surrounding context, so its stable
+    // patch identity drifts and the recut must not be admitted.
+    await writeFile(join(repo, "payload.txt"), payloadLines("5", "THREE"))
+    await git(repo, ["commit", "-qam", "advance base adjacent drift"])
+    expect(await git(repo, ["rev-parse", "main"])).not.toBe(baseSha)
+
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    errors.mockRestore()
+
+    expect(run.status).toBe("failed")
+    expect(run.error).toMatchObject({ code: "recut-certificate" })
+    expect(await git(repo, ["show", "main:payload.txt"])).not.toContain("FIVE")
+  })
+
+  it("admits a composed recut whose root base advanced (composite patch identity survives)", async () => {
+    const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
+    const oldRootBaseSha = await git(repo, ["rev-parse", `${rootBaseSha}^`])
+    await using process = createProcess()
+    const composition = {
+      version: 1,
+      sources: [
+        {
+          repo: "dep",
+          branch: "issue/source",
+          baseSha: oldPinSha,
+          tipSha: sourceTipSha,
+          payload: ["src/candidate.ts"],
+        },
+      ],
+    } as const
+    const recut = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/source",
+      base: "main",
+      revision: 1,
+      headSha: oldRootBaseSha,
+      baseSha: oldRootBaseSha,
+      composition,
+    })
+    expect(recut.baseSha).toBe(rootBaseSha)
+    // Advance the authoritative root base with a disjoint root change (dep pin untouched).
+    await writeFile(join(repo, "unrelated-root.txt"), "advanced\n")
+    await git(repo, ["add", "unrelated-root.txt"])
+    await git(repo, ["commit", "-qm", "advance root base"])
+    expect(await git(repo, ["rev-parse", "main"])).not.toBe(rootBaseSha)
+
+    await using app = await checkedQueue(process, repo, ["true"])
+    await app.bays.submit({
+      branch: "issue/source",
+      headSha: oldRootBaseSha,
+      base: "main",
+      baseSha: oldRootBaseSha,
+      composition,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recut.headSha,
+      baseSha: recut.baseSha,
+      treeSha: recut.treeSha,
+      patchId: recut.patchId,
+      reviewCarried: false,
+      composition: recut.composition,
+    })
+    await app.bays.ready({ pr: "PR1" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run.status, run.error?.message).toBe("passed")
+    // The advanced root file and the composed dep pin both landed.
+    expect(await git(repo, ["show", "main:unrelated-root.txt"])).toContain("advanced")
   })
 
   it("auto-restacks a disjoint source payload and composes the exact wrapper", async () => {

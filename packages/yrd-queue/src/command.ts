@@ -764,6 +764,25 @@ export type PRRecutResult = Readonly<{
 
 export type GitPRRecutter = Readonly<{ recut(input: PRRecutInput): Promise<PRRecutResult> }>
 
+/**
+ * Base-independent composite patch identity for a composition's source rewrites.
+ * A single source certifies by its own source-repo patch id; multiple sources
+ * certify by a stable hash of their (repo, patchId) pairs in composition order.
+ * Every source rewrite pins the fixed `source.baseSha..source.tipSha` payload, so
+ * this identity does not depend on the authoritative root base — which is exactly
+ * why it survives a base-chase re-anchoring while the whole-root treeSha does not.
+ */
+function compositePatchId(rewrites: readonly SourceRewrite[]): string {
+  const onlyRewrite = rewrites.length === 1 ? rewrites[0] : undefined
+  return onlyRewrite !== undefined
+    ? onlyRewrite.patchId
+    : createHash("sha256")
+        .update(
+          JSON.stringify(rewrites.map(({ repo: sourceRepo, patchId: sourcePatchId }) => [sourceRepo, sourcePatchId])),
+        )
+        .digest("hex")
+}
+
 export function createGitPRRecutter(options: {
   inject: Readonly<{ process: Pick<Process, "run"> }>
   repo: string
@@ -825,17 +844,7 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
         }
       }),
     }
-    const onlyRewrite = rewrites.length === 1 ? rewrites[0] : undefined
-    const patchId =
-      onlyRewrite !== undefined
-        ? onlyRewrite.patchId
-        : createHash("sha256")
-            .update(
-              JSON.stringify(
-                rewrites.map(({ repo: sourceRepo, patchId: sourcePatchId }) => [sourceRepo, sourcePatchId]),
-              ),
-            )
-            .digest("hex")
+    const patchId = compositePatchId(rewrites)
     return {
       status: "passed",
       output: {
@@ -1279,11 +1288,15 @@ async function prepareCandidate(
   const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   for (const pr of input.prs) {
     if (pr.composition !== undefined) {
-      const baseCertificate = await verifyComposedRecutBase(git, path, pr)
-      if (baseCertificate !== undefined) return baseCertificate
+      let baseMoved = false
+      if (pr.recut !== undefined) {
+        const movement = await recutBaseMovement(git, path, pr)
+        if (movement.status === "failed") return movement
+        baseMoved = movement.moved
+      }
       const composed = await composePR(git, repo, path, pr)
       if (composed.status === "failed") return composed
-      const treeCertificate = await verifyComposedRecutTree(git, path, pr)
+      const treeCertificate = await verifyComposedRecutTree(git, path, pr, composed.output, baseMoved)
       if (treeCertificate !== undefined) return treeCertificate
       sourceRewrites.push(...composed.output)
       continue
@@ -1339,40 +1352,93 @@ async function prepareCandidate(
   }
 }
 
+type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
+
+/**
+ * Classify how the authoritative candidate base relates to the reviewed recut base
+ * for a `pr.recut` snapshot. `repo` is the candidate worktree; its HEAD is the base
+ * this candidate is actually built on. A recut certifies a mechanical rebase of the
+ * reviewed revision, so the recorded base must be an *ancestor* of the candidate base:
+ * either the same commit (no movement) or a forward advance the reviewed change can be
+ * re-anchored onto. A missing or non-ancestor base cannot be mechanically re-anchored
+ * and stays a hard recut-certificate refusal.
+ */
+async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"][number]): Promise<RecutBaseMovement> {
+  const baseSha = pr.baseSha
+  if (baseSha === undefined) {
+    return candidateFailure("recut-certificate", `PR '${pr.id}' recut revision ${pr.revision} has no immutable base`)
+  }
+  const head = await git.commit(repo, "HEAD")
+  if (head === baseSha) return { status: "moved", moved: false, baseSha, head }
+  if (!(await isAncestor(git, repo, baseSha, head))) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut base '${baseSha}' is not an ancestor of the authoritative candidate base`,
+    )
+  }
+  return { status: "moved", moved: true, baseSha, head }
+}
+
+/**
+ * Re-derive the reviewed change onto the current candidate HEAD without mutating the
+ * worktree, and return its stable patch identity. `merge-tree --write-tree HEAD headSha`
+ * performs the three-way merge whose merge base is the reviewed base — this IS the
+ * mechanical rebase of the reviewed revision onto the advanced base. On a clean merge we
+ * hash the diff HEAD..<recomposed tree>, mirroring how the fast path hashes baseSha..headSha.
+ * A merge conflict (the base move touched the reviewed lines) or an unresolvable tree yields
+ * `undefined`, which the caller treats as genuine drift requiring a human recut.
+ */
+async function rederiveRecutPatchId(git: Git, repo: string, headSha: string): Promise<string | undefined> {
+  const merged = await git.run(repo, ["merge-tree", "--write-tree", "HEAD", headSha], true)
+  if (merged.code !== 0) return undefined
+  const tree = merged.stdout.split("\n")[0]?.trim()
+  if (tree === undefined || !/^[0-9a-f]{40,64}$/iu.test(tree)) return undefined
+  return git.stablePatchId(repo, "HEAD", tree)
+}
+
 async function verifyRecutCertificate(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
 ): Promise<CandidateFailure | undefined> {
   if (pr.recut === undefined) return undefined
-  const baseSha = pr.baseSha
-  if (baseSha === undefined || (await git.commit(repo, "HEAD")) !== baseSha) {
-    return candidateFailure(
-      "recut-certificate",
-      `PR '${pr.id}' recut base does not match the authoritative candidate base`,
-    )
-  }
+  // The reviewed head is immutable: its tree must be the tree that was recut, independent
+  // of where the base sits. A mismatch is genuine certificate corruption, not a base move.
   const treeSha = (await git.run(repo, ["rev-parse", `${pr.headSha}^{tree}`], true)).stdout
-  const patchId = await git.stablePatchId(repo, baseSha, pr.headSha)
-  if (treeSha !== pr.recut.treeSha || patchId !== pr.recut.patchId) {
+  if (treeSha !== pr.recut.treeSha) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut patch/tree certificate does not match revision ${pr.revision}`,
+      `PR '${pr.id}' recut tree certificate does not match revision ${pr.revision}`,
     )
   }
-  return undefined
-}
-
-async function verifyComposedRecutBase(
-  git: Git,
-  repo: string,
-  pr: StepExecution["prs"][number],
-): Promise<CandidateFailure | undefined> {
-  if (pr.recut === undefined) return undefined
-  if (pr.baseSha === undefined || (await git.commit(repo, "HEAD")) !== pr.baseSha) {
+  const movement = await recutBaseMovement(git, repo, pr)
+  if (movement.status === "failed") return movement
+  if (!movement.moved) {
+    // Fast path: base unchanged — the reviewed diff must hash to the recorded patch id.
+    const patchId = await git.stablePatchId(repo, movement.baseSha, pr.headSha)
+    if (patchId !== pr.recut.patchId) {
+      return candidateFailure(
+        "recut-certificate",
+        `PR '${pr.id}' recut patch certificate does not match revision ${pr.revision}`,
+      )
+    }
+    return undefined
+  }
+  // Base advanced: mechanically re-anchor the reviewed change onto the current base and
+  // accept iff its patch identity is unchanged — the reviewed change survived byte-identical,
+  // just re-based. Any difference (conflict or content drift) is a genuine change needing a
+  // human recut, and stays a recut-certificate refusal exactly as before.
+  const rederived = await rederiveRecutPatchId(git, repo, pr.headSha)
+  if (rederived === undefined) {
     return candidateFailure(
       "recut-certificate",
-      `PR '${pr.id}' recut base does not match the authoritative candidate base`,
+      `PR '${pr.id}' recut could not be mechanically re-anchored onto the advanced base for revision ${pr.revision}`,
+    )
+  }
+  if (rederived !== pr.recut.patchId) {
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut change did not survive the advanced base for revision ${pr.revision}`,
     )
   }
   return undefined
@@ -1382,14 +1448,28 @@ async function verifyComposedRecutTree(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
+  rewrites: readonly SourceRewrite[],
+  baseMoved: boolean,
 ): Promise<CandidateFailure | undefined> {
   if (pr.recut === undefined) return undefined
-  const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
-  return treeSha === pr.recut.treeSha
+  if (!baseMoved) {
+    // Fast path: base unchanged — the recomposed whole-root tree must replay exactly.
+    const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
+    return treeSha === pr.recut.treeSha
+      ? undefined
+      : candidateFailure(
+          "recut-certificate",
+          `PR '${pr.id}' recomposed tree certificate does not match revision ${pr.revision}`,
+        )
+  }
+  // Base advanced: the whole-root treeSha legitimately differs (the base moved), so certify
+  // the base-independent composite source patch identity instead. composePR already re-derived
+  // the source rewrites onto the current base; their identity must equal the reviewed one.
+  return compositePatchId(rewrites) === pr.recut.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
-        `PR '${pr.id}' recomposed tree certificate does not match revision ${pr.revision}`,
+        `PR '${pr.id}' recomposed change did not survive the advanced base for revision ${pr.revision}`,
       )
 }
 
