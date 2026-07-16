@@ -1576,6 +1576,63 @@ describe("runYrd", () => {
     expect(app.bays.pr("PR1")?.revisions).toHaveLength(2)
   })
 
+  it("recomputes the certificate after an authored revision supersedes a recut head", async () => {
+    const app = await createApp()
+    const branch = "issue/recut-then-author"
+    const recutHead = "2".repeat(40)
+    const authoredHead = "3".repeat(40)
+    const successorHead = "4".repeat(40)
+    const oldTreeSha = "c".repeat(40)
+    const oldPatchId = "d".repeat(40)
+    const nextTreeSha = "e".repeat(40)
+    const nextPatchId = "f".repeat(40)
+
+    await app.bays.submit({ branch, headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recutHead,
+      baseSha: BASE_SHA,
+      treeSha: oldTreeSha,
+      patchId: oldPatchId,
+      reviewCarried: false,
+    })
+    await app.bays.intake({ branch, headSha: authoredHead, base: "main", baseSha: BASE_SHA })
+
+    const requests: unknown[] = []
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          requests.push(input)
+          return Promise.resolve({
+            headSha: successorHead,
+            baseSha: "b".repeat(40),
+            treeSha: nextTreeSha,
+            patchId: nextPatchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), output.io, services)).toBe(0)
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).not.toHaveProperty("current")
+    expect(app.bays.pr("PR1")).toMatchObject({
+      revision: 4,
+      headSha: successorHead,
+      recut: { fromRevision: 3, treeSha: nextTreeSha, patchId: nextPatchId },
+      revisions: [
+        { revision: 1, headSha: HEAD_SHA },
+        { revision: 2, headSha: recutHead, recut: { fromRevision: 1, treeSha: oldTreeSha, patchId: oldPatchId } },
+        { revision: 3, headSha: authoredHead },
+        { revision: 4, headSha: successorHead, recut: { fromRevision: 3 } },
+      ],
+    })
+  })
+
   it("refuses to recut a PR whose current head already holds a passing check unless forced", async () => {
     const app = await createApp()
     await openAndSubmit(app)

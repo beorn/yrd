@@ -661,18 +661,42 @@ type GitResult = Readonly<{
   sweepFailure?: string
 }>
 type Git = ReturnType<typeof createGit>
+const CERTIFICATE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames"] as const
+
+function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0))
+  let offset = 0
+  for (const chunk of chunks) {
+    output.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return output
+}
 
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
+  env.GIT_NO_REPLACE_OBJECTS = "1"
   const execute = async (
     repo: string,
     args: readonly string[],
     allowFailure: boolean,
     trim: boolean,
+    stdoutChunks?: Uint8Array[],
   ): Promise<GitResult> => {
-    const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
+    const result = await process.run({
+      argv: ["git", "-C", repo, ...args],
+      cwd: repo,
+      env,
+      ...(stdoutChunks === undefined
+        ? {}
+        : {
+            onOutput: (output: Readonly<{ stream: "stdout" | "stderr"; chunk: Uint8Array }>) => {
+              if (output.stream === "stdout") stdoutChunks.push(output.chunk.slice())
+            },
+          }),
+    })
     const progress = result as typeof result & ProgressResult
     const completed = {
       code: result.exitCode,
@@ -706,13 +730,20 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     to: string,
     paths?: readonly string[],
   ): Promise<string | undefined> => {
-    const diff = await run(repo, ["diff", "--full-index", "--binary", from, to, "--", ...(paths ?? [])], true)
+    const diffChunks: Uint8Array[] = []
+    const diff = await execute(
+      repo,
+      ["diff", ...CERTIFICATE_DIFF_OPTIONS, "--full-index", "--binary", from, to, "--", ...(paths ?? [])],
+      true,
+      false,
+      diffChunks,
+    )
     if (diff.code !== 0) return undefined
     const result = await process.run({
       argv: ["git", "-C", repo, "patch-id", "--stable"],
       cwd: repo,
       env,
-      stdin: diff.stdout,
+      stdin: concatenateBytes(diffChunks),
     })
     if (result.exitCode !== 0) return undefined
     return /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(result.stdout.trim())?.[1]
@@ -720,7 +751,15 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
   const rangeDiff = (repo: string, oldBase: string, oldTip: string, newBase: string, newTip: string) =>
     run(
       repo,
-      ["range-diff", "--no-color", "--no-dual-color", "--no-patch", `${oldBase}..${oldTip}`, `${newBase}..${newTip}`],
+      [
+        "range-diff",
+        ...CERTIFICATE_DIFF_OPTIONS,
+        "--no-color",
+        "--no-dual-color",
+        "--no-patch",
+        `${oldBase}..${oldTip}`,
+        `${newBase}..${newTip}`,
+      ],
       true,
     )
   return Object.freeze({ run, raw, commit, optionalCommit, stablePatchId, rangeDiff, process, env })
@@ -772,7 +811,7 @@ export type GitPRRecutter = Readonly<{ recut(input: PRRecutInput): Promise<PRRec
  * this identity does not depend on the authoritative root base — which is exactly
  * why it survives a base-chase re-anchoring while the whole-root treeSha does not.
  */
-function compositePatchId(rewrites: readonly SourceRewrite[]): string {
+function compositionPatchId(rewrites: readonly Readonly<{ repo: string; patchId: string }>[]): string {
   const onlyRewrite = rewrites.length === 1 ? rewrites[0] : undefined
   return onlyRewrite !== undefined
     ? onlyRewrite.patchId
@@ -795,21 +834,23 @@ export function createGitPRRecutter(options: {
 
 async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRRecutResult> {
   const target = await authoritativeQueueBase(git, repo, input.base)
+  const current = input.current
   if (
-    (input.current?.revision === input.revision || input.current?.fromRevision === input.revision) &&
-    input.current.baseSha === target.sha &&
-    input.current.treeSha !== undefined &&
-    input.current.patchId !== undefined
+    (current?.revision === input.revision || current?.fromRevision === input.revision) &&
+    current.baseSha === target.sha &&
+    current.treeSha !== undefined &&
+    current.patchId !== undefined
   ) {
+    await assertCurrentRecutCertificate(git, repo, target, input, current)
     return {
-      headSha: input.current.headSha,
+      headSha: current.headSha,
       baseSha: target.sha,
-      treeSha: input.current.treeSha,
-      patchId: input.current.patchId,
+      treeSha: current.treeSha,
+      patchId: current.patchId,
       unchanged: true,
-      ...((input.current.composition ?? input.composition) === undefined
+      ...((current.composition ?? input.composition) === undefined
         ? {}
-        : { composition: input.current.composition ?? input.composition }),
+        : { composition: current.composition ?? input.composition }),
     }
   }
   if (input.composition === undefined) {
@@ -844,7 +885,7 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
         }
       }),
     }
-    const patchId = compositePatchId(rewrites)
+    const patchId = compositionPatchId(rewrites)
     return {
       status: "passed",
       output: {
@@ -861,6 +902,123 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
   if (outcome.status === "passed") return outcome.output
   const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+}
+
+async function assertCurrentRecutCertificate(
+  git: Git,
+  repo: string,
+  target: GitQueueTarget,
+  input: PRRecutInput,
+  current: NonNullable<PRRecutInput["current"]>,
+): Promise<void> {
+  const certifiedTreeSha = current.treeSha
+  const certifiedPatchId = current.patchId
+  if (certifiedTreeSha === undefined || certifiedPatchId === undefined) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-certificate",
+      message: `yrd: PR '${input.id}' current revision ${current.revision} has no patch/tree certificate`,
+    })
+  }
+  const composition = current.composition ?? input.composition
+  if (composition === undefined) {
+    const headExists = (await git.optionalCommit(repo, current.headSha)) === current.headSha
+    const onTarget = headExists && (await isAncestor(git, repo, target.sha, current.headSha))
+    const tree = headExists ? await git.run(repo, ["rev-parse", `${current.headSha}^{tree}`], true) : undefined
+    const patchId = onTarget ? await git.stablePatchId(repo, target.sha, current.headSha) : undefined
+    if (tree?.code !== 0 || tree?.stdout !== certifiedTreeSha || patchId !== certifiedPatchId) {
+      throw createFailure({
+        kind: "refusal",
+        code: "recut-certificate",
+        message: `yrd: PR '${input.id}' current patch/tree certificate does not match revision ${current.revision}`,
+      })
+    }
+    return
+  }
+
+  if (current.headSha !== target.sha) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-certificate",
+      message: `yrd: PR '${input.id}' current composed head does not match the authoritative base`,
+    })
+  }
+  const currentCompositionFailure = (message: string) =>
+    createFailure({
+      kind: "refusal",
+      code: "recut-certificate",
+      message: `yrd: PR '${input.id}' current composed certificate could not replay: ${message}`,
+    })
+  const outcome = await withScratch<Readonly<{ treeSha: string; patchId: string }>>(
+    git,
+    repo,
+    target.sha,
+    tmpdir(),
+    async (path) => {
+      const receipts: Readonly<{ repo: string; patchId: string }>[] = []
+      for (const source of composition.sources) {
+        const sourceRepo = join(repo, source.repo)
+        try {
+          await realpath(sourceRepo)
+        } catch {
+          throw currentCompositionFailure(`source repository '${source.repo}' is not initialized`)
+        }
+        const currentPin = await readGitlink(git, path, "HEAD", source.repo)
+        if (currentPin !== source.baseSha) {
+          throw currentCompositionFailure(`source '${source.repo}' base does not match the authoritative root pin`)
+        }
+        if (
+          (await git.optionalCommit(sourceRepo, source.baseSha)) !== source.baseSha ||
+          (await git.optionalCommit(sourceRepo, source.tipSha)) !== source.tipSha ||
+          !(await isAncestor(git, sourceRepo, source.baseSha, source.tipSha))
+        ) {
+          throw currentCompositionFailure(`source '${source.repo}' immutable range is missing or invalid`)
+        }
+        const payload = await changedPaths(git, sourceRepo, source.baseSha, source.tipSha)
+        const patchId = await git.stablePatchId(sourceRepo, source.baseSha, source.tipSha)
+        if (!samePaths(payload, source.payload))
+          throw currentCompositionFailure(`source '${source.repo}' payload differs`)
+        if (patchId === undefined)
+          throw currentCompositionFailure(`source '${source.repo}' patch certificate does not replay`)
+        const staged = await git.run(
+          path,
+          ["update-index", "--cacheinfo", `160000,${source.tipSha},${source.repo}`],
+          true,
+        )
+        if (staged.code !== 0) throw currentCompositionFailure(`source '${source.repo}' wrapper could not be staged`)
+        receipts.push({ repo: source.repo, patchId })
+      }
+      const tree = await git.run(path, ["write-tree"], true)
+      if (tree.code !== 0) throw currentCompositionFailure("wrapper tree could not be written")
+      const materialized = await changedPaths(git, path, target.sha, tree.stdout)
+      if (
+        !samePaths(
+          materialized,
+          composition.sources.map((source) => source.repo),
+        )
+      ) {
+        throw currentCompositionFailure("wrapper paths do not match the current composition")
+      }
+      return {
+        status: "passed",
+        output: {
+          treeSha: tree.stdout,
+          patchId: compositionPatchId(receipts),
+        },
+      }
+    },
+  )
+  if (outcome.status !== "passed") {
+    const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+    throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
+  }
+  if (outcome.output.treeSha !== certifiedTreeSha || outcome.output.patchId !== certifiedPatchId) {
+    throw createFailure({
+      kind: "refusal",
+      code: "recut-certificate",
+      message: `yrd: PR '${input.id}' current composed patch/tree certificate does not match revision ${current.revision}`,
+    })
+  }
 }
 
 async function recutDirectPR(
@@ -1073,6 +1231,7 @@ async function recutDirectPR(
       ffCarrierGitlinks.size === 0
         ? materializedPatchId
         : await git.stablePatchId(path, target.sha, headSha, certifyPayload)
+    let usedUnionMerge = false
     if (certifyPayload.length > 0) {
       if (certifySourcePatchId === undefined || certifyMaterializedPatchId === undefined) {
         throw createFailure({
@@ -1081,16 +1240,27 @@ async function recutDirectPR(
           message: `yrd: PR '${input.id}' recut has no stable patch identity`,
         })
       }
-      if (
-        certifyMaterializedPatchId !== certifySourcePatchId &&
-        !(certifyOverlap.length > 0 && (await usesUnionMerge(git, path, certifyOverlap)))
-      ) {
+      const patchMatches = certifyMaterializedPatchId === certifySourcePatchId
+      const unionMerged =
+        !patchMatches && certifyOverlap.length > 0 && (await usesUnionMerge(git, repo, target.sha, certifyOverlap))
+      if (!patchMatches && !unionMerged) {
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
           message: `yrd: PR '${input.id}' recut changed stable patch identity`,
         })
       }
+      if (
+        unionMerged &&
+        !(await matchesExpectedUnionMerge(git, repo, sourceBase, target.sha, input.headSha, headSha, certifyOverlap))
+      ) {
+        throw createFailure({
+          kind: "refusal",
+          code: "payload-certificate",
+          message: `yrd: PR '${input.id}' recut did not preserve deterministic union identity`,
+        })
+      }
+      usedUnionMerge = unionMerged
     }
     for (const gitlink of ffCarrierGitlinks) {
       const authoredPin = await readGitlink(git, repo, input.headSha, gitlink)
@@ -1103,7 +1273,18 @@ async function recutDirectPR(
         })
       }
     }
-    if (absorbedGitlinks.length === 0 && ffCarrierGitlinks.size === 0) {
+    const hasGitlinkExceptions = absorbedGitlinks.length > 0 || ffCarrierGitlinks.size > 0
+    if (usedUnionMerge && hasGitlinkExceptions) {
+      const sourceCount = await git.run(repo, ["rev-list", "--count", `${sourceBase}..${input.headSha}`], true)
+      const recutCount = await git.run(path, ["rev-list", "--count", `${target.sha}..${headSha}`], true)
+      if (sourceCount.code !== 0 || recutCount.code !== 0 || sourceCount.stdout !== "1" || recutCount.stdout !== "1") {
+        throw createFailure({
+          kind: "refusal",
+          code: "payload-certificate",
+          message: `yrd: PR '${input.id}' union-merge recut requires one root commit`,
+        })
+      }
+    } else if (!hasGitlinkExceptions) {
       const rangeDiff = await git.rangeDiff(path, sourceBase, input.headSha, target.sha, headSha)
       if (rangeDiff.code !== 0 || !isEqualRangeDiff(rangeDiff.stdout)) {
         throw createFailure({
@@ -1113,15 +1294,40 @@ async function recutDirectPR(
         })
       }
     } else {
-      const sourceCount = Number(
-        (await git.run(repo, ["rev-list", "--count", `${sourceBase}..${input.headSha}`])).stdout,
+      const ffGitlinks = [...ffCarrierGitlinks].toSorted()
+      const sourceSequence = await certifiedPatchSequence(
+        git,
+        repo,
+        sourceBase,
+        input.headSha,
+        absorbedGitlinks,
+        ffGitlinks,
+        "source",
       )
-      const recutCount = Number((await git.run(path, ["rev-list", "--count", `${target.sha}..${headSha}`])).stdout)
-      if (sourceCount !== 1 || recutCount !== 1) {
+      const recutSequence = await certifiedPatchSequence(
+        git,
+        path,
+        target.sha,
+        headSha,
+        absorbedGitlinks,
+        ffGitlinks,
+        "recut",
+      )
+      if (sourceSequence === undefined || recutSequence === undefined) {
         throw createFailure({
           kind: "refusal",
           code: "payload-certificate",
-          message: `yrd: PR '${input.id}' current-composition recut requires one root commit`,
+          message: `yrd: PR '${input.id}' current-composition recut has no stable commit-sequence identity`,
+        })
+      }
+      if (
+        sourceSequence.length !== recutSequence.length ||
+        sourceSequence.some((patchId, index) => patchId !== recutSequence[index])
+      ) {
+        throw createFailure({
+          kind: "refusal",
+          code: "payload-certificate",
+          message: `yrd: PR '${input.id}' current-composition recut is not commit-sequence equivalent`,
         })
       }
     }
@@ -1296,8 +1502,8 @@ async function prepareCandidate(
       }
       const composed = await composePR(git, repo, path, pr)
       if (composed.status === "failed") return composed
-      const treeCertificate = await verifyComposedRecutTree(git, path, pr, composed.output, baseMoved)
-      if (treeCertificate !== undefined) return treeCertificate
+      const certificate = await verifyComposedRecutCertificate(git, path, pr, composed.output, baseMoved)
+      if (certificate !== undefined) return certificate
       sourceRewrites.push(...composed.output)
       continue
     }
@@ -1444,7 +1650,7 @@ async function verifyRecutCertificate(
   return undefined
 }
 
-async function verifyComposedRecutTree(
+async function verifyComposedRecutCertificate(
   git: Git,
   repo: string,
   pr: StepExecution["prs"][number],
@@ -1452,20 +1658,22 @@ async function verifyComposedRecutTree(
   baseMoved: boolean,
 ): Promise<CandidateFailure | undefined> {
   if (pr.recut === undefined) return undefined
+  const patchId = compositionPatchId(rewrites)
   if (!baseMoved) {
-    // Fast path: base unchanged — the recomposed whole-root tree must replay exactly.
+    // Fast path: base unchanged — both the recomposed whole-root tree and the
+    // base-independent source-patch identity must replay exactly.
     const treeSha = (await git.run(repo, ["rev-parse", "HEAD^{tree}"], true)).stdout
-    return treeSha === pr.recut.treeSha
+    return treeSha === pr.recut.treeSha && patchId === pr.recut.patchId
       ? undefined
       : candidateFailure(
           "recut-certificate",
-          `PR '${pr.id}' recomposed tree certificate does not match revision ${pr.revision}`,
+          `PR '${pr.id}' recomposed patch/tree certificate does not match revision ${pr.revision}`,
         )
   }
   // Base advanced: the whole-root treeSha legitimately differs (the base moved), so certify
   // the base-independent composite source patch identity instead. composePR already re-derived
   // the source rewrites onto the current base; their identity must equal the reviewed one.
-  return compositePatchId(rewrites) === pr.recut.patchId
+  return patchId === pr.recut.patchId
     ? undefined
     : candidateFailure(
         "recut-certificate",
@@ -1923,7 +2131,7 @@ async function readGitlinkConflictStages(
 }
 
 async function changedPaths(git: Git, repo: string, from: string, to: string): Promise<string[]> {
-  const result = await git.run(repo, ["diff", "--name-only", "--no-renames", "-z", from, to, "--"])
+  const result = await git.run(repo, ["diff", ...CERTIFICATE_DIFF_OPTIONS, "--name-only", "-z", from, to, "--"])
   return nulPaths(result.stdout)
 }
 
@@ -1934,8 +2142,70 @@ async function changedPayloadIdentity(
   to: string,
   paths?: readonly string[],
 ): Promise<string> {
-  return (await git.run(repo, ["diff", "--raw", "--no-abbrev", "--no-renames", "-z", from, to, "--", ...(paths ?? [])]))
-    .stdout
+  return (
+    await git.run(repo, [
+      "diff",
+      ...CERTIFICATE_DIFF_OPTIONS,
+      "--raw",
+      "--no-abbrev",
+      "-z",
+      from,
+      to,
+      "--",
+      ...(paths ?? []),
+    ])
+  ).stdout
+}
+
+/**
+ * Certify every ordered authored slot after removing absorbed gitlink paths.
+ * An absorbed-only slot may disappear during rebase. A forward-resolved
+ * gitlink slot may not: it carries the exact authored post-commit pin alongside
+ * the stable patch ID of its remaining paths, preserving commit boundaries and
+ * order even though the gitlink's from-pin changed with the authoritative base.
+ * Merge commits stay fail-closed because the direct recutter does not preserve
+ * merge shape.
+ */
+async function certifiedPatchSequence(
+  git: Git,
+  repo: string,
+  from: string,
+  to: string,
+  absorbedPaths: readonly string[],
+  ffGitlinks: readonly string[],
+  side: "source" | "recut",
+): Promise<readonly string[] | undefined> {
+  const commitsResult = await git.run(repo, ["rev-list", "--reverse", "--topo-order", `${from}..${to}`], true)
+  if (commitsResult.code !== 0) return undefined
+  const merges = await git.run(repo, ["rev-list", "--merges", `${from}..${to}`], true)
+  if (merges.code !== 0 || merges.stdout !== "") return undefined
+
+  const excludedPaths = [...new Set([...absorbedPaths, ...ffGitlinks])].toSorted()
+  const pathspec = [".", ...excludedPaths.map((path) => `:(top,literal,exclude)${path}`)]
+  const slots: string[] = []
+  for (const commit of commitsResult.stdout.split(/\r?\n/u).filter((candidate) => candidate !== "")) {
+    const parent = `${commit}^`
+    const commitPaths = new Set(await changedPaths(git, repo, parent, commit))
+    if (side === "recut" && absorbedPaths.some((path) => commitPaths.has(path))) return undefined
+    const pins: [path: string, sha: string][] = []
+    for (const path of ffGitlinks) {
+      if (!commitPaths.has(path)) continue
+      const pin = await readGitlink(git, repo, commit, path)
+      if (pin === undefined) return undefined
+      pins.push([path, pin])
+    }
+    const changed = await git.run(
+      repo,
+      ["diff", ...CERTIFICATE_DIFF_OPTIONS, "--quiet", parent, commit, "--", ...pathspec],
+      true,
+    )
+    if (changed.code !== 0 && changed.code !== 1) return undefined
+    const patchId = changed.code === 0 ? undefined : await git.stablePatchId(repo, parent, commit, pathspec)
+    if (changed.code === 1 && patchId === undefined) return undefined
+    if (patchId === undefined && pins.length === 0) continue
+    slots.push(JSON.stringify([patchId ?? null, pins]))
+  }
+  return slots
 }
 
 async function absorbedAuthoredGitlinks(
@@ -2017,8 +2287,8 @@ async function certifiesSupersededGitlink(
   return samePaths(authoredPayload, source.payload) && samePaths(certifiedPayload, source.payload)
 }
 
-async function usesUnionMerge(git: Git, repo: string, paths: readonly string[]): Promise<boolean> {
-  const result = await git.run(repo, ["check-attr", "-z", "merge", "--", ...paths], true)
+async function usesUnionMerge(git: Git, repo: string, ref: string, paths: readonly string[]): Promise<boolean> {
+  const result = await git.run(repo, ["check-attr", "-z", "--source", ref, "merge", "--", ...paths], true)
   if (result.code !== 0) return false
   const fields = result.stdout.split("\0")
   const attributes = new Map<string, string>()
@@ -2029,6 +2299,79 @@ async function usesUnionMerge(git: Git, repo: string, paths: readonly string[]):
     if (path !== undefined && attribute === "merge" && value !== undefined) attributes.set(path, value)
   }
   return paths.length > 0 && paths.every((path) => attributes.get(path) === "union")
+}
+
+type UnionBlob = Readonly<{ mode: "100644" | "100755"; content: string }>
+
+async function readUnionBlob(git: Git, repo: string, ref: string, path: string): Promise<UnionBlob | undefined> {
+  const tree = await git.raw(repo, ["ls-tree", "-z", ref, "--", path], true)
+  if (tree.code !== 0 || tree.stdout === "") return undefined
+  const tab = tree.stdout.indexOf("\t")
+  const match = /^(100644|100755) blob ([0-9a-f]{40,64})$/u.exec(tree.stdout.slice(0, tab))
+  const mode = match?.[1] as UnionBlob["mode"] | undefined
+  const oid = match?.[2]
+  const end = tree.stdout.indexOf("\0", tab + 1)
+  const recordPath = tree.stdout.slice(tab + 1, end === -1 ? undefined : end)
+  if (tab === -1 || mode === undefined || oid === undefined || recordPath !== path) return undefined
+  const blob = await git.raw(repo, ["cat-file", "blob", oid], true)
+  if (blob.code !== 0) return undefined
+  const roundTrip = await git.process.run({
+    argv: ["git", "-C", repo, "hash-object", "--stdin"],
+    cwd: repo,
+    env: git.env,
+    stdin: blob.stdout,
+  })
+  if (roundTrip.exitCode !== 0 || roundTrip.stdout.trim() !== oid) return undefined
+  return { mode, content: blob.stdout }
+}
+
+function mergedUnionMode(
+  base: UnionBlob["mode"],
+  current: UnionBlob["mode"],
+  authored: UnionBlob["mode"],
+): UnionBlob["mode"] | undefined {
+  if (current === authored) return current
+  if (current === base) return authored
+  if (authored === base) return current
+  return undefined
+}
+
+async function matchesExpectedUnionMerge(
+  git: Git,
+  repo: string,
+  baseRef: string,
+  currentRef: string,
+  authoredRef: string,
+  recutRef: string,
+  paths: readonly string[],
+): Promise<boolean> {
+  const root = await mkdtemp(join(tmpdir(), "yrd-union-proof-"))
+  try {
+    for (const [index, path] of paths.entries()) {
+      const base = await readUnionBlob(git, repo, baseRef, path)
+      const current = await readUnionBlob(git, repo, currentRef, path)
+      const authored = await readUnionBlob(git, repo, authoredRef, path)
+      const recut = await readUnionBlob(git, repo, recutRef, path)
+      if (base === undefined || current === undefined || authored === undefined || recut === undefined) return false
+      const mode = mergedUnionMode(base.mode, current.mode, authored.mode)
+      if (mode === undefined || recut.mode !== mode) return false
+      const currentPath = join(root, `${index}-current`)
+      const basePath = join(root, `${index}-base`)
+      const authoredPath = join(root, `${index}-authored`)
+      await writeFile(currentPath, current.content)
+      await writeFile(basePath, base.content)
+      await writeFile(authoredPath, authored.content)
+      const merged = await git.raw(
+        repo,
+        ["merge-file", "--union", "--stdout", currentPath, basePath, authoredPath],
+        true,
+      )
+      if (merged.code !== 0 || merged.stdout !== recut.content) return false
+    }
+    return paths.length > 0
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 }
 
 async function stagedPaths(git: Git, repo: string): Promise<string[]> {

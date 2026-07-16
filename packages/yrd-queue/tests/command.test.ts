@@ -84,6 +84,7 @@ async function hookedSubmoduleRepository(options: {
   baseVersion: string
   candidateVersion: string
   requiredVersion: string
+  splitCarrier?: boolean
 }): Promise<{ repo: string; remote: string; baseSha: string; featureSha: string; moduleSha: string }> {
   const { repo } = await repository()
   const module = join(repo, "..", "module")
@@ -104,8 +105,10 @@ async function hookedSubmoduleRepository(options: {
   await git(repo, ["switch", "-qc", "issue/feature"])
   await git(join(repo, "dep"), ["fetch", "-q", "origin"])
   await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
+  await git(repo, ["add", "dep"])
+  if (options.splitCarrier === true) await git(repo, ["commit", "-qm", "feature dependency"])
   await writeFile(join(repo, "feature.txt"), "feature\n")
-  await git(repo, ["add", "dep", "feature.txt"])
+  await git(repo, ["add", "feature.txt"])
   await git(repo, ["commit", "-qm", "feature"])
   const featureSha = await git(repo, ["rev-parse", "HEAD"])
   await git(repo, ["switch", "-q", "main"])
@@ -435,6 +438,125 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
+  it.each([
+    { certificate: "exact", tree: "exact", patch: "exact", valid: true },
+    { certificate: "stale tree", tree: "stale", patch: "exact", valid: false },
+    { certificate: "stale patch", tree: "exact", patch: "stale", valid: false },
+  ] as const)("replays a current direct recut with an $certificate certificate", async ({ patch, tree, valid }) => {
+    const { repo, candidate } = await repository("candidate")
+    const oldBaseSha = await git(repo, ["rev-parse", "main"])
+    await writeFile(join(repo, "upstream.txt"), "upstream\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    await using process = createProcess()
+    const recutter = createGitPRRecutter({ inject: { process }, repo })
+    const input = {
+      id: "PR1",
+      branch: "issue/candidate",
+      base: "main",
+      revision: 1,
+      headSha: candidate,
+      baseSha: oldBaseSha,
+    } as const
+    const first = await recutter.recut(input)
+
+    const request = recutter.recut({
+      ...input,
+      current: {
+        revision: 2,
+        fromRevision: 1,
+        headSha: first.headSha,
+        baseSha: first.baseSha,
+        treeSha: tree === "exact" ? first.treeSha : "0".repeat(40),
+        patchId: patch === "exact" ? first.patchId : "f".repeat(40),
+      },
+    })
+    if (valid) {
+      await expect(request).resolves.toMatchObject({
+        headSha: first.headSha,
+        baseSha: first.baseSha,
+        treeSha: first.treeSha,
+        patchId: first.patchId,
+        unchanged: true,
+      })
+    } else {
+      await expect(request).rejects.toMatchObject({
+        failure: {
+          kind: "refusal",
+          code: "recut-certificate",
+          message: expect.stringContaining("patch/tree certificate"),
+        },
+      })
+    }
+    expect(await git(repo, ["status", "--porcelain"])).toBe("")
+  })
+
+  it("derives direct recut certificates from raw blobs despite a canonicalizing textconv", async () => {
+    const { repo } = await repository()
+    await writeFile(join(repo, ".gitattributes"), "payload.dat diff=canonical\n")
+    await writeFile(join(repo, "payload.dat"), "alpha\n")
+    await git(repo, ["add", ".gitattributes", "payload.dat"])
+    await git(repo, ["commit", "-qm", "add attributed payload"])
+    const baseSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["config", "diff.canonical.textconv", "sed 's/.*/CANON/'"])
+    await git(repo, ["switch", "-qc", "issue/payload"])
+    await writeFile(join(repo, "payload.dat"), "beta\n")
+    await git(repo, ["commit", "-qam", "change payload"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await writeFile(join(repo, "upstream.txt"), "upstream\n")
+    await git(repo, ["add", "upstream.txt"])
+    await git(repo, ["commit", "-qm", "advance authority"])
+    expect(await git(repo, ["diff", baseSha, headSha, "--", "payload.dat"])).toBe("")
+    const rawDiff = await git(repo, ["diff", "--no-textconv", baseSha, headSha, "--", "payload.dat"])
+    expect(rawDiff).toContain("-alpha")
+    expect(rawDiff).toContain("+beta")
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/payload",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha,
+    })
+
+    expect(result.patchId).toMatch(/^[0-9a-f]{40}$/u)
+    expect(await git(repo, ["show", `${result.headSha}:payload.dat`])).toBe("beta")
+  })
+
+  it("certifies the raw carrier object when a local replacement ref is present", async () => {
+    const { repo } = await repository()
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    await git(repo, ["switch", "-qc", "issue/raw"])
+    await writeFile(join(repo, "payload.txt"), "raw carrier\n")
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", "raw carrier"])
+    const rawSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-qc", "issue/replacement", baseSha])
+    await writeFile(join(repo, "payload.txt"), "replacement view\n")
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", "replacement view"])
+    const replacementSha = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["replace", rawSha, replacementSha])
+    const rawTree = await git(repo, ["--no-replace-objects", "rev-parse", `${rawSha}^{tree}`])
+    expect(await git(repo, ["rev-parse", `${rawSha}^{tree}`])).not.toBe(rawTree)
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/raw",
+      base: "main",
+      revision: 1,
+      headSha: rawSha,
+      baseSha,
+    })
+
+    expect(result).toMatchObject({ headSha: rawSha, treeSha: rawTree, unchanged: true })
+  })
+
   it("recuts from the source merge base when submission recorded authoritative current base", async () => {
     const { repo } = await repository()
     const baseLines = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`)
@@ -491,7 +613,10 @@ describe("Queue command adapters", () => {
     await git(repo, ["config", "protocol.file.allow", "always"])
     await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
     await writeFile(join(repo, ".gitattributes"), "doctrine.md merge=union\n")
-    await writeFile(join(repo, "doctrine.md"), doctrineText(["Validate admitted work.", "Keep it flowing."]))
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText(["Validate admitted work.", "Receipt marker: �(", "Keep it flowing."]),
+    )
     await git(repo, ["add", ".gitattributes", "doctrine.md"])
     await git(repo, ["commit", "-qam", "add dependency"])
     const sourceBase = await git(repo, ["rev-parse", "HEAD"])
@@ -532,6 +657,7 @@ describe("Queue command adapters", () => {
       doctrineText([
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
+        "Receipt marker: �(",
         "Keep it flowing.",
       ]),
     )
@@ -548,6 +674,7 @@ describe("Queue command adapters", () => {
         "Validate admitted work.",
         "Execute the generated `current_command` verbatim.",
         "For authored roots, draft then recut the same PR.",
+        "Receipt marker: �(",
         "Keep it flowing.",
       ]),
     )
@@ -556,7 +683,19 @@ describe("Queue command adapters", () => {
     const authoredHead = await git(repo, ["rev-parse", "HEAD"])
     await git(repo, ["switch", "-q", "main"])
     await git(repo, ["submodule", "update", "--init", "--recursive"])
-    await using process = createProcess()
+    await using delegate = createProcess()
+    let afterRebase: ((path: string) => Promise<void>) | undefined
+    const process = {
+      run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        const result = await delegate.run(request)
+        if (result.exitCode === 0 && request.argv.includes("rebase") && afterRebase !== undefined) {
+          const mutate = afterRebase
+          afterRebase = undefined
+          await mutate(request.cwd ?? repo)
+        }
+        return result
+      },
+    }
     const recutter = createGitPRRecutter({ inject: { process }, repo })
     const input = {
       id: "PR1",
@@ -570,35 +709,33 @@ describe("Queue command adapters", () => {
       /could not recut onto .+ submodule 'dep' pins .+ have diverged; neither is an ancestor of the other/u,
     )
 
-    const result = await recutter.recut({
-      ...input,
-      currentCompositions: [
-        {
-          version: 1,
-          sources: [
-            {
-              repo: "dep",
-              branch: "main",
-              baseSha: composedTip,
-              tipSha: currentPin,
-              payload: ["repair.ts"],
-            },
-          ],
-        },
-        {
-          version: 1,
-          sources: [
-            {
-              repo: "dep",
-              branch: "main",
-              baseSha: composedBase,
-              tipSha: composedTip,
-              payload: ["source-a.ts", "source-b.ts"],
-            },
-          ],
-        },
-      ],
-    })
+    const currentCompositions = [
+      {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "main",
+            baseSha: composedTip,
+            tipSha: currentPin,
+            payload: ["repair.ts"],
+          },
+        ],
+      },
+      {
+        version: 1,
+        sources: [
+          {
+            repo: "dep",
+            branch: "main",
+            baseSha: composedBase,
+            tipSha: composedTip,
+            payload: ["source-a.ts", "source-b.ts"],
+          },
+        ],
+      },
+    ] as const
+    const result = await recutter.recut({ ...input, currentCompositions })
 
     expect(result).toMatchObject({
       baseSha: currentBase,
@@ -612,6 +749,72 @@ describe("Queue command adapters", () => {
     expect(recutDoctrine).toContain("generated `current_command` verbatim")
     expect(recutDoctrine).toContain("For authored roots, draft then recut the same PR")
     expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(currentPin)
+
+    await git(repo, ["switch", "-qc", "issue/root-multi", sourceBase])
+    await git(join(repo, "dep"), ["checkout", "-q", sourceTip])
+    await git(repo, ["add", "dep"])
+    await git(repo, ["commit", "-qm", "authored root pin"])
+    await writeFile(
+      join(repo, "doctrine.md"),
+      doctrineText([
+        "Validate admitted work.",
+        "Execute the generated `current_command` verbatim.",
+        "For authored roots, draft then recut the same PR.",
+        "Receipt marker: �(",
+        "Keep it flowing.",
+      ]),
+    )
+    await git(repo, ["add", "doctrine.md"])
+    await git(repo, ["commit", "-qm", "authored root doctrine"])
+    const multiCommitHead = await git(repo, ["rev-parse", "HEAD"])
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["submodule", "update", "--init", "--recursive"])
+    await expect(
+      recutter.recut({
+        ...input,
+        branch: "issue/root-multi",
+        headSha: multiCommitHead,
+        currentCompositions,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("union-merge recut requires one root commit"),
+      },
+    })
+
+    const validBytes = new TextEncoder().encode(recutDoctrine)
+    const marker = [0xef, 0xbf, 0xbd, 0x28]
+    const markerIndex = validBytes.findIndex((byte, index) =>
+      marker.every((part, offset) => validBytes[index + offset] === part),
+    )
+    expect(markerIndex).toBeGreaterThanOrEqual(0)
+    const tamperedBytes = new Uint8Array(validBytes.length - 2)
+    tamperedBytes.set(validBytes.slice(0, markerIndex), 0)
+    tamperedBytes.set([0xc3, 0x28], markerIndex)
+    tamperedBytes.set(validBytes.slice(markerIndex + marker.length), markerIndex + 2)
+    afterRebase = async (path) => {
+      await writeFile(join(path, "doctrine.md"), tamperedBytes)
+      await git(path, ["add", "doctrine.md"])
+      await git(path, [
+        "-c",
+        "user.name=Yrd Queue",
+        "-c",
+        "user.email=yrd-queue@example.invalid",
+        "commit",
+        "--amend",
+        "-qm",
+        "tamper union output",
+      ])
+    }
+    await expect(recutter.recut({ ...input, currentCompositions })).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("did not preserve deterministic union identity"),
+      },
+    })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
@@ -651,11 +854,12 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
   })
 
-  it("admits a mechanically certified recut that preserves an authored root gitlink", async () => {
+  it("admits a mechanically certified two-commit recut that preserves an authored root gitlink", async () => {
     const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
       requiredVersion: "base",
+      splitCarrier: true,
     })
     await writeFile(join(repo, "upstream.txt"), "upstream\n")
     await git(repo, ["add", "upstream.txt"])
@@ -671,6 +875,11 @@ describe("Queue command adapters", () => {
       headSha: featureSha,
       baseSha,
     })
+    expect(await git(repo, ["rev-list", "--count", `${recut.baseSha}..${recut.headSha}`])).toBe("2")
+    expect(await git(repo, ["rev-parse", `${recut.headSha}~2`])).toBe(recut.baseSha)
+    expect(
+      (await git(repo, ["log", "--reverse", "--format=%s", `${recut.baseSha}..${recut.headSha}`])).split("\n"),
+    ).toEqual(["feature dependency", "feature"])
     await using app = await checkedQueue(process, repo, ["true"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
     await app.bays.recut({
@@ -743,33 +952,71 @@ describe("Queue command adapters", () => {
     expect(await git(repo, ["ls-tree", result.treeSha, "dep"])).toContain(rewritten!.tipSha)
     expect(await git(module, ["diff", "--name-only", newPinSha, rewritten!.tipSha])).toBe("src/candidate.ts")
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
-    await expect(
-      recutter.recut({
-        ...input,
-        current: {
-          revision: 2,
-          headSha: result.headSha,
-          baseSha: result.baseSha,
-          treeSha: result.treeSha,
-          patchId: result.patchId,
-          fromRevision: 1,
-          composition: result.composition,
-        },
-      }),
-    ).resolves.toMatchObject({
+    const current = {
+      revision: 2,
+      headSha: result.headSha,
+      baseSha: result.baseSha,
+      treeSha: result.treeSha,
+      patchId: result.patchId,
+      fromRevision: 1,
+      composition: result.composition,
+    } as const
+    const unchanged = {
       headSha: result.headSha,
       baseSha: result.baseSha,
       treeSha: result.treeSha,
       patchId: result.patchId,
       composition: result.composition,
       unchanged: true,
+    } as const
+    await expect(recutter.recut({ ...input, current })).resolves.toMatchObject(unchanged)
+    const candidateBranch = result.composition?.sources[0]?.branch
+    if (candidateBranch === undefined) throw new Error("missing immutable source candidate")
+    await git(module, ["update-ref", "-d", candidateBranch])
+    await expect(recutter.recut({ ...input, current })).resolves.toMatchObject(unchanged)
+    await expect(
+      recutter.recut({
+        ...input,
+        current: { ...current, treeSha: "0".repeat(40) },
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "recut-certificate",
+        message: expect.stringContaining("composed patch/tree certificate"),
+      },
+    })
+    await expect(
+      recutter.recut({
+        ...input,
+        current: { ...current, patchId: "f".repeat(40) },
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "recut-certificate",
+        message: expect.stringContaining("composed patch/tree certificate"),
+      },
+    })
+    await expect(
+      recutter.recut({
+        ...input,
+        current: { ...current, headSha: oldRootBaseSha },
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "recut-certificate",
+        message: expect.stringContaining("head does not match the authoritative base"),
+      },
     })
   })
 
   it.each([
-    { certificate: "exact", valid: true },
-    { certificate: "mismatched", valid: false },
-  ] as const)("admits a composed recut only when its $certificate tree certificate replays", async ({ valid }) => {
+    { certificate: "exact", tree: "exact", patch: "exact", valid: true },
+    { certificate: "mismatched tree", tree: "mismatched", patch: "exact", valid: false },
+    { certificate: "mismatched patch", tree: "exact", patch: "mismatched", valid: false },
+  ] as const)("admits a composed recut only when its $certificate replays", async ({ patch, tree, valid }) => {
     const { repo, oldPinSha, sourceTipSha, rootBaseSha } = await restackSubmoduleRepository()
     const oldRootBaseSha = await git(repo, ["rev-parse", `${rootBaseSha}^`])
     await using process = createProcess()
@@ -808,8 +1055,8 @@ describe("Queue command adapters", () => {
       fromRevision: 1,
       headSha: recut.headSha,
       baseSha: recut.baseSha,
-      treeSha: valid ? recut.treeSha : "f".repeat(40),
-      patchId: recut.patchId,
+      treeSha: tree === "exact" ? recut.treeSha : "f".repeat(40),
+      patchId: patch === "exact" ? recut.patchId : "e".repeat(40),
       reviewCarried: false,
       composition: recut.composition,
     })
@@ -825,7 +1072,7 @@ describe("Queue command adapters", () => {
       expect(run.status).toBe("failed")
       expect(run.error).toMatchObject({
         code: "recut-certificate",
-        message: expect.stringContaining("tree certificate"),
+        message: expect.stringContaining("patch/tree certificate"),
       })
       expect(errors).toHaveBeenCalled()
     }
@@ -1243,6 +1490,7 @@ describe("Queue command adapters", () => {
       candidateVersion: "candidate",
       requiredVersion: "candidate",
     })
+    await git(repo, ["config", "diff.ignoreSubmodules", "all"])
     await using process = createProcess()
     await using app = await checkedQueue(process, repo, ["true"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha })

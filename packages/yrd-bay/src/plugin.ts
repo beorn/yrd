@@ -1700,6 +1700,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               ...(pushed.baseSha === undefined ? {} : { baseSha: pushed.baseSha }),
               correlation: pushed.correlation,
               ...(pushed.composition === undefined ? { composition: undefined } : { composition: pushed.composition }),
+              recut: undefined,
               revisions: [...existing.revisions, record],
               terminalRun: undefined,
               submittedAt: undefined,
