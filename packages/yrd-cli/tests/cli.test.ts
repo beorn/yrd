@@ -4008,6 +4008,34 @@ describe("runYrd", () => {
     }
   })
 
+  it("renders queue ls identically to the live watch first frame", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const now = () => Date.parse("2026-07-09T12:01:00.000Z")
+
+    const list = outputIO({ now, columns: 120, rows: 24 })
+    expect(await runYrd(app, yrd("queue", "ls"), list.io), list.stderr()).toBe(0)
+
+    let mounted: ReactElement | undefined
+    const watch = outputIO({ now, columns: 120, rows: 24 })
+    const live = withLiveRenderer(watch.io, async (element) => {
+      mounted = element
+    })
+    expect(await runYrd(app, yrd("queue", "ls", "--watch"), live)).toBe(0)
+    if (mounted === undefined) throw new Error("expected watch pane to mount")
+
+    const firstFrame = stripOsc8Targets(
+      await renderString(
+        createElement(QueueWatchFrame, {
+          snapshot: (mounted.props as QueueWatchPaneProps).initial,
+          paused: false,
+        }),
+        { width: 120, height: 24, plain: true },
+      ),
+    )
+    expect(stripOsc8Targets(list.stdout()).trimEnd()).toBe(firstFrame.trimEnd())
+  })
+
   it("keeps queue aliases and plural filters on one lossless JSON projection", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/alpha", headSha: "1".repeat(40), base: "main" })

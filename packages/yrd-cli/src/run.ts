@@ -300,6 +300,8 @@ type WatchOptions = QueueListOptions
 type JsonOption = { json?: boolean }
 
 const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
+const QUEUE_TIMELINE_CHROME_ROWS = 14
+const QUEUE_TIMELINE_DEFAULT_ROW_LIMIT = 20
 const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "pending",
   "running",
@@ -309,10 +311,14 @@ const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
 ]
 
 function queueTimelineRowLimit(io: YrdCliIO): number {
-  if (io.rows === undefined) return 20
+  if (io.rows === undefined) return QUEUE_TIMELINE_DEFAULT_ROW_LIMIT
   // Tabs, metadata, worst-case abnormal STATUS box, filter, columns,
   // STATISTICS, and cap/coverage disclosures remain outside ListView.
-  return Math.max(1, io.rows - 14)
+  return Math.max(1, io.rows - QUEUE_TIMELINE_CHROME_ROWS)
+}
+
+function queueTimelineViewportHeight(io: YrdCliIO): number {
+  return io.rows ?? QUEUE_TIMELINE_DEFAULT_ROW_LIMIT + QUEUE_TIMELINE_CHROME_ROWS
 }
 
 function queueTimelineWindow(value: string | undefined): number {
@@ -1841,6 +1847,13 @@ async function listQueues(
   io: YrdCliIO,
 ): Promise<void> {
   const snapshot = await queueListSnapshot(app, filters, options, io)
+  const human = jsonEnabled(options)
+    ? createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 })
+    : createElement((await import("./watch-pane.tsx")).QueueWatchFrame, {
+        snapshot,
+        paused: false,
+        ...(options.pr === undefined ? {} : { pr: options.pr }),
+      })
   await printResult(
     io,
     jsonEnabled(options),
@@ -1849,7 +1862,8 @@ async function listQueues(
       projection: snapshot.projection,
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
     },
-    createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
+    human,
+    { height: queueTimelineViewportHeight(io) },
   )
 }
 
