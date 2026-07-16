@@ -84,6 +84,7 @@ async function hookedSubmoduleRepository(options: {
   candidatePublication?: "tip" | "non-tip" | "unpushed"
   candidateModuleUrl?: string | null
   seedCandidateLocally?: boolean
+  additionalCandidatePath?: string
 }): Promise<{
   repo: string
   remote: string
@@ -105,7 +106,13 @@ async function hookedSubmoduleRepository(options: {
   await git(module, ["commit", "-qm", "base"])
   await git(module, ["push", "-q", "-u", "origin", "main"])
   await git(repo, ["config", "protocol.file.allow", "always"])
-  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleOrigin, "dep"])
+  const modulePaths = [
+    "dep",
+    ...(options.additionalCandidatePath === undefined ? [] : [options.additionalCandidatePath]),
+  ]
+  for (const path of modulePaths) {
+    await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", moduleOrigin, path])
+  }
   await git(repo, ["commit", "-qam", "add dependency"])
   const baseSha = await git(repo, ["rev-parse", "HEAD"])
 
@@ -130,15 +137,17 @@ async function hookedSubmoduleRepository(options: {
       await git(repo, ["config", "--file", ".gitmodules", "submodule.dep.url", options.candidateModuleUrl])
     }
   }
-  await git(join(repo, "dep"), ["-c", "protocol.file.allow=always", "fetch", "-q", module, moduleSha])
-  await git(join(repo, "dep"), ["checkout", "-q", moduleSha])
+  for (const path of modulePaths) {
+    await git(join(repo, path), ["-c", "protocol.file.allow=always", "fetch", "-q", module, moduleSha])
+    await git(join(repo, path), ["checkout", "-q", moduleSha])
+  }
   await writeFile(join(repo, "feature.txt"), "feature\n")
-  await git(repo, ["add", ".gitmodules", "dep", "feature.txt"])
+  await git(repo, ["add", ".gitmodules", ...modulePaths, "feature.txt"])
   await git(repo, ["commit", "-qm", "feature"])
   const featureSha = await git(repo, ["rev-parse", "HEAD"])
   await git(repo, ["switch", "-q", "main"])
-  await git(repo, ["submodule", "--quiet", "deinit", "--force", "--", "dep"])
-  await rm(join(repo, ".git", "modules", "dep"), { recursive: true, force: true })
+  await git(repo, ["submodule", "--quiet", "deinit", "--force", "--", ...modulePaths])
+  for (const path of modulePaths) await rm(join(repo, ".git", "modules", path), { recursive: true, force: true })
   await git(repo, ["submodule", "update", "--init", "--recursive"])
   if (options.seedCandidateLocally === true) {
     await git(join(repo, "dep"), ["-c", "protocol.file.allow=always", "fetch", "-q", module, moduleSha])
@@ -295,6 +304,27 @@ function isCandidateSubmoduleMaterialization(request: ProcessRequest): boolean {
   )
 }
 
+function isCandidateBuild(request: ProcessRequest): boolean {
+  return (
+    request.argv[0] === "git" &&
+    request.argv.includes("worktree") &&
+    request.argv.includes("add") &&
+    request.argv.some((argument) => argument.includes("yrd-queue-"))
+  )
+}
+
+function isSubmoduleProofRequest(request: ProcessRequest): boolean {
+  return request.cwd?.includes("yrd-submodule-proof-") === true
+}
+
+function isSubmoduleProofFetch(request: ProcessRequest): boolean {
+  return isSubmoduleProofRequest(request) && request.argv.includes("fetch") && request.argv.includes("--depth=1")
+}
+
+function isSubmoduleProofUpdate(request: ProcessRequest): boolean {
+  return isSubmoduleProofRequest(request) && request.argv.includes("submodule") && request.argv.includes("update")
+}
+
 function submoduleProofRoots(requests: readonly ProcessRequest[]): string[] {
   return [
     ...new Set(
@@ -307,7 +337,12 @@ function submoduleProofRoots(requests: readonly ProcessRequest[]): string[] {
 
 function recordSubmoduleProof(
   process: Pick<Process, "run">,
-  options: Readonly<{ timeOutProofUpdate?: boolean }> = {},
+  options: Readonly<{
+    timeOutProofFetch?: boolean
+    rejectFilteredProofFetch?: boolean
+    failProofCleanup?: boolean
+    failProofCleanupAt?: number
+  }> = {},
 ): Readonly<{
   process: Pick<Process, "run">
   evidence: {
@@ -315,6 +350,7 @@ function recordSubmoduleProof(
     alternateChecks: number
     alternatesSeen: boolean
     proofAliveDuringCandidateMaterialization: boolean
+    cleanupFailuresInjected: string[]
   }
 }> {
   const evidence = {
@@ -322,6 +358,7 @@ function recordSubmoduleProof(
     alternateChecks: 0,
     alternatesSeen: false,
     proofAliveDuringCandidateMaterialization: false,
+    cleanupFailuresInjected: [] as string[],
   }
   const proofPaths = new Set<string>()
   return {
@@ -330,15 +367,13 @@ function recordSubmoduleProof(
       async run(request): Promise<ProcessResult> {
         evidence.requests.push(request)
         const cwd = request.cwd
-        const proofUpdate =
-          cwd?.includes("yrd-submodule-proof-") === true &&
-          request.argv.includes("submodule") &&
-          request.argv.includes("update")
-        if (cwd?.includes("yrd-submodule-proof-") === true) proofPaths.add(cwd)
+        const proofFetch = isSubmoduleProofFetch(request)
+        const proofUpdate = isSubmoduleProofUpdate(request)
+        if (isSubmoduleProofRequest(request) && cwd !== undefined) proofPaths.add(cwd)
         if (isCandidateSubmoduleMaterialization(request)) {
           evidence.proofAliveDuringCandidateMaterialization = [...proofPaths].some((path) => existsSync(path))
         }
-        if (proofUpdate && options.timeOutProofUpdate === true) {
+        if (proofFetch && options.timeOutProofFetch === true) {
           return {
             exitCode: 124,
             signal: "SIGTERM",
@@ -349,12 +384,36 @@ function recordSubmoduleProof(
             verdict: "TIMED_OUT",
           }
         }
+        if (proofFetch && request.argv.includes("--filter=tree:0") && options.rejectFilteredProofFetch === true) {
+          return {
+            exitCode: 128,
+            signal: null,
+            stdout: "",
+            stderr: "filtering not recognized by server",
+            durationMs: 1,
+            timedOut: false,
+            verdict: "EXITED",
+          }
+        }
         const result = await process.run(request)
-        if (proofUpdate && cwd !== undefined) {
+        if ((proofFetch || proofUpdate) && cwd !== undefined) {
           evidence.alternateChecks += 1
           evidence.alternatesSeen ||=
+            existsSync(join(cwd, "objects", "info", "alternates")) ||
             existsSync(join(cwd, ".git", "objects", "info", "alternates")) ||
             existsSync(join(cwd, ".git", "modules", "dep", "objects", "info", "alternates"))
+          const cleanupFailurePhase = options.failProofCleanupAt ?? 1
+          if (
+            options.failProofCleanup === true &&
+            evidence.cleanupFailuresInjected.length === 0 &&
+            proofPaths.size === cleanupFailurePhase
+          ) {
+            const locked = join(cwd, "cleanup-refusal")
+            await mkdir(locked, { recursive: true })
+            await writeFile(join(locked, "proof-store-must-not-be-stranded"), "locked\n")
+            await chmod(locked, 0)
+            evidence.cleanupFailuresInjected.push(locked)
+          }
         }
         return result
       },
@@ -2383,7 +2442,7 @@ describe("Queue command adapters", () => {
     expect(await Bun.file(join(repo, "operator-wip.txt")).text()).toBe("preserve me\n")
   })
 
-  it("refuses an unpushed candidate submodule pin from an empty store before materialization", async () => {
+  it("refuses an unpushed candidate submodule pin during submit admission before candidate build", async () => {
     const { repo, moduleOrigin, featureSha, moduleSha } = await hookedSubmoduleRepository({
       baseVersion: "base",
       candidateVersion: "candidate",
@@ -2396,8 +2455,9 @@ describe("Queue command adapters", () => {
       env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
     })
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.requestChecks({ pr: "PR1" })
 
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const run = (await app.queue.admit({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run).toMatchObject({
       status: "failed",
@@ -2409,7 +2469,21 @@ describe("Queue command adapters", () => {
     expect(run.error?.message).toContain("dep")
     expect(run.error?.message).toContain(moduleSha)
     expect(run.error?.message).toContain(moduleOrigin)
+    expect(run.steps[0]?.job).toMatchObject({
+      status: "failed",
+      error: { code: "submodule-pin-unreachable" },
+    })
+    expect(recording.evidence.requests.some(isCandidateBuild)).toBe(false)
     expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
+    expect(recording.evidence.requests.some(isSubmoduleProofUpdate)).toBe(false)
+    expect(
+      recording.evidence.requests.some(
+        (request) =>
+          isSubmoduleProofFetch(request) &&
+          request.argv.includes("--filter=tree:0") &&
+          request.argv.includes(moduleSha),
+      ),
+    ).toBe(true)
     expect(recording.evidence.alternateChecks).toBeGreaterThan(0)
     expect(recording.evidence.alternatesSeen).toBe(false)
     const proofRoots = submoduleProofRoots(recording.evidence.requests)
@@ -2479,9 +2553,8 @@ describe("Queue command adapters", () => {
     expect(run.error?.message).toContain("dep")
     expect(run.error?.message).toContain(moduleSha)
     expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
-    const proofRoots = submoduleProofRoots(recording.evidence.requests)
-    expect(proofRoots.length).toBeGreaterThan(0)
-    expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
+    expect(recording.evidence.requests.some(isCandidateBuild)).toBe(false)
+    expect(submoduleProofRoots(recording.evidence.requests)).toHaveLength(0)
   })
 
   it("bounds a clean-store candidate submodule reachability probe", async () => {
@@ -2491,7 +2564,7 @@ describe("Queue command adapters", () => {
       requiredVersion: "candidate",
     })
     await using process = createProcess()
-    const recording = recordSubmoduleProof(process, { timeOutProofUpdate: true })
+    const recording = recordSubmoduleProof(process, { timeOutProofFetch: true })
     await using app = await checkedQueue(recording.process, repo, ["true"], {
       env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
     })
@@ -2514,9 +2587,157 @@ describe("Queue command adapters", () => {
       ),
     ).toBe(true)
     expect(recording.evidence.requests.some(isCandidateSubmoduleMaterialization)).toBe(false)
+    expect(recording.evidence.requests.some(isSubmoduleProofUpdate)).toBe(false)
     const proofRoots = submoduleProofRoots(recording.evidence.requests)
     expect(proofRoots.length).toBeGreaterThan(0)
     expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
+  })
+
+  it("fails loudly when an unreachable-pin proof store cannot be cleaned", async () => {
+    const { repo, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "unpushed",
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process, { failProofCleanup: true })
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    try {
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({
+        status: "failed",
+        error: { code: "submodule-proof-cleanup-failed" },
+      })
+      expect(recording.evidence.cleanupFailuresInjected).toHaveLength(1)
+    } finally {
+      for (const locked of recording.evidence.cleanupFailuresInjected) await chmod(locked, 0o700)
+      for (const root of submoduleProofRoots(recording.evidence.requests)) {
+        await rm(dirname(root), { recursive: true, force: true })
+      }
+    }
+  })
+
+  it("does not advance the remote base when proof cleanup fails after candidate materialization", async () => {
+    const { repo, remote, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "non-tip",
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process, { failProofCleanup: true, failProofCleanupAt: 2 })
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    try {
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({
+        status: "failed",
+        error: { code: "submodule-proof-cleanup-failed" },
+      })
+      expect(recording.evidence.proofAliveDuringCandidateMaterialization).toBe(true)
+      expect(await git(remote, ["rev-parse", "main"])).toBe(baseSha)
+    } finally {
+      for (const locked of recording.evidence.cleanupFailuresInjected) await chmod(locked, 0o700)
+      for (const root of submoduleProofRoots(recording.evidence.requests)) {
+        await rm(dirname(root), { recursive: true, force: true })
+      }
+    }
+  })
+
+  it("rolls back a local base when proof cleanup fails after candidate materialization", async () => {
+    const { repo, baseSha, featureSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "non-tip",
+    })
+    await git(repo, ["remote", "remove", "origin"])
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process, { failProofCleanup: true, failProofCleanupAt: 2 })
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    try {
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({
+        status: "failed",
+        error: { code: "submodule-proof-cleanup-failed" },
+      })
+      expect(recording.evidence.proofAliveDuringCandidateMaterialization).toBe(true)
+      expect(await git(repo, ["rev-parse", "main"])).toBe(baseSha)
+      expect(await git(repo, ["status", "--porcelain"])).toBe("")
+    } finally {
+      for (const locked of recording.evidence.cleanupFailuresInjected) await chmod(locked, 0o700)
+      for (const root of submoduleProofRoots(recording.evidence.requests)) {
+        await rm(dirname(root), { recursive: true, force: true })
+      }
+    }
+  })
+
+  it("falls back to an unfiltered shallow exact-SHA fetch when the origin rejects filtering", async () => {
+    const { repo, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "non-tip",
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process, { rejectFilteredProofFetch: true })
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "passed" })
+    const exactFetches = recording.evidence.requests.filter(
+      (request) => isSubmoduleProofFetch(request) && request.argv.includes(moduleSha),
+    )
+    expect(exactFetches.filter((request) => request.argv.includes("--filter=tree:0"))).toHaveLength(2)
+    expect(exactFetches.filter((request) => !request.argv.includes("--filter=tree:0"))).toHaveLength(2)
+    expect(recording.evidence.requests.some(isSubmoduleProofUpdate)).toBe(false)
+  })
+
+  it("groups same-origin pins into one exact-SHA fetch per proof phase", async () => {
+    const { repo, featureSha, moduleSha } = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+      candidatePublication: "non-tip",
+      additionalCandidatePath: "dep-two",
+    })
+    await using process = createProcess()
+    const recording = recordSubmoduleProof(process)
+    await using app = await checkedQueue(recording.process, repo, ["true"], {
+      env: { ...globalThis.process.env, YRD_ALLOW_AUTHORED_GITLINKS: "1" },
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "passed" })
+    const filtered = recording.evidence.requests.filter(
+      (request) => isSubmoduleProofFetch(request) && request.argv.includes("--filter=tree:0"),
+    )
+    expect(filtered).toHaveLength(2)
+    expect(filtered.every((request) => request.argv.filter((argument) => argument === moduleSha).length === 1)).toBe(
+      true,
+    )
+    expect(submoduleProofRoots(recording.evidence.requests)).toHaveLength(2)
   })
 
   it("accepts a candidate submodule pin that is reachable but no longer a ref tip", async () => {
@@ -2541,6 +2762,15 @@ describe("Queue command adapters", () => {
     expect(recording.evidence.alternateChecks).toBeGreaterThan(0)
     expect(recording.evidence.alternatesSeen).toBe(false)
     expect(recording.evidence.proofAliveDuringCandidateMaterialization).toBe(true)
+    expect(recording.evidence.requests.some(isSubmoduleProofUpdate)).toBe(false)
+    expect(
+      recording.evidence.requests.filter(
+        (request) =>
+          isSubmoduleProofFetch(request) &&
+          request.argv.includes("--filter=tree:0") &&
+          request.argv.includes(moduleSha),
+      ),
+    ).toHaveLength(2)
     const proofRoots = submoduleProofRoots(recording.evidence.requests)
     expect(proofRoots.length).toBeGreaterThan(0)
     expect(proofRoots.every((root) => !existsSync(root))).toBe(true)
