@@ -64,10 +64,56 @@ export const SourceRewriteSchema = z
   })
   .strict() as z.ZodType<SourceRewrite>
 
+export type QueueSubmoduleResolutionEvidence =
+  | Readonly<{
+      kind: "pin"
+      path: string
+      sha: string
+    }>
+  | Readonly<{
+      kind: "compose"
+      path: string
+      sha: string
+      ref: string
+      reviewedBlobs: readonly Readonly<{
+        path: string
+        oid: string
+        content: string
+      }>[]
+    }>
+
+export const QueueSubmoduleResolutionEvidenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("pin"),
+      path: z.string().min(1),
+      sha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("compose"),
+      path: z.string().min(1),
+      sha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+      ref: z.string().min(1),
+      reviewedBlobs: z.array(
+        z
+          .object({
+            path: z.string().min(1),
+            oid: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+            content: z.string(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+]) as z.ZodType<QueueSubmoduleResolutionEvidence>
+
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
   sourceRewrites?: readonly SourceRewrite[]
+  submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
 }>
 
 export const IntegrationProofSchema = z
@@ -76,6 +122,7 @@ export const IntegrationProofSchema = z
     // The base branch tip after integration, not the pre-integration base.
     baseSha: GitShaSchema,
     sourceRewrites: z.array(SourceRewriteSchema).optional(),
+    submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
   })
   .strict() as z.ZodType<IntegrationProof>
 

@@ -49,6 +49,7 @@ describe("queue-native submodule composition planner", () => {
           message:
             `yrd: compose vendor/alpha\n\n` +
             `Yrd-Composition-Path: vendor/alpha\n` +
+            `Yrd-Composition-Base: ${oid("4")}\n` +
             `Yrd-Composition-Parents: ${oid("5")} ${oid("6")}`,
         },
         {
