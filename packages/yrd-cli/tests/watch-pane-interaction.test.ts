@@ -74,8 +74,8 @@ describe("QueueWatchFrame 21106 interaction", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("PRs PR42@r1"))
 
-      const rowY = rowIndexOf(app.text, "Land the durable patch")
-      const rowX = app.text.split("\n")[rowY]?.indexOf("Land the durable patch") ?? -1
+      const rowY = rowIndexOf(app.text, "PR4.1")
+      const rowX = app.text.split("\n")[rowY]?.indexOf("PR4.1") ?? -1
       expect(rowY).toBeGreaterThan(0)
       expect(rowX).toBeGreaterThan(0)
       await app.click(rowX, rowY)
@@ -162,19 +162,19 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("Reject broken payload")
+      expect(app.text).toContain("PR5.1")
       expect(app.text).toContain("[x] failed")
 
       await app.press("f")
-      await waitFor(() => !app.text.includes("Reject broken payload"))
+      await waitFor(() => !app.text.includes("PR5.1"))
       expect(app.text).toContain("[ ] failed")
 
       await app.press("f")
-      await waitFor(() => app.text.includes("Reject broken payload"))
+      await waitFor(() => app.text.includes("PR5.1"))
       expect(app.text).toContain("[x] failed")
 
       await app.press("d")
-      await waitFor(() => !app.text.includes("Land the durable patch"))
+      await waitFor(() => !app.text.includes("PR4.1"))
       expect(app.text).toContain("[ ] done")
 
       // `p` toggles the pending bucket — it never pauses.
@@ -183,7 +183,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).not.toContain("PAUSED")
       await app.press("p")
       await app.press("d")
-      await waitFor(() => app.text.includes("Land the durable patch"))
+      await waitFor(() => app.text.includes("PR4.1"))
     } finally {
       app.unmount()
     }
@@ -195,13 +195,13 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("Align host navigation")
+      expect(app.text).toContain("PR42.1")
       const filterY = rowIndexOf(app.text, "[x] running")
       const filterX = app.text.split("\n")[filterY]?.indexOf("[x] running") ?? -1
       expect(filterY).toBeGreaterThan(0)
       expect(filterX).toBeGreaterThan(0)
       await app.click(filterX + 1, filterY)
-      await waitFor(() => !app.text.includes("Align host navigation"))
+      await waitFor(() => !app.text.includes("PR42.1"))
       expect(app.text).toContain("[ ] running")
     } finally {
       app.unmount()

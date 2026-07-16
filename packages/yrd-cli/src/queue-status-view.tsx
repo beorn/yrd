@@ -2583,8 +2583,6 @@ const TIMELINE_CONTENT_CAP = 160
 // Fixed cells never clip arbitrarily; labels longer than this shorten at a
 // semantic boundary via fitTimelineLabel.
 const TIMELINE_STATE_CAP = 20
-const TIMELINE_TOTAL_GLYPH = "◷"
-
 /**
  * Powerline branch glyph (U+E0A0), prefixed on every rendered branch name in
  * the watch UI (user directive 2026-07-16), matching ag-code's `BRANCH_ICON`.
@@ -2602,7 +2600,6 @@ type TimelineCellLayout = Readonly<{
   runWidth: number
   /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
   byWidth: number
-  stepWidth: number
   ageWidth: number
   runDurationWidth: number
   compact: boolean
@@ -2703,9 +2700,8 @@ function timelineCellLayout(
     statusWidth: Math.max(6, ...rows.map((row) => timelineStatusCell(row).word.length + 2)),
     runWidth: Math.max(3, ...rows.map((row) => timelineRunCell(row, compact).text.length)),
     byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
-    stepWidth: Math.max(4, ...rows.map((row) => timelineStepCell(row).text.length)),
     ageWidth: Math.max(3, ...rows.map((row) => timelineAgeCell(row).length)),
-    runDurationWidth: Math.max(3, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length + 1))),
+    runDurationWidth: Math.max(3, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length))),
     compact,
     includeDate,
   }
@@ -2775,7 +2771,6 @@ function TimelineCells({
   status,
   run,
   pr,
-  step,
   by,
   age,
   runDuration,
@@ -2787,7 +2782,6 @@ function TimelineCells({
   status: React.ReactNode
   run: React.ReactNode
   pr: React.ReactNode
-  step: React.ReactNode
   by: React.ReactNode
   age: React.ReactNode
   runDuration: React.ReactNode
@@ -2822,11 +2816,10 @@ function TimelineCells({
       <Box id={id("pr")} flexDirection="row" flexGrow={1} flexBasis={0} minWidth={12} overflow="hidden">
         {pr}
       </Box>
-      <Box id={id("step")} width={layout.stepWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
-        {step}
-      </Box>
       {layout.byWidth === 0 ? null : (
-        <Box id={id("by")} width={layout.byWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        // BY is left-aligned — header and cells (user directive 2026-07-16,
+        // supersedes the 15c right-aligned BY clause).
+        <Box id={id("by")} width={layout.byWidth} flexShrink={0} minWidth={0}>
           {by}
         </Box>
       )}
@@ -2841,10 +2834,10 @@ function TimelineCells({
   )
 }
 
-// Header (15c, split-label respec 2026-07-15): TIME | STATUS | RUN | PR |
-// STEP | BY | AGE | RUN — RUN(id) and PR are separate labels, each exactly
-// over its own column; the trailing bare RUN header belongs to the
-// run-duration column that replaced TOTAL.
+// Header: TIME | STATUS | RUN | PR | BY | AGE | RUN — RUN(id) and PR are
+// separate labels, each exactly over its own column; the trailing bare RUN
+// header belongs to the run-duration column. STEP was folded into the PR cell
+// (user directive 2026-07-16, item Q).
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   // The column header reads white + bold (user directive 2026-07-16) so it
   // stands out above the muted row cells.
@@ -2860,7 +2853,6 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
       status={label("STATUS")}
       run={label("RUN")}
       pr={label("PR")}
-      step={label("STEP")}
       by={label("BY")}
       age={label("AGE")}
       runDuration={label("RUN")}
@@ -2917,22 +2909,26 @@ function TimelineProjectedRow({
         </Text>
       }
       pr={
+        // The flexible cell folds the removed STEP column in (user directive
+        // 2026-07-16, item Q): `PR.rev  <branch-glyph> <branch> (<status>)`.
+        // The PR+revision id stays bold (item F); the parenthesized suffix is
+        // the live step (running) or terminal failure code, colorized by state.
         <>
-          {/* The PR+revision id is always bold (user directive 2026-07-16). */}
           <Text bold color={forcedFg} flexShrink={0}>
             {row.pr}.{row.revision}
           </Text>
-          <Box paddingLeft={1} minWidth={0} overflow="hidden">
-            <Text bold={active} color={forcedFg} wrap="truncate" minWidth={0}>
-              {row.subject}
+          <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Text color={forcedFg} wrap="truncate" minWidth={0}>
+              {branchLabel(row.branch)}
             </Text>
+            {step.text === "" ? null : (
+              <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
+                {" "}
+                ({step.text})
+              </Text>
+            )}
           </Box>
         </>
-      }
-      step={
-        <Text color={forcedFg ?? step.color} wrap="truncate">
-          {step.text}
-        </Text>
       }
       by={
         <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
@@ -2941,14 +2937,9 @@ function TimelineProjectedRow({
       }
       age={<Text color={forcedFg ?? "$fg-muted"}>{timelineAgeCell(row)}</Text>}
       runDuration={
-        runDuration === "" ? (
-          <Text> </Text>
-        ) : (
-          <Text color={forcedFg}>
-            <Text color={forcedFg ?? "$fg-muted"}>{TIMELINE_TOTAL_GLYPH}</Text>
-            {runDuration}
-          </Text>
-        )
+        // Run duration: no clock glyph, just the dimmed time (user directive
+        // 2026-07-16, supersedes the 15c `◷`-carries-onto-RUN clause).
+        runDuration === "" ? <Text> </Text> : <Text color={forcedFg ?? "$fg-muted"}>{runDuration}</Text>
       }
     />
   )

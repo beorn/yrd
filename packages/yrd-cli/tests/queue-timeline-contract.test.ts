@@ -123,7 +123,7 @@ describe("queue timeline 21106 contract", () => {
     const updatedLine = rowIndex(rows, "updated 17:30:00")
     const filterLine = rowIndex(rows, "FILTER ")
     const headerLine = rowIndex(rows, "TIME")
-    const lastRowLine = rowIndex(rows, "PR4.1 Land the durable patch")
+    const lastRowLine = rowIndex(rows, "PR4.1")
     const statisticsLine = rowIndex(rows, "STATS")
     const flowLine = rowIndex(rows, "FLOW ")
 
@@ -139,7 +139,7 @@ describe("queue timeline 21106 contract", () => {
     // ACTIVE/WAIT moved out of the per-row columns into the statistics box.
     const header = rows[headerLine]
     if (header === undefined) throw new Error("expected the table header row")
-    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+PR\s+STEP\s+BY\s+AGE\s+RUN$/u)
+    expect(header.trim()).toMatch(/^TIME\s+STATUS\s+RUN\s+PR\s+BY\s+AGE\s+RUN$/u)
     expect(header).not.toContain("ACTIVE")
     expect(header).not.toContain("WAIT")
     expect(header).not.toContain("SUBJECT")
@@ -167,28 +167,26 @@ describe("queue timeline 21106 contract", () => {
     const rejected = rows[rowIndex(rows, "PR5.1")]
     const integrated = rows[rowIndex(rows, "PR4.1")]
 
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend pending PR1\.1 Prepare release notes\s+@cto\s+50:00$/u)
+    // Row contract (user directive 2026-07-16): STEP folded into the flexible
+    // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
+    // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
+    // branch glyph (U+E0A0) is matched as one non-space char.
+    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend pending PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 PR42\.1 Align host navigation keybindings without disturbing internal pane controls\s+2:check @agent\/3 36:00 ◷20:00$/u,
+      /^17:10:00 ● run\s+main#42 PR42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
     )
     expect(partner?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 PR43\.1 Carry the production split-pane contract into the queue detail surface\s+2:check @agent\/5 34:00 ◷20:00$/u,
+      /^17:10:00 ● run\s+main#42 PR43\.1\s+\S topic\/pr43 \(2:check\)\s+@agent\/5 34:00 20:00$/u,
     )
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × fail\s+main#5\s+PR5\.1 Reject broken payload\s+typecheck-failed @agent\/2 27:00 ◷12:00$/u,
+      /^16:42:00 × fail\s+main#5\s+PR5\.1\s+\S topic\/pr5 \(typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
     )
-    expect(integrated?.trim()).toMatch(
-      /^16:25:00 ✓ done\s+main#4\s+PR4\.1 Land the durable patch\s+@agent\/7 25:00 ◷15:00$/u,
-    )
+    expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+PR4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
 
-    // Fixed cells stay aligned: the clock glyph column is shared by every
-    // row that has a total.
-    const glyphColumns = [lead, partner, rejected, integrated].map((row) => row?.indexOf("◷"))
-    expect(new Set(glyphColumns).size).toBe(1)
-    // The pending row has no Run yet: blue `pending` instead of a run id,
-    // no step, no run duration.
+    // No row carries the removed clock glyph, and the pending row has no Run
+    // yet: blue `pending` instead of a run id, no run duration.
+    for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("#")
-    expect(pending).not.toContain("◷")
   })
 
   it("falls back to the compact #run form and keeps fixed fields intact at 80 columns", async () => {
@@ -199,7 +197,8 @@ describe("queue timeline 21106 contract", () => {
     expect(lead).not.toContain("main#42")
     expect(lead).toContain("2:check")
     expect(lead).toContain("36:00")
-    expect(lead).toContain("◷20:00")
+    expect(lead).toContain("20:00")
+    expect(lead).not.toContain("◷")
     // The BY column is the first casualty on narrow tiers — dropped before
     // any identity, clock, or measurement column.
     expect(lead?.trimStart().startsWith("17:10:00 ● run")).toBe(true)
@@ -207,7 +206,8 @@ describe("queue timeline 21106 contract", () => {
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
     const rejected = rows[rowIndex(rows, "PR5.1")]
     expect(rejected).toContain("typecheck-failed")
-    expect(rejected).toContain("◷12:00")
+    expect(rejected).toContain("12:00")
+    expect(rejected).not.toContain("◷")
   })
 
   it("renders runner states once, loudly, in the RUNNER box", async () => {
@@ -292,7 +292,7 @@ describe("queue timeline 21106 contract", () => {
     for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ RUNNER", "│ ROWS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
-    expect(wide[rowIndex(wide, "STEP")]?.indexOf("TIME")).toBe(0)
+    expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
 
     const narrow = await renderTimeline(contractProjection(), 100)
     const narrowBorder = narrow[rowIndex(narrow, "STATS")]
@@ -532,7 +532,8 @@ describe("queue timeline 21106 contract", () => {
       if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
       if (row.step !== undefined) expect(rendered, row.id).toContain(row.step)
       if (row.ageMs !== null) expect(rendered, row.id).toContain(duration(row.ageMs))
-      if (row.totalMs !== null) expect(rendered, row.id).toContain(`\u25f7${duration(row.totalMs)}`)
+      // Run duration is a bare dimmed time now \u2014 no `\u25f7` glyph (item S).
+      if (row.totalMs !== null) expect(rendered, row.id).toContain(duration(row.totalMs))
     }
   })
 

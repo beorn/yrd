@@ -48,7 +48,7 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: true, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      for (const cell of ["time", "status", "run", "pr", "step", "by", "age", "dur"]) {
+      for (const cell of ["time", "status", "run", "pr", "by", "age", "dur"]) {
         const header = app.locator(`#th-${cell}`).boundingBox()
         expect(header, `header cell th-${cell}`).not.toBeNull()
         const cells = app.locator(`[id^='td-${cell}-']`)
@@ -76,7 +76,7 @@ describe("queue timeline chrome 21106", () => {
       )
       try {
         await oneShot.waitForLayoutStable()
-        for (const cell of ["time", "status", "run", "pr", "step", "by", "age", "dur"]) {
+        for (const cell of ["time", "status", "run", "pr", "by", "age", "dur"]) {
           const live = app.locator(`#th-${cell}`).boundingBox()
           const plain = oneShot.locator(`#th-${cell}`).boundingBox()
           expect(plain?.x, `one-shot '${cell}' header x`).toBe(live?.x)
@@ -137,13 +137,15 @@ describe("queue timeline chrome 21106", () => {
       const runRow = rowAt(text, runRowY)
       const runX = runRow.indexOf("main#4 ") >= 0 ? runRow.indexOf("main#4 ") : runRow.indexOf("main#4")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
-      const subjectX = runRow.indexOf("Land the durable patch")
-      expect(subjectX).toBeGreaterThan(0)
+      // The flexible cell now holds the branch (item Q); its `/` marks a branch
+      // char rendered in the default (non-muted) fg.
+      const branchX = runRow.indexOf("/")
+      expect(branchX).toBeGreaterThan(0)
       const runFg = app.cell(runX, runRowY).fg
       const timeFg = app.cell(timeX, runRowY).fg
-      const subjectFg = app.cell(subjectX, runRowY).fg
+      const branchFg = app.cell(branchX, runRowY).fg
       expect(runFg, "run id shares TIME's muted fg").toEqual(timeFg)
-      expect(runFg, "run id is not default fg").not.toEqual(subjectFg)
+      expect(runFg, "run id is not default fg").not.toEqual(branchFg)
 
       const pendingRowY = rowIndexOf(text, " pend ")
       const pendingRow = rowAt(text, pendingRowY)
@@ -306,6 +308,7 @@ describe("queue timeline chrome 21106", () => {
         const topY = lines.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = lines[topY]
+        if (topLine === undefined) throw new Error(`${label} top border row missing`)
         const titleX = topLine.indexOf(label)
         // A rounded top-right corner closes this box's border row after the
         // label (nested/side-by-side boxes still close with `╮`; search from the
@@ -427,11 +430,22 @@ describe("queue timeline chrome 21106", () => {
       for (const x of [timeX, statusX]) {
         expect(app.cell(x, cursorY).fg).toEqual(cursorFg)
       }
-      // The selection band spans the FULL row width: the run-duration glyph
-      // near the right edge AND the inter-cell gap next to it carry the same
-      // selection background as the left-edge cells.
-      const durX = cursorLine.indexOf("◷")
-      expect(durX, "cursor row run-duration glyph").toBeGreaterThan(statusX)
+      // The selection band spans the FULL row width: the run-duration cell at
+      // the right edge (now a bare dimmed time, no glyph — item S) AND the
+      // inter-cell gap next to it carry the same selection background as the
+      // left-edge cells. Locate the cursor row's `td-dur` cell (robust across
+      // the split layout, where a text scan would catch a DETAIL-pane time).
+      const durCells = app.locator("[id^='td-dur-']")
+      let durBox: { x: number; y: number; width: number } | null = null
+      for (let index = 0; index < durCells.count(); index += 1) {
+        const box = durCells.nth(index).boundingBox()
+        if (box?.y === cursorY) {
+          durBox = box
+          break
+        }
+      }
+      expect(durBox, "cursor row run-duration cell").not.toBeNull()
+      const durX = durBox!.x + durBox!.width - 1
       expect(app.cell(durX, cursorY).bg, "selection bg at the right edge").toEqual(cursorBg)
       expect(app.cell(durX - 1, cursorY).bg, "selection bg across cell gaps").toEqual(cursorBg)
       // Unselected rejected row keeps its own colorization: status fg differs

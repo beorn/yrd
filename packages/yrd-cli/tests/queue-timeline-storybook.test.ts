@@ -90,7 +90,7 @@ describe("queue timeline storybook", () => {
       term.screen
         .getText()
         .split("\n")
-        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("STEP"))
+        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("PR"))
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
@@ -451,11 +451,11 @@ describe("queue timeline storybook", () => {
     )
     try {
       await right.waitForLayoutStable()
-      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("STEP"))
+      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).toContain("STATUS")
       expect(header).not.toContain("BY")
       expect(right.text).toContain("PR42.1")
-      expect(right.text).toContain("◷20:00")
+      expect(right.text).toContain("20:00")
     } finally {
       right.unmount()
     }
@@ -572,10 +572,10 @@ describe("queue timeline storybook", () => {
       await handle.press("d")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("[ ] done")
-      expect(handle.text).not.toContain("PR4.1 Land the durable patch")
+      expect(handle.text).not.toContain("PR4.1")
       await handle.press("d")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR4.1 Land the durable patch")
+      expect(handle.text).toContain("PR4.1")
 
       // `o` expands the EVIDENCE section inside the detail body.
       await handle.press("o")
