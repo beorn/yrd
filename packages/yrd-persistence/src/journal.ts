@@ -144,6 +144,7 @@ const ArchivedOrphanRecordSchema = z
         "origin-lane": z.literal("v3-phantom"),
         "origin-file": z.string().min(1),
         "origin-row": z.uuidv7(),
+        "source-sha256": DigestSchema.optional(),
         "imported-at": z.iso.datetime({ offset: true }),
         "imported-by": z.string().min(1),
         "collision-policy": z.literal("refuse"),
@@ -690,6 +691,7 @@ async function readOrphanSource(
 
   const records: ArchivedOrphanRecord[] = []
   const identities = new Set<string>()
+  const sourceSha256 = sha256(bytes)
   const importedAt = options.importedAt ?? new Date().toISOString()
   let start = 0
   while (start < bytes.length) {
@@ -717,6 +719,7 @@ async function readOrphanSource(
           "origin-lane": "v3-phantom",
           "origin-file": options.sourcePath,
           "origin-row": frame.command.id,
+          "source-sha256": sourceSha256,
           "imported-at": importedAt,
           "imported-by": options.importedBy,
           "collision-policy": "refuse",
@@ -726,7 +729,7 @@ async function readOrphanSource(
     )
     start = end
   }
-  return { records, sourceSha256: sha256(bytes) }
+  return { records, sourceSha256 }
 }
 
 function frameIdentities(frame: JournalFrame): ArchivedOrphanCollision[] {
