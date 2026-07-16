@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { isAbsolute, join, resolve } from "node:path"
+import { isAbsolute, join, resolve, sep } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process, ProcessResult } from "@yrd/process"
@@ -10,6 +10,12 @@ import type { IntegratedShape, IntegrationProof, PRShape, PRSnapshot, SourceRewr
 import { IntegrationProofSchema, SourceRewriteSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
 import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
+import { executeQueueSubmoduleComposition } from "./submodule-composition-git.ts"
+import {
+  planQueueSubmoduleComposition,
+  type QueueConflictStage,
+  type QueueTreeConflict,
+} from "./submodule-composition.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -46,11 +52,40 @@ export const CommandEvidenceSchema = z
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
 
+export const QueueSubmoduleResolutionEvidenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("pin"),
+      path: z.string().min(1),
+      sha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("compose"),
+      path: z.string().min(1),
+      sha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+      ref: z.string().min(1),
+      reviewedBlobs: z.array(
+        z
+          .object({
+            path: z.string().min(1),
+            oid: z.string().regex(/^[0-9a-f]{40,64}$/iu),
+            content: z.string(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+])
+export type QueueSubmoduleResolutionEvidence = Readonly<z.infer<typeof QueueSubmoduleResolutionEvidenceSchema>>
+
 export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateRef: z.string().min(1),
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
+  submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
@@ -59,6 +94,7 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   candidateSha: true,
   candidateRef: true,
   sourceRewrites: true,
+  submoduleResolutions: true,
 }).strict()
 type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
 
@@ -96,7 +132,10 @@ const SubmoduleReachabilityRefusalEvidenceSchema = z
     ]),
     repository: z.string().min(1),
     origin: z.string().min(1).optional(),
-    sha: z.string().regex(/^[0-9a-f]{40,64}$/iu).optional(),
+    sha: z
+      .string()
+      .regex(/^[0-9a-f]{40,64}$/iu)
+      .optional(),
     paths: z.array(z.string().min(1)).min(1).optional(),
     exitCode: z.number().int().optional(),
     timedOut: z.boolean().optional(),
@@ -582,7 +621,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ["range-diff", "--no-color", "--no-dual-color", "--no-patch", `${oldBase}..${oldTip}`, `${newBase}..${newTip}`],
       true,
     )
-  return Object.freeze({ run, raw, commit, optionalCommit, stablePatchId, rangeDiff })
+  return Object.freeze({ run, raw, commit, optionalCommit, stablePatchId, rangeDiff, process, env })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -1059,10 +1098,18 @@ async function prepareCandidate(
   artifactRoot: string,
   allowAuthoredGitlinks: boolean,
 ): Promise<
-  | Readonly<{ status: "passed"; output: Readonly<{ sha: string; sourceRewrites: readonly SourceRewrite[] }> }>
+  | Readonly<{
+      status: "passed"
+      output: Readonly<{
+        sha: string
+        sourceRewrites: readonly SourceRewrite[]
+        submoduleResolutions: readonly QueueSubmoduleResolutionEvidence[]
+      }>
+    }>
   | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }>; output: GitCheckFailureEvidence }>
 > {
   const sourceRewrites: SourceRewrite[] = []
+  const submoduleResolutions: QueueSubmoduleResolutionEvidence[] = []
   for (const pr of input.prs) {
     if (pr.composition !== undefined) {
       const baseCertificate = await verifyComposedRecutBase(git, path, pr)
@@ -1092,13 +1139,18 @@ async function prepareCandidate(
     }
     const merged = await git.run(path, ["merge", "--no-ff", "--no-edit", pr.headSha], true)
     if (merged.code !== 0) {
+      const resolved = await resolveCandidateSubmoduleConflict(git, repo, path)
+      if (resolved.status === "composed") {
+        submoduleResolutions.push(...resolved.output)
+        continue
+      }
       const artifacts = await writeTerminalArtifacts(artifactRoot, input, attempt, merged.stdout, merged.stderr)
       await git.run(path, ["merge", "--abort"], true)
-      const detail = `PR '${pr.id}' could not be applied: ${merged.stderr || merged.stdout}`
+      const detail = `PR '${pr.id}' could not be applied: ${resolved.message}`
       return {
         status: "failed",
         error: {
-          code: "candidate-conflict",
+          code: resolved.code,
           message: detail,
         },
         output: await failureEvidence({
@@ -1114,7 +1166,10 @@ async function prepareCandidate(
       }
     }
   }
-  return { status: "passed", output: { sha: await git.commit(path, "HEAD"), sourceRewrites } }
+  return {
+    status: "passed",
+    output: { sha: await git.commit(path, "HEAD"), sourceRewrites, submoduleResolutions },
+  }
 }
 
 async function verifyRecutCertificate(
@@ -1813,14 +1868,7 @@ async function candidateSubmodulePins(
   const configured = await runSubmoduleProbe(
     git,
     path,
-    [
-      "config",
-      "--null",
-      "--blob",
-      `${candidateSha}:.gitmodules`,
-      "--get-regexp",
-      "^submodule\\..*\\.(path|url)$",
-    ],
+    ["config", "--null", "--blob", `${candidateSha}:.gitmodules`, "--get-regexp", "^submodule\\..*\\.(path|url)$"],
     configuredContext,
     true,
   )
@@ -1836,7 +1884,8 @@ async function candidateSubmodulePins(
   const urlsByPath = new Map<string, string>()
   for (const [name, module] of modules) {
     if (module.path === undefined) continue
-    if (module.url === undefined) throw new Error(`yrd: candidate submodule '${module.path}' has no URL (section '${name}')`)
+    if (module.url === undefined)
+      throw new Error(`yrd: candidate submodule '${module.path}' has no URL (section '${name}')`)
     const previous = urlsByPath.get(module.path)
     if (previous !== undefined && previous !== module.url) {
       throw new Error(`yrd: candidate submodule path '${module.path}' resolves to conflicting URLs`)
@@ -1862,6 +1911,121 @@ async function candidateSubmodulePins(
     }
     return { ...gitlink, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
   })
+}
+
+type CandidateSubmoduleConflictResult =
+  | Readonly<{ status: "composed"; output: readonly QueueSubmoduleResolutionEvidence[] }>
+  | Readonly<{
+      status: "refused"
+      code: "candidate-conflict" | "submodule-composition-conflict" | "submodule-composition-unavailable"
+      message: string
+    }>
+
+async function resolveCandidateSubmoduleConflict(
+  git: Git,
+  repo: string,
+  path: string,
+): Promise<CandidateSubmoduleConflictResult> {
+  const conflicts = await readQueueTreeConflicts(git, path)
+  if (conflicts.length === 0) {
+    return { status: "refused", code: "candidate-conflict", message: "merge failed without unmerged paths" }
+  }
+  const structural = planQueueSubmoduleComposition(
+    conflicts.map((conflict) => ({ ...conflict, origin: "yrd://structural-validation" })),
+  )
+  if (structural.status === "refused") return structural
+
+  const pins = await candidateSubmodulePins(git, repo, path, "HEAD")
+  const origins = new Map(pins.map((pin) => [pin.path, pin.origin]))
+  const plan = planQueueSubmoduleComposition(
+    conflicts.map((conflict) => ({ ...conflict, origin: origins.get(conflict.path) })),
+  )
+  if (plan.status === "refused") return plan
+
+  const stores = new Map(
+    plan.resolutions.flatMap((resolution) =>
+      resolution.kind === "compose"
+        ? [[resolution.origin, candidateSubmoduleStore(repo, resolution.path)] as const]
+        : [],
+    ),
+  )
+  const executed = await executeQueueSubmoduleComposition(plan, {
+    inject: {
+      process: git.process,
+      storeForOrigin(origin) {
+        const store = stores.get(origin)
+        if (store === undefined) throw new Error(`no initialized local store is available for '${origin}'`)
+        return store
+      },
+    },
+    env: git.env,
+  })
+  if (executed.status === "refused") return executed
+
+  for (const resolution of executed.resolutions) {
+    const staged = await git.run(
+      path,
+      ["update-index", "--cacheinfo", `160000,${resolution.sha},${resolution.path}`],
+      true,
+    )
+    if (staged.code !== 0) {
+      return {
+        status: "refused",
+        code: "submodule-composition-unavailable",
+        message: `could not stage composed pin for '${resolution.path}': ${fetchDetail(staged)}`,
+      }
+    }
+  }
+  const unresolved = await unmergedPaths(git, path)
+  if (unresolved.length > 0) {
+    return {
+      status: "refused",
+      code: "candidate-conflict",
+      message: `candidate still has unresolved paths after submodule composition: ${unresolved.join(", ")}`,
+    }
+  }
+  const committed = await git.run(path, ["commit", "--no-edit"], true)
+  if (committed.code !== 0) {
+    return {
+      status: "refused",
+      code: "submodule-composition-unavailable",
+      message: `could not finalize the root composition commit: ${fetchDetail(committed)}`,
+    }
+  }
+  return {
+    status: "composed",
+    output: executed.resolutions.map((resolution) => QueueSubmoduleResolutionEvidenceSchema.parse(resolution)),
+  }
+}
+
+async function readQueueTreeConflicts(git: Git, repo: string): Promise<QueueTreeConflict[]> {
+  const listed = await git.raw(repo, ["ls-files", "--unmerged", "-z"], true)
+  if (!probeSettled(listed) || listed.code !== 0) {
+    throw new Error(`yrd: could not read candidate conflict stages: ${fetchDetail(listed)}`)
+  }
+  const grouped = new Map<string, QueueConflictStage[]>()
+  for (const entry of listed.stdout.split("\0")) {
+    if (entry === "") continue
+    const parsed = /^([0-7]{6}) ([0-9a-f]{40}|[0-9a-f]{64}) ([123])\t([\s\S]+)$/iu.exec(entry)
+    if (parsed?.[1] === undefined || parsed[2] === undefined || parsed[3] === undefined || parsed[4] === undefined) {
+      throw new Error("yrd: candidate conflict index emitted a malformed stage record")
+    }
+    const stages = grouped.get(parsed[4]) ?? []
+    stages.push({ mode: parsed[1], oid: parsed[2], stage: Number(parsed[3]) })
+    grouped.set(parsed[4], stages)
+  }
+  return [...grouped]
+    .map(([conflictPath, stages]) => ({ path: conflictPath, stages }))
+    .toSorted((left, right) => left.path.localeCompare(right.path))
+}
+
+function candidateSubmoduleStore(repo: string, path: string): string {
+  const root = resolve(repo)
+  const store = resolve(root, path)
+  if (store === root || !store.startsWith(`${root}${sep}`)) {
+    throw new Error(`yrd: submodule path '${path}' escapes the root repository`)
+  }
+  return store
 }
 
 function fetchDetail(result: GitResult): string {
@@ -2092,6 +2256,9 @@ async function withPinnedCandidate<Output extends JsonValue>(
         candidateSha: candidate.output.sha,
         candidateRef: pinned.ref,
         ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
+        ...(candidate.output.submoduleResolutions.length === 0
+          ? {}
+          : { submoduleResolutions: candidate.output.submoduleResolutions }),
       }),
     )
   })
@@ -2245,6 +2412,16 @@ async function validatePinnedCandidate(
         error: {
           code: "invalid-candidate",
           message: `checked candidate does not pin source '${source.repo}' to '${source.newTipSha}'`,
+        },
+      }
+    }
+  }
+  for (const resolution of checked.submoduleResolutions ?? []) {
+    if ((await readGitlink(git, repo, checked.candidateSha, resolution.path)) !== resolution.sha) {
+      return {
+        error: {
+          code: "invalid-candidate",
+          message: `checked candidate does not pin submodule '${resolution.path}' to '${resolution.sha}'`,
         },
       }
     }

@@ -123,6 +123,60 @@ async function hookedSubmoduleRepository(options: {
   return { repo, remote, baseSha, featureSha, moduleSha }
 }
 
+async function divergentSubmoduleRepository(kind: "clean" | "conflict"): Promise<{
+  repo: string
+  module: string
+  rootCurrentSha: string
+  featureSha: string
+}> {
+  const { repo } = await repository()
+  const module = join(repo, "..", `composition-module-${kind}`)
+  await Bun.$`git init -q -b main ${module}`
+  await git(module, ["config", "user.name", "Yrd Test"])
+  await git(module, ["config", "user.email", "yrd@example.invalid"])
+  await writeFile(join(module, "notes.md"), "top\nmiddle\nbottom\n")
+  await git(module, ["add", "notes.md"])
+  await git(module, ["commit", "-qm", "base"])
+  const baseSha = await git(module, ["rev-parse", "HEAD"])
+
+  await git(module, ["switch", "-qc", "current"])
+  await writeFile(
+    join(module, "notes.md"),
+    kind === "clean" ? "top-current\nmiddle\nbottom\n" : "top\ncurrent\nbottom\n",
+  )
+  await git(module, ["commit", "-qam", "current"])
+  const currentSha = await git(module, ["rev-parse", "HEAD"])
+
+  await git(module, ["switch", "-qc", "incoming", baseSha])
+  await writeFile(
+    join(module, "notes.md"),
+    kind === "clean" ? "top\nmiddle\nbottom-incoming\n" : "top\nincoming\nbottom\n",
+  )
+  await git(module, ["commit", "-qam", "incoming"])
+  const incomingSha = await git(module, ["rev-parse", "HEAD"])
+  await git(module, ["switch", "-q", "main"])
+
+  await git(repo, ["config", "protocol.file.allow", "always"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+  await git(repo, ["commit", "-qam", "add dependency"])
+  const rootBaseSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(join(repo, "dep"), ["fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*"])
+
+  await git(join(repo, "dep"), ["checkout", "-q", currentSha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "-qm", "advance current dependency"])
+  const rootCurrentSha = await git(repo, ["rev-parse", "HEAD"])
+
+  await git(repo, ["switch", "-qc", "issue/feature", rootBaseSha])
+  await git(join(repo, "dep"), ["checkout", "-q", incomingSha])
+  await git(repo, ["add", "dep"])
+  await git(repo, ["commit", "-qm", "advance incoming dependency"])
+  const featureSha = await git(repo, ["rev-parse", "HEAD"])
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["-c", "protocol.file.allow=always", "submodule", "update", "-q"])
+  return { repo, module, rootCurrentSha, featureSha }
+}
+
 async function restackSubmoduleRepository(
   options: Readonly<{
     sourcePath?: string
@@ -2455,27 +2509,57 @@ describe("Queue command adapters", () => {
       verdict: "STALLED",
       sweepFailure: "process tree remained alive",
     },
-  ] as const)("keeps the candidate submitted after a cannot-probe $name", async (failure) => {
-    const fixture = await hookedSubmoduleRepository({
-      baseVersion: "base",
-      candidateVersion: "candidate",
-      requiredVersion: "candidate",
-    })
-    await using process = createProcess()
-    const requests: ProcessRequest[] = []
-    let configuredCheckRan = false
-    const unavailable: Pick<Process, "run"> = {
-      run(request) {
-        requests.push(request)
-        if (request.argv[0] === "true") configuredCheckRan = true
-        if (request.argv.includes("--filter=tree:0")) {
-          return Promise.resolve({
+  ] as const)(
+    "keeps the candidate submitted after a cannot-probe $name",
+    async (failure) => {
+      const fixture = await hookedSubmoduleRepository({
+        baseVersion: "base",
+        candidateVersion: "candidate",
+        requiredVersion: "candidate",
+      })
+      await using process = createProcess()
+      const requests: ProcessRequest[] = []
+      let configuredCheckRan = false
+      const unavailable: Pick<Process, "run"> = {
+        run(request) {
+          requests.push(request)
+          if (request.argv[0] === "true") configuredCheckRan = true
+          if (request.argv.includes("--filter=tree:0")) {
+            return Promise.resolve({
+              exitCode: failure.exitCode,
+              signal: failure.signal,
+              stdout: "",
+              stderr: failure.stderr,
+              durationMs: 1,
+              timedOut: failure.timedOut,
+              ...("stalled" in failure
+                ? {
+                    stalled: failure.stalled,
+                    verdict: failure.verdict,
+                    sweepFailure: failure.sweepFailure,
+                  }
+                : {}),
+            })
+          }
+          return process.run(request)
+        },
+      }
+      await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({
+        status: "failed",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "submodule-reachability-refusal",
+            operation: "filtered-fetch",
+            sha: fixture.moduleSha,
             exitCode: failure.exitCode,
-            signal: failure.signal,
-            stdout: "",
-            stderr: failure.stderr,
-            durationMs: 1,
             timedOut: failure.timedOut,
+            signal: failure.signal,
             ...("stalled" in failure
               ? {
                   stalled: failure.stalled,
@@ -2483,42 +2567,16 @@ describe("Queue command adapters", () => {
                   sweepFailure: failure.sweepFailure,
                 }
               : {}),
-          })
-        }
-        return process.run(request)
-      },
-    }
-    await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "failed",
-      error: {
-        code: "queue-environment-refused",
-        evidence: {
-          kind: "submodule-reachability-refusal",
-          operation: "filtered-fetch",
-          sha: fixture.moduleSha,
-          exitCode: failure.exitCode,
-          timedOut: failure.timedOut,
-          signal: failure.signal,
-          ...("stalled" in failure
-            ? {
-                stalled: failure.stalled,
-                verdict: failure.verdict,
-                sweepFailure: failure.sweepFailure,
-              }
-            : {}),
-          retryable: true,
+            retryable: true,
+          },
         },
-      },
-    })
-    expect(configuredCheckRan).toBe(false)
-    expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
-  }, 15_000)
+      })
+      expect(configuredCheckRan).toBe(false)
+      expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
+      expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    },
+    15_000,
+  )
 
   it.each([
     {
@@ -2575,52 +2633,56 @@ describe("Queue command adapters", () => {
       stderr: "",
       timedOut: false,
     },
-  ] as const)("keeps the candidate submitted after a $name", async (failure) => {
-    const fixture = await hookedSubmoduleRepository({
-      baseVersion: "base",
-      candidateVersion: "candidate",
-      requiredVersion: "candidate",
-    })
-    await using process = createProcess()
-    let configuredCheckRan = false
-    const unavailable: Pick<Process, "run"> = {
-      run(request) {
-        if (request.argv[0] === "true") configuredCheckRan = true
-        if (failure.matches(request.argv)) {
-          return Promise.resolve({
-            exitCode: failure.exitCode,
-            signal: failure.signal,
-            stdout: "",
-            stderr: failure.stderr,
-            durationMs: 1,
-            timedOut: failure.timedOut,
-          })
-        }
-        return process.run(request)
-      },
-    }
-    await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
-    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
-
-    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
-
-    expect(run).toMatchObject({
-      status: "failed",
-      error: {
-        code: "queue-environment-refused",
-        evidence: {
-          kind: "submodule-reachability-refusal",
-          operation: failure.operation,
-          exitCode: failure.exitCode,
-          timedOut: failure.timedOut,
-          signal: failure.signal,
-          retryable: true,
+  ] as const)(
+    "keeps the candidate submitted after a $name",
+    async (failure) => {
+      const fixture = await hookedSubmoduleRepository({
+        baseVersion: "base",
+        candidateVersion: "candidate",
+        requiredVersion: "candidate",
+      })
+      await using process = createProcess()
+      let configuredCheckRan = false
+      const unavailable: Pick<Process, "run"> = {
+        run(request) {
+          if (request.argv[0] === "true") configuredCheckRan = true
+          if (failure.matches(request.argv)) {
+            return Promise.resolve({
+              exitCode: failure.exitCode,
+              signal: failure.signal,
+              stdout: "",
+              stderr: failure.stderr,
+              durationMs: 1,
+              timedOut: failure.timedOut,
+            })
+          }
+          return process.run(request)
         },
-      },
-    })
-    expect(configuredCheckRan).toBe(false)
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
-  }, 15_000)
+      }
+      await using app = await checkedQueue(unavailable, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+      await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+      expect(run).toMatchObject({
+        status: "failed",
+        error: {
+          code: "queue-environment-refused",
+          evidence: {
+            kind: "submodule-reachability-refusal",
+            operation: failure.operation,
+            exitCode: failure.exitCode,
+            timedOut: failure.timedOut,
+            signal: failure.signal,
+            retryable: true,
+          },
+        },
+      })
+      expect(configuredCheckRan).toBe(false)
+      expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+    },
+    15_000,
+  )
 
   it("allows an absolute submodule URL after an exact no-value origin lookup", async () => {
     const fixture = await hookedSubmoduleRepository({
@@ -2792,6 +2854,53 @@ describe("Queue command adapters", () => {
     expect(configuredCheckRan).toBe(false)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
   })
+
+  it("composes a divergent clean submodule pin into the checked and landed root candidate", async () => {
+    const fixture = await divergentSubmoduleRepository("clean")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+    const check = run.steps[0]?.job
+    if (check?.status !== "passed") throw new Error(`check was ${check?.status ?? "missing"}`)
+    const evidence = GitCheckEvidenceSchema.parse(check.output)
+
+    expect(run.status).toBe("passed")
+    expect(evidence.submoduleResolutions).toEqual([
+      {
+        kind: "compose",
+        path: "dep",
+        sha: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        ref: expect.stringMatching(/^refs\/yrd\/compositions\/[0-9a-f]{64}$/u),
+        reviewedBlobs: [
+          {
+            path: "notes.md",
+            oid: expect.stringMatching(/^[0-9a-f]{40}$/u),
+            content: "top-current\nmiddle\nbottom-incoming\n",
+          },
+        ],
+      },
+    ])
+    const resolution = evidence.submoduleResolutions?.[0]
+    if (resolution?.kind !== "compose") throw new Error("missing composed submodule evidence")
+    expect(await git(fixture.repo, ["ls-tree", "main", "dep"])).toContain(resolution.sha)
+    expect(await git(fixture.module, ["rev-parse", resolution.ref])).toBe(resolution.sha)
+  }, 20_000)
+
+  it("refuses a real submodule content conflict without pinning or landing a root candidate", async () => {
+    const fixture = await divergentSubmoduleRepository("conflict")
+    await using process = createProcess()
+    await using app = await checkedQueue(process, fixture.repo, ["true"], { env: authoredGitlinksEnv })
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({ status: "failed", error: { code: "submodule-composition-conflict" } })
+    expect(await git(fixture.repo, ["rev-parse", "main"])).toBe(fixture.rootCurrentSha)
+    expect(await git(fixture.repo, ["for-each-ref", "--format=%(refname)", "refs/yrd/candidates"])).toBe("")
+    expect(await git(fixture.module, ["for-each-ref", "--format=%(refname)", "refs/yrd/compositions"])).toBe("")
+  }, 20_000)
 
   it("runs remote push hooks from the checked candidate tree and submodule pins", async () => {
     const { repo, remote, featureSha, moduleSha } = await hookedSubmoduleRepository({
