@@ -759,7 +759,29 @@ function createQueue<Shape extends PRShape>(
       if (active?.job?.status === "requested") {
         const guarded = await actions.advance(id)
         if (guarded.events.length > 0) continue
-        await jobs.run(active.job.id, options)
+        try {
+          await jobs.run(active.job.id, options)
+        } catch (cause) {
+          // merge-queue R43: a peer runtime can cancel (or otherwise settle)
+          // the Job between this runtime's ownership check and its settlement
+          // commit — the commit re-folds the journal, meets the terminal Job,
+          // and the transition guard throws. That guard protects state
+          // integrity and stays; HERE the condition is recoverable: the Job is
+          // already settled, so record a loud typed skip and keep composing
+          // instead of killing the resident runner. The skip is
+          // terminal-state-verified against the refreshed projection — any
+          // failure while the Job is still live propagates unchanged.
+          await actions.refresh()
+          const raced = runtime().jobs.byId[active.job.id]
+          if (raced === undefined || !Job.terminal(raced)) throw cause
+          log.warn?.("queue step settlement lost to a peer transition; skipping the settled job", {
+            action: "canceled-skip",
+            run: id,
+            job: active.job.id,
+            status: raced.status,
+            reason: cause instanceof Error ? cause.message : String(cause),
+          })
+        }
         continue
       }
       if (active?.job?.status === "running" || active?.job?.status === "waiting") {
