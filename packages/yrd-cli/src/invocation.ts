@@ -86,6 +86,12 @@ export function canonicalizeYrdCommandAliases(args: readonly string[], projectio
   ) {
     canonical[commandIndex + 1] = "list"
   }
+  // `queue watch [filter...]` is the live projection of `queue list --watch`;
+  // rewrite the operand so `watch` is consumed as the flag, never spliced into
+  // the positional filter terms by the bare-operand rule below.
+  if (canonical[commandIndex] === "queue" && canonical[commandIndex + 1] === "watch") {
+    canonical.splice(commandIndex + 1, 1, "list", "--watch")
+  }
   const queueOperand = canonical[commandIndex + 1]
   if (
     canonical[commandIndex] === "queue" &&
