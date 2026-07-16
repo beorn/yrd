@@ -9,6 +9,7 @@ import {
   TabPanel,
   Tabs,
   Text,
+  clampSplitPaneRatio,
   resolveSplitPaneLayout,
   useInput,
   useScopeEffect,
@@ -59,6 +60,22 @@ export function queueDetailTier(columns: number, rows: number): QueueDetailTier 
     preferredDirection: "row",
   })
   return layout === "row" ? "right" : layout === "column" ? "below" : "full"
+}
+
+export function queueTimelineColumns(
+  columns: number,
+  tier: QueueDetailTier,
+  detailOpen: boolean,
+  splitRatio: number,
+): number {
+  if (tier !== "right" || !detailOpen) return columns
+  const visibleRatio = clampSplitPaneRatio(splitRatio, {
+    containerSize: columns,
+    dividerSize: DIVIDER_SIZE,
+    minPrimarySize: LIST_NATURAL_WIDTH,
+    minSecondarySize: DETAIL_NATURAL_WIDTH,
+  })
+  return Math.round(visibleRatio * Math.max(0, columns - DIVIDER_SIZE))
 }
 
 export type QueueWatchSnapshot = Readonly<{
@@ -410,13 +427,7 @@ export function QueueWatchFrame({
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
-  const timelineColumns =
-    tier === "right"
-      ? Math.max(
-          LIST_NATURAL_WIDTH,
-          Math.min(columns - DIVIDER_SIZE - DETAIL_NATURAL_WIDTH, Math.floor((columns - DIVIDER_SIZE) * splitRatio)),
-        )
-      : columns
+  const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
