@@ -89,6 +89,35 @@ describe("queue timeline storybook", () => {
     }
   })
 
+  it("restores the wide BY column when Escape closes right-side detail", async () => {
+    using term = createTermless({ cols: 160, rows: 50 })
+    const handle = await run(createElement(QueueTimelineStorybook), term, {
+      mouse: true,
+      selection: false,
+    })
+    const timelineHeader = (): string | undefined =>
+      term.screen
+        .getText()
+        .split("\n")
+        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("RUN·PR"))
+    try {
+      await waitFor(() => term.screen.getText().includes("production-overview"))
+      expect(timelineHeader()).not.toContain("BY")
+      expect(term.screen.getText()).toContain("Esc close detail")
+
+      await act(async () => {
+        await handle.press("Escape")
+        await handle.waitForLayoutStable()
+      })
+
+      await waitFor(() => timelineHeader()?.includes("BY") === true)
+      expect(timelineHeader()).toContain("BY")
+      expect(term.screen.getText()).toContain("Enter reopen detail")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("opens the default selected run detail from the narrow production tier", async () => {
     using term = createTermless({ cols: 80, rows: 24 })
     const handle = await run(createElement(QueueTimelineStorybook), term, {
@@ -387,20 +416,39 @@ describe("queue timeline storybook", () => {
     }
 
     const boundaryStory = queueTimelineStories["detail-below"]
-    const fullAtFooterBoundary = await run(
+    const fullAtNaturalBoundary = await run(
       createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot, paused: false }),
-      { writable: { write: () => {} }, cols: 100, rows: 25 },
+      { writable: { write: () => {} }, cols: 100, rows: 32 },
     )
-    const belowAfterFooter = await run(
+    const belowAfterNaturalBoundary = await run(
       createElement(QueueWatchFrame, { snapshot: boundaryStory.snapshot, paused: false }),
-      { writable: { write: () => {} }, cols: 100, rows: 26 },
+      { writable: { write: () => {} }, cols: 100, rows: 33 },
     )
     try {
-      expect(fullAtFooterBoundary.text).not.toContain("PRs PR4")
-      expect(belowAfterFooter.text).toContain("PRs PR4")
+      expect(fullAtNaturalBoundary.text).not.toContain("PRs PR4")
+      expect(fullAtNaturalBoundary.text).toContain("PR4.1")
+      expect(belowAfterNaturalBoundary.text).toContain("PRs PR4")
+      expect(belowAfterNaturalBoundary.text).toContain("PR4.1")
     } finally {
-      fullAtFooterBoundary.unmount()
-      belowAfterFooter.unmount()
+      fullAtNaturalBoundary.unmount()
+      belowAfterNaturalBoundary.unmount()
+    }
+
+    const right = createRenderer({ cols: 160, rows: 50 })(
+      createElement(QueueWatchFrame, {
+        snapshot: queueTimelineStories["production-overview"].snapshot,
+        paused: false,
+      }),
+    )
+    try {
+      await right.waitForLayoutStable()
+      const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("RUN·PR"))
+      expect(header).toContain("STATUS")
+      expect(header).not.toContain("BY")
+      expect(right.text).toContain("PR42.1")
+      expect(right.text).toContain("◷20:00")
+    } finally {
+      right.unmount()
     }
 
     const live = queueTimelineStories["live-output-growth"]
