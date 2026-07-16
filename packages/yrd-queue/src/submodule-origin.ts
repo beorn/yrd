@@ -1,7 +1,7 @@
 import { resolve } from "node:path"
 import { join as joinPosix, normalize as normalizePosix } from "node:path/posix"
 
-const REMOTE_SCHEME = /^[a-z][a-z\d+.-]*:\/\//iu
+const REMOTE_SCHEME = /^[a-z][a-z\d+.-]*:/iu
 const SCP_REMOTE = /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u
 
 /** Resolve a Git-relative submodule URL with the superproject remote as a directory. */

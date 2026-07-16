@@ -1202,6 +1202,79 @@ describe("Queue command adapters", () => {
     expect(proofFetches[0]?.argv.at(-1)).toBe(proofFetches[1]?.argv.at(-1))
   }, 15_000)
 
+  it.each([
+    {
+      name: "DNS transport failure",
+      exitCode: 128,
+      signal: null,
+      stderr: "fatal: unable to access remote: Could not resolve host",
+      timedOut: false,
+    },
+    {
+      name: "timeout",
+      exitCode: 124,
+      signal: null,
+      stderr: "fatal: filtering not recognized by server",
+      timedOut: true,
+    },
+    {
+      name: "signal termination",
+      exitCode: 143,
+      signal: "SIGTERM",
+      stderr: "",
+      timedOut: false,
+    },
+  ] as const)("keeps the candidate submitted after a cannot-probe $name", async (failure) => {
+    const fixture = await hookedSubmoduleRepository({
+      baseVersion: "base",
+      candidateVersion: "candidate",
+      requiredVersion: "candidate",
+    })
+    await using process = createProcess()
+    const requests: ProcessRequest[] = []
+    let configuredCheckRan = false
+    const unavailable: Pick<Process, "run"> = {
+      run(request) {
+        requests.push(request)
+        if (request.argv[0] === "true") configuredCheckRan = true
+        if (request.argv.includes("--filter=tree:0")) {
+          return Promise.resolve({
+            exitCode: failure.exitCode,
+            signal: failure.signal,
+            stdout: "",
+            stderr: failure.stderr,
+            durationMs: 1,
+            timedOut: failure.timedOut,
+          })
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailable, fixture.repo, ["true"])
+    await app.bays.submit({ branch: "issue/feature", headSha: fixture.featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "submodule-reachability-refusal",
+          operation: "filtered-fetch",
+          sha: fixture.moduleSha,
+          exitCode: failure.exitCode,
+          timedOut: failure.timedOut,
+          signal: failure.signal,
+          retryable: true,
+        },
+      },
+    })
+    expect(configuredCheckRan).toBe(false)
+    expect(requests.filter(({ argv }) => argv.includes("--depth=1"))).toHaveLength(1)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: fixture.featureSha })
+  }, 15_000)
+
   it.each(["seeded", "unseeded"] as const)(
     "refuses an unreachable exact pin from a fresh store with an operator tree that is %s",
     async (operator) => {

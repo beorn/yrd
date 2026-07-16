@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { parseJobLaunch, type JobResult } from "@yrd/job"
-import type { Process } from "@yrd/process"
+import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape } from "./model.ts"
 import { IntegrationProofSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
+import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -64,6 +65,22 @@ export const QueueAuthorityRefusalEvidenceSchema = z
   })
   .strict()
 export type QueueAuthorityRefusalEvidence = Readonly<z.infer<typeof QueueAuthorityRefusalEvidenceSchema>>
+
+const SubmoduleReachabilityRefusalEvidenceSchema = z
+  .object({
+    kind: z.literal("submodule-reachability-refusal"),
+    operation: z.enum(["initialize", "filtered-fetch", "fallback-fetch", "verify"]),
+    origin: z.string().min(1),
+    sha: z.string().regex(/^[0-9a-f]{40,64}$/iu).optional(),
+    paths: z.array(z.string().min(1)).min(1).optional(),
+    exitCode: z.number().int().optional(),
+    timedOut: z.boolean().optional(),
+    signal: z.string().nullable().optional(),
+    detail: z.string().min(1),
+    retryable: z.literal(true),
+  })
+  .strict()
+type SubmoduleReachabilityRefusalEvidence = Readonly<z.infer<typeof SubmoduleReachabilityRefusalEvidenceSchema>>
 
 export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
@@ -348,7 +365,14 @@ async function failureEvidence(
   })
 }
 
-type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
+type GitResult = Readonly<{
+  code: number
+  stdout: string
+  stderr: string
+  durationMs: number
+  signal: ProcessResult["signal"]
+  timedOut: boolean
+}>
 type Git = ReturnType<typeof createGit>
 
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
@@ -366,6 +390,9 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       code: result.exitCode,
       stdout: trim ? result.stdout.trim() : result.stdout,
       stderr: trim ? result.stderr.trim() : result.stderr,
+      durationMs: result.durationMs,
+      signal: result.signal,
+      timedOut: result.timedOut,
     }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
@@ -540,12 +567,14 @@ type MutableSubmoduleConfig = { path?: string; url?: string }
 const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
 const FILTER_UNSUPPORTED =
   /filtering not recognized by server|server does not support filter|filter(?:ing)? (?:is )?not supported|unsupported[^\n]*filter/iu
+const DEFINITIVE_EXACT_SHA_ABSENCE =
+  /not our ref|could(?: not|n't) find remote ref|does not allow request for unadvertised object/iu
+const DEFINITIVE_LOCAL_OBJECT_ABSENCE =
+  /not a valid object name|bad object|unknown revision|needed a single revision/iu
 
 function scpRemote(value: string): RegExpExecArray | null {
   return /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u.exec(value)
 }
-
-import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 
 function canonicalRemote(repo: string, value: string): string {
   if (isAbsolute(value) || REMOTE_SCHEME.test(value) || scpRemote(value) !== null) return value
@@ -647,7 +676,43 @@ async function candidateSubmodulePins(
 }
 
 function fetchDetail(result: GitResult): string {
-  return result.stderr.trim() || result.stdout.trim() || `git exited ${result.code}`
+  const detail = result.stderr.trim() || result.stdout.trim() || `git exited ${result.code}`
+  if (result.timedOut) return `git timed out: ${detail}`
+  if (result.signal !== null) return `git terminated by ${result.signal}: ${detail}`
+  return detail
+}
+
+type SubmoduleProbeContext = Readonly<{
+  operation: "initialize" | "filtered-fetch" | "fallback-fetch" | "verify"
+  origin: string
+  sha?: string
+  paths?: readonly string[]
+}>
+
+async function runSubmoduleProbe(
+  git: Git,
+  repo: string,
+  args: readonly string[],
+  context: SubmoduleProbeContext,
+): Promise<GitResult> {
+  try {
+    return await git.run(repo, args, true)
+  } catch (cause) {
+    throw createSubmoduleReachabilityRefusal(context, undefined, messageOf(cause))
+  }
+}
+
+function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
+  return !result.timedOut && result.signal === null && pattern.test(`${result.stderr}\n${result.stdout}`)
+}
+
+function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResult): never {
+  if (definitiveProbeFailure(result, DEFINITIVE_EXACT_SHA_ABSENCE)) {
+    throw new Error(
+      `yrd: candidate submodule pin '${context.sha}' for ${context.paths?.join(", ")} is not reachable from '${context.origin}': ${fetchDetail(result)}`,
+    )
+  }
+  throw createSubmoduleReachabilityRefusal(context, result)
 }
 
 async function proveCandidateSubmoduleReachability(
@@ -672,42 +737,52 @@ async function proveCandidateSubmoduleReachability(
 
   for (const [origin, shas] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
     const store = join(proofParent, createHash("sha256").update(origin).digest("hex"))
-    const initialized = await git.run(
+    const initializedContext = { operation: "initialize", origin } as const
+    const initialized = await runSubmoduleProbe(
+      git,
       proofParent,
       ["init", "--bare", "--quiet", `--template=${template}`, store],
-      true,
+      initializedContext,
     )
     if (initialized.code !== 0) {
-      throw new Error(`yrd: could not create fresh submodule proof store for '${origin}': ${fetchDetail(initialized)}`)
+      throw createSubmoduleReachabilityRefusal(initializedContext, initialized)
     }
     for (const [sha, paths] of [...shas].sort(([left], [right]) => left.localeCompare(right))) {
-      const filtered = await git.run(
+      const filteredContext = { operation: "filtered-fetch", origin, sha, paths } as const
+      const filtered = await runSubmoduleProbe(
+        git,
         store,
         ["-c", "protocol.version=2", "fetch", "--depth=1", "--filter=tree:0", origin, sha],
-        true,
+        filteredContext,
       )
       if (filtered.code !== 0) {
-        if (!FILTER_UNSUPPORTED.test(`${filtered.stderr}\n${filtered.stdout}`)) {
-          throw new Error(
-            `yrd: candidate submodule pin '${sha}' for ${paths.join(", ")} is not reachable from '${origin}': ${fetchDetail(filtered)}`,
-          )
+        const canFallback =
+          !filtered.timedOut &&
+          filtered.signal === null &&
+          FILTER_UNSUPPORTED.test(`${filtered.stderr}\n${filtered.stdout}`)
+        if (!canFallback) {
+          throwFetchProbeFailure(filteredContext, filtered)
         }
-        const fallback = await git.run(
+        const fallbackContext = { operation: "fallback-fetch", origin, sha, paths } as const
+        const fallback = await runSubmoduleProbe(
+          git,
           store,
           ["-c", "protocol.version=2", "fetch", "--depth=1", origin, sha],
-          true,
+          fallbackContext,
         )
         if (fallback.code !== 0) {
-          throw new Error(
-            `yrd: candidate submodule pin '${sha}' for ${paths.join(", ")} is not reachable from '${origin}': ${fetchDetail(fallback)}`,
-          )
+          throwFetchProbeFailure(fallbackContext, fallback)
         }
       }
-      const fetched = await git.run(store, ["cat-file", "-e", `${sha}^{commit}`], true)
+      const verifyContext = { operation: "verify", origin, sha, paths } as const
+      const fetched = await runSubmoduleProbe(git, store, ["cat-file", "-e", `${sha}^{commit}`], verifyContext)
       if (fetched.code !== 0) {
-        throw new Error(
-          `yrd: exact fetch from '${origin}' did not produce candidate submodule pin '${sha}' for ${paths.join(", ")}`,
-        )
+        if (definitiveProbeFailure(fetched, DEFINITIVE_LOCAL_OBJECT_ABSENCE)) {
+          throw new Error(
+            `yrd: exact fetch from '${origin}' did not produce candidate submodule pin '${sha}' for ${paths.join(", ")}`,
+          )
+        }
+        throw createSubmoduleReachabilityRefusal(verifyContext, fetched)
       }
     }
   }
@@ -844,7 +919,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
       )
     } catch (cause) {
-      const refusal = queueAuthorityRefusal(cause)
+      const refusal = queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
@@ -966,11 +1041,53 @@ function createQueueAuthorityRefusal(base: string, attempts: number, detail: str
   )
 }
 
+type SubmoduleReachabilityFailure = YrdFailure & Readonly<{ evidence: SubmoduleReachabilityRefusalEvidence }>
+
+function createSubmoduleReachabilityRefusal(
+  context: SubmoduleProbeContext,
+  result?: GitResult,
+  causeDetail?: string,
+): SubmoduleReachabilityFailure {
+  const detail = causeDetail ?? (result === undefined ? "submodule reachability probe failed" : fetchDetail(result))
+  const evidence = SubmoduleReachabilityRefusalEvidenceSchema.parse({
+    kind: "submodule-reachability-refusal",
+    operation: context.operation,
+    origin: context.origin,
+    ...(context.sha === undefined ? {} : { sha: context.sha }),
+    ...(context.paths === undefined ? {} : { paths: [...context.paths] }),
+    ...(result === undefined
+      ? {}
+      : {
+          exitCode: result.code,
+          timedOut: result.timedOut,
+          signal: result.signal,
+        }),
+    detail,
+    retryable: true,
+  })
+  return Object.assign(
+    createFailure({
+      kind: "infrastructure",
+      code: "queue-environment-refused",
+      message: `yrd: could not prove candidate submodule reachability from '${context.origin}': ${detail}`,
+    }),
+    { evidence },
+  )
+}
+
 function queueAuthorityRefusal(cause: unknown): QueueAuthorityRefusalEvidence | undefined {
   if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
     return undefined
   }
   const parsed = QueueAuthorityRefusalEvidenceSchema.safeParse(cause.evidence)
+  return parsed.success ? parsed.data : undefined
+}
+
+function submoduleReachabilityRefusal(cause: unknown): SubmoduleReachabilityRefusalEvidence | undefined {
+  if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
+    return undefined
+  }
+  const parsed = SubmoduleReachabilityRefusalEvidenceSchema.safeParse(cause.evidence)
   return parsed.success ? parsed.data : undefined
 }
 
