@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import * as z from "zod"
 
 type CounterState = { counter: { value: number } }
+type PrototypeKeyState = { values: Record<string, string> }
 
 const roots: string[] = []
 
@@ -53,11 +54,71 @@ function counterDefinition(offset = 0, projectionVersion: string | null = `count
   return createYrdDef().extend(contribution) as YrdDef<CounterState, CommandTree, object>
 }
 
+function prototypeKeyDefinition() {
+  const put = command({
+    title: "Put",
+    visibility: "public",
+    params: z.object({ key: z.string(), value: z.string() }),
+    apply: (_state: PrototypeKeyState, args: { key: string; value: string }) => ({
+      events: [event("values/put", args)],
+    }),
+  })
+  return createYrdDef().extend({
+    initialState: { values: {} as Record<string, string> },
+    commands: { values: { put } },
+    events: { "values/put": z.object({ key: z.string(), value: z.string() }) },
+    projectionVersion: "prototype-key-v1",
+    project(state: PrototypeKeyState, applied: { name: string; data: unknown }) {
+      const { key, value } = applied.data as { key: string; value: string }
+      return { values: Object.fromEntries([...Object.entries(state.values), [key, value]]) }
+    },
+  })
+}
+
 function withoutCheckpoint<Value>(journal: Journal<Value>): Journal<Value> {
   return { read: journal.read, append: journal.append }
 }
 
 describe("persistent Core projection checkpoint", () => {
+  it("restores checkpoint state at cursor zero during runtime activation", async () => {
+    const readAfter: number[] = []
+    let saves = 0
+    const journal: Journal<unknown> = {
+      read(after = 0) {
+        readAfter.push(after)
+        return (async function* () {})()
+      },
+      append() {
+        return Promise.reject(new Error("append is not expected during activation"))
+      },
+      checkpoint: {
+        load(identity) {
+          return Promise.resolve({
+            identity,
+            cursor: 0,
+            value: {
+              v: 1,
+              state: { counter: { value: 41 } },
+              receipts: [],
+              causeIds: [],
+              eventIds: [],
+            },
+          })
+        },
+        save() {
+          saves += 1
+          return Promise.resolve(true)
+        },
+      },
+    }
+
+    await using runtime = await createYrd(counterDefinition(), { inject: { journal, id: ids() } })
+
+    expect(runtime.state().counter.value).toBe(41)
+    expect(readAfter).toEqual([0])
+    expect(saves).toBe(0)
+  })
+
   it("restores state and retry registries, then folds only the post-checkpoint tail", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
@@ -70,6 +131,7 @@ describe("persistent Core projection checkpoint", () => {
       checkpoint: { identity: string; cursor: number }
     }
     expect(seeded.checkpoint).toMatchObject({ cursor: expect.any(Number), identity: expect.any(String) })
+    expect(seeded.checkpoint.cursor).toBeGreaterThan(0)
 
     const tail = await createYrd(definition, { inject: { journal: withoutCheckpoint(createJournal({ dir })), id } })
     await tail.dispatch({ op: "counter.add", args: { by: 2 } })
@@ -174,5 +236,26 @@ describe("persistent Core projection checkpoint", () => {
     await expect(access(join(dir, "snapshot-v4.json"))).rejects.toMatchObject({ code: "ENOENT" })
     await expect(access(join(dir, "projection-checkpoint-v1.json"))).rejects.toMatchObject({ code: "ENOENT" })
     expect(events.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(1)
+  })
+
+  it("preserves own JSON keys that shadow Object prototype names across warm restore", async () => {
+    const dir = await stateDir()
+    const definition = prototypeKeyDefinition()
+    const first = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    await first.dispatch({ op: "values.put", args: { key: "__proto__", value: "preserved" } })
+    expect(Object.hasOwn(first.state().values, "__proto__")).toBe(true)
+    await first.close()
+
+    const persisted = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
+      checkpoint: { cursor: number }
+      checkpointValue: { state: PrototypeKeyState }
+    }
+    expect(persisted.checkpoint.cursor).toBeGreaterThan(0)
+    expect(Object.hasOwn(persisted.checkpointValue.state.values, "__proto__")).toBe(true)
+    expect(persisted.checkpointValue.state.values.__proto__).toBe("preserved")
+
+    await using warm = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    expect(Object.hasOwn(warm.state().values, "__proto__")).toBe(true)
+    expect(warm.state().values.__proto__).toBe("preserved")
   })
 })

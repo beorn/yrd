@@ -822,7 +822,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v1",
+      projectionVersion: "bays-v2",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)

@@ -78,7 +78,7 @@ const PROJECTION_CHECKPOINT_VERSION = 1
 const ProjectionCheckpointSchema = z
   .object({
     v: z.literal(PROJECTION_CHECKPOINT_VERSION),
-    state: JsonSchema,
+    state: z.unknown(),
     at: z.string().optional(),
     receipts: z.array(z.unknown()),
     causeIds: z.array(z.string()),
@@ -337,7 +337,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
       throw new Error("checkpoint cursor must be a non-negative safe integer")
     }
     const parsed = ProjectionCheckpointSchema.parse(checkpoint.value)
-    if (typeof parsed.state !== "object" || parsed.state === null || Array.isArray(parsed.state)) {
+    const state = projectionCheckpointState(parsed.state)
+    if (typeof state !== "object" || state === null || Array.isArray(state)) {
       throw new Error("checkpoint state must be a JSON object")
     }
 
@@ -371,7 +372,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     return {
       cursor: checkpoint.cursor,
       ...(parsed.at === undefined ? {} : { at: parsed.at }),
-      state: cloneFrozen(parsed.state as State) as DeepReadonly<State>,
+      state: cloneFrozen(state as State) as DeepReadonly<State>,
       receiptsById,
       receiptsByKey,
       causeIds,
@@ -399,7 +400,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       return
     }
     try {
-      const stateValue = JsonSchema.parse(projectionCheckpointState(next.state))
+      const stateValue = projectionCheckpointState(next.state)
       const saved = await checkpointStore.save({
         identity: checkpointIdentity,
         cursor: next.cursor,
@@ -732,12 +733,14 @@ function projectionCheckpointState(value: unknown, path = "$state"): JsonValue {
   if (Object.getOwnPropertySymbols(value).some((key) => Object.prototype.propertyIsEnumerable.call(value, key))) {
     throw new TypeError(`yrd: projection checkpoint state '${path}' must not contain enumerable symbol keys`)
   }
-  const result: Record<string, JsonValue> = {}
+  const entries: [string, JsonValue][] = []
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (entry === undefined) continue
-    result[key] = projectionCheckpointState(entry, `${path}.${key}`)
+    entries.push([key, projectionCheckpointState(entry, `${path}.${key}`)])
   }
-  return result
+  // Define dynamic keys as own data properties. Assignment into `{}` would
+  // invoke the inherited __proto__ setter and silently drop valid JSON state.
+  return Object.fromEntries(entries)
 }
 
 function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
