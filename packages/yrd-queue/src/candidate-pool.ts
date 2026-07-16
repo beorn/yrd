@@ -169,19 +169,20 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
    * leaves the entry state INTACT so a later close/evict retries the removal —
    * it never claims success while leaving Git worktree-admin residue behind. */
   async function removeWorktree(entry: PoolEntry): Promise<void> {
-    const path = entry.path
-    const root = entry.root
-    if (path !== undefined) {
-      const removed = await git.run(repo, ["worktree", "remove", "--force", path], true)
+    if (entry.path !== undefined) {
+      const removed = await git.run(repo, ["worktree", "remove", "--force", entry.path], true)
       if (removed.code !== 0) {
-        throw new Error(removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${path}'`)
+        throw new Error(removed.stderr || removed.stdout || `yrd: could not remove candidate worktree '${entry.path}'`)
       }
+      // The Git admin removal succeeded; the root directory is the remaining
+      // cleanup obligation. Keep entry.root populated until the rm SUCCEEDS —
+      // clearing it earlier turned an rm failure into an EMPTY survivor whose
+      // close() retry no-oped and reported closed over on-disk residue.
+      entry.path = undefined
     }
-    // Only clear pool state after the Git admin removal succeeded.
-    entry.path = undefined
-    entry.root = undefined
-    if (root !== undefined) {
-      await rm(root, { recursive: true, force: true })
+    if (entry.root !== undefined) {
+      await rm(entry.root, { recursive: true, force: true })
+      entry.root = undefined
     }
   }
 
