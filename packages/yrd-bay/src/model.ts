@@ -176,7 +176,11 @@ export type Bay = Readonly<{
 
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
-const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set(["integrated", "withdrawn", "canceled"])
+const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>([
+  "integrated",
+  "withdrawn",
+  "canceled",
+])
 
 /** A PR can only accept new check requests while pushed/submitted/rejected; once
  * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer

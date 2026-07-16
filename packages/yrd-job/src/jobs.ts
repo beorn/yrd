@@ -260,7 +260,12 @@ export const Job = Object.freeze({
   },
 })
 
-const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set(["passed", "failed", "lost", "canceled"])
+const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set<Job["status"]>([
+  "passed",
+  "failed",
+  "lost",
+  "canceled",
+])
 
 /** A Job status is terminal once no further transition can run: passed/failed/lost/canceled. */
 export function isTerminalJobStatus(status: Job["status"]): boolean {
