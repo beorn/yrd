@@ -1238,6 +1238,16 @@ describe("Queue command adapters", () => {
       stderr: "fatal: couldn't find remote ref deadbeef",
       timedOut: false,
     },
+    {
+      name: "stalled filter-like probe",
+      exitCode: 143,
+      signal: null,
+      stderr: "fatal: filtering not recognized by server",
+      timedOut: false,
+      stalled: true,
+      verdict: "STALLED",
+      sweepFailure: "process tree remained alive",
+    },
   ] as const)("keeps the candidate submitted after a cannot-probe $name", async (failure) => {
     const fixture = await hookedSubmoduleRepository({
       baseVersion: "base",
@@ -1259,6 +1269,13 @@ describe("Queue command adapters", () => {
             stderr: failure.stderr,
             durationMs: 1,
             timedOut: failure.timedOut,
+            ...("stalled" in failure
+              ? {
+                  stalled: failure.stalled,
+                  verdict: failure.verdict,
+                  sweepFailure: failure.sweepFailure,
+                }
+              : {}),
           })
         }
         return process.run(request)
@@ -1280,6 +1297,13 @@ describe("Queue command adapters", () => {
           exitCode: failure.exitCode,
           timedOut: failure.timedOut,
           signal: failure.signal,
+          ...("stalled" in failure
+            ? {
+                stalled: failure.stalled,
+                verdict: failure.verdict,
+                sweepFailure: failure.sweepFailure,
+              }
+            : {}),
           retryable: true,
         },
       },

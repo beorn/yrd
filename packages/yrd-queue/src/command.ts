@@ -85,6 +85,9 @@ const SubmoduleReachabilityRefusalEvidenceSchema = z
     exitCode: z.number().int().optional(),
     timedOut: z.boolean().optional(),
     signal: z.string().nullable().optional(),
+    stalled: z.boolean().optional(),
+    verdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
+    sweepFailure: z.string().min(1).optional(),
     detail: z.string().min(1),
     retryable: z.literal(true),
   })
@@ -381,6 +384,9 @@ type GitResult = Readonly<{
   durationMs: number
   signal: ProcessResult["signal"]
   timedOut: boolean
+  stalled?: boolean
+  verdict?: "EXITED" | "TIMED_OUT" | "STALLED"
+  sweepFailure?: string
 }>
 type Git = ReturnType<typeof createGit>
 
@@ -395,6 +401,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     trim: boolean,
   ): Promise<GitResult> => {
     const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
+    const progress = result as typeof result & ProgressResult
     const completed = {
       code: result.exitCode,
       stdout: trim ? result.stdout.trim() : result.stdout,
@@ -402,6 +409,9 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       durationMs: result.durationMs,
       signal: result.signal,
       timedOut: result.timedOut,
+      ...(progress.stalled === undefined ? {} : { stalled: progress.stalled }),
+      ...(progress.verdict === undefined ? {} : { verdict: progress.verdict }),
+      ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
     }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
@@ -703,6 +713,8 @@ async function candidateSubmodulePins(
 
 function fetchDetail(result: GitResult): string {
   const detail = result.stderr.trim() || result.stdout.trim() || `git exited ${result.code}`
+  if (result.sweepFailure !== undefined) return `git process sweep failed (${result.sweepFailure}): ${detail}`
+  if (result.stalled || result.verdict === "STALLED") return `git stalled: ${detail}`
   if (result.timedOut) return `git timed out: ${detail}`
   if (result.signal !== null) return `git terminated by ${result.signal}: ${detail}`
   return detail
@@ -731,18 +743,31 @@ async function runSubmoduleProbe(
   raw = false,
 ): Promise<GitResult> {
   try {
-    return await (raw ? git.raw(repo, args, true) : git.run(repo, args, true))
+    const result = await (raw ? git.raw(repo, args, true) : git.run(repo, args, true))
+    if (!probeSettled(result)) throw createSubmoduleReachabilityRefusal(context, result)
+    return result
   } catch (cause) {
+    if (submoduleReachabilityRefusal(cause) !== undefined) throw cause
     throw createSubmoduleReachabilityRefusal(context, undefined, messageOf(cause))
   }
 }
 
+function probeSettled(result: GitResult): boolean {
+  return (
+    !result.timedOut &&
+    result.signal === null &&
+    result.stalled !== true &&
+    (result.verdict === undefined || result.verdict === "EXITED") &&
+    result.sweepFailure === undefined
+  )
+}
+
 function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
-  return !result.timedOut && result.signal === null && pattern.test(`${result.stderr}\n${result.stdout}`)
+  return probeSettled(result) && pattern.test(`${result.stderr}\n${result.stdout}`)
 }
 
 function definitiveCandidateMetadataFailure(result: GitResult): boolean {
-  if (result.timedOut || result.signal !== null) return false
+  if (!probeSettled(result)) return false
   const detail = `${result.stderr}\n${result.stdout}`.trim()
   return detail === "" || /\.gitmodules.*does not exist|bad config line|invalid config|invalid key/iu.test(detail)
 }
@@ -797,10 +822,7 @@ async function proveCandidateSubmoduleReachability(
         filteredContext,
       )
       if (filtered.code !== 0) {
-        const canFallback =
-          !filtered.timedOut &&
-          filtered.signal === null &&
-          FILTER_UNSUPPORTED.test(`${filtered.stderr}\n${filtered.stdout}`)
+        const canFallback = probeSettled(filtered) && FILTER_UNSUPPORTED.test(`${filtered.stderr}\n${filtered.stdout}`)
         if (!canFallback) {
           throwFetchProbeFailure(filteredContext, filtered)
         }
@@ -1103,6 +1125,9 @@ function createSubmoduleReachabilityRefusal(
           exitCode: result.code,
           timedOut: result.timedOut,
           signal: result.signal,
+          ...(result.stalled === undefined ? {} : { stalled: result.stalled }),
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+          ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
         }),
     detail,
     retryable: true,
