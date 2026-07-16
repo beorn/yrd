@@ -15,6 +15,7 @@ import type {
   SourceRewrite,
 } from "./model.ts"
 import { IntegrationProofSchema, QueueSubmoduleResolutionEvidenceSchema, SourceRewriteSchema } from "./model.ts"
+import type { CandidatePool } from "./candidate-pool.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
 import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import { executeQueueSubmoduleComposition } from "./submodule-composition-git.ts"
@@ -2185,6 +2186,8 @@ export type GitCheckOptions = ProcessDependency &
     repo: string
     command: readonly string[]
     checkoutParent?: string
+    /** Opt-in warm candidate-worktree pool (merge-queue R40). Absent → cold path. */
+    candidatePool?: CandidatePool
     artifactRoot?: string
     purpose?: string
     runner?: "local" | "waiting"
@@ -2234,12 +2237,24 @@ async function withPinnedCandidate<Output extends JsonValue>(
   repo: string,
   input: StepExecution,
   context: Readonly<{ id: string; attempt: number }>,
-  options: Readonly<{ checkoutParent?: string; artifactRoot?: string; allowAuthoredGitlinks?: boolean }>,
+  options: Readonly<{
+    checkoutParent?: string
+    artifactRoot?: string
+    allowAuthoredGitlinks?: boolean
+    candidatePool?: CandidatePool
+  }>,
   onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
   use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   const target = await authoritativeQueueBase(git, repo, primaryPR(input).base)
-  return withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), async (path, scratchRoot) => {
+  // Warm pool when the host opts in; otherwise the exact cold scratch path.
+  const withCandidateWorktree = (
+    run: (path: string, scratchRoot: string) => Promise<JobResult<Output>>,
+  ): Promise<JobResult<Output>> =>
+    options.candidatePool === undefined
+      ? withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), run)
+      : options.candidatePool.withCandidate(target.sha, run)
+  return withCandidateWorktree(async (path, scratchRoot) => {
     const candidate = await prepareCandidate(
       git,
       repo,
@@ -2294,6 +2309,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         context,
         {
           checkoutParent: options.checkoutParent,
+          ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
           artifactRoot: options.artifactRoot,
           allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
         },
