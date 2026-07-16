@@ -500,11 +500,13 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   const detail = selectedDetail
 
   // Both panes carry the one title-in-border chrome idiom with one cell of
-  // outer padding on all sides (user directive 2026-07-15); content, headers,
-  // and the FILTER/STATS rows all sit inside that padding.
+  // outer padding (user directive 2026-07-15); content, headers, and the
+  // FILTER/STATS rows all sit inside that padding. The QUEUE pane is `flushTop`
+  // (no top padding) so its `updated` clock reads flush against the title
+  // border rather than below an offset gap (user directive 2026-07-16).
   const queuePaneTitle = `QUEUE ${snapshot.projection.base}`
   const framedTimeline = (
-    <TitledBox title={queuePaneTitle} padding={1} fill>
+    <TitledBox title={queuePaneTitle} padding={1} fill flushTop>
       {timeline}
     </TitledBox>
   )

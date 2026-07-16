@@ -240,6 +240,93 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
+  it("draws every watch box with full rounded corners, a left label, and a label color matching its border", async () => {
+    // Reworked title-in-border chrome (user directives 1+2, 2026-07-16):
+    // `╭─ TITLE ─…─╮` on top with the label punched into the LEFT of the top
+    // edge, `╰─…─╯` on the bottom (rounded corners everywhere), and the label
+    // sharing the border's resolved color.
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      await waitFor(() => app.text.includes("STATS"))
+      const lines = app.text.split("\n")
+      for (const label of ["QUEUE main", "RUNNER", "STATS", "DETAIL"]) {
+        const topY = lines.findIndex((l) => l.includes(`╭─ ${label} `))
+        expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
+        const topLine = lines[topY]
+        const titleX = topLine.indexOf(label)
+        // A rounded top-right corner closes this box's border row after the
+        // label (nested/side-by-side boxes still close with `╮`; search from the
+        // label so a neighbouring box's corner to the left is not mistaken).
+        expect(topLine.indexOf("╮", titleX), `${label} rounded top-right corner`).toBeGreaterThan(titleX)
+        // The label color equals the border-fill color on the same row.
+        const fillX = topLine.indexOf("─", titleX + label.length + 1)
+        expect(fillX, `${label} border fill after the label`).toBeGreaterThan(titleX)
+        expect(app.cell(titleX, topY).fg, `${label} label fg == border fg`).toEqual(app.cell(fillX, topY).fg)
+      }
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("floats the QUEUE chrome flush against the title, not below an offset gap", async () => {
+    // Directive 3 (2026-07-16): the QUEUE pane drops its top padding so the
+    // first content row — the sibling tabs on the left and the `updated` clock
+    // on the right — sits flush directly beneath the QUEUE title border, instead
+    // of the temporal cue floating below a blank offset row.
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      await waitFor(() => app.text.includes("STATS"))
+      const queueY = rowIndexOf(app.text, "QUEUE main")
+      const firstContent = rowAt(app.text, queueY + 1)
+      // The row directly under the title is real chrome (sibling tabs), not a
+      // blank padding gap.
+      expect(
+        firstContent.replace(/[│\s]/gu, "").length,
+        "first content row is flush chrome, not a blank gap",
+      ).toBeGreaterThan(0)
+      expect(firstContent, "flush header carries the queue sibling tabs").toContain("release/")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("turns the RUNNER label and border red together when the heartbeat is stale", async () => {
+    // Directive 2 (2026-07-16): the error-red case colors both the border AND
+    // the label, matching the STALE banner's error fg.
+    const story = queueTimelineStories["contract-overview"].snapshot.projection
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: {
+        pid: 342,
+        startedAt: new Date(NOW - 60_000).toISOString(),
+        lastTickAt: new Date(NOW - 60_000).toISOString(),
+        command: "resident runner",
+      },
+    }
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const titleY = rowIndexOf(app.text, "RUNNER")
+      const titleLine = rowAt(app.text, titleY)
+      const titleX = titleLine.indexOf("RUNNER")
+      const fillX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
+      expect(app.cell(titleX, titleY).fg, "stale RUNNER label fg == border fg").toEqual(app.cell(fillX, titleY).fg)
+      const staleY = rowIndexOf(app.text, "RUNNER STALE")
+      expect(staleY, "stale banner present").toBeGreaterThan(titleY)
+      const staleLine = rowAt(app.text, staleY)
+      const staleX = staleLine.indexOf("RUNNER STALE")
+      expect(app.cell(titleX, titleY).fg, "label red == stale-banner error red").toEqual(app.cell(staleX, staleY).fg)
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("frames both watch panes with padded title-in-border chrome and bottom-aligned STATS", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })

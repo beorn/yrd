@@ -14,7 +14,7 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Divider, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
+import { Box, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -2959,10 +2959,13 @@ function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: nu
 
 /**
  * The one title-in-border chrome idiom every watch box uses (user directive
- * 2026-07-15): a name-in-border title over a round box with no top edge —
- * the same style the STATS box established. `fill` makes the frame stretch to
- * its parent (pane usage); `padding` widens the inner content padding from the
- * single-row default (`paddingX=1`).
+ * 2026-07-16): a FULL round border (all four corners) with a LEFT-aligned name
+ * label punched into the top edge — `╭─ TITLE ──────╮`. The label inherits the
+ * effective border color, so a stale/error box turns border and title red
+ * together. `fill` stretches the frame to its parent (pane usage); `padding`
+ * widens the inner content padding from the single-row default (`paddingX=1`);
+ * `flushTop` drops the top padding so the first content row (e.g. the QUEUE
+ * pane's `updated` clock) reads flush beneath the title instead of below a gap.
  */
 export function TitledBox({
   title,
@@ -2970,6 +2973,7 @@ export function TitledBox({
   padding,
   fill = false,
   marginTop,
+  flushTop = false,
   children,
 }: Readonly<{
   title: string
@@ -2977,8 +2981,18 @@ export function TitledBox({
   padding?: number
   fill?: boolean
   marginTop?: number
+  flushTop?: boolean
   children: React.ReactNode
 }>) {
+  // One resolved border value drives both the border glyphs and the label so
+  // they are provably the same color (the default, or the error-red override).
+  const border = borderColor ?? "$border-default"
+  const bodyPadding =
+    padding === undefined
+      ? { paddingX: 1, paddingTop: flushTop ? 0 : undefined }
+      : flushTop
+        ? { paddingLeft: padding, paddingRight: padding, paddingBottom: padding, paddingTop: 0 }
+        : { padding }
   return (
     <Box
       width="100%"
@@ -2990,17 +3004,43 @@ export function TitledBox({
       flexGrow={fill ? 1 : undefined}
       marginTop={marginTop}
     >
-      <Divider title={title} titleColor="$fg-muted" color={borderColor} />
+      <Box flexDirection="row" width="100%" flexShrink={0} minWidth={0}>
+        <Text color={border} flexShrink={0}>
+          {"╭─ "}
+        </Text>
+        <Text color={border} bold flexShrink={0}>
+          {title}
+        </Text>
+        <Text color={border} flexShrink={0}>
+          {" "}
+        </Text>
+        {/* Flex-grow fill: a top-only round border renders the `─` run that
+            stretches from the label to the rounded top-right corner. */}
+        <Box
+          height={1}
+          flexGrow={1}
+          flexShrink={1}
+          minWidth={0}
+          borderStyle="round"
+          borderColor={border}
+          borderLeft={false}
+          borderRight={false}
+          borderBottom={false}
+        />
+        <Text color={border} flexShrink={0}>
+          {"╮"}
+        </Text>
+      </Box>
       <Box
         borderStyle="round"
         borderTop={false}
-        borderColor={borderColor}
+        borderColor={border}
         width="100%"
         flexDirection="column"
         flexGrow={fill ? 1 : undefined}
         minWidth={0}
         minHeight={0}
-        {...(padding === undefined ? { paddingX: 1 } : { padding })}
+        {...bodyPadding}
       >
         {children}
       </Box>
@@ -3238,6 +3278,21 @@ function TimelineFilterLine({
   )
 }
 
+/**
+ * The one temporal-trust cue, `updated HH:MM:SS`. The snapshot clock is always
+ * "now", so day qualification never applies. The QUEUE pane renders it flush
+ * against the title border (its `flushTop` drops the top padding) so it reads
+ * as aligned with the QUEUE title rather than floating below an offset gap
+ * (user directive 2026-07-16).
+ */
+function QueueUpdatedClock({ now }: { now: string }) {
+  return (
+    <Text color="$fg-muted" flexShrink={0}>
+      updated {queueLogClock(now, false, false)}
+    </Text>
+  )
+}
+
 function ProjectedQueueTimeline({
   projection,
   nav,
@@ -3269,38 +3324,33 @@ function ProjectedQueueTimeline({
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
   )
   const layout = timelineCellLayout(rows, includeDate, columns)
-  const updated = (
-    <Text color="$fg-muted" flexShrink={0}>
-      {/* The one temporal-trust cue is always `updated HH:MM:SS` — the
-          snapshot clock is now, so day qualification never applies. */}
-      updated {queueLogClock(projection.now, false, false)}
-    </Text>
-  )
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
         {paneChrome ? (
-          // Pane chrome: the pane's title-in-border already names the queue,
-          // so the header row carries the sibling tabs (when any) on the left
-          // and the `updated` clock in the top-right corner.
+          // Pane chrome: the QUEUE box's title-in-border already names the
+          // queue on its top edge; this first content row sits flush beneath it
+          // (the QUEUE pane drops its top padding) and carries the sibling tabs
+          // on the left and the `updated` clock on the right — so the temporal
+          // cue reads as flush-aligned with the QUEUE title (user directive
+          // 2026-07-16), not floating below an offset gap.
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
             {projection.siblingBases.length === 0 ? null : (
               <QueueTabsLine base={projection.base} siblings={projection.siblingBases} showLabel={false} />
             )}
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
-            {/* Anchored-freshness cue: arrivals above a pinned cursor. */}
             {freshRows === 0 ? null : (
               <Text color="$fg-warning" flexShrink={0}>
                 {freshRows} new
               </Text>
             )}
-            {updated}
+            <QueueUpdatedClock now={projection.now} />
           </Box>
         ) : (
           <>
             <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
-              {updated}
+              <QueueUpdatedClock now={projection.now} />
             </Box>
           </>
         )}
