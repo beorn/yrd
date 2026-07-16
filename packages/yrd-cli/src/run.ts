@@ -2379,12 +2379,15 @@ export async function watchQueueRuns(
         continue
       }
       heartbeat?.check()
+      // The runner is a service; its stdout is a log stream. Human output is
+      // loggily-only (--json still streams the structured record). The
+      // QueueRunsView table (RUN/PRS/STATE/STEPS) is the interactive
+      // `queue watch` viewer's surface — it must never be dumped into the
+      // runner's log. (#undead: runner-loggily-only)
       if (jsonEnabled(options)) {
         for (const run of runs) {
           io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
         }
-      } else if (runs.length > 0) {
-        await printHuman(io, createElement(QueueRunsView, { runs }))
       }
       const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
       if (drainRequested()) {
