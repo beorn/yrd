@@ -194,6 +194,7 @@ function candidateStep(
   checkoutParent: string,
   name: string,
   config: YrdStepConfig,
+  revision: string,
 ): RuntimeStep {
   return eraseStep(
     withStep(
@@ -211,18 +212,95 @@ function candidateStep(
         ...(config.environment === undefined ? {} : { environment: config.environment }),
       }),
       {
-        revision: queueStepRevision({
-          repo,
-          stateDir,
-          name,
-          config,
-          timeoutMs: stepTimeoutMs(config),
-          toolchain: hostToolchainFingerprint(),
-          checkoutParent,
-        }),
+        revision,
         classification: config.classification ?? "carrier",
       },
     ),
+  )
+}
+
+/**
+ * Derive the installed-step descriptor — identity, integration contract, and
+ * revision — for every configured step. This is the ONE home for the descriptor
+ * recipe: {@link configuredQueueSteps} wires its runtime machinery around these
+ * revisions, and the environment audit re-derives from a freshly loaded config
+ * through this same function, so drift detection always proves the CURRENT
+ * on-disk config rather than a startup snapshot.
+ */
+function configuredStepDescriptors(
+  fixed: Readonly<{ repo: string; stateDir: string; baysRoot: string }>,
+  config: ResolvedYrdProjectConfig,
+  mergeCommand: readonly string[] | undefined,
+): readonly InstalledStep[] {
+  const toolchain = hostToolchainFingerprint()
+  let integrated = false
+  return config.steps.map((name) => {
+    const stepConfig = config.definitions[name] ?? { runner: "local" as const }
+    const timeoutMs = stepTimeoutMs(stepConfig)
+    if (name === "merge") {
+      integrated = true
+      return {
+        name,
+        title: "merge",
+        revision: queueStepRevision({
+          repo: fixed.repo,
+          stateDir: fixed.stateDir,
+          name,
+          config: stepConfig,
+          timeoutMs,
+          toolchain,
+          resolvedCommand: mergeCommand,
+        }),
+        integrates: true,
+        needsIntegration: false,
+      }
+    }
+    if (!integrated) {
+      return {
+        name,
+        title: name,
+        revision: queueStepRevision({
+          repo: fixed.repo,
+          stateDir: fixed.stateDir,
+          name,
+          config: stepConfig,
+          timeoutMs,
+          toolchain,
+          checkoutParent: fixed.baysRoot,
+        }),
+        integrates: false,
+        needsIntegration: false,
+        classification: stepConfig.classification ?? "carrier",
+      }
+    }
+    return {
+      name,
+      title: name,
+      revision: queueStepRevision({
+        repo: fixed.repo,
+        stateDir: fixed.stateDir,
+        name,
+        config: stepConfig,
+        timeoutMs,
+        toolchain,
+      }),
+      integrates: false,
+      needsIntegration: true,
+    }
+  })
+}
+
+/** Re-derive the current config's step descriptors from disk. Fails loud on an
+ * invalid config so the environment audit never certifies a broken selection. */
+async function reloadConfiguredStepDescriptors(repository: YrdRepository): Promise<readonly InstalledStep[]> {
+  const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
+  validateConfig(loaded.config)
+  const mergeCommand =
+    loaded.config.definitions.merge?.run === undefined ? undefined : shellCommand(loaded.config.definitions.merge.run)
+  return configuredStepDescriptors(
+    { repo: repository.repo, stateDir: repository.stateDir, baysRoot: repository.baysRoot },
+    loaded.config,
+    mergeCommand,
   )
 }
 
@@ -252,9 +330,17 @@ function configuredQueueSteps(
   options: DefaultYrdAppOptions,
   mergeCommand: readonly string[] | undefined,
 ): readonly RuntimeStep[] {
+  const descriptors = configuredStepDescriptors(
+    { repo: options.repo, stateDir: options.stateDir, baysRoot: options.baysRoot },
+    options.config,
+    mergeCommand,
+  )
   let integrated = false
-  return options.config.steps.map((name) => {
+  return options.config.steps.map((name, index) => {
     const config = options.config.definitions[name] ?? { runner: "local" as const }
+    const descriptor = descriptors[index]
+    if (descriptor === undefined) throw new Error(`yrd: missing derived descriptor for queue step '${name}'`)
+    const revision = descriptor.revision
     if (name === "merge") {
       integrated = true
       return eraseStep(
@@ -269,33 +355,16 @@ function configuredQueueSteps(
                 timeoutMs: stepTimeoutMs(config),
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
               }),
-          {
-            revision: queueStepRevision({
-              repo: options.repo,
-              stateDir: options.stateDir,
-              name,
-              config,
-              timeoutMs: stepTimeoutMs(config),
-              toolchain: hostToolchainFingerprint(),
-              resolvedCommand: mergeCommand,
-            }),
-          },
+          { revision },
         ),
       )
     }
     if (!integrated) {
-      return candidateStep(options.process, options.repo, options.stateDir, options.baysRoot, name, config)
+      return candidateStep(options.process, options.repo, options.stateDir, options.baysRoot, name, config, revision)
     }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
-        revision: queueStepRevision({
-          repo: options.repo,
-          stateDir: options.stateDir,
-          name,
-          config,
-          timeoutMs: stepTimeoutMs(config),
-          toolchain: hostToolchainFingerprint(),
-        }),
+        revision,
         needsIntegration: true,
       }),
     )
@@ -495,36 +564,48 @@ async function intakeReceipt(app: YrdCliApp, receipt: Readonly<ReceiverReceipt>)
 function queueAdministration(
   process: Pick<Process, "run">,
   repository: YrdRepository,
-  config: ResolvedYrdProjectConfig,
-  installedSteps: () => readonly InstalledStep[],
+  defaultBase: string,
+  deriveConfiguredSteps: () => Promise<readonly InstalledStep[]>,
 ): YrdCliQueueAdministration {
-  const inspect = async (base = config.base) => {
+  const inspect = async (base = defaultBase) => {
     const baseSha = await resolveCommit(process, repository.repo, base)
     if (baseSha === undefined) throw new Error(`yrd: queue base '${base}' does not resolve`)
     return { base, baseSha }
   }
   return Object.freeze({
     async auditEnvironment(): Promise<QueueAuditResult> {
-      const baselines = await readInstalledBaselines(repository.stateDir)
+      // Re-derive the selected config's steps from disk on EVERY audit so a
+      // config change after startup is proven, not masked by a stale snapshot.
+      const [baselines, current] = await Promise.all([
+        readInstalledBaselines(repository.stateDir),
+        deriveConfiguredSteps(),
+      ])
       const findings = Object.values(baselines).flatMap((baseline) => {
-        const finding = installedBaselineDrift(baseline, installedSteps())
+        const finding = installedBaselineDrift(baseline, current)
         return finding === undefined ? [] : [finding]
       })
       return { findings }
     },
     async provision(base) {
-      const inspected = await inspect(base)
+      const [inspected, current] = await Promise.all([inspect(base), deriveConfiguredSteps()])
       await writeInstalledBaseline(repository.stateDir, {
         ...inspected,
         installedAt: new Date().toISOString(),
-        steps: installedSteps(),
+        steps: current,
       })
-      return { ...inspected, steps: config.steps, persistentResources: false }
+      return { ...inspected, steps: current.map((step) => step.name), persistentResources: false }
     },
-    async deprovision(base) {
-      const inspected = await inspect(base)
-      const released = (await removeInstalledBaseline(repository.stateDir, inspected.base)) ? ["installed-baseline"] : []
-      return { ...inspected, released, persistentResources: false }
+    async deprovision(base = defaultBase) {
+      // Deinit must clear the stored baseline by key WITHOUT requiring the base
+      // ref to resolve: a deleted stale base is exactly the case whose prescribed
+      // remedy is `yrd queue deinit <base>`, so a wedged ref must not block it.
+      const stored = (await readInstalledBaselines(repository.stateDir))[base]
+      const baseSha = (await resolveCommit(process, repository.repo, base)) ?? stored?.baseSha
+      const released = (await removeInstalledBaseline(repository.stateDir, base)) ? ["installed-baseline"] : []
+      if (baseSha === undefined) {
+        throw new Error(`yrd: queue base '${base}' does not resolve and no installed baseline is stored for it`)
+      }
+      return { base, baseSha, released, persistentResources: false }
     },
   })
 }
@@ -777,7 +858,9 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     }
     await drain()
     const services = Object.freeze({
-      queue: queueAdministration(process, repository, loaded.config, () => runtimeApp.queue.steps()),
+      queue: queueAdministration(process, repository, loaded.config.base, () =>
+        reloadConfiguredStepDescriptors(repository),
+      ),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
       journal: Object.freeze({
         importOrphan: (sourcePath: string) =>
