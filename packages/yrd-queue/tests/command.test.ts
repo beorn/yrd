@@ -2447,6 +2447,93 @@ describe("Queue command adapters", () => {
     expect(existsSync(join(repo, "base-moved.txt"))).toBe(true)
   })
 
+  it.each(["native-worktree", "native-ref", "native-remote", "configured"] as const)(
+    "drains canceled or superseded authority at the %s merge side-effect boundary",
+    async (executor) => {
+      const { repo, feature: featureSha } = await repository("feature")
+      const baseSha = await git(repo, ["rev-parse", "main"])
+      await using process = createProcess()
+      const checkInput = {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha: featureSha }],
+        shape: { results: {} },
+      } satisfies StepExecution<PRShape>
+      const checked = await gitCheckStep({ inject: { process }, repo, command: ["test", "-f", "feature.txt"] })(
+        checkInput,
+        { id: "J-check", attempt: 1, runner: "test", signal: new AbortController().signal },
+      )
+      if (checked.status !== "passed") throw new Error("check did not pass")
+      if (executor === "native-remote") {
+        const remote = join(repo, "..", "origin.git")
+        await Bun.$`git init -q --bare ${remote}`
+        await git(repo, ["remote", "add", "origin", remote])
+        await git(repo, ["push", "-q", "origin", "main", "issue/feature"])
+      } else if (executor === "native-ref") {
+        await git(repo, ["switch", "--detach", "-q", baseSha])
+      }
+
+      const canceled = new AbortController()
+      let mergeRuns = 0
+      const authorityProcess: Pick<Process, "run"> = {
+        async run(request) {
+          if (request.argv[0] === "merge-must-not-run") {
+            mergeRuns += 1
+            return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
+          }
+          if (
+            request.argv[0] === "git" &&
+            ((executor === "native-remote" && request.argv[3] === "submodule" && request.argv[4] === "update") ||
+              (executor !== "native-remote" &&
+                request.argv[3] === "merge-base" &&
+                request.argv[4] === "--is-ancestor" &&
+                request.argv[5] === featureSha))
+          ) {
+            canceled.abort()
+          }
+          if (
+            request.argv[0] === "git" &&
+            ((executor === "native-worktree" && request.argv[3] === "merge" && request.argv[4] === "--ff-only") ||
+              (executor === "native-ref" &&
+                request.argv[3] === "update-ref" &&
+                request.argv[4] === "refs/heads/main") ||
+              (executor === "native-remote" && request.argv[3] === "push"))
+          ) {
+            mergeRuns += 1
+          }
+          return process.run(request)
+        },
+      }
+      const merge =
+        executor === "configured"
+          ? configuredMergeStep<Checked>({
+              inject: { process: authorityProcess },
+              repo,
+              command: ["merge-must-not-run"],
+            })
+          : gitMergeStep<Checked>({ inject: { process: authorityProcess }, repo })
+      const outcome = await merge(
+        {
+          ...checkInput,
+          step: "merge",
+          index: 1,
+          shape: { results: { check: checked.output } },
+        },
+        { id: "J-merge", attempt: 1, runner: "test", signal: canceled.signal },
+      )
+
+      expect(canceled.signal.aborted).toBe(true)
+      expect(outcome).toMatchObject({ status: "failed", error: { code: "merge-canceled" } })
+      expect(mergeRuns).toBe(0)
+      const landedSha =
+        executor === "native-remote"
+          ? (await git(repo, ["ls-remote", "origin", "refs/heads/main"])).split(/\s/u)[0]
+          : await git(repo, ["rev-parse", "main"])
+      expect(landedSha).toBe(baseSha)
+    },
+  )
+
   it("reconciles the authoritative landing after a delegated merge reports a post-push failure", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const remote = join(repo, "..", "origin.git")

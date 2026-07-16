@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
-import { parseJobLaunch, type JobResult } from "@yrd/job"
+import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape, PRSnapshot, SourceRewrite } from "./model.ts"
@@ -1923,6 +1923,7 @@ type MergeCandidateResult =
   | Readonly<{ status: "passed"; base: GitQueueTarget; checked: PinnedCandidate }>
   | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }> }>
   | Readonly<{ status: "waiting"; token: string; detail?: string }>
+type FailedJobResult = Extract<JobResult<never>, { status: "failed" }>
 
 async function mergeCandidate(
   git: Git,
@@ -1954,6 +1955,17 @@ async function mergeCandidate(
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
   const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
   return "error" in validated ? { status: "failed", error: validated.error } : { status: "passed", base, checked }
+}
+
+function mergeAuthorityCancellation(context: Pick<JobContext, "signal">): FailedJobResult | undefined {
+  if (!context.signal.aborted) return undefined
+  return {
+    status: "failed",
+    error: {
+      code: "merge-canceled",
+      message: "merge execution authority was canceled or superseded before landing",
+    },
+  }
 }
 
 async function sourceCandidateRefError(
@@ -2121,6 +2133,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             }
             const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
             if (sourceRefError !== undefined) return failed("invalid-candidate", sourceRefError)
+            const cancellation = mergeAuthorityCancellation(context)
+            if (cancellation !== undefined) return cancellation
             const pushed = await git.run(
               path,
               ["push", "--porcelain", remote, `${checked.candidateSha}:${branchRef}`],
@@ -2164,6 +2178,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         const status = await git.run(checkedOut, ["status", "--porcelain"])
         if (status.stdout !== "") return failed("dirty-base", status.stdout)
         if ((await git.commit(checkedOut, "HEAD")) !== baseSha) return failed("stale-base", `${branch} moved`)
+        const cancellation = mergeAuthorityCancellation(context)
+        if (cancellation !== undefined) return cancellation
         const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
         const aligned = await git.run(
@@ -2206,6 +2222,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           return failed("invalid-candidate", sourceRefError)
         }
       } else {
+        const cancellation = mergeAuthorityCancellation(context)
+        if (cancellation !== undefined) return cancellation
         const expected = base.local ? baseSha : "0".repeat(baseSha.length)
         const moved = await git.run(repo, ["update-ref", base.branchRef, checked.candidateSha, expected], true)
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
@@ -2252,6 +2270,8 @@ export function configuredMergeStep<Shape extends PRShape>(
         }),
       })
 
+      const cancellation = mergeAuthorityCancellation(context)
+      if (cancellation !== undefined) return cancellation
       const outcome = await command(input, context)
       let landing: GitQueueTarget
       try {
