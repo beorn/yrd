@@ -18,7 +18,8 @@ import { fixturePr, fixtureResult, fixtureSnapshot, queueTimelineStories } from 
 import { queueLandingLabel } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
-const FOOTER = "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate"
+const FOOTER =
+  "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate - ⇧-drag to select"
 
 function rowIndexOf(text: string, needle: string): number {
   return text.split("\n").findIndex((row) => row.includes(needle))
