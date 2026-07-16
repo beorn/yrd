@@ -15,6 +15,7 @@ import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import { Box, Divider, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
+import { stripAnsi } from "./ansi.ts"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -834,15 +835,22 @@ function isObjectValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
+// Display helper: render an arbitrary value as plain text. Strings may be raw
+// subprocess output (a step's captured stdout/stderr), so ANSI escapes are
+// removed here — external terminal codes must never reach a `<Text>` node
+// (silvery's background-conflict guard throws on stray background SGR).
 function safeText(value: unknown): string {
   if (value === undefined) return "-"
   if (value === "") return "-"
-  if (typeof value === "string") return value
+  if (typeof value === "string") return stripAnsi(value)
   return JSON.stringify(value)
 }
 
+// Display helper: collapse to a single line for table/inline cells. Also strips
+// ANSI escapes so externally-sourced field text (output/error/detail/lost,
+// failure summaries) renders as plain characters — see `safeText`.
 function singleQueue(value: string): string {
-  const normalized = value.replace(/\s+/gu, " ").trim()
+  const normalized = stripAnsi(value).replace(/\s+/gu, " ").trim()
   return normalized === "" ? "-" : normalized
 }
 
@@ -1150,7 +1158,7 @@ function queueState(pr: PR, run: QueueRun | undefined): string {
 function stepError(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
-  if (job.status === "failed") return (job as JobByStatus<"failed">).error.message
+  if (job.status === "failed") return stripAnsi((job as JobByStatus<"failed">).error.message)
   return "-"
 }
 
@@ -1162,23 +1170,25 @@ function stepErrorCode(step: QueueStep): string {
 function stepLost(step: QueueStep): string {
   const job = step.job
   if (job?.status !== "lost") return "-"
-  return job.lostReason
+  return stripAnsi(job.lostReason)
 }
 
+// `detail` can surface a job's captured output detail or its error message —
+// both externally sourced — so ANSI escapes are stripped here at the boundary.
 function stepDetail(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
   const outputDetail =
     (job.status === "passed" || job.status === "failed") && isObjectValue(job.output) ? job.output.detail : undefined
-  if (typeof outputDetail === "string" && outputDetail !== "") return outputDetail
+  if (typeof outputDetail === "string" && outputDetail !== "") return stripAnsi(outputDetail)
   const detail =
     job.status === "waiting" || job.status === "passed" || job.status === "failed"
       ? "detail" in job
         ? job.detail
         : undefined
       : undefined
-  if (typeof detail === "string" && detail !== "") return detail
-  if (job.status === "failed") return (job as JobByStatus<"failed">).error.message
+  if (typeof detail === "string" && detail !== "") return stripAnsi(detail)
+  if (job.status === "failed") return stripAnsi((job as JobByStatus<"failed">).error.message)
   return "-"
 }
 
@@ -1290,7 +1300,7 @@ function failureFact(
 }
 
 function causalSummary(message: string): string {
-  const parts = message
+  const parts = stripAnsi(message)
     .split(/\r?\n/u)
     .map((part) => part.trim())
     .filter((part) => part !== "" && !/^at\s+/u.test(part))
@@ -3417,7 +3427,7 @@ export function QueueTimelineView({
               <Text wrap="truncate">
                 {meta.isCursor ? "> " : "  "}
                 <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text> {row.pr} {row.run ?? "-"} {row.subject}{" "}
-                <Text color="$fg-muted">{row.detail}</Text>
+                <Text color="$fg-muted">{stripAnsi(row.detail)}</Text>
               </Text>
             </Box>
           )}
@@ -3685,9 +3695,9 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
     duration: preciseDuration(attempt.durationMs),
     durationMs: attempt.durationMs,
     errorCode: attempt.result.status === "failed" ? attempt.result.error.code : "-",
-    error: attempt.result.status === "failed" ? attempt.result.error.message : "-",
-    lost: attempt.result.status === "lost" ? attempt.result.reason : "-",
-    detail: detail ?? (attempt.result.status === "failed" ? attempt.result.error.message : "-"),
+    error: attempt.result.status === "failed" ? stripAnsi(attempt.result.error.message) : "-",
+    lost: attempt.result.status === "lost" ? stripAnsi(attempt.result.reason) : "-",
+    detail: stripAnsi(detail ?? (attempt.result.status === "failed" ? attempt.result.error.message : "-")),
     output:
       attempt.result.status === "lost"
         ? "-"
