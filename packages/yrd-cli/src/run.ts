@@ -502,7 +502,7 @@ type RuntimeBootstrap = Readonly<{
   env: NodeJS.ProcessEnv
   load(
     context: YrdContext,
-    options: Readonly<{ resident: boolean }>,
+    options: Readonly<{ resident: boolean; viewer: boolean }>,
   ): Promise<
     Readonly<{
       app: YrdCliApp
@@ -2224,9 +2224,7 @@ export async function requireFreshInstalledBaseline(services: YrdCliServices): P
     configuration("queue.audit capability is not installed")
   }
   const result = await administration.auditEnvironment()
-  const drift = result.findings.filter(
-    (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
-  )
+  const drift = result.findings.filter((finding) => finding.code === "config-drift" || finding.code === "runtime-drift")
   if (drift.length === 0) return
   refusal(drift.map((finding) => finding.message).join("\n"))
 }
@@ -2947,7 +2945,11 @@ function buildProgram(
         action.name() === "run" &&
         action.parent?.name() === "queue" &&
         (action.opts() as Readonly<{ watch?: boolean }>).watch === true
-      const loaded = await bootstrap.load(selected, { resident })
+      const viewer =
+        action.name() === "list" &&
+        action.parent?.name() === "queue" &&
+        (action.opts() as Readonly<{ watch?: boolean }>).watch === true
+      const loaded = await bootstrap.load(selected, { resident, viewer })
       runtimeApp = loaded.app
       runtimeServices = loaded.services
       Object.assign(io, loaded.io)

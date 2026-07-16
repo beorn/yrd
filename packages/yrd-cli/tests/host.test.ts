@@ -19,6 +19,7 @@ import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.t
 import { queueStepRevision } from "../src/host-revision.ts"
 import type { ResolvedYrdProjectConfig } from "../src/config.ts"
 import { classifyFailure } from "../src/invocation.ts"
+import { withLiveRenderer } from "../src/live-renderer.ts"
 import { discoverYrdRepository } from "../src/repository.ts"
 import type { SignalDelivery, SignalDeliveryAdapter } from "../src/signals.ts"
 
@@ -546,6 +547,49 @@ notify:
       failure: { kind: "configuration", code: "signal-submitter-missing" },
     })
     expect((failure as Error).message).toContain("set TRIBE_NAME to the submitting Tribe handle")
+  })
+
+  it("runs the literal queue watch viewer without Tribe identity or notification settlement", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    const tribeName = process.env.TRIBE_NAME
+    delete process.env.TRIBE_NAME
+    let mounted = false
+    let stderr = ""
+    try {
+      const io = withLiveRenderer(
+        {
+          cwd: repo,
+          stdout: () => undefined,
+          stderr: (text) => {
+            stderr += text
+          },
+        },
+        async () => {
+          mounted = true
+        },
+      )
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "queue", "watch"], io),
+        stderr,
+      ).toBe(0)
+    } finally {
+      if (tribeName === undefined) delete process.env.TRIBE_NAME
+      else process.env.TRIBE_NAME = tribeName
+    }
+
+    expect(mounted).toBe(true)
+    expect(stderr).not.toContain("set TRIBE_NAME")
+    expect(await Bun.file(join(repo, ".git", "yrd", "notifications", "cursor-v1.json")).exists()).toBe(false)
   })
 
   it("refuses a needs-review route when review is not an eligibility requirement", async () => {

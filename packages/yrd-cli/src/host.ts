@@ -870,10 +870,14 @@ export type YrdHostOptions = Readonly<{
 }>
 
 export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHost> {
-  return createYrdRuntimeHost(options)
+  return createYrdRuntimeHost(options, undefined, "active")
 }
 
-async function createYrdRuntimeHost(options: YrdHostOptions, resident?: ResidentRunnerIdentity): Promise<YrdHost> {
+async function createYrdRuntimeHost(
+  options: YrdHostOptions,
+  resident: ResidentRunnerIdentity | undefined,
+  mode: "active" | "viewer",
+): Promise<YrdHost> {
   const scope = createScope("yrd-host")
   const ownsLog = options.log === undefined
   const log =
@@ -900,30 +904,32 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     const journal = createJournal({ dir: repository.stateDir, inject: { log } })
     const routes = loaded.config.notify ?? {}
     const defaultActor = env.TRIBE_NAME?.trim() || "operator"
-    const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
-    if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultActor).success) {
-      raiseFailure(
-        "configuration",
-        "signal-submitter-missing",
-        `yrd: notify.${submitterRoute} targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)`,
-      )
-    }
-    if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {
-      raiseFailure(
-        "configuration",
-        "signal-review-policy-missing",
-        "yrd: notify.pr/needs-review requires 'requires: [review]' so the routed eligibility transition can exist",
-      )
-    }
-    if (Object.keys(routes).length > 0) {
-      signals = createSignalObserver({
-        journal,
-        stateDir: repository.stateDir,
-        routes,
-        reviewRequired: loaded.config.requires.includes("review"),
-        adapter: options.signalAdapter ?? createTribeSignalAdapter(process),
-        log,
-      })
+    if (mode === "active") {
+      const submitterRoute = Object.entries(routes).find(([, targets]) => targets?.includes("submitter") === true)?.[0]
+      if (submitterRoute !== undefined && !SignalRecipientSchema.safeParse(defaultActor).success) {
+        raiseFailure(
+          "configuration",
+          "signal-submitter-missing",
+          `yrd: notify.${submitterRoute} targets submitter, but TRIBE_NAME is not a Tribe recipient; set TRIBE_NAME to the submitting Tribe handle (for example, @agent/2)`,
+        )
+      }
+      if (routes["pr/needs-review"] !== undefined && !loaded.config.requires.includes("review")) {
+        raiseFailure(
+          "configuration",
+          "signal-review-policy-missing",
+          "yrd: notify.pr/needs-review requires 'requires: [review]' so the routed eligibility transition can exist",
+        )
+      }
+      if (Object.keys(routes).length > 0) {
+        signals = createSignalObserver({
+          journal,
+          stateDir: repository.stateDir,
+          routes,
+          reviewRequired: loaded.config.requires.includes("review"),
+          adapter: options.signalAdapter ?? createTribeSignalAdapter(process),
+          log,
+        })
+      }
     }
     candidatePool = createCandidatePool({
       repo: repository.repo,
@@ -961,7 +967,7 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
         )
       }
     }
-    await drain()
+    if (mode === "active") await drain()
     const services = Object.freeze({
       queue: queueAdministration(
         process,
@@ -1125,7 +1131,11 @@ export async function runYrdProcess(
         log = createYrdLogger(context.observability, (text) => io.stderr(text))
         const resident = options.resident ? residentRunnerIdentity(env) : undefined
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
-        const activeHost = await createYrdRuntimeHost({ cwd: context.repo, env, log: runtimeLog }, resident)
+        const activeHost = await createYrdRuntimeHost(
+          { cwd: context.repo, env, log: runtimeLog },
+          resident,
+          options.viewer ? "viewer" : "active",
+        )
         host = activeHost
         const runnerLog = runtimeLog.child("runner")
         const drain = options.resident ? new AbortController() : undefined
