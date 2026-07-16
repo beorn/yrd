@@ -1,14 +1,15 @@
 import { createHash } from "node:crypto"
 import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { isAbsolute, join, resolve } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
 import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
-import type { Process } from "@yrd/process"
+import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import type { IntegratedShape, IntegrationProof, PRShape, PRSnapshot, SourceRewrite } from "./model.ts"
 import { IntegrationProofSchema, SourceRewriteSchema } from "./model.ts"
 import type { StepExecution, StepRunner } from "./queue.ts"
+import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -80,6 +81,34 @@ export const QueueAuthorityRefusalEvidenceSchema = z
   })
   .strict()
 export type QueueAuthorityRefusalEvidence = Readonly<z.infer<typeof QueueAuthorityRefusalEvidenceSchema>>
+
+const SubmoduleReachabilityRefusalEvidenceSchema = z
+  .object({
+    kind: z.literal("submodule-reachability-refusal"),
+    operation: z.enum([
+      "read-tree",
+      "read-gitmodules",
+      "read-superproject-origin",
+      "initialize",
+      "filtered-fetch",
+      "fallback-fetch",
+      "verify",
+    ]),
+    repository: z.string().min(1),
+    origin: z.string().min(1).optional(),
+    sha: z.string().regex(/^[0-9a-f]{40,64}$/iu).optional(),
+    paths: z.array(z.string().min(1)).min(1).optional(),
+    exitCode: z.number().int().optional(),
+    timedOut: z.boolean().optional(),
+    signal: z.string().nullable().optional(),
+    stalled: z.boolean().optional(),
+    verdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
+    sweepFailure: z.string().min(1).optional(),
+    detail: z.string().min(1),
+    retryable: z.literal(true),
+  })
+  .strict()
+type SubmoduleReachabilityRefusalEvidence = Readonly<z.infer<typeof SubmoduleReachabilityRefusalEvidenceSchema>>
 
 export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
@@ -479,21 +508,51 @@ async function failureEvidence(
   })
 }
 
-type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
+type GitResult = Readonly<{
+  code: number
+  stdout: string
+  stderr: string
+  durationMs: number
+  signal: ProcessResult["signal"]
+  timedOut: boolean
+  stalled?: boolean
+  verdict?: "EXITED" | "TIMED_OUT" | "STALLED"
+  sweepFailure?: string
+}>
 type Git = ReturnType<typeof createGit>
 
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv = globalThis.process.env) {
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
-  const run = async (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> => {
+  const execute = async (
+    repo: string,
+    args: readonly string[],
+    allowFailure: boolean,
+    trim: boolean,
+  ): Promise<GitResult> => {
     const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
-    const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
+    const progress = result as typeof result & ProgressResult
+    const completed = {
+      code: result.exitCode,
+      stdout: trim ? result.stdout.trim() : result.stdout,
+      stderr: trim ? result.stderr.trim() : result.stderr,
+      durationMs: result.durationMs,
+      signal: result.signal,
+      timedOut: result.timedOut,
+      ...(progress.stalled === undefined ? {} : { stalled: progress.stalled }),
+      ...(progress.verdict === undefined ? {} : { verdict: progress.verdict }),
+      ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+    }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
     }
     return completed
   }
+  const run = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
+    execute(repo, args, allowFailure, true)
+  const raw = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
+    execute(repo, args, allowFailure, false)
   const commit = async (repo: string, ref: string): Promise<string> =>
     (await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).stdout
   const optionalCommit = async (repo: string, ref: string): Promise<string | undefined> => {
@@ -523,7 +582,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ["range-diff", "--no-color", "--no-dual-color", "--no-patch", `${oldBase}..${oldTip}`, `${newBase}..${newTip}`],
       true,
     )
-  return Object.freeze({ run, commit, optionalCommit, stablePatchId, rangeDiff })
+  return Object.freeze({ run, raw, commit, optionalCommit, stablePatchId, rangeDiff })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -950,7 +1009,7 @@ async function withScratch<Output extends JsonValue>(
   repo: string,
   ref: string,
   parent: string,
-  run: (path: string) => Promise<JobResult<Output>>,
+  run: (path: string, root: string) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   await mkdir(parent, { recursive: true })
   const root = await mkdtemp(join(await realpath(parent), "yrd-queue-"))
@@ -961,7 +1020,7 @@ async function withScratch<Output extends JsonValue>(
   try {
     await git.run(repo, ["worktree", "add", "--detach", path, ref])
     added = true
-    outcome = await run(path)
+    outcome = await run(path, root)
   } catch (cause) {
     operationFailure = cause
   }
@@ -1668,6 +1727,278 @@ async function authoredGitlinkPaths(
   return { status: "passed", output: gitlinks }
 }
 
+type CandidateSubmodulePin = Readonly<{ path: string; sha: string; origin: string }>
+type MutableSubmoduleConfig = { path?: string; url?: string }
+
+const REMOTE_SCHEME = /^[a-z][a-z0-9+.-]*:/iu
+const FILTER_UNSUPPORTED =
+  /filtering not recognized by server|server does not support filter|filter(?:ing)? (?:is )?not supported|unsupported[^\n]*filter/iu
+const DEFINITIVE_EXACT_SHA_ABSENCE = /not our ref/iu
+
+function scpRemote(value: string): RegExpExecArray | null {
+  return /^((?:[^/@:]+@)?[^/:]+:)(.+)$/u.exec(value)
+}
+
+function canonicalRemote(repo: string, value: string): string {
+  if (isAbsolute(value) || REMOTE_SCHEME.test(value) || scpRemote(value) !== null) return value
+  return resolve(repo, value)
+}
+
+function resolveSubmoduleOrigin(repo: string, superOrigin: string | undefined, value: string): string {
+  if (!value.startsWith("./") && !value.startsWith("../")) return canonicalRemote(repo, value)
+  if (superOrigin === undefined) {
+    throw new Error(`yrd: relative submodule URL '${value}' has no superproject origin`)
+  }
+  const base = canonicalRemote(repo, superOrigin)
+  try {
+    return resolveRelativeSubmoduleOrigin(base, value)
+  } catch (cause) {
+    throw new Error(`yrd: could not resolve submodule URL '${value}' against '${base}': ${messageOf(cause)}`)
+  }
+}
+
+function parseSubmoduleConfig(output: string): Map<string, MutableSubmoduleConfig> {
+  const modules = new Map<string, MutableSubmoduleConfig>()
+  for (const entry of output.split("\0")) {
+    if (entry === "") continue
+    const separator = entry.indexOf("\n")
+    if (separator < 1) throw new Error("yrd: candidate .gitmodules emitted an invalid NUL record")
+    const key = entry.slice(0, separator)
+    const value = entry.slice(separator + 1)
+    const match = /^submodule\.(.+)\.(path|url)$/iu.exec(key)
+    if (match?.[1] === undefined) continue
+    const property = match[2]
+    if (property !== "path" && property !== "url") continue
+    const current = modules.get(match[1]) ?? {}
+    if (current[property] !== undefined && current[property] !== value) {
+      throw new Error(`yrd: candidate .gitmodules defines conflicting ${property} values for '${match[1]}'`)
+    }
+    current[property] = value
+    modules.set(match[1], current)
+  }
+  return modules
+}
+
+async function candidateSubmodulePins(
+  git: Git,
+  repo: string,
+  path: string,
+  candidateSha: string,
+): Promise<CandidateSubmodulePin[]> {
+  const treeContext = { operation: "read-tree", repository: path } as const
+  const tree = await runSubmoduleProbe(
+    git,
+    path,
+    ["ls-tree", "-r", "-z", "--full-tree", candidateSha],
+    treeContext,
+    true,
+  )
+  if (tree.code !== 0) throw createSubmoduleReachabilityRefusal(treeContext, tree)
+  const gitlinks: ReadonlyArray<Readonly<{ path: string; sha: string }>> = tree.stdout
+    .split("\0")
+    .filter((entry) => entry !== "")
+    .flatMap((entry) => {
+      const separator = entry.indexOf("\t")
+      if (separator < 1) throw new Error("yrd: candidate tree emitted an invalid NUL record")
+      const [mode, type, sha] = entry.slice(0, separator).split(" ")
+      if (mode !== "160000") return []
+      if (type !== "commit" || sha === undefined || !/^[0-9a-f]{40,64}$/iu.test(sha)) {
+        throw new Error(`yrd: candidate gitlink '${entry.slice(separator + 1)}' has an invalid object identity`)
+      }
+      return [{ path: entry.slice(separator + 1), sha }]
+    })
+  if (gitlinks.length === 0) return []
+
+  const configuredContext = { operation: "read-gitmodules", repository: path } as const
+  const configured = await runSubmoduleProbe(
+    git,
+    path,
+    [
+      "config",
+      "--null",
+      "--blob",
+      `${candidateSha}:.gitmodules`,
+      "--get-regexp",
+      "^submodule\\..*\\.(path|url)$",
+    ],
+    configuredContext,
+    true,
+  )
+  if (configured.code !== 0) {
+    if (definitiveCandidateMetadataFailure(configured)) {
+      throw new Error(
+        `yrd: candidate contains gitlinks but .gitmodules is missing or invalid: ${configured.stderr.trim() || configured.stdout.trim() || "no submodule metadata"}`,
+      )
+    }
+    throw createSubmoduleReachabilityRefusal(configuredContext, configured)
+  }
+  const modules = parseSubmoduleConfig(configured.stdout)
+  const urlsByPath = new Map<string, string>()
+  for (const [name, module] of modules) {
+    if (module.path === undefined) continue
+    if (module.url === undefined) throw new Error(`yrd: candidate submodule '${module.path}' has no URL (section '${name}')`)
+    const previous = urlsByPath.get(module.path)
+    if (previous !== undefined && previous !== module.url) {
+      throw new Error(`yrd: candidate submodule path '${module.path}' resolves to conflicting URLs`)
+    }
+    urlsByPath.set(module.path, module.url)
+  }
+  const remoteContext = { operation: "read-superproject-origin", repository: repo } as const
+  const remote = await runSubmoduleProbe(git, repo, ["config", "--get", "remote.origin.url"], remoteContext)
+  const originNotConfigured = remote.code === 1 && remote.stdout === "" && remote.stderr === ""
+  if (remote.code !== 0 && !originNotConfigured) {
+    throw createSubmoduleReachabilityRefusal(remoteContext, remote)
+  }
+  const superOrigin = remote.code === 0 && remote.stdout !== "" ? remote.stdout : undefined
+  return gitlinks.map((gitlink) => {
+    const url = urlsByPath.get(gitlink.path)
+    if (url === undefined) throw new Error(`yrd: candidate submodule '${gitlink.path}' has no URL`)
+    if (superOrigin === undefined && (url.startsWith("./") || url.startsWith("../"))) {
+      throw createSubmoduleReachabilityRefusal(
+        remoteContext,
+        remote,
+        `candidate submodule '${gitlink.path}' uses relative URL '${url}' but the superproject origin is not configured`,
+      )
+    }
+    return { ...gitlink, origin: resolveSubmoduleOrigin(repo, superOrigin, url) }
+  })
+}
+
+function fetchDetail(result: GitResult): string {
+  const detail = result.stderr.trim() || result.stdout.trim() || `git exited ${result.code}`
+  if (result.sweepFailure !== undefined) return `git process sweep failed (${result.sweepFailure}): ${detail}`
+  if (result.stalled || result.verdict === "STALLED") return `git stalled: ${detail}`
+  if (result.timedOut) return `git timed out: ${detail}`
+  if (result.signal !== null) return `git terminated by ${result.signal}: ${detail}`
+  return detail
+}
+
+type SubmoduleProbeContext = Readonly<{
+  operation:
+    | "read-tree"
+    | "read-gitmodules"
+    | "read-superproject-origin"
+    | "initialize"
+    | "filtered-fetch"
+    | "fallback-fetch"
+    | "verify"
+  repository: string
+  origin?: string
+  sha?: string
+  paths?: readonly string[]
+}>
+
+async function runSubmoduleProbe(
+  git: Git,
+  repo: string,
+  args: readonly string[],
+  context: SubmoduleProbeContext,
+  raw = false,
+): Promise<GitResult> {
+  try {
+    const result = await (raw ? git.raw(repo, args, true) : git.run(repo, args, true))
+    if (!probeSettled(result)) throw createSubmoduleReachabilityRefusal(context, result)
+    return result
+  } catch (cause) {
+    if (submoduleReachabilityRefusal(cause) !== undefined) throw cause
+    throw createSubmoduleReachabilityRefusal(context, undefined, messageOf(cause))
+  }
+}
+
+function probeSettled(result: GitResult): boolean {
+  return (
+    !result.timedOut &&
+    result.signal === null &&
+    result.stalled !== true &&
+    (result.verdict === undefined || result.verdict === "EXITED") &&
+    result.sweepFailure === undefined
+  )
+}
+
+function definitiveProbeFailure(result: GitResult, pattern: RegExp): boolean {
+  return probeSettled(result) && pattern.test(`${result.stderr}\n${result.stdout}`)
+}
+
+function definitiveCandidateMetadataFailure(result: GitResult): boolean {
+  if (!probeSettled(result)) return false
+  const detail = `${result.stderr}\n${result.stdout}`.trim()
+  return /\.gitmodules.*does not exist|bad config line|invalid config|invalid key/iu.test(detail)
+}
+
+function throwFetchProbeFailure(context: SubmoduleProbeContext, result: GitResult): never {
+  if (definitiveProbeFailure(result, DEFINITIVE_EXACT_SHA_ABSENCE)) {
+    throw new Error(
+      `yrd: candidate submodule pin '${context.sha}' for ${context.paths?.join(", ")} is not reachable from '${context.origin}': ${fetchDetail(result)}`,
+    )
+  }
+  throw createSubmoduleReachabilityRefusal(context, result)
+}
+
+async function proveCandidateSubmoduleReachability(
+  git: Git,
+  repo: string,
+  path: string,
+  candidateSha: string,
+  proofParent: string,
+): Promise<void> {
+  const pins = await candidateSubmodulePins(git, repo, path, candidateSha)
+  if (pins.length === 0) return
+
+  const groups = new Map<string, Map<string, string[]>>()
+  for (const pin of pins) {
+    const shas = groups.get(pin.origin) ?? new Map<string, string[]>()
+    shas.set(pin.sha, [...(shas.get(pin.sha) ?? []), pin.path])
+    groups.set(pin.origin, shas)
+  }
+  await mkdir(proofParent, { recursive: true })
+  const template = join(proofParent, "empty-template")
+  await mkdir(template, { recursive: true })
+
+  for (const [origin, shas] of [...groups].sort(([left], [right]) => left.localeCompare(right))) {
+    const store = join(proofParent, createHash("sha256").update(origin).digest("hex"))
+    const initializedContext = { operation: "initialize", repository: proofParent, origin } as const
+    const initialized = await runSubmoduleProbe(
+      git,
+      proofParent,
+      ["init", "--bare", "--quiet", `--template=${template}`, store],
+      initializedContext,
+    )
+    if (initialized.code !== 0) {
+      throw createSubmoduleReachabilityRefusal(initializedContext, initialized)
+    }
+    for (const [sha, paths] of [...shas].sort(([left], [right]) => left.localeCompare(right))) {
+      const filteredContext = { operation: "filtered-fetch", repository: store, origin, sha, paths } as const
+      const filtered = await runSubmoduleProbe(
+        git,
+        store,
+        ["-c", "protocol.version=2", "fetch", "--depth=1", "--filter=tree:0", origin, sha],
+        filteredContext,
+      )
+      if (filtered.code !== 0) {
+        const canFallback = probeSettled(filtered) && FILTER_UNSUPPORTED.test(`${filtered.stderr}\n${filtered.stdout}`)
+        if (!canFallback) {
+          throwFetchProbeFailure(filteredContext, filtered)
+        }
+        const fallbackContext = { operation: "fallback-fetch", repository: store, origin, sha, paths } as const
+        const fallback = await runSubmoduleProbe(
+          git,
+          store,
+          ["-c", "protocol.version=2", "fetch", "--depth=1", origin, sha],
+          fallbackContext,
+        )
+        if (fallback.code !== 0) {
+          throwFetchProbeFailure(fallbackContext, fallback)
+        }
+      }
+      const verifyContext = { operation: "verify", repository: store, origin, sha, paths } as const
+      const fetched = await runSubmoduleProbe(git, store, ["cat-file", "-e", `${sha}^{commit}`], verifyContext)
+      if (fetched.code !== 0) {
+        throw createSubmoduleReachabilityRefusal(verifyContext, fetched)
+      }
+    }
+  }
+}
+
 export type GitCheckOptions = ProcessDependency &
   Readonly<{
     repo: string
@@ -1727,7 +2058,7 @@ async function withPinnedCandidate<Output extends JsonValue>(
   use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
 ): Promise<JobResult<Output>> {
   const target = await authoritativeQueueBase(git, repo, primaryPR(input).base)
-  return withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), async (path) => {
+  return withScratch(git, repo, target.sha, options.checkoutParent ?? tmpdir(), async (path, scratchRoot) => {
     const candidate = await prepareCandidate(
       git,
       repo,
@@ -1738,6 +2069,13 @@ async function withPinnedCandidate<Output extends JsonValue>(
       options.allowAuthoredGitlinks === true,
     )
     if (candidate.status === "failed") return onFailure(candidate)
+    await proveCandidateSubmoduleReachability(
+      git,
+      repo,
+      path,
+      candidate.output.sha,
+      join(scratchRoot, "submodule-proof"),
+    )
     const pinned = await pinCandidate(
       git,
       repo,
@@ -1819,7 +2157,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
       )
     } catch (cause) {
-      const refusal = queueAuthorityRefusal(cause)
+      const refusal = queueAuthorityRefusal(cause) ?? submoduleReachabilityRefusal(cause)
       if (refusal !== undefined) {
         return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
       }
@@ -2018,11 +2356,57 @@ function createQueueAuthorityRefusal(base: string, attempts: number, detail: str
   )
 }
 
+type SubmoduleReachabilityFailure = YrdFailure & Readonly<{ evidence: SubmoduleReachabilityRefusalEvidence }>
+
+function createSubmoduleReachabilityRefusal(
+  context: SubmoduleProbeContext,
+  result?: GitResult,
+  causeDetail?: string,
+): SubmoduleReachabilityFailure {
+  const detail = causeDetail ?? (result === undefined ? "submodule reachability probe failed" : fetchDetail(result))
+  const evidence = SubmoduleReachabilityRefusalEvidenceSchema.parse({
+    kind: "submodule-reachability-refusal",
+    operation: context.operation,
+    repository: context.repository,
+    ...(context.origin === undefined ? {} : { origin: context.origin }),
+    ...(context.sha === undefined ? {} : { sha: context.sha }),
+    ...(context.paths === undefined ? {} : { paths: [...context.paths] }),
+    ...(result === undefined
+      ? {}
+      : {
+          exitCode: result.code,
+          timedOut: result.timedOut,
+          signal: result.signal,
+          ...(result.stalled === undefined ? {} : { stalled: result.stalled }),
+          ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+          ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
+        }),
+    detail,
+    retryable: true,
+  })
+  return Object.assign(
+    createFailure({
+      kind: "infrastructure",
+      code: "queue-environment-refused",
+      message: `yrd: could not prove candidate submodule reachability from '${context.origin ?? context.repository}': ${detail}`,
+    }),
+    { evidence },
+  )
+}
+
 function queueAuthorityRefusal(cause: unknown): QueueAuthorityRefusalEvidence | undefined {
   if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
     return undefined
   }
   const parsed = QueueAuthorityRefusalEvidenceSchema.safeParse(cause.evidence)
+  return parsed.success ? parsed.data : undefined
+}
+
+function submoduleReachabilityRefusal(cause: unknown): SubmoduleReachabilityRefusalEvidence | undefined {
+  if (failureFact(cause)?.code !== "queue-environment-refused" || !(cause instanceof Error) || !("evidence" in cause)) {
+    return undefined
+  }
+  const parsed = SubmoduleReachabilityRefusalEvidenceSchema.safeParse(cause.evidence)
   return parsed.success ? parsed.data : undefined
 }
 
