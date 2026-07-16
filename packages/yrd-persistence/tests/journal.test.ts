@@ -74,6 +74,13 @@ type TestInject = Readonly<{
         length: number,
         position: number,
       ): Promise<Readonly<{ bytesWritten: number }>>
+      read(
+        file: FileHandle,
+        bytes: Uint8Array,
+        offset: number,
+        length: number,
+        position: number,
+      ): Promise<Readonly<{ bytesRead: number }>>
       datasync(file: FileHandle): Promise<void>
     }>
   >

@@ -4,7 +4,7 @@
  * @consumer @yrd/persistence
  */
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -24,13 +24,22 @@ import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import { describe, expect, it } from "vitest"
 import * as z from "zod"
-import { SNAPSHOT_FILE, SNAPSHOT_REFRESH_FRAMES } from "../src/snapshot.ts"
+import { SNAPSHOT_FILE, SNAPSHOT_REFRESH_FRAMES, encodeSnapshotFile } from "../src/snapshot.ts"
 
 const MANIFEST = "events-v4.manifest.json"
 
 type TestInject = Readonly<{
   thresholds?: Readonly<{ bytes?: number; frames?: number; snapshotFrames?: number }>
   log?: ConditionalLogger
+  io?: Readonly<{
+    read?(
+      file: FileHandle,
+      bytes: Uint8Array,
+      offset: number,
+      length: number,
+      position: number,
+    ): Promise<Readonly<{ bytesRead: number }>>
+  }>
 }>
 
 function uuid(label: string): string {
@@ -93,8 +102,33 @@ async function snapshotDocument(dir: string) {
     cursor: number
     frames: number
     values: unknown[]
-    binding: { generation: number }
+    binding: {
+      decoder: string
+      generation: number
+      manifestDigest: string
+      tailIdentity: string
+      tailLogicalStart: number
+      tailPrefixSha256: string
+      segments: { path: string; logicalStart: number; logicalEnd: number; compressedSha256: string }[]
+    }
   }
+}
+
+/** Builds an encodeSnapshotFile view from a seeded snapshot document (binding template). */
+function viewFrom(document: Awaited<ReturnType<typeof snapshotDocument>>, logicalEnd: number) {
+  return {
+    decoder: document.binding.decoder,
+    generation: document.binding.generation,
+    manifestDigest: document.binding.manifestDigest,
+    tailIdentity: document.binding.tailIdentity,
+    tailLogicalStart: document.binding.tailLogicalStart,
+    logicalEnd,
+    segments: document.binding.segments,
+  }
+}
+
+function sha256Hex(bytes: Uint8Array | string): string {
+  return createHash("sha256").update(bytes).digest("hex")
 }
 
 function counterDefinition() {
@@ -393,22 +427,50 @@ describe("journal snapshot cache", () => {
     await third.close()
   })
 
-  it("keeps duplicate event detection armed across a snapshot restore", async () => {
+  it.each([
+    ["command id", "duplicate command id"],
+    ["cause id", "duplicate cause id"],
+    ["event id", "duplicate event id"],
+  ] as const)("keeps duplicate %s detection armed across a snapshot restore", async (kind, expected) => {
     const dir = await directory()
     const journal = createJournal({ dir })
     const first = frame("dup-1")
     const cursor = await accepted(journal, first, 0)
     await drained(journal)
 
-    const duplicate = frame("dup-2")
+    const second = frame("dup-2")
     const [firstEvent] = first.events
-    const [duplicateEvent] = duplicate.events
-    if (firstEvent === undefined || duplicateEvent === undefined) throw new Error("expected seeded events")
-    const duplicated = { ...duplicate, events: [{ ...duplicateEvent, id: firstEvent.id }] }
+    const [secondEvent] = second.events
+    if (firstEvent === undefined || secondEvent === undefined) throw new Error("expected seeded events")
+    let duplicated: ReturnType<typeof frame>
+    if (kind === "command id") {
+      const commandValue = Command.parse({ id: first.command.id, op: second.command.op })
+      const cause: Cause = CauseSchema.parse({
+        id: uuid("dup-cause:command"),
+        commandId: commandValue.id,
+        op: commandValue.op,
+        commandHash: Command.hash(commandValue),
+      })
+      duplicated = { cause, command: commandValue, events: [secondEvent] }
+    } else if (kind === "cause id") {
+      duplicated = {
+        ...second,
+        cause: CauseSchema.parse({
+          id: first.cause.id,
+          commandId: second.command.id,
+          op: second.command.op,
+          commandHash: Command.hash(second.command),
+        }),
+      }
+    } else {
+      duplicated = { ...second, events: [{ ...secondEvent, id: firstEvent.id }] }
+    }
     await accepted(journal, duplicated, cursor)
 
+    // the duplicate lives in the tail; the original comes from the snapshot — the
+    // receipts/cause/event registries must be rebuilt from cached frames exactly
     await expect(createYrd(counterDefinition(), { inject: { journal: createJournal({ dir }) } })).rejects.toThrow(
-      "duplicate event id",
+      expected,
     )
   })
 
@@ -427,14 +489,23 @@ describe("journal snapshot cache", () => {
     const warmEvents = await Array.fromAsync(warm.events())
     expect(warmEvents).toEqual(coldEvents)
     expect(warm.state()).toEqual(coldState)
+    // events beyond the snapshot (tail) must stream after the checkpointed prefix in journal order
+    for (let index = 0; index < 2; index += 1) await warm.dispatch({ op: "counter.add" })
+    const crossing = await Array.fromAsync(warm.events())
     await warm.close()
+    expect(crossing.slice(0, coldEvents.length)).toEqual(coldEvents)
+    expect(crossing).toHaveLength(coldEvents.length + 2)
+    const control = await createYrd(definition, { inject: { journal: createJournal({ dir }) } })
+    expect(await Array.fromAsync(control.events())).toEqual(crossing)
+    expect(control.state().counter).toBe(7)
+    await control.close()
 
     // an invalid snapshot must yield the same events and state as the full replay
     const path = join(dir, SNAPSHOT_FILE)
     await writeFile(path, (await readFile(path, "utf8")).slice(0, 40))
     const fallback = await createYrd(definition, { inject: { journal: createJournal({ dir }) } })
-    expect(await Array.fromAsync(fallback.events())).toEqual(coldEvents)
-    expect(fallback.state()).toEqual(coldState)
+    expect(await Array.fromAsync(fallback.events())).toEqual(crossing)
+    expect(fallback.state().counter).toBe(7)
     await fallback.close()
   })
 
@@ -453,5 +524,176 @@ describe("journal snapshot cache", () => {
     const warm = await drained(createJournal({ dir }))
     expect(warm.values).toEqual(cold.values)
     expect(canonicalize(warm.values)).toBe(canonicalize(cold.values))
+  })
+
+  it("returns the original receipt for a retried command key after a warm restart", async () => {
+    const dir = await directory()
+    const definition = counterDefinition()
+
+    const first = await createYrd(definition, { inject: { journal: createJournal({ dir }) } })
+    const original = await first.dispatch({ op: "counter.add" }, { key: "idempotent-op" })
+    await first.close()
+
+    const seeding = await createYrd(definition, { inject: { journal: createJournal({ dir }) } })
+    await seeding.close()
+    const warm = await createYrd(definition, { inject: { journal: createJournal({ dir }) } })
+    const before = await warm.journalSnapshot()
+    const replayed = await warm.dispatch({ op: "counter.add" }, { key: "idempotent-op" })
+    const after = await warm.journalSnapshot()
+
+    // receiptsByKey must be rebuilt from the cached frames exactly: same receipt, no new append
+    expect(replayed).toEqual(original)
+    expect(after.asOf.cursor).toBe(before.asOf.cursor)
+    expect(warm.state().counter).toBe(1)
+    await warm.close()
+  })
+
+  it("never seeds a snapshot inside a segment and rejects pre-fix mid-segment snapshots over corrupt authority", async () => {
+    const dir = await directory()
+    // frames:2 compaction: c1+c2 become ONE segment, c3 stays in the tail
+    const journal = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 2 } })
+    const cursor1 = await accepted(journal, frame("c1"), 0)
+    const cursor2 = await accepted(journal, frame("c2"), cursor1)
+    const cursor3 = await accepted(journal, frame("c3"), cursor2)
+
+    // 1) bounded read ending INSIDE the segment completes but must not seed a snapshot
+    const bounded = await drained(createJournal({ dir }), 0, cursor1)
+    expect(bounded.values).toEqual([frame("c1")])
+    await expect(readFile(join(dir, SNAPSHOT_FILE), "utf8")).rejects.toMatchObject({ code: "ENOENT" })
+
+    // 2) template from a legitimate seed, then reproduce the pre-fix state: a
+    //    snapshot whose cursor lands inside the compressed segment
+    const seeded = await drained(createJournal({ dir }))
+    expect(seeded.values).toHaveLength(3)
+    const document = await snapshotDocument(dir)
+    expect(document.binding.segments).toHaveLength(1)
+    const [segment] = document.binding.segments
+    if (segment === undefined) throw new Error("expected one compacted segment")
+    expect(segment.logicalStart).toBeLessThan(cursor1)
+    expect(segment.logicalEnd).toBeGreaterThan(cursor1)
+    const crafted = encodeSnapshotFile({
+      view: viewFrom(document, cursor3),
+      cursor: cursor1,
+      frames: 1,
+      valuesJson: JSON.stringify(bounded.values),
+      tailPrefixSha256: sha256Hex(Buffer.alloc(0)),
+    })
+
+    // 3) corrupt the covered bytes of the segment WITHOUT touching manifest or cache
+    const segmentPath = join(dir, segment.path)
+    const compressed = await readFile(segmentPath)
+    compressed[Math.floor(compressed.length / 2)] = (compressed[Math.floor(compressed.length / 2)] ?? 0) ^ 0xff
+    await writeFile(segmentPath, compressed)
+
+    // control: cache-disabled bounded replay over the corrupt segment
+    await rm(join(dir, SNAPSHOT_FILE), { force: true })
+    let controlError: Error | undefined
+    try {
+      await drained(createJournal({ dir }), 0, cursor1)
+    } catch (error) {
+      controlError = error as Error
+    }
+    if (controlError === undefined) throw new Error("expected the control replay to reject")
+    expect(controlError.message).toContain("compressed segment checksum mismatch")
+
+    // 4) the same bounded read with the pre-fix snapshot present must warn once,
+    //    fall back, raise the SAME error, and must NOT rewrite from corrupt authority
+    await writeFile(join(dir, SNAPSHOT_FILE), crafted)
+    const { log, events, end } = capture()
+    let unmaskedError: Error | undefined
+    try {
+      await drained(createJournal({ dir, inject: { log } }), 0, cursor1)
+    } catch (error) {
+      unmaskedError = error as Error
+    }
+    end()
+    expect(propsOf(events, "full-replay")).toEqual([
+      expect.objectContaining({ reason: "snapshot-covers-partial-segment", observed: cursor1 }),
+    ])
+    expect(unmaskedError?.message).toBe(controlError.message)
+    expect(await readFile(join(dir, SNAPSHOT_FILE), "utf8")).toBe(crafted)
+  })
+
+  it("invalidates loudly when the snapshot was written by a different decoder", async () => {
+    const dir = await directory()
+    const journal = createJournal({ dir })
+    let cursor = 0
+    for (const key of ["c1", "c2"]) cursor = await accepted(journal, frame(key), cursor)
+    await drained(journal)
+    const document = await snapshotDocument(dir)
+    expect(document.binding.decoder).toMatch(/^journal-v4\/frame-v3\//)
+
+    const foreign = encodeSnapshotFile({
+      view: { ...viewFrom(document, cursor), decoder: "journal-v4/frame-v3/decode-r0" },
+      cursor: document.cursor,
+      frames: document.frames,
+      valuesJson: JSON.stringify(document.values),
+      tailPrefixSha256: document.binding.tailPrefixSha256,
+    })
+    await writeFile(join(dir, SNAPSHOT_FILE), foreign)
+
+    const { log, events, end } = capture()
+    const recovered = await drained(createJournal({ dir, inject: { log } }))
+    end()
+    expect(recovered.values).toEqual([frame("c1"), frame("c2")])
+    expect(propsOf(events, "full-replay")).toEqual([
+      expect.objectContaining({
+        reason: "snapshot-decoder-mismatch",
+        expected: document.binding.decoder,
+        observed: "journal-v4/frame-v3/decode-r0",
+      }),
+    ])
+    expect((await snapshotDocument(dir)).binding.decoder).toBe(document.binding.decoder)
+  })
+
+  it("reads exactly the verification and tail-delta byte ranges on a warm start", async () => {
+    const dir = await directory()
+    const journal = testJournal(dir, { thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 2 } })
+    const cursor1 = await accepted(journal, frame("c1"), 0)
+    const cursor2 = await accepted(journal, frame("c2"), cursor1)
+    const cursor3 = await accepted(journal, frame("c3"), cursor2)
+    await drained(createJournal({ dir }))
+    const document = await snapshotDocument(dir)
+    const [segment] = document.binding.segments
+    if (segment === undefined) throw new Error("expected one compacted segment")
+    const compressedSize = (await stat(join(dir, segment.path))).size
+    const tailStart = document.binding.tailLogicalStart
+    expect(tailStart).toBe(cursor2)
+    const coveredTail = cursor3 - tailStart
+
+    const spy = () => {
+      const reads = new Map<FileHandle, [number, number][]>()
+      const read = (file: FileHandle, bytes: Uint8Array, offset: number, length: number, position: number) => {
+        reads.set(file, [...(reads.get(file) ?? []), [position, length]])
+        return file.read(bytes, offset, length, position)
+      }
+      return { reads, read }
+    }
+
+    // warm at head: one whole-compressed-segment integrity read + one tail-prefix
+    // integrity read; NO historical decode read and NO tail re-read from offset 0
+    const atHead = spy()
+    const warm = await drained(testJournal(dir, { io: { read: atHead.read } }))
+    expect(warm.values).toEqual([frame("c1"), frame("c2"), frame("c3")])
+    const headRanges = [...atHead.reads.values()]
+    expect(headRanges).toHaveLength(2)
+    expect(headRanges).toEqual(expect.arrayContaining([[[0, compressedSize]], [[0, coveredTail]]]))
+
+    // with new tail frames: the ONLY additional read is the tail delta [covered, committed)
+    const cursor4 = await accepted(createJournal({ dir }), frame("c4"), cursor3)
+    const delta = spy()
+    const tail = await drained(testJournal(dir, { io: { read: delta.read } }))
+    expect(tail.values).toEqual([frame("c1"), frame("c2"), frame("c3"), frame("c4")])
+    const deltaRanges = [...delta.reads.values()]
+    expect(deltaRanges).toHaveLength(2)
+    expect(deltaRanges).toEqual(
+      expect.arrayContaining([
+        [[0, compressedSize]],
+        [
+          [0, coveredTail],
+          [coveredTail, cursor4 - cursor3],
+        ],
+      ]),
+    )
   })
 })

@@ -35,6 +35,14 @@ const RECOVERY_FILE = "events-v4.recovery.json"
 const V3_FILE = "events-v3.jsonl"
 const V3_CUTOVER = Buffer.from(`{"v":${FORMAT_VERSION},"cutover":"${MANIFEST_FILE}"}\n`)
 const EMPTY_DIGEST = sha256(Buffer.alloc(0))
+/**
+ * Identity of the frame decoder baked into every snapshot binding. Snapshot values
+ * are served without per-frame re-validation, so ANY semantic change to decode()
+ * / decodeFrame() / StoredFrameSchema that is not already covered by a VERSION or
+ * FORMAT_VERSION bump MUST bump the trailing revision here — otherwise an old
+ * cache silently serves values decoded under the previous rules.
+ */
+const JOURNAL_DECODER = `journal-v${FORMAT_VERSION}/frame-v${VERSION}/decode-r1`
 const DigestSchema = z.string().regex(/^[0-9a-f]{64}$/)
 const IntegerSchema = z.number().int().nonnegative()
 const PrivatePathSchema = z.string().regex(/^events-v4\.[a-zA-Z0-9._-]+$/)
@@ -140,6 +148,13 @@ type JournalIO = Readonly<{
     length: number,
     position: number,
   ): Promise<Readonly<{ bytesWritten: number }>>
+  read(
+    file: FileHandle,
+    bytes: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<Readonly<{ bytesRead: number }>>
   datasync(file: FileHandle): Promise<void>
 }>
 
@@ -210,6 +225,7 @@ type SnapshotCache =
 
 const defaultIO: JournalIO = {
   write: (file, bytes, offset, length, position) => file.write(bytes, offset, length, position),
+  read: (file, bytes, offset, length, position) => file.read(bytes, offset, length, position),
   datasync: (file) => file.datasync(),
 }
 
@@ -263,12 +279,18 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
         const collect: string[] | null = cache.kind === "bypass" ? null : []
         let replayed = 0
         for (const part of snapshot.parts) {
-          const start = Math.max(served, part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart)
+          const logicalStart = part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart
+          const start = Math.max(served, logicalStart)
           const end = Math.min(snapshot.before, part.kind === "segment" ? part.descriptor.logicalEnd : part.logicalEnd)
           if (start >= end) continue
-          const raw = await readPart(part)
-          const logicalStart = part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart
-          const slice = raw.subarray(start - logicalStart, end - logicalStart)
+          // Tail bytes are read range-exact so a warm start never re-reads the
+          // snapshot-covered prefix just to slice past it; segments are immutable
+          // whole-file units (verified compressed) and are only read when the range
+          // actually overlaps them.
+          const slice =
+            part.kind === "tail"
+              ? await readExactly(part.file, start - logicalStart, end - start, io)
+              : (await readSegment(part.descriptor, part.file, io)).subarray(start - logicalStart, end - logicalStart)
           for await (const batch of decode([slice], start, join(runtime.dir, partPath(part)))) {
             frames += batch.values.length
             replayed += batch.values.length
@@ -292,11 +314,25 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
           platform !== "win32" &&
           (cache.kind !== "hit" || replayed > thresholds.snapshotFrames)
         ) {
-          await writeSnapshotCache(runtime, snapshot.active, snapshot.parts, snapshot.before, {
-            base: cache.kind === "hit" ? cache : null,
-            chunks: collect,
-            replayed,
-          })
+          if (snapshot.before < snapshot.active.manifest.tail.logicalStart) {
+            // A snapshot ending inside the segment range would leave a partially
+            // covered segment outside physical verification (a repeated bounded
+            // read could then serve cached frames over corrupted covered bytes),
+            // so bounded reads below the tail start never seed or refresh.
+            log.debug?.("journal snapshot cache not written for a bounded read inside the segment range", {
+              action: "snapshot-skipped",
+              reason: "bounded-read-inside-segments",
+              path: join(runtime.dir, SNAPSHOT_FILE),
+              before: snapshot.before,
+              tailLogicalStart: snapshot.active.manifest.tail.logicalStart,
+            })
+          } else {
+            await writeSnapshotCache(runtime, snapshot.active, snapshot.parts, snapshot.before, {
+              base: cache.kind === "hit" ? cache : null,
+              chunks: collect,
+              replayed,
+            })
+          }
         }
       } finally {
         await closeParts(snapshot.parts)
@@ -514,7 +550,7 @@ async function appendFrame(
 
 async function candidateFromSnapshot(runtime: Runtime, snapshot: CompactionSnapshot): Promise<SegmentCandidate> {
   try {
-    const raw = await readExactly(snapshot.tail, 0, snapshot.state.committedBytes)
+    const raw = await readExactly(snapshot.tail, 0, snapshot.state.committedBytes, runtime.io)
     const built = await buildCandidate(
       runtime,
       raw,
@@ -893,6 +929,7 @@ async function rollbackGeneration(runtime: Runtime, recovery: Recovery, cause: u
 
 function snapshotBindingView(active: ActiveState): SnapshotBindingView {
   return {
+    decoder: JOURNAL_DECODER,
     generation: active.manifest.generation,
     manifestDigest: active.manifest.digest,
     tailIdentity: active.manifest.tail.identity,
@@ -961,9 +998,11 @@ async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Prom
 
   // Physical verification: covered journal bytes must still match the binding so the
   // cache can never mask on-disk corruption that a raw replay would have detected.
+  // parseSnapshotFile guarantees cursor >= tailLogicalStart, so every segment is
+  // fully covered and every one of them is verified here.
   for (const part of snapshot.parts) {
-    if (part.kind !== "segment" || part.descriptor.logicalEnd > parsed.cursor) continue
-    const compressed = await readWhole(part.file)
+    if (part.kind !== "segment") continue
+    const compressed = await readWhole(part.file, runtime.io)
     if (sha256(compressed) !== part.descriptor.compressedSha256) {
       runtime.log.warn?.("journal snapshot cache rejected: covered segment bytes changed on disk", {
         action: "full-replay",
@@ -982,7 +1021,7 @@ async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Prom
     if (tail === undefined || tail.kind !== "tail") {
       throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
     }
-    const prefix = await readExactly(tail.file, 0, coveredTailBytes)
+    const prefix = await readExactly(tail.file, 0, coveredTailBytes, runtime.io)
     const observed = sha256(prefix)
     if (observed !== parsed.tailPrefixSha256) {
       runtime.log.warn?.("journal snapshot cache rejected: covered tail bytes changed on disk", {
@@ -1033,7 +1072,7 @@ async function writeSnapshotCache(
       if (tail === undefined || tail.kind !== "tail") {
         throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
       }
-      tailPrefixSha256 = sha256(await readExactly(tail.file, 0, coveredTailBytes))
+      tailPrefixSha256 = sha256(await readExactly(tail.file, 0, coveredTailBytes, runtime.io))
     }
     const valuesJson =
       input.base === null ? `[${input.chunks.join(",")}]` : joinValuesJson(input.base.valuesJson, input.chunks)
@@ -1151,15 +1190,14 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
   }
 }
 
-async function readPart(part: ReadPart): Promise<Buffer> {
-  if (part.kind === "tail") return readExactly(part.file, 0, part.rawBytes)
-  const compressed = await readWhole(part.file)
-  if (sha256(compressed) !== part.descriptor.compressedSha256) {
-    throw new Error(`yrd: compressed segment checksum mismatch (${part.descriptor.path})`)
+async function readSegment(descriptor: Segment, file: FileHandle, io: JournalIO): Promise<Buffer> {
+  const compressed = await readWhole(file, io)
+  if (sha256(compressed) !== descriptor.compressedSha256) {
+    throw new Error(`yrd: compressed segment checksum mismatch (${descriptor.path})`)
   }
   const raw = gunzipSync(compressed)
-  if (raw.length !== part.descriptor.rawBytes || sha256(raw) !== part.descriptor.rawSha256) {
-    throw new Error(`yrd: raw segment checksum mismatch (${part.descriptor.path})`)
+  if (raw.length !== descriptor.rawBytes || sha256(raw) !== descriptor.rawSha256) {
+    throw new Error(`yrd: raw segment checksum mismatch (${descriptor.path})`)
   }
   return raw
 }
@@ -1232,7 +1270,7 @@ async function readLegacy(runtime: Runtime, repair: boolean) {
         truncatedBytes: size - end,
       })
     }
-    return { exists: true, raw: await readExactly(file, 0, end), end }
+    return { exists: true, raw: await readExactly(file, 0, end, runtime.io), end }
   } finally {
     await file.close()
   }
@@ -1604,20 +1642,20 @@ async function writeAll(file: FileHandle, bytes: Uint8Array, position: number, i
   }
 }
 
-async function readExactly(file: FileHandle, position: number, length: number): Promise<Buffer> {
+async function readExactly(file: FileHandle, position: number, length: number, io: JournalIO): Promise<Buffer> {
   const bytes = Buffer.allocUnsafe(length)
   let offset = 0
   while (offset < length) {
-    const { bytesRead } = await file.read(bytes, offset, length - offset, position + offset)
+    const { bytesRead } = await io.read(file, bytes, offset, length - offset, position + offset)
     if (bytesRead <= 0) throw new Error(`yrd: journal file ended ${length - offset} bytes early`)
     offset += bytesRead
   }
   return bytes
 }
 
-async function readWhole(file: FileHandle): Promise<Buffer> {
+async function readWhole(file: FileHandle, io: JournalIO): Promise<Buffer> {
   const { size } = await file.stat()
-  return readExactly(file, 0, size)
+  return readExactly(file, 0, size, io)
 }
 
 async function closeParts(parts: readonly ReadPart[]): Promise<void> {
