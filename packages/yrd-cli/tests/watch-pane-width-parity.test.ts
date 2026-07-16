@@ -1,3 +1,8 @@
+/**
+ * @failure QueueWatchFrame used full terminal width inside a right SplitPane, hiding fixed columns and failing to restore BY after detail closed.
+ * @level l2
+ * @consumer @yrd/cli QueueWatchFrame SplitPane width and collapse contract (21106)
+ */
 import { describe, expect, test } from "vitest"
 import { queueTimelineColumns } from "../src/watch-pane.tsx"
 
