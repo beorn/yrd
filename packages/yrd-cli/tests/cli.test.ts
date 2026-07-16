@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { createLogger } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import {
@@ -372,6 +373,12 @@ async function createApp(
       journal: options.journal ?? createMemoryJournal(),
       clock: options.clock ?? (() => "2026-07-09T12:00:00.000Z"),
       id: ids(),
+      // Match production DI (host.ts injects the CLI logger). Without this the
+      // app falls back to createLogger("yrd") — loggily's default console
+      // transport — and incidental warn/error lifecycle logs (yrd:jobs,
+      // yrd:queue) leak to console.error, tripping km's setup.ts console-output
+      // gate. Silent because these tests assert on io.stdout/stderr, not logs.
+      log: createLogger("yrd", [{ level: "silent" }]),
     },
   })
 }
