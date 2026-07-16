@@ -330,10 +330,166 @@ describe("PR signal observer", () => {
       },
     ])
     expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:1:@agent/7",
+      "@agent/7 yrd:pr/rejected:PR7:2:@agent/7",
       "@agent/7 yrd:pr/rejected:PR7:3:@agent/7",
+      "@cto yrd:pr/needs-review:PR7:1:@cto",
+      "@cto yrd:pr/needs-review:PR7:2:@cto",
       "@cto yrd:pr/needs-review:PR7:3:@cto",
       "@agent/8 yrd:pr/rejected:PR8:1:@agent/8",
       "@cto yrd:pr/needs-review:PR8:1:@cto",
+    ])
+  })
+
+  it("closes rejection and review balls for every prior revision when a later revision integrates", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000040")
+    const event = frame.events[0]!
+    const landingSha = "d".repeat(40)
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000040",
+            name: "pr/integrated",
+            data: { pr: "PR7", revision: 2, headSha: "a".repeat(40), actor: "@agent/7", run: "R9", landingSha },
+          },
+        ],
+      },
+    ])
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/rejected": ["submitter"], "pr/needs-review": ["@cto"], "pr/integrated": ["broadcast"] },
+      adapter: recordingAdapter([], closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:1:@agent/7",
+      "@agent/7 yrd:pr/rejected:PR7:2:@agent/7",
+      "@cto yrd:pr/needs-review:PR7:1:@cto",
+      "@cto yrd:pr/needs-review:PR7:2:@cto",
+    ])
+  })
+
+  it("closes rejection and review balls across revisions when a PR is withdrawn", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000041")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000041",
+            name: "pr/withdrawn",
+            data: { pr: "PR7", revision: 2, headSha: "a".repeat(40), actor: "@agent/7", reason: "superseded" },
+          },
+        ],
+      },
+    ])
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/rejected": ["submitter"], "pr/needs-review": ["@cto"] },
+      adapter: recordingAdapter([], closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:1:@agent/7",
+      "@agent/7 yrd:pr/rejected:PR7:2:@agent/7",
+      "@cto yrd:pr/needs-review:PR7:1:@cto",
+      "@cto yrd:pr/needs-review:PR7:2:@cto",
+    ])
+  })
+
+  it("closes rejection and review balls across revisions when a PR is canceled", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000042")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000042",
+            name: "pr/canceled",
+            data: {
+              pr: "PR7",
+              revision: 2,
+              headSha: "a".repeat(40),
+              run: "R9",
+              actor: "@agent/7",
+              by: "@chief",
+              reason: "superseded by requeue",
+            },
+          },
+        ],
+      },
+    ])
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/rejected": ["submitter"], "pr/needs-review": ["@cto"] },
+      adapter: recordingAdapter([], closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:1:@agent/7",
+      "@agent/7 yrd:pr/rejected:PR7:2:@agent/7",
+      "@cto yrd:pr/needs-review:PR7:1:@cto",
+      "@cto yrd:pr/needs-review:PR7:2:@cto",
+    ])
+  })
+
+  it("routes actor-carrying terminal closures to the submitter and skips submitter balls with no recorded actor", async () => {
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000043")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000043",
+            name: "pr/withdrawn",
+            data: { pr: "PR7", revision: 1, headSha: "a".repeat(40), actor: "@agent/7" },
+          },
+          {
+            ...event,
+            id: "00000000-0000-7000-8000-000000000044",
+            name: "pr/canceled",
+            data: { pr: "PR8", revision: 1, headSha: "c".repeat(40), run: "R9", by: "@chief", reason: "no submitter" },
+          },
+        ],
+      },
+    ])
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: await stateDir(),
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: recordingAdapter([], closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(closures.map(({ recipient, request }) => `${recipient} ${request}`)).toEqual([
+      "@agent/7 yrd:pr/rejected:PR7:1:@agent/7",
     ])
   })
 
