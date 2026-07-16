@@ -3310,9 +3310,8 @@ describe("runYrd", () => {
     const lines = rendered.split("\n").filter(Boolean)
     const header = lines.find((line) => line.includes("TIME") && line.includes("RUN·PR"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "RUN·PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
-    for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
-      expect(header).not.toContain(removed)
+    for (const label of ["TIME", "STATUS", "RUN·PR", "STEP", "BY", "AGE"]) expect(header).toContain(label)
+    for (const removed of ["SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) expect(header).not.toContain(removed)
     const first = lines.find((line) => line.includes("PR1.1"))
     const second = lines.find((line) => line.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -3324,7 +3323,7 @@ describe("runYrd", () => {
     expect(lines.indexOf(lines.find((line) => line.trimStart().startsWith("FILTER "))!)).toBe(
       lines.indexOf(header!) - 1,
     )
-    expect(lines.findIndex((line) => line.includes("STATISTICS"))).toBeGreaterThan(lines.indexOf(second!))
+    expect(lines.findIndex((line) => line.includes("STATS"))).toBeGreaterThan(lines.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3401,7 +3400,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("builds one filtered one-revision timeline and deduplicated STATISTICS projection", async () => {
+  it("builds one filtered one-revision timeline and deduplicated STATS projection", async () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const member = (id: string, revision: number, headSha: string) => ({
@@ -3628,7 +3627,7 @@ describe("runYrd", () => {
       expect(header).toContain("AGE")
       expect(header?.trimEnd()).toMatch(/RUN$/u)
       expect(header).not.toContain("TOTAL")
-      expect(header).not.toContain("STATUS")
+      expect(header).toContain("STATUS")
       expect(header).not.toContain("ACTIVE")
       expect(header).not.toContain("WAIT")
       expect(header).not.toContain("SUBJECT")
@@ -3641,7 +3640,7 @@ describe("runYrd", () => {
       // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
       // date-qualified but never truncated below seconds.
       expect(integratedLine).toContain("2026-07-13T15:40:00")
-      expect(integratedLine).toContain("integrated")
+      expect(integratedLine).toContain("✓ ok")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 ◷10:00$/u)
     }
     const renderStyledTimeline = createRenderer({ cols: 200, rows: 30 })
@@ -5251,7 +5250,7 @@ describe("runYrd", () => {
     const detailHuman = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detailHuman.io)).toBe(0)
     expect(detailHuman.stdout()).toContain("RUN R1")
-    expect(detailHuman.stdout()).toContain("RELATED RUNS R1")
+    expect(detailHuman.stdout()).not.toContain("RELATED RUNS")
     expect(detailHuman.stdout()).toContain("JOB ")
     expect(detailHuman.stdout()).toContain("RUNNER ")
     expect(detailHuman.stdout()).toContain("LEASE -")
