@@ -910,7 +910,7 @@ function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean
   const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
   if (includeDate) {
     const day = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
-    return `${day}T${clock}`
+    return `${day}T${compact ? clock.slice(0, 5) : clock}`
   }
   return compact ? clock.slice(0, 5) : clock
 }
@@ -2561,8 +2561,8 @@ function timelineMetric(value: number | null): string {
   return ">99kd"
 }
 
-// The queue content surface is capped at min(viewport - 2, 160) cells with one
-// cell of side padding, centered when the viewport is wider than the cap.
+// The queue content surface is left-flush (15e killed the dead left gutter)
+// and capped at 160 cells on wide viewports.
 const TIMELINE_CONTENT_CAP = 160
 // Fixed cells never clip arbitrarily; labels longer than this shorten at a
 // semantic boundary via fitTimelineLabel.
@@ -2571,10 +2571,11 @@ const TIMELINE_TOTAL_GLYPH = "◷"
 
 type TimelineCellLayout = Readonly<{
   timeWidth: number
+  statusWidth: number
   runWidth: number
   /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
   byWidth: number
-  stateWidth: number
+  stepWidth: number
   ageWidth: number
   totalWidth: number
   compact: boolean
@@ -2595,21 +2596,35 @@ function fitTimelineLabel(label: string, max: number): string {
   return boundary > 0 ? label.slice(0, boundary) : label.slice(0, max)
 }
 
-type TimelineStateCell = Readonly<{ text: string; color?: string; bold?: boolean }>
+type TimelineStatusCell = Readonly<{ word: string; color: string; bold?: boolean }>
 
-// The STEP cell: current `ordinal:name` while running, the short visible
-// state (grey-bold `integrated`, inline failure code) once terminal.
-function timelineStateCell(row: QueueTimelineProjectedRow): TimelineStateCell {
+// The STATUS cell between TIME and RUN: marker glyph + concise colorized
+// status word (15e). Run-less pending rows render `pending` in blue;
+// integrated stays grey-bold with the muted marker — never green.
+function timelineStatusCell(row: QueueTimelineProjectedRow): TimelineStatusCell {
+  if (row.status === "running") return { word: "running", color: "$fg-info" }
+  if (row.status === "pending") return { word: "pending", color: "$fg-info" }
+  if (row.status === "integrated") return { word: "integrated", color: "$fg-muted", bold: true }
+  if (row.status === "canceled") return { word: "canceled", color: "$fg-muted" }
+  if (row.status === "environment-refused") return { word: "env-refused", color: "$fg-warning" }
+  return { word: "rejected", color: "$fg-error" }
+}
+
+type TimelineStepCell = Readonly<{ text: string; color?: string }>
+
+// The STEP cell carries the current `ordinal:name` while running and the
+// failure CODE (the cause) on failed terminals; the status word itself
+// lives in the STATUS column.
+function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
-  if (row.status === "pending") return { text: "" }
-  if (row.status === "integrated") return { text: "integrated", color: "$fg-muted", bold: true }
-  if (row.status === "canceled")
-    return { text: fitTimelineLabel(row.failure?.code ?? "canceled", TIMELINE_STATE_CAP), color: "$fg-muted" }
-  const code = row.failure?.code ?? (row.status === "environment-refused" ? "env-refused" : "rejected")
-  return {
-    text: fitTimelineLabel(code, TIMELINE_STATE_CAP),
-    color: row.status === "environment-refused" ? "$fg-warning" : "$fg-error",
+  if (row.failure !== undefined && row.status !== "integrated") {
+    return {
+      text: fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP),
+      color:
+        row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
+    }
   }
+  return { text: "" }
 }
 
 function timelineAgeCell(row: QueueTimelineProjectedRow): string {
@@ -2620,8 +2635,10 @@ function timelineTotalCell(row: QueueTimelineProjectedRow): string {
   return row.totalMs === null ? "" : mediaDuration(row.totalMs)
 }
 
-function timelineClockCell(row: QueueTimelineProjectedRow, includeDate: boolean): string {
-  return row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
+function timelineClockCell(row: QueueTimelineProjectedRow, layout: TimelineCellLayout): string {
+  return row.timestamp === null
+    ? "-"
+    : queueLogClock(row.timestamp, layout.compact && layout.includeDate, layout.includeDate)
 }
 
 function timelineByCell(row: QueueTimelineProjectedRow): string {
@@ -2635,10 +2652,11 @@ function timelineCellLayout(
 ): TimelineCellLayout {
   const compact = columns <= 80
   return {
-    timeWidth: includeDate ? 19 : 8,
+    timeWidth: includeDate ? (compact ? 16 : 19) : 8,
+    statusWidth: Math.max(6, ...rows.map((row) => timelineStatusCell(row).word.length + 2)),
     runWidth: Math.max(3, ...rows.map((row) => timelineRunLabel(row, compact).length)),
     byWidth: columns < 100 ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
-    stateWidth: Math.max(4, ...rows.map((row) => timelineStateCell(row).text.length)),
+    stepWidth: Math.max(4, ...rows.map((row) => timelineStepCell(row).text.length)),
     ageWidth: Math.max(3, ...rows.map((row) => timelineAgeCell(row).length)),
     totalWidth: Math.max(5, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length + 1))),
     compact,
@@ -2673,26 +2691,20 @@ function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: b
     if (live) return <Pulse colors={["$fg-info", "$fg-muted"]}>{row.glyph}</Pulse>
     return <Text color="$fg-info">{row.glyph}</Text>
   }
-  const color =
-    row.status === "rejected"
-      ? "$fg-error"
-      : row.status === "environment-refused"
-        ? "$fg-warning"
-        : row.status === "pending"
-          ? undefined
-          : "$fg-muted"
-  return <Text color={color}>{row.glyph}</Text>
+  return <Text color={timelineStatusCell(row).color}>{row.glyph}</Text>
 }
 
 function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={1} flexShrink={0}>
-        <Text color="$fg-muted"> </Text>
-      </Box>
       <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           TIME
+        </Text>
+      </Box>
+      <Box width={layout.statusWidth} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted" wrap="truncate">
+          STATUS
         </Text>
       </Box>
       <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
@@ -2712,7 +2724,7 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
           PR
         </Text>
       </Box>
-      <Box width={layout.stateWidth} flexShrink={0} minWidth={0}>
+      <Box width={layout.stepWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
           STEP
         </Text>
@@ -2739,7 +2751,8 @@ function TimelineProjectedRow({
   live: boolean
 }) {
   const active = row.status === "running"
-  const state = timelineStateCell(row)
+  const status = timelineStatusCell(row)
+  const step = timelineStepCell(row)
   const total = timelineTotalCell(row)
   return (
     <Box
@@ -2750,11 +2763,19 @@ function TimelineProjectedRow({
       overflow="hidden"
       backgroundColor={cursor ? "$bg-accent" : undefined}
     >
-      <Box width={1} flexShrink={0}>
-        <TimelineMarker row={row} live={live} />
-      </Box>
       <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
-        <Text wrap="truncate">{timelineClockCell(row, layout.includeDate)}</Text>
+        <Text color="$fg-muted" wrap="truncate">
+          {timelineClockCell(row, layout)}
+        </Text>
+      </Box>
+      <Box width={layout.statusWidth} flexDirection="row" flexShrink={0} minWidth={0} overflow="hidden">
+        <Box width={1} flexShrink={0}>
+          <TimelineMarker row={row} live={live} />
+        </Box>
+        <Text color={status.color} bold={status.bold ?? false} wrap="truncate">
+          {" "}
+          {status.word}
+        </Text>
       </Box>
       <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
         <Text wrap="truncate">{timelineRunLabel(row, layout.compact)}</Text>
@@ -2774,9 +2795,9 @@ function TimelineProjectedRow({
           {row.subject}
         </Text>
       </Box>
-      <Box width={layout.stateWidth} flexShrink={0} minWidth={0}>
-        <Text color={state.color} bold={state.bold ?? false} wrap="truncate">
-          {state.text}
+      <Box width={layout.stepWidth} flexShrink={0} minWidth={0}>
+        <Text color={step.color} wrap="truncate">
+          {step.text}
         </Text>
       </Box>
       <Box width={layout.ageWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
@@ -2968,7 +2989,7 @@ function ProjectedQueueTimeline({
   )
   const layout = timelineCellLayout(rows, includeDate, columns)
   return (
-    <Box width="100%" flexDirection="row" justifyContent="center" minWidth={0} paddingX={1}>
+    <Box width="100%" minWidth={0}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0}>
         <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
         <Box height={1} flexDirection="row" justifyContent="space-between" gap={1} minWidth={0}>
@@ -3049,19 +3070,18 @@ export function QueueTimelineView({
   columns?: number
 }) {
   if (projection !== undefined) {
-    const surfaceWidth = Math.max(1, Math.min(columns - 2, 160))
-    const gutter = Math.max(0, Math.floor((columns - surfaceWidth) / 2))
+    // 15e: the list is left-flush — no gutter, no centering; the surface
+    // still caps at 160 cells on wide viewports.
+    const surfaceWidth = Math.max(1, Math.min(columns, TIMELINE_CONTENT_CAP))
     return (
-      <Box flexDirection="column" width={surfaceWidth} maxWidth={160} marginX={gutter} minWidth={0}>
-        <ProjectedQueueTimeline
-          projection={projection}
-          nav={nav}
-          cursorKey={cursorKey}
-          onCursor={onCursor}
-          onSelect={onSelect}
-          columns={surfaceWidth}
-        />
-      </Box>
+      <ProjectedQueueTimeline
+        projection={projection}
+        nav={nav}
+        cursorKey={cursorKey}
+        onCursor={onCursor}
+        onSelect={onSelect}
+        columns={surfaceWidth}
+      />
     )
   }
   if (results === undefined || now === undefined) {
