@@ -2733,9 +2733,26 @@ export function queueTimelineDefaultCursorId(
 // The working disc pulses only in the live pane; the one-shot projection has
 // no app scope (and a static print cannot pulse), so it renders the same
 // glyph statically — byte-identical plain output either way.
+/**
+ * Live-activity pulse cadence, matched to ag-code's activity indicator (item O,
+ * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
+ * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
+ * period (900 ms) reproduces ag's blink. (ag additionally synchronizes every
+ * indicator to one global phase via `useSynchronizedPulse`; silvery's per-node
+ * timer is a close, primitive-native approximation — a shared-phase Pulse would
+ * be the exact match, tracked as a silvery follow-up.)
+ */
+const AG_PULSE_INTERVAL_MS = 900
+
 function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
   if (row.status === "running") {
-    if (live) return <Pulse colors={["$fg-info", "$fg-muted"]}>{row.glyph}</Pulse>
+    if (live) {
+      return (
+        <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS}>
+          {row.glyph}
+        </Pulse>
+      )
+    }
     return <Text color="$fg-info">{row.glyph}</Text>
   }
   return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
