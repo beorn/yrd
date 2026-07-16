@@ -2934,7 +2934,9 @@ function ProjectedQueueTimeline({
             )}
           </Box>
           <Text color="$fg-muted" flexShrink={0}>
-            updated {queueLogClock(projection.now, false, includeDate)}
+            {/* The one temporal-trust cue is always `updated HH:MM:SS` — the
+                snapshot clock is now, so day qualification never applies. */}
+            updated {queueLogClock(projection.now, false, false)}
           </Text>
         </Box>
         {projection.pause === undefined ? null : <TimelineStatusBox pause={projection.pause} />}
