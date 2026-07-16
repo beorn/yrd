@@ -2224,6 +2224,17 @@ export function PRDetailView({
   position?: number
 }) {
   const run = latestPRRun(pr, runs)
+  const runMember = run?.prs.find((member) => member.id === pr.id)
+  // The newest run for this PR may have executed against a now-superseded
+  // revision (e.g. rev 1 was rejected while rev 2 sits pending with no run of
+  // its own). Presenting that historical run as the PR's current state reads as
+  // "this pending item already failed", so it is scoped to a history block and
+  // the current revision's real state is stated above it (user-reported
+  // 2026-07-16). A superseded run implies the current revision has no run yet:
+  // any run against it would sort newer and be selected here instead.
+  const supersededRunRevision =
+    run !== undefined && runMember !== undefined && runMember.revision !== pr.revision ? runMember.revision : undefined
+  const currentStateWord = pr.status === "submitted" ? "pending" : pr.status
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
@@ -2251,10 +2262,23 @@ export function PRDetailView({
       <Text>
         <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>LINEAGE</Text> {revisionLineage}
       </Text>
-      {detail.run === undefined ? null : <QueueShowView data={detail.run} compact highlightPr={pr.id} />}
+      {supersededRunRevision === undefined ? null : (
+        <Text>
+          <Text bold>CURRENT rev {pr.revision}</Text> — {currentStateWord}, no run yet
+        </Text>
+      )}
+      {detail.run === undefined ? null : (
+        <QueueShowView
+          data={detail.run}
+          compact
+          highlightPr={pr.id}
+          {...(supersededRunRevision === undefined ? {} : { historyRevision: supersededRunRevision })}
+        />
+      )}
       {blocker === undefined ? null : (
-        <Text color="$fg-warning">
-          <Text bold>BLOCKER</Text> {blocker}
+        <Text color={supersededRunRevision === undefined ? "$fg-warning" : "$fg-muted"}>
+          <Text bold>BLOCKER</Text>
+          {supersededRunRevision === undefined ? "" : ` (rev ${supersededRunRevision})`} {blocker}
         </Text>
       )}
       {detail.run === undefined && landing !== undefined ? (
@@ -4149,10 +4173,17 @@ function CompactQueueShowView({
   data,
   highlightPr,
   section = "all",
+  historyRevision,
 }: {
   data: QueueShowData
   highlightPr?: string
   section?: "run" | "steps" | "all"
+  /**
+   * When set, this run executed against a now-superseded PR revision: the RUN
+   * header is dimmed and annotated `(rev N · superseded)` so a historical run
+   * is never read as the PR's current state (user-reported 2026-07-16).
+   */
+  historyRevision?: number
 }) {
   const durations = [
     ["TOTAL", presentFact(data.totalDuration)] as const,
@@ -4170,8 +4201,10 @@ function CompactQueueShowView({
     <Box flexDirection="column" minWidth={0}>
       {runFacts ? (
         <>
-          <Text bold wrap="truncate">
-            RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
+          <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
+            RUN {data.run}
+            {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status} OUTCOME{" "}
+            {data.outcome}
           </Text>
           <Text wrap="truncate">
             BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
@@ -4267,14 +4300,25 @@ export function QueueShowView({
   compact = false,
   highlightPr,
   section = "all",
+  historyRevision,
 }: {
   data: QueueShowData
   compact?: boolean
   highlightPr?: string
   /** Compact-only: split run-level vs step-level facts for the step tabs (item H). */
   section?: "run" | "steps" | "all"
+  /** Compact-only: mark this run as history for a now-superseded revision. */
+  historyRevision?: number
 }) {
-  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} section={section} />
+  if (compact)
+    return (
+      <CompactQueueShowView
+        data={data}
+        highlightPr={highlightPr}
+        section={section}
+        {...(historyRevision === undefined ? {} : { historyRevision })}
+      />
+    )
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />
