@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve, sep } from "node:path"
 import { createFailure, failureFact, type JsonValue, type YrdFailure } from "@yrd/core"
-import { parseJobLaunch, type JobContext, type JobResult } from "@yrd/job"
+import { JobErrorSchema, parseJobLaunch, type JobContext, type JobError, type JobResult } from "@yrd/job"
 import type { Process, ProcessResult } from "@yrd/process"
 import * as z from "zod"
 import type {
@@ -49,6 +49,7 @@ export const CommandEvidenceSchema = z
     classification: z.enum(["base", "carrier"]).optional(),
     detail: z.string().optional(),
     diagnostics: z.array(CommandDiagnosticSchema).optional(),
+    diagnosticsTruncated: z.literal(true).optional(),
     /** True when the command was settled by its wall-clock bound (21012 S1). */
     timedOut: z.boolean().optional(),
     stageVerdict: z.enum(["EXITED", "TIMED_OUT", "STALLED"]).optional(),
@@ -59,12 +60,22 @@ export const CommandEvidenceSchema = z
   .strict()
 export type CommandEvidence = Readonly<z.infer<typeof CommandEvidenceSchema>>
 
+export const GitCheckComparisonEvidenceSchema = z
+  .object({
+    parent: CommandEvidenceSchema,
+    netNewDiagnostics: z.array(CommandDiagnosticSchema),
+    resolvedDiagnostics: z.array(CommandDiagnosticSchema),
+  })
+  .strict()
+export type GitCheckComparisonEvidence = Readonly<z.infer<typeof GitCheckComparisonEvidenceSchema>>
+
 export const GitCheckEvidenceSchema = CommandEvidenceSchema.extend({
   baseSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateSha: z.string().regex(/^[0-9a-f]{40,64}$/iu),
   candidateRef: z.string().min(1),
   sourceRewrites: z.array(SourceRewriteSchema).optional(),
   submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
+  comparison: GitCheckComparisonEvidenceSchema.optional(),
 }).strict()
 export type GitCheckEvidence = Readonly<z.infer<typeof GitCheckEvidenceSchema>>
 
@@ -76,6 +87,16 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
   submoduleResolutions: true,
 }).strict()
 type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
+
+export const GitCheckComparisonRefusalEvidenceSchema = PinnedCandidateSchema.extend({
+  kind: z.literal("check-comparison-refusal"),
+  phase: z.enum(["parent", "candidate"]),
+  error: JobErrorSchema,
+  parent: CommandEvidenceSchema.optional(),
+  candidateEvidence: CommandEvidenceSchema.optional(),
+  retryable: z.literal(true),
+}).strict()
+export type GitCheckComparisonRefusalEvidence = Readonly<z.infer<typeof GitCheckComparisonRefusalEvidenceSchema>>
 
 export const GitCheckFailureEvidenceSchema = z
   .object({
@@ -144,6 +165,7 @@ export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
   CommandEvidenceSchema,
   GitCheckFailureEvidenceSchema,
+  GitCheckComparisonRefusalEvidenceSchema,
 ])
 export type GitCheckResultEvidence = Readonly<z.infer<typeof GitCheckResultEvidenceSchema>>
 
@@ -261,7 +283,8 @@ function configuredCommand<Shape extends PRShape>(
       artifacts,
       classification: options.classification ?? "carrier",
       ...(detail === "" ? {} : { detail }),
-      ...(diagnostics.length === 0 ? {} : { diagnostics }),
+      ...(diagnostics.values.length === 0 ? {} : { diagnostics: diagnostics.values }),
+      ...(diagnostics.truncated ? { diagnosticsTruncated: true as const } : {}),
       ...(result.timedOut ? { timedOut: true } : {}),
       ...(progress.verdict === undefined ? {} : { stageVerdict: progress.verdict }),
       ...(progress.lastProgressAtMs === undefined ? {} : { lastProgressAtMs: progress.lastProgressAtMs }),
@@ -322,14 +345,17 @@ function commandDetail(output: string): string {
   return `${output.slice(0, headLength)}${marker}${output.slice(-(limit - headLength - marker.length))}`
 }
 
-function commandDiagnostics(output: string): CommandDiagnostic[] {
+function commandDiagnostics(output: string): Readonly<{
+  values: readonly CommandDiagnostic[]
+  truncated: boolean
+}> {
   const diagnostics: CommandDiagnostic[] = []
   for (const row of output.split(/\r?\n/u)) {
     const text = row.trim()
     const changed = /^[ MADRCU?!]{2}\s+(.+)$/u.exec(row)
     if (changed?.[1] !== undefined) {
+      if (diagnostics.length >= 20) return { values: diagnostics, truncated: true }
       diagnostics.push({ file: changed[1], [sourceRowKey]: 1, message: "working tree changed during check" })
-      if (diagnostics.length >= 20) break
       continue
     }
     const match =
@@ -338,15 +364,92 @@ function commandDiagnostics(output: string): CommandDiagnostic[] {
     const rowNumber = Number(match[2])
     const column = match[3] === undefined ? undefined : Number(match[3])
     if (rowNumber < 1 || (column !== undefined && column < 1)) continue
+    if (diagnostics.length >= 20) return { values: diagnostics, truncated: true }
     diagnostics.push({
       file: match[1],
       [sourceRowKey]: rowNumber,
       ...(column === undefined ? {} : { column }),
       message: match[4],
     })
-    if (diagnostics.length >= 20) break
+  }
+  return { values: diagnostics, truncated: false }
+}
+
+function comparisonDiagnostic(diagnostic: CommandDiagnostic, cwd: string): CommandDiagnostic {
+  const prefix = `${resolve(cwd)}${sep}`
+  const offset = diagnostic.file.indexOf(prefix)
+  return {
+    ...diagnostic,
+    file:
+      offset < 0
+        ? diagnostic.file
+        : `${diagnostic.file.slice(0, offset)}${diagnostic.file.slice(offset + prefix.length)}`,
+  }
+}
+
+function diagnosticIdentity(diagnostic: CommandDiagnostic): string {
+  return JSON.stringify([diagnostic.file, diagnostic[sourceRowKey], diagnostic.column ?? null, diagnostic.message])
+}
+
+function uniqueComparisonDiagnostics(evidence: CommandEvidence, cwd: string): readonly CommandDiagnostic[] {
+  const seen = new Set<string>()
+  const diagnostics: CommandDiagnostic[] = []
+  for (const raw of evidence.diagnostics ?? []) {
+    const diagnostic = comparisonDiagnostic(raw, cwd)
+    const identity = diagnosticIdentity(diagnostic)
+    if (seen.has(identity)) continue
+    seen.add(identity)
+    diagnostics.push(diagnostic)
   }
   return diagnostics
+}
+
+function compareCommandEvidence(
+  parent: CommandEvidence,
+  parentCwd: string,
+  candidate: CommandEvidence,
+  candidateCwd: string,
+): GitCheckComparisonEvidence {
+  const parentDiagnostics = uniqueComparisonDiagnostics(parent, parentCwd)
+  const candidateDiagnostics = uniqueComparisonDiagnostics(candidate, candidateCwd)
+  const parentIdentities = new Set(parentDiagnostics.map(diagnosticIdentity))
+  const candidateIdentities = new Set(candidateDiagnostics.map(diagnosticIdentity))
+  return GitCheckComparisonEvidenceSchema.parse({
+    parent,
+    netNewDiagnostics: candidateDiagnostics.filter(
+      (diagnostic) => !parentIdentities.has(diagnosticIdentity(diagnostic)),
+    ),
+    resolvedDiagnostics: parentDiagnostics.filter(
+      (diagnostic) => !candidateIdentities.has(diagnosticIdentity(diagnostic)),
+    ),
+  })
+}
+
+function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose: string): CommandEvidence | undefined {
+  if (outcome.status === "passed") return outcome.output
+  if (
+    outcome.status === "failed" &&
+    outcome.error.code === `${purpose}-failed` &&
+    outcome.output !== undefined &&
+    outcome.output.diagnostics !== undefined &&
+    outcome.output.diagnostics.length > 0 &&
+    outcome.output.diagnosticsTruncated !== true
+  ) {
+    return outcome.output
+  }
+  return undefined
+}
+
+function comparisonOutcomeError(
+  outcome: JobResult<CommandEvidence>,
+  purpose: string,
+  phase: "parent" | "candidate",
+): JobError {
+  if (outcome.status === "failed") return outcome.error
+  return {
+    code: `${purpose}-${phase}-evidence-unavailable`,
+    message: `${purpose} ${phase} command returned ${outcome.status} instead of comparable evidence`,
+  }
 }
 
 function commandEnvironment(
@@ -534,7 +637,8 @@ async function failureEvidence(
     artifacts,
     classification: options.classification,
     detail: options.detail,
-    ...(diagnostics.length === 0 ? {} : { diagnostics }),
+    ...(diagnostics.values.length === 0 ? {} : { diagnostics: diagnostics.values }),
+    ...(diagnostics.truncated ? { diagnosticsTruncated: true as const } : {}),
   })
 }
 
@@ -2299,45 +2403,197 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
         },
         (failure) => failure,
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
-          const configured: ConfiguredCommandOptions<PRShape> = {
+          const artifactRoot = options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")
+          const configured = (
+            cwd: string,
+            targetSha: string,
+            root: string,
+            parentTree: boolean,
+          ): ConfiguredCommandOptions<PRShape> => ({
             inject: options.inject,
             command: options.command,
-            cwd: path,
+            cwd,
             purpose,
-            artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
+            artifactRoot: root,
             ...(options.env === undefined ? {} : { env: options.env }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
-            classification: options.classification ?? "carrier",
+            classification: parentTree ? "base" : (options.classification ?? "carrier"),
             variables: () => ({
               YRD_BASE_SHA: candidate.baseSha,
-              YRD_CANDIDATE_SHA: candidate.candidateSha,
+              YRD_CANDIDATE_SHA: targetSha,
+              ...(parentTree ? { YRD_SHA: candidate.baseSha } : {}),
               ...(options.environment === undefined ? {} : { YRD_ENVIRONMENT: options.environment }),
             }),
-          }
-          const runner =
-            options.runner === "waiting" ? configuredWaitingCommandStep(configured) : configuredCommandStep(configured)
-          const outcome = await runner({ ...input, targetSha: candidate.candidateSha }, context)
-          const evidence = {
+          })
+          const candidateConfig = configured(path, candidate.candidateSha, artifactRoot, false)
+          const candidateMetadata = {
             ...candidate,
             classification: options.classification ?? ("carrier" as const),
           }
-          if (outcome.status === "passed") {
-            return { status: "passed", output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }
-          }
-          if (outcome.status === "waiting") {
+
+          if (options.runner === "waiting") {
+            const outcome = await configuredWaitingCommandStep(candidateConfig)(
+              { ...input, targetSha: candidate.candidateSha },
+              context,
+            )
+            if (outcome.status === "passed") {
+              return {
+                status: "passed",
+                output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
+              }
+            }
+            if (outcome.status === "waiting") {
+              return {
+                ...outcome,
+                checkpoint: GitCheckEvidenceSchema.parse({
+                  ...(outcome.checkpoint as CommandEvidence),
+                  ...candidateMetadata,
+                }),
+              }
+            }
             return {
-              ...outcome,
-              checkpoint: GitCheckEvidenceSchema.parse({ ...(outcome.checkpoint as CommandEvidence), ...evidence }),
+              status: "failed",
+              error: outcome.error,
+              ...(outcome.output === undefined
+                ? {}
+                : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }) }),
             }
           }
-          return {
-            status: "failed",
-            error: outcome.error,
-            ...(outcome.output === undefined
-              ? {}
-              : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...evidence }) }),
+
+          let outcome: JobResult<CommandEvidence>
+          try {
+            outcome = await configuredCommandStep(candidateConfig)(
+              { ...input, targetSha: candidate.candidateSha },
+              context,
+            )
+          } catch (cause) {
+            const error = JobErrorSchema.parse({
+              code: `${purpose}-candidate-evidence-unavailable`,
+              message: messageOf(cause),
+            })
+            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-comparison-refusal",
+              phase: "candidate",
+              error,
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} candidate evidence could not be evaluated: ${error.message}`,
+              refusal,
+            )
           }
+
+          if (outcome.status === "passed") {
+            return {
+              status: "passed",
+              output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
+            }
+          }
+          if (outcome.status !== "failed") {
+            const error = comparisonOutcomeError(outcome, purpose, "candidate")
+            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-comparison-refusal",
+              phase: "candidate",
+              error,
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} candidate evidence could not be evaluated: ${error.message}`,
+              refusal,
+            )
+          }
+
+          const candidateEvidence = comparableCommandEvidence(outcome, purpose)
+          if (candidateEvidence === undefined) {
+            const error = comparisonOutcomeError(outcome, purpose, "candidate")
+            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-comparison-refusal",
+              phase: "candidate",
+              error,
+              ...(outcome.status === "failed" && outcome.output !== undefined
+                ? { candidateEvidence: outcome.output }
+                : {}),
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} candidate evidence could not be evaluated: ${error.message}`,
+              refusal,
+            )
+          }
+
+          let parentPath = ""
+          let parentOutcome: JobResult<CommandEvidence>
+          try {
+            parentOutcome = await withScratch(
+              git,
+              repo,
+              candidate.baseSha,
+              options.checkoutParent ?? tmpdir(),
+              async (scratchPath) => {
+                parentPath = scratchPath
+                return configuredCommandStep(
+                  configured(scratchPath, candidate.baseSha, join(artifactRoot, "parent"), true),
+                )({ ...input, targetSha: candidate.baseSha }, context)
+              },
+            )
+          } catch (cause) {
+            const error = JobErrorSchema.parse({
+              code: `${purpose}-parent-evidence-unavailable`,
+              message: messageOf(cause),
+            })
+            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-comparison-refusal",
+              phase: "parent",
+              error,
+              candidateEvidence,
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} parent evidence could not be evaluated: ${error.message}`,
+              refusal,
+            )
+          }
+
+          const parentEvidence = comparableCommandEvidence(parentOutcome, purpose)
+          if (parentEvidence === undefined) {
+            const error = comparisonOutcomeError(parentOutcome, purpose, "parent")
+            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+              ...candidate,
+              kind: "check-comparison-refusal",
+              phase: "parent",
+              error,
+              ...(parentOutcome.status === "failed" && parentOutcome.output !== undefined
+                ? { parent: parentOutcome.output }
+                : {}),
+              candidateEvidence,
+              retryable: true,
+            })
+            return failedWithEvidence(
+              "queue-environment-refused",
+              `${purpose} parent evidence could not be evaluated: ${error.message}`,
+              refusal,
+            )
+          }
+
+          const comparison = compareCommandEvidence(parentEvidence, parentPath, candidateEvidence, path)
+          const evidence = GitCheckEvidenceSchema.parse({
+            ...candidateEvidence,
+            ...candidateMetadata,
+            comparison,
+          })
+          if (comparison.netNewDiagnostics.length === 0) {
+            return { status: "passed", output: evidence }
+          }
+          return { status: "failed", error: outcome.error, output: evidence }
         },
       )
     } catch (cause) {
