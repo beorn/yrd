@@ -45,7 +45,7 @@ import {
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
-import { createExclusive, createJournal } from "@yrd/persistence"
+import { createExclusive, createJournal, importOrphanJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
@@ -759,6 +759,10 @@ async function createYrdRuntimeHost(options: YrdHostOptions, resident?: Resident
     const services = Object.freeze({
       queue: queueAdministration(process, repository, loaded.config),
       recut: createGitPRRecutter({ inject: { process }, repo: repository.repo, env }),
+      journal: Object.freeze({
+        importOrphan: (sourcePath: string) =>
+          importOrphanJournal({ dir: repository.stateDir, sourcePath, importedBy: defaultActor, log }),
+      }),
     })
     let closePromise: Promise<void> | undefined
     const close = () =>

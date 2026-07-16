@@ -4,6 +4,7 @@ import type { Yrd } from "@yrd/core"
 import type { HasJobs, JobCommands, JobsState } from "@yrd/job"
 import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesState } from "@yrd/queue"
 import type { HasIssues } from "@yrd/issue"
+import type { OrphanJournalImportResult } from "@yrd/persistence"
 import type { Scope } from "@silvery/scope"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
@@ -16,6 +17,10 @@ export type YrdCliQueueAdministration = Readonly<{
   auditEnvironment?(): Promise<QueueAuditResult>
   provision?(base?: string): Promise<unknown>
   deprovision?(base?: string): Promise<unknown>
+}>
+
+export type YrdCliJournalAdministration = Readonly<{
+  importOrphan(sourcePath: string): Promise<OrphanJournalImportResult>
 }>
 
 export type YrdCliState = Readonly<{
@@ -32,6 +37,7 @@ export type YrdCliApp = Yrd<YrdCliState, YrdCliCommands> & HasJobs & HasBays & H
 export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   recut?: GitPRRecutter
+  journal?: YrdCliJournalAdministration
 }>
 
 export type YrdCliIO = {

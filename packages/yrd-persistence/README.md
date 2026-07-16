@@ -42,6 +42,18 @@ The retention policy is explicit: remove v3 only after that verified success;
 on verification failure restore v3 authority and preserve failed manifest,
 recovery pointer, and candidate files as operator evidence.
 
+An operator may explicitly preserve a detached v3 lane with
+`yrd journal import-orphan <path>`. The source stays read-only. Each source row
+is appended atomically as a checksummed `archived-orphan` v4 record containing
+the original stored frame plus `origin-lane`, `origin-file`, `origin-row`,
+`source-sha256`, `imported-at`, `imported-by`, and `collision-policy=refuse`
+provenance. Core
+`Journal.read()` advances its opaque cursor across these physical records but
+never returns them as live frames; audit consumers use
+`readArchivedOrphans()` instead. Import refuses before mutation when a command,
+cause, event, or canonical payload identity already exists live, and replaying
+the same origin rows is idempotent.
+
 ## Append durability
 
 Append remains compare-and-append under the existing POSIX writer lock:
