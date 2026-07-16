@@ -2071,6 +2071,16 @@ async function logRuns(
   )
 }
 
+/** Refuse to start expensive queue Runs while the installed baseline is stale.
+ * Non-drift environment findings stay audit-only; config drift blocks the run
+ * with the one actionable migration remedy. */
+export async function requireFreshInstalledBaseline(services: YrdCliServices): Promise<void> {
+  const result = await services.queue?.auditEnvironment?.()
+  const drift = (result?.findings ?? []).filter((finding) => finding.code === "config-drift")
+  if (drift.length === 0) return
+  refusal(drift.map((finding) => finding.message).join("\n"))
+}
+
 async function queueAudit(
   app: YrdCliApp,
   services: YrdCliServices,
@@ -2896,6 +2906,7 @@ function buildProgram(
     .option("--interval <seconds>", "watch interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
+      await requireFreshInstalledBaseline(installedServices())
       if (options.watch === true) {
         setExit(await watchQueueRuns(installed(), selectors, options, io))
         return
