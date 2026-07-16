@@ -6649,6 +6649,111 @@ describe("runYrd", () => {
     expect(watch.stdout()).toBe("")
     expect(sleeps).toEqual([1_000])
   })
+
+  it("announces one resident runner across idle watch polls while JSON stays silent", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-resident-watch-presence-"))
+    execFileSync("git", ["init", "-q", repo])
+    const runner = `yrd-cli:${process.pid}`
+    const presence = `Queue runner ${runner} active; watching the default queue every 1s (Ctrl-C drains).\n`
+
+    try {
+      const app = await createApp()
+      await openAndSubmit(app)
+      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+
+      const controller = new AbortController()
+      const sleeps: number[] = []
+      const human = outputIO({
+        cwd: repo,
+        runner,
+        scope: {
+          signal: controller.signal,
+          sleep: async (milliseconds) => {
+            sleeps.push(milliseconds)
+            if (sleeps.length === 2) controller.abort()
+          },
+        },
+      })
+      expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), human.io), human.stderr()).toBe(0)
+      expect(human.stdout()).toBe(presence)
+      expect(sleeps).toEqual([1_000, 1_000])
+
+      const jsonController = new AbortController()
+      const json = outputIO({
+        cwd: repo,
+        runner,
+        scope: {
+          signal: jsonController.signal,
+          sleep: async () => jsonController.abort(),
+        },
+      })
+      expect(
+        await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1", "--json"), json.io),
+        json.stderr(),
+      ).toBe(0)
+      expect(json.stdout()).toBe("")
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("keeps resident presence out of selector and JSON runs without changing their projections", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-resident-watch-projection-"))
+    execFileSync("git", ["init", "-q", repo])
+    const runner = `yrd-cli:${process.pid}`
+    const presence = `Queue runner ${runner} active; watching the default queue every 1s (Ctrl-C drains).\n`
+
+    const readyApp = async () => {
+      const app = await createApp()
+      await openAndSubmit(app)
+      return app
+    }
+    const onePassScope = () => {
+      const controller = new AbortController()
+      return {
+        signal: controller.signal,
+        sleep: async () => controller.abort(),
+      }
+    }
+
+    try {
+      const selectedHuman = outputIO({ cwd: repo, runner })
+      expect(
+        await runYrd(await readyApp(), yrd("queue", "run", "PR1", "--watch", "--interval", "1"), selectedHuman.io),
+        selectedHuman.stderr(),
+      ).toBe(0)
+      expect(selectedHuman.stdout()).not.toContain("Queue runner ")
+
+      const automaticHuman = outputIO({ cwd: repo, runner, scope: onePassScope() })
+      expect(
+        await runYrd(await readyApp(), yrd("queue", "run", "--watch", "--interval", "1"), automaticHuman.io),
+        automaticHuman.stderr(),
+      ).toBe(0)
+      expect(automaticHuman.stdout()).toBe(presence + selectedHuman.stdout())
+
+      const selectedJson = outputIO({ cwd: repo, runner })
+      expect(
+        await runYrd(
+          await readyApp(),
+          yrd("queue", "run", "PR1", "--watch", "--interval", "1", "--json"),
+          selectedJson.io,
+        ),
+        selectedJson.stderr(),
+      ).toBe(0)
+
+      const automaticJson = outputIO({ cwd: repo, runner, scope: onePassScope() })
+      expect(
+        await runYrd(await readyApp(), yrd("queue", "run", "--watch", "--interval", "1", "--json"), automaticJson.io),
+        automaticJson.stderr(),
+      ).toBe(0)
+      expect(automaticJson.stdout()).toBe(selectedJson.stdout())
+      expect(automaticJson.stdout().trim().split("\n")).toHaveLength(1)
+      expect(JSON.parse(automaticJson.stdout())).toMatchObject({ command: "queue.run", mode: "watch" })
+      expect(automaticJson.stdout()).not.toContain("Queue runner ")
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("submit correlation", () => {

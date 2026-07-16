@@ -2224,6 +2224,12 @@ async function watchQueueRuns(
   const drainRequested = () => drainSignal?.aborted === true
   const heartbeat = io.runner?.startsWith("yrd-cli:") === true ? await startResidentRunnerHeartbeat(io) : undefined
   try {
+    heartbeat?.check()
+    if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
+      io.stdout(
+        `Queue runner ${io.runner} active; watching the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
+      )
+    }
     while (true) {
       heartbeat?.check()
       const runs = await runQueues(app, selectors, options, io)
