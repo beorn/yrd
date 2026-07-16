@@ -1230,6 +1230,34 @@ function CellLink({ href, children }: { href: string; children: string }) {
   )
 }
 
+/** An OSC 8 target for an issue reference that is a URL or a filesystem path.
+ * Plain tracker ids (`@km/...`, `#123`, `owner/repo#5`) stay unlinked text. */
+function issueHref(issue: string): string | undefined {
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(issue)) return issue
+  if (/^(?:\/|\.\.?\/)/u.test(issue)) return pathToFileURL(resolve(issue)).href
+  return undefined
+}
+
+/** An issue reference rendered as an OSC 8 hyperlink when it resolves to a URL
+ * or path, and as plain text otherwise. */
+function IssueValue({ issue }: { issue: string }) {
+  const href = issueHref(issue)
+  return href === undefined ? <>{issue}</> : <CellLink href={href}>{issue}</CellLink>
+}
+
+/** A PR description spanning rows; blank rows are preserved as paragraph breaks. */
+function DescriptionBlock({ description }: { description: string }) {
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {description.split("\n").map((row, index) => (
+        <Text key={index} wrap="truncate" bgConflict="ignore">
+          {row === "" ? " " : row}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 function LocationLinks({ entries }: { entries: readonly QueueLogLocationEntry[] }) {
   if (entries.length === 0) return "-"
   return (
@@ -1365,7 +1393,12 @@ function timelineMemberSubject(
   const isCurrent = current?.revision === member.revision && current.headSha === member.headSha
   const bayPath = isCurrent && current?.bay !== undefined ? state?.byId[current.bay]?.path : undefined
   return boundedQueue(
-    bayPath ?? (isCurrent ? current?.name : undefined) ?? member.name ?? current?.branch ?? member.branch,
+    bayPath ??
+      (isCurrent ? (current?.title ?? current?.name) : undefined) ??
+      member.name ??
+      current?.title ??
+      current?.branch ??
+      member.branch,
     80,
   )
 }
@@ -1535,7 +1568,7 @@ function timelinePendingRows(
         revision: pr.revision,
         headSha: pr.headSha,
         branch: pr.branch,
-        subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
+        subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
         ...(submitter === undefined ? {} : { submitter }),
         detail,
         ...(position === undefined ? {} : { position }),
@@ -1808,7 +1841,7 @@ function projectPR(
     pr: pr.id,
     ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
     branch: pr.branch,
-    subject: boundedQueue(pr.name ?? pr.branch, 80),
+    subject: boundedQueue(pr.title ?? pr.name ?? pr.branch, 80),
     nativeStatus: pr.status,
     state: stateLabel,
     ...taskStatusFields(taskStatus),
@@ -2251,6 +2284,11 @@ export function PRDetailView({
         <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
+      {pr.title === undefined ? null : (
+        <Text wrap="truncate" bgConflict="ignore">
+          <Text bold>TITLE</Text> {pr.title}
+        </Text>
+      )}
       <Text>
         <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
         {pr.headSha}
@@ -2259,9 +2297,20 @@ export function PRDetailView({
         <Text bold>BASE</Text> {pr.base}
         {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
       </Text>
+      {pr.issue === undefined ? null : (
+        <Text wrap="truncate">
+          <Text bold>ISSUE</Text> <IssueValue issue={pr.issue} />
+        </Text>
+      )}
       <Text>
         <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>LINEAGE</Text> {revisionLineage}
       </Text>
+      {pr.description === undefined ? null : (
+        <Box flexDirection="column" minWidth={0}>
+          <Text bold>DESCRIPTION</Text>
+          <DescriptionBlock description={pr.description} />
+        </Box>
+      )}
       {supersededRunRevision === undefined ? null : (
         <Text>
           <Text bold>CURRENT rev {pr.revision}</Text> — {currentStateWord}, no run yet
@@ -2518,7 +2567,7 @@ export function activeWatchRow(
   return {
     run: run.id,
     pr: member.id,
-    subject: boundedQueue(pr?.name ?? member.id, 80),
+    subject: boundedQueue(pr?.title ?? pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
     steps: queueRunSteps(run),
     status: run.status,
@@ -4112,8 +4161,10 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
     <Box flexDirection="column" minWidth={0}>
       {prs.map((pr, index) => {
         const name = presentFact(pr.name)
+        const title = presentFact(pr.title)
         const issue = presentFact(pr.issue)
         const note = presentFact(pr.note)
+        const description = presentFact(pr.description)
         const clocks = prRevisionClocks(pr)
         return (
           <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
@@ -4121,11 +4172,26 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
               PR {pr.id}@r{pr.revision}
               {name === undefined ? "" : ` ${name}`}
             </Text>
-            {issue === undefined ? null : <Text wrap="truncate">ISSUE {issue}</Text>}
+            {title === undefined ? null : (
+              <Text wrap="truncate" bgConflict="ignore">
+                TITLE {title}
+              </Text>
+            )}
+            {issue === undefined ? null : (
+              <Text wrap="truncate">
+                ISSUE <IssueValue issue={issue} />
+              </Text>
+            )}
             {note === undefined ? null : (
               <Text wrap="truncate" bgConflict="ignore">
                 NOTE {note}
               </Text>
+            )}
+            {description === undefined ? null : (
+              <Box flexDirection="column" minWidth={0}>
+                <Text bold>DESCRIPTION</Text>
+                <DescriptionBlock description={description} />
+              </Box>
             )}
             {pr.reviews.map((review, reviewIndex) => (
               <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">

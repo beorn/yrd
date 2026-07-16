@@ -268,6 +268,17 @@ identity. Yrd preserves these links but does not import tracker lifecycle or
 fleet policy. Actor attribution does not launch a process; an explicit composed
 runner, such as Contest's `ag` runner, mans the Bay.
 
+A submitted PR also carries a `--title` (its subject) and a `--description`
+(its body). When either flag is omitted, `pr submit` seeds it from the head
+commit — the subject becomes the title and the commit body becomes the
+description, with a trailing `Issue: <ref>` reference appended when `--issue` is
+present. Explicit flags always win, and `pr edit` re-sets any of them on a live
+PR. Both are mutable delivery metadata (unlike the immutable issue join) and are
+carried forward unchanged across `pr recut` and `pr ready` revisions. The `pr
+list` SUBJECT column shows the title over the branch name, and `pr view` and the
+watch detail pane render the title, an OSC 8 issue hyperlink (when the reference
+is a URL or path), and the description block.
+
 `open --from` uses an existing branch; there is no `adopt` command. Direct
 branch submission does not provision a worktree:
 
@@ -284,8 +295,11 @@ rebinding a live PR to a different correlation is refused.
 
 ```text
 yrd pr submit [selector...] [--draft] [--follow] [--base <branch>]
+  [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
 yrd pr list [--needs-review] [--json]
+yrd pr edit <selector> [--issue <ref>] [--note <text>]
+  [--title <text>] [--description <text>] [--json]
 yrd pr recut <selector> [--revision <number>] [--queue] [--json]
 yrd pr ready <selector> [--json]
 yrd pr review <selector> (--approve | --reject)

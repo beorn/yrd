@@ -1101,4 +1101,97 @@ describe("withBays", () => {
     }
     void invalid
   })
+
+  it("sets and mutably re-edits a PR title and description via editPr", async () => {
+    await using app = (await createHarness()).app
+    await app.bays.submit({ branch: "topic/metadata", headSha: HEAD_1 })
+
+    await app.bays.editPr({
+      pr: "PR1",
+      title: "feat(bay): add pr metadata",
+      description: "Adds a durable title and description to the PR record.",
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      title: "feat(bay): add pr metadata",
+      description: "Adds a durable title and description to the PR record.",
+      status: "submitted",
+    })
+
+    // Unlike the immutable issue join, title and description are editable metadata.
+    await app.bays.editPr({ pr: "PR1", title: "feat(bay): pr title + description" })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      title: "feat(bay): pr title + description",
+      description: "Adds a durable title and description to the PR record.",
+    })
+
+    // A no-op edit (unchanged values) emits nothing.
+    expect((await app.bays.editPr({ pr: "PR1", title: "feat(bay): pr title + description" })).events).toEqual([])
+  })
+
+  it("binds a title and description at submit through submitSelection options", async () => {
+    await using app = (await createHarness()).app
+    const submitted = await app.bays.submitSelection("topic/submit-metadata", {
+      resolveRevision: async () => HEAD_1,
+      run: runtime,
+      base: "main",
+      title: "fix(queue): scope superseded runs",
+      description: "Scopes superseded-revision runs in the watch detail pane.",
+    })
+    expect(submitted).toMatchObject({
+      status: "submitted",
+      title: "fix(queue): scope superseded runs",
+      description: "Scopes superseded-revision runs in the watch detail pane.",
+    })
+  })
+
+  it("carries title and description forward across a resubmitted revision", async () => {
+    await using app = (await createHarness()).app
+    let tip = HEAD_1
+    const submit = (extra: Record<string, unknown> = {}) =>
+      app.bays.submitSelection("topic/carry-forward", {
+        resolveRevision: async () => tip,
+        run: runtime,
+        base: "main",
+        ...extra,
+      })
+
+    await submit({ title: "feat: carried title", description: "Carried description body." })
+    tip = HEAD_2
+    const resubmitted = await submit()
+    expect(resubmitted).toMatchObject({
+      revision: 2,
+      headSha: HEAD_2,
+      title: "feat: carried title",
+      description: "Carried description body.",
+    })
+  })
+
+  it("carries title and description forward across a mechanical recut", async () => {
+    await using app = (await createHarness()).app
+    const nextBase = "b".repeat(40)
+    await app.bays.submit({ branch: "issue/recut-metadata", headSha: HEAD_1, baseSha: BASE, draft: true })
+    await app.bays.editPr({
+      pr: "PR1",
+      issue: "@km/all/21091-issue",
+      title: "feat: recut carries metadata",
+      description: "Recut must not drop the authored title or description.",
+    })
+
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: nextBase,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      revision: 2,
+      headSha: HEAD_2,
+      issue: "@km/all/21091-issue",
+      title: "feat: recut carries metadata",
+      description: "Recut must not drop the authored title or description.",
+    })
+  })
 })
