@@ -911,6 +911,7 @@ export async function runYrdProcess(
           io: {
             cwd: activeHost.repository.worktree,
             artifactRoot: join(activeHost.repository.stateDir, "artifacts"),
+            residentRunnerDir: join(activeHost.repository.stateDir, "resident-runner"),
             ...(resident === undefined ? {} : { runner: resident.id }),
             concurrency: io.concurrency ?? activeHost.config.contest.concurrency,
             resolveRevision: (ref, cwd) =>

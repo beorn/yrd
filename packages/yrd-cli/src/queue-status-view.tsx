@@ -13,7 +13,7 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, ListView, Spinner, Table, Text, type TableColumn } from "silvery"
+import { Box, Link, ListView, Pulse, Spinner, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -62,6 +62,14 @@ export type QueueTimelineRevisionLineage = Readonly<{
   sourceReadyAt?: string
 }>
 
+/**
+ * One physical, selectable queue row. The list deliberately denormalizes one
+ * exact PR revision (RunMember) per row: a batched Run repeats its Run facts
+ * (`run`, `status`, `step`, `totalMs`) on one row per member while `pr`,
+ * `revision`, `branch`, `subject`, `ageMs`, and `queueWaitMs` are member
+ * facts. `id` is the composite cursor identity (`runId + prId + revision` for
+ * Run rows, `prId + revision` for pending rows) that live reshuffles preserve.
+ */
 export type QueueTimelineProjectedRow = Readonly<{
   id: string
   base: string
@@ -71,9 +79,13 @@ export type QueueTimelineProjectedRow = Readonly<{
   timestamp: string | null
   timestampMs: number | null
   run?: string
-  prs: readonly string[]
-  branches: readonly string[]
+  pr: string
+  revision: number
+  branch: string
   subject: string
+  /** The actor who submitted this exact PR revision; absent only for journals written before submitter identity. */
+  submitter?: string
+  step?: string
   detail: string
   position?: number
   sourceReadyAt?: string
@@ -83,13 +95,23 @@ export type QueueTimelineProjectedRow = Readonly<{
   totalMs: number | null
   activeMs: number | null
   waitMs: number | null
-  queueWaitMs: readonly (number | null)[]
+  queueWaitMs: number | null
 }>
+
+/**
+ * Queue-runner liveness for the header. `null` means the lease was probed and
+ * nothing holds it (rendered loudly — nothing drains the queue); omitting the
+ * field means the host never probed. `lastTickAt` stays absent until the run
+ * loop writes heartbeats; the flock probe itself is the at-snapshot liveness
+ * authority.
+ */
+export type QueueRunnerStatus = Readonly<{ pid?: number; startedAt?: string; lastTickAt?: string }>
 
 export type QueueTimelineProjection = Readonly<{
   now: string
   base: string
   siblingBases: readonly string[]
+  runner?: QueueRunnerStatus | null
   pause?: QueueSummary["pause"]
   oldestOpenMs: number | null
   filters: Readonly<{
@@ -123,6 +145,7 @@ export type QueueTimelineProjectionOptions = Readonly<{
   siblingBases?: readonly string[]
   base?: string
   state?: BaysState
+  runner?: QueueRunnerStatus | null
 }>
 
 export type QueueTerminalOutcome = "integrated" | "rejected" | "environment-refused" | "canceled"
@@ -646,10 +669,9 @@ export function queueTimelineRows(
     state,
   })
   return projection.rows.map((row) => {
-    const pr = row.prs[0] ?? "-"
     return {
       key: row.id,
-      pr,
+      pr: row.pr,
       ...(row.run === undefined ? {} : { run: row.run }),
       ...(row.position === undefined ? {} : { position: row.position }),
       base: row.base,
@@ -1229,12 +1251,15 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
 const QUEUE_ROW_LIMIT = 5
 const RECENT_ROW_LIMIT = 3
 
+// Canonical km/ag marker vocabulary: working disc, hollow pending, red
+// failure cross, muted completion check. Never ASCII slash spinners or
+// background fills; color is applied by the renderer, foreground-only.
 function statusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return "[/]"
-  if (["integrated", "passed"].includes(status)) return "[x]"
-  if (["rejected", "failed", "lost"].includes(status)) return "[!]"
-  if (["withdrawn", "retired"].includes(status)) return "[-]"
-  return "[ ]"
+  if (["checking", "running", "waiting"].includes(status)) return "●"
+  if (["integrated", "passed"].includes(status)) return "✓"
+  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) return "×"
+  if (["withdrawn", "retired", "canceled"].includes(status)) return "-"
+  return "○"
 }
 
 function failureFact(
@@ -1305,19 +1330,6 @@ function timelineAge(timestamp: string | undefined, nowIso: string, subject: str
   return elapsedMs(timestamp, nowIso, subject) ?? null
 }
 
-function timelineSubject(result: QueueStatusResult, run: QueueRun, state: BaysState | undefined): string {
-  return boundedQueue(
-    run.prs
-      .map((member) => {
-        const current = result.prs.find((candidate) => candidate.id === member.id)
-        const bayPath = current?.bay === undefined ? undefined : state?.byId[current.bay]?.path
-        return bayPath ?? current?.name ?? member.name ?? current?.branch ?? member.branch
-      })
-      .join(" · "),
-    80,
-  )
-}
-
 function timelineRevisionLineage(pr: PR, revision = pr.revision): QueueTimelineRevisionLineage {
   const retained = pr.revisions?.some((candidate) => candidate.revision === revision)
   if (retained !== true) {
@@ -1336,14 +1348,6 @@ function timelineRevisionLineage(pr: PR, revision = pr.revision): QueueTimelineR
   }
 }
 
-function timelineRunLineages(result: QueueStatusResult, run: QueueRun): QueueTimelineRevisionLineage[] {
-  return run.prs.map((member) => {
-    const pr = result.prs.find((candidate) => candidate.id === member.id)
-    if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
-    return timelineRevisionLineage(pr, member.revision)
-  })
-}
-
 function timelineLineageLabel(lineages: readonly QueueTimelineRevisionLineage[]): string | undefined {
   const recuts = lineages.filter(({ revisions }) => revisions.length > 1)
   if (recuts.length === 0) return undefined
@@ -1360,18 +1364,6 @@ function withTimelineLineage(detail: string, lineages: readonly QueueTimelineRev
   return lineage === undefined ? detail : `${detail} · ${lineage}`
 }
 
-function retargetTimelineLineage(
-  detail: string,
-  current: readonly QueueTimelineRevisionLineage[],
-  selected: readonly QueueTimelineRevisionLineage[],
-): string {
-  const currentLabel = timelineLineageLabel(current)
-  if (currentLabel === undefined) return withTimelineLineage(detail, selected)
-  const suffix = ` · ${currentLabel}`
-  if (!detail.endsWith(suffix)) throw new Error("yrd: queue timeline row lost its revision-lineage suffix")
-  return withTimelineLineage(detail.slice(0, -suffix.length), selected)
-}
-
 function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
   return run.prs.map((member) => {
     const runKey = queueRunRevisionKey(run, member)
@@ -1382,14 +1374,14 @@ function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, 
   })
 }
 
-function timelineRunRow(
+function timelineRunMemberRows(
   result: QueueStatusResult,
   run: QueueRun,
   nowIso: string,
   submissionTimes: ReadonlyMap<string, string | null>,
   state: BaysState | undefined,
   attempts: readonly QueueAttempt[],
-): QueueTimelineProjectedRow {
+): QueueTimelineProjectedRow[] {
   const running = run.status === "running" || run.status === "waiting"
   const status: QueueTimelineStatus = running ? "running" : terminalOutcome(run)
   const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
@@ -1406,6 +1398,12 @@ function timelineRunRow(
   const waitMs = running ? null : (durations.waitDurationMs ?? null)
   const failure = status === "integrated" ? undefined : failureFact(run, relevantStep(run))
   const step = relevantStep(run)
+  // The row's STEP cell names the currently executing step; a later queued
+  // step (requested) only shows when nothing is actively running.
+  const currentStep =
+    run.steps.toReversed().find((candidate) => ["running", "waiting"].includes(jobStatus(candidate))) ?? step
+  const stepLabel =
+    running && currentStep !== undefined ? `${run.steps.indexOf(currentStep) + 1}:${currentStep.name}` : undefined
   const baseDetail =
     failure === undefined
       ? status === "integrated"
@@ -1414,29 +1412,54 @@ function timelineRunRow(
           ? run.status
           : `${step.name}: ${jobStatus(step)}`
       : `${failure.code}: ${causalSummary(failure.message)}`
-  const revisionLineage = timelineRunLineages(result, run)
-  const detail = withTimelineLineage(baseDetail, revisionLineage)
-  return {
-    id: `${run.base}:run:${run.id}`,
-    base: run.base,
-    group: running ? "running" : "completed",
-    status,
-    glyph: statusGlyph(status),
-    timestamp,
-    timestampMs,
-    run: run.id,
-    prs: run.prs.map((member) => member.id),
-    branches: run.prs.map((member) => member.branch),
-    subject: timelineSubject(result, run, state),
-    detail,
-    revisionLineage,
-    ...(failure === undefined ? {} : { failure }),
-    ageMs: timelineAge(timestamp ?? undefined, nowIso, `Run '${run.id}' recency`),
-    totalMs,
-    activeMs,
-    waitMs,
-    queueWaitMs: running ? [] : timelineQueueWaits(run, submissionTimes),
-  }
+  const queueWaits = timelineQueueWaits(run, submissionTimes)
+  const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
+  return run.prs.map((member, index) => {
+    const current = result.prs.find((candidate) => candidate.id === member.id)
+    if (current === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
+    const lineage = timelineRevisionLineage(current, member.revision)
+    const bayPath = current.bay === undefined ? undefined : state?.byId[current.bay]?.path
+    const runKey = queueRunRevisionKey(run, member)
+    const submittedAt = submissionTimes.has(runKey)
+      ? (submissionTimes.get(runKey) ?? undefined)
+      : (submissionTimes.get(queueRevisionKey(member)) ?? undefined)
+    // Member AGE anchors on the causal admission clock of THIS run, so a
+    // later resubmission of the same revision can never postdate an earlier
+    // run's finish (the 21106 timestamp-crash class).
+    const admission = (current.revisions?.length ?? 0) > 0 ? runRevisionClock(current, run) : undefined
+    const sourceReadyAt =
+      admission === undefined
+        ? (lineage.sourceReadyAt ?? submittedAt)
+        : admission.admittedBy === "submission"
+          ? (lineage.sourceReadyAt ?? admission.submittedAt)
+          : (admission.checkRequestedAt ?? admission.pushedAt)
+    const submitter = current.revisions?.find((candidate) => candidate.revision === member.revision)?.actor
+    return {
+      id: `${run.base}:run:${run.id}:${member.id}:${member.revision}`,
+      base: run.base,
+      group: running ? ("running" as const) : ("completed" as const),
+      status,
+      glyph: statusGlyph(status),
+      timestamp,
+      timestampMs,
+      run: run.id,
+      pr: member.id,
+      revision: member.revision,
+      branch: member.branch,
+      subject: boundedQueue(bayPath ?? current.name ?? member.name ?? member.branch, 80),
+      ...(submitter === undefined ? {} : { submitter }),
+      ...(stepLabel === undefined ? {} : { step: stepLabel }),
+      detail: withTimelineLineage(baseDetail, [lineage]),
+      ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
+      revisionLineage: [lineage],
+      ...(failure === undefined ? {} : { failure }),
+      ageMs: elapsedMs(sourceReadyAt, ageEndIso, `PR '${member.id}' source-ready age`) ?? null,
+      totalMs,
+      activeMs,
+      waitMs,
+      queueWaitMs: queueWaits[index] ?? null,
+    }
+  })
 }
 
 function timelinePendingRows(
@@ -1458,6 +1481,9 @@ function timelinePendingRows(
     const revisionLineage = [timelineRevisionLineage(pr)]
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
     const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
+    const submitter = pr.revisions?.find(
+      (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+    )?.actor
     return [
       {
         id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1467,9 +1493,11 @@ function timelinePendingRows(
         glyph: statusGlyph("pending"),
         timestamp,
         timestampMs,
-        prs: [pr.id],
-        branches: [pr.branch],
+        pr: pr.id,
+        revision: pr.revision,
+        branch: pr.branch,
         subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
+        ...(submitter === undefined ? {} : { submitter }),
         detail,
         ...(position === undefined ? {} : { position }),
         ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
@@ -1478,7 +1506,7 @@ function timelinePendingRows(
         totalMs: null,
         activeMs: null,
         waitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
-        queueWaitMs: [],
+        queueWaitMs: timelineAge(timestamp ?? undefined, nowIso, `PR '${pr.id}' queue wait`),
       },
     ]
   })
@@ -1500,7 +1528,7 @@ function timelineSort(left: QueueTimelineProjectedRow, right: QueueTimelineProje
 
 function timelineMatches(row: QueueTimelineProjectedRow, terms: readonly string[]): boolean {
   if (terms.length === 0) return true
-  const searchable = [row.run ?? "", ...row.prs, ...row.branches, row.subject, row.failure?.code ?? ""]
+  const searchable = [row.run ?? "", row.pr, row.branch, row.subject, row.failure?.code ?? ""]
     .join("\n")
     .toLocaleLowerCase()
   return terms.some((term) => searchable.includes(term))
@@ -1509,32 +1537,14 @@ function timelineMatches(row: QueueTimelineProjectedRow, terms: readonly string[
 function latestTimelineRows(rows: readonly QueueTimelineProjectedRow[]): QueueTimelineProjectedRow[] {
   const latestByPr = new Map<string, QueueTimelineProjectedRow>()
   for (const row of rows) {
-    for (const pr of row.prs) {
-      const current = latestByPr.get(pr)
-      const currentAt = current?.timestampMs ?? Number.NEGATIVE_INFINITY
-      const nextAt = row.timestampMs ?? Number.NEGATIVE_INFINITY
-      if (current === undefined || nextAt > currentAt || (nextAt === currentAt && row.id > current.id)) {
-        latestByPr.set(pr, row)
-      }
+    const current = latestByPr.get(row.pr)
+    const currentAt = current?.timestampMs ?? Number.NEGATIVE_INFINITY
+    const nextAt = row.timestampMs ?? Number.NEGATIVE_INFINITY
+    if (current === undefined || nextAt > currentAt || (nextAt === currentAt && row.id > current.id)) {
+      latestByPr.set(row.pr, row)
     }
   }
-  return rows.flatMap((row) => {
-    const memberIndexes = row.prs.flatMap((pr, index) => (latestByPr.get(pr)?.id === row.id ? [index] : []))
-    if (memberIndexes.length === 0) return []
-    if (memberIndexes.length === row.prs.length) return [row]
-    const prs = memberIndexes.flatMap((index) => {
-      const pr = row.prs[index]
-      return pr === undefined ? [] : [pr]
-    })
-    const branches = memberIndexes.flatMap((index) => {
-      const branch = row.branches[index]
-      return branch === undefined ? [] : [branch]
-    })
-    const queueWaitMs = memberIndexes.map((index) => row.queueWaitMs[index] ?? null)
-    const revisionLineage = row.revisionLineage.filter((entry) => prs.includes(entry.pr))
-    const detail = retargetTimelineLineage(row.detail, row.revisionLineage, revisionLineage)
-    return [{ ...row, prs, branches, subject: branches.join(" · "), detail, queueWaitMs, revisionLineage }]
-  })
+  return rows.filter((row) => latestByPr.get(row.pr)?.id === row.id)
 }
 
 export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[]): Map<string, string | null> {
@@ -1597,8 +1607,8 @@ export function queueTimelineProjection(
   const terms = [...new Set(options.terms.map((term) => term.trim().toLocaleLowerCase()).filter(Boolean))]
   const rawRows = results.flatMap((result) => [
     ...timelinePendingRows(result, nowIso, options.submissionTimes, options.state),
-    ...[...result.running, ...result.waiting, ...result.finished].map((run) =>
-      timelineRunRow(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
+    ...[...result.running, ...result.waiting, ...result.finished].flatMap((run) =>
+      timelineRunMemberRows(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
     ),
   ])
   const filtered = rawRows
@@ -1606,22 +1616,33 @@ export function queueTimelineProjection(
     .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= options.now))
     .filter((row) => timelineMatches(row, terms))
   const rows = (options.latest ? latestTimelineRows(filtered) : filtered).toSorted(timelineSort)
-  const terminalFacts: QueueTerminalFact[] = rows.flatMap((row) => {
-    if (row.group !== "completed" || row.timestampMs === null) return []
-    return [
-      {
-        run: row.id,
+  // Metrics stay per-Run: member rows of one batched Run fold into one
+  // terminal fact carrying every visible member's queue wait.
+  const terminalFactByRun = new Map<string, QueueTerminalFact>()
+  for (const row of rows) {
+    if (row.group !== "completed" || row.timestampMs === null || row.run === undefined) continue
+    const key = `${row.base}:${row.run}`
+    const fact = terminalFactByRun.get(key)
+    const waits = row.queueWaitMs === null ? [] : [row.queueWaitMs]
+    if (fact === undefined) {
+      terminalFactByRun.set(key, {
+        run: row.run,
         terminalAtMs: row.timestampMs,
         outcome: row.status as QueueTerminalOutcome,
         activeMs: row.totalMs,
-        queueWaitMs: row.queueWaitMs.filter((wait): wait is number => wait !== null),
-      },
-    ]
-  })
+        queueWaitMs: waits,
+      })
+      continue
+    }
+    terminalFactByRun.set(key, { ...fact, queueWaitMs: [...fact.queueWaitMs, ...waits] })
+  }
+  const terminalFacts = [...terminalFactByRun.values()]
   const allRuns = results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
   const finished = results.flatMap((result) => result.finished)
+  const detailRuns = new Set<string>()
   const details = rows.flatMap((row) => {
-    if (row.run === undefined) return []
+    if (row.run === undefined || detailRuns.has(`${row.base}:${row.run}`)) return []
+    detailRuns.add(`${row.base}:${row.run}`)
     const run = allRuns.find((candidate) => candidate.id === row.run && candidate.base === row.base)
     return run === undefined ? [] : [queueShowData(run, finished, options.attempts ?? [])]
   })
@@ -1640,6 +1661,7 @@ export function queueTimelineProjection(
     now: nowIso,
     base,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
+    ...(options.runner === undefined ? {} : { runner: options.runner }),
     ...(pause === undefined ? {} : { pause }),
     oldestOpenMs,
     filters: { windowMs: options.windowMs, since, statuses, terms, latest: options.latest },
@@ -2508,101 +2530,167 @@ function timelineMetric(value: number | null): string {
   return ">99kd"
 }
 
-function TimelineFlow({ metrics }: { metrics: QueueFlowMetrics }) {
-  const decision = metrics.decisionRejection.rate
-  const all = metrics.activeRun.allTerminal
-  const integrated = metrics.activeRun.integratedOnly
-  const wait = metrics.queueWait
-  return (
-    <Box flexDirection="column">
-      <Text wrap="truncate">
-        FLOW attempts={metrics.terminalAttempts} integrated={metrics.outcomes.integrated} rejected=
-        {metrics.outcomes.rejected} decision={decision === null ? "-" : `${(decision * 100).toFixed(1)}%`} env=
-        {metrics.outcomes.environmentRefused} canceled={metrics.outcomes.canceled}
-      </Text>
-      <Text color="$fg-muted" wrap="truncate">
-        ACTIVE ALL n={all.n} min={timelineMetric(all.minMs)} avg={timelineMetric(all.avgMs)} p50=
-        {timelineMetric(all.p50Ms)} p90={timelineMetric(all.p90Ms)} max={timelineMetric(all.maxMs)}
-      </Text>
-      <Text color="$fg-muted" wrap="truncate">
-        ACTIVE INTEGRATED n={integrated.n} min={timelineMetric(integrated.minMs)} avg=
-        {timelineMetric(integrated.avgMs)} p50={timelineMetric(integrated.p50Ms)} p90=
-        {timelineMetric(integrated.p90Ms)} max={timelineMetric(integrated.maxMs)}
-      </Text>
-      <Text color="$fg-muted" wrap="truncate">
-        WAIT n={wait.n} avg={timelineMetric(wait.avgMs)} p50={timelineMetric(wait.p50Ms)} p90=
-        {timelineMetric(wait.p90Ms)} max={timelineMetric(wait.maxMs)}
-      </Text>
-    </Box>
-  )
+// The queue content surface is capped at min(viewport - 2, 160) cells with one
+// cell of side padding, centered when the viewport is wider than the cap.
+const TIMELINE_CONTENT_CAP = 160
+// Fixed cells never clip arbitrarily; labels longer than this shorten at a
+// semantic boundary via fitTimelineLabel.
+const TIMELINE_STATE_CAP = 20
+const TIMELINE_TOTAL_GLYPH = "◷"
+
+type TimelineCellLayout = Readonly<{
+  timeWidth: number
+  runWidth: number
+  /** 0 drops the BY column entirely — the first casualty on narrow tiers. */
+  byWidth: number
+  stateWidth: number
+  ageWidth: number
+  totalWidth: number
+  compact: boolean
+  includeDate: boolean
+}>
+
+function timelineRunLabel(row: QueueTimelineProjectedRow, compact: boolean): string {
+  if (row.run === undefined) return ""
+  const match = /^R(\d+)$/u.exec(row.run)
+  if (match === null) return row.run
+  return compact ? `#${match[1]}` : `${row.base}#${match[1]}`
 }
 
-function TimelineStatusBand({ row }: { row: QueueTimelineProjectedRow }) {
-  const colors: Record<QueueTimelineStatus, Readonly<{ backgroundColor: string; color: string }>> = {
-    pending: { backgroundColor: "$bg-accent", color: "$fg-on-accent" },
-    running: { backgroundColor: "$bg-info", color: "$fg-on-info" },
-    integrated: { backgroundColor: "$bg-success", color: "$fg-on-success" },
-    rejected: { backgroundColor: "$bg-error", color: "$fg-on-error" },
-    "environment-refused": { backgroundColor: "$bg-warning", color: "$fg-on-warning" },
-    canceled: { backgroundColor: "$bg-inverse", color: "$fg-on-inverse" },
+// Preserve the leading semantic unit instead of clipping an arbitrary suffix.
+function fitTimelineLabel(label: string, max: number): string {
+  if (label.length <= max) return label
+  const boundary = Math.max(label.lastIndexOf("-", max), label.lastIndexOf(":", max))
+  return boundary > 0 ? label.slice(0, boundary) : label.slice(0, max)
+}
+
+type TimelineStateCell = Readonly<{ text: string; color?: string; bold?: boolean }>
+
+// The STEP cell: current `ordinal:name` while running, the short visible
+// state (grey-bold `integrated`, inline failure code) once terminal.
+function timelineStateCell(row: QueueTimelineProjectedRow): TimelineStateCell {
+  if (row.status === "running") return { text: row.step ?? "" }
+  if (row.status === "pending") return { text: "" }
+  if (row.status === "integrated") return { text: "integrated", color: "$fg-muted", bold: true }
+  if (row.status === "canceled")
+    return { text: fitTimelineLabel(row.failure?.code ?? "canceled", TIMELINE_STATE_CAP), color: "$fg-muted" }
+  const code = row.failure?.code ?? (row.status === "environment-refused" ? "env-refused" : "rejected")
+  return {
+    text: fitTimelineLabel(code, TIMELINE_STATE_CAP),
+    color: row.status === "environment-refused" ? "$fg-warning" : "$fg-error",
   }
-  const label = row.status === "environment-refused" ? "env-refused" : row.status
-  return (
-    <Box
-      width={17}
-      height={1}
-      flexShrink={0}
-      minWidth={0}
-      gap={1}
-      paddingX={1}
-      overflow="hidden"
-      backgroundColor={colors[row.status].backgroundColor}
-      color={colors[row.status].color}
-    >
-      {row.status === "running" ? <Spinner type="line" /> : <Text>{row.glyph}</Text>}
-      <Text bold wrap="truncate">
-        {label}
-      </Text>
-    </Box>
-  )
 }
 
-function TimelineHeader({ includeDate, compact }: { includeDate: boolean; compact: boolean }) {
-  const timeWidth = includeDate ? (compact ? 16 : 21) : 10
+function timelineAgeCell(row: QueueTimelineProjectedRow): string {
+  return row.ageMs === null ? "" : mediaDuration(row.ageMs)
+}
+
+function timelineTotalCell(row: QueueTimelineProjectedRow): string {
+  return row.totalMs === null ? "" : mediaDuration(row.totalMs)
+}
+
+function timelineClockCell(row: QueueTimelineProjectedRow, includeDate: boolean): string {
+  return row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
+}
+
+function timelineByCell(row: QueueTimelineProjectedRow): string {
+  return row.submitter ?? "-"
+}
+
+function timelineCellLayout(
+  rows: readonly QueueTimelineProjectedRow[],
+  includeDate: boolean,
+  compact: boolean,
+): TimelineCellLayout {
+  return {
+    timeWidth: includeDate ? 20 : 8,
+    runWidth: Math.max(3, ...rows.map((row) => timelineRunLabel(row, compact).length)),
+    byWidth: compact ? 0 : Math.max(2, ...rows.map((row) => timelineByCell(row).length)),
+    stateWidth: Math.max(4, ...rows.map((row) => timelineStateCell(row).text.length)),
+    ageWidth: Math.max(3, ...rows.map((row) => timelineAgeCell(row).length)),
+    totalWidth: Math.max(5, ...rows.map((row) => (row.totalMs === null ? 0 : timelineTotalCell(row).length + 1))),
+    compact,
+    includeDate,
+  }
+}
+
+/** Default list cursor: the first RUNNING row, else the most recently finished row. */
+export function queueTimelineDefaultCursorId(
+  rows: readonly Pick<QueueTimelineProjectedRow, "id" | "status" | "group" | "timestampMs">[],
+): string | undefined {
+  const running = rows.find((row) => row.status === "running")
+  if (running !== undefined) return running.id
+  let finished: (typeof rows)[number] | undefined
+  for (const row of rows) {
+    if (row.group !== "completed") continue
+    if (
+      finished === undefined ||
+      (row.timestampMs ?? Number.NEGATIVE_INFINITY) > (finished.timestampMs ?? Number.NEGATIVE_INFINITY)
+    ) {
+      finished = row
+    }
+  }
+  return (finished ?? rows[0])?.id
+}
+
+// The working disc pulses only in the live pane; the one-shot projection has
+// no app scope (and a static print cannot pulse), so it renders the same
+// glyph statically — byte-identical plain output either way.
+function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
+  if (row.status === "running") {
+    if (live) return <Pulse colors={["$fg-info", "$fg-muted"]}>{row.glyph}</Pulse>
+    return <Text color="$fg-info">{row.glyph}</Text>
+  }
+  const color =
+    row.status === "rejected"
+      ? "$fg-error"
+      : row.status === "environment-refused"
+        ? "$fg-warning"
+        : row.status === "pending"
+          ? undefined
+          : "$fg-muted"
+  return <Text color={color}>{row.glyph}</Text>
+}
+
+function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   return (
     <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={timeWidth} flexShrink={0} minWidth={0}>
+      <Box width={1} flexShrink={0}>
+        <Text color="$fg-muted"> </Text>
+      </Box>
+      <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
-          {"  TIME"}
+          TIME
         </Text>
       </Box>
-      <Box width={17} flexShrink={0} minWidth={0}>
-        <Text color="$fg-muted">STATUS</Text>
-      </Box>
-      <Box width={16} flexShrink={0} minWidth={0}>
+      <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
         <Text color="$fg-muted" wrap="truncate">
-          RUN·PR
+          RUN
         </Text>
       </Box>
-      {compact ? null : (
-        <>
-          <Box flexGrow={1} flexBasis={0} minWidth={0}>
-            <Text color="$fg-muted" wrap="truncate">
-              SUBJECT
-            </Text>
-          </Box>
-          <Box flexGrow={1} flexBasis={0} minWidth={0}>
-            <Text color="$fg-muted" wrap="truncate">
-              DETAIL
-            </Text>
-          </Box>
-        </>
-      )}
-      {(["AGE", "TOTAL", "ACTIVE", "WAIT"] as const).map((label) => (
-        <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
-          <Text color="$fg-muted">{label}</Text>
+      {layout.byWidth === 0 ? null : (
+        <Box width={layout.byWidth} flexShrink={0} minWidth={0}>
+          <Text color="$fg-muted" wrap="truncate">
+            BY
+          </Text>
         </Box>
-      ))}
+      )}
+      <Box flexGrow={1} flexBasis={0} minWidth={12}>
+        <Text color="$fg-muted" wrap="truncate">
+          PR
+        </Text>
+      </Box>
+      <Box width={layout.stateWidth} flexShrink={0} minWidth={0}>
+        <Text color="$fg-muted" wrap="truncate">
+          STEP
+        </Text>
+      </Box>
+      <Box width={layout.ageWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">AGE</Text>
+      </Box>
+      <Box width={layout.totalWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">TOTAL</Text>
+      </Box>
     </Box>
   )
 }
@@ -2610,66 +2698,199 @@ function TimelineHeader({ includeDate, compact }: { includeDate: boolean; compac
 function TimelineProjectedRow({
   row,
   cursor,
-  includeDate,
-  compact,
+  layout,
+  live,
 }: {
   row: QueueTimelineProjectedRow
   cursor: boolean
-  includeDate: boolean
-  compact: boolean
+  layout: TimelineCellLayout
+  live: boolean
 }) {
-  const color = row.status === "integrated" ? "$fg-muted" : undefined
-  const rawClock = row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, includeDate)
-  const clock = compact && includeDate ? rawClock.slice(5) : rawClock
-  const timeWidth = includeDate ? (compact ? 16 : 21) : 10
-  const identity = `${row.run === undefined ? "" : `${row.run}·`}${row.prs.join(",")}`
-  const measurements = [
-    ["age", row.ageMs],
-    ["total", row.totalMs],
-    ["active", row.activeMs],
-    ["wait", row.waitMs],
-  ] as const
+  const active = row.status === "running"
+  const state = timelineStateCell(row)
+  const total = timelineTotalCell(row)
   return (
-    <Box height={1} flexDirection="row" gap={1} minWidth={0} overflow="hidden">
-      <Box width={timeWidth} flexShrink={0} minWidth={0}>
-        <Text color={color} wrap="truncate">
-          {cursor ? "> " : "  "}
-          {clock}
-        </Text>
+    <Box
+      height={1}
+      flexDirection="row"
+      gap={1}
+      minWidth={0}
+      overflow="hidden"
+      backgroundColor={cursor ? "$bg-accent" : undefined}
+    >
+      <Box width={1} flexShrink={0}>
+        <TimelineMarker row={row} live={live} />
       </Box>
-      <TimelineStatusBand row={row} />
-      <Box width={16} flexShrink={0} minWidth={0}>
-        <Text color={color} wrap="truncate">
-          {identity}
-        </Text>
+      <Box width={layout.timeWidth} flexShrink={0} minWidth={0}>
+        <Text wrap="truncate">{timelineClockCell(row, layout.includeDate)}</Text>
       </Box>
-      {compact ? null : (
-        <>
-          <Box flexGrow={1} flexBasis={0} minWidth={6}>
-            <Text color={color} wrap="truncate">
-              {row.subject}
-            </Text>
-          </Box>
-          <Box flexGrow={1} flexBasis={0} minWidth={10}>
-            {row.failure === undefined ? (
-              <Text color={color} wrap="truncate">
-                {row.detail}
-              </Text>
-            ) : (
-              <Text wrap="truncate">
-                {row.failure.code}: <Text color="$fg-muted">{causalSummary(row.failure.message)}</Text>
-              </Text>
-            )}
-          </Box>
-        </>
-      )}
-      {measurements.map(([label, value]) => (
-        <Box key={label} width={6} flexShrink={0} minWidth={0} justifyContent="flex-end">
-          <Text color={color} wrap="truncate">
-            {timelineMetric(value)}
+      <Box width={layout.runWidth} flexShrink={0} minWidth={0}>
+        <Text wrap="truncate">{timelineRunLabel(row, layout.compact)}</Text>
+      </Box>
+      {layout.byWidth === 0 ? null : (
+        <Box width={layout.byWidth} flexShrink={0} minWidth={0}>
+          <Text color="$fg-muted" wrap="truncate">
+            {timelineByCell(row)}
           </Text>
         </Box>
+      )}
+      <Box flexDirection="row" flexGrow={1} flexBasis={0} minWidth={12} overflow="hidden">
+        <Text bold={active} flexShrink={0}>
+          {row.pr}.{row.revision}{" "}
+        </Text>
+        <Text bold={active} wrap="truncate" minWidth={0}>
+          {row.subject}
+        </Text>
+      </Box>
+      <Box width={layout.stateWidth} flexShrink={0} minWidth={0}>
+        <Text color={state.color} bold={state.bold ?? false} wrap="truncate">
+          {state.text}
+        </Text>
+      </Box>
+      <Box width={layout.ageWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        <Text color="$fg-muted">{timelineAgeCell(row)}</Text>
+      </Box>
+      <Box width={layout.totalWidth} flexShrink={0} minWidth={0} justifyContent="flex-end">
+        {total === "" ? (
+          <Text> </Text>
+        ) : (
+          <Text>
+            <Text color="$fg-muted">{TIMELINE_TOTAL_GLYPH}</Text>
+            {total}
+          </Text>
+        )}
+      </Box>
+    </Box>
+  )
+}
+
+function QueueTabsLine({ base, siblings }: { base: string; siblings: readonly string[] }) {
+  if (siblings.length === 0) {
+    return (
+      <Text bold wrap="truncate">
+        QUEUE {base}
+      </Text>
+    )
+  }
+  return (
+    <Box flexDirection="row" flexShrink={0} minWidth={0}>
+      <Box paddingRight={1} flexShrink={0}>
+        <Text bold>QUEUE</Text>
+      </Box>
+      <Tabs value={base} isActive={false}>
+        <TabList>
+          {[base, ...siblings].map((value) => (
+            <Tab key={value} value={value}>
+              {value}
+            </Tab>
+          ))}
+        </TabList>
+      </Tabs>
+    </Box>
+  )
+}
+
+// Runner liveness is a header fact. Absence is rendered loudly — a probed
+// lease that nobody holds means nothing drains this queue. An unprobed host
+// (embedded/test io without a lease dir) omits the fact instead of claiming
+// absence it never verified.
+function TimelineRunnerFact({ runner, now }: { runner: QueueRunnerStatus | null; now: string }) {
+  if (runner === null) {
+    return (
+      <Text color="$fg-error" bold wrap="truncate">
+        RUNNER none — nothing drains this queue
+      </Text>
+    )
+  }
+  const uptimeMs = elapsedMs(runner.startedAt, now, "queue runner uptime")
+  return (
+    <Text wrap="truncate">
+      <Text color="$fg-muted">RUNNER </Text>
+      {runner.pid === undefined ? "pid unknown" : `yrd-cli:${runner.pid}`}
+      {uptimeMs === undefined ? null : (
+        <>
+          <Text color="$fg-muted"> up </Text>
+          {mediaDuration(uptimeMs)}
+        </>
+      )}
+      <Text color="$fg-muted">
+        {" · "}
+        {runner.lastTickAt === undefined ? "lease live" : `tick ${queueLogClock(runner.lastTickAt, false, false)}`}
+      </Text>
+    </Text>
+  )
+}
+
+function TimelineStatusBox({ pause }: { pause: NonNullable<QueueTimelineProjection["pause"]> }) {
+  const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
+  return (
+    <Box borderStyle="round" borderColor="$fg-warning" width="100%" paddingX={1} flexShrink={0} minWidth={0}>
+      <Text color="$fg-warning" wrap="truncate">
+        <Text bold>STATUS</Text>
+        {"  HOLD THE LINE — "}
+        {pause.reason} · allowed {allowed}
+      </Text>
+    </Box>
+  )
+}
+
+function TimelineStatLine({ label, facts }: { label: string; facts: readonly (readonly [string, string])[] }) {
+  return (
+    <Text wrap="truncate">
+      <Text color="$fg-muted">{label}</Text>
+      {facts.map(([key, value]) => (
+        <Text key={key}>
+          {" "}
+          <Text color="$fg-muted">{key}=</Text>
+          {value}
+        </Text>
       ))}
+    </Text>
+  )
+}
+
+function TimelineStatistics({ projection }: { projection: QueueTimelineProjection }) {
+  const metrics = projection.metrics
+  const decision = metrics.decisionRejection.rate
+  const all = metrics.activeRun.allTerminal
+  const integrated = metrics.activeRun.integratedOnly
+  const wait = metrics.queueWait
+  const count = (group: QueueTimelineGroup) => String(projection.rows.filter((row) => row.group === group).length)
+  const distribution = (values: DurationDistribution | QueueWaitDistribution): (readonly [string, string])[] => [
+    ["n", String(values.n)],
+    ...("minMs" in values ? [["min", timelineMetric(values.minMs)] as const] : []),
+    ["avg", timelineMetric(values.avgMs)],
+    ["p50", timelineMetric(values.p50Ms)],
+    ["p90", timelineMetric(values.p90Ms)],
+    ["max", timelineMetric(values.maxMs)],
+  ]
+  return (
+    <Box borderStyle="round" width="100%" flexDirection="column" flexShrink={0} minWidth={0} paddingX={1}>
+      <Text color="$fg-muted" bold>
+        STATISTICS
+      </Text>
+      <TimelineStatLine
+        label="ROWS"
+        facts={[
+          ["pending", count("pending")],
+          ["running", count("running")],
+          ["completed", count("completed")],
+        ]}
+      />
+      <TimelineStatLine
+        label="FLOW"
+        facts={[
+          ["attempts", String(metrics.terminalAttempts)],
+          ["integrated", String(metrics.outcomes.integrated)],
+          ["rejected", String(metrics.outcomes.rejected)],
+          ["decision", decision === null ? "-" : `${(decision * 100).toFixed(1)}%`],
+          ["env", String(metrics.outcomes.environmentRefused)],
+          ["canceled", String(metrics.outcomes.canceled)],
+        ]}
+      />
+      <TimelineStatLine label="ACTIVE ALL" facts={distribution(all)} />
+      <TimelineStatLine label="ACTIVE INTEGRATED" facts={distribution(integrated)} />
+      <TimelineStatLine label="WAIT" facts={distribution(wait)} />
     </Box>
   )
 }
@@ -2691,61 +2912,65 @@ function ProjectedQueueTimeline({
 }) {
   const compact = columns <= 80
   const rows = projection.rows.slice(0, projection.display.shown)
-  const siblings = projection.siblingBases.length === 0 ? "none" : projection.siblingBases.join(",")
   const statusFilter = projection.filters.statuses.length === 5 ? "all" : projection.filters.statuses.join(",")
   const includeDate = rows.some(
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
   )
-  const allowed = projection.pause?.allowedPRs.length === 0 ? "none" : projection.pause?.allowedPRs.join(",")
+  const layout = timelineCellLayout(rows, includeDate, compact)
   return (
-    <Box flexDirection="column">
-      <Text bold wrap="truncate">
-        QUEUE {projection.base}{" "}
-        <Text color="$fg-muted">
-          siblings {siblings} · updated {queueLogClock(projection.now, false, includeDate)}
-        </Text>
-      </Text>
-      <Text color="$fg-muted" wrap="truncate">
-        FILTER since={mediaDuration(projection.filters.windowMs)} status={statusFilter} terms=
-        {projection.filters.terms.length === 0 ? "none" : projection.filters.terms.join("|")} latest=
-        {projection.filters.latest ? "yes" : "no"}
-      </Text>
-      {projection.pause === undefined ? null : (
-        <Text wrap="truncate">
-          <Text color="$fg-warning" bold>
-            PAUSED
-          </Text>{" "}
-          {projection.pause.reason} (allowed: {allowed})
-        </Text>
-      )}
-      {projection.oldestOpenMs === null ? null : (
-        <Text color="$fg-muted">OLDEST OPEN {mediaDuration(projection.oldestOpenMs)}</Text>
-      )}
-      <TimelineFlow metrics={projection.metrics} />
-      {rows.length === 0 ? (
-        <Text color="$fg-muted">No matching queue rows.</Text>
-      ) : (
-        <Box flexDirection="column">
-          <TimelineHeader includeDate={includeDate} compact={compact} />
-          <ListView
-            items={rows}
-            nav={nav}
-            cursorKey={cursorKey}
-            onCursor={onCursor}
-            onSelect={onSelect}
-            active={true}
-            getKey={(row) => row.id}
-            estimateHeight={1}
-            renderItem={(row, _index, meta) => (
-              <TimelineProjectedRow row={row} cursor={meta.isCursor} includeDate={includeDate} compact={compact} />
+    <Box width="100%" flexDirection="row" justifyContent="center" minWidth={0} paddingX={1}>
+      <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0}>
+        <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
+        <Box height={1} flexDirection="row" justifyContent="space-between" gap={1} minWidth={0}>
+          <Box flexDirection="row" gap={2} minWidth={0} overflow="hidden">
+            {projection.runner === undefined ? null : (
+              <TimelineRunnerFact runner={projection.runner} now={projection.now} />
             )}
-          />
+            {projection.oldestOpenMs === null ? null : (
+              <Text wrap="truncate">
+                <Text color="$fg-muted">oldest open </Text>
+                {mediaDuration(projection.oldestOpenMs)}
+              </Text>
+            )}
+          </Box>
+          <Text color="$fg-muted" flexShrink={0}>
+            updated {queueLogClock(projection.now, false, includeDate)}
+          </Text>
         </Box>
-      )}
-      {projection.display.hidden === 0 ? null : <Text color="$fg-muted">... {projection.display.hidden} more</Text>}
-      {projection.coverage.complete ? null : (
-        <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
-      )}
+        {projection.pause === undefined ? null : <TimelineStatusBox pause={projection.pause} />}
+        <Box height={1} flexDirection="row" justifyContent="flex-end" minWidth={0}>
+          <Text color="$fg-muted" wrap="truncate">
+            FILTER since={mediaDuration(projection.filters.windowMs)} status={statusFilter} terms=
+            {projection.filters.terms.length === 0 ? "none" : projection.filters.terms.join("|")} latest=
+            {projection.filters.latest ? "yes" : "no"}
+          </Text>
+        </Box>
+        {rows.length === 0 ? (
+          <Text color="$fg-muted">No matching queue rows.</Text>
+        ) : (
+          <Box flexDirection="column" minWidth={0}>
+            <TimelineHeader layout={layout} />
+            <ListView
+              items={rows}
+              nav={nav}
+              cursorKey={cursorKey}
+              onCursor={onCursor}
+              onSelect={onSelect}
+              active={true}
+              getKey={(row) => row.id}
+              estimateHeight={1}
+              renderItem={(row, _index, meta) => (
+                <TimelineProjectedRow row={row} cursor={meta.isCursor} layout={layout} live={nav} />
+              )}
+            />
+          </Box>
+        )}
+        {projection.display.hidden === 0 ? null : <Text color="$fg-muted">... {projection.display.hidden} more</Text>}
+        {projection.coverage.complete ? null : (
+          <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
+        )}
+        <TimelineStatistics projection={projection} />
+      </Box>
     </Box>
   )
 }
@@ -3228,6 +3453,23 @@ function queueShowMembers(data: QueueShowData): string {
   return data.prs.map((pr) => `${pr.id}@r${pr.revision}:${pr.headSha.slice(0, 12)}`).join(",")
 }
 
+// The batched-members group is called `PRs`, never `MEMBERS`. The list-selected
+// member stays visibly highlighted so shared Run steps/logs do not erase which
+// row the user chose.
+function QueueShowMembersLine({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
+  return (
+    <Text wrap="truncate">
+      PRs{" "}
+      {data.prs.map((pr, index) => (
+        <Text key={pr.id} bold={pr.id === highlightPr}>
+          {index === 0 ? "" : ","}
+          {pr.id}@r{pr.revision}:{pr.headSha.slice(0, 12)}
+        </Text>
+      ))}
+    </Text>
+  )
+}
+
 function QueueStepLifecycleView({ row }: { row: QueueShowRow }) {
   return (
     <Box flexDirection="column">
@@ -3285,7 +3527,7 @@ function CompactQueueShowView({ data }: { data: QueueShowData }) {
         RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
       </Text>
       <Text wrap="truncate">
-        BASE {data.base} PRS {queueShowMembers(data)} RETRY {data.retries}
+        BASE {data.base} PRs {queueShowMembers(data)} RETRY {data.retries}
       </Text>
       <Text wrap="truncate">
         START {data.started} END {data.finished}
@@ -3313,11 +3555,19 @@ function CompactQueueShowView({ data }: { data: QueueShowData }) {
   )
 }
 
-export function QueueShowView({ data, compact = false }: { data: QueueShowData; compact?: boolean }) {
+export function QueueShowView({
+  data,
+  compact = false,
+  highlightPr,
+}: {
+  data: QueueShowData
+  compact?: boolean
+  highlightPr?: string
+}) {
   if (compact) return <CompactQueueShowView data={data} />
   return (
     <Box flexDirection="column">
-      <Text wrap="truncate">MEMBERS {queueShowMembers(data)}</Text>
+      <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />
       <Table
         data={[data]}
         columns={[

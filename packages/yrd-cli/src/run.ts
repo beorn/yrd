@@ -23,6 +23,7 @@ import {
 import type { Contest } from "@yrd/contest"
 import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import type { Job } from "@yrd/job"
+import { probeExclusive } from "@yrd/persistence"
 import { Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
@@ -1625,6 +1626,17 @@ export async function queueArtifactOutputs(
   return outputs
 }
 
+// The runner-liveness header fact. The kernel flock is the at-snapshot
+// authority; the lock body supplies diagnostic pid/startedAt. An unprobed
+// host (no lease dir wired) returns undefined so the header omits the fact
+// instead of claiming an absence it never verified.
+function queueRunnerStatus(io: YrdCliIO): Readonly<{ pid?: number; startedAt?: string }> | null | undefined {
+  if (io.residentRunnerDir === undefined) return undefined
+  const probe = probeExclusive(io.residentRunnerDir)
+  if (!probe.held) return null
+  return probe.holder ?? {}
+}
+
 async function queueListSnapshot(
   app: YrdCliApp,
   filters: readonly string[],
@@ -1638,6 +1650,7 @@ async function queueListSnapshot(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
+  const runner = queueRunnerStatus(io)
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -1649,6 +1662,7 @@ async function queueListSnapshot(
     siblingBases: queueBases(state),
     base,
     state: state.bays,
+    ...(runner === undefined ? {} : { runner }),
   })
   const outputs =
     includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(results, io.artifactRoot) : []

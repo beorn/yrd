@@ -49,6 +49,12 @@ export type YrdCliIO = {
   cwd?: string
   /** Process-host-owned step artifact root used by the live read-only output projection. */
   artifactRoot?: string
+  /**
+   * Resident-runner lease dir probed for queue-header runner liveness.
+   * Absent only for embedded/test hosts; the projection then omits the
+   * runner fact rather than claiming absence it never probed.
+   */
+  residentRunnerDir?: string
   runner?: string
   leaseMs?: number
   concurrency?: number

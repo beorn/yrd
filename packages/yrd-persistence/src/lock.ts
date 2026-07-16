@@ -17,6 +17,7 @@ export type ExclusiveOptions = Readonly<{
 type WriterLock = Readonly<{ release(): void }>
 type Flock = { flock(fd: number, operation: number): number }
 
+const LOCK_SH = 1
 const LOCK_EX = 2
 const LOCK_NB = 4
 const LOCK_UN = 8
@@ -88,6 +89,51 @@ async function acquire(dir: string, options: ExclusiveOptions): Promise<WriterLo
       flock(fd, LOCK_UN)
       closeSync(fd)
     },
+  }
+}
+
+export type ExclusiveHolder = Readonly<{ pid?: number; startedAt?: string }>
+export type ExclusiveProbe = Readonly<{ held: boolean; holder?: ExclusiveHolder }>
+
+/**
+ * Read-only liveness probe for an exclusive dir. The kernel flock is the
+ * authority: a shared non-blocking grab succeeds only when no writer holds
+ * the lock, so a crashed holder never reads as present. The lock body's
+ * `{pid, startedAt}` is diagnostic identity, never the liveness verdict.
+ */
+export function probeExclusive(dir: string): ExclusiveProbe {
+  const path = join(dir, "writer.lock")
+  if (held.has(path)) return { held: true, ...probeHolder(path) }
+  let fd: number
+  try {
+    fd = openSync(path, "r")
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return { held: false }
+    throw cause
+  }
+  try {
+    if (flock(fd, LOCK_SH | LOCK_NB) === 0) {
+      flock(fd, LOCK_UN)
+      return { held: false }
+    }
+    return { held: true, ...probeHolder(path) }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function probeHolder(path: string): Readonly<{ holder?: ExclusiveHolder }> {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; startedAt?: unknown }
+    const holder = {
+      ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
+      ...(typeof value.startedAt === "string" ? { startedAt: value.startedAt } : {}),
+    }
+    return Object.keys(holder).length === 0 ? {} : { holder }
+  } catch {
+    // Diagnostic data never decides lock ownership; a held lock with an
+    // unreadable body still reports held with an unknown holder.
+    return {}
   }
 }
 

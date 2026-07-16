@@ -14,6 +14,7 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const STORY_NAMES = [
   "production-overview",
+  "contract-overview",
   "idle",
   "pending-only",
   "running-spinner",
@@ -72,7 +73,7 @@ describe("queue timeline storybook", () => {
       const frame = term.screen.getText()
       expect(frame).toContain("QUEUE main")
       expect(frame).toContain("running")
-      expect(frame).toContain("MEMBERS PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
+      expect(frame).toContain("PRs PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
       expect(frame).toContain("R42 main [/] running")
       expect(frame).toContain("check     step-v2 [/] running   2")
       expect(frame).toContain("OUTPUT check#2")
@@ -91,7 +92,8 @@ describe("queue timeline storybook", () => {
     })
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
-      expect(term.screen.getText()).toContain("R42·PR42,PR43")
+      expect(term.screen.getText()).toContain("PR42.1")
+      expect(term.screen.getText()).toContain("PR43.1")
       expect(term.screen.getText()).toContain("Enter detail")
 
       await act(async () => {
@@ -113,12 +115,13 @@ describe("queue timeline storybook", () => {
     const overviewResult = overview.results[0]
     if (overviewResult === undefined) throw new Error("production-overview is missing its queue result")
 
-    expect(overview.projection.rows.map((row) => row.status)).toEqual([
-      "running",
-      "canceled",
-      "environment-refused",
-      "rejected",
-      "integrated",
+    expect(overview.projection.rows.map((row) => [row.status, row.pr])).toEqual([
+      ["running", "PR42"],
+      ["running", "PR43"],
+      ["canceled", "PR7"],
+      ["environment-refused", "PR6"],
+      ["rejected", "PR5"],
+      ["integrated", "PR4"],
     ])
     const batch = overviewResult.running.find((run) => run.id === "R42")
     if (batch === undefined) throw new Error("production-overview is missing batch run R42")
@@ -237,13 +240,13 @@ describe("queue timeline storybook", () => {
         if (divider === "vertical") {
           await waitFor(() => findGlyphColumn(term, "│") >= 0)
           expect(findGlyphColumn(term, "│"), name).toBeGreaterThan(0)
-          expect(term.screen.getText(), name).toContain("MEMBERS PR4")
+          expect(term.screen.getText(), name).toContain("PRs PR4")
         } else if (divider === "horizontal") {
           await waitFor(() => findGlyphRow(term, "─") >= 0)
           expect(findGlyphRow(term, "─"), name).toBeGreaterThan(0)
-          expect(term.screen.getText(), name).toContain("MEMBERS PR4")
+          expect(term.screen.getText(), name).toContain("PRs PR4")
         } else {
-          expect(term.screen.getText(), name).not.toContain("MEMBERS PR4")
+          expect(term.screen.getText(), name).not.toContain("PRs PR4")
           await act(async () => {
             await handle.press("Enter")
             await handle.waitForLayoutStable()
@@ -266,7 +269,7 @@ describe("queue timeline storybook", () => {
       selection: false,
     })
     try {
-      await waitFor(() => term.screen.getText().includes("PR PR6 STATUS"))
+      await waitFor(() => term.screen.getText().includes("PRs PR3@r1"))
       const initialDivider = findGlyphColumn(term, "│")
       expect(initialDivider).toBeGreaterThan(0)
       const draggedDivider = initialDivider + 12
@@ -277,7 +280,7 @@ describe("queue timeline storybook", () => {
       await term.mouse.up(draggedDivider, 1)
 
       await handle.press("j")
-      await waitFor(() => term.screen.getText().includes("PR PR1 STATUS"))
+      await waitFor(() => term.screen.getText().includes("PRs PR7@r1"))
       expect(findGlyphColumn(term, "│")).toBe(draggedDivider)
     } finally {
       handle.unmount()
@@ -316,8 +319,8 @@ describe("queue timeline storybook", () => {
       { writable: { write: () => {} }, cols: 100, rows: 26 },
     )
     try {
-      expect(fullAtFooterBoundary.text).not.toContain("MEMBERS PR4")
-      expect(belowAfterFooter.text).toContain("MEMBERS PR4")
+      expect(fullAtFooterBoundary.text).not.toContain("PRs PR4")
+      expect(belowAfterFooter.text).toContain("PRs PR4")
     } finally {
       fullAtFooterBoundary.unmount()
       belowAfterFooter.unmount()
@@ -368,10 +371,9 @@ describe("queue timeline storybook", () => {
       outputs: [
         {
           ...outputTemplate,
-          text: `${Array.from(
-            { length: count },
-            (_, index) => `detail-line-${String(index + 1).padStart(3, "0")}`,
-          ).join("\n")}\n`,
+          text: `${Array.from({ length: count }, (_, index) => `detail-row-${String(index + 1).padStart(3, "0")}`).join(
+            "\n",
+          )}\n`,
         },
       ],
     })
@@ -380,35 +382,31 @@ describe("queue timeline storybook", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80), paused: false }))
     try {
       await handle.waitForLayoutStable()
-      await handle.press("j")
-      await handle.press("j")
-      await handle.press("j")
-      await handle.waitForLayoutStable()
-      expect(handle.text).toContain("MEMBERS PR3")
-      expect(handle.text).toContain("detail-line-080")
+      expect(handle.text).toContain("PRs PR3")
+      expect(handle.text).toContain("detail-row-080")
 
       // This long fixture makes the lossless follow contract observable: wheel
       // input targets the detail pane, never the selected master-list row.
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, -3)
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-001")
-      expect(handle.text).toContain("MEMBERS PR3")
+      expect(handle.text).toContain("detail-row-001")
+      expect(handle.text).toContain("PRs PR3")
 
       handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(81), paused: false }))
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-001")
-      expect(handle.text).not.toContain("detail-line-081")
-      expect(handle.text).toContain("MEMBERS PR3")
+      expect(handle.text).toContain("detail-row-001")
+      expect(handle.text).not.toContain("detail-row-081")
+      expect(handle.text).toContain("PRs PR3")
 
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, 3)
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-081")
-      expect(handle.text).toContain("MEMBERS PR3")
+      expect(handle.text).toContain("detail-row-081")
+      expect(handle.text).toContain("PRs PR3")
 
       handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(82), paused: false }))
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("detail-line-082")
-      expect(handle.text).toContain("MEMBERS PR3")
+      expect(handle.text).toContain("detail-row-082")
+      expect(handle.text).toContain("PRs PR3")
     } finally {
       handle.unmount()
     }
@@ -424,7 +422,7 @@ describe("queue timeline storybook", () => {
       rows: viewport.rows,
     })
     try {
-      expect(handle.text).toContain("MEMBERS PR4")
+      expect(handle.text).toContain("PRs PR4")
       expect(handle.text).toContain("f filters")
       expect(handle.text).toContain("o evidence")
 
@@ -435,7 +433,7 @@ describe("queue timeline storybook", () => {
 
       await handle.press("Escape")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("MEMBERS PR4")
+      expect(handle.text).toContain("PRs PR4")
 
       await handle.press("o")
       await handle.waitForLayoutStable()
@@ -444,7 +442,7 @@ describe("queue timeline storybook", () => {
 
       await handle.press("Escape")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("MEMBERS PR4")
+      expect(handle.text).toContain("PRs PR4")
     } finally {
       handle.unmount()
     }
@@ -458,8 +456,9 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR1 STATUS")
 
-      // Seven summary lines plus the table header put the second height-1 row at y=9.
-      await handle.click(2, 9)
+      // Tabs, metadata, and FILTER rows plus the table header put the second
+      // height-1 row at y=5.
+      await handle.click(3, 5)
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR PR2 STATUS")
       expect(handle.text).not.toContain("PR PR1 STATUS")
