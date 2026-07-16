@@ -133,6 +133,8 @@ export type SubmitArgs = z.infer<typeof SubmitArgsSchema>
 export type SubmitSelectionOptions = Readonly<{
   base?: string
   issue?: string
+  title?: string
+  description?: string
   draft?: boolean
   correlation?: Correlation
   composition?: CompositionV1
@@ -146,9 +148,19 @@ export type CloseBayArgs = z.infer<typeof CloseBayArgsSchema>
 const PrCloseArgsSchema = z.object({ pr: TextSchema, reason: TextSchema.optional() }).strict()
 export type PrCloseArgs = z.infer<typeof PrCloseArgsSchema>
 const PrEditArgsSchema = z
-  .object({ pr: TextSchema, issue: TextSchema.optional(), note: TextSchema.optional() })
+  .object({
+    pr: TextSchema,
+    issue: TextSchema.optional(),
+    note: TextSchema.optional(),
+    title: TextSchema.optional(),
+    description: TextSchema.optional(),
+  })
   .strict()
-  .refine(({ issue, note }) => issue !== undefined || note !== undefined, { message: "'issue' or 'note' is required" })
+  .refine(
+    ({ issue, note, title, description }) =>
+      issue !== undefined || note !== undefined || title !== undefined || description !== undefined,
+    { message: "'issue', 'note', 'title', or 'description' is required" },
+  )
 export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
 const PrReadyArgsSchema = z.object({ pr: TextSchema }).strict()
@@ -599,6 +611,24 @@ export function createBays(
     }
     return bound
   }
+  const bindMetadata = async (
+    pr: DeepReadonly<PR>,
+    metadata: Pick<SubmitSelectionOptions, "title" | "description">,
+  ): Promise<DeepReadonly<PR>> => {
+    const titleChanged = metadata.title !== undefined && metadata.title !== pr.title
+    const descriptionChanged = metadata.description !== undefined && metadata.description !== pr.description
+    if (!titleChanged && !descriptionChanged) return pr
+    await actions.editPr({
+      pr: pr.id,
+      ...(titleChanged ? { title: metadata.title } : {}),
+      ...(descriptionChanged ? { description: metadata.description } : {}),
+    })
+    const bound = resolvePR(state(), pr.id)
+    if (bound === undefined) {
+      raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${pr.id}' disappeared after metadata bind`)
+    }
+    return bound
+  }
   const bindSubmission = async (
     pr: DeepReadonly<PR>,
     submission: Pick<SubmitSelectionOptions, "issue" | "correlation">,
@@ -675,7 +705,11 @@ export function createBays(
           })
           pr = resolvePR(state(), pr.id)
           if (pr === undefined) {
-            raiseFailure("infrastructure", "pr-state-invalid", `yrd: PR '${selector}' disappeared after revision intake`)
+            raiseFailure(
+              "infrastructure",
+              "pr-state-invalid",
+              `yrd: PR '${selector}' disappeared after revision intake`,
+            )
           }
         }
       }
@@ -756,7 +790,11 @@ export function createBays(
         attributes: { selector },
         resultAttributes: prIdentity,
       },
-      () => submitSelectionOperation(selector, options),
+      // Bind the resolved title/description in one seam AFTER the PR is
+      // materialized, so every submit path (bay, direct branch, resubmit,
+      // draft, integrated) records the same metadata without threading it
+      // through each early return.
+      async () => bindMetadata(await submitSelectionOperation(selector, options), options),
     )
   }
 
@@ -1558,13 +1596,19 @@ function editPr(state: DeepReadonly<BayState>, args: PrEditArgs) {
       `yrd: PR '${pr.id}' is ${pr.status}; issue can only be linked while pushed or submitted`,
     )
   }
-  if (!issueChanged && args.note === undefined) return { events: [] }
+  // Title and description are mutable delivery metadata (unlike the immutable
+  // issue join): a later edit overwrites the prior value with no conflict.
+  const titleChanged = args.title !== undefined && args.title !== pr.title
+  const descriptionChanged = args.description !== undefined && args.description !== pr.description
+  if (!issueChanged && args.note === undefined && !titleChanged && !descriptionChanged) return { events: [] }
   return {
     events: [
       event("pr/edited", {
         pr: pr.id,
         ...(issueChanged ? { issue: args.issue } : {}),
         ...(args.note === undefined ? {} : { note: args.note }),
+        ...(titleChanged ? { title: args.title } : {}),
+        ...(descriptionChanged ? { description: args.description } : {}),
       }),
     ],
   }
@@ -1940,6 +1984,8 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         : patchPR(pr, {
             ...(attachIssue ? { issue: changed.issue } : {}),
             ...(changed.note === undefined ? {} : { note: changed.note }),
+            ...(changed.title === undefined ? {} : { title: changed.title }),
+            ...(changed.description === undefined ? {} : { description: changed.description }),
           })
     }
     case "pr/reviewed": {

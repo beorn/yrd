@@ -366,9 +366,7 @@ function integratedRunner(
       ...(config.environment === undefined ? {} : { YRD_ENVIRONMENT: config.environment }),
     }),
     ...(config.env === undefined ? {} : { environmentOverrides: config.env }),
-    ...(config.environmentPassthrough === undefined
-      ? {}
-      : { environmentPassthrough: config.environmentPassthrough }),
+    ...(config.environmentPassthrough === undefined ? {} : { environmentPassthrough: config.environmentPassthrough }),
   }
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
@@ -442,6 +440,26 @@ async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: s
     if (result.exitCode === 0) return result.stdout.trim().toLowerCase()
   }
   return undefined
+}
+
+async function resolveCommitMeta(
+  process: Pick<Process, "run">,
+  repo: string,
+  ref: string,
+): Promise<Readonly<{ subject: string; body?: string }> | undefined> {
+  const sha = await resolveCommit(process, repo, ref)
+  if (sha === undefined) return undefined
+  const result = await process.run({
+    argv: ["git", "-C", repo, "show", "--no-patch", "--format=%s%x00%b", sha],
+    cwd: repo,
+    env: cleanGitEnvironment(globalThis.process.env),
+  })
+  if (result.exitCode !== 0) return undefined
+  const separator = result.stdout.indexOf("\0")
+  const subject = (separator === -1 ? result.stdout : result.stdout.slice(0, separator)).trim()
+  if (subject === "") return undefined
+  const body = separator === -1 ? "" : result.stdout.slice(separator + 1).trim()
+  return { subject, ...(body === "" ? {} : { body }) }
 }
 
 async function resolveQueueTarget(
@@ -1132,6 +1150,10 @@ export async function runYrdProcess(
               io.resolveRevision === undefined
                 ? resolveCommit(activeHost.process, cwd, ref)
                 : io.resolveRevision(ref, cwd),
+            resolveCommitMeta: (ref, cwd) =>
+              io.resolveCommitMeta === undefined
+                ? resolveCommitMeta(activeHost.process, cwd, ref)
+                : io.resolveCommitMeta(ref, cwd),
             resolveQueueTarget: (ref, cwd) =>
               io.resolveQueueTarget === undefined
                 ? resolveQueueTarget(activeHost.process, activeHost.repository.repo, activeHost.config.base, ref)

@@ -1056,6 +1056,27 @@ async function optionalRevision(ref: string, io: YrdCliIO): Promise<string | und
   return io.resolveRevision?.(ref, cwd)
 }
 
+async function optionalCommitMeta(
+  ref: string,
+  io: YrdCliIO,
+): Promise<Readonly<{ subject: string; body?: string }> | undefined> {
+  const cwd = io.cwd ?? process.cwd()
+  return io.resolveCommitMeta?.(ref, cwd)
+}
+
+/** The head commit body plus a trailing issue reference — mirrors GitHub's
+ * "closing keyword in the body" convention while yrd keeps the issue as a
+ * first-class field too. Returns undefined only when neither a body nor an
+ * issue exists. */
+function composeDescription(body: string | undefined, issue: string | undefined): string | undefined {
+  const parts: string[] = []
+  const trimmedBody = body?.trim()
+  if (trimmedBody !== undefined && trimmedBody !== "") parts.push(trimmedBody)
+  const trimmedIssue = issue?.trim()
+  if (trimmedIssue !== undefined && trimmedIssue !== "") parts.push(`Issue: ${trimmedIssue}`)
+  return parts.length === 0 ? undefined : parts.join("\n\n")
+}
+
 async function resolvedQueueTarget(ref: string, io: YrdCliIO): Promise<Readonly<{ base: string; sha?: string }>> {
   const cwd = io.cwd ?? process.cwd()
   if (io.resolveQueueTarget !== undefined) {
@@ -1082,6 +1103,33 @@ async function queueTargetGroups(bases: ReadonlySet<string>, io: YrdCliIO): Prom
   return [...groups.entries()].map(([base, group]) => ({ base, ...group }))
 }
 
+/** Effective title/description for a submit: an explicit flag wins, else a
+ * value already on the PR is carried forward, else the head commit subject/body
+ * (with an issue reference) seeds the default. The commit is only read when a default
+ * is actually needed, so carried-forward revisions never re-derive it. */
+async function resolveSubmitMetadata(
+  app: YrdCliApp,
+  selector: string,
+  options: Readonly<{ title?: string; description?: string; issue?: string }>,
+  io: YrdCliIO,
+): Promise<Readonly<{ title?: string; description?: string }>> {
+  const existing = app.bays.pr(selector)
+  const needTitle = options.title === undefined && existing?.title === undefined
+  const needDescription = options.description === undefined && existing?.description === undefined
+  const issue = options.issue ?? existing?.issue
+  let commit: Readonly<{ subject: string; body?: string }> | undefined
+  if (needTitle || needDescription) {
+    const bay = app.bays.get(selector)
+    commit = await optionalCommitMeta(bay?.branch ?? existing?.branch ?? selector, io)
+  }
+  const title = options.title ?? existing?.title ?? commit?.subject
+  const description = options.description ?? existing?.description ?? composeDescription(commit?.body, issue)
+  return {
+    ...(title === undefined ? {} : { title }),
+    ...(description === undefined ? {} : { description }),
+  }
+}
+
 async function submitBays(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -1091,6 +1139,8 @@ async function submitBays(
     base?: string
     queue?: string
     issue?: string
+    title?: string
+    description?: string
     correlation?: string
     composition?: string
     json?: boolean
@@ -1110,9 +1160,12 @@ async function submitBays(
     usage("--composition requires exactly one bay or branch selector")
   }
   for (const selector of inferred) {
+    const metadata = await resolveSubmitMetadata(app, selector, options, io)
     const pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
+      ...(metadata.title === undefined ? {} : { title: metadata.title }),
+      ...(metadata.description === undefined ? {} : { description: metadata.description }),
       ...(options.draft === true ? { draft: true } : {}),
       ...(correlation === undefined ? {} : { correlation }),
       ...(composition === undefined ? {} : { composition }),
@@ -1470,15 +1523,24 @@ async function statusPr(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
 async function editPr(
   app: YrdCliApp,
   selector: string,
-  options: JsonOption & Readonly<{ issue?: string; note?: string }>,
+  options: JsonOption & Readonly<{ issue?: string; note?: string; title?: string; description?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
-  if (options.issue === undefined && options.note === undefined) usage("pr edit requires --issue or --note")
+  if (
+    options.issue === undefined &&
+    options.note === undefined &&
+    options.title === undefined &&
+    options.description === undefined
+  ) {
+    usage("pr edit requires --issue, --note, --title, or --description")
+  }
   const pr = requiredPr(app, selector)
   await app.bays.editPr({
     pr: pr.id,
     ...(options.issue === undefined ? {} : { issue: options.issue }),
     ...(options.note === undefined ? {} : { note: options.note }),
+    ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.description === undefined ? {} : { description: options.description }),
   })
   const edited = requiredPr(app, pr.id)
   await printResult(
@@ -2899,6 +2961,8 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--title <text>", "PR subject (defaults to the head commit subject)")
+    .option("--description <text>", "PR description body (defaults to the head commit body)")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "immutable version-1 source composition JSON")
     .option("--json", "emit stable JSON")
@@ -3075,6 +3139,8 @@ function buildProgram(
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--title <text>", "PR subject (defaults to the head commit subject)")
+    .option("--description <text>", "PR description body (defaults to the head commit body)")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
     .option("--json", "emit stable JSON")
@@ -3103,9 +3169,11 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (options) => statusPr(installed(), options, io))
   pr.command("edit <selector>")
-    .description("edit the issue link or note")
+    .description("edit the issue link, note, title, or description")
     .option("--issue <ref>", "set the tracker-neutral issue reference")
     .option("--note <text>", "set the delivery note")
+    .option("--title <text>", "set the PR subject")
+    .option("--description <text>", "set the PR description body")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => editPr(installed(), selector, options, io))
   const recut = pr

@@ -275,6 +275,10 @@ export type PR = Readonly<{
   name?: string
   issue?: string
   note?: string
+  /** Human subject for the change; defaults to the head commit subject at submit. */
+  title?: string
+  /** Human body describing the change; defaults to the head commit body (plus an issue reference) at submit. */
+  description?: string
   branch: string
   base: string
   status: PRStatus

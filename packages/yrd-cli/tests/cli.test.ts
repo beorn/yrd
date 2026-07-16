@@ -64,6 +64,8 @@ import {
   QueueLogView,
   QueueRunsView,
   PRListView,
+  PRDetailView,
+  QueueDetailPrFacts,
   QueueTimelineView,
   QueueWatchView,
   activeWatchRow,
@@ -3316,7 +3318,8 @@ describe("runYrd", () => {
     expect(header).toBeDefined()
     for (const label of ["TIME", "STATUS", "RUN", "PR", "BY", "AGE"]) expect(header).toContain(label)
     // STEP folded into the PR cell (item Q), so it is no longer a header column.
-    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) expect(header).not.toContain(removed)
+    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
+      expect(header).not.toContain(removed)
     const first = rows.find((row) => row.includes("PR1.1"))
     const second = rows.find((row) => row.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -3325,9 +3328,7 @@ describe("runYrd", () => {
     expect(second).toContain("@agent/3")
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
-    expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(
-      rows.indexOf(header!) - 1,
-    )
+    expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(rows.indexOf(header!) - 1)
     expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(rows.indexOf(second!))
   })
 
@@ -7840,5 +7841,185 @@ describe("queue run — runner output is loggily/JSON only (#undead runner-loggi
     const runJson = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--watch", "PR1", "--json"), runJson.io), runJson.stderr()).toBe(0)
     expect(runJson.stdout()).toContain("queue.run")
+  })
+})
+
+describe("PR metadata — title, description, and issue link", () => {
+  function commitMetaIO(subject: string, body?: string, overrides: Partial<YrdCliIO> = {}) {
+    return outputIO({
+      resolveRevision: async () => HEAD_SHA,
+      resolveCommitMeta: async () => ({ subject, ...(body === undefined ? {} : { body }) }),
+      ...overrides,
+    })
+  }
+
+  it("defaults the PR title and description from the head commit subject and body at submit", async () => {
+    const app = await createApp()
+    const submit = commitMetaIO("feat(bay): pr metadata", "Adds a durable title and description to the PR record.")
+    expect(await runYrd(app, yrd("pr", "submit", "topic/defaults", "--base", "main"), submit.io), submit.stderr()).toBe(
+      0,
+    )
+    expect(app.bays.pr("topic/defaults")).toMatchObject({
+      title: "feat(bay): pr metadata",
+      description: "Adds a durable title and description to the PR record.",
+    })
+  })
+
+  it("appends an issue reference to the default description when --issue is given", async () => {
+    const app = await createApp()
+    const submit = commitMetaIO("feat: linked change", "Commit body text.")
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/linked", "--base", "main", "--issue", "@km/all/21091-metadata"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+    const pr = app.bays.pr("topic/linked")
+    expect(pr?.title).toBe("feat: linked change")
+    expect(pr?.description).toContain("Commit body text.")
+    expect(pr?.description).toContain("Issue: @km/all/21091-metadata")
+    expect(pr?.issue).toBe("@km/all/21091-metadata")
+  })
+
+  it("lets explicit --title and --description override the commit defaults", async () => {
+    const app = await createApp()
+    const submit = commitMetaIO("feat: from commit subject", "Commit body.")
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "pr",
+          "submit",
+          "topic/explicit",
+          "--base",
+          "main",
+          "--title",
+          "Explicit subject text",
+          "--description",
+          "Explicit description body.",
+        ),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+    expect(app.bays.pr("topic/explicit")).toMatchObject({
+      title: "Explicit subject text",
+      description: "Explicit description body.",
+    })
+  })
+
+  it("edits the title and description of a live PR via pr edit", async () => {
+    const app = await createApp()
+    const submit = commitMetaIO("feat: original subject", "Original body.")
+    expect(await runYrd(app, yrd("pr", "submit", "topic/edit", "--base", "main"), submit.io), submit.stderr()).toBe(0)
+    const edit = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "edit", "topic/edit", "--title", "feat: renamed subject", "--description", "New body."),
+        edit.io,
+      ),
+      edit.stderr(),
+    ).toBe(0)
+    expect(app.bays.pr("topic/edit")).toMatchObject({ title: "feat: renamed subject", description: "New body." })
+  })
+
+  it("prefers the PR title over the branch in the pr list SUBJECT column and JSON", async () => {
+    const app = await createApp()
+    // Short enough to survive the SUBJECT column budget so the branch never wins.
+    const submit = commitMetaIO("add pr metadata")
+    expect(await runYrd(app, yrd("pr", "submit", "topic/list", "--base", "main"), submit.io), submit.stderr()).toBe(0)
+
+    const list = outputIO({ columns: 120 })
+    expect(await runYrd(app, yrd("pr", "list"), list.io), list.stderr()).toBe(0)
+    expect(list.stdout()).toContain("add pr metadata")
+    expect(list.stdout()).not.toContain("topic/list")
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    expect(JSON.parse(json.stdout())).toMatchObject({ prs: [{ title: "add pr metadata" }] })
+  })
+
+  it("shows TITLE, ISSUE, and DESCRIPTION rows in pr view", async () => {
+    const app = await createApp()
+    const submit = commitMetaIO("feat(view): pr metadata", "The description body.")
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/view", "--base", "main", "--issue", "https://example.test/issues/7"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+
+    const view = outputIO({ columns: 120, color: true })
+    expect(await runYrd(app, yrd("pr", "view", "topic/view"), view.io), view.stderr()).toBe(0)
+    const visible = stripOsc8Targets(view.stdout())
+    expect(visible).toContain("TITLE")
+    expect(visible).toContain("feat(view): pr metadata")
+    expect(visible).toContain("ISSUE")
+    expect(visible).toContain("DESCRIPTION")
+    expect(visible).toContain("The description body.")
+    // The issue URL is an OSC 8 hyperlink target in the detail identity area.
+    expect(view.stdout()).toContain("]8;;https://example.test/issues/7")
+  })
+
+  function metadataPr(overrides: Partial<PR> = {}): PR {
+    return {
+      id: "PR1",
+      branch: "topic/metadata",
+      base: "main",
+      status: "submitted",
+      revision: 1,
+      headSha: HEAD_SHA,
+      baseSha: BASE_SHA,
+      title: "feat(detail): pr metadata",
+      description: "First row of the description.\n\nIssue: https://example.test/issues/9",
+      issue: "https://example.test/issues/9",
+      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+      reviews: [],
+      comments: [],
+      checkRequests: [],
+      ...overrides,
+    }
+  }
+
+  it("renders title, an OSC 8 issue hyperlink, and the description in the PR detail view", async () => {
+    const rendered = await renderString(
+      createElement(PRDetailView, { pr: metadataPr(), runs: [], now: Date.parse("2026-07-09T12:10:00.000Z") }),
+      { width: 120, height: 40 },
+    )
+    const visible = stripOsc8Targets(rendered)
+    expect(visible).toContain("TITLE")
+    expect(visible).toContain("feat(detail): pr metadata")
+    expect(visible).toContain("ISSUE")
+    expect(visible).toContain("DESCRIPTION")
+    expect(visible).toContain("First row of the description.")
+    expect(rendered).toContain("]8;;https://example.test/issues/9")
+  })
+
+  it("renders title, issue hyperlink, and description per member in the batched PRS facts", async () => {
+    const rendered = await renderString(createElement(QueueDetailPrFacts, { prs: [metadataPr()] }), {
+      width: 120,
+      height: 40,
+    })
+    const visible = stripOsc8Targets(rendered)
+    expect(visible).toContain("TITLE feat(detail): pr metadata")
+    expect(visible).toContain("ISSUE")
+    expect(visible).toContain("DESCRIPTION")
+    expect(rendered).toContain("]8;;https://example.test/issues/9")
+  })
+
+  it("keeps a plain-text issue reference unlinked when it is not a URL or path", async () => {
+    const rendered = await renderString(
+      createElement(QueueDetailPrFacts, {
+        prs: [metadataPr({ issue: "@km/all/21091-plain", description: undefined })],
+      }),
+      { width: 120, height: 20 },
+    )
+    expect(rendered).toContain("@km/all/21091-plain")
+    expect(rendered).not.toContain("]8;;")
   })
 })

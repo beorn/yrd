@@ -73,6 +73,8 @@ export type YrdCliIO = {
   now?: () => number
   resolveRevision?(ref: string, cwd: string): Promise<string | undefined>
   resolveQueueTarget?(ref: string, cwd: string): Promise<Readonly<{ base: string; sha: string }>>
+  /** Head commit subject + body used to default a submitted PR's title/description. */
+  resolveCommitMeta?(ref: string, cwd: string): Promise<Readonly<{ subject: string; body?: string }> | undefined>
   currentBranch?(cwd: string): string | undefined
   /** Git facts for `pr prune`; defaults to real Git plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts

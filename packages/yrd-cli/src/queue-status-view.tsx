@@ -1230,6 +1230,34 @@ function CellLink({ href, children }: { href: string; children: string }) {
   )
 }
 
+/** An OSC 8 target for an issue reference that is a URL or a filesystem path.
+ * Plain tracker ids (`@km/...`, `#123`, `owner/repo#5`) stay unlinked text. */
+function issueHref(issue: string): string | undefined {
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(issue)) return issue
+  if (/^(?:\/|\.\.?\/)/u.test(issue)) return pathToFileURL(resolve(issue)).href
+  return undefined
+}
+
+/** An issue reference rendered as an OSC 8 hyperlink when it resolves to a URL
+ * or path, and as plain text otherwise. */
+function IssueValue({ issue }: { issue: string }) {
+  const href = issueHref(issue)
+  return href === undefined ? <>{issue}</> : <CellLink href={href}>{issue}</CellLink>
+}
+
+/** A PR description spanning rows; blank rows are preserved as paragraph breaks. */
+function DescriptionBlock({ description }: { description: string }) {
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {description.split("\n").map((row, index) => (
+        <Text key={index} wrap="truncate" bgConflict="ignore">
+          {row === "" ? " " : row}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 function LocationLinks({ entries }: { entries: readonly QueueLogLocationEntry[] }) {
   if (entries.length === 0) return "-"
   return (
@@ -1365,7 +1393,12 @@ function timelineMemberSubject(
   const isCurrent = current?.revision === member.revision && current.headSha === member.headSha
   const bayPath = isCurrent && current?.bay !== undefined ? state?.byId[current.bay]?.path : undefined
   return boundedQueue(
-    bayPath ?? (isCurrent ? current?.name : undefined) ?? member.name ?? current?.branch ?? member.branch,
+    bayPath ??
+      (isCurrent ? (current?.title ?? current?.name) : undefined) ??
+      member.name ??
+      current?.title ??
+      current?.branch ??
+      member.branch,
     80,
   )
 }
@@ -1535,7 +1568,7 @@ function timelinePendingRows(
         revision: pr.revision,
         headSha: pr.headSha,
         branch: pr.branch,
-        subject: boundedQueue(bayPath ?? pr.name ?? pr.branch, 80),
+        subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
         ...(submitter === undefined ? {} : { submitter }),
         detail,
         ...(position === undefined ? {} : { position }),
@@ -1808,7 +1841,7 @@ function projectPR(
     pr: pr.id,
     ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
     branch: pr.branch,
-    subject: boundedQueue(pr.name ?? pr.branch, 80),
+    subject: boundedQueue(pr.title ?? pr.name ?? pr.branch, 80),
     nativeStatus: pr.status,
     state: stateLabel,
     ...taskStatusFields(taskStatus),
@@ -2224,6 +2257,17 @@ export function PRDetailView({
   position?: number
 }) {
   const run = latestPRRun(pr, runs)
+  const runMember = run?.prs.find((member) => member.id === pr.id)
+  // The newest run for this PR may have executed against a now-superseded
+  // revision (e.g. rev 1 was rejected while rev 2 sits pending with no run of
+  // its own). Presenting that historical run as the PR's current state reads as
+  // "this pending item already failed", so it is scoped to a history block and
+  // the current revision's real state is stated above it (user-reported
+  // 2026-07-16). A superseded run implies the current revision has no run yet:
+  // any run against it would sort newer and be selected here instead.
+  const supersededRunRevision =
+    run !== undefined && runMember !== undefined && runMember.revision !== pr.revision ? runMember.revision : undefined
+  const currentStateWord = pr.status === "submitted" ? "pending" : pr.status
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
@@ -2240,6 +2284,11 @@ export function PRDetailView({
         <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
+      {pr.title === undefined ? null : (
+        <Text wrap="truncate" bgConflict="ignore">
+          <Text bold>TITLE</Text> {pr.title}
+        </Text>
+      )}
       <Text>
         <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
         {pr.headSha}
@@ -2248,13 +2297,37 @@ export function PRDetailView({
         <Text bold>BASE</Text> {pr.base}
         {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
       </Text>
+      {pr.issue === undefined ? null : (
+        <Text wrap="truncate">
+          <Text bold>ISSUE</Text> <IssueValue issue={pr.issue} />
+        </Text>
+      )}
       <Text>
         <Text bold>SOURCE READY</Text> {lineage.sourceReadyAt ?? "-"} <Text bold>LINEAGE</Text> {revisionLineage}
       </Text>
-      {detail.run === undefined ? null : <QueueShowView data={detail.run} compact highlightPr={pr.id} />}
+      {pr.description === undefined ? null : (
+        <Box flexDirection="column" minWidth={0}>
+          <Text bold>DESCRIPTION</Text>
+          <DescriptionBlock description={pr.description} />
+        </Box>
+      )}
+      {supersededRunRevision === undefined ? null : (
+        <Text>
+          <Text bold>CURRENT rev {pr.revision}</Text> — {currentStateWord}, no run yet
+        </Text>
+      )}
+      {detail.run === undefined ? null : (
+        <QueueShowView
+          data={detail.run}
+          compact
+          highlightPr={pr.id}
+          {...(supersededRunRevision === undefined ? {} : { historyRevision: supersededRunRevision })}
+        />
+      )}
       {blocker === undefined ? null : (
-        <Text color="$fg-warning">
-          <Text bold>BLOCKER</Text> {blocker}
+        <Text color={supersededRunRevision === undefined ? "$fg-warning" : "$fg-muted"}>
+          <Text bold>BLOCKER</Text>
+          {supersededRunRevision === undefined ? "" : ` (rev ${supersededRunRevision})`} {blocker}
         </Text>
       )}
       {detail.run === undefined && landing !== undefined ? (
@@ -2494,7 +2567,7 @@ export function activeWatchRow(
   return {
     run: run.id,
     pr: member.id,
-    subject: boundedQueue(pr?.name ?? member.id, 80),
+    subject: boundedQueue(pr?.title ?? pr?.name ?? member.id, 80),
     step: step?.name ?? "-",
     steps: queueRunSteps(run),
     status: run.status,
@@ -4088,8 +4161,10 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
     <Box flexDirection="column" minWidth={0}>
       {prs.map((pr, index) => {
         const name = presentFact(pr.name)
+        const title = presentFact(pr.title)
         const issue = presentFact(pr.issue)
         const note = presentFact(pr.note)
+        const description = presentFact(pr.description)
         const clocks = prRevisionClocks(pr)
         return (
           <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
@@ -4097,11 +4172,26 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
               PR {pr.id}@r{pr.revision}
               {name === undefined ? "" : ` ${name}`}
             </Text>
-            {issue === undefined ? null : <Text wrap="truncate">ISSUE {issue}</Text>}
+            {title === undefined ? null : (
+              <Text wrap="truncate" bgConflict="ignore">
+                TITLE {title}
+              </Text>
+            )}
+            {issue === undefined ? null : (
+              <Text wrap="truncate">
+                ISSUE <IssueValue issue={issue} />
+              </Text>
+            )}
             {note === undefined ? null : (
               <Text wrap="truncate" bgConflict="ignore">
                 NOTE {note}
               </Text>
+            )}
+            {description === undefined ? null : (
+              <Box flexDirection="column" minWidth={0}>
+                <Text bold>DESCRIPTION</Text>
+                <DescriptionBlock description={description} />
+              </Box>
             )}
             {pr.reviews.map((review, reviewIndex) => (
               <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">
@@ -4149,10 +4239,17 @@ function CompactQueueShowView({
   data,
   highlightPr,
   section = "all",
+  historyRevision,
 }: {
   data: QueueShowData
   highlightPr?: string
   section?: "run" | "steps" | "all"
+  /**
+   * When set, this run executed against a now-superseded PR revision: the RUN
+   * header is dimmed and annotated `(rev N · superseded)` so a historical run
+   * is never read as the PR's current state (user-reported 2026-07-16).
+   */
+  historyRevision?: number
 }) {
   const durations = [
     ["TOTAL", presentFact(data.totalDuration)] as const,
@@ -4170,8 +4267,10 @@ function CompactQueueShowView({
     <Box flexDirection="column" minWidth={0}>
       {runFacts ? (
         <>
-          <Text bold wrap="truncate">
-            RUN {data.run} STATUS {data.status} OUTCOME {data.outcome}
+          <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
+            RUN {data.run}
+            {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status} OUTCOME{" "}
+            {data.outcome}
           </Text>
           <Text wrap="truncate">
             BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
@@ -4267,14 +4366,25 @@ export function QueueShowView({
   compact = false,
   highlightPr,
   section = "all",
+  historyRevision,
 }: {
   data: QueueShowData
   compact?: boolean
   highlightPr?: string
   /** Compact-only: split run-level vs step-level facts for the step tabs (item H). */
   section?: "run" | "steps" | "all"
+  /** Compact-only: mark this run as history for a now-superseded revision. */
+  historyRevision?: number
 }) {
-  if (compact) return <CompactQueueShowView data={data} highlightPr={highlightPr} section={section} />
+  if (compact)
+    return (
+      <CompactQueueShowView
+        data={data}
+        highlightPr={highlightPr}
+        section={section}
+        {...(historyRevision === undefined ? {} : { historyRevision })}
+      />
+    )
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />
