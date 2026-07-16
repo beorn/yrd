@@ -186,7 +186,13 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
           ) : line.kind === "muted" ? (
             <Text color="$fg-muted">{line.text}</Text>
           ) : (
-            <Text>{line.text}</Text>
+            // Body lines mirror a step's raw `output.log` tail — foreign terminal
+            // output whose embedded ANSI (colors AND backgrounds, e.g. vitest's
+            // cyan ` RUN ` banner) is intentional. `bgConflict="ignore"` keeps
+            // those colors and stops silvery's background-conflict guard (default
+            // `throw`) from killing the watch loop, while the global throw stays a
+            // safety net for silvery's own pipeline bugs everywhere else.
+            <Text bgConflict="ignore">{line.text}</Text>
           )
         }
       />
