@@ -17,6 +17,7 @@ import {
   installedBaselineRemedy,
   readInstalledBaselines,
   removeInstalledBaseline,
+  runtimeBaselineDrift,
   writeInstalledBaseline,
   type InstalledBaseline,
 } from "../src/installed-baseline.ts"
@@ -69,6 +70,19 @@ describe("installed baseline drift", () => {
     expect(installedBaselineDrift(baseline(installed), current)?.message).toContain(
       "step 'merge' integration contract changed",
     )
+  })
+
+  it("names the runtime leg with the restart remedy when the running process diverges from the baseline (merge-queue R41b)", () => {
+    const installed = [step("check", "v2"), step("merge", "v2", { integrates: true })]
+    expect(runtimeBaselineDrift(baseline(installed), installed)).toBeUndefined()
+    const finding = runtimeBaselineDrift(baseline(installed), [
+      step("check", "v1"),
+      step("merge", "v2", { integrates: true }),
+    ])
+    expect(finding).toMatchObject({ code: "runtime-drift" })
+    expect(finding?.message).toContain("resident runtime diverges from the installed baseline")
+    expect(finding?.message).toContain("step 'check' revision 'v2' installed, runtime 'v1'")
+    expect(finding?.message).toContain("Restart this queue runner process")
   })
 
   it("reports drift when the same steps are reordered (revisions exclude order)", () => {
@@ -281,6 +295,50 @@ describe("host installed baseline", () => {
       await requireFreshInstalledBaseline(drifted.services)
     } finally {
       await drifted.close()
+    }
+  })
+
+  it("audits the RUNTIME leg: a v1 resident fails after another process migrates baseline and disk to v2 (merge-queue R41b)", async () => {
+    const repo = await queueRepository("true")
+    const resident = await createYrdHost({ cwd: repo })
+    try {
+      await resident.services.queue?.provision?.("main")
+      // Three-way equal (runtime == baseline == disk) → clean.
+      expect(await resident.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+
+      // Disk moves to v2 while runtime and baseline stay v1: the DISK leg —
+      // exactly ONE finding with the migration remedy (existing class).
+      await writeFile(
+        join(repo, ".yrd.yml"),
+        'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n',
+      )
+      const diskLeg = await resident.services.queue?.auditEnvironment?.()
+      expect(diskLeg?.findings).toMatchObject([{ code: "config-drift" }])
+      expect(diskLeg?.findings[0]?.message).toContain(installedBaselineRemedy("main"))
+
+      // A second administration migrates the installed baseline to v2 (the
+      // prescribed deinit/init) while the v1 resident keeps running. Its own
+      // three legs agree, so ITS audit is clean.
+      const migrator = await createYrdHost({ cwd: repo })
+      try {
+        await migrator.services.queue?.deprovision?.("main")
+        await migrator.services.queue?.provision?.("main")
+        expect(await migrator.services.queue?.auditEnvironment?.()).toEqual({ findings: [] })
+      } finally {
+        await migrator.close()
+      }
+
+      // Baseline == disk (both v2), but THIS resident's runtime still executes
+      // v1 steps. The audit must fail on the RUNTIME leg — a baseline==disk
+      // comparison alone certifies a lie.
+      const runtimeLeg = await resident.services.queue?.auditEnvironment?.()
+      expect(runtimeLeg?.findings).toMatchObject([{ code: "runtime-drift" }])
+      expect(runtimeLeg?.findings[0]?.message).toContain("runtime")
+      expect(runtimeLeg?.findings[0]?.message).toContain("step 'check' revision")
+      // And the run gate refuses to start runs on it.
+      await expect(requireFreshInstalledBaseline(resident.services)).rejects.toThrow(/runtime/u)
+    } finally {
+      await resident.close()
     }
   })
 
