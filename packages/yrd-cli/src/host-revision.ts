@@ -39,6 +39,10 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
         resolvedCommand: input.resolvedCommand,
         runner: input.config.runner,
         environment: input.config.environment,
+        // JSON.stringify drops undefined keys, so configs without these fields
+        // keep their pre-R42 revision identity.
+        env: input.config.env,
+        environmentPassthrough: input.config.environmentPassthrough,
         classification: input.config.classification ?? "carrier",
         timeoutMs: input.timeoutMs,
         noProgressMs: input.noProgressMs,

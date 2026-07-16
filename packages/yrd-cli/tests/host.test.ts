@@ -2462,3 +2462,47 @@ describe("stepNoProgressMs — the no-output-progress bound that stalls a silent
     expect(queueStepRevision({ ...input, noProgressMs: 120_000 })).not.toBe(baseline)
   })
 })
+
+describe("step environment declarations — deterministic check children (merge-queue R42)", () => {
+  it("parses declared env values and ambient passthrough names", async () => {
+    const { parseYrdConfig } = await import("../src/config.ts")
+    const config = parseYrdConfig({
+      check: { run: "bun run check", env: { NODE_ENV: "test" }, environmentPassthrough: ["CI"] },
+    })
+    expect(config.definitions.check).toMatchObject({
+      env: { NODE_ENV: "test" },
+      environmentPassthrough: ["CI"],
+    })
+  })
+
+  it("rejects reserved and malformed environment declarations", async () => {
+    const { parseYrdConfig } = await import("../src/config.ts")
+    for (const step of [
+      { run: "x", env: { YRD_PR: "forged" } },
+      { run: "x", env: { GIT_DIR: "/elsewhere" } },
+      { run: "x", environmentPassthrough: ["YRD_SHA"] },
+      { run: "x", environmentPassthrough: ["BAD NAME"] },
+      { run: "x", environmentPassthrough: ["CI", "CI"] },
+    ]) {
+      expect(() => parseYrdConfig({ check: step }), JSON.stringify(step)).toThrow()
+    }
+  })
+
+  it("binds environment declarations into the queue step revision identity", () => {
+    const toolchain = { bun: "1.3.0", node: "24.0.0", platform: "darwin", arch: "arm64" }
+    const input = {
+      repo: "/repo",
+      stateDir: "/repo/.git/yrd",
+      name: "check",
+      config: { run: "bun run check", runner: "local" as const },
+      timeoutMs: 60_000,
+      noProgressMs: 600_000,
+      toolchain,
+    }
+    const baseline = queueStepRevision(input)
+    expect(queueStepRevision({ ...input, config: { ...input.config, env: { NODE_ENV: "test" } } })).not.toBe(baseline)
+    expect(queueStepRevision({ ...input, config: { ...input.config, environmentPassthrough: ["CI"] } })).not.toBe(
+      baseline,
+    )
+  })
+})

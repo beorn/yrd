@@ -46,6 +46,13 @@ export const CommandEvidenceSchema = z
     exitCode: z.number().int(),
     durationMs: z.number().nonnegative(),
     configHash: z.string().regex(/^[0-9a-f]{64}$/u),
+    /** Identity of the APPLIED child environment (merge-queue R42): allowlisted
+     * ambient + declared passthrough + declared overrides, excluding per-execution
+     * YRD_* coordinates so identical inputs hash identically across attempts. */
+    environmentHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
     artifacts: z.array(StepArtifactSchema),
     classification: z.enum(["base", "carrier"]).optional(),
     detail: z.string().optional(),
@@ -163,6 +170,11 @@ export type ConfiguredCommandOptions<Shape extends PRShape> = ProcessDependency 
     purpose: string
     artifactRoot?: string
     env?: NodeJS.ProcessEnv
+    /** Declared child values applied over the allowlisted ambient set; reserved
+     * YRD_ and GIT_ prefixed names are refused loudly at construction. */
+    environmentOverrides?: Readonly<Record<string, string>>
+    /** Ambient names copied into the child beyond the base allowlist — explicit, never implicit. */
+    environmentPassthrough?: readonly string[]
     timeoutMs?: number
     noProgressTimeoutMs?: number
     classification?: "base" | "carrier"
@@ -197,6 +209,11 @@ function configuredCommand<Shape extends PRShape>(
   waiting: boolean,
 ): StepRunner<Shape, CommandEvidence> {
   const argv = validateCommand(options.command, options.purpose)
+  const declaration = validateEnvironmentDeclaration(
+    options.purpose,
+    options.environmentPassthrough,
+    options.environmentOverrides,
+  )
   const configHash = createHash("sha256")
     .update(options.purpose)
     .update("\0")
@@ -227,12 +244,13 @@ function configuredCommand<Shape extends PRShape>(
       input,
       context.attempt,
     )
+    const env = commandEnvironment(options.env ?? globalThis.process.env, variables, declaration)
     let result: Awaited<ReturnType<Process["run"]>>
     try {
       result = await process.run({
         argv,
         cwd,
-        env: commandEnvironment(options.env ?? globalThis.process.env, variables),
+        env,
         signal: context.signal,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
@@ -259,6 +277,7 @@ function configuredCommand<Shape extends PRShape>(
       exitCode: result.exitCode,
       durationMs: result.durationMs,
       configHash,
+      environmentHash: environmentHash(env),
       artifacts,
       classification: options.classification ?? "carrier",
       ...(detail === "" ? {} : { detail }),
@@ -350,20 +369,66 @@ function commandDiagnostics(output: string): CommandDiagnostic[] {
   return diagnostics
 }
 
+/** The deterministic ambient base every git+bun child needs (merge-queue R42):
+ * PATH locates the toolchain binaries; HOME anchors git/bun user config and
+ * caches; SHELL satisfies tools that consult the login shell; TMPDIR keeps
+ * scratch files on the runner's temp volume; LANG (plus the LC_* family below)
+ * pins text encoding for tool output; USER/LOGNAME feed git's fallback ident.
+ * Everything else — NODE_ENV, DEBUG, provider tokens, harness state — is
+ * DROPPED so a check verdict never depends on who or where launched the
+ * resident runner. Ambient exceptions must be declared via
+ * environmentPassthrough; fixed values via environmentOverrides. */
+const COMMAND_ENVIRONMENT_BASE = new Set(["PATH", "HOME", "SHELL", "TMPDIR", "LANG", "USER", "LOGNAME"])
+
+type EnvironmentDeclaration = Readonly<{
+  passthrough: ReadonlySet<string>
+  overrides: Readonly<Record<string, string>>
+}>
+
+function validateEnvironmentDeclaration(
+  purpose: string,
+  passthrough: readonly string[] = [],
+  overrides: Readonly<Record<string, string>> = {},
+): EnvironmentDeclaration {
+  for (const name of [...passthrough, ...Object.keys(overrides)]) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+      throw new Error(`yrd: ${purpose} environment name '${name}' is not a valid variable name`)
+    }
+    if (name.startsWith("YRD_") || name.startsWith("GIT_")) {
+      throw new Error(`yrd: ${purpose} environment name '${name}' uses a reserved prefix`)
+    }
+  }
+  return Object.freeze({ passthrough: new Set(passthrough), overrides })
+}
+
 function commandEnvironment(
   source: NodeJS.ProcessEnv,
   variables: Readonly<Record<string, string | undefined>>,
+  declaration: EnvironmentDeclaration,
 ): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(source)) {
-    if (value === undefined || key.startsWith("YRD_") || key.startsWith("GIT_")) continue
+    if (value === undefined) continue
+    if (!COMMAND_ENVIRONMENT_BASE.has(key) && !key.startsWith("LC_") && !declaration.passthrough.has(key)) continue
     env[key] = value
   }
+  for (const [key, value] of Object.entries(declaration.overrides)) env[key] = value
   for (const [key, value] of Object.entries(variables)) {
     if (!key.startsWith("YRD_")) throw new Error(`yrd: configured command variable '${key}' must start with YRD_`)
     if (value !== undefined) env[key] = value
   }
   return env
+}
+
+/** Evidence identity of the APPLIED child environment. Per-execution YRD_*
+ * coordinates (job, attempt, run, candidate) are excluded so the SAME inputs
+ * produce the SAME identity; any allowlisted, passthrough, or declared change
+ * is visible. */
+function environmentHash(env: Readonly<Record<string, string>>): string {
+  const applied = Object.entries(env)
+    .filter(([key]) => !key.startsWith("YRD_"))
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+  return createHash("sha256").update(JSON.stringify(applied)).digest("hex")
 }
 
 function validateCommand(command: unknown, purpose: string): readonly string[] {
@@ -2194,6 +2259,8 @@ export type GitCheckOptions = ProcessDependency &
     classification?: "base" | "carrier"
     environment?: string
     env?: NodeJS.ProcessEnv
+    environmentOverrides?: Readonly<Record<string, string>>
+    environmentPassthrough?: readonly string[]
     timeoutMs?: number
     noProgressTimeoutMs?: number
   }>
@@ -2322,6 +2389,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             purpose,
             artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
             ...(options.env === undefined ? {} : { env: options.env }),
+            ...(options.environmentOverrides === undefined
+              ? {}
+              : { environmentOverrides: options.environmentOverrides }),
+            ...(options.environmentPassthrough === undefined
+              ? {}
+              : { environmentPassthrough: options.environmentPassthrough }),
             ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
             ...(options.noProgressTimeoutMs === undefined ? {} : { noProgressTimeoutMs: options.noProgressTimeoutMs }),
             classification: options.classification ?? "carrier",
@@ -2392,6 +2465,8 @@ export type ConfiguredMergeOptions = ProcessDependency &
     artifactRoot?: string
     environment?: string
     env?: NodeJS.ProcessEnv
+    environmentOverrides?: Readonly<Record<string, string>>
+    environmentPassthrough?: readonly string[]
     timeoutMs?: number
   }>
 
@@ -2893,6 +2968,10 @@ export function configuredMergeStep<Shape extends PRShape>(
         purpose: "merge",
         artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
         ...(options.env === undefined ? {} : { env: options.env }),
+        ...(options.environmentOverrides === undefined ? {} : { environmentOverrides: options.environmentOverrides }),
+        ...(options.environmentPassthrough === undefined
+          ? {}
+          : { environmentPassthrough: options.environmentPassthrough }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
         variables: () => ({
           YRD_CANDIDATE_SHA: candidate.checked.candidateSha,

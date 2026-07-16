@@ -313,6 +313,8 @@ async function checkedQueue(
     checkoutParent?: string
     classification?: "base" | "carrier"
     env?: NodeJS.ProcessEnv
+    environmentOverrides?: Readonly<Record<string, string>>
+    environmentPassthrough?: readonly string[]
   }> = {},
 ) {
   const bayJobs = createBayJobDefs(unusedWorkspace)
@@ -326,6 +328,10 @@ async function checkedQueue(
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
       ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.environmentOverrides === undefined ? {} : { environmentOverrides: options.environmentOverrides }),
+      ...(options.environmentPassthrough === undefined
+        ? {}
+        : { environmentPassthrough: options.environmentPassthrough }),
     }),
     {
       revision: `check:${JSON.stringify(command)}:${options.waiting === true}`,
@@ -2308,6 +2314,10 @@ describe("Queue command adapters", () => {
       cwd: repo,
       purpose: "check",
       env: { ...globalThis.process.env, YRD_LEAK: "must-not-leak", GIT_DIR: "/must/not/leak" },
+      // The asserted order needs byte collation; ambient LC_*/LANG are allowlisted
+      // ambient state, so the deterministic-environment contract (merge-queue R42)
+      // requires DECLARING it instead of inheriting whatever launched the runner.
+      environmentOverrides: { LC_ALL: "C" },
       variables: () => ({ YRD_CUSTOM: "custom" }),
     })
     const result = await step(
@@ -2332,6 +2342,193 @@ describe("Queue command adapters", () => {
     ])
     expect(result.output.detail).not.toContain("YRD_LEAK")
     expect(result.output.detail).not.toContain("GIT_DIR")
+  })
+
+  describe("deterministic child environment (merge-queue R42)", () => {
+    const headSha = "a".repeat(40)
+    const execution = (): StepExecution<PRShape> =>
+      ({
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [{ id: "PR1", branch: "issue/feature", base: "main", revision: 1, headSha }],
+        shape: { results: {} },
+      }) as StepExecution<PRShape>
+    const jobContext = (attempt = 1) => ({
+      id: "J1",
+      attempt,
+      runner: "test",
+      signal: new AbortController().signal,
+    })
+    const capturingProcess = () => {
+      const requests: ProcessRequest[] = []
+      const process: Pick<Process, "run"> = {
+        run(request) {
+          requests.push(request)
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          })
+        },
+      }
+      return { requests, process }
+    }
+    const ambient: NodeJS.ProcessEnv = {
+      PATH: "/deterministic/bin",
+      HOME: "/deterministic/home",
+      SHELL: "/bin/zsh",
+      TMPDIR: "/deterministic/tmp",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "C",
+      USER: "runner",
+      LOGNAME: "runner",
+      AMBIENT_JUNK: "must-not-leak",
+      NODE_ENV: "production",
+      DEBUG: "must-not-leak",
+    }
+    const runCapture = async (
+      options: Readonly<{
+        env: NodeJS.ProcessEnv
+        environmentOverrides?: Readonly<Record<string, string>>
+        environmentPassthrough?: readonly string[]
+      }>,
+      attempt = 1,
+    ) => {
+      const { requests, process } = capturingProcess()
+      const step = configuredCommandStep<PRShape>({
+        inject: { process },
+        command: ["check-env"],
+        cwd: ".",
+        purpose: "check",
+        ...options,
+      })
+      const result = await step(execution(), jobContext(attempt))
+      if (result.status !== "passed") throw new Error(`configured command was ${result.status}`)
+      const request = requests[0]
+      if (request === undefined) throw new Error("configured command spawned no child")
+      return { env: request.env ?? {}, evidence: result.output }
+    }
+
+    it("drops every ambient value outside the base toolchain allowlist", async () => {
+      const { env } = await runCapture({ env: ambient })
+      expect(env).toMatchObject({
+        PATH: "/deterministic/bin",
+        HOME: "/deterministic/home",
+        SHELL: "/bin/zsh",
+        TMPDIR: "/deterministic/tmp",
+        LANG: "en_US.UTF-8",
+        LC_ALL: "C",
+        USER: "runner",
+        LOGNAME: "runner",
+      })
+      expect(env.AMBIENT_JUNK).toBeUndefined()
+      expect(env.NODE_ENV).toBeUndefined()
+      expect(env.DEBUG).toBeUndefined()
+    })
+
+    it("applies declared environment values over the allowlisted ambient set", async () => {
+      const { env } = await runCapture({
+        env: ambient,
+        environmentOverrides: { LANG: "C.UTF-8", NODE_ENV: "test" },
+      })
+      expect(env.LANG).toBe("C.UTF-8")
+      expect(env.NODE_ENV).toBe("test")
+    })
+
+    it("copies only declared passthrough names from the ambient environment", async () => {
+      const { env } = await runCapture({
+        env: { ...ambient, CHECK_TOKEN: "declared", CHECK_OTHER: "undeclared" },
+        environmentPassthrough: ["CHECK_TOKEN"],
+      })
+      expect(env.CHECK_TOKEN).toBe("declared")
+      expect(env.CHECK_OTHER).toBeUndefined()
+    })
+
+    it("refuses reserved or malformed environment declarations at construction", () => {
+      const { process } = capturingProcess()
+      const construct = (
+        options: Readonly<{
+          environmentOverrides?: Readonly<Record<string, string>>
+          environmentPassthrough?: readonly string[]
+        }>,
+      ) =>
+        configuredCommandStep<PRShape>({
+          inject: { process },
+          command: ["check-env"],
+          cwd: ".",
+          purpose: "check",
+          ...options,
+        })
+      expect(() => construct({ environmentPassthrough: ["GIT_DIR"] })).toThrow("GIT_DIR")
+      expect(() => construct({ environmentPassthrough: ["YRD_PR"] })).toThrow("YRD_PR")
+      expect(() => construct({ environmentOverrides: { YRD_CUSTOM: "x" } })).toThrow("YRD_CUSTOM")
+      expect(() => construct({ environmentOverrides: { GIT_CONFIG: "x" } })).toThrow("GIT_CONFIG")
+      expect(() => construct({ environmentOverrides: { "BAD NAME": "x" } })).toThrow("BAD NAME")
+    })
+
+    it("stamps evidence with a stable applied-environment identity", async () => {
+      const passthroughEnv = { ...ambient, CHECK_TOKEN: "declared" }
+      const first = await runCapture({ env: passthroughEnv, environmentPassthrough: ["CHECK_TOKEN"] })
+      const second = await runCapture({ env: passthroughEnv, environmentPassthrough: ["CHECK_TOKEN"] })
+      expect(first.evidence.environmentHash).toMatch(/^[0-9a-f]{64}$/u)
+      expect(second.evidence.environmentHash).toBe(first.evidence.environmentHash)
+
+      // Per-execution YRD_* coordinates (job, attempt, run) never move the identity.
+      const retried = await runCapture({ env: passthroughEnv, environmentPassthrough: ["CHECK_TOKEN"] }, 2)
+      expect(retried.evidence.environmentHash).toBe(first.evidence.environmentHash)
+
+      // Dropped ambient junk never moves the identity.
+      const junkMoved = await runCapture({
+        env: { ...passthroughEnv, AMBIENT_JUNK: "different" },
+        environmentPassthrough: ["CHECK_TOKEN"],
+      })
+      expect(junkMoved.evidence.environmentHash).toBe(first.evidence.environmentHash)
+
+      // Any APPLIED change — allowlisted, passthrough, or declared — is visible.
+      const allowlistedMoved = await runCapture({
+        env: { ...passthroughEnv, LANG: "C" },
+        environmentPassthrough: ["CHECK_TOKEN"],
+      })
+      expect(allowlistedMoved.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+      const passthroughMoved = await runCapture({
+        env: { ...passthroughEnv, CHECK_TOKEN: "rotated" },
+        environmentPassthrough: ["CHECK_TOKEN"],
+      })
+      expect(passthroughMoved.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+      const declaredMoved = await runCapture({
+        env: passthroughEnv,
+        environmentPassthrough: ["CHECK_TOKEN"],
+        environmentOverrides: { CHECK_MODE: "strict" },
+      })
+      expect(declaredMoved.evidence.environmentHash).not.toBe(first.evidence.environmentHash)
+    })
+
+    it("gives check children the declared environment, never the runner's ambient junk", async () => {
+      const { repo, feature: featureSha } = await repository("feature")
+      await using process = createProcess()
+      await using app = await checkedQueue(
+        process,
+        repo,
+        shellCommand("env | grep -E '^CHECK_' | sort || true"),
+        {
+          env: { ...globalThis.process.env, CHECK_JUNK: "must-not-leak", CHECK_TOKEN: "ambient-token" },
+          environmentOverrides: { CHECK_DECLARED: "yes" },
+          environmentPassthrough: ["CHECK_TOKEN"],
+        },
+      )
+      await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+      const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
+      expect(run.status).toBe("passed")
+      const job = run.steps[0]!.job
+      if (job?.status !== "passed") throw new Error("check did not pass")
+      const evidence = GitCheckEvidenceSchema.parse(job.output)
+      expect(evidence.detail?.split("\n")).toEqual(["CHECK_DECLARED=yes", "CHECK_TOKEN=ambient-token"])
+    })
   })
 
   it("checks and lands one combined candidate for a passing batch", async () => {

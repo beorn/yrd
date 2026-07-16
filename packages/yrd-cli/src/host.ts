@@ -238,6 +238,10 @@ function candidateStep(
         timeoutMs: stepTimeoutMs(config),
         noProgressTimeoutMs: stepNoProgressMs(config),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
+        ...(config.env === undefined ? {} : { environmentOverrides: config.env }),
+        ...(config.environmentPassthrough === undefined
+          ? {}
+          : { environmentPassthrough: config.environmentPassthrough }),
       }),
       {
         revision,
@@ -355,6 +359,10 @@ function integratedRunner(
       YRD_INTEGRATED_SHA: input.shape.integration.commit,
       ...(config.environment === undefined ? {} : { YRD_ENVIRONMENT: config.environment }),
     }),
+    ...(config.env === undefined ? {} : { environmentOverrides: config.env }),
+    ...(config.environmentPassthrough === undefined
+      ? {}
+      : { environmentPassthrough: config.environmentPassthrough }),
   }
   return config.runner === "waiting" ? configuredWaitingCommandStep(options) : configuredCommandStep(options)
 }
@@ -387,6 +395,10 @@ function configuredQueueSteps(
                 artifactRoot: join(options.stateDir, "artifacts"),
                 timeoutMs: stepTimeoutMs(config),
                 ...(config.environment === undefined ? {} : { environment: config.environment }),
+                ...(config.env === undefined ? {} : { environmentOverrides: config.env }),
+                ...(config.environmentPassthrough === undefined
+                  ? {}
+                  : { environmentPassthrough: config.environmentPassthrough }),
               }),
           { revision },
         ),

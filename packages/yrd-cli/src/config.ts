@@ -36,12 +36,28 @@ const NotifySchema = z
 export type SignalRouteTarget = z.infer<typeof NotifyTargetSchema>
 export type SignalKind = "pr/rejected" | "pr/needs-review" | "pr/integrated" | "run/failed"
 export type SignalRoutes = Readonly<Partial<Record<SignalKind, readonly SignalRouteTarget[]>>>
+const EnvironmentNameSchema = TextSchema.regex(/^[A-Za-z_][A-Za-z0-9_]*$/u).refine(
+  (name) => !name.startsWith("YRD_") && !name.startsWith("GIT_"),
+  { message: "uses a reserved prefix" },
+)
 const StepObjectSchema = z
   .object({
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
     classification: z.enum(["base", "carrier"]).optional(),
     environment: TextSchema.optional(),
+    /** Declared child values applied over the deterministic base allowlist (merge-queue R42). */
+    env: z.record(EnvironmentNameSchema, z.string()).optional(),
+    /** Ambient names copied into the check child beyond the base allowlist — explicit, never implicit. */
+    environmentPassthrough: z
+      .array(EnvironmentNameSchema)
+      .min(1)
+      .superRefine((names, context) => {
+        if (new Set(names).size !== names.length) {
+          context.addIssue({ code: "custom", message: "contains duplicate environment names" })
+        }
+      })
+      .optional(),
     /** Declarative per-step wall-clock bound; absent = the host default applies (21012 S1 — never silently unbounded). */
     timeoutMs: z.number().int().min(1).optional(),
     /** Declarative per-step no-output-progress bound; absent = the host default applies. A child that emits its banner
