@@ -417,7 +417,7 @@ export function encodeProjectionCheckpointFile(
     valueSha256: sha256Utf8(checkpointValue),
   })
   const payload = {
-    v: CORE_CHECKPOINT_SCHEMA_VERSION as const,
+    v: CORE_CHECKPOINT_SCHEMA_VERSION,
     binding,
     cursor: input.cursor,
     checkpoint,
