@@ -7815,3 +7815,28 @@ describe("journal version skew fail-loud", () => {
     )
   })
 })
+
+describe("queue run — runner output is loggily/JSON only (#undead runner-loggily-only)", () => {
+  // The `queue run --watch` runner is a background service whose stdout is a
+  // log. The QueueRunsView table (RUN/PRS/STATE/STEPS) is the interactive
+  // `queue watch` viewer's surface, not the runner's — it must never be dumped
+  // into the runner's log stream. In human mode the --watch runner emits
+  // nothing to stdout but loggily; `--json` still streams the run record.
+  // (A selector makes the watch loop run exactly one cycle and return.)
+  it("does not print the QueueRunsView table on human stdout under --watch", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const runHuman = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--watch", "PR1"), runHuman.io), runHuman.stderr()).toBe(0)
+    expect(runHuman.stdout()).not.toContain("STATE")
+    expect(runHuman.stdout()).not.toContain("STEPS")
+  })
+
+  it("still streams the run record under --watch --json", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    const runJson = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "--watch", "PR1", "--json"), runJson.io), runJson.stderr()).toBe(0)
+    expect(runJson.stdout()).toContain("queue.run")
+  })
+})
