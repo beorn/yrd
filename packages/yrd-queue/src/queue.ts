@@ -454,6 +454,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
         "queue/run/failed": ReplayQueueFailedSchema,
       },
+      projectionVersion: "queues-v1",
       project: projectQueues,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)

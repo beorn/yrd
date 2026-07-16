@@ -330,8 +330,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const restoreProjection = (checkpoint: JournalCheckpoint): Projection => {
-    if (checkpoint.identity !== checkpointIdentity)
+    if (checkpoint.identity !== checkpointIdentity) {
       throw new Error("checkpoint identity does not match this projection")
+    }
     if (!Number.isSafeInteger(checkpoint.cursor) || checkpoint.cursor < 0) {
       throw new Error("checkpoint cursor must be a non-negative safe integer")
     }
@@ -398,7 +399,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       return
     }
     try {
-      const stateValue = JsonSchema.parse(next.state)
+      const stateValue = JsonSchema.parse(projectionCheckpointState(next.state))
       const saved = await checkpointStore.save({
         identity: checkpointIdentity,
         cursor: next.cursor,
@@ -687,7 +688,12 @@ function projectionCheckpointIdentity<State extends object, Commands extends Com
     Object.fromEntries(
       Object.keys(schemas)
         .sort()
-        .map((name) => [name, z.toJSONSchema(schemas[name]!)]),
+        .map((name) => {
+          const schema = schemas[name]
+          if (schema === undefined) throw new TypeError(`yrd: event schema '${name}' is missing`)
+          // Journal identity follows accepted input shape; transform semantics are owned by projectionVersion.
+          return [name, z.toJSONSchema(schema, { io: "input" })]
+        }),
     )
   const encoded = canonicalize({
     v: PROJECTION_CHECKPOINT_VERSION,
@@ -698,6 +704,40 @@ function projectionCheckpointIdentity<State extends object, Commands extends Com
   })
   if (encoded === undefined) throw new TypeError("yrd: projection checkpoint identity must be canonical JSON")
   return createHash("sha256").update(encoded).digest("hex")
+}
+
+function projectionCheckpointState(value: unknown, path = "$state"): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new TypeError(`yrd: projection checkpoint state '${path}' must be a finite JSON number`)
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry, index) => {
+      if (entry === undefined) {
+        throw new TypeError(`yrd: projection checkpoint state '${path}[${index}]' must not be undefined`)
+      }
+      return projectionCheckpointState(entry, `${path}[${index}]`)
+    })
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`yrd: projection checkpoint state '${path}' is not JSON-compatible`)
+  }
+  const prototype = Reflect.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`yrd: projection checkpoint state '${path}' must be a plain object`)
+  }
+  if (Object.getOwnPropertySymbols(value).some((key) => Object.prototype.propertyIsEnumerable.call(value, key))) {
+    throw new TypeError(`yrd: projection checkpoint state '${path}' must not contain enumerable symbol keys`)
+  }
+  const result: Record<string, JsonValue> = {}
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (entry === undefined) continue
+    result[key] = projectionCheckpointState(entry, `${path}.${key}`)
+  }
+  return result
 }
 
 function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
