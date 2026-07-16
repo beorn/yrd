@@ -16,6 +16,14 @@ import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
+import {
+  SNAPSHOT_FILE,
+  SNAPSHOT_REFRESH_FRAMES,
+  encodeSnapshotFile,
+  joinValuesJson,
+  parseSnapshotFile,
+  type SnapshotBindingView,
+} from "./snapshot.ts"
 
 const VERSION = 3
 const FORMAT_VERSION = 4
@@ -147,7 +155,7 @@ type JournalOptions = Readonly<{
 
 type InternalInject = NonNullable<JournalOptions["inject"]> &
   Readonly<{
-    thresholds?: Readonly<{ bytes?: number; frames?: number }>
+    thresholds?: Readonly<{ bytes?: number; frames?: number; snapshotFrames?: number }>
     platform?: string
     phase?: (phase: string, details: Readonly<Record<string, unknown>>) => void | Promise<void>
   }>
@@ -190,7 +198,15 @@ type ReadSnapshot = Readonly<{
   tailBytes: number
   tailFrames: number
   generation: number
+  /** The pinned v4 authority, or null on the legacy v3 path (no snapshot cache there). */
+  active: ActiveState | null
 }>
+
+type SnapshotCache =
+  | Readonly<{ kind: "hit"; cursor: number; frames: number; values: readonly unknown[]; valuesJson: string }>
+  | Readonly<{ kind: "miss" }>
+  | Readonly<{ kind: "invalid" }>
+  | Readonly<{ kind: "bypass" }>
 
 const defaultIO: JournalIO = {
   write: (file, bytes, offset, length, position) => file.write(bytes, offset, length, position),
@@ -205,6 +221,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
   const thresholds = {
     bytes: threshold(inject.thresholds?.bytes, DEFAULT_THRESHOLD_BYTES, "bytes"),
     frames: threshold(inject.thresholds?.frames, DEFAULT_THRESHOLD_FRAMES, "frames"),
+    snapshotFrames: threshold(inject.thresholds?.snapshotFrames, SNAPSHOT_REFRESH_FRAMES, "snapshotFrames"),
   }
   const platform = inject.platform ?? process.platform
   const runtime: Runtime = {
@@ -232,11 +249,21 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
 
       let frames = 0
       try {
+        const cache: SnapshotCache =
+          after === 0 && snapshot.active !== null ? await loadSnapshotCache(runtime, snapshot) : { kind: "bypass" }
+        let served = after
+        if (cache.kind === "hit") {
+          served = Math.max(after, cache.cursor)
+          if (cache.values.length > 0 && cache.cursor > after) {
+            frames += cache.values.length
+            yield { cursor: cache.cursor, values: cache.values }
+          }
+        }
+
+        const collect: string[] | null = cache.kind === "bypass" ? null : []
+        let replayed = 0
         for (const part of snapshot.parts) {
-          const start = Math.max(
-            snapshot.after,
-            part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart,
-          )
+          const start = Math.max(served, part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart)
           const end = Math.min(snapshot.before, part.kind === "segment" ? part.descriptor.logicalEnd : part.logicalEnd)
           if (start >= end) continue
           const raw = await readPart(part)
@@ -244,8 +271,32 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
           const slice = raw.subarray(start - logicalStart, end - logicalStart)
           for await (const batch of decode([slice], start, join(runtime.dir, partPath(part)))) {
             frames += batch.values.length
+            replayed += batch.values.length
+            if (collect !== null) for (const value of batch.values) collect.push(JSON.stringify(value))
             yield batch
           }
+        }
+
+        if (cache.kind === "hit") {
+          log.debug?.("journal snapshot cache served the cold prefix", {
+            action: "snapshot-hit",
+            path: join(runtime.dir, SNAPSHOT_FILE),
+            cursor: cache.cursor,
+            cachedFrames: cache.frames,
+            replayedFrames: replayed,
+          })
+        }
+        if (
+          collect !== null &&
+          snapshot.active !== null &&
+          platform !== "win32" &&
+          (cache.kind !== "hit" || replayed > thresholds.snapshotFrames)
+        ) {
+          await writeSnapshotCache(runtime, snapshot.active, snapshot.parts, snapshot.before, {
+            base: cache.kind === "hit" ? cache : null,
+            chunks: collect,
+            replayed,
+          })
         }
       } finally {
         await closeParts(snapshot.parts)
@@ -650,7 +701,13 @@ async function installCandidate(runtime: Runtime, candidate: SegmentCandidate): 
 
 async function finalizeGeneration(runtime: Runtime, recovery: Recovery, manifest: Manifest): Promise<void> {
   if (recovery.sourceV3Path !== null) await sealMigratedV3(runtime, recovery, manifest)
-  await removePaths(runtime, recovery.successPaths.filter((path) => path !== V3_FILE))
+  await removePaths(
+    runtime,
+    recovery.successPaths.filter((path) => path !== V3_FILE),
+  )
+  // The snapshot cache is bound to the replaced generation; remove it deliberately so
+  // the next replay reseeds quietly instead of tripping the loud staleness fallback.
+  await removeIfExists(join(runtime.dir, SNAPSHOT_FILE))
 }
 
 async function sealMigratedV3(runtime: Runtime, recovery: Recovery, manifest: Manifest): Promise<void> {
@@ -666,13 +723,8 @@ async function sealMigratedV3(runtime: Runtime, recovery: Recovery, manifest: Ma
     const source = manifest.segments.find(
       (segment) => segment.sourceGeneration === 3 && segment.sourceTailIdentity === V3_FILE,
     )
-    if (
-      raw.length !== recovery.verifyEnd ||
-      (source !== undefined && sha256(raw) !== source.rawSha256)
-    ) {
-      throw new Error(
-        `yrd: legacy v3 journal changed during v4 cutover at ${path}; preserve it for reconciliation`,
-      )
+    if (raw.length !== recovery.verifyEnd || (source !== undefined && sha256(raw) !== source.rawSha256)) {
+      throw new Error(`yrd: legacy v3 journal changed during v4 cutover at ${path}; preserve it for reconciliation`)
     }
   }
   await installV3Cutover(runtime)
@@ -689,9 +741,7 @@ async function ensureV3Cutover(runtime: Runtime): Promise<void> {
     return
   }
   if (raw.equals(V3_CUTOVER)) return
-  throw new Error(
-    `yrd: legacy v3 journal changed after v4 cutover at ${path}; preserve it for reconciliation`,
-  )
+  throw new Error(`yrd: legacy v3 journal changed after v4 cutover at ${path}; preserve it for reconciliation`)
 }
 
 async function installV3Cutover(runtime: Runtime): Promise<void> {
@@ -841,6 +891,187 @@ async function rollbackGeneration(runtime: Runtime, recovery: Recovery, cause: u
   })
 }
 
+function snapshotBindingView(active: ActiveState): SnapshotBindingView {
+  return {
+    generation: active.manifest.generation,
+    manifestDigest: active.manifest.digest,
+    tailIdentity: active.manifest.tail.identity,
+    tailLogicalStart: active.manifest.tail.logicalStart,
+    logicalEnd: active.state.logicalEnd,
+    segments: active.manifest.segments.map((segment) => ({
+      path: segment.path,
+      logicalStart: segment.logicalStart,
+      logicalEnd: segment.logicalEnd,
+      compressedSha256: segment.compressedSha256,
+    })),
+  }
+}
+
+/**
+ * Loads and validates the snapshot cache against the pinned read snapshot.
+ * Invalid or stale caches warn LOUDLY (naming exactly what mismatched) and
+ * make the caller fall back to a full replay plus an atomic rewrite; only a
+ * plain missing file (normal first run) stays quiet at debug level.
+ */
+async function loadSnapshotCache(runtime: Runtime, snapshot: ReadSnapshot): Promise<SnapshotCache> {
+  const active = snapshot.active
+  if (active === null) throw new Error("yrd: the journal snapshot cache requires an active v4 generation")
+  const path = join(runtime.dir, SNAPSHOT_FILE)
+  let text: string
+  try {
+    text = await readFile(path, "utf8")
+  } catch (error) {
+    if (isMissing(error)) {
+      runtime.log.debug?.("journal snapshot cache missing; full replay will seed it", {
+        action: "snapshot-miss",
+        path,
+      })
+      return { kind: "miss" }
+    }
+    runtime.log.warn?.("journal snapshot cache unreadable; falling back to full replay", {
+      action: "full-replay",
+      reason: "snapshot-unreadable",
+      path,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { kind: "invalid" }
+  }
+
+  const view = snapshotBindingView(active)
+  const parsed = parseSnapshotFile(text, view)
+  if (!parsed.ok) {
+    runtime.log.warn?.("journal snapshot cache invalid; falling back to full replay and rewriting", {
+      action: "full-replay",
+      reason: parsed.reason,
+      path,
+      ...(parsed.expected === undefined ? {} : { expected: parsed.expected }),
+      ...(parsed.observed === undefined ? {} : { observed: parsed.observed }),
+    })
+    return { kind: "invalid" }
+  }
+  if (parsed.cursor > snapshot.before) {
+    runtime.log.debug?.("journal snapshot cache covers more than the requested range; reading raw", {
+      action: "snapshot-bypass",
+      path,
+      cursor: parsed.cursor,
+      before: snapshot.before,
+    })
+    return { kind: "bypass" }
+  }
+
+  // Physical verification: covered journal bytes must still match the binding so the
+  // cache can never mask on-disk corruption that a raw replay would have detected.
+  for (const part of snapshot.parts) {
+    if (part.kind !== "segment" || part.descriptor.logicalEnd > parsed.cursor) continue
+    const compressed = await readWhole(part.file)
+    if (sha256(compressed) !== part.descriptor.compressedSha256) {
+      runtime.log.warn?.("journal snapshot cache rejected: covered segment bytes changed on disk", {
+        action: "full-replay",
+        reason: "snapshot-covered-segment-checksum",
+        path,
+        segment: part.descriptor.path,
+        expected: part.descriptor.compressedSha256,
+        observed: sha256(compressed),
+      })
+      return { kind: "invalid" }
+    }
+  }
+  const coveredTailBytes = Math.max(0, parsed.cursor - view.tailLogicalStart)
+  if (coveredTailBytes > 0) {
+    const tail = snapshot.parts.find((part) => part.kind === "tail")
+    if (tail === undefined || tail.kind !== "tail") {
+      throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
+    }
+    const prefix = await readExactly(tail.file, 0, coveredTailBytes)
+    const observed = sha256(prefix)
+    if (observed !== parsed.tailPrefixSha256) {
+      runtime.log.warn?.("journal snapshot cache rejected: covered tail bytes changed on disk", {
+        action: "full-replay",
+        reason: "snapshot-covered-tail-checksum",
+        path,
+        expected: parsed.tailPrefixSha256,
+        observed,
+        coveredBytes: coveredTailBytes,
+      })
+      return { kind: "invalid" }
+    }
+  }
+  return {
+    kind: "hit",
+    cursor: parsed.cursor,
+    frames: parsed.frames,
+    values: parsed.values,
+    valuesJson: parsed.valuesJson,
+  }
+}
+
+/**
+ * Atomically (temp file + rename) rewrites the snapshot cache to cover [0, before).
+ * Concurrent writers are safe: each writes its own temp and the last rename wins,
+ * and every candidate is self-consistent and bound to the generation it read.
+ * A write failure is loudly logged but never fails the read — the journal remains
+ * the authority and the next replay simply reseeds the cache.
+ */
+async function writeSnapshotCache(
+  runtime: Runtime,
+  active: ActiveState,
+  parts: readonly ReadPart[],
+  before: number,
+  input: Readonly<{
+    base: Readonly<{ frames: number; valuesJson: string }> | null
+    chunks: readonly string[]
+    replayed: number
+  }>,
+): Promise<void> {
+  const path = join(runtime.dir, SNAPSHOT_FILE)
+  try {
+    const view = snapshotBindingView(active)
+    const coveredTailBytes = Math.max(0, before - view.tailLogicalStart)
+    let tailPrefixSha256 = EMPTY_DIGEST
+    if (coveredTailBytes > 0) {
+      const tail = parts.find((part) => part.kind === "tail")
+      if (tail === undefined || tail.kind !== "tail") {
+        throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
+      }
+      tailPrefixSha256 = sha256(await readExactly(tail.file, 0, coveredTailBytes))
+    }
+    const valuesJson =
+      input.base === null ? `[${input.chunks.join(",")}]` : joinValuesJson(input.base.valuesJson, input.chunks)
+    const frames = (input.base?.frames ?? 0) + input.replayed
+    const text = encodeSnapshotFile({ view, cursor: before, frames, valuesJson, tailPrefixSha256 })
+    // A reader pinned across a concurrent compaction would bind to the replaced
+    // generation; skip the write when the on-disk authority moved on (best effort —
+    // a raced stale write is still caught loudly by binding validation on next read).
+    const current = await loadManifestRecord(runtime.dir)
+    if (current === null || current.manifest.digest !== active.manifest.digest) {
+      runtime.log.debug?.("journal snapshot cache write skipped after a generation change", {
+        action: "snapshot-skipped",
+        path,
+        expectedGeneration: active.manifest.generation,
+        observedGeneration: current?.manifest.generation ?? null,
+      })
+      return
+    }
+    await replaceDurable(runtime, SNAPSHOT_FILE, Buffer.from(text))
+    runtime.log.debug?.("journal snapshot cache written", {
+      action: input.base === null ? "snapshot-seeded" : "snapshot-refreshed",
+      path,
+      cursor: before,
+      frames,
+      replayedFrames: input.replayed,
+    })
+  } catch (error) {
+    // Loud but non-fatal by design: the read already returned correct data and the
+    // journal stays authoritative; a failed cache write must not fail the caller.
+    runtime.log.error?.("journal snapshot cache write failed; journal remains authoritative", {
+      action: "skipped",
+      reason: "snapshot-write-failed",
+      path,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 async function acquireReadSnapshot(runtime: Runtime, after: number, before?: number): Promise<ReadSnapshot> {
   await recoverPending(runtime)
   const manifestRecord = await loadManifestRecord(runtime.dir)
@@ -861,6 +1092,7 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
         tailBytes: 0,
         tailFrames: 0,
         generation: 3,
+        active: null,
       }
     }
     try {
@@ -876,6 +1108,7 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
         tailBytes: logicalEnd,
         tailFrames: 0,
         generation: 3,
+        active: null,
       }
     } catch (error) {
       await file.close()
@@ -910,6 +1143,7 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
       tailBytes: active.state.committedBytes,
       tailFrames: active.state.frames,
       generation: active.manifest.generation,
+      active,
     }
   } catch (error) {
     await closeParts(parts)
