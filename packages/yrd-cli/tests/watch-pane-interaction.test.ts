@@ -116,6 +116,55 @@ describe("QueueWatchFrame 21106 interaction", () => {
     }
   })
 
+  it("paints a hover-affordance background under the pointer, distinct from selection, and clears on leave (item P)", async () => {
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    const render = createRenderer({ cols: 200, rows: 50 })
+    const app = render(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      // Default cursor is the first running row (PR42); its detail is open.
+      await waitFor(() => app.text.includes("PRs PR42@r1"))
+      const rows = app.text.split("\n")
+
+      // A non-cursor QUEUE list row (clock-prefixed, so we never match the
+      // identity-title row of the DETAIL pane).
+      const isListRow = (needle: string) => (row: string) => row.includes(needle) && /^\s*\d{2}:\d{2}:\d{2}/u.test(row)
+      const hoverY = rows.findIndex(isListRow("PR4.1"))
+      const hoverX = rows[hoverY]?.indexOf("PR4.1") ?? -1
+      const cursorY = rows.findIndex(isListRow("PR42.1"))
+      const cursorX = rows[cursorY]?.indexOf("PR42.1") ?? -1
+      expect(hoverY).toBeGreaterThan(0)
+      expect(hoverX).toBeGreaterThan(0)
+      expect(cursorY).toBeGreaterThan(0)
+
+      // The cursor row carries a selection background; the non-cursor row is bare.
+      const selectionBg = app.cell(cursorX, cursorY).bg
+      expect(selectionBg, "cursor row carries a selection background").not.toBeNull()
+      expect(app.cell(hoverX, hoverY).bg, "an un-hovered non-cursor row has no background").toBeNull()
+
+      // Hover the non-cursor row: an affordance background appears...
+      await app.hover(hoverX, hoverY)
+      await app.waitForLayoutStable()
+      const hoverBg = app.cell(hoverX, hoverY).bg
+      expect(hoverBg, "the hovered row paints an affordance background").not.toBeNull()
+      // ...it is the hover tint, NOT the selection background...
+      expect(hoverBg, "hover affordance is distinct from selection").not.toEqual(selectionBg)
+      // ...and hover never moves the cursor/detail (hover paints, click selects).
+      expect(app.text, "hover must not switch the detail selection").toContain("PRs PR42@r1")
+      expect(app.text).not.toContain("PRs PR4@r1")
+      expect(app.cell(cursorX, cursorY).bg, "cursor selection is unchanged by hover").toEqual(selectionBg)
+
+      // Moving the pointer onto the cursor row clears the prior affordance
+      // (transient) while selection still wins on the cursor row itself.
+      await app.hover(cursorX, cursorY)
+      await app.waitForLayoutStable()
+      expect(app.cell(hoverX, hoverY).bg, "affordance clears when the pointer leaves the row").toBeNull()
+      expect(app.cell(cursorX, cursorY).bg, "selection still wins over hover on the cursor row").toEqual(selectionBg)
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("wheel-scrolls the list viewport without moving the selection", async () => {
     const prs = Array.from({ length: 24 }, (_, index) =>
       fixturePr(`PR${index + 1}`, "submitted", `2026-07-13T11:${String(10 + index).padStart(2, "0")}:00.000Z`),
@@ -132,9 +181,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
 
       // Scope to the QUEUE list row (starts with a clock) — the DETAIL pane's
       // identity title also names PR1.1 (item M) and must not be wheeled.
-      const listY = app.text
-        .split("\n")
-        .findIndex((row) => row.includes("PR1.1") && /^\s*\d{2}:\d{2}:\d{2}/u.test(row))
+      const listY = app.text.split("\n").findIndex((row) => row.includes("PR1.1") && /^\s*\d{2}:\d{2}:\d{2}/u.test(row))
       const listX = (app.text.split("\n")[listY]?.indexOf("PR1.1") ?? 0) + 2
       for (let index = 0; index < 12; index += 1) await app.wheel(listX, listY, 3)
       await waitFor(() => app.text.includes("PR24.1"))
