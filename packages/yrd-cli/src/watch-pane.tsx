@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
+  Accordion,
   Box,
   ListView,
   SplitPane,
+  Tab,
+  TabList,
+  TabPanel,
+  Tabs,
   Text,
   resolveSplitPaneLayout,
   useInput,
@@ -16,6 +21,7 @@ import {
   QueueTimelineView,
   QueueWatchView,
   queueTimelineRows,
+  type QueueShowData,
   type QueueStatusResult,
   type QueueTimelineProjection,
 } from "./queue-status-view.tsx"
@@ -179,6 +185,96 @@ function QueueFilterView({ projection }: { projection: QueueTimelineProjection }
   )
 }
 
+function isSuccessfulStepStatus(status: string): boolean {
+  return status === "passed" || status === "skipped"
+}
+
+function queueStepNames(data: QueueShowData): readonly string[] {
+  return [...new Set(data.steps.map((row) => row.step))]
+}
+
+function defaultQueueStep(data: QueueShowData, names: readonly string[]): string | undefined {
+  const needsAttention = names.find((name) =>
+    data.steps.some((row) => row.step === name && !isSuccessfulStepStatus(row.status)),
+  )
+  return needsAttention ?? names.at(-1)
+}
+
+function stepLogStartsExpanded(data: QueueShowData, step: string): boolean {
+  return data.steps.some((row) => row.step === step && !isSuccessfulStepStatus(row.status))
+}
+
+function QueueWorkflowStepTabs({
+  data,
+  outputs,
+  compact,
+  active,
+}: {
+  data: QueueShowData
+  outputs: readonly QueueArtifactOutput[]
+  compact: boolean
+  active: boolean
+}) {
+  const names = useMemo(() => queueStepNames(data), [data])
+  const fallbackStep = defaultQueueStep(data, names)
+  const [selectedStep, setSelectedStep] = useState(fallbackStep)
+  const [expandedLogs, setExpandedLogs] = useState<Readonly<Record<string, boolean>>>(() =>
+    Object.fromEntries(names.map((name) => [name, stepLogStartsExpanded(data, name)])),
+  )
+  const activeStep = selectedStep !== undefined && names.includes(selectedStep) ? selectedStep : fallbackStep
+
+  if (activeStep === undefined) {
+    return (
+      <Box flexDirection="column" flexGrow={1} minHeight={0}>
+        <QueueShowView data={data} compact={compact} />
+        <QueueArtifactOutputView outputs={outputs} />
+      </Box>
+    )
+  }
+
+  return (
+    <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
+      <TabList>
+        {names.map((name) => (
+          <Tab key={name} value={name}>
+            {name}
+          </Tab>
+        ))}
+      </TabList>
+      {names.map((name) => {
+        const stepRows = data.steps.filter((row) => row.step === name)
+        const stepOutputs = outputs.filter((output) => output.step === name)
+        const stepData: QueueShowData = { ...data, steps: stepRows }
+        const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
+        return (
+          <TabPanel key={name} value={name}>
+            <Text color="$fg-muted">
+              ACTIVE STEP <Text bold>{name}</Text>
+            </Text>
+            <QueueShowView data={stepData} compact={compact} />
+            <Accordion
+              title="LOG"
+              expanded={logExpanded}
+              onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
+              marginTop={1}
+              flexGrow={1}
+              minHeight={0}
+            >
+              {stepOutputs.length === 0 ? (
+                <Text color="$fg-muted">Waiting for first output…</Text>
+              ) : (
+                <Box minHeight={8} flexGrow={1}>
+                  <QueueArtifactOutputView outputs={stepOutputs} />
+                </Box>
+              )}
+            </Accordion>
+          </TabPanel>
+        )
+      })}
+    </Tabs>
+  )
+}
+
 export function QueueWatchFrame({
   snapshot,
   paused,
@@ -313,10 +409,13 @@ export function QueueWatchFrame({
         <QueueWatchView results={snapshot.results} now={snapshot.now} pr={detailPr} />
       )
     ) : (
-      <Box flexDirection="column" flexGrow={1} minHeight={0}>
-        <QueueShowView data={detailData} compact={tier === "full"} />
-        <QueueArtifactOutputView key={selectedRow?.run} outputs={detailOutputs} />
-      </Box>
+      <QueueWorkflowStepTabs
+        key={detailData.run}
+        data={detailData}
+        outputs={detailOutputs}
+        compact={tier === "full"}
+        active={detailOpen && detailMode === "detail"}
+      />
     )
   if (snapshot.projection === undefined) {
     return (
@@ -352,6 +451,10 @@ export function QueueWatchFrame({
       : detailOpen
         ? "Esc close detail"
         : "Enter reopen detail"
+  const stepHint =
+    detailOpen && detailMode === "detail" && detailData !== undefined && queueStepNames(detailData).length > 1
+      ? " · h/l steps"
+      : ""
 
   return (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>
@@ -379,6 +482,7 @@ export function QueueWatchFrame({
         <Text color="$fg-muted">
           {" "}
           {paused ? "p resume" : "p pause"} q quit · {footerHint}
+          {stepHint}
           {" · f filters · o evidence"}
           {newRows === 0 ? "" : ` · ${newRows} new`}
         </Text>

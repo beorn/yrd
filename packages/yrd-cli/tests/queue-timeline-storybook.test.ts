@@ -79,9 +79,9 @@ describe("queue timeline storybook", () => {
       expect(frame).toContain("running")
       expect(frame).toContain("MEMBERS PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
       expect(frame).toContain("R42 main [/] running")
-      expect(frame).toContain("check     step-v2 [/] running   2")
+      expect(frame).toMatch(/check\s+step-v2 \[\/\] running\s+2/u)
       expect(frame).toContain("OUTPUT check#2")
-      expect(frame).toContain("p pause q quit · Esc close detail · f filters · o evidence")
+      expect(frame).toContain("p pause q quit · Esc close detail · h/l steps · f filters · o evidence")
       expect(frame).not.toContain("No matching queue rows.")
     } finally {
       handle.unmount()
