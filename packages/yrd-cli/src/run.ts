@@ -926,6 +926,39 @@ async function reviewPr(
   )
 }
 
+async function requestReviewPr(
+  app: YrdCliApp,
+  selector: string,
+  actors: readonly string[],
+  options: JsonOption & Readonly<{ clear?: boolean; by?: string }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (options.clear === true && actors.length > 0) {
+    usage("pr request-review --clear cannot combine with reviewer actors")
+  }
+  if (options.clear !== true && actors.length === 0) {
+    usage("pr request-review requires reviewer actors or --clear")
+  }
+  await app.bays.requestReview({
+    pr: selector,
+    reviewers: options.clear === true ? [] : [...actors],
+    actor: options.by ?? io.runner ?? "operator",
+  })
+  const pr = app.bays.pr(selector)
+  if (pr === undefined) throw new Error(`yrd: PR '${selector}' disappeared after request-review`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    {
+      command: "pr.request-review",
+      pr: prFact(pr),
+      requestedReviewers: pr.requestedReviewers ?? [],
+      needsReview: app.bays.needsReview(pr.id),
+    },
+    `${pr.id} requested reviewers ${(pr.requestedReviewers ?? []).length === 0 ? "cleared" : (pr.requestedReviewers ?? []).join(", ")}`,
+  )
+}
+
 async function commentPr(
   app: YrdCliApp,
   selector: string,
@@ -1037,6 +1070,7 @@ async function submitBays(
     issue?: string
     correlation?: string
     composition?: string
+    reviewer?: readonly string[]
     json?: boolean
   },
   io: YrdCliIO,
@@ -1053,8 +1087,9 @@ async function submitBays(
   if (composition !== undefined && inferred.length !== 1) {
     usage("--composition requires exactly one bay or branch selector")
   }
+  const reviewers = options.reviewer ?? []
   for (const selector of inferred) {
-    const pr = await app.bays.submitSelection(selector, {
+    let pr = await app.bays.submitSelection(selector, {
       ...(base === undefined ? {} : { base }),
       ...(options.issue === undefined ? {} : { issue: options.issue }),
       ...(options.draft === true ? { draft: true } : {}),
@@ -1063,6 +1098,16 @@ async function submitBays(
       resolveRevision: (ref) => optionalRevision(ref, io),
       run: runtimeOptions(io),
     })
+    if (reviewers.length > 0 && pr.status !== "integrated") {
+      await app.bays.requestReview({
+        pr: pr.id,
+        reviewers: [...reviewers],
+        ...(io.runner === undefined ? {} : { actor: io.runner }),
+      })
+      const requested = app.bays.pr(pr.id)
+      if (requested === undefined) throw new Error(`yrd: PR '${pr.id}' disappeared after request-review`)
+      pr = requested
+    }
     prs.push(pr)
   }
   if (command === "bay.submit" || options.draft === true) {
@@ -1197,9 +1242,11 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
 
 async function listPrs(
   app: YrdCliApp,
-  options: JsonOption & Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean }>,
+  options: JsonOption &
+    Readonly<{ base?: string; state?: string; issue?: string; needsReview?: boolean; reviewer?: string }>,
   io: YrdCliIO,
 ): Promise<void> {
+  if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
   const state = stateOf(app)
   const base = options.base === undefined ? undefined : selectedBase(state, options.base)
   const rows = app.bays
@@ -1207,12 +1254,19 @@ async function listPrs(
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
     .filter((pr) => options.state === undefined || pr.status === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
-    .map((pr) => ({ pr, eligibility: app.queue.eligibility(pr.id) }))
-    .filter(({ pr, eligibility }) =>
+    .map((pr) => ({
+      pr,
+      eligibility: app.queue.eligibility(pr.id),
+      needsReview: app.bays.needsReview(pr.id, options.reviewer),
+    }))
+    .filter(({ pr, eligibility, needsReview }) =>
       options.needsReview === true
-        ? (pr.status === "pushed" || pr.status === "submitted") &&
-          eligibility.review.required &&
-          !eligibility.review.approved
+        ? options.reviewer !== undefined
+          ? needsReview
+          : needsReview ||
+            ((pr.status === "pushed" || pr.status === "submitted") &&
+              eligibility.review.required &&
+              !eligibility.review.approved)
         : true,
     )
   const selected = new Set(rows.map(({ pr }) => pr.id))
@@ -1222,9 +1276,11 @@ async function listPrs(
     jsonEnabled(options),
     {
       command: "pr.list",
-      prs: rows.map(({ pr, eligibility }) => ({
+      prs: rows.map(({ pr, eligibility, needsReview }) => ({
         ...projectPRTaskStatus(pr),
         eligibility: projectEligibilityTaskStatus(eligibility),
+        requestedReviewers: pr.requestedReviewers ?? [],
+        needsReview,
       })),
       runs: runs.map(projectQueueRunTaskStatus),
     },
@@ -2936,6 +2992,7 @@ function buildProgram(
     .option("--state <state>", "scope PRs to one native state")
     .option("--issue <ref>", "scope PRs to one issue reference")
     .option("--needs-review", "show revisions needing approval")
+    .option("--reviewer <actor>", "scope --needs-review to one requested reviewer")
     .option("--json", "emit stable JSON")
     .action(async (options) => listPrs(installed(), options, io))
   const submit = pr
@@ -2948,6 +3005,12 @@ function buildProgram(
     .option("--issue <ref>", "link a tracker-neutral issue reference")
     .option("--correlation <namespace:id>", "bind an opaque correlation to the submitted revision")
     .option("--composition <path>", "queue-generated source composition JSON; not for authored root carriers")
+    .option(
+      "--reviewer <actor>",
+      "request a review from <actor> right after submit (repeatable)",
+      (value: string, previous: readonly string[]) => [...previous, value],
+      [] as readonly string[],
+    )
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => setExit(await submitBays(installed(), selectors, options, io, "pr.submit")))
   addAuthoredCarrierWorkflow(submit, name)
@@ -3002,6 +3065,12 @@ function buildProgram(
     .option("--note <text>", "review note")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => reviewPr(installed(), selector, options, io))
+  pr.command("request-review <selector> [actors...]")
+    .description("replace the requested reviewers for a PR (declarative set)")
+    .option("--clear", "clear the requested reviewer set")
+    .option("--by <actor>", "requesting identity")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, actors, options) => requestReviewPr(installed(), selector, actors, options, io))
   pr.command("comment <selector>")
     .description("record a non-gating revision comment")
     .option("--by <actor>", "commenter identity")
