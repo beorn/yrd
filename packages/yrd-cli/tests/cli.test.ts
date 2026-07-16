@@ -3294,8 +3294,8 @@ describe("runYrd", () => {
     })
 
     expect(projection.rows).toMatchObject([
-      { id: "main:run:R1:PR1:1", run: "R1", prs: ["PR1"], revision: 1, submitter: "@cto" },
-      { id: "main:run:R1:PR2:1", run: "R1", prs: ["PR2"], revision: 1, submitter: "@agent/3" },
+      { id: "main:run:R1:PR1:1", run: "R1", pr: "PR1", revision: 1, submitter: "@cto" },
+      { id: "main:run:R1:PR2:1", run: "R1", pr: "PR2", revision: 1, submitter: "@agent/3" },
     ])
     expect(projection.metrics).toMatchObject({ terminalAttempts: 1, outcomes: { integrated: 1 } })
 
@@ -3309,8 +3309,8 @@ describe("runYrd", () => {
     const lines = rendered.split("\n").filter(Boolean)
     const header = lines.find((line) => line.includes("TIME") && line.includes("TOTAL"))
     expect(header).toBeDefined()
-    for (const label of ["TIME", "RUN", "BY", "PR", "STEP", "AGE", "TOTAL"]) expect(header).toContain(label)
-    for (const removed of ["STATUS", "SUBJECT", "DETAIL", "ACTIVE", "WAIT"]) expect(header).not.toContain(removed)
+    for (const label of ["TIME", "STATUS", "RUN", "BY", "PR", "STEP", "AGE", "TOTAL"]) expect(header).toContain(label)
+    for (const removed of ["SUBJECT", "DETAIL", "ACTIVE", "WAIT"]) expect(header).not.toContain(removed)
     const first = lines.find((line) => line.includes("PR1.1"))
     const second = lines.find((line) => line.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -3322,9 +3322,7 @@ describe("runYrd", () => {
     expect(lines.indexOf(lines.find((line) => line.trimStart().startsWith("FILTER "))!)).toBe(
       lines.indexOf(header!) - 1,
     )
-    expect(lines.findIndex((line) => line.trimStart().startsWith("STATISTICS "))).toBeGreaterThan(
-      lines.indexOf(second!),
-    )
+    expect(lines.findIndex((line) => line.includes("STATISTICS"))).toBeGreaterThan(lines.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3363,7 +3361,7 @@ describe("runYrd", () => {
       rmSync(statusPath)
       const absent = outputIO({ cwd: repo, resolveQueueTarget })
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
-      expect(absent.stdout()).toContain("RUNNER ABSENT")
+      expect(absent.stdout()).toContain("RUNNER none — nothing drains this queue")
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }
@@ -3597,6 +3595,7 @@ describe("runYrd", () => {
       { width: 200, height: 32, plain: true },
     )
     expect(rendered).toContain("TIME")
+    expect(rendered).toContain("STATUS")
     expect(rendered).toContain("RUN")
     expect(rendered).toContain("AGE")
     expect(rendered).toContain("TOTAL")
@@ -3625,6 +3624,7 @@ describe("runYrd", () => {
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       expect(Math.max(...lines.map((line) => Array.from(line).length))).toBeLessThanOrEqual(width)
       const header = lines.find((line) => line.includes("TOTAL") && line.includes("TIME"))
+      expect(header).toContain("STATUS")
       expect(header).toContain("STEP")
       expect(header).toContain("AGE")
       expect(header).toContain("TOTAL")
@@ -3637,7 +3637,8 @@ describe("runYrd", () => {
       else expect(header).toContain("BY")
       const integratedLine = lines.find((line) => line.includes("PR1.1"))
       expect(integratedLine).toBeDefined()
-      expect(integratedLine).toContain("2026-07-13T10:10:00Z")
+      // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00.
+      expect(integratedLine).toContain("2026-07-13T15:40")
       expect(integratedLine).toContain("integrated")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 ◷10:00$/u)
     }
@@ -3737,11 +3738,11 @@ describe("runYrd", () => {
     )
     expect(frame).toContain("PR1.1")
     expect(frame).toContain("QUEUE main")
-    expect(frame).not.toContain("pending")
+    expect(frame).toContain("pending")
     expect(frame).not.toContain("position 1")
     expect(frame).toContain("AGE")
     expect(frame).toContain("WAIT")
-    expect(frame).toContain("RUNNER ABSENT")
+    expect(frame).toContain("RUNNER none — nothing drains this queue")
     expect(frame).toContain("LIVE")
     expect(frame).toContain("p pause")
     expect(frame).toContain("q quit")
@@ -3956,7 +3957,7 @@ describe("runYrd", () => {
 
     expect(plain.stdout()).toContain("PR1.1")
     expect(plain.stdout()).toContain("PR2.1")
-    expect(plain.stdout()).not.toContain("pending")
+    expect(plain.stdout()).toContain("pending")
     expect(latest.stdout()).toContain("PR1.1")
     expect(latest.stdout()).toContain("PR2.1")
     expect(plain.stdout()).toContain("latest=no")
