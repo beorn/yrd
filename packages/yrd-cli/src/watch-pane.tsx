@@ -35,6 +35,11 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
+import {
+  footerWithSelectionHint,
+  QUEUE_FOOTER_KEYS,
+  QUEUE_FOOTER_KEYS_NO_FILTERS,
+} from "./watch-footer.ts"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
@@ -547,7 +552,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
         <Box marginTop={1}>
-          <Text color="$fg-muted">q quit - enter/esc show/hide detail - h/j/k/l navigate</Text>
+          <Text color="$fg-muted">{footerWithSelectionHint(QUEUE_FOOTER_KEYS_NO_FILTERS, columns)}</Text>
         </Box>
       </Box>
     )
@@ -603,9 +608,11 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
         )}
       </Box>
       <Box height={1} flexShrink={0}>
-        {/* Exact keybinding footer (user respec 2026-07-15). Pause/resume is
-            removed; `N new` moved to the pane header's temporal-trust row. */}
-        <Text color="$fg-muted">q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate</Text>
+        {/* Keybinding footer (user respec 2026-07-15) + width-gated selection
+            affordance; rationale lives on SELECTION_FOOTER_HINT /
+            footerWithSelectionHint. On narrow terminals the hint is dropped
+            entirely (not clipped), so the user-specced keybindings never wrap. */}
+        <Text color="$fg-muted">{footerWithSelectionHint(QUEUE_FOOTER_KEYS, columns)}</Text>
       </Box>
     </Box>
   )

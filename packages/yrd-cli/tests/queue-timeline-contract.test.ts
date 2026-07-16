@@ -426,7 +426,7 @@ describe("queue timeline 21106 contract", () => {
       expect(footer).toBeGreaterThan(0)
       expect(rows.slice(footer + 1).every((row) => row.trim() === "")).toBe(true)
       expect(rows[footer]?.trim()).toBe(
-        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
+        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate - ⇧-drag to select",
       )
       const statistics = rows.findIndex((row) => row.includes("STATS"))
       expect(statistics).toBeGreaterThan(0)
