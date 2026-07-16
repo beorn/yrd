@@ -2879,11 +2879,13 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
 function TimelineProjectedRow({
   row,
   cursor,
+  hovered,
   layout,
   live,
 }: {
   row: QueueTimelineProjectedRow
   cursor: boolean
+  hovered: boolean
   layout: TimelineCellLayout
   live: boolean
 }) {
@@ -2895,11 +2897,15 @@ function TimelineProjectedRow({
   // Selection forces the semantic pair on EVERY cell (user respec
   // 2026-07-15): $bg-selected under $fg-on-selected, no per-cell colors.
   const forcedFg = cursor ? "$fg-on-selected" : undefined
+  // Hover is affordance-only (item P): a background tint under the pointer that
+  // never moves the cursor or detail selection. Cursor selection wins, so a
+  // hovered cursor row keeps $bg-selected; foreground is untouched by hover.
+  const rowBackground = cursor ? "$bg-selected" : hovered ? "$bg-surface-hover" : undefined
   return (
     <TimelineCells
       layout={layout}
       rowId={row.id}
-      backgroundColor={cursor ? "$bg-selected" : undefined}
+      backgroundColor={rowBackground}
       time={
         <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
           {timelineClockCell(row, layout)}
@@ -3425,7 +3431,13 @@ function ProjectedQueueTimeline({
               getKey={(row) => row.id}
               estimateHeight={1}
               renderItem={(row, _index, meta) => (
-                <TimelineProjectedRow row={row} cursor={meta.isCursor} layout={layout} live={nav} />
+                <TimelineProjectedRow
+                  row={row}
+                  cursor={meta.isCursor}
+                  hovered={meta.isHovered}
+                  layout={layout}
+                  live={nav}
+                />
               )}
             />
           </Box>
