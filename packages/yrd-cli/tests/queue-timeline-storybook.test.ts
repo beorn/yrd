@@ -89,6 +89,35 @@ describe("queue timeline storybook", () => {
     }
   })
 
+  it("restores the wide BY column when Escape closes right-side detail", async () => {
+    using term = createTermless({ cols: 160, rows: 50 })
+    const handle = await run(createElement(QueueTimelineStorybook), term, {
+      mouse: true,
+      selection: false,
+    })
+    const timelineHeader = (): string | undefined =>
+      term.screen
+        .getText()
+        .split("\n")
+        .find((line) => line.includes("TIME") && line.includes("STATUS") && line.includes("RUN·PR"))
+    try {
+      await waitFor(() => term.screen.getText().includes("production-overview"))
+      expect(timelineHeader()).not.toContain("BY")
+      expect(term.screen.getText()).toContain("Esc close detail")
+
+      await act(async () => {
+        await handle.press("Escape")
+        await handle.waitForLayoutStable()
+      })
+
+      await waitFor(() => timelineHeader()?.includes("BY") === true)
+      expect(timelineHeader()).toContain("BY")
+      expect(term.screen.getText()).toContain("Enter reopen detail")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("opens the default selected run detail from the narrow production tier", async () => {
     using term = createTermless({ cols: 80, rows: 24 })
     const handle = await run(createElement(QueueTimelineStorybook), term, {
