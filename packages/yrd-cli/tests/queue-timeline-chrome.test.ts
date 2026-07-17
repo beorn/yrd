@@ -32,6 +32,14 @@ function rowAt(text: string, index: number): string {
   return row
 }
 
+/** The status-pills row (no more "FILTER" label; the four plain-word pills share
+ *  one row with any non-default dimensions). */
+function pillsRow(text: string): string {
+  const found = text.split("\n").find((row) => /pending.*running.*failed.*done/u.test(row))
+  if (found === undefined) throw new Error("no pills row")
+  return found
+}
+
 /** mediaDuration display format (H:MM:SS / M:SS) for expected-age assertions. */
 function clockDuration(milliseconds: number): string {
   const seconds = Math.max(0, Math.round(milliseconds / 1_000))
@@ -97,7 +105,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("renders the column header white+bold, the PR id always bold, and a blank row above FILTER", async () => {
+  it("renders the column header white+bold, the PR id always bold, and no blank row above the header", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -117,9 +125,9 @@ describe("queue timeline chrome 21106", () => {
       const doneRow = rowAt(text, mutedRowY)
       const prX = doneRow.indexOf("PR4.1")
       expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
-      // D: the row directly above the FILTER/coverage row is blank.
-      const filterY = rowIndexOf(text, "FILTER ")
-      expect(rowAt(text, filterY - 1).trim(), "blank row above FILTER").toBe("")
+      // Item 5: the table header sits flush — the row directly above the TIME
+      // header is not a blank spacer (it is the STATUS/RUNNER box border).
+      expect(rowAt(text, headerY - 1).trim(), "no blank row above the header").not.toBe("")
     } finally {
       app.unmount()
     }
@@ -246,7 +254,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("omits since= from FILTER when the window is unbounded (the new default)", async () => {
+  it("omits since= from the pills row when the window is unbounded (the new default)", async () => {
     const base = queueTimelineStories["contract-overview"].snapshot.projection
     const unbounded: QueueTimelineProjection = {
       ...base,
@@ -257,27 +265,30 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app.waitForLayoutStable()
-      const filterLine = rowAt(app.text, rowIndexOf(app.text, "FILTER"))
+      const filterLine = pillsRow(app.text)
       expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
-      expect(filterLine).toContain("[p]ending")
+      expect(filterLine).toContain("pending")
     } finally {
       app.unmount()
     }
   })
 
-  it("renders only non-default FILTER dimensions plus the four status pills", async () => {
+  it("renders only non-default dimensions plus the four plain-word status pills (no FILTER label)", async () => {
     const defaults = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection: defaults, nav: false, columns: 160 }))
     try {
       await app.waitForLayoutStable()
-      const filterY = rowIndexOf(app.text, "FILTER")
-      const filterLine = rowAt(app.text, filterY)
+      const filterLine = pillsRow(app.text)
+      // Item 3: the "FILTER" label is gone; the non-default `since=` dimension
+      // survives as a dim prefix and the pills are plain words (no brackets).
+      expect(app.text, "FILTER label is deleted").not.toContain("FILTER")
       expect(filterLine).toContain("since=6:00:00")
-      expect(filterLine).toContain("[p]ending")
-      expect(filterLine).toContain("[r]unning")
-      expect(filterLine).toContain("[f]ailed")
-      expect(filterLine).toContain("[d]one")
+      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("running")
+      expect(filterLine).toContain("failed")
+      expect(filterLine).toContain("done")
+      expect(filterLine, "no bracketed hotkey hints").not.toMatch(/\[[prfd]\]/u)
       expect(filterLine).not.toContain("terms=")
       expect(filterLine).not.toContain("latest=")
       expect(filterLine).not.toContain("status=")
@@ -291,12 +302,12 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app2.waitForLayoutStable()
-      const filterLine = rowAt(app2.text, rowIndexOf(app2.text, "FILTER"))
+      const filterLine = pillsRow(app2.text)
       expect(filterLine).toContain("terms=typecheck")
       // Pills always render their label (bucket on/off is colour, not glyph).
-      expect(filterLine).toContain("[p]ending")
-      expect(filterLine).toContain("[f]ailed")
-      expect(filterLine).toContain("[d]one")
+      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("failed")
+      expect(filterLine).toContain("done")
     } finally {
       app2.unmount()
     }

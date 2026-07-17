@@ -566,18 +566,18 @@ describe("queue timeline storybook", () => {
       // `f` is the failed-bucket toggle (user respec 2026-07-15): the lone
       // integrated run stays visible. The bucket is a TogglePill now (state is
       // colour, label constant), so the toggle is proven by the rows.
-      expect(handle.text).toContain("[f]ailed")
+      expect(handle.text).toContain("failed")
       await handle.press("f")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR4.1")
       await handle.press("f")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("[f]ailed")
+      expect(handle.text).toContain("failed")
 
       // `d` hides the done bucket — the integrated row leaves the list.
       await handle.press("d")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("[d]one")
+      expect(handle.text).toContain("done")
       expect(handle.text).not.toContain("PR4.1")
       await handle.press("d")
       await handle.waitForLayoutStable()

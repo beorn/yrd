@@ -121,16 +121,19 @@ describe("queue timeline 21106 contract", () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const queueLine = rowIndex(rows, "QUEUE")
     const updatedLine = rowIndex(rows, "updated 17:30:00")
-    const filterLine = rowIndex(rows, "FILTER ")
     const headerLine = rowIndex(rows, "TIME")
     const lastRowLine = rowIndex(rows, "PR4.1")
+    // Item 2 (deliberate contract change): the pills row moved from ABOVE the
+    // header to BELOW the list — new order updated → header → rows → pills →
+    // time-stats (the FLOW box heads r9's windowed TimeStatsBox grid).
+    const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
     const flowBoxLine = rowIndex(rows, "FLOW")
 
     expect(queueLine).toBeLessThan(updatedLine)
-    expect(updatedLine).toBeLessThan(filterLine)
-    expect(filterLine).toBeLessThan(headerLine)
+    expect(updatedLine).toBeLessThan(headerLine)
     expect(headerLine).toBeLessThan(lastRowLine)
-    expect(lastRowLine).toBeLessThan(flowBoxLine)
+    expect(lastRowLine).toBeLessThan(pillsLine)
+    expect(pillsLine).toBeLessThan(flowBoxLine)
 
     // The status box is omitted when the queue is normal.
     expect(rows.join("\n")).not.toContain("HOLD THE LINE")
@@ -227,7 +230,8 @@ describe("queue timeline 21106 contract", () => {
     expect(paused.runner).toBeNull()
     const absentRows = await renderTimeline(paused, 120)
     expect(absentRows.join("\n")).toMatch(/NO RUNNER - (queue last drained .+ ago|no drained run in window)/u)
-    expect(rowIndex(absentRows, "NO RUNNER")).toBeLessThan(rowIndex(absentRows, "FILTER "))
+    const pillsAt = absentRows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    expect(rowIndex(absentRows, "NO RUNNER"), "the RUNNER box is above the pills row").toBeLessThan(pillsAt)
 
     // A heartbeat older than the stale threshold is equally loud.
     const stale = {
@@ -305,15 +309,20 @@ describe("queue timeline 21106 contract", () => {
     expect(narrowBorder.trimEnd().length).toBe(100)
   })
 
-  it("attaches the right-aligned FILTER row directly above the list", async () => {
+  it("attaches the right-aligned pills row directly below the list (item 2)", async () => {
     for (const width of [120, 200]) {
       const rows = await renderTimeline(contractProjection(), width)
-      const filterLine = rowIndex(rows, "FILTER ")
-      const header = rows[filterLine + 1]
-      expect(header, `width ${width}`).toContain("TIME")
-      const filter = rows[filterLine]
-      if (filter === undefined) throw new Error("expected the FILTER row")
-      expect(filter.trim()).toBe("FILTER since=6:00:00 [p]ending [r]unning [f]ailed [d]one")
+      const headerLine = rowIndex(rows, "TIME")
+      const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+      // Item 2: the pills row renders BELOW the list, not above the header.
+      expect(pillsLine, `width ${width}`).toBeGreaterThan(headerLine)
+      const filter = rows[pillsLine]
+      if (filter === undefined) throw new Error("expected the pills row")
+      // Item 3: no "FILTER" label, no [p] brackets; the `since=` dimension
+      // survives and the pills are plain words. Right-aligned to the cap.
+      expect(filter).not.toContain("FILTER")
+      expect(filter).not.toMatch(/\[[prfd]\]/u)
+      expect(filter.trim()).toContain("since=6:00:00 pending running failed done")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
@@ -328,7 +337,8 @@ describe("queue timeline 21106 contract", () => {
     expect(rows[statusLine]).toContain("operator freeze")
     expect(rows[statusLine]).toContain("allowed PR2")
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
-    expect(statusLine).toBeLessThan(rowIndex(rows, "FILTER "))
+    const pillsAt = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    expect(statusLine, "the STATUS box sits above the pills row").toBeLessThan(pillsAt)
 
     const render = createRenderer({ cols: 120, rows: 45 })
     const styled = render(createElement(QueueTimelineView, { projection, columns: 120 }))
