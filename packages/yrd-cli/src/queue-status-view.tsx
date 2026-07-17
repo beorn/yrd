@@ -14,7 +14,20 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Box, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
+import {
+  Box,
+  Link,
+  ListView,
+  Pulse,
+  Tab,
+  TabList,
+  Table,
+  Tabs,
+  Text,
+  TogglePill,
+  TogglePillGroup,
+  type TableColumn,
+} from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -3465,33 +3478,25 @@ function TimelineFilterLine({
   // unbounded window shows everything and prints no `since=` (user directive
   // 2026-07-16).
   const bounded = filters.windowMs < QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
+  // The FILTER label carries the non-default dimensions as a dim prefix; the
+  // four status buckets are TogglePills keyed by their p/r/f/d letter
+  // (`[p]ending`…). The whole cluster sits very dim and lifts together on hover
+  // (silvery TogglePillGroup), and clicking a pill toggles its bucket.
+  const label =
+    `FILTER${bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}` +
+    `${filters.terms.length === 0 ? "" : ` terms=${filters.terms.join("|")}`}` +
+    `${filters.latest ? " latest" : ""}`
   return (
-    <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0} overflow="hidden">
-      <Text color="$fg-muted" flexShrink={0}>
-        FILTER{bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}
-      </Text>
-      {filters.terms.length === 0 ? null : (
-        <Text color="$fg-muted" flexShrink={0} wrap="truncate">
-          terms={filters.terms.join("|")}
-        </Text>
-      )}
-      {filters.latest ? (
-        <Text color="$fg-muted" flexShrink={0}>
-          latest
-        </Text>
-      ) : null}
+    <TogglePillGroup label={label} flexShrink={0} minWidth={0} overflow="hidden">
       {QUEUE_TIMELINE_STATUS_BUCKETS.map((bucket) => (
-        <Box
+        <TogglePill
           key={bucket}
-          flexShrink={0}
-          onClick={onToggleBucket === undefined ? undefined : () => onToggleBucket(bucket)}
-        >
-          <Text color="$fg-muted">
-            [{buckets.has(bucket) ? "x" : " "}] {bucket}
-          </Text>
-        </Box>
+          label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
+          active={buckets.has(bucket)}
+          onToggle={() => onToggleBucket?.(bucket)}
+        />
       ))}
-    </Box>
+    </TogglePillGroup>
   )
 }
 
@@ -3569,10 +3574,29 @@ function ProjectedQueueTimeline({
         )}
         <TimelineRunnerBox projection={projection} />
         <TimelineStatusBox projection={projection} />
-        {/* A blank row sets the FILTER row apart from the boxes above it
-            (user directive 2026-07-16). */}
+        {/* A blank row sets the FILTER/coverage row apart from the boxes above
+            it (item D, 2026-07-16). */}
         <Box height={1} flexShrink={0} />
-        <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+        {/* FILTER pills + coverage share ONE row directly above the list (user
+            directive 2026-07-16, W1): the "... N more" / retained coverage reads
+            on the left, the very-dim FILTER toggle-pills right-align. The pills
+            always render (the filter is always live); the coverage text only
+            appears when rows exceed the pane or the window is bounded. */}
+        <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
+          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+            {projection.display.hidden === 0 ? null : (
+              <Text color="$fg-muted" wrap="truncate">
+                ... {projection.display.hidden} more
+              </Text>
+            )}
+            {projection.coverage.complete ? null : (
+              <Text color="$fg-warning" wrap="truncate">
+                retained since {projection.coverage.retainedSince}
+              </Text>
+            )}
+          </Box>
+          <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+        </Box>
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>
         ) : (
@@ -3621,10 +3645,6 @@ function ProjectedQueueTimeline({
               }}
             />
           </Box>
-        )}
-        {projection.display.hidden === 0 ? null : <Text color="$fg-muted">... {projection.display.hidden} more</Text>}
-        {projection.coverage.complete ? null : (
-          <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
         )}
         {fillHeight ? <Box flexGrow={1} minHeight={0} /> : null}
         <TimelineStatistics projection={projection} />

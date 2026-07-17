@@ -117,7 +117,7 @@ describe("queue timeline chrome 21106", () => {
       const doneRow = rowAt(text, mutedRowY)
       const prX = doneRow.indexOf("PR4.1")
       expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
-      // D: the row directly above FILTER is blank.
+      // D: the row directly above the FILTER/coverage row is blank.
       const filterY = rowIndexOf(text, "FILTER ")
       expect(rowAt(text, filterY - 1).trim(), "blank row above FILTER").toBe("")
     } finally {
@@ -259,13 +259,13 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       const filterLine = rowAt(app.text, rowIndexOf(app.text, "FILTER"))
       expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
-      expect(filterLine).toContain("[x] pending")
+      expect(filterLine).toContain("[p]ending")
     } finally {
       app.unmount()
     }
   })
 
-  it("renders only non-default FILTER dimensions plus the four status checkboxes", async () => {
+  it("renders only non-default FILTER dimensions plus the four status pills", async () => {
     const defaults = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection: defaults, nav: false, columns: 160 }))
@@ -274,10 +274,10 @@ describe("queue timeline chrome 21106", () => {
       const filterY = rowIndexOf(app.text, "FILTER")
       const filterLine = rowAt(app.text, filterY)
       expect(filterLine).toContain("since=6:00:00")
-      expect(filterLine).toContain("[x] pending")
-      expect(filterLine).toContain("[x] running")
-      expect(filterLine).toContain("[x] failed")
-      expect(filterLine).toContain("[x] done")
+      expect(filterLine).toContain("[p]ending")
+      expect(filterLine).toContain("[r]unning")
+      expect(filterLine).toContain("[f]ailed")
+      expect(filterLine).toContain("[d]one")
       expect(filterLine).not.toContain("terms=")
       expect(filterLine).not.toContain("latest=")
       expect(filterLine).not.toContain("status=")
@@ -293,9 +293,10 @@ describe("queue timeline chrome 21106", () => {
       await app2.waitForLayoutStable()
       const filterLine = rowAt(app2.text, rowIndexOf(app2.text, "FILTER"))
       expect(filterLine).toContain("terms=typecheck")
-      expect(filterLine).toContain("[ ] pending")
-      expect(filterLine).toContain("[x] failed")
-      expect(filterLine).toContain("[ ] done")
+      // Pills always render their label (bucket on/off is colour, not glyph).
+      expect(filterLine).toContain("[p]ending")
+      expect(filterLine).toContain("[f]ailed")
+      expect(filterLine).toContain("[d]one")
     } finally {
       app2.unmount()
     }

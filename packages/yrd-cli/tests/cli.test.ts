@@ -3847,7 +3847,10 @@ describe("runYrd", () => {
       )
       const rows = fixed.split("\n")
       const filter = rows.find((row) => row.includes("FILTER "))
-      expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
+      // The FILTER pills share the row with the left-aligned coverage text
+      // ("retained since …" / "... N more"), so assert the pill cluster is
+      // present rather than owning the whole row (W1, 2026-07-16).
+      expect.soft(filter).toContain("FILTER since=6:00:00 [p]ending [r]unning [f]ailed [d]one")
       const flow = rows.find((row) => row.includes("FLOW "))
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
       // Throughput rides the FLOW row as a per-24h landed-rate fact (landed=1
