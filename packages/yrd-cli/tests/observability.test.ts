@@ -15,6 +15,7 @@ import {
   YRD_LIFECYCLE_LEVELS,
   createYrdLogger,
   observeYrdLifecycle,
+  residentObservability,
   resolveYrdObservability,
 } from "../src/observability.ts"
 
@@ -50,15 +51,15 @@ afterEach(async () => {
 
 describe("Yrd observability controls", () => {
   it.each([
-    [{}, {}, { level: "warn", spans: false }],
-    [{}, { LOG_LEVEL: "info" }, { level: "info", spans: false }],
-    [{}, { DEBUG: "yrd:queue" }, { level: "warn", debug: "yrd:queue", spans: false }],
-    [{ verbose: 1 }, { LOG_LEVEL: "error" }, { level: "info", spans: false }],
-    [{ verbose: 2 }, { LOG_LEVEL: "error" }, { level: "debug", spans: true }],
-    [{ verbose: 3 }, { LOG_LEVEL: "error" }, { level: "trace", spans: true }],
-    [{ quiet: 1 }, { LOG_LEVEL: "trace" }, { level: "error", spans: false }],
-    [{ quiet: 2 }, { LOG_LEVEL: "trace" }, { level: "silent", spans: false }],
-    [{ logLevel: "debug" }, { LOG_LEVEL: "error" }, { level: "debug", spans: true }],
+    [{}, {}, { level: "warn", spans: false, explicitLevel: false }],
+    [{}, { LOG_LEVEL: "info" }, { level: "info", spans: false, explicitLevel: true }],
+    [{}, { DEBUG: "yrd:queue" }, { level: "warn", debug: "yrd:queue", spans: false, explicitLevel: false }],
+    [{ verbose: 1 }, { LOG_LEVEL: "error" }, { level: "info", spans: false, explicitLevel: true }],
+    [{ verbose: 2 }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
+    [{ verbose: 3 }, { LOG_LEVEL: "error" }, { level: "trace", spans: true, explicitLevel: true }],
+    [{ quiet: 1 }, { LOG_LEVEL: "trace" }, { level: "error", spans: false, explicitLevel: true }],
+    [{ quiet: 2 }, { LOG_LEVEL: "trace" }, { level: "silent", spans: false, explicitLevel: true }],
+    [{ logLevel: "debug" }, { LOG_LEVEL: "error" }, { level: "debug", spans: true, explicitLevel: true }],
   ] as const)("resolves CLI controls before LOG_LEVEL while DEBUG only filters namespaces", (flags, env, expected) => {
     expect(resolveYrdObservability(flags, env)).toEqual(expected)
   })
@@ -69,6 +70,36 @@ describe("Yrd observability controls", () => {
     [{}, { LOG_LEVEL: "chatty" }, "LOG_LEVEL must be one of"],
   ] as const)("rejects contradictory or invalid controls", (flags, env, message) => {
     expect(() => resolveYrdObservability(flags, env)).toThrow(message)
+  })
+})
+
+describe("resident runner observability", () => {
+  it("raises the default warn to info so span completions (incl successes) print", () => {
+    // The long-lived follow-runner's stdout IS a log stream; at the default
+    // warn it never prints a completed step/run/compose. Bump warn → info only
+    // when the operator has NOT chosen a level, so every settlement shows.
+    const base = resolveYrdObservability({}, {})
+    expect(base).toMatchObject({ level: "warn", explicitLevel: false })
+    expect(residentObservability(base)).toMatchObject({ level: "info", explicitLevel: false })
+  })
+
+  it("never overrides an explicit operator level (--log-level / LOG_LEVEL / -v / -q)", () => {
+    // Each of these is an explicit choice; the resident honours it verbatim.
+    for (const config of [
+      resolveYrdObservability({}, { LOG_LEVEL: "warn" }), // explicit warn stays warn
+      resolveYrdObservability({}, { LOG_LEVEL: "error" }),
+      resolveYrdObservability({ quiet: 1 }, {}),
+      resolveYrdObservability({ verbose: 2 }, {}),
+      resolveYrdObservability({ logLevel: "debug" }, {}),
+    ]) {
+      expect(residentObservability(config)).toEqual(config)
+    }
+  })
+
+  it("leaves a non-default resolved level untouched even without an explicit flag", () => {
+    // Defensive: only the exact default (warn + not-explicit) is bumped.
+    const trace = { level: "trace", spans: true, explicitLevel: false } as const
+    expect(residentObservability(trace)).toEqual(trace)
   })
 })
 

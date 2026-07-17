@@ -15,6 +15,9 @@ export type YrdObservability = Readonly<{
   debug?: string
   file?: string
   spans: boolean
+  /** True when the operator chose the level (--log-level / LOG_LEVEL / -v / -q).
+   * The resident follow-runner only bumps its default level when this is false. */
+  explicitLevel: boolean
 }>
 
 const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "silent"] as const
@@ -79,7 +82,20 @@ export function resolveYrdObservability(
     ...(setting(env.DEBUG) === undefined ? {} : { debug: setting(env.DEBUG) }),
     ...(setting(env.LOGGILY_FILE) === undefined ? {} : { file: setting(env.LOGGILY_FILE) }),
     spans: selected === "trace" || selected === "debug",
+    explicitLevel: explicit !== undefined || configured !== undefined || verbose > 0 || quiet > 0,
   })
+}
+
+/** The resident follow-runner's stdout IS a log stream, so at the default `warn`
+ * it would never print a completed step/run/compose — the success case simply
+ * vanishes. Bump the resolved policy to `info` at the resident entry, but ONLY
+ * when the operator left the level at its default (never overriding an explicit
+ * `--log-level`/`LOG_LEVEL`/`-v`/`-q`). Scoping the bump to the resident process
+ * keeps one-shot commands at `warn`, so they never gain `yrd:journal:lock`
+ * INFO spam. */
+export function residentObservability(config: YrdObservability): YrdObservability {
+  if (config.explicitLevel || config.level !== "warn") return config
+  return Object.freeze({ ...config, level: "info" })
 }
 
 /** Create the one host-owned logger fan-out. Both sinks share the exact same
