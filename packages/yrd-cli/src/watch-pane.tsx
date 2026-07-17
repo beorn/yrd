@@ -490,6 +490,20 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
     setNewRows(0)
   }
 
+  // Jump-to-newest (item 4-new): the `↓ N new` cue resumes default-follow at
+  // the newest row (first running, else newest finished) and clears the count.
+  // It reuses the exact `defaultCursorKey` the un-pinned pane already follows,
+  // so clicking the cue lands where the cursor would sit without a manual pin.
+  const jumpToNewest = (): void => {
+    const targetKey = defaultCursorKey ?? rows[0]?.key
+    if (targetKey === undefined) return
+    const target = rows.find((row) => row.key === targetKey)
+    setManualCursor(false)
+    setCursorRowKey(targetKey)
+    setSelectedPr(target?.pr ?? pr)
+    setNewRows(0)
+  }
+
   const selectedRow = rows[cursor]
   const detailPr = pr ?? selectedPr
   const detailData =
@@ -532,6 +546,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
         visibleBuckets={visibleBuckets}
         onToggleBucket={toggleBucket}
         freshRows={newRows}
+        onJumpToNewest={jumpToNewest}
       />
     )
   const selectedDetail =
@@ -590,7 +605,12 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   // horizontal padding keeps content off the pane edge; the header rows sit
   // flush at the top.
   const framedTimeline = (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
+    // The QUEUE pane is its own selection scope (item 4a): a drag started here
+    // resolves to this Box as the nearest `contain` boundary, so it never grows
+    // across the SplitPane divider into the DETAIL pane. `contain` keeps the
+    // rows selectable while bounding the range; the RUNNER/STATS boxes nest
+    // their own tighter scopes inside it.
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
       {timeline}
     </Box>
   )
@@ -599,7 +619,18 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   const selectedProjectedRow = projectedRows?.[cursor]
   const detailIdentity = selectedProjectedRow === undefined ? undefined : queueRowIdentity(selectedProjectedRow)
   const framedDetail = (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
+    // The DETAIL pane is its own selection scope (item 4a): a drag inside the
+    // detail body resolves to this Box as the nearest `contain` boundary, so it
+    // cannot grow back across the divider into the QUEUE pane.
+    <Box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      minWidth={0}
+      minHeight={0}
+      paddingX={1}
+      userSelect="contain"
+    >
       <Text bold wrap="truncate">
         {detailIdentity ?? "No queue row selected."}
       </Text>

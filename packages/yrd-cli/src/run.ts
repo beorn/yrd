@@ -369,11 +369,27 @@ const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "other",
 ]
 
-function queueTimelineRowLimit(io: YrdCliIO): number {
+/**
+ * Fixed rows the QUEUE pane spends on chrome OUTSIDE the row ListView, so the
+ * row cap fills the rest of the pane height (item 5): the QUEUE tab row, the
+ * RUNNER box, the FILTER row + its blank separator, the STATS box, the
+ * TIME/STATUS/… header, and the `... N more` / coverage disclosures. Derived
+ * from actual rendered chrome rather than a bare magic number so it tracks the
+ * layout. NOTE: watch-style's #68 folds the FILTER row into the `... N more`
+ * coverage row and drops the standalone FILTER row + its blank separator —
+ * shrinking this reserve by ~2 — so re-tune to ~12 when that composes.
+ */
+const QUEUE_PANE_CHROME_ROWS = 14
+
+/**
+ * The ListView row cap, derived from the pane height so the rows fill it: the
+ * terminal row count less the fixed chrome the QUEUE pane reserves. The
+ * ListView virtualizes, so an over-tall row set scrolls rather than overflowing.
+ * A headless caller (no `io.rows`) falls back to a conservative page.
+ */
+export function queueTimelineRowLimit(io: Pick<YrdCliIO, "rows">): number {
   if (io.rows === undefined) return 20
-  // Tabs, metadata, worst-case abnormal STATUS box, filter, columns,
-  // STATISTICS, and cap/coverage disclosures remain outside ListView.
-  return Math.max(1, io.rows - 14)
+  return Math.max(1, io.rows - QUEUE_PANE_CHROME_ROWS)
 }
 
 function queueTimelineWindow(value: string | undefined): number {
