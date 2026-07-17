@@ -309,7 +309,7 @@ describe("queue timeline 21106 contract", () => {
       expect(header, `width ${width}`).toContain("TIME")
       const filter = rows[filterLine]
       if (filter === undefined) throw new Error("expected the FILTER row")
-      expect(filter.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
+      expect(filter.trim()).toBe("FILTER since=6:00:00 [p]ending [r]unning [f]ailed [d]one")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })

@@ -234,26 +234,26 @@ describe("QueueWatchFrame 21106 interaction", () => {
     }
   })
 
-  it("toggles status buckets with p/r/f/d and reflects them in the checkboxes", async () => {
+  it("toggles status buckets with p/r/f/d and filters the timeline rows", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       expect(app.text).toContain("PR5.1")
-      expect(app.text).toContain("[x] failed")
+      // The status buckets are TogglePills now (label constant, state by colour),
+      // so the toggle is verified by the rows appearing/disappearing, not by an
+      // [x]/[ ] checkbox glyph.
+      expect(app.text, "the failed pill renders").toContain("[f]ailed")
 
       await app.press("f")
       await waitFor(() => !app.text.includes("PR5.1"))
-      expect(app.text).toContain("[ ] failed")
 
       await app.press("f")
       await waitFor(() => app.text.includes("PR5.1"))
-      expect(app.text).toContain("[x] failed")
 
       await app.press("d")
       await waitFor(() => !app.text.includes("PR4.1"))
-      expect(app.text).toContain("[ ] done")
 
       // `p` toggles the pending bucket — it never pauses.
       await app.press("p")
@@ -267,20 +267,21 @@ describe("QueueWatchFrame 21106 interaction", () => {
     }
   })
 
-  it("toggles a status bucket by clicking its checkbox", async () => {
+  it("toggles a status bucket by clicking its pill", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       expect(app.text).toContain("PR42.1")
-      const filterY = rowIndexOf(app.text, "[x] running")
-      const filterX = app.text.split("\n")[filterY]?.indexOf("[x] running") ?? -1
+      const filterY = rowIndexOf(app.text, "[r]unning")
+      const filterX = app.text.split("\n")[filterY]?.indexOf("[r]unning") ?? -1
       expect(filterY).toBeGreaterThan(0)
       expect(filterX).toBeGreaterThan(0)
+      // Clicking the [r]unning pill toggles the running bucket off — the running
+      // rows drop out (state is colour, so the filtering behaviour is the proof).
       await app.click(filterX + 1, filterY)
       await waitFor(() => !app.text.includes("PR42.1"))
-      expect(app.text).toContain("[ ] running")
     } finally {
       app.unmount()
     }

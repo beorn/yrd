@@ -14,7 +14,21 @@ import {
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
-import { Accordion, Box, Link, ListView, Pulse, Tab, TabList, Table, Tabs, Text, type TableColumn } from "silvery"
+import {
+  Accordion,
+  Box,
+  Link,
+  ListView,
+  Pulse,
+  Tab,
+  TabList,
+  Table,
+  Tabs,
+  Text,
+  TogglePill,
+  TogglePillGroup,
+  type TableColumn,
+} from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import {
   formatDuration,
@@ -2326,8 +2340,8 @@ export function PRDetailView({
         </Text>
       )}
       <Text>
-        <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
-        {pr.headSha}
+        <Text bold>SOURCE</Text> <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {pr.branch} <Text bold>REV</Text>{" "}
+        {pr.revision} <Text bold>HEAD</Text> {pr.headSha}
       </Text>
       <Text>
         <Text bold>BASE</Text> {pr.base}
@@ -2698,24 +2712,13 @@ const TIMELINE_STATE_CAP = 20
  */
 const BRANCH_ICON = ""
 
-/** A branch name prefixed with the Powerline branch glyph. */
-function branchLabel(branch: string): string {
-  return `${BRANCH_ICON} ${branch}`
-}
-
 /**
- * A branch name whose Powerline glyph is dimmed apart from the name, so the
- * glyph reads as a subtle marker rather than competing with the branch text
- * (item W3, 2026-07-16). Used in the DETAIL surfaces this pane owns; the
- * timeline-row glyph is styled by its own row renderer.
+ * The branch glyph renders dim/subtle everywhere (user directive 2026-07-16,
+ * W2) — a quiet decoration on the branch name, never competing with it. On a
+ * cursor-selected row the glyph follows the selection foreground instead, so
+ * the whole row reads as one selected unit.
  */
-function BranchLabel({ branch }: { branch: string }) {
-  return (
-    <>
-      <Text color="$fg-muted">{BRANCH_ICON}</Text> {branch}
-    </>
-  )
-}
+const BRANCH_ICON_COLOR = "$fg-muted"
 
 /**
  * Stable no-op passed as ListView `onItemHover` so hovering a queue row does
@@ -2750,9 +2753,10 @@ function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): Time
 /**
  * The DETAIL pane's flush-top identity title for a selected row (items a/i,
  * 2026-07-16): the run identity emphasized like the QUEUE tab (`$fg-warning`
- * bold) with a dimmed branch glyph, and the run's STATUS + OUTCOME right-aligned
- * on the same row, colorized by run outcome (`passed, integrated` green,
- * `failed, rejected` red). Reads like the row, not the word "DETAIL".
+ * bold) with the dim branch glyph (the shared `BRANCH_ICON_COLOR`, W2), and the
+ * run's STATUS + OUTCOME right-aligned on the same row, colorized by run outcome
+ * (`passed, integrated` green, `failed, rejected` red). Reads like the row, not
+ * the word "DETAIL".
  */
 export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRow; data?: QueueShowData }) {
   if (row === undefined) {
@@ -2766,7 +2770,8 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
   return (
     <Box flexDirection="row" justifyContent="space-between" minWidth={0}>
       <Text bold color="$fg-warning" wrap="truncate" minWidth={0}>
-        {timelineRunCell(row, false).text} {row.pr}.{row.revision} <BranchLabel branch={row.branch} />
+        {timelineRunCell(row, false).text} {row.pr}.{row.revision} <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text>{" "}
+        {row.branch}
       </Text>
       {outcome === undefined ? null : (
         <Text bold color={outcome.color} flexShrink={0}>
@@ -3100,8 +3105,12 @@ function TimelineProjectedRow({
             {row.pr}.{row.revision}
           </Text>
           <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
+              {BRANCH_ICON}
+            </Text>
             <Text color={forcedFg} wrap="truncate" minWidth={0}>
-              {branchLabel(row.branch)}
+              {" "}
+              {row.branch}
             </Text>
             {step.text === "" ? null : (
               <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
@@ -3505,33 +3514,25 @@ function TimelineFilterLine({
   // unbounded window shows everything and prints no `since=` (user directive
   // 2026-07-16).
   const bounded = filters.windowMs < QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
+  // The FILTER label carries the non-default dimensions as a dim prefix; the
+  // four status buckets are TogglePills keyed by their p/r/f/d letter
+  // (`[p]ending`…). The whole cluster sits very dim and lifts together on hover
+  // (silvery TogglePillGroup), and clicking a pill toggles its bucket.
+  const label =
+    `FILTER${bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}` +
+    `${filters.terms.length === 0 ? "" : ` terms=${filters.terms.join("|")}`}` +
+    `${filters.latest ? " latest" : ""}`
   return (
-    <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0} overflow="hidden">
-      <Text color="$fg-muted" flexShrink={0}>
-        FILTER{bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}
-      </Text>
-      {filters.terms.length === 0 ? null : (
-        <Text color="$fg-muted" flexShrink={0} wrap="truncate">
-          terms={filters.terms.join("|")}
-        </Text>
-      )}
-      {filters.latest ? (
-        <Text color="$fg-muted" flexShrink={0}>
-          latest
-        </Text>
-      ) : null}
+    <TogglePillGroup label={label} flexShrink={0} minWidth={0} overflow="hidden">
       {QUEUE_TIMELINE_STATUS_BUCKETS.map((bucket) => (
-        <Box
+        <TogglePill
           key={bucket}
-          flexShrink={0}
-          onClick={onToggleBucket === undefined ? undefined : () => onToggleBucket(bucket)}
-        >
-          <Text color="$fg-muted">
-            [{buckets.has(bucket) ? "x" : " "}] {bucket}
-          </Text>
-        </Box>
+          label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
+          active={buckets.has(bucket)}
+          onToggle={() => onToggleBucket?.(bucket)}
+        />
       ))}
-    </Box>
+    </TogglePillGroup>
   )
 }
 
@@ -3609,10 +3610,29 @@ function ProjectedQueueTimeline({
         )}
         <TimelineRunnerBox projection={projection} />
         <TimelineStatusBox projection={projection} />
-        {/* A blank row sets the FILTER row apart from the boxes above it
-            (user directive 2026-07-16). */}
+        {/* A blank row sets the FILTER/coverage row apart from the boxes above
+            it (item D, 2026-07-16). */}
         <Box height={1} flexShrink={0} />
-        <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+        {/* FILTER pills + coverage share ONE row directly above the list (user
+            directive 2026-07-16, W1): the "... N more" / retained coverage reads
+            on the left, the very-dim FILTER toggle-pills right-align. The pills
+            always render (the filter is always live); the coverage text only
+            appears when rows exceed the pane or the window is bounded. */}
+        <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
+          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+            {projection.display.hidden === 0 ? null : (
+              <Text color="$fg-muted" wrap="truncate">
+                ... {projection.display.hidden} more
+              </Text>
+            )}
+            {projection.coverage.complete ? null : (
+              <Text color="$fg-warning" wrap="truncate">
+                retained since {projection.coverage.retainedSince}
+              </Text>
+            )}
+          </Box>
+          <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+        </Box>
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>
         ) : (
@@ -3661,10 +3681,6 @@ function ProjectedQueueTimeline({
               }}
             />
           </Box>
-        )}
-        {projection.display.hidden === 0 ? null : <Text color="$fg-muted">... {projection.display.hidden} more</Text>}
-        {projection.coverage.complete ? null : (
-          <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
         )}
         {fillHeight ? <Box flexGrow={1} minHeight={0} /> : null}
         <TimelineStatistics projection={projection} />
