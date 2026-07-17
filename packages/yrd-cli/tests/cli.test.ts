@@ -3259,6 +3259,15 @@ describe("runYrd", () => {
           p90Ms: 100 * minute,
           maxMs: 100 * minute,
         },
+        // R2 (rejected, 20m) + R3 (env-refused, 30m); the failed complement.
+        failedOnly: {
+          n: 2,
+          minMs: 20 * minute,
+          avgMs: 25 * minute,
+          p50Ms: 25 * minute,
+          p90Ms: 30 * minute,
+          maxMs: 30 * minute,
+        },
       },
       queueWait: {
         n: 5,
@@ -3278,6 +3287,7 @@ describe("runYrd", () => {
       activeRun: {
         allTerminal: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
         integratedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
+        failedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
       },
       queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
     })
@@ -3546,7 +3556,8 @@ describe("runYrd", () => {
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
     expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(rows.indexOf(header!) - 1)
-    expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(rows.indexOf(second!))
+    // The windowed TimeStatsBox grid (respec item 6) leads with the FLOW box.
+    expect(rows.findIndex((row) => row.includes("FLOW"))).toBeGreaterThan(rows.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3842,18 +3853,24 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          { width, height: 30, plain: true },
+          // Height fits the windowed TimeStatsBox grid (respec item 6). The
+          // standalone QueueTimelineView has no fillHeight list-scroll, so a box
+          // tuned to the old short STATS box would clip the header at a narrow
+          // tier (2x2 grid). Production (QueueWatchFrame) keeps the header via
+          // the scrolling list at any height.
+          { width, height: 44, plain: true },
         ),
       )
       const rows = fixed.split("\n")
       const filter = rows.find((row) => row.includes("FILTER "))
       expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
-      const flow = rows.find((row) => row.includes("FLOW "))
-      expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
-      // Throughput rides the FLOW row as a per-24h landed-rate fact (landed=1
-      // over the 6h window → 4/24h), appended after the existing facts. It sits
-      // past the 80-col truncation boundary, so only assert it where it fits.
-      if (width >= 120) expect.soft(flow).toContain("throughput=4/24h")
+      // The windowed TimeStatsBox grid (respec item 6) reads the SAME consolidated
+      // queueFlowMetrics aggregate, windowed per box, rather than a single FLOW
+      // stat row, so it leads with a bordered FLOW box (RUNS / INTEGRATED / FAILS)
+      // at every tier. The landed per-24h throughput fact stays in the aggregate
+      // (projection.metrics.throughput) for --json consumers.
+      expect.soft(rows.some((row) => row.includes("╭─ FLOW "))).toBe(true)
+      expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).not.toContain("STEP")
@@ -5693,7 +5710,10 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    expect(laterQueue.stdout()).toContain("oldest=1:00")
+    // The windowed TimeStatsBox grid (respec item 6) replaced the single STATS
+    // box; the old ROWS "oldest=" cell has no place among the FLOW / TIME boxes,
+    // so the queue renders the FLOW throughput box instead.
+    expect(laterQueue.stdout()).toContain("FLOW")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
