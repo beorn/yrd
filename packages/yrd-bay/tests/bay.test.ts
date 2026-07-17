@@ -1004,6 +1004,48 @@ describe("withBays", () => {
     })
   })
 
+  it("retires the current recut proof when a new authored head starts another revision", async () => {
+    await using app = (await createHarness()).app
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+
+    await app.bays.submit({
+      branch: "issue/recut-then-author",
+      headSha: HEAD_1,
+      baseSha: BASE,
+      draft: true,
+    })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: BASE,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+    })
+
+    await app.bays.intake({
+      branch: "issue/recut-then-author",
+      headSha: "3".repeat(40),
+      base: "main",
+      baseSha: BASE,
+    })
+
+    const pr = app.bays.pr("PR1")
+    expect(pr).toMatchObject({
+      revision: 3,
+      headSha: "3".repeat(40),
+      revisions: [
+        { revision: 1, headSha: HEAD_1 },
+        { revision: 2, headSha: HEAD_2, recut: { fromRevision: 1, treeSha, patchId } },
+        { revision: 3, headSha: "3".repeat(40) },
+      ],
+    })
+    expect(pr?.recut).toBeUndefined()
+    expect(pr?.revisions[2]?.recut).toBeUndefined()
+  })
+
   it("keeps the selected immutable revision correlation when recutting an older payload", async () => {
     await using app = (await createHarness()).app
     const sourceCorrelation = { namespace: "tribe-request", id: "source" }
