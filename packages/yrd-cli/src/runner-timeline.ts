@@ -18,7 +18,7 @@ import type { Event } from "loggily"
 
 /** Powerline branch glyph (U+E0A0), the same BRANCH_ICON the watch UI prefixes
  * onto every branch name (user directive 2026-07-16). */
-export const TIMELINE_BRANCH_ICON = ""
+export const TIMELINE_BRANCH_ICON = ""
 
 /** The status → row glyph map (mirrors the watch timeline's statusGlyph). */
 export function timelineStatusGlyph(status: string): string {
