@@ -229,7 +229,7 @@ export type QueueFlowMetrics = Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
     // Active duration of the failed Runs (rejected + env-refused + canceled).
-    // Drives the windowed TIME FAILED box; the complement of integratedOnly.
+    // Drives the TIME box FAILED section; the complement of integratedOnly.
     failedOnly: DurationDistribution
   }>
   queueWait: QueueWaitDistribution
@@ -3505,11 +3505,11 @@ function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection
   )
 }
 
-// The single STATS box was replaced by the side-by-side windowed TimeStatsBox
-// surface (user respec item 6). It renders from `time-stats-box.tsx`, which
-// windows the SAME consolidated `queueFlowMetrics` aggregate (throughput +
-// per-24h + oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via
-// `time-stats.ts`.
+// The single STATS box was replaced by the windowed TimeStatsBox surface: a
+// FLOW throughput box beside a TIME box whose INTEGRATED/FAILED/WAIT sections
+// stack. It renders from `time-stats-box.tsx`, which windows the SAME
+// consolidated `queueFlowMetrics` aggregate (throughput + per-24h +
+// oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via `time-stats.ts`.
 
 /** The four operator-facing status buckets (user respec 2026-07-15). */
 export type QueueTimelineStatusBucket = "pending" | "running" | "failed" | "done"

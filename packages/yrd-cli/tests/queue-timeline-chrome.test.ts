@@ -429,7 +429,7 @@ describe("queue timeline chrome 21106", () => {
       // the pane by a flex spacer. The keybindings footer was removed (item h),
       // so there is no footer to anchor against — instead the grid's last box-
       // border row (╰) hugs the pane's last content row. Height/tier-independent:
-      // whether the grid renders 4-across, 2x2, or 1-column, the lowest box
+      // whether FLOW + TIME render side by side or stacked, the lowest box
       // bottom border sits on (or one row above) the last non-blank row.
       const rows = text.split("\n")
       const lastY = rows.findLastIndex((row) => row.trim() !== "")
