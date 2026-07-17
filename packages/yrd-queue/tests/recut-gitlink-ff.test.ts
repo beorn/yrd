@@ -533,6 +533,161 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
   })
 
+  /**
+   * 21461: when the recut's scratch worktree has the submodule CHECKED OUT,
+   * git's merge machinery proves the gitlink ancestry itself and fast-forwards
+   * with NO conflict — the conflict-time classification never runs. These rows
+   * force that environment by initializing the submodule inside the scratch
+   * right after `worktree add` (the integrator's persistent-worktree shape),
+   * and pin the mechanism by asserting the rebase succeeded first try with no
+   * conflict-resolution `update-index --cacheinfo` call.
+   */
+  function scratchAutoFfProcess(delegate: { run(request: ProcessRequest): Promise<ProcessResult> }) {
+    const seen: string[][] = []
+    const process = {
+      run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        seen.push([...request.argv])
+        const result = await delegate.run(request)
+        const argv = request.argv
+        const worktreeAt = argv.indexOf("worktree")
+        if (result.exitCode === 0 && worktreeAt !== -1 && argv[worktreeAt + 1] === "add") {
+          // argv tail is `… worktree add --detach <path> <ref>`.
+          const scratchPath = argv[argv.length - 2]
+          if (scratchPath === undefined) throw new Error(`unexpected worktree-add argv: ${argv.join(" ")}`)
+          await git(scratchPath, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "dep"])
+        }
+        return result
+      },
+    }
+    const initialRebases = () =>
+      seen.filter((argv) => argv.includes("rebase") && !argv.includes("--abort") && !argv.includes("--continue"))
+    const conflictResolutions = () =>
+      seen.filter((argv) => argv.includes("update-index") && argv.includes("--cacheinfo"))
+    return { process, initialRebases, conflictResolutions }
+  }
+
+  it("certifies a carrier gitlink git auto-fast-forwarded without a conflict (21461)", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    const target = await advanceBase(repo, moduleC)
+
+    const dirtyBefore = await git(repo, ["status", "--porcelain"])
+    await using delegate = createProcess()
+    const { process, initialRebases, conflictResolutions } = scratchAutoFfProcess(delegate)
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
+    })
+
+    // Mechanism pin: the rebase fast-forwarded the gitlink itself — one initial
+    // rebase, no `rebase --continue`, zero conflict-time pin resolutions.
+    // Without this, the row silently degenerates to the already-tested
+    // conflict path.
+    expect(initialRebases()).toHaveLength(1)
+    expect(conflictResolutions()).toHaveLength(0)
+
+    expect(result.unchanged).toBe(false)
+    expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+    expect((await git(repo, ["diff", "--name-only", target, result.headSha])).split("\n").toSorted()).toEqual([
+      "dep",
+      "feature.txt",
+    ])
+    expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+  })
+
+  it("still refuses non-gitlink tampering on the auto-fast-forward path", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+
+    await using delegate = createProcess()
+    const inner = scratchAutoFfProcess(delegate)
+    let tamper = true
+    const process = {
+      run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        const result = await inner.process.run(request)
+        if (tamper && result.exitCode === 0 && request.argv.includes("rebase")) {
+          tamper = false
+          const path = request.cwd ?? repo
+          await writeFile(join(path, "feature.txt"), "tampered\n")
+          await git(path, ["add", "feature.txt"])
+          await git(path, [
+            "-c",
+            "user.name=Yrd Queue",
+            "-c",
+            "user.email=yrd-queue@example.invalid",
+            "commit",
+            "--amend",
+            "-qm",
+            "tamper authored payload",
+          ])
+        }
+        return result
+      },
+    }
+
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-identity",
+        message: expect.stringContaining("changed blob, mode, status, path, or gitlink identity"),
+      },
+    })
+  })
+
+  it("stays fail-closed when the auto-fast-forward cannot be re-proved in the integrator's store", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    // Deliberately NO fetch into repo/dep: the scratch's fresh submodule clone
+    // lets git fast-forward, but the integrator's own submodule store cannot
+    // re-prove the ancestry — the path must stay unclassified and the strict
+    // certificate must refuse rather than trust the scratch.
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+
+    await using delegate = createProcess()
+    const { process } = scratchAutoFfProcess(delegate)
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("changed stable patch identity"),
+      },
+    })
+  })
+
   it("refuses loudly and names the object when the carrier pin is absent locally", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleC = await moduleCommit(module, "main", moduleA, "c")

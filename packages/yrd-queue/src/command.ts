@@ -484,7 +484,6 @@ function validateEnvironmentDeclaration(
   })
 }
 
-
 function compareCommandEvidence(
   parent: CommandEvidence,
   parentCwd: string,
@@ -1320,6 +1319,25 @@ async function recutDirectPR(
         message: `yrd: PR '${input.id}' recut has no stable patch identity`,
       })
     }
+    // 21461: git's merge machinery fast-forwards a carrier gitlink WITHOUT a
+    // conflict when the submodule is checked out where the rebase runs (ORT
+    // proves the ancestry itself), so the conflict-time classification above
+    // never sees it. Left unclassified, the path stays inside the strict
+    // patch-id certificate whose from-side differs by construction whenever the
+    // base advanced the same submodule — a guaranteed "changed stable patch
+    // identity" refusal for a byte-identical payload (a0's PR541, four
+    // revisions). Classify those paths post-rebase with the same ancestry
+    // proof the conflict path uses; unprovable or base-won paths stay
+    // unclassified and strict certification keeps owning them.
+    await classifyAutoFastForwardedCarrierGitlinks(git, repo, path, {
+      overlap,
+      skip: absorbedSet,
+      sourceBase,
+      targetSha: target.sha,
+      authoredHead: input.headSha,
+      recutHead: headSha,
+      into: ffCarrierGitlinks,
+    })
     // Fast-forward-resolved carrier gitlinks legitimately change their diff
     // from-side (the base advanced the same submodule to an ancestor of the
     // carrier's pin), so exclude them from the strict patch-id equivalence and
@@ -2200,6 +2218,66 @@ async function resolveGitlinkFastForward(
   return {
     kind: "refuse",
     message: `submodule '${path}' pins '${ours}' and '${theirs}' have diverged; neither is an ancestor of the other — resolve it in the submodule and resubmit`,
+  }
+}
+
+/**
+ * Post-rebase classification of carrier gitlinks that git fast-forwarded
+ * WITHOUT a conflict (21461) — the silent sibling of resolveGitlinkFastForward's
+ * "carrier" verdict, proved with the same primitive (ancestry in the
+ * submodule's local store). A path in `overlap` is classified into `into` only
+ * when ALL of:
+ *  - the recut materialized exactly the authored end pin (git picked the
+ *    carrier side),
+ *  - the base actually advanced the from-side pin (the asymmetry that would
+ *    otherwise fail the strict patch-id certificate), and
+ *  - the target pin is an ancestor of the authored pin in the submodule's
+ *    local store (the same fast-forward legitimacy proof the conflict path
+ *    demands).
+ * Anything unprovable — no gitlink at one of the four corners, a missing
+ * submodule checkout or object, unrelated pins — is left UNCLASSIFIED so the
+ * strict certificate keeps owning it; this function never widens what a
+ * conflict-time "carrier" classification could have admitted.
+ */
+async function classifyAutoFastForwardedCarrierGitlinks(
+  git: Git,
+  repo: string,
+  scratch: string,
+  args: Readonly<{
+    overlap: readonly string[]
+    skip: ReadonlySet<string>
+    sourceBase: string
+    targetSha: string
+    authoredHead: string
+    recutHead: string
+    into: Set<string>
+  }>,
+): Promise<void> {
+  for (const gitlink of args.overlap) {
+    if (args.into.has(gitlink) || args.skip.has(gitlink)) continue
+    const authoredPin = await readGitlink(git, repo, args.authoredHead, gitlink)
+    if (authoredPin === undefined) continue
+    const materializedPin = await readGitlink(git, scratch, args.recutHead, gitlink)
+    if (materializedPin !== authoredPin) continue
+    const sourcePin = await readGitlink(git, repo, args.sourceBase, gitlink)
+    const targetPin = await readGitlink(git, repo, args.targetSha, gitlink)
+    if (sourcePin === undefined || targetPin === undefined) continue
+    if (targetPin === sourcePin || targetPin === authoredPin) continue
+    const submodule = join(repo, gitlink)
+    try {
+      await realpath(submodule)
+    } catch {
+      continue
+    }
+    let present = true
+    for (const oid of [targetPin, authoredPin]) {
+      if ((await git.run(submodule, ["cat-file", "-e", `${oid}^{commit}`], true)).code !== 0) {
+        present = false
+        break
+      }
+    }
+    if (!present) continue
+    if (await isAncestor(git, submodule, targetPin, authoredPin)) args.into.add(gitlink)
   }
 }
 
