@@ -1,4 +1,4 @@
-// @failure Cross-pane mouse drags select the whole screen because the QUEUE / DETAIL / RUNNER / STATS surfaces declare no selection scope, so a drag resolves to their common screen root.
+// @failure Cross-pane mouse drags select the whole screen because the QUEUE / DETAIL / STATUS / STATS surfaces declare no selection scope, so a drag resolves to their common screen root.
 // @level l2
 // @consumer @yrd/cli watch
 
@@ -74,11 +74,19 @@ function twoPaneSnapshot() {
   const runningRun = fixtureRun("RR", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
     steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
   })
-  return fixtureSnapshot(fixtureResult([...prs, runningPr], [runningRun]), { rowLimit: 20 })
+  return fixtureSnapshot(
+    fixtureResult([...prs, runningPr], [runningRun], {
+      base: "main",
+      reason: "operator freeze",
+      allowedPRs: [],
+      pausedAt: "2026-07-13T11:45:00.000Z",
+    }),
+    { rowLimit: 20 },
+  )
 }
 
 describe("queue watch per-pane selection scopes (item 4a)", () => {
-  it("gives QUEUE, DETAIL, RUNNER, and STATS each their own contain scope", async () => {
+  it("gives QUEUE, DETAIL, exceptional STATUS, and STATS each their own contain scope", async () => {
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot: twoPaneSnapshot() }))
     try {
@@ -110,13 +118,13 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
       expect(sameScope(detailScope, queueScope), "QUEUE and DETAIL are different scopes").toBe(false)
       expect(queueScope.right, "QUEUE scope ends before DETAIL scope begins").toBeLessThan(detailScope.left)
 
-      // The RUNNER box and STATS box are each their own scope, nested inside the
+      // The exceptional STATUS box and STATS box are each their own scope, nested inside the
       // QUEUE pane — a drag inside one never grows into the list or its sibling.
-      const runnerScope = scopeAt(app, pointOf(text, "84042", 0, LEFT_MAX))
+      const statusScope = scopeAt(app, pointOf(text, "HOLD THE LINE", 0, LEFT_MAX))
       const statsScope = scopeAt(app, pointOf(text, "STATS", 0, LEFT_MAX))
-      expect(nestedWithin(runnerScope, queueScope), "RUNNER is its own scope inside QUEUE").toBe(true)
+      expect(nestedWithin(statusScope, queueScope), "STATUS is its own scope inside QUEUE").toBe(true)
       expect(nestedWithin(statsScope, queueScope), "STATS is its own scope inside QUEUE").toBe(true)
-      expect(sameScope(runnerScope, statsScope), "RUNNER and STATS are different scopes").toBe(false)
+      expect(sameScope(statusScope, statsScope), "STATUS and STATS are different scopes").toBe(false)
     } finally {
       app.unmount()
     }

@@ -13,8 +13,8 @@ import {
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 
-// Items 2/3/5 — the pills row moves BELOW the list (new order RUNNER → table
-// header → rows → pills → stats), the "FILTER" label and the [p] brackets are
+// Items 2/3/5 — the pills row moves BELOW the list (new order table header →
+// rows → pills → stats), the "FILTER" label and the [p] brackets are
 // gone (pills are plain words, hotkey hint carried by a bold first letter — the
 // bold weight is verified by silvery's TogglePill unit test), and the blank row
 // above the table header is removed.
@@ -48,7 +48,7 @@ function rowIndex(text: string, pattern: RegExp): number {
 }
 
 describe("queue timeline FILTER pills row (items 2/3/5)", () => {
-  it("orders RUNNER → table header → rows → pills → stats with no blank above the header", async () => {
+  it("orders table header → rows → pills → stats with no blank above the header", async () => {
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(
       createElement(QueueTimelineView, {
@@ -62,14 +62,14 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
     )
     try {
       await app.waitForLayoutStable()
-      const runnerY = rowIndex(app.text, /RUNNER/u)
       const headerY = rowIndex(app.text, /\bTIME\b/u)
       const firstRowY = rowIndex(app.text, /PR0\.\d/u)
       const pillsY = rowIndex(app.text, /pending.*running.*failed.*done/u)
       const statsY = rowIndex(app.text, /╭─ STATS /u)
 
-      expect(runnerY, "RUNNER box renders").toBeGreaterThanOrEqual(0)
-      expect(headerY, "table header renders").toBeGreaterThan(runnerY)
+      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).not.toContain("╭─ STATUS ")
+      expect(headerY, "table header renders").toBeGreaterThanOrEqual(0)
       expect(firstRowY, "rows render below the header").toBeGreaterThan(headerY)
       expect(pillsY, "pills render below the rows").toBeGreaterThan(firstRowY)
       expect(statsY, "stats render below the pills").toBeGreaterThan(pillsY)

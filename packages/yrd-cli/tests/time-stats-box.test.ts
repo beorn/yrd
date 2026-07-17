@@ -7,7 +7,7 @@ import { createElement as h } from "react"
 import { Box } from "silvery"
 import { describe, expect, it } from "vitest"
 import type { QueueTerminalFact } from "../src/queue-status-view.tsx"
-import { TimeStatsBoxes } from "../src/time-stats-box.tsx"
+import { TimeStatsBox } from "../src/time-stats-box.tsx"
 
 const MINUTE = 60_000
 const DAY = 24 * 60 * MINUTE
@@ -42,7 +42,7 @@ function boxesElement(props: {
   earliestEventMs: number | null
   width: number
 }) {
-  return h(Box, { width: props.width, flexDirection: "column" }, h(TimeStatsBoxes, props))
+  return h(Box, { width: props.width, flexDirection: "column" }, h(TimeStatsBox, props))
 }
 
 function rowContaining(app: { text: string }, needle: string): string {
@@ -83,7 +83,7 @@ function assertBoxClean(text: string, title: string): void {
   expect(/^[─]+$/u.test(bottom.slice(left + 1, right)), `${title} bottom edge unbroken`).toBe(true)
 }
 
-describe("TimeStatsBoxes", () => {
+describe("TimeStatsBox", () => {
   it("renders one STATS box with FLOW and TIME sections", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))

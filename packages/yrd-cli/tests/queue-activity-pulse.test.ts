@@ -1,4 +1,4 @@
-// @failure Activity indicators are not one synchronized blue pulse: the runner marker + its command text, and the running row's glyph + status word, drift out of phase or a selected running row loses its blue.
+// @failure The running row's glyph and status word drift out of phase, or a selected running row loses its blue activity signal.
 // @level l2
 // @consumer @yrd/cli watch
 
@@ -16,8 +16,8 @@ import {
 import { QueueTimelineView } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
-// Items 10-13 — every "executing right now" indicator pulses blue on ONE shared
-// app-scope phase. The synchronized clock guarantees any two activity cells
+// Items 12-13 — every visible "executing right now" row indicator pulses blue
+// on ONE shared app-scope phase. The synchronized clock guarantees activity cells
 // carry the SAME colour on every frame, so equality across frames is the robust
 // invariant (no need to sample a specific phase). Activity blue also survives
 // row selection (item 13).
@@ -39,29 +39,17 @@ function cellOf(app: ReturnType<ReturnType<typeof createRenderer>>, needle: stri
   return app.cell(x, y)
 }
 
-describe("synchronized activity pulse (items 10-13)", () => {
-  it("pulses the RUNNER marker AND its command text as one (item 11)", async () => {
-    const projection = processingSnapshot().projection
-    const render = createRenderer({ cols: 120, rows: 40 })
-    const app = render(createElement(QueueTimelineView, { projection, nav: true, columns: 120, paneChrome: true, fillHeight: true }))
-    try {
-      await app.waitForLayoutStable()
-      // The leading disc and the `[pid]` command text share the same synchronized
-      // colour — they never beat out of phase.
-      const markerFg = cellOf(app, "●", "84042").fg
-      const commandFg = cellOf(app, "[84042]", "84042").fg
-      expect(commandFg, "runner marker + command text pulse in one phase").toEqual(markerFg)
-    } finally {
-      app.unmount()
-    }
-  })
-
+describe("synchronized activity pulse (items 12-13)", () => {
   it("pulses the running row's glyph AND status word blue in the shared phase (item 12)", async () => {
     const projection = processingSnapshot().projection
     const render = createRenderer({ cols: 120, rows: 40 })
-    const app = render(createElement(QueueTimelineView, { projection, nav: true, columns: 120, paneChrome: true, fillHeight: true }))
+    const app = render(
+      createElement(QueueTimelineView, { projection, nav: true, columns: 120, paneChrome: true, fillHeight: true }),
+    )
     try {
       await app.waitForLayoutStable()
+      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).not.toContain("╭─ STATUS ")
       // The running row's status disc and its `run` word share one activity colour.
       const glyphFg = cellOf(app, "●", "PRR.1").fg
       const wordFg = cellOf(app, "run", "PRR.1").fg

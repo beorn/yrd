@@ -52,7 +52,7 @@ import {
   type TaskStatus,
   type TaskStatusFields,
 } from "./task-status.ts"
-import { TimeStatsBoxes } from "./time-stats-box.tsx"
+import { TimeStatsBox } from "./time-stats-box.tsx"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -2955,7 +2955,7 @@ export function queueTimelineDefaultCursorId(
  * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
  * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
  * period (900 ms) reproduces ag's blink. Every activity indicator uses silvery's
- * `synchronized` Pulse (items 10-13) so they share ONE app-scope phase clock —
+ * `synchronized` Pulse (items 12-13) so they share ONE app-scope phase clock —
  * the exact-match shared phase the earlier per-node timer only approximated.
  */
 const AG_PULSE_INTERVAL_MS = 900
@@ -3294,7 +3294,7 @@ export function TitledBox({
       flexShrink={fill ? 1 : 0}
       flexGrow={fill ? 1 : undefined}
       marginTop={marginTop}
-      // Each titled box (RUNNER / STATUS / STATS) is its own selection scope
+      // Each titled box (STATUS / STATS) is its own selection scope
       // (item 4a): a drag started inside it resolves to this box as the nearest
       // `contain` boundary, so it never grows into a sibling box or the pane
       // around it. Nested inside the pane's own scope; `contain` keeps content
@@ -3362,142 +3362,53 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
-/** The RUNNER LIVENESS the leading marker reflects (item 4). */
-export type QueueHealthKind = "down" | "processing" | "idle"
-
-export type QueueHealthMarker = Readonly<{
-  kind: QueueHealthKind
-  /** The dot colour in the static (non-live / print) render. */
-  color: string
-  /** The `[on, off]` pulse phases while the runner is alive; `null` = solid. */
-  pulse: readonly [string, string] | null
-}>
-
-/**
- * The RUNNER LIVENESS the leading marker reflects (item 4) — NOT job activity or
- * outcomes (the row states + STATS carry those):
- *
- * - `down`       — the resident runner is missing OR its heartbeat went stale:
- *                  SOLID RED. Nothing is draining the queue.
- * - `processing` — runner alive and a run is checking right now: PULSING BLUE.
- * - `idle`       — runner alive with no job in flight: PULSING GREY.
- *
- * A stale heartbeat maps to `down` alongside a missing runner: both mean the
- * queue is not being reliably drained, so the marker reads the same.
- */
-export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
-  const timing = runnerTiming(projection)
-  if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
-    return { kind: "down", color: "$fg-error", pulse: null }
-  }
-  if (projection.rows.some((row) => row.status === "running")) {
-    return { kind: "processing", color: "$fg-info", pulse: ["$fg-info", "$fg-muted"] }
-  }
-  return { kind: "idle", color: "$fg-muted", pulse: ["$fg-muted", "$bg-surface-default"] }
-}
-
 /** The status-dot glyph — same filled disc the per-row running marker uses. */
 const QUEUE_HEALTH_GLYPH = "●"
 
 /**
- * RUNNER-liveness activity (items 4/10/11): renders `children` on the marker's
- * pulse, or statically in its on-colour when down or non-live. In the live pane
- * the pulse is SYNCHRONIZED (silvery shared-phase clock, item 11) so the leading
- * disc and the adjacent runner command text — and every other synchronized
- * activity indicator — beat as one, never out of phase. `live` gates the pulse
- * exactly as `TimelineMarker` does (the one-shot projection has no app scope).
+ * Project only actionable runner state. Healthy runner facts stay out of the
+ * normal queue surface; missing/stale facts become one compact STATUS row.
  */
-function RunnerActivity({
-  marker,
-  live,
-  children,
-  ...rest
-}: {
-  marker: QueueHealthMarker
-  live: boolean
-  children: React.ReactNode
-} & Omit<TextProps, "color" | "children">) {
-  if (marker.pulse !== null && live) {
-    return (
-      <Pulse synchronized colors={marker.pulse} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
-        {children}
-      </Pulse>
-    )
-  }
-  return (
-    <Text color={marker.color} {...rest}>
-      {children}
-    </Text>
-  )
-}
-
-/**
- * The RUNNER box renders the runner fact exactly once (15d), restyled per the
- * 2026-07-15 user spec: absent → one all-red `NO RUNNER - queue last drained
- * <age> ago` banner; present → `[pid] <command>` with a right-aligned
- * `uptime H:MM`; a stale heartbeat keeps its loud red banner inside the box. A
- * leading whole-queue health marker (item 4b) heads the box in both states.
- */
-function TimelineRunnerBox({ projection, live = false }: { projection: QueueTimelineProjection; live?: boolean }) {
+function queueRunnerException(projection: QueueTimelineProjection): string | null {
   const runner = projection.runner
   const timing = runnerTiming(projection)
-  const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
-  // ONE marker drives both the leading disc AND the runner command text, so
-  // they pulse in the same synchronized phase (items 10/11).
-  const marker = queueHealthMarker(projection)
   if (runner === null) {
     const drained = timelineLastDrainedMs(projection)
     const now = Date.parse(projection.now)
-    return (
-      <TitledBox title="RUNNER" borderColor="$fg-error">
-        <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-          <RunnerActivity marker={marker} live={live} flexShrink={0}>
-            {QUEUE_HEALTH_GLYPH}
-          </RunnerActivity>
-          <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
-            {drained === null
-              ? "NO RUNNER - no drained run in window"
-              : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
-          </Text>
-        </Box>
-      </TitledBox>
-    )
+    return drained === null
+      ? "NO RUNNER - no drained run in window"
+      : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`
   }
-  return (
-    <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
-      <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-        <RunnerActivity marker={marker} live={live} flexShrink={0}>
-          {QUEUE_HEALTH_GLYPH}
-        </RunnerActivity>
-        <RunnerActivity marker={marker} live={live} wrap="truncate" minWidth={0}>
-          [{runner.pid}] {runner.command ?? "resident runner"}
-        </RunnerActivity>
-        <Box flexGrow={1} flexBasis={0} minWidth={0} />
-        <Text color="$fg-muted" flexShrink={0}>
-          uptime {uptimeClock(timing?.uptimeMs ?? 0)}
-        </Text>
-      </Box>
-      {runnerStale && timing !== null ? (
-        <Text color="$fg-error" bold wrap="truncate">
-          RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
-        </Text>
-      ) : null}
-    </TitledBox>
-  )
+  if (timing === null || timing.ageMs <= RUNNER_STALE_MS) return null
+  return `RUNNER STALE — last tick ${mediaDuration(timing.ageMs)} ago · [${runner.pid}] ${runner.command ?? "resident runner"} · uptime ${uptimeClock(timing.uptimeMs)}`
 }
 
-// The STATUS box owns the queue-exception state that is not the runner fact:
-// pause. The runner renders exactly once, in the RUNNER box above. Unpaused
-// renders no box.
+/**
+ * STATUS is exceptional-only. It owns both queue pause and unhealthy resident
+ * runner state; a healthy, unpaused queue renders no status frame at all.
+ */
 function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection }) {
+  const runnerException = queueRunnerException(projection)
   const pause = projection.pause
-  if (pause === undefined) return null
-  const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
+  if (pause === undefined && runnerException === null) return null
+  const allowed = pause === undefined ? null : pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
   return (
-    <TitledBox title="STATUS" borderColor="$fg-warning">
-      <Text color="$fg-warning" wrap="truncate">
-        HOLD THE LINE — {pause.reason} · allowed {allowed}
-      </Text>
+    <TitledBox title="STATUS" borderColor={runnerException === null ? "$fg-warning" : "$fg-error"}>
+      {pause === undefined ? null : (
+        <Text color="$fg-warning" wrap="truncate">
+          HOLD THE LINE — {pause.reason} · allowed {allowed}
+        </Text>
+      )}
+      {runnerException === null ? null : (
+        <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+          <Text color="$fg-error" flexShrink={0}>
+            {QUEUE_HEALTH_GLYPH}
+          </Text>
+          <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
+            {runnerException}
+          </Text>
+        </Box>
+      )}
     </TitledBox>
   )
 }
@@ -3758,7 +3669,6 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} live={nav} />
         <TimelineStatusBox projection={projection} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the
@@ -3819,7 +3729,7 @@ function ProjectedQueueTimeline({
             spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
         {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
-            order RUNNER → header → rows → pills → STATS). The "... N more" /
+            order optional STATUS → header → rows → pills → STATS). The "... N more" /
             retained coverage reads on the left, the very-dim toggle-pills
             right-align. In fill mode the coverage degrades to EMPTY (the rows
             virtualize and scroll, so nothing is permanently hidden — no "... 0
@@ -3840,7 +3750,7 @@ function ProjectedQueueTimeline({
           </Box>
           <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
         </Box>
-        <TimeStatsBoxes
+        <TimeStatsBox
           facts={projection.timeStatsFacts}
           now={projection.now}
           earliestEventMs={projection.earliestEventMs}
@@ -4771,8 +4681,8 @@ export function QueueShowView({
    *  so drop the RUN header row here (framedDetail title, item a). */
   titleAbove?: boolean
 }) {
-  if (compact)
-    {return (
+  if (compact) {
+    return (
       <CompactQueueShowView
         data={data}
         highlightPr={highlightPr}
@@ -4780,7 +4690,8 @@ export function QueueShowView({
         titleAbove={titleAbove}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />
-    )}
+    )
+  }
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />

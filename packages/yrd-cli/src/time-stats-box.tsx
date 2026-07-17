@@ -1,5 +1,5 @@
 /**
- * TimeStatsBoxes — the queue watch's single bordered STATS box. Inside it, the
+ * TimeStatsBox — the queue watch's single bordered STATS box. Inside it, the
  * FLOW throughput and TIME duration sections share the same four rolling-window
  * columns (HR / DAY / WK / MON). The sections arrange side by side on a wide pane
  * and stack into one column as the pane narrows, without becoming separate boxes.
@@ -163,7 +163,7 @@ function TimeStatsSection({ rows }: Readonly<{ rows: readonly BoxRow[] }>) {
  * @param earliestEventMs  the oldest journal record's time (drives the `-` gate)
  * @param width  the pane content width, in cells, chosen by the caller
  */
-export function TimeStatsBoxes({
+export function TimeStatsBox({
   facts,
   now,
   earliestEventMs,
@@ -178,18 +178,18 @@ export function TimeStatsBoxes({
   if (Number.isNaN(nowMs)) throw new Error(`yrd: invalid time-stats snapshot '${now}'`)
   const stats = queueTimeStats(facts, nowMs, earliestEventMs)
   const windowKeys = stats.map((entry) => entry.key)
-  const boxes = [
+  const sections = [
     { title: "FLOW", rows: flowRows(stats, windowKeys) },
     { title: "TIME", rows: timeRows(stats, windowKeys) },
   ]
   const perRow = width >= TWO_ACROSS_MIN ? 2 : 1
   return (
     <TitledBox title="STATS" marginTop={1}>
-      {chunk(boxes, perRow).map((group, index) => (
+      {chunk(sections, perRow).map((group, index) => (
         <Box key={index} flexDirection="row" gap={GRID_GAP} minWidth={0} alignItems="flex-start">
-          {group.map((box) => (
-            <Box key={box.title} flexGrow={1} flexBasis={0} minWidth={0}>
-              <TimeStatsSection rows={box.rows} />
+          {group.map((section) => (
+            <Box key={section.title} flexGrow={1} flexBasis={0} minWidth={0}>
+              <TimeStatsSection rows={section.rows} />
             </Box>
           ))}
         </Box>

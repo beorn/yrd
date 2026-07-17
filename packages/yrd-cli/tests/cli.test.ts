@@ -3771,7 +3771,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-13T12:00:00.000Z",
           lastTickAt: "2026-07-13T12:00:00.000Z",
-          // The RUNNER box renders this verbatim as `[pid] <command>`.
+          // Exceptional STATUS renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
         })
         now += 1_000

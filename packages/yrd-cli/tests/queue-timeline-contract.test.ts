@@ -80,6 +80,16 @@ describe("queue timeline 21106 contract", () => {
     expect(exceptional).not.toContain("╭─ RUNNER ")
     expect(exceptional).toContain("HOLD THE LINE")
     expect(exceptional).toContain("NO RUNNER")
+
+    const stale = {
+      ...contractProjection(),
+      runner: { pid: 84042, startedAt: "2026-07-13T11:00:00.000Z", lastTickAt: "2026-07-13T11:00:00.000Z" },
+    }
+    const staleFrame = (await renderTimeline(stale, 120)).join("\n")
+    expect(staleFrame.match(/╭─ STATUS /gu)).toHaveLength(1)
+    expect(staleFrame).not.toContain("╭─ RUNNER ")
+    expect(staleFrame).toContain("[84042]")
+    expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
   })
 
   it("projects one selectable row per exact PR revision with composite cursor identity", () => {
@@ -126,7 +136,7 @@ describe("queue timeline 21106 contract", () => {
       "@agent/2",
       "@agent/7",
     ])
-    // RUNNER: probed lease liveness rides the projection for header + JSON.
+    // RUNNER: probed lease liveness rides the projection for JSON and exceptional STATUS.
     expect(projection.runner).toEqual({
       pid: 84042,
       startedAt: "2026-07-13T11:00:00.000Z",
@@ -177,11 +187,11 @@ describe("queue timeline 21106 contract", () => {
     expect(header).not.toContain("DETAIL")
     expect(header).not.toContain("TOTAL")
     expect(header).toContain("STATUS")
-    // The standing RUNNER box (user respec 2026-07-15) renders the healthy
-    // runner fact exactly once: `[pid] <command>` plus a right-aligned uptime.
-    const runnerLine = rowIndex(rows, "[84042]")
-    expect(rows[runnerLine]).toContain("uptime 01:00")
-    expect(rowIndex(rows, "RUNNER")).toBeLessThan(runnerLine)
+    // Healthy runner state is intentionally silent. STATUS is reserved for
+    // actionable pause or runner-failure facts.
+    expect(rows.join("\n")).not.toContain("╭─ RUNNER ")
+    expect(rows.join("\n")).not.toContain("╭─ STATUS ")
+    expect(rows.join("\n")).not.toContain("[84042]")
     expect(rows.join("\n")).not.toContain("NO RUNNER")
     expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
@@ -245,32 +255,6 @@ describe("queue timeline 21106 contract", () => {
     expect(rejected).not.toContain("◷")
   })
 
-  it("renders runner states once, loudly, in the RUNNER box", async () => {
-    const projection = contractProjection()
-    // Healthy heartbeat: the RUNNER box carries `[pid]` + uptime, no alarms.
-    const healthy = (await renderTimeline(projection, 120)).join("\n")
-    expect(healthy).toContain("[84042]")
-    expect(healthy).toContain("uptime 01:00")
-    expect(healthy).not.toContain("NO RUNNER")
-
-    // No heartbeat at all: loud, never blank, in the box above the filter.
-    const paused = queueTimelineStories.paused.snapshot.projection
-    if (paused === undefined) throw new Error("paused story is missing its projection")
-    expect(paused.runner).toBeNull()
-    const absentRows = await renderTimeline(paused, 120)
-    expect(absentRows.join("\n")).toMatch(/NO RUNNER - (queue last drained .+ ago|no drained run in window)/u)
-    const pillsAt = absentRows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
-    expect(rowIndex(absentRows, "NO RUNNER"), "the RUNNER box is above the pills row").toBeLessThan(pillsAt)
-
-    // A heartbeat older than the stale threshold is equally loud.
-    const stale = {
-      ...projection,
-      runner: { pid: 84042, startedAt: "2026-07-13T11:00:00.000Z", lastTickAt: "2026-07-13T11:00:00.000Z" },
-    }
-    const staleFrame = (await renderTimeline(stale, 120)).join("\n")
-    expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
-  })
-
   it("pins the 15d semantic colors on markers, states, and identity cells", async () => {
     const render = createRenderer({ cols: 160, rows: 45 })
     const styled = render(createElement(QueueTimelineView, { projection: contractProjection(), columns: 160 }))
@@ -323,7 +307,7 @@ describe("queue timeline 21106 contract", () => {
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ RUNNER", "╭─ STATS"]) {
+    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ STATS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
@@ -559,9 +543,11 @@ describe("queue timeline 21106 contract", () => {
     }
     const frame = rows.join("\n")
     expect(frame).toContain(`updated ${wallClock(projection.now)}`)
-    // The healthy runner fact renders once, in the standing RUNNER box.
+    // The healthy runner fact remains available to JSON/projection consumers,
+    // but renders no normal-state status chrome.
     expect(projection.runner).not.toBeNull()
-    expect(frame).toContain("[84042]")
+    expect(frame).not.toContain("[84042]")
+    expect(frame).not.toContain("╭─ STATUS ")
 
     for (const row of projection.rows) {
       const rendered = rows[rowIndex(rows, `${row.pr}.${row.revision}`)]
