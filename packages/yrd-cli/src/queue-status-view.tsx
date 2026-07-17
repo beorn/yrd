@@ -35,6 +35,7 @@ import {
   type TaskStatus,
   type TaskStatusFields,
 } from "./task-status.ts"
+import { TimeStatsBoxes } from "./time-stats-box.tsx"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -132,6 +133,10 @@ export type QueueTimelineProjection = Readonly<{
   rows: readonly QueueTimelineProjectedRow[]
   details: readonly QueueShowData[]
   metrics: QueueFlowMetrics
+  /** Every retained completed-Run terminal fact, for the windowed TimeStatsBox. */
+  timeStatsFacts: readonly QueueTerminalFact[]
+  /** Oldest timestamped journal record (ms), or null when none — drives the "-" coverage gate. */
+  earliestEventMs: number | null
 }>
 
 export type QueueTimelineProjectionOptions = Readonly<{
@@ -1659,6 +1664,34 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
   return submissionTimes
 }
 
+/**
+ * Fold projected rows into one terminal fact per completed Run. Member rows of
+ * one batched Run collapse to a single fact that carries every visible member's
+ * queue wait. Pass the window-filtered rows for the single-window `metrics`, or
+ * the raw rows for the windowed time-stats fact set.
+ */
+function foldTerminalFacts(rows: readonly QueueTimelineProjectedRow[]): QueueTerminalFact[] {
+  const byRun = new Map<string, QueueTerminalFact>()
+  for (const row of rows) {
+    if (row.group !== "completed" || row.timestampMs === null || row.run === undefined) continue
+    const key = `${row.base}:${row.run}`
+    const fact = byRun.get(key)
+    const waits = row.queueWaitMs === null ? [] : [row.queueWaitMs]
+    if (fact === undefined) {
+      byRun.set(key, {
+        run: row.run,
+        terminalAtMs: row.timestampMs,
+        outcome: row.status as QueueTerminalOutcome,
+        activeMs: row.totalMs,
+        queueWaitMs: waits,
+      })
+      continue
+    }
+    byRun.set(key, { ...fact, queueWaitMs: [...fact.queueWaitMs, ...waits] })
+  }
+  return [...byRun.values()]
+}
+
 export function queueTimelineProjection(
   results: readonly QueueStatusResult[],
   options: QueueTimelineProjectionOptions,
@@ -1688,27 +1721,20 @@ export function queueTimelineProjection(
     .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= options.now))
     .filter((row) => timelineMatches(row, terms))
   const rows = (options.latest ? latestTimelineRows(filtered) : filtered).toSorted(timelineSort)
-  // Metrics stay per-Run: member rows of one batched Run fold into one
-  // terminal fact carrying every visible member's queue wait.
-  const terminalFactByRun = new Map<string, QueueTerminalFact>()
-  for (const row of rows) {
-    if (row.group !== "completed" || row.timestampMs === null || row.run === undefined) continue
-    const key = `${row.base}:${row.run}`
-    const fact = terminalFactByRun.get(key)
-    const waits = row.queueWaitMs === null ? [] : [row.queueWaitMs]
-    if (fact === undefined) {
-      terminalFactByRun.set(key, {
-        run: row.run,
-        terminalAtMs: row.timestampMs,
-        outcome: row.status as QueueTerminalOutcome,
-        activeMs: row.totalMs,
-        queueWaitMs: waits,
-      })
-      continue
-    }
-    terminalFactByRun.set(key, { ...fact, queueWaitMs: [...fact.queueWaitMs, ...waits] })
-  }
-  const terminalFacts = [...terminalFactByRun.values()]
+  // The single-window `metrics` fold over the visible (window-filtered) rows.
+  const terminalFacts = foldTerminalFacts(rows)
+  // The windowed TimeStatsBox reads its own rolling windows (hour/day/week/
+  // month), so it folds every retained completed Run regardless of the display
+  // `--since` window, and re-windows per box. Unfiltered by the operator's view
+  // so a health readout never hides failures behind a status/term filter.
+  const timeStatsFacts = foldTerminalFacts(rawRows)
+  // The journal's data horizon: the oldest timestamped record we hold. A rolling
+  // window renders `-` until the horizon reaches back a full span.
+  const earliestEventMs = rawRows.reduce<number | null>(
+    (earliest, row) =>
+      row.timestampMs === null ? earliest : earliest === null ? row.timestampMs : Math.min(earliest, row.timestampMs),
+    null,
+  )
   const allRuns = results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
   const finished = results.flatMap((result) => result.finished)
   const detailRuns = new Set<string>()
@@ -1752,6 +1778,8 @@ export function queueTimelineProjection(
     rows,
     details,
     metrics: queueFlowMetrics(terminalFacts, { now: options.now, windowMs: options.windowMs }),
+    timeStatsFacts,
+    earliestEventMs,
   }
 }
 
@@ -2635,7 +2663,7 @@ function queueLogSubmissionTime(
   return clock.admittedBy === "submission" ? clock.submittedAt : undefined
 }
 
-function timelineMetric(value: number | null): string {
+export function timelineMetric(value: number | null): string {
   if (value === null) return "-"
   const duration = mediaDuration(value)
   if (duration.length <= 6) return duration
@@ -3248,66 +3276,9 @@ function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection
   )
 }
 
-function TimelineStatLine({ label, facts }: { label: string; facts: readonly (readonly [string, string])[] }) {
-  return (
-    <Text wrap="truncate">
-      <Text color="$fg-muted">{label}</Text>
-      {facts.map(([key, value]) => (
-        <Text key={key}>
-          {" "}
-          <Text color="$fg-muted">{key}=</Text>
-          {value}
-        </Text>
-      ))}
-    </Text>
-  )
-}
-
-function TimelineStatistics({ projection }: { projection: QueueTimelineProjection }) {
-  const metrics = projection.metrics
-  const decision = metrics.decisionRejection.rate
-  const all = metrics.activeRun.allTerminal
-  const integrated = metrics.activeRun.integratedOnly
-  const wait = metrics.queueWait
-  const count = (group: QueueTimelineGroup) => String(projection.rows.filter((row) => row.group === group).length)
-  const distribution = (values: DurationDistribution | QueueWaitDistribution): (readonly [string, string])[] => [
-    ["n", String(values.n)],
-    ...("minMs" in values ? [["min", timelineMetric(values.minMs)] as const] : []),
-    ["avg", timelineMetric(values.avgMs)],
-    ["p50", timelineMetric(values.p50Ms)],
-    ["p90", timelineMetric(values.p90Ms)],
-    ["max", timelineMetric(values.maxMs)],
-  ]
-  return (
-    <TitledBox title="STATS" marginTop={1}>
-      <>
-        <TimelineStatLine
-          label="ROWS"
-          facts={[
-            ["pending", count("pending")],
-            ["running", count("running")],
-            ["completed", count("completed")],
-            ["oldest", projection.oldestOpenMs === null ? "-" : mediaDuration(projection.oldestOpenMs)],
-          ]}
-        />
-        <TimelineStatLine
-          label="FLOW"
-          facts={[
-            ["attempts", String(metrics.terminalAttempts)],
-            ["integrated", String(metrics.outcomes.integrated)],
-            ["rejected", String(metrics.outcomes.rejected)],
-            ["decision", decision === null ? "-" : `${(decision * 100).toFixed(1)}%`],
-            ["env", String(metrics.outcomes.environmentRefused)],
-            ["canceled", String(metrics.outcomes.canceled)],
-          ]}
-        />
-        <TimelineStatLine label="ACTIVE ALL" facts={distribution(all)} />
-        <TimelineStatLine label="ACTIVE INTEGRATED" facts={distribution(integrated)} />
-        <TimelineStatLine label="WAIT" facts={distribution(wait)} />
-      </>
-    </TitledBox>
-  )
-}
+// The single STATS box was replaced by the side-by-side windowed TimeStatsBox
+// surface (user respec item 6). Its rolling-window aggregation lives in
+// `time-stats.ts`; the boxes render from `time-stats-box.tsx`.
 
 /** The four operator-facing status buckets (user respec 2026-07-15). */
 export type QueueTimelineStatusBucket = "pending" | "running" | "failed" | "done"
@@ -3573,7 +3544,12 @@ function ProjectedQueueTimeline({
           <Text color="$fg-warning">retained since {projection.coverage.retainedSince}</Text>
         )}
         {fillHeight ? <Box flexGrow={1} minHeight={0} /> : null}
-        <TimelineStatistics projection={projection} />
+        <TimeStatsBoxes
+          facts={projection.timeStatsFacts}
+          now={projection.now}
+          earliestEventMs={projection.earliestEventMs}
+          width={columns}
+        />
       </Box>
     </Box>
   )

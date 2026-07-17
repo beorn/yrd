@@ -303,9 +303,11 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STATS"))
+      await waitFor(() => app.text.includes("FLOW"))
       const rows = app.text.split("\n")
-      for (const label of ["RUNNER", "STATS"]) {
+      // FLOW is the leading windowed TimeStatsBox (side-by-side respec item 6);
+      // it carries the same rounded-corner + left-label chrome as RUNNER.
+      for (const label of ["RUNNER", "FLOW"]) {
         const topY = rows.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = rows[topY]
@@ -333,7 +335,7 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STATS"))
+      await waitFor(() => app.text.includes("FLOW"))
       const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
       // The QUEUE tab row itself carries the sibling tab and the updated clock.
       expect(queueLine, "QUEUE tab row carries the sibling tab").toContain("release/")
@@ -378,13 +380,13 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("renders QUEUE + DETAIL as unboxed panes with bottom-aligned STATS", async () => {
+  it("renders QUEUE + DETAIL as unboxed panes with bottom-aligned statistics", async () => {
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STATS"))
+      await waitFor(() => app.text.includes("FLOW"))
       const text = app.text
       // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
       // identity (`RUN R42` detail), not the word "DETAIL" — neither is boxed.
@@ -397,14 +399,16 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader).not.toBeNull()
       expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(2)
-      // Bottom-aligned STATS: the STATS block sits in the bottom band of the
-      // pane, directly above the footer, not right under the list rows.
+      // Bottom-aligned statistics: the windowed TimeStatsBox grid is pushed to
+      // the bottom of the pane (a flex spacer sits above it), so its last box
+      // border row hugs the footer rather than sitting right under the list rows.
       const rows = text.split("\n")
       const footerY = rows.findIndex((row) => row.includes("q quit"))
-      const statsY = rowIndexOf(text, "STATS")
+      const statsY = rowIndexOf(text, "FLOW")
+      const lastBoxBottomY = rows.slice(0, footerY).findLastIndex((row) => row.includes("╰"))
       expect(footerY).toBeGreaterThan(0)
       expect(statsY).toBeGreaterThan(0)
-      expect(footerY - statsY, "STATS anchors to the bottom band").toBeLessThanOrEqual(12)
+      expect(footerY - lastBoxBottomY, "statistics grid anchors to the bottom band").toBeLessThanOrEqual(1)
     } finally {
       app.unmount()
     }

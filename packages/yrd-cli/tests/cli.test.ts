@@ -3374,7 +3374,8 @@ describe("runYrd", () => {
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
     expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(rows.indexOf(header!) - 1)
-    expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(rows.indexOf(second!))
+    // The windowed TimeStatsBox grid (respec item 6) leads with the FLOW box.
+    expect(rows.findIndex((row) => row.includes("FLOW"))).toBeGreaterThan(rows.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3666,14 +3667,22 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          { width, height: 30, plain: true },
+          // Height fits the windowed TimeStatsBox grid (respec item 6). The
+          // standalone QueueTimelineView has no fillHeight list-scroll, so a box
+          // tuned to the old short STATS box would clip the header at a narrow
+          // tier (2x2 grid). Production (QueueWatchFrame) keeps the header via
+          // the scrolling list at any height.
+          { width, height: 44, plain: true },
         ),
       )
       const rows = fixed.split("\n")
       const filter = rows.find((row) => row.includes("FILTER "))
       expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
-      const flow = rows.find((row) => row.includes("FLOW "))
-      expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
+      // The windowed TimeStatsBox grid (respec item 6) reads its own rolling-
+      // window fact set rather than the single-window `metrics`, so it leads with
+      // a bordered FLOW box (RUNS / INTEGRATED / FAILS) at every tier.
+      expect.soft(rows.some((row) => row.includes("╭─ FLOW "))).toBe(true)
+      expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).not.toContain("STEP")
@@ -5513,7 +5522,10 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    expect(laterQueue.stdout()).toContain("oldest=1:00")
+    // The windowed TimeStatsBox grid (respec item 6) replaced the single STATS
+    // box; the old ROWS "oldest=" cell has no place among the FLOW / TIME boxes,
+    // so the queue renders the FLOW throughput box instead.
+    expect(laterQueue.stdout()).toContain("FLOW")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)

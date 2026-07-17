@@ -306,9 +306,13 @@ describe("queue timeline storybook", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
       frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
+    // Height fits the windowed TimeStatsBox grid (respec item 6); the standalone
+    // QueueTimelineView has no fillHeight list-scroll, so a fixed box tuned to the
+    // old short STATS box would clip the header. Production (QueueWatchFrame) keeps
+    // the header at any height via the scrolling list.
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
-      height: 24,
+      height: 40,
       plain: true,
     })
     expect(header(wide), "wide header").toContain("BY")
@@ -320,7 +324,7 @@ describe("queue timeline storybook", () => {
 
     const narrow = await renderString(createElement(QueueTimelineView, { projection, columns: 90 }), {
       width: 90,
-      height: 24,
+      height: 40,
       plain: true,
     })
     expect(header(narrow), "narrow header").not.toContain("BY")
