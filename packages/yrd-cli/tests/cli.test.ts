@@ -7633,7 +7633,7 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
 }
 
 describe("typed issue landing bridge", () => {
-  it("projects every native PR state from exact issue ownership at one journal cursor", async () => {
+  it("projects every native PR state in JSON and human views from one exact journal cursor", async () => {
     for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
       const issueRef = `@km/all/21091-${status}`
       const app = await createApp({ failingCheck: status === "rejected" })
@@ -7689,6 +7689,15 @@ describe("typed issue landing bridge", () => {
         if (status === "rejected") {
           expect(delivery).toMatchObject({ bounce: { run: "R1", detail: "check failed" } })
         }
+
+        const human = outputIO()
+        expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
+        expect(human.stdout()).toContain(issueRef)
+        expect(human.stdout()).toContain("DELIVERIES")
+        expect(human.stdout()).toContain(`PR1 rev1 ${status}`)
+        expect(human.stdout()).toContain(`HEAD ${HEAD_SHA}`)
+        if (status === "integrated") expect(human.stdout()).toContain(MERGED_SHA)
+        if (status === "rejected") expect(human.stdout()).toContain("BOUNCE R1 check failed")
       } finally {
         await app.close()
       }
@@ -8034,6 +8043,19 @@ describe("typed issue landing bridge", () => {
         regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
       }),
     ])
+
+    const human = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io), human.stderr()).toBe(0)
+    for (const visibleFact of [
+      "REGRESSION high DETECTED 2026-07-09T13:00:00.000Z RECORDED 2026-07-09T15:00:00.000Z",
+      `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalLanding}`,
+      "artifact://tty/21091-red",
+      "hab:turn/original-implementation",
+      "tribe:verdict/original-review",
+      `REPAIR ${repairIssue} PR2 R2 LANDING ${repairLanding}`,
+    ]) {
+      expect(human.stdout()).toContain(visibleFact)
+    }
   })
 
   it("retries a racing pr runs snapshot and refuses three exhausted cuts without partial JSON", async () => {

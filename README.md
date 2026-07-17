@@ -517,6 +517,11 @@ terminal Queue run, and one journal `asOf` cursor; integrated deliveries alone
 carry `landingSha`. Rejected deliveries carry their typed bounce run. Canceled
 and withdrawn are distinct terminal outcomes.
 
+The human `yrd issue view <issue>` surface projects those same typed facts: it
+prints exact PR revision/head, Queue runs, native status, landing or bounce, and
+the original/repair provenance of every recorded regression. Bare `yrd issue`
+keeps the compact multi-issue table.
+
 `yrd migrate terminal-associations` is the explicit compatibility cutover for
 legacy rejected-PR events that predate the typed Queue run field. Its default
 dry-run lists every unassociated terminal, either with one revision/head-bound

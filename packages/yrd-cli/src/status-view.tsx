@@ -1,5 +1,5 @@
 import { pathToFileURL } from "node:url"
-import type { Bay, PR } from "@yrd/bay"
+import type { Bay, PR, PRRegression } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
 import { projectPRTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
@@ -224,24 +224,112 @@ export type IssueLensRow = Readonly<{
   outcome: string
 }>
 
-export function IssueLensView({ rows }: { rows: readonly IssueLensRow[] }) {
+export type IssueDeliveryRow = Readonly<{
+  pr: string
+  revision: number
+  headSha: string
+  status: PR["status"]
+  runs: readonly string[]
+  landingSha?: string
+  bounce?: Readonly<{ run: string; detail?: string }>
+  regressions?: readonly PRRegression[]
+}> &
+  TaskStatusFields
+
+export function IssueLensView({
+  rows,
+  deliveries = [],
+}: {
+  rows: readonly IssueLensRow[]
+  deliveries?: readonly IssueDeliveryRow[]
+}) {
+  if (deliveries.length === 0 || rows[0] === undefined) {
+    return (
+      <Table
+        data={rows}
+        columns={[
+          { header: "ISSUE", key: "issue", grow: true },
+          {
+            header: "STATUS",
+            key: "taskStatus",
+            minWidth: 13,
+            render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.taskStatus} />,
+          },
+          { header: "BAYS", key: "bays" },
+          { header: "PRS", key: "prs" },
+          { header: "CONTESTS", key: "contests" },
+          { header: "OUTCOME", key: "outcome", grow: true },
+        ]}
+      />
+    )
+  }
+
+  const issue = rows[0]
   return (
-    <Table
-      data={rows}
-      columns={[
-        { header: "ISSUE", key: "issue", grow: true },
-        {
-          header: "STATUS",
-          key: "taskStatus",
-          minWidth: 13,
-          render: (row) => <TaskStatusValue taskStatus={row.taskStatus} glyph={row.glyph} value={row.taskStatus} />,
-        },
-        { header: "BAYS", key: "bays" },
-        { header: "PRS", key: "prs" },
-        { header: "CONTESTS", key: "contests" },
-        { header: "OUTCOME", key: "outcome", grow: true },
-      ]}
-    />
+    <Box flexDirection="column">
+      <Text wrap="wrap">
+        <Text bold>ISSUE</Text> {issue.issue}
+      </Text>
+      <Text wrap="wrap">
+        <TaskStatusValue taskStatus={issue.taskStatus} glyph={issue.glyph} value={issue.taskStatus} /> BAYS {issue.bays}{" "}
+        PRS {issue.prs} CONTESTS {issue.contests}
+      </Text>
+      <Text wrap="wrap">OUTCOME {issue.outcome}</Text>
+      <Text bold>DELIVERIES</Text>
+      {deliveries.map((delivery) => (
+        <IssueDeliveryView key={`${delivery.pr}:${delivery.revision}:${delivery.headSha}`} delivery={delivery} />
+      ))}
+    </Box>
+  )
+}
+
+function IssueDeliveryView({ delivery }: { delivery: IssueDeliveryRow }) {
+  return (
+    <Box flexDirection="column" paddingLeft={1}>
+      <Text wrap="wrap">
+        <TaskStatusValue
+          taskStatus={delivery.taskStatus}
+          glyph={delivery.glyph}
+          value={`${delivery.pr} rev${delivery.revision} ${delivery.status}`}
+        />{" "}
+        RUNS {delivery.runs.join(",") || "-"}
+      </Text>
+      <Text wrap="wrap">HEAD {delivery.headSha}</Text>
+      {delivery.landingSha === undefined ? null : <Text wrap="wrap">LANDING {delivery.landingSha}</Text>}
+      {delivery.bounce === undefined ? null : (
+        <Text wrap="wrap" color="$fg-error">
+          BOUNCE {delivery.bounce.run}
+          {delivery.bounce.detail === undefined ? "" : ` ${delivery.bounce.detail}`}
+        </Text>
+      )}
+      {delivery.regressions?.map((regression) => (
+        <IssueRegressionView
+          key={`${regression.pr}:${regression.run}:${regression.repairPr}:${regression.repairRun}`}
+          regression={regression}
+        />
+      ))}
+    </Box>
+  )
+}
+
+function IssueRegressionView({ regression }: { regression: PRRegression }) {
+  return (
+    <Box flexDirection="column" paddingLeft={2}>
+      <Text color="$fg-warning">
+        <Text bold>REGRESSION {regression.severity}</Text> DETECTED {regression.detectedAt} RECORDED{" "}
+        {regression.recordedAt}
+      </Text>
+      <Text wrap="wrap">
+        ORIGINAL {regression.issueRef} {regression.pr} {regression.run} LANDING {regression.landingSha}
+      </Text>
+      <Text wrap="wrap">EVIDENCE {regression.evidence}</Text>
+      <Text wrap="wrap">IMPLEMENTATION {regression.implementationRunRef}</Text>
+      <Text wrap="wrap">REVIEW {regression.reviewRef}</Text>
+      <Text wrap="wrap">
+        REPAIR {regression.repairIssueRef} {regression.repairPr} {regression.repairRun} LANDING{" "}
+        {regression.repairLandingSha}
+      </Text>
+    </Box>
   )
 }
 
