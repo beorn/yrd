@@ -3132,13 +3132,16 @@ function buildProgram(
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
       // at the pre-action boundary). `queue list --watch` is a DIFFERENT command
       // — the live VIEWER — whose `--watch` is untouched by the run-mode cutover,
-      // so its detection stays on the parsed `.watch` flag. bootstrap.load
-      // requires both flags (RuntimeBootstrap.load type).
+      // so its detection stays on the parsed `.watch` flag. The static `pr list`
+      // projection is also a viewer: listing must never drain receiver receipts
+      // or settle notifications. bootstrap.load requires both flags
+      // (RuntimeBootstrap.load type).
       const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
       const viewer =
-        action.name() === "list" &&
-        action.parent?.name() === "queue" &&
-        (action.opts() as Readonly<{ watch?: boolean }>).watch === true
+        (action.name() === "list" &&
+          action.parent?.name() === "queue" &&
+          (action.opts() as Readonly<{ watch?: boolean }>).watch === true) ||
+        (action.name() === "list" && action.parent?.name() === "pr")
       const loaded = await bootstrap.load(selected, { resident, viewer })
       runtimeApp = loaded.app
       runtimeServices = loaded.services
