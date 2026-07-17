@@ -2163,6 +2163,9 @@ function advanceQueue(
               ) {
                 return []
               }
+              const revision = current.revisions.find(
+                (candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha,
+              )
               return [
                 event("pr/canceled", {
                   pr: pr.id,
@@ -2171,6 +2174,7 @@ function advanceQueue(
                   run: record.id,
                   ...(current.issue === undefined ? {} : { issueRef: current.issue }),
                   ...(current.correlation === undefined ? {} : { correlation: current.correlation }),
+                  ...(revision?.actor === undefined ? {} : { actor: revision.actor }),
                   by: job.canceledBy,
                   reason: job.cancelReason,
                 }),

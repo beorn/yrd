@@ -149,7 +149,7 @@ describe("withBays", () => {
     expect(retired.events).toContainEqual(
       expect.objectContaining({
         name: "pr/withdrawn",
-        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation },
+        data: { pr: "PR1", revision: 1, headSha: HEAD_1, issueRef, correlation, actor: "operator" },
       }),
     )
   })
