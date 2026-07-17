@@ -147,6 +147,14 @@ describe("queue timeline chrome 21106", () => {
       expect(runFg, "run id shares TIME's muted fg").toEqual(timeFg)
       expect(runFg, "run id is not default fg").not.toEqual(branchFg)
 
+      // The branch glyph (U+E0A0) is a dim decoration (W2, 2026-07-16): muted
+      // like TIME, and distinctly dimmer than the branch name it prefixes.
+      const iconX = runRow.indexOf("")
+      expect(iconX, "branch glyph present").toBeGreaterThan(0)
+      const iconFg = app.cell(iconX, runRowY).fg
+      expect(iconFg, "branch glyph is muted, like TIME").toEqual(timeFg)
+      expect(iconFg, "branch glyph is dimmer than the branch name").not.toEqual(branchFg)
+
       const pendingRowY = rowIndexOf(text, " pend ")
       const pendingRow = rowAt(text, pendingRowY)
       const pendingX = pendingRow.lastIndexOf("pending")
