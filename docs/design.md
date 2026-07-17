@@ -158,6 +158,18 @@ type SourceRewrite = Readonly<{
   compare-and-push; if one disappears during landing, it rolls the root branch
   back and reports `invalid-candidate`. Production remotes protect this
   namespace from deletion and non-fast-forward updates.
+- Content-addressed source-candidate refs have a **minimum seven-day retention
+  window after the owning revision reaches a terminal journal state**. They are
+  never delete-on-integration refs, and generic branch cleanup must treat them
+  as retained evidence even when their patch is present on `main`. After the
+  window, only a future Yrd-owned collector may make a ref eligible for
+  deletion, and only from a fresh complete inventory proving all of the
+  following: the ref is
+  patch-equivalent to `main`, its exact SHA belongs to a terminal revision, no
+  live PR or Run owns it, and the expected local/remote pair still byte-matches.
+  Unknown, unmatched, unique-work, or unpaired refs remain retained. The
+  run-scoped `refs/yrd/candidates/<run>/<step>/attempt-*` namespace is separate
+  protected evidence and is outside this source-ref policy.
 - A composed Candidate's root tree must pin every repository's final
   `SourceRewrite.newTipSha`. The receipt retains every sequential rewrite in a
   same-repository batch, while the final rewrite is the root gitlink binding.
