@@ -87,6 +87,7 @@ import {
   type QueueLogCoverage,
   type QueueStatusResult,
   type QueueTerminalFact,
+  type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
@@ -924,13 +925,13 @@ describe("runYrd", () => {
 
     const fresh = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io), fresh.stderr()).toBe(0)
-    const defaults = JSON.parse(fresh.stdout()).projection
+    const defaults = (JSON.parse(fresh.stdout()) as { projection: QueueTimelineProjection }).projection
     expect(defaults.filters.windowMs).toBe(QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS)
     expect(defaults.metrics.windowMs).toBe(24 * 60 * 60_000)
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--since", "3h", "--json"), scoped.io), scoped.stderr()).toBe(0)
-    const explicit = JSON.parse(scoped.stdout()).projection
+    const explicit = (JSON.parse(scoped.stdout()) as { projection: QueueTimelineProjection }).projection
     expect(explicit.filters.windowMs).toBe(3 * 60 * 60_000)
     expect(explicit.metrics.windowMs).toBe(3 * 60 * 60_000)
   })
@@ -3634,8 +3635,9 @@ describe("runYrd", () => {
     expect(header).toBeDefined()
     for (const label of ["TIME", "STATUS", "RUN", "PR", "BY", "AGE"]) expect(header).toContain(label)
     // STEP folded into the PR cell (item Q), so it is no longer a header column.
-    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
+    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) {
       expect(header).not.toContain(removed)
+    }
     const first = rows.find((row) => row.includes("PR1.1"))
     const second = rows.find((row) => row.includes("PR2.1"))
     expect(first).toContain("main#1")
