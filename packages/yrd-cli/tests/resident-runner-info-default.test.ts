@@ -43,8 +43,8 @@ async function readRecords(file: string): Promise<Record<string, unknown>[]> {
   return text
     .trim()
     .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((entry) => entry !== "")
+    .map((entry) => JSON.parse(entry) as Record<string, unknown>)
 }
 
 afterEach(async () => {
@@ -57,7 +57,7 @@ describe("resident follow-runner INFO-by-default", () => {
     // default level the success case simply vanishes. The resident INFO bump
     // makes every drain cycle print its settlement with duration. Assert against
     // the structured sink so the proof is format-independent (item 4 restyles the
-    // human line; the JSONL record stays the anchor).
+    // human-facing output; the JSONL record stays the anchor).
     const { repo } = await runnerRepo()
     const logFile = join(repo, "resident.jsonl")
     const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {

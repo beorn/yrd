@@ -1,5 +1,5 @@
 /**
- * @failure The graceful-drain notice wraps a multi-line prose paragraph to bare stderr instead of one structured loggily line, colliding with the resident runner's log stream.
+ * @failure The graceful-drain notice wraps a multi-row prose paragraph to bare stderr instead of one structured loggily record, colliding with the resident runner's log stream.
  * @level l2
  * @consumer @yrd/cli resident follow-runner operators
  */
@@ -26,7 +26,7 @@ describe("graceful-drain notice", () => {
     reportGracefulShutdown(log, "SIGINT")
 
     // No bare wrapped paragraph — the resident's stdout/stderr IS a log stream;
-    // exactly one formatted warn line reaches it.
+    // exactly one formatted warn record reaches it.
     expect(stderr.join("").split("\n").filter(Boolean)).toHaveLength(1)
     expect(stderr.join("")).toContain("WARN yrd:runner")
 
@@ -35,7 +35,7 @@ describe("graceful-drain notice", () => {
     )
     expect(drain).toHaveLength(1)
     // The force-stop hint and recovery guidance become structured FIELDS, not
-    // prose wrap; the single message line reads as one scannable notice.
+    // prose wrap; the single warn message reads as one scannable notice.
     expect(drain[0]).toMatchObject({
       namespace: "yrd:runner",
       props: expect.objectContaining({

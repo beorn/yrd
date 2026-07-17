@@ -108,7 +108,9 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
 
       // A DETAIL-pane node resolves to a DISJOINT scope: a drag anchored in the
       // QUEUE pane cannot reach it (its contain boundary ends before DETAIL begins).
-      const detailPoint = pointOf(text, "OUTCOME", RIGHT_MIN)
+      // The detail rework (W3) prints the run status/outcome inline rather than an
+      // "OUTCOME" label, so anchor on the RUN LOGS accordion — a detail-body node.
+      const detailPoint = pointOf(text, "RUN LOGS", RIGHT_MIN)
       expect(resolveUserSelect(nodeAt(app, detailPoint)), "detail stays selectable").not.toBe("none")
       const detailScope = scopeAt(app, detailPoint)
       expect(sameScope(detailScope, queueScope), "QUEUE and DETAIL are different scopes").toBe(false)

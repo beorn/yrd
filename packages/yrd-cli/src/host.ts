@@ -799,7 +799,7 @@ async function closeRuntime(
 
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 
-/** Announce a graceful drain as ONE structured loggily line — never a bare
+/** Announce a graceful drain as ONE structured loggily record — never a bare
  * wrapped stderr paragraph, since the resident runner's stderr IS its log
  * stream. The force-stop hint and its consequences are structured FIELDS, so a
  * viewer can surface them without parsing prose. */
