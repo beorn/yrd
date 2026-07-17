@@ -29,7 +29,7 @@ function windowByKey(stats: ReturnType<typeof queueTimeStats>, key: string) {
   return found
 }
 
-/** Failed Runs = the non-integrated terminal outcomes, per the FLOW box. */
+/** Failed Runs = the non-integrated terminal outcomes, per the STATS / FLOW section. */
 function failsOf(outcomes: Readonly<{ rejected: number; environmentRefused: number; canceled: number }>): number {
   return outcomes.rejected + outcomes.environmentRefused + outcomes.canceled
 }
@@ -115,12 +115,12 @@ describe("queueTimeStats windows", () => {
     facts.push(fact({ run: "f1", terminalAtMs: NOW - MINUTE, outcome: "rejected", activeMs: 20 * MINUTE }))
     facts.push(fact({ run: "f2", terminalAtMs: NOW - MINUTE, outcome: "canceled", activeMs: 40 * MINUTE }))
     const active = windowByKey(queueTimeStats(facts, NOW, NOW - 30 * DAY), "HR").metrics.activeRun
-    // TIME box INTEGRATED section: AVG of 1..10 = 5.5; p50 = interpolated median 5.5; p90 = nearest-rank 9.
+    // STATS / TIME / INTEGRATED: AVG of 1..10 = 5.5; p50 = interpolated median 5.5; p90 = nearest-rank 9.
     expect(active.integratedOnly.n).toBe(10)
     expect(active.integratedOnly.avgMs).toBe(5.5 * MINUTE)
     expect(active.integratedOnly.p50Ms).toBe(5.5 * MINUTE)
     expect(active.integratedOnly.p90Ms).toBe(9 * MINUTE)
-    // TIME box FAILED section: the failed-only distribution the consolidated aggregate now carries.
+    // STATS / TIME / FAILED: the failed-only distribution the consolidated aggregate now carries.
     expect(active.failedOnly.n).toBe(2)
     expect(active.failedOnly.avgMs).toBe(30 * MINUTE)
   })

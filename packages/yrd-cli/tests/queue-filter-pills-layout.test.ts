@@ -51,7 +51,14 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
   it("orders RUNNER → table header → rows → pills → stats with no blank above the header", async () => {
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(
-      createElement(QueueTimelineView, { projection: paneProjection(), columns: 120, paneChrome: true, fillHeight: true, nav: true, cursorKey: 0 }),
+      createElement(QueueTimelineView, {
+        projection: paneProjection(),
+        columns: 120,
+        paneChrome: true,
+        fillHeight: true,
+        nav: true,
+        cursorKey: 0,
+      }),
     )
     try {
       await app.waitForLayoutStable()
@@ -59,9 +66,7 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       const headerY = rowIndex(app.text, /\bTIME\b/u)
       const firstRowY = rowIndex(app.text, /PR0\.\d/u)
       const pillsY = rowIndex(app.text, /pending.*running.*failed.*done/u)
-      // r9 replaced the single STATS box with the windowed TimeStatsBox grid,
-      // headed by the FLOW box.
-      const statsY = rowIndex(app.text, /\bFLOW\b/u)
+      const statsY = rowIndex(app.text, /╭─ STATS /u)
 
       expect(runnerY, "RUNNER box renders").toBeGreaterThanOrEqual(0)
       expect(headerY, "table header renders").toBeGreaterThan(runnerY)
@@ -80,7 +85,14 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
   it("drops the FILTER label and the [p] brackets — pills are plain words", async () => {
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(
-      createElement(QueueTimelineView, { projection: paneProjection(), columns: 120, paneChrome: true, fillHeight: true, nav: true, cursorKey: 0 }),
+      createElement(QueueTimelineView, {
+        projection: paneProjection(),
+        columns: 120,
+        paneChrome: true,
+        fillHeight: true,
+        nav: true,
+        cursorKey: 0,
+      }),
     )
     try {
       await app.waitForLayoutStable()

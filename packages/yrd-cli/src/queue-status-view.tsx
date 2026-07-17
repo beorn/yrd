@@ -150,7 +150,7 @@ export type QueueTimelineProjection = Readonly<{
   rows: readonly QueueTimelineProjectedRow[]
   details: readonly QueueShowData[]
   metrics: QueueFlowMetrics
-  /** Every retained completed-Run terminal fact, for the windowed TimeStatsBox. */
+  /** Every retained completed-Run terminal fact, for the windowed STATS box. */
   timeStatsFacts: readonly QueueTerminalFact[]
   /** Oldest timestamped journal record (ms), or null when none — drives the "-" coverage gate. */
   earliestEventMs: number | null
@@ -230,7 +230,7 @@ export type QueueFlowMetrics = Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
     // Active duration of the failed Runs (rejected + env-refused + canceled).
-    // Drives the TIME box FAILED section; the complement of integratedOnly.
+    // Drives the STATS / TIME / FAILED section; the complement of integratedOnly.
     failedOnly: DurationDistribution
   }>
   queueWait: QueueWaitDistribution
@@ -1780,7 +1780,7 @@ export function queueTimelineProjection(
   // Metrics stay per-Run: member rows of one batched Run fold into one terminal
   // fact carrying every visible member's queue wait.
   const terminalFacts = foldTerminalFacts(metricsRows)
-  // The windowed TimeStatsBox reads its own rolling windows (hour/day/week/
+  // The windowed STATS box reads its own rolling windows (hour/day/week/
   // month) off the SAME consolidated queueFlowMetrics aggregate. It folds the
   // FULL retained fact horizon (rawRows, before any window bound), NOT the
   // display `windowMs` listing nor the 24h `metricsWindowMs` default — so WK/MON
@@ -3142,11 +3142,7 @@ function TimelineProjectedRow({
           <Box width={1} flexShrink={0}>
             {/* A running row's glyph keeps its blue pulse even under selection
                 (items 12/13); other statuses take the selection fg. */}
-            {active || !cursor ? (
-              <TimelineMarker row={row} live={live} />
-            ) : (
-              <Text color={forcedFg}>{row.glyph}</Text>
-            )}
+            {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
           </Box>
           <Box paddingLeft={1} minWidth={0} overflow="hidden">
             {/* The running status word pulses blue in the shared phase (item 12)
@@ -3506,9 +3502,9 @@ function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection
   )
 }
 
-// The single STATS box was replaced by the windowed TimeStatsBox surface: a
-// FLOW throughput box beside a TIME box whose INTEGRATED/FAILED/WAIT sections
-// stack. It renders from `time-stats-box.tsx`, which windows the SAME
+// The single STATS box contains a FLOW throughput section beside a TIME section
+// whose INTEGRATED/FAILED/WAIT groups stack. It renders from
+// `time-stats-box.tsx`, which windows the SAME
 // consolidated `queueFlowMetrics` aggregate (throughput + per-24h +
 // oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via `time-stats.ts`.
 
@@ -3774,13 +3770,7 @@ function ProjectedQueueTimeline({
           // slack so the virtualizing ListView shows as many rows as fit and
           // scrolls the rest; STATS then anchors at the bottom. Off fill it
           // stays content-sized.
-          <Box
-            flexDirection="column"
-            minWidth={0}
-            flexShrink={1}
-            minHeight={0}
-            flexGrow={fillHeight ? 1 : undefined}
-          >
+          <Box flexDirection="column" minWidth={0} flexShrink={1} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
             <TimelineHeader layout={layout} />
             <ListView
               items={rows}
@@ -3824,12 +3814,12 @@ function ProjectedQueueTimeline({
             />
           </Box>
         )}
-        {/* An empty fill pane's spacer pushes the pills + time-stats boxes to
+        {/* An empty fill pane's spacer pushes the pills + STATS box to
             the bottom; a non-empty fill pane grows its row block instead, so no
             spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
         {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
-            order RUNNER → header → rows → pills → time-stats). The "... N more" /
+            order RUNNER → header → rows → pills → STATS). The "... N more" /
             retained coverage reads on the left, the very-dim toggle-pills
             right-align. In fill mode the coverage degrades to EMPTY (the rows
             virtualize and scroll, so nothing is permanently hidden — no "... 0
@@ -4782,7 +4772,7 @@ export function QueueShowView({
   titleAbove?: boolean
 }) {
   if (compact)
-    return (
+    {return (
       <CompactQueueShowView
         data={data}
         highlightPr={highlightPr}
@@ -4790,7 +4780,7 @@ export function QueueShowView({
         titleAbove={titleAbove}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />
-    )
+    )}
   return (
     <Box flexDirection="column">
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />

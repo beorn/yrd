@@ -16,7 +16,12 @@ import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 function manyPendingSnapshot() {
   const prs = Array.from({ length: 10 }, (_, i) =>
-    fixturePr(`PR${String(i).padStart(2, "0")}`, "submitted", `2026-07-13T11:${String(10 + i).padStart(2, "0")}:00.000Z`, `Subject ${i}`),
+    fixturePr(
+      `PR${String(i).padStart(2, "0")}`,
+      "submitted",
+      `2026-07-13T11:${String(10 + i).padStart(2, "0")}:00.000Z`,
+      `Subject ${i}`,
+    ),
   )
   // rowLimit 3 forces a tight projection pre-slice: shown=3, hidden=7.
   return fixtureSnapshot(fixtureResult(prs, []), { rowLimit: 3 })
@@ -42,15 +47,13 @@ describe("queue timeline fill height (item 5)", () => {
       // No `... N more` residue: every retained row is reachable in the pane.
       expect(app.text, "fill suppresses the pre-slice residue").not.toMatch(/\.\.\. \d+ more/u)
 
-      // The windowed TimeStatsBox grid (it leads with a bordered FLOW box; the
-      // old single STATS box with its "ACTIVE ALL" row is gone) anchors below the
-      // filled rows — the row block claims the slack, so the grid sits after the
-      // last PR row.
+      // The singular STATS box anchors below the filled rows — the row block
+      // claims the slack, so the box sits after the last PR row.
       const rows = app.text.split("\n")
-      const statsY = rows.findIndex((row) => row.includes("FLOW"))
+      const statsY = rows.findIndex((row) => row.includes("╭─ STATS "))
       const lastRowY = rows.reduce((last, row, index) => (/PR\d\d\.\d/u.test(row) ? index : last), -1)
-      expect(statsY, "FLOW grid renders").toBeGreaterThan(0)
-      expect(statsY, "FLOW grid sits below the filled rows").toBeGreaterThan(lastRowY)
+      expect(statsY, "STATS box renders").toBeGreaterThan(0)
+      expect(statsY, "STATS box sits below the filled rows").toBeGreaterThan(lastRowY)
     } finally {
       app.unmount()
     }

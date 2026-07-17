@@ -3681,7 +3681,7 @@ describe("runYrd", () => {
     expect(projection.metrics).toMatchObject({ terminalAttempts: 1, outcomes: { integrated: 1 } })
 
     const rendered = stripOsc8Targets(
-      // Height fits the FLOW + stacked-TIME grid; a standalone QueueTimelineView
+      // Height fits the singular STATS box; a standalone QueueTimelineView
       // has no fillHeight list-scroll, so a box tuned to the old short grid would
       // clip the FILTER/header rows. Production (QueueWatchFrame) scrolls the list.
       await renderString(createElement(QueueTimelineView, { projection, columns: 140 }), {
@@ -3710,10 +3710,8 @@ describe("runYrd", () => {
     // the header) and dropped its "FILTER" label — plain-word pills now.
     const pillsRowIndex = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
-    // The windowed TimeStatsBox grid (respec item 6) leads with the FLOW box,
-    // below the pills.
-    const flowIndex = rows.findIndex((row) => row.includes("FLOW"))
-    expect(flowIndex).toBeGreaterThan(pillsRowIndex)
+    const statsIndex = rows.findIndex((row) => row.includes("╭─ STATS "))
+    expect(statsIndex).toBeGreaterThan(pillsRowIndex)
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -4009,10 +4007,10 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          // Height fits the windowed TimeStatsBox grid. The standalone
+          // Height fits the singular STATS box. The standalone
           // QueueTimelineView has no fillHeight list-scroll, so a box tuned to the
-          // old short STATS box would clip the header at a narrow tier (FLOW + the
-          // stacked TIME box). Production (QueueWatchFrame) keeps the header via
+          // old short statistics surface would clip the header at a narrow tier.
+          // Production (QueueWatchFrame) keeps the header via
           // the scrolling list at any height.
           { width, height: 44, plain: true },
         ),
@@ -4024,12 +4022,10 @@ describe("runYrd", () => {
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
       // no [p] brackets — the since= dimension survives, pills are plain words.
       expect.soft(filter).toContain("since=6:00:00 pending running failed done")
-      // The windowed TimeStatsBox grid (respec item 6) reads the SAME consolidated
-      // queueFlowMetrics aggregate, windowed per box, rather than a single FLOW
-      // stat row, so it leads with a bordered FLOW box (RUNS / INTEGRATED / FAILS)
-      // at every tier. The landed per-24h throughput fact stays in the aggregate
-      // (projection.metrics.throughput) for --json consumers.
-      expect.soft(rows.some((row) => row.includes("╭─ FLOW "))).toBe(true)
+      // The singular STATS box reads the SAME consolidated queueFlowMetrics
+      // aggregate at every tier. The landed per-24h throughput fact stays in the
+      // aggregate (projection.metrics.throughput) for --json consumers.
+      expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
       expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
@@ -5871,10 +5867,8 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    // The windowed TimeStatsBox grid (respec item 6) replaced the single STATS
-    // box; the old ROWS "oldest=" cell has no place among the FLOW / TIME boxes,
-    // so the queue renders the FLOW throughput box instead.
-    expect(laterQueue.stdout()).toContain("FLOW")
+    // The old ROWS "oldest=" cell has no place in the windowed STATS surface.
+    expect(laterQueue.stdout()).toContain("STATS")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)

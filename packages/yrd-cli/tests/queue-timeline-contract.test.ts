@@ -140,15 +140,15 @@ describe("queue timeline 21106 contract", () => {
     const lastRowLine = rowIndex(rows, "PR4.1")
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
-    // time-stats (the FLOW box heads r9's windowed TimeStatsBox grid).
+    // the singular STATS box.
     const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
-    const flowBoxLine = rowIndex(rows, "FLOW")
+    const statsBoxLine = rowIndex(rows, "╭─ STATS ")
 
     expect(queueLine).toBeLessThan(updatedLine)
     expect(updatedLine).toBeLessThan(headerLine)
     expect(headerLine).toBeLessThan(lastRowLine)
     expect(lastRowLine).toBeLessThan(pillsLine)
-    expect(pillsLine).toBeLessThan(flowBoxLine)
+    expect(pillsLine).toBeLessThan(statsBoxLine)
 
     // The status box is omitted when the queue is normal.
     expect(rows.join("\n")).not.toContain("HOLD THE LINE")
@@ -170,10 +170,9 @@ describe("queue timeline 21106 contract", () => {
     expect(rows.join("\n")).not.toContain("NO RUNNER")
     expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
-    // The windowed TimeStatsBox grid replaces the single STATS box: a FLOW
-    // throughput box beside a TIME box whose INTEGRATED / FAILED / WAIT sections
-    // stack, both headed by the rolling windows HR / DAY / WK / MON.
-    const statisticsText = rows.slice(flowBoxLine).join("\n")
+    // One full-width STATS box contains the FLOW and TIME sections, both headed
+    // by the rolling windows HR / DAY / WK / MON.
+    const statisticsText = rows.slice(statsBoxLine).join("\n")
     for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90"]) {
       expect(statisticsText).toContain(cell)
     }
@@ -300,26 +299,24 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
-    // The windowed TimeStatsBox grid fills the full capped width with no dead
-    // gutter. The leading FLOW box opens with a rounded top-left corner
-    // `╭─ FLOW `, and the whole box row (FLOW + TIME side by side) spans the cap.
-    const wideBorder = wide[rowIndex(wide, "FLOW")]
+    // The singular STATS box fills the full capped width with no dead gutter.
+    const wideBorder = wide[rowIndex(wide, "╭─ STATS ")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
-    expect(wideBorder.startsWith("╭─ FLOW ")).toBe(true)
+    expect(wideBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(wideBorder.trimEnd().length).toBe(160)
     for (const row of wide) expect(Array.from(row.trimEnd()).length).toBeLessThanOrEqual(160)
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ RUNNER", "│ RUNS"]) {
+    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ RUNNER", "╭─ STATS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
 
     const narrow = await renderTimeline(contractProjection(), 100)
-    const narrowBorder = narrow[rowIndex(narrow, "FLOW")]
+    const narrowBorder = narrow[rowIndex(narrow, "╭─ STATS ")]
     if (narrowBorder === undefined) throw new Error("expected the statistics border row")
-    expect(narrowBorder.startsWith("╭─ FLOW ")).toBe(true)
+    expect(narrowBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(narrowBorder.trimEnd().length).toBe(100)
   })
 
@@ -453,10 +450,9 @@ describe("queue timeline 21106 contract", () => {
       // The bottom keybindings footer row was removed entirely (item h).
       expect(handle.text).not.toContain("q quit")
       expect(handle.text).not.toContain("⇧-drag")
-      // The windowed TimeStatsBox grid still renders — it leads with a bordered
-      // FLOW box (there is no "STATS" label), and with the footer gone it sits in
-      // the pane's bottom band below the list rows.
-      const statistics = rows.findIndex((row) => row.includes("FLOW"))
+      // The singular STATS box still renders in the pane's bottom band below
+      // the list rows.
+      const statistics = rows.findIndex((row) => row.includes("╭─ STATS "))
       expect(statistics).toBeGreaterThan(0)
 
       // Default cursor is the batch lead; the shared Run detail (agent8's

@@ -328,19 +328,18 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("FLOW"))
+      await waitFor(() => app.text.includes("╭─ STATS "))
       const rows = app.text.split("\n")
-      // FLOW is the leading windowed TimeStatsBox (side-by-side respec item 6);
-      // it carries the same rounded-corner + left-label chrome as RUNNER.
-      for (const label of ["RUNNER", "FLOW"]) {
+      // The singular STATS frame carries the same rounded-corner + left-label
+      // chrome as RUNNER.
+      for (const label of ["RUNNER", "STATS"]) {
         const topY = rows.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = rows[topY]
         if (topLine === undefined) throw new Error(`${label} top border row missing`)
         const titleX = topLine.indexOf(label)
         // A rounded top-right corner closes this box's border row after the
-        // label (nested/side-by-side boxes still close with `╮`; search from the
-        // label so a neighbouring box's corner to the left is not mistaken).
+        // label.
         expect(topLine.indexOf("╮", titleX), `${label} rounded top-right corner`).toBeGreaterThan(titleX)
         // The label color equals the border-fill color on the same row.
         const fillX = topLine.indexOf("─", titleX + label.length + 1)
@@ -360,7 +359,7 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("FLOW"))
+      await waitFor(() => app.text.includes("╭─ STATS "))
       const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
       // The QUEUE tab row itself carries the sibling tab and the updated clock.
       expect(queueLine, "QUEUE tab row carries the sibling tab").toContain("release/")
@@ -411,7 +410,7 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("FLOW"))
+      await waitFor(() => app.text.includes("╭─ STATS "))
       const text = app.text
       // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
       // identity title (`main#42 PR42.1`), not the word "DETAIL" — neither is boxed.
@@ -424,19 +423,15 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader).not.toBeNull()
       expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(2)
-      // Bottom-aligned statistics: the windowed TimeStatsBox grid (no "STATS"
-      // label — it leads with a bordered FLOW box) is pushed to the bottom of
-      // the pane by a flex spacer. The keybindings footer was removed (item h),
-      // so there is no footer to anchor against — instead the grid's last box-
-      // border row (╰) hugs the pane's last content row. Height/tier-independent:
-      // whether FLOW + TIME render side by side or stacked, the lowest box
-      // bottom border sits on (or one row above) the last non-blank row.
+      // Bottom-aligned statistics: the singular STATS box is pushed to the
+      // bottom of the pane by a flex spacer. The keybindings footer was removed
+      // (item h), so the box's bottom border hugs the pane's last content row.
       const rows = text.split("\n")
       const lastY = rows.findLastIndex((row) => row.trim() !== "")
-      const statsY = rowIndexOf(text, "FLOW")
+      const statsY = rowIndexOf(text, "╭─ STATS ")
       const lastBoxBottomY = rows.findLastIndex((row) => row.includes("╰"))
       expect(lastY).toBeGreaterThan(0)
-      expect(statsY, "FLOW grid renders below the list header").toBeGreaterThan(timeHeader!.y)
+      expect(statsY, "STATS box renders below the list header").toBeGreaterThan(timeHeader!.y)
       expect(lastBoxBottomY).toBeGreaterThan(0)
       expect(lastY - lastBoxBottomY, "the grid's last box border hugs the pane bottom band").toBeLessThanOrEqual(1)
     } finally {

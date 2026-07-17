@@ -304,7 +304,7 @@ describe("queue timeline storybook", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
       frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
-    // Height fits the windowed TimeStatsBox grid (respec item 6); the standalone
+    // Height fits the singular STATS box; the standalone
     // QueueTimelineView has no fillHeight list-scroll, so a fixed box tuned to the
     // old short STATS box would clip the header. Production (QueueWatchFrame) keeps
     // the header at any height via the scrolling list.
