@@ -2783,9 +2783,10 @@ type TimelineCellLayout = Readonly<{
 type TimelineRunCell = Readonly<{ text: string; color?: string }>
 
 // The RUN(id) part of the RUN·PR identity cell: main#N (or #N on the compact
-// tier); run-less rows render `pending` in blue — colored, never blank (15d).
+// tier); a run that has not started yet renders a plain muted dash (item 9),
+// never blank.
 function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): TimelineRunCell {
-  if (row.run === undefined) return { text: "pending", color: "$fg-info" }
+  if (row.run === undefined) return { text: "-", color: "$fg-muted" }
   const match = /^R(\d+)$/u.exec(row.run)
   if (match === null) return { text: row.run }
   return { text: compact ? `#${match[1]}` : `${row.base}#${match[1]}` }
@@ -2955,24 +2956,45 @@ export function queueTimelineDefaultCursorId(
  * Live-activity pulse cadence, matched to ag-code's activity indicator (item O,
  * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
  * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
- * period (900 ms) reproduces ag's blink. (ag additionally synchronizes every
- * indicator to one global phase via `useSynchronizedPulse`; silvery's per-node
- * timer is a close, primitive-native approximation — a shared-phase Pulse would
- * be the exact match, tracked as a silvery follow-up.)
+ * period (900 ms) reproduces ag's blink. Every activity indicator uses silvery's
+ * `synchronized` Pulse (items 10-13) so they share ONE app-scope phase clock —
+ * the exact-match shared phase the earlier per-node timer only approximated.
  */
 const AG_PULSE_INTERVAL_MS = 900
 
-function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
-  if (row.status === "running") {
-    if (live) {
-      return (
-        <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS}>
-          {row.glyph}
-        </Pulse>
-      )
-    }
-    return <Text color="$fg-info">{row.glyph}</Text>
+/** The universal "executing right now" pulse: blue against muted, shared phase
+ * (item 12). Static blue is never used for activity — if it is blue because
+ * something is in progress, it pulses. */
+const ACTIVITY_PULSE_COLORS: readonly [string, string] = ["$fg-info", "$fg-muted"]
+
+/**
+ * A synchronized blue activity pulse for any "in progress right now" content
+ * (items 12/13): the running row's status glyph + word, the active step's glyph
+ * + label. Pulses on the shared phase when `live`; static blue otherwise. It
+ * KEEPS the activity blue even under row selection (item 13) — `forceFg` is only
+ * applied to non-activity content by the caller, never routed here.
+ */
+function ActivityPulse({
+  live,
+  children,
+  ...rest
+}: { live: boolean; children: React.ReactNode } & Omit<TextProps, "color" | "children">) {
+  if (live) {
+    return (
+      <Pulse synchronized colors={ACTIVITY_PULSE_COLORS} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
+        {children}
+      </Pulse>
+    )
   }
+  return (
+    <Text color={ACTIVITY_PULSE_COLORS[0]} {...rest}>
+      {children}
+    </Text>
+  )
+}
+
+function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
+  if (row.status === "running") return <ActivityPulse live={live}>{row.glyph}</ActivityPulse>
   return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
 }
 
@@ -3120,12 +3142,26 @@ function TimelineProjectedRow({
       status={
         <>
           <Box width={1} flexShrink={0}>
-            {cursor ? <Text color={forcedFg}>{row.glyph}</Text> : <TimelineMarker row={row} live={live} />}
+            {/* A running row's glyph keeps its blue pulse even under selection
+                (items 12/13); other statuses take the selection fg. */}
+            {active || !cursor ? (
+              <TimelineMarker row={row} live={live} />
+            ) : (
+              <Text color={forcedFg}>{row.glyph}</Text>
+            )}
           </Box>
           <Box paddingLeft={1} minWidth={0} overflow="hidden">
-            <Text color={forcedFg ?? status.color} wrap="truncate">
-              {status.word}
-            </Text>
+            {/* The running status word pulses blue in the shared phase (item 12)
+                and stays blue when the row is selected (item 13). */}
+            {active ? (
+              <ActivityPulse live={live} wrap="truncate">
+                {status.word}
+              </ActivityPulse>
+            ) : (
+              <Text color={forcedFg ?? status.color} wrap="truncate">
+                {status.word}
+              </Text>
+            )}
           </Box>
         </>
       }
@@ -3332,57 +3368,71 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
-/** The whole-queue health the leading RUNNER marker summarizes (item 4b). */
-export type QueueHealthKind = "active" | "failed" | "stale" | "healthy"
+/** The RUNNER LIVENESS the leading marker reflects (item 4). */
+export type QueueHealthKind = "down" | "processing" | "idle"
 
-export type QueueHealthMarker = Readonly<{ kind: QueueHealthKind; color: string }>
+export type QueueHealthMarker = Readonly<{
+  kind: QueueHealthKind
+  /** The dot colour in the static (non-live / print) render. */
+  color: string
+  /** The `[on, off]` pulse phases while the runner is alive; `null` = solid. */
+  pulse: readonly [string, string] | null
+}>
 
 /**
- * The single whole-queue health the RUNNER box's leading marker shows (item 4b),
- * derived from the projection's own runner + rows/metrics — no new plumbing:
+ * The RUNNER LIVENESS the leading marker reflects (item 4) — NOT job activity or
+ * outcomes (the row states + STATS carry those):
  *
- * - `active`  — a run is checking right now (pulsing info dot, ag-code cadence).
- * - `failed`  — recent terminal failures in the window (red).
- * - `stale`   — the resident runner is missing or its heartbeat went stale (yellow).
- * - `healthy` — idle, drained, runner fresh (green).
+ * - `down`       — the resident runner is missing OR its heartbeat went stale:
+ *                  SOLID RED. Nothing is draining the queue.
+ * - `processing` — runner alive and a run is checking right now: PULSING BLUE.
+ * - `idle`       — runner alive with no job in flight: PULSING GREY.
  *
- * Precedence is severity-ordered: an in-flight run reads as activity even when
- * older failures sit in the window; a fresh failure outranks a stale runner.
+ * A stale heartbeat maps to `down` alongside a missing runner: both mean the
+ * queue is not being reliably drained, so the marker reads the same.
  */
 export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
-  if (projection.rows.some((row) => row.status === "running")) return { kind: "active", color: "$fg-info" }
-  const outcomes = projection.metrics.outcomes
-  if (outcomes.rejected + outcomes.environmentRefused + outcomes.canceled > 0) {
-    return { kind: "failed", color: "$fg-error" }
-  }
   const timing = runnerTiming(projection)
   if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
-    return { kind: "stale", color: "$fg-warning" }
+    return { kind: "down", color: "$fg-error", pulse: null }
   }
-  return { kind: "healthy", color: "$fg-success" }
+  if (projection.rows.some((row) => row.status === "running")) {
+    return { kind: "processing", color: "$fg-info", pulse: ["$fg-info", "$fg-muted"] }
+  }
+  return { kind: "idle", color: "$fg-muted", pulse: ["$fg-muted", "$bg-surface-default"] }
 }
 
 /** The status-dot glyph — same filled disc the per-row running marker uses. */
 const QUEUE_HEALTH_GLYPH = "●"
 
 /**
- * The leading whole-queue marker at the front of the RUNNER box (item 4b). It
- * pulses on the shared ag-code cadence while a run is active (live pane only —
- * the one-shot projection renders the static info dot), and is a colorized
- * status dot otherwise. `live` gates the pulse exactly as `TimelineMarker` does.
+ * RUNNER-liveness activity (items 4/10/11): renders `children` on the marker's
+ * pulse, or statically in its on-colour when down or non-live. In the live pane
+ * the pulse is SYNCHRONIZED (silvery shared-phase clock, item 11) so the leading
+ * disc and the adjacent runner command text — and every other synchronized
+ * activity indicator — beat as one, never out of phase. `live` gates the pulse
+ * exactly as `TimelineMarker` does (the one-shot projection has no app scope).
  */
-function RunnerQueueMarker({ projection, live }: { projection: QueueTimelineProjection; live: boolean }) {
-  const marker = queueHealthMarker(projection)
-  if (marker.kind === "active" && live) {
+function RunnerActivity({
+  marker,
+  live,
+  children,
+  ...rest
+}: {
+  marker: QueueHealthMarker
+  live: boolean
+  children: React.ReactNode
+} & Omit<TextProps, "color" | "children">) {
+  if (marker.pulse !== null && live) {
     return (
-      <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS} flexShrink={0}>
-        {QUEUE_HEALTH_GLYPH}
+      <Pulse synchronized colors={marker.pulse} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
+        {children}
       </Pulse>
     )
   }
   return (
-    <Text color={marker.color} flexShrink={0}>
-      {QUEUE_HEALTH_GLYPH}
+    <Text color={marker.color} {...rest}>
+      {children}
     </Text>
   )
 }
@@ -3398,13 +3448,18 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   const runner = projection.runner
   const timing = runnerTiming(projection)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
+  // ONE marker drives both the leading disc AND the runner command text, so
+  // they pulse in the same synchronized phase (items 10/11).
+  const marker = queueHealthMarker(projection)
   if (runner === null) {
     const drained = timelineLastDrainedMs(projection)
     const now = Date.parse(projection.now)
     return (
       <TitledBox title="RUNNER" borderColor="$fg-error">
         <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-          <RunnerQueueMarker projection={projection} live={live} />
+          <RunnerActivity marker={marker} live={live} flexShrink={0}>
+            {QUEUE_HEALTH_GLYPH}
+          </RunnerActivity>
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
             {drained === null
               ? "NO RUNNER - no drained run in window"
@@ -3417,10 +3472,12 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   return (
     <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
       <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-        <RunnerQueueMarker projection={projection} live={live} />
-        <Text wrap="truncate" minWidth={0}>
+        <RunnerActivity marker={marker} live={live} flexShrink={0}>
+          {QUEUE_HEALTH_GLYPH}
+        </RunnerActivity>
+        <RunnerActivity marker={marker} live={live} wrap="truncate" minWidth={0}>
           [{runner.pid}] {runner.command ?? "resident runner"}
-        </Text>
+        </RunnerActivity>
         <Box flexGrow={1} flexBasis={0} minWidth={0} />
         <Text color="$fg-muted" flexShrink={0}>
           uptime {uptimeClock(timing?.uptimeMs ?? 0)}
@@ -3551,6 +3608,27 @@ export function queueTimelineDateSeparatorLabel(
 }
 
 /**
+ * The YYYY-MM-DD header to show above the row at `index`. The boundary rule is
+ * the r5 rule (a header strictly BETWEEN two adjacent rows whose local calendar
+ * day differs). In `leading` mode (the fill pane, item 1) the first timed row
+ * ALSO gets a header — the fill TIME cell is time-of-day only, so the top day
+ * needs its own anchor; the one-shot print path keeps the boundary-only rule
+ * because its inline-date TIME cell already anchors the first day.
+ */
+export function queueTimelineDateHeaderAt(
+  rows: readonly QueueTimelineProjectedRow[],
+  index: number,
+  leading: boolean,
+): string | null {
+  const current = rows[index]
+  if (current === undefined) return null
+  if (leading && index === 0) {
+    return current.timestamp === null ? null : timelineLocalCalendarDay(current.timestamp)
+  }
+  return queueTimelineDateSeparatorLabel(rows[index - 1], current)
+}
+
+/**
  * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
  * only when on; no `none`/`no`/`all` placeholders. The four status buckets
@@ -3567,24 +3645,35 @@ function TimelineFilterLine({
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
 }) {
   const filters = projection.filters
-  // `since=` renders only when the operator bounded the window; the default
-  // unbounded window shows everything and prints no `since=` (user directive
-  // 2026-07-16).
+  // The "FILTER" label text is deleted (item 3): the pills stand alone. The
+  // non-default dimensions (`since=` only when the window is bounded, `terms=`
+  // only when terms were passed, `latest` only when on) survive as a dim group
+  // label; the common unbounded/no-terms watch renders no label at all.
   const bounded = filters.windowMs < QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS
-  // The FILTER label carries the non-default dimensions as a dim prefix; the
-  // four status buckets are TogglePills keyed by their p/r/f/d letter
-  // (`[p]ending`…). The whole cluster sits very dim and lifts together on hover
-  // (silvery TogglePillGroup), and clicking a pill toggles its bucket.
-  const label =
-    `FILTER${bounded ? ` since=${mediaDuration(filters.windowMs)}` : ""}` +
-    `${filters.terms.length === 0 ? "" : ` terms=${filters.terms.join("|")}`}` +
-    `${filters.latest ? " latest" : ""}`
+  const dimensions = [
+    bounded ? `since=${mediaDuration(filters.windowMs)}` : "",
+    filters.terms.length === 0 ? "" : `terms=${filters.terms.join("|")}`,
+    filters.latest ? "latest" : "",
+  ]
+    .filter(Boolean)
+    .join(" ")
+  // The four status buckets are TogglePills labelled by their plain word with a
+  // BOLD first letter (item 3) — `pending`/`running`/`failed`/`done`, the bold
+  // `p`/`r`/`f`/`d` doubling as the hotkey hint (no `[p]` brackets). The whole
+  // cluster sits very dim and lifts together on hover (silvery TogglePillGroup);
+  // clicking a pill toggles its bucket, mirroring the p/r/f/d keys.
   return (
-    <TogglePillGroup label={label} flexShrink={0} minWidth={0} overflow="hidden">
+    <TogglePillGroup
+      {...(dimensions === "" ? {} : { label: dimensions })}
+      flexShrink={0}
+      minWidth={0}
+      overflow="hidden"
+    >
       {QUEUE_TIMELINE_STATUS_BUCKETS.map((bucket) => (
         <TogglePill
           key={bucket}
-          label={`[${bucket.slice(0, 1)}]${bucket.slice(1)}`}
+          label={bucket}
+          boldFirstLetter
           active={buckets.has(bucket)}
           onToggle={() => onToggleBucket?.(bucket)}
         />
@@ -3637,9 +3726,13 @@ function ProjectedQueueTimeline({
 }) {
   const rows = queueTimelineVisibleRows(projection, visibleBuckets, fillHeight)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
-  const includeDate = rows.some(
-    (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
-  )
+  // In the fill pane the TIME cell is time-of-day only (item 1) and the day is
+  // carried by YYYY-MM-DD header rows (leading + per-boundary, below). The
+  // one-shot print path is pinned: it keeps the inline-date TIME cell when the
+  // visible window spans more than one local day.
+  const includeDate =
+    !fillHeight &&
+    rows.some((row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10))
   const layout = timelineCellLayout(rows, includeDate, columns)
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
@@ -3673,34 +3766,9 @@ function ProjectedQueueTimeline({
         )}
         <TimelineRunnerBox projection={projection} live={nav} />
         <TimelineStatusBox projection={projection} />
-        {/* A blank row sets the FILTER/coverage row apart from the boxes above
-            it (item D, 2026-07-16). */}
-        <Box height={1} flexShrink={0} />
-        {/* FILTER pills + coverage share ONE row directly above the list (user
-            directive 2026-07-16, W1): the "... N more" / retained coverage reads
-            on the left, the very-dim FILTER toggle-pills right-align. The pills
-            always render (the filter is always live); the coverage text only
-            appears when rows exceed the pane or the window is bounded. */}
-        <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
-          {/* In fill mode (Tip A, item 5) the interactive rows Box virtualizes
-              and scrolls every retained row, so nothing is permanently hidden:
-              the coverage cell degrades to EMPTY (no awkward "... 0 more") and
-              the row shows pills-only. Off fill (print / one-shot) the coverage
-              text renders exactly as W1b placed it. The pills always render. */}
-          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
-            {fillHeight || projection.display.hidden === 0 ? null : (
-              <Text color="$fg-muted" wrap="truncate">
-                ... {projection.display.hidden} more
-              </Text>
-            )}
-            {fillHeight || projection.coverage.complete ? null : (
-              <Text color="$fg-warning" wrap="truncate">
-                retained since {projection.coverage.retainedSince}
-              </Text>
-            )}
-          </Box>
-          <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
-        </Box>
+        {/* No blank row above the table header (item 5): the header sits flush
+            under the boxes above it. The pills + coverage row moved BELOW the
+            list (item 2), rendered after the rows block. */}
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>
         ) : (
@@ -3734,11 +3802,9 @@ function ProjectedQueueTimeline({
               // `cursorKey`/`onCursor`/`onSelect` all keep their existing
               // one-entry-per-row index contract with the caller (watch-pane's
               // externally computed `cursor` indexes this exact `rows` array).
-              estimateHeight={(index) =>
-                queueTimelineDateSeparatorLabel(rows[index - 1], rows[index]!) === null ? 1 : 2
-              }
+              estimateHeight={(index) => (queueTimelineDateHeaderAt(rows, index, fillHeight) === null ? 1 : 2)}
               renderItem={(row, index, meta) => {
-                const dateSeparator = queueTimelineDateSeparatorLabel(rows[index - 1], row)
+                const dateSeparator = queueTimelineDateHeaderAt(rows, index, fillHeight)
                 const entry = (
                   <TimelineProjectedRow
                     row={row}
@@ -3760,12 +3826,32 @@ function ProjectedQueueTimeline({
             />
           </Box>
         )}
-        {/* Empty fill panes still anchor the time-stats boxes at the bottom; a
-            non-empty fill pane grows its row block instead (the rows Box above
-            grows under fill), so no spacer competes with it. The pre-slice
-            residue ("... N more") and retained-since coverage live in the merged
-            FILTER row above the list (W1b) — never a post-list coverage block. */}
+        {/* An empty fill pane's spacer pushes the pills + time-stats boxes to
+            the bottom; a non-empty fill pane grows its row block instead, so no
+            spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
+        {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
+            order RUNNER → header → rows → pills → time-stats). The "... N more" /
+            retained coverage reads on the left, the very-dim toggle-pills
+            right-align. In fill mode the coverage degrades to EMPTY (the rows
+            virtualize and scroll, so nothing is permanently hidden — no "... 0
+            more"); the pills always render. Off fill the coverage renders as
+            W1b placed it. */}
+        <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
+          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+            {fillHeight || projection.display.hidden === 0 ? null : (
+              <Text color="$fg-muted" wrap="truncate">
+                ... {projection.display.hidden} more
+              </Text>
+            )}
+            {fillHeight || projection.coverage.complete ? null : (
+              <Text color="$fg-warning" wrap="truncate">
+                retained since {projection.coverage.retainedSince}
+              </Text>
+            )}
+          </Box>
+          <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
+        </Box>
         <TimeStatsBoxes
           facts={projection.timeStatsFacts}
           now={projection.now}

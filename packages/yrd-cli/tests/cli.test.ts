@@ -3644,9 +3644,14 @@ describe("runYrd", () => {
     expect(second).toContain("@agent/3")
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
-    expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(rows.indexOf(header!) - 1)
-    // The windowed TimeStatsBox grid (respec item 6) leads with the FLOW box.
-    expect(rows.findIndex((row) => row.includes("FLOW"))).toBeGreaterThan(rows.indexOf(second!))
+    // Item 2/3: the status pills row moved BELOW the list (was directly above
+    // the header) and dropped its "FILTER" label — plain-word pills now.
+    const pillsRowIndex = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
+    // The windowed TimeStatsBox grid (respec item 6) leads with the FLOW box,
+    // below the pills.
+    const flowIndex = rows.findIndex((row) => row.includes("FLOW"))
+    expect(flowIndex).toBeGreaterThan(pillsRowIndex)
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3951,11 +3956,12 @@ describe("runYrd", () => {
         ),
       )
       const rows = fixed.split("\n")
-      const filter = rows.find((row) => row.includes("FILTER "))
-      // The FILTER pills share the row with the left-aligned coverage text
-      // ("retained since …" / "... N more"), so assert the pill cluster is
-      // present rather than owning the whole row (W1, 2026-07-16).
-      expect.soft(filter).toContain("FILTER since=6:00:00 [p]ending [r]unning [f]ailed [d]one")
+      const filter = rows.find((row) => /pending.*running.*failed.*done/u.test(row))
+      // The pills share the row with the left-aligned coverage text ("retained
+      // since …" / "... N more"), so assert the pill cluster is present rather
+      // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
+      // no [p] brackets — the since= dimension survives, pills are plain words.
+      expect.soft(filter).toContain("since=6:00:00 pending running failed done")
       // The windowed TimeStatsBox grid (respec item 6) reads the SAME consolidated
       // queueFlowMetrics aggregate, windowed per box, rather than a single FLOW
       // stat row, so it leads with a bordered FLOW box (RUNS / INTEGRATED / FAILS)

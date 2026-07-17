@@ -32,6 +32,14 @@ function rowAt(text: string, index: number): string {
   return row
 }
 
+/** The status-pills row (no more "FILTER" label; the four plain-word pills share
+ *  one row with any non-default dimensions). */
+function pillsRow(text: string): string {
+  const found = text.split("\n").find((row) => /pending.*running.*failed.*done/u.test(row))
+  if (found === undefined) throw new Error("no pills row")
+  return found
+}
+
 /** mediaDuration display format (H:MM:SS / M:SS) for expected-age assertions. */
 function clockDuration(milliseconds: number): string {
   const seconds = Math.max(0, Math.round(milliseconds / 1_000))
@@ -97,7 +105,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("renders the column header white+bold, the PR id always bold, and a blank row above FILTER", async () => {
+  it("renders the column header white+bold, the PR id always bold, and no blank row above the header", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -117,15 +125,15 @@ describe("queue timeline chrome 21106", () => {
       const doneRow = rowAt(text, mutedRowY)
       const prX = doneRow.indexOf("PR4.1")
       expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
-      // D: the row directly above the FILTER/coverage row is blank.
-      const filterY = rowIndexOf(text, "FILTER ")
-      expect(rowAt(text, filterY - 1).trim(), "blank row above FILTER").toBe("")
+      // Item 5: the table header sits flush — the row directly above the TIME
+      // header is not a blank spacer (it is the STATUS/RUNNER box border).
+      expect(rowAt(text, headerY - 1).trim(), "no blank row above the header").not.toBe("")
     } finally {
       app.unmount()
     }
   })
 
-  it("mutes real run ids like TIME while pending keeps its own color", async () => {
+  it("mutes real run ids like TIME while a not-yet-started run shows a muted dash", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -155,12 +163,17 @@ describe("queue timeline chrome 21106", () => {
       expect(iconFg, "branch glyph is muted, like TIME").toEqual(timeFg)
       expect(iconFg, "branch glyph is dimmer than the branch name").not.toEqual(branchFg)
 
+      // Item 9: a not-yet-started run shows a muted "-" in the RUN cell — no
+      // colored "pending" word there. The pending STATUS word keeps its info color.
       const pendingRowY = rowIndexOf(text, " pend ")
       const pendingRow = rowAt(text, pendingRowY)
-      const pendingX = pendingRow.lastIndexOf("pending")
-      expect(pendingX, "pending run cell present on the pending row").toBeGreaterThan(0)
-      const pendingFg = app.cell(pendingX, pendingRowY).fg
-      expect(pendingFg, "pending run cell keeps info color").not.toEqual(timeFg)
+      expect(pendingRow, "run-less row shows no colored pending run id").not.toContain("pending")
+      const pendStatusX = pendingRow.indexOf("pend")
+      expect(pendStatusX, "pending status word present").toBeGreaterThan(0)
+      expect(
+        app.cell(pendStatusX, pendingRowY).fg,
+        "pending status word keeps its own (info) color, distinct from muted TIME",
+      ).not.toEqual(timeFg)
     } finally {
       app.unmount()
     }
@@ -246,7 +259,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("omits since= from FILTER when the window is unbounded (the new default)", async () => {
+  it("omits since= from the pills row when the window is unbounded (the new default)", async () => {
     const base = queueTimelineStories["contract-overview"].snapshot.projection
     const unbounded: QueueTimelineProjection = {
       ...base,
@@ -257,27 +270,30 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app.waitForLayoutStable()
-      const filterLine = rowAt(app.text, rowIndexOf(app.text, "FILTER"))
+      const filterLine = pillsRow(app.text)
       expect(filterLine, "unbounded window shows no since=").not.toContain("since=")
-      expect(filterLine).toContain("[p]ending")
+      expect(filterLine).toContain("pending")
     } finally {
       app.unmount()
     }
   })
 
-  it("renders only non-default FILTER dimensions plus the four status pills", async () => {
+  it("renders only non-default dimensions plus the four plain-word status pills (no FILTER label)", async () => {
     const defaults = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection: defaults, nav: false, columns: 160 }))
     try {
       await app.waitForLayoutStable()
-      const filterY = rowIndexOf(app.text, "FILTER")
-      const filterLine = rowAt(app.text, filterY)
+      const filterLine = pillsRow(app.text)
+      // Item 3: the "FILTER" label is gone; the non-default `since=` dimension
+      // survives as a dim prefix and the pills are plain words (no brackets).
+      expect(app.text, "FILTER label is deleted").not.toContain("FILTER")
       expect(filterLine).toContain("since=6:00:00")
-      expect(filterLine).toContain("[p]ending")
-      expect(filterLine).toContain("[r]unning")
-      expect(filterLine).toContain("[f]ailed")
-      expect(filterLine).toContain("[d]one")
+      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("running")
+      expect(filterLine).toContain("failed")
+      expect(filterLine).toContain("done")
+      expect(filterLine, "no bracketed hotkey hints").not.toMatch(/\[[prfd]\]/u)
       expect(filterLine).not.toContain("terms=")
       expect(filterLine).not.toContain("latest=")
       expect(filterLine).not.toContain("status=")
@@ -291,12 +307,12 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app2.waitForLayoutStable()
-      const filterLine = rowAt(app2.text, rowIndexOf(app2.text, "FILTER"))
+      const filterLine = pillsRow(app2.text)
       expect(filterLine).toContain("terms=typecheck")
       // Pills always render their label (bucket on/off is colour, not glyph).
-      expect(filterLine).toContain("[p]ending")
-      expect(filterLine).toContain("[f]ailed")
-      expect(filterLine).toContain("[d]one")
+      expect(filterLine).toContain("pending")
+      expect(filterLine).toContain("failed")
+      expect(filterLine).toContain("done")
     } finally {
       app2.unmount()
     }
@@ -441,14 +457,15 @@ describe("queue timeline chrome 21106", () => {
       const cursorLine = rowAt(text, cursorY)
       const statusX = cursorLine.indexOf(" run ") + 1
       const timeX = cursorLine.search(/\d{2}:\d{2}:\d{2}/u)
-      const cursorFg = app.cell(statusX, cursorY).fg
-      const cursorBg = app.cell(statusX, cursorY).bg
-      expect(app.cell(timeX, cursorY).fg, "TIME cell forced to selection fg").toEqual(cursorFg)
+      // Sample the selection fg/bg from a NON-activity cell (TIME).
+      const cursorFg = app.cell(timeX, cursorY).fg
+      const cursorBg = app.cell(timeX, cursorY).bg
       expect(app.cell(timeX, cursorY).bg, "TIME cell selection bg").toEqual(cursorBg)
-      // Every sampled cell shares the same forced pair.
-      for (const x of [timeX, statusX]) {
-        expect(app.cell(x, cursorY).fg).toEqual(cursorFg)
-      }
+      // Item 13: the running status word keeps its BLUE activity fg under
+      // selection — it is NEVER forced to the selection fg — while the selection
+      // bg still covers it (the band is unbroken).
+      expect(app.cell(statusX, cursorY).fg, "running activity fg stays blue under selection").not.toEqual(cursorFg)
+      expect(app.cell(statusX, cursorY).bg, "selection bg still covers the activity cell").toEqual(cursorBg)
       // The selection band spans the FULL row width: the run-duration cell at
       // the right edge (now a bare dimmed time, no glyph — item S) AND the
       // inter-cell gap next to it carry the same selection background as the

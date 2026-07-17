@@ -121,16 +121,19 @@ describe("queue timeline 21106 contract", () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const queueLine = rowIndex(rows, "QUEUE")
     const updatedLine = rowIndex(rows, "updated 17:30:00")
-    const filterLine = rowIndex(rows, "FILTER ")
     const headerLine = rowIndex(rows, "TIME")
     const lastRowLine = rowIndex(rows, "PR4.1")
+    // Item 2 (deliberate contract change): the pills row moved from ABOVE the
+    // header to BELOW the list — new order updated → header → rows → pills →
+    // time-stats (the FLOW box heads r9's windowed TimeStatsBox grid).
+    const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
     const flowBoxLine = rowIndex(rows, "FLOW")
 
     expect(queueLine).toBeLessThan(updatedLine)
-    expect(updatedLine).toBeLessThan(filterLine)
-    expect(filterLine).toBeLessThan(headerLine)
+    expect(updatedLine).toBeLessThan(headerLine)
     expect(headerLine).toBeLessThan(lastRowLine)
-    expect(lastRowLine).toBeLessThan(flowBoxLine)
+    expect(lastRowLine).toBeLessThan(pillsLine)
+    expect(pillsLine).toBeLessThan(flowBoxLine)
 
     // The status box is omitted when the queue is normal.
     expect(rows.join("\n")).not.toContain("HOLD THE LINE")
@@ -174,7 +177,7 @@ describe("queue timeline 21106 contract", () => {
     // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend pending PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
+    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend\s+-\s+PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
       /^17:10:00 ● run\s+main#42 PR42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
     )
@@ -186,8 +189,8 @@ describe("queue timeline 21106 contract", () => {
     )
     expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+PR4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
 
-    // No row carries the removed clock glyph, and the pending row has no Run
-    // yet: blue `pending` instead of a run id, no run duration.
+    // No row carries the removed clock glyph, and a not-yet-started run shows a
+    // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
     for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("#")
   })
@@ -227,7 +230,8 @@ describe("queue timeline 21106 contract", () => {
     expect(paused.runner).toBeNull()
     const absentRows = await renderTimeline(paused, 120)
     expect(absentRows.join("\n")).toMatch(/NO RUNNER - (queue last drained .+ ago|no drained run in window)/u)
-    expect(rowIndex(absentRows, "NO RUNNER")).toBeLessThan(rowIndex(absentRows, "FILTER "))
+    const pillsAt = absentRows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    expect(rowIndex(absentRows, "NO RUNNER"), "the RUNNER box is above the pills row").toBeLessThan(pillsAt)
 
     // A heartbeat older than the stale threshold is equally loud.
     const stale = {
@@ -251,7 +255,8 @@ describe("queue timeline 21106 contract", () => {
         if (column < 0) throw new Error(`missing '${needle}' in the '${anchor}' row`)
         return styled.cell(column, row)
       }
-      const info = cell("pending", "PR1.1").fg
+      // Item 9: a not-yet-started run shows a muted "-", not a blue "pending"
+      // run id — the blue (info) reference is now the running working disc.
       const runningMarker = cell("●", "PR42.1").fg
       const successMarker = cell("✓", "PR4.1").fg
       const successText = cell("done", "PR4.1").fg
@@ -259,22 +264,20 @@ describe("queue timeline 21106 contract", () => {
       const mutedTime = cell("16:40:00", "PR1.1").fg
       const mutedAge = cell("50:00", "PR1.1").fg
 
-      for (const pinned of [info, runningMarker, successMarker, successText, failureText, mutedTime, mutedAge]) {
+      for (const pinned of [runningMarker, successMarker, successText, failureText, mutedTime, mutedAge]) {
         expect(pinned).not.toBeNull()
       }
-      // Blue pending identity matches the pulsing blue working disc.
-      expect(info).toEqual(runningMarker)
       // GREEN success marker + semantic success text (15d re-rule).
       expect(successMarker).toEqual(successText)
-      expect(successMarker).not.toEqual(info)
+      expect(successMarker).not.toEqual(runningMarker)
       expect(successMarker).not.toEqual(mutedTime)
       // Failure code keeps its own semantic foreground.
       expect(failureText).not.toEqual(successMarker)
-      expect(failureText).not.toEqual(info)
+      expect(failureText).not.toEqual(runningMarker)
       expect(failureText).not.toEqual(mutedTime)
       // TIME and AGE share the muted foreground.
       expect(mutedTime).toEqual(mutedAge)
-      expect(mutedTime).not.toEqual(info)
+      expect(mutedTime).not.toEqual(runningMarker)
     } finally {
       styled.unmount()
     }
@@ -305,15 +308,20 @@ describe("queue timeline 21106 contract", () => {
     expect(narrowBorder.trimEnd().length).toBe(100)
   })
 
-  it("attaches the right-aligned FILTER row directly above the list", async () => {
+  it("attaches the right-aligned pills row directly below the list (item 2)", async () => {
     for (const width of [120, 200]) {
       const rows = await renderTimeline(contractProjection(), width)
-      const filterLine = rowIndex(rows, "FILTER ")
-      const header = rows[filterLine + 1]
-      expect(header, `width ${width}`).toContain("TIME")
-      const filter = rows[filterLine]
-      if (filter === undefined) throw new Error("expected the FILTER row")
-      expect(filter.trim()).toBe("FILTER since=6:00:00 [p]ending [r]unning [f]ailed [d]one")
+      const headerLine = rowIndex(rows, "TIME")
+      const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+      // Item 2: the pills row renders BELOW the list, not above the header.
+      expect(pillsLine, `width ${width}`).toBeGreaterThan(headerLine)
+      const filter = rows[pillsLine]
+      if (filter === undefined) throw new Error("expected the pills row")
+      // Item 3: no "FILTER" label, no [p] brackets; the `since=` dimension
+      // survives and the pills are plain words. Right-aligned to the cap.
+      expect(filter).not.toContain("FILTER")
+      expect(filter).not.toMatch(/\[[prfd]\]/u)
+      expect(filter.trim()).toContain("since=6:00:00 pending running failed done")
       expect(filter.trimEnd().length, `width ${width}`).toBe(Math.min(width, 160))
     }
   })
@@ -328,7 +336,8 @@ describe("queue timeline 21106 contract", () => {
     expect(rows[statusLine]).toContain("operator freeze")
     expect(rows[statusLine]).toContain("allowed PR2")
     expect(rowIndex(rows, "updated 17:30:00")).toBeLessThan(statusLine)
-    expect(statusLine).toBeLessThan(rowIndex(rows, "FILTER "))
+    const pillsAt = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    expect(statusLine, "the STATUS box sits above the pills row").toBeLessThan(pillsAt)
 
     const render = createRenderer({ cols: 120, rows: 45 })
     const styled = render(createElement(QueueTimelineView, { projection, columns: 120 }))

@@ -1,4 +1,4 @@
-// @failure The RUNNER box shows no whole-queue health at a glance: no leading marker that pulses while a run is active or colorizes recent failures / a stale runner / an idle-healthy queue.
+// @failure The RUNNER box marker reflects job activity/outcomes instead of runner liveness, so an operator cannot tell at a glance whether the runner is down (red), processing (pulsing blue), or idle-alive (pulsing grey).
 // @level l2
 // @consumer @yrd/cli watch
 
@@ -15,17 +15,16 @@ import {
 } from "../dev/queue-timeline-fixtures.ts"
 import { QueueTimelineView, queueHealthMarker, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
 
-// Item 4b — the RUNNER box leads with a single whole-queue health marker,
-// derived from the projection's own runner + rows/metrics (no new plumbing):
-// active pulses, failures go red, a missing/stale runner goes yellow, an idle
-// drained queue is dim green. Precedence is severity-ordered.
+// Item 4 — the RUNNER box marker reflects RUNNER LIVENESS, not job activity:
+// runner down (missing or stale heartbeat) → solid red; runner alive +
+// processing → pulsing blue; runner alive + idle → pulsing grey.
 
 function idleProjection(): QueueTimelineProjection {
   const pending = fixturePr("PRA", "submitted", "2026-07-13T11:10:00.000Z", "Alpha")
   return fixtureSnapshot(fixtureResult([pending], [])).projection
 }
 
-function activeProjection(): QueueTimelineProjection {
+function processingProjection(): QueueTimelineProjection {
   const runningPr = fixturePr("PRR", "submitted", "2026-07-13T11:25:00.000Z", "Running")
   const runningRun = fixtureRun("RR", [runningPr], "running", "2026-07-13T11:40:00.000Z", {
     steps: [fixtureStep("check", fixtureJob("JRR-check", "running"))],
@@ -33,41 +32,37 @@ function activeProjection(): QueueTimelineProjection {
   return fixtureSnapshot(fixtureResult([runningPr], [runningRun]), { rowLimit: 20 }).projection
 }
 
-/** The idle projection with only the fields the marker reads overridden — a
- *  real projection base keeps every other field valid. */
-function withOutcomes(base: QueueTimelineProjection, rejected: number): QueueTimelineProjection {
-  return { ...base, metrics: { ...base.metrics, outcomes: { ...base.metrics.outcomes, rejected } } }
-}
-
-describe("queueHealthMarker (item 4b)", () => {
-  it("reads active while a run is checking", () => {
-    expect(queueHealthMarker(activeProjection())).toEqual({ kind: "active", color: "$fg-info" })
+describe("queueHealthMarker liveness (item 4)", () => {
+  it("reads processing (pulsing blue) while the runner is alive and a run is checking", () => {
+    expect(queueHealthMarker(processingProjection())).toEqual({
+      kind: "processing",
+      color: "$fg-info",
+      pulse: ["$fg-info", "$fg-muted"],
+    })
   })
 
-  it("keeps active precedence even with failures in the window", () => {
-    expect(queueHealthMarker(withOutcomes(activeProjection(), 3)).kind).toBe("active")
+  it("reads idle (pulsing grey) while the runner is alive with no run in flight", () => {
+    expect(queueHealthMarker(idleProjection())).toEqual({
+      kind: "idle",
+      color: "$fg-muted",
+      pulse: ["$fg-muted", "$bg-surface-default"],
+    })
   })
 
-  it("reads failed when recent terminal failures sit in the window", () => {
-    expect(queueHealthMarker(withOutcomes(idleProjection(), 1))).toEqual({ kind: "failed", color: "$fg-error" })
-  })
-
-  it("reads stale when the resident runner is missing", () => {
+  it("reads down (solid red) when the resident runner is missing", () => {
     const base = idleProjection()
-    expect(queueHealthMarker({ ...base, runner: null })).toEqual({ kind: "stale", color: "$fg-warning" })
+    expect(queueHealthMarker({ ...base, runner: null })).toEqual({ kind: "down", color: "$fg-error", pulse: null })
   })
 
-  it("reads stale when the runner heartbeat is stale", () => {
-    const base = idleProjection()
+  it("reads down (solid red) when the runner heartbeat is stale — even mid-run", () => {
+    const base = processingProjection()
     const runner = base.runner
-    expect(runner, "idle base has a resident runner").not.toBeNull()
+    expect(runner, "processing base has a resident runner").not.toBeNull()
     const staleTick = new Date(Date.parse(base.now) - 60_000).toISOString()
     const stale = { ...base, runner: { ...runner!, lastTickAt: staleTick } }
-    expect(queueHealthMarker(stale)).toEqual({ kind: "stale", color: "$fg-warning" })
-  })
-
-  it("reads healthy when the queue is idle, drained, and the runner is fresh", () => {
-    expect(queueHealthMarker(idleProjection())).toEqual({ kind: "healthy", color: "$fg-success" })
+    // Down maps a stale heartbeat to red regardless of an in-flight run: nothing
+    // is reliably draining the queue.
+    expect(queueHealthMarker(stale)).toEqual({ kind: "down", color: "$fg-error", pulse: null })
   })
 })
 
@@ -81,9 +76,9 @@ function discPointOnRow(text: string, rowNeedle: string): readonly [number, numb
   return [x, y]
 }
 
-describe("RUNNER box leading marker render (item 4b)", () => {
-  it("leads the runner row with the disc and colors it like the active status glyph", async () => {
-    const projection = activeProjection()
+describe("RUNNER box liveness marker render (item 4)", () => {
+  it("leads the runner row with the disc and colors processing like the active status glyph", async () => {
+    const projection = processingProjection()
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 120 }))
     try {
@@ -93,9 +88,8 @@ describe("RUNNER box leading marker render (item 4b)", () => {
       const pidX = app.text.split("\n")[markerAt[1]]!.indexOf("[84042]")
       expect(markerAt[0], "marker precedes the pid").toBeLessThan(pidX)
 
-      // Active state renders the info-colored disc: its cell fg matches the
-      // running row's status disc (both `$fg-info`), proving the color reaches
-      // the cell — not just the marker helper.
+      // The static (non-live) processing dot is info-colored — its cell fg
+      // matches the running row's status disc (both `$fg-info`).
       const statusAt = discPointOnRow(app.text, "PRR.1")
       expect(app.cell(markerAt[0], markerAt[1]).fg).toEqual(app.cell(statusAt[0], statusAt[1]).fg)
     } finally {
@@ -103,7 +97,7 @@ describe("RUNNER box leading marker render (item 4b)", () => {
     }
   })
 
-  it("leads the NO RUNNER banner with the disc when no runner exists", async () => {
+  it("leads the NO RUNNER banner with a red disc when the runner is down", async () => {
     const projection: QueueTimelineProjection = { ...idleProjection(), runner: null }
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 120 }))
@@ -112,6 +106,9 @@ describe("RUNNER box leading marker render (item 4b)", () => {
       const markerAt = discPointOnRow(app.text, "NO RUNNER")
       const bannerX = app.text.split("\n")[markerAt[1]]!.indexOf("NO RUNNER")
       expect(markerAt[0], "marker precedes the NO RUNNER banner").toBeLessThan(bannerX)
+      // The down dot shares the error fg with the banner text.
+      const bannerCell = app.cell(bannerX, markerAt[1])
+      expect(app.cell(markerAt[0], markerAt[1]).fg, "down marker is error-red like the banner").toEqual(bannerCell.fg)
     } finally {
       app.unmount()
     }

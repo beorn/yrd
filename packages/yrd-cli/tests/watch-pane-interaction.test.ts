@@ -243,8 +243,8 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).toContain("PR5.1")
       // The status buckets are TogglePills now (label constant, state by colour),
       // so the toggle is verified by the rows appearing/disappearing, not by an
-      // [x]/[ ] checkbox glyph.
-      expect(app.text, "the failed pill renders").toContain("[f]ailed")
+      // [x]/[ ] checkbox glyph. Item 3: pills are plain words, no [f] brackets.
+      expect(app.text, "the failed pill renders").toContain("failed")
 
       await app.press("f")
       await waitFor(() => !app.text.includes("PR5.1"))
@@ -274,11 +274,13 @@ describe("QueueWatchFrame 21106 interaction", () => {
     try {
       await app.waitForLayoutStable()
       expect(app.text).toContain("PR42.1")
-      const filterY = rowIndexOf(app.text, "[r]unning")
-      const filterX = app.text.split("\n")[filterY]?.indexOf("[r]unning") ?? -1
+      // The pills row (the one carrying all four plain-word pills) sits below
+      // the list; find `running` there, not in a running PR row above it.
+      const filterY = app.text.split("\n").findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+      const filterX = app.text.split("\n")[filterY]?.indexOf("running") ?? -1
       expect(filterY).toBeGreaterThan(0)
       expect(filterX).toBeGreaterThan(0)
-      // Clicking the [r]unning pill toggles the running bucket off — the running
+      // Clicking the running pill toggles the running bucket off — the running
       // rows drop out (state is colour, so the filtering behaviour is the proof).
       await app.click(filterX + 1, filterY)
       await waitFor(() => !app.text.includes("PR42.1"))
