@@ -1,5 +1,5 @@
 /**
- * @failure The resident follow-runner stays at WARN so completed run/compose settlements — successes especially — never print, or the INFO bump leaks into one-shot commands as yrd:journal:lock spam.
+ * @failure Routine lock/compose settlements leak into the resident runner's INFO stream, or disappear when an operator explicitly enables DEBUG.
  * @level l3
  * @consumer @yrd/cli resident follow-runner operators
  */
@@ -51,20 +51,18 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe("resident follow-runner INFO-by-default", () => {
-  it("prints compose settlements — successes included — at INFO with timing", async () => {
-    // A WARN runner would never write a completed `compose succeeded`: at the
-    // default level the success case simply vanishes. The resident INFO bump
-    // makes every drain cycle print its settlement with duration. Assert against
-    // the structured sink so the proof is format-independent (item 4 restyles the
-    // human-facing output; the JSONL record stays the anchor).
+describe("resident follow-runner lifecycle levels", () => {
+  it("keeps routine compose successes at DEBUG with timing", async () => {
+    // Run/check/merge settlements remain INFO milestones. A compose cycle is
+    // routine plumbing, so it appears only when the operator enables DEBUG.
+    // Assert against the structured sink so the proof is format-independent.
     const { repo } = await runnerRepo()
     const logFile = join(repo, "resident.jsonl")
     const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
+      env: { ...process.env, LOGGILY_FILE: logFile, LOG_LEVEL: "debug", NO_COLOR: "1" },
     })
     const drainStdout = new Response(cli.stdout).text()
     const drainStderr = new Response(cli.stderr).text()
@@ -73,10 +71,13 @@ describe("resident follow-runner INFO-by-default", () => {
         async () => {
           const records = await readRecords(logFile)
           const composeDone = records.find(
-            (r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded" && r.level === "info",
+            (r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded" && r.level === "debug",
           )
-          expect(composeDone, "no INFO yrd:queue:compose succeeded settlement").toBeDefined()
+          expect(composeDone, "no DEBUG yrd:queue:compose succeeded settlement").toBeDefined()
           expect(composeDone).toMatchObject({ msg: "compose succeeded", durationMs: expect.any(Number) })
+          expect(
+            records.some((r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded" && r.level === "info"),
+          ).toBe(false)
         },
         { timeout: 20_000, interval: 200 },
       )

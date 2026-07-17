@@ -115,6 +115,27 @@ describe("Yrd lifecycle records", () => {
     })
   })
 
+  it("demotes routine lock and compose successes to DEBUG while keeping run success at INFO", async () => {
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    await observeYrdLifecycle(log.child("journal"), { lifecycle: "lock" }, async () => undefined)
+    await observeYrdLifecycle(log.child("queue"), { lifecycle: "compose" }, async () => [])
+    await observeYrdLifecycle(log.child("queue"), { lifecycle: "run" }, async () => [])
+
+    expect(
+      events
+        .filter((event): event is Extract<Event, { kind: "log" }> => event.kind === "log")
+        .filter((event) => event.props?.outcome === "succeeded")
+        .map((event) => [event.namespace, event.level]),
+    ).toEqual([
+      ["yrd:journal:lock", "debug"],
+      ["yrd:queue:compose", "debug"],
+      ["yrd:queue:run", "info"],
+    ])
+    log.end()
+  })
+
   it("reuses delivery identities and records duration without journal facts", async () => {
     const events: Event[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
@@ -305,9 +326,11 @@ describe("observable CLI exemplar", () => {
         (record) => record.level === "info" && record.name === "yrd:journal:append" && record.op === "bay.submit",
       ),
     ).toEqual(expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }))
-    expect(evidence.find((record) => record.level === "info" && record.name === "yrd:journal:lock")).toEqual(
-      expect.objectContaining({ outcome: "succeeded", durationMs: expect.any(Number) }),
-    )
+    expect(
+      evidence.find(
+        (record) => record.level === "debug" && record.name === "yrd:journal:lock" && record.outcome === "succeeded",
+      ),
+    ).toEqual(expect.objectContaining({ durationMs: expect.any(Number) }))
     expect(
       evidence.find(
         (record) => record.level === "span" && record.name === "yrd:process:run" && record.outcome === "succeeded",

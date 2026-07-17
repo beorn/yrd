@@ -251,7 +251,7 @@ describe("filesystem Journal", () => {
         expect.objectContaining({
           kind: "log",
           namespace: "yrd:journal:lock",
-          level: "info",
+          level: "debug",
           props: expect.objectContaining({ lifecycle: "lock", outcome: "succeeded", durationMs: expect.any(Number) }),
         }),
         expect.objectContaining({
