@@ -52,6 +52,21 @@ describe("queue timeline 21106 contract", () => {
     else process.env.TZ = priorTZ
   })
 
+  it("renders one full-width STATS box after the list", async () => {
+    const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
+    const frame = rows.join("\n")
+    const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
+    const statsLine = rowIndex(rows, "╭─ STATS ")
+
+    expect(statsLine).toBeGreaterThan(pillsLine)
+    expect(rows[statsLine]?.length).toBe(120)
+    expect(frame).not.toContain("╭─ FLOW ")
+    expect(frame).not.toContain("╭─ TIME ")
+    for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90", "HR", "DAY", "WK", "MON"]) {
+      expect(frame).toContain(cell)
+    }
+  })
+
   it("projects one selectable row per exact PR revision with composite cursor identity", () => {
     const projection = contractProjection()
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr, row.revision])).toEqual([
