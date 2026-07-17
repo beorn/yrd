@@ -227,7 +227,24 @@ function stepLogStartsExpanded(data: QueueShowData, step: string): boolean {
   return data.steps.some((row) => row.step === step && !isSuccessfulStepStatus(row.status))
 }
 
-function QueueWorkflowStepTabs({
+// Effective selection derives from the live step unless the operator explicitly
+// picked a tab. A `null` pick means "follow the live step"; a pick that is no
+// longer a real step (a step vanished between snapshots) falls back to live.
+export function resolveStepTabSelection(
+  names: readonly string[],
+  liveStep: string | undefined,
+  userSelectedStep: string | null,
+): string | undefined {
+  return userSelectedStep !== null && names.includes(userSelectedStep) ? userSelectedStep : liveStep
+}
+
+// Effective fold derives from live status (running/attention open, completed
+// folded) unless the operator explicitly toggled this step's log.
+export function resolveStepLogExpanded(autoExpanded: boolean, userToggled: boolean | undefined): boolean {
+  return userToggled ?? autoExpanded
+}
+
+export function QueueWorkflowStepTabs({
   data,
   outputs,
   compact,
@@ -243,13 +260,18 @@ function QueueWorkflowStepTabs({
   prs: readonly PR[]
 }) {
   const names = useMemo(() => queueStepNames(data), [data])
-  const fallbackStep = defaultQueueStep(data, names)
-  const [selectedStep, setSelectedStep] = useState(fallbackStep)
-  const [expandedLogs, setExpandedLogs] = useState<Readonly<Record<string, boolean>>>(() =>
-    Object.fromEntries(names.map((name) => [name, stepLogStartsExpanded(data, name)])),
-  )
+  // The live current step re-derives from the freshest props on every render,
+  // so a same-run status advance (a running step passes, the next starts) moves
+  // it. Operator intent is tracked SEPARATELY and only overrides the live view
+  // when the operator actually acted: `userSelectedStep === null` and an absent
+  // `userToggledLogs` key both mean "follow the live derivation". The parent
+  // remounts this component when the run changes (`key={detailData.run}`), which
+  // resets these overrides to their empty defaults for the next run.
+  const liveStep = defaultQueueStep(data, names)
+  const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
+  const [userToggledLogs, setUserToggledLogs] = useState<Readonly<Record<string, boolean>>>({})
   const [prsExpanded, setPrsExpanded] = useState(false)
-  const activeStep = selectedStep !== undefined && names.includes(selectedStep) ? selectedStep : fallbackStep
+  const activeStep = resolveStepTabSelection(names, liveStep, userSelectedStep)
 
   // The batched members' review/comment/check-request/revision history (item J)
   // is a collapsed disclosure so it never pushes the step body past a short
@@ -301,7 +323,7 @@ function QueueWorkflowStepTabs({
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
       <QueueShowView data={data} compact={compact} highlightPr={highlightPr} section="run" />
       {prFacts}
-      <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
+      <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
         <TabList>
           {names.map((name) => (
             <Tab key={name} value={name}>
@@ -313,7 +335,7 @@ function QueueWorkflowStepTabs({
           const stepRows = data.steps.filter((row) => row.step === name)
           const stepOutputs = outputs.filter((output) => output.step === name)
           const stepData: QueueShowData = { ...data, steps: stepRows }
-          const logExpanded = expandedLogs[name] ?? stepLogStartsExpanded(data, name)
+          const logExpanded = resolveStepLogExpanded(stepLogStartsExpanded(data, name), userToggledLogs[name])
           return (
             <TabPanel key={name} value={name}>
               {/* Only the step-level facts here (item H); the run-level facts
@@ -322,7 +344,7 @@ function QueueWorkflowStepTabs({
               <Accordion
                 title="LOG"
                 expanded={logExpanded}
-                onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
+                onToggle={(expanded) => setUserToggledLogs((current) => ({ ...current, [name]: expanded }))}
                 marginTop={1}
                 flexGrow={1}
                 minHeight={0}
