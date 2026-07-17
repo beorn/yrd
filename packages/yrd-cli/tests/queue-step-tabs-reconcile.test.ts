@@ -31,7 +31,7 @@ function SameRunAdvance({ first, second }: { first: readonly StepState[]; second
   useEffect(() => {
     setSteps(second)
   }, [second])
-  return h(QueueWorkflowStepTabs, { data: stepTabsData(steps), outputs: [], compact: true, active: false })
+  return h(QueueWorkflowStepTabs, { data: stepTabsData(steps), outputs: [], compact: true, active: false, prs: [] })
 }
 
 async function renderAdvance(first: readonly StepState[], second: readonly StepState[]): Promise<string> {
@@ -40,7 +40,7 @@ async function renderAdvance(first: readonly StepState[], second: readonly StepS
 
 async function renderOnce(steps: readonly StepState[]): Promise<string> {
   return renderString(
-    h(QueueWorkflowStepTabs, { data: stepTabsData(steps), outputs: [], compact: true, active: false }),
+    h(QueueWorkflowStepTabs, { data: stepTabsData(steps), outputs: [], compact: true, active: false, prs: [] }),
     { width: 100, height: 40, plain: true },
   )
 }

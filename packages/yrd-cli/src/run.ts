@@ -357,7 +357,6 @@ type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
 
-const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
 // Flow metrics default to a 24h horizon (median/p90 wait, run durations,
 // rejection rate, throughput) independent of the tighter listing window; an
 // explicit --since overrides both.
@@ -3113,7 +3112,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "listing window (default 6h; flow metrics default 24h)")
+    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
@@ -3133,7 +3132,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "listing window (default 6h; flow metrics default 24h)")
+    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
@@ -3150,7 +3149,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "listing window (default 6h; flow metrics default 24h)")
+    .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")

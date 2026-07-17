@@ -82,6 +82,7 @@ import {
   queueStatusRows,
   queueTimelineProjection,
   queueTimelineRows,
+  QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   watchQueueRows,
   type QueueLogCoverage,
   type QueueStatusResult,
@@ -913,14 +914,17 @@ describe("runYrd", () => {
     }
   })
 
-  it("defaults flow metrics to a 24h window while the listing window stays 6h; --since wins both", async () => {
+  // Composed defaults: item K keeps the LISTING window unbounded (show
+  // everything unless --since is given) while flow metrics (21089) keep their
+  // own bounded 24h horizon — unbounded rates would be meaningless.
+  it("defaults flow metrics to a 24h window while the listing window stays unbounded; --since wins both", async () => {
     const app = await createApp()
     await openAndSubmit(app)
 
     const fresh = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io), fresh.stderr()).toBe(0)
     const defaults = JSON.parse(fresh.stdout()).projection
-    expect(defaults.filters.windowMs).toBe(6 * 60 * 60_000)
+    expect(defaults.filters.windowMs).toBe(QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS)
     expect(defaults.metrics.windowMs).toBe(24 * 60 * 60_000)
 
     const scoped = outputIO()

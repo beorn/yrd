@@ -2041,8 +2041,6 @@ describe("Queue command adapters", () => {
     expect(evidence).toMatchObject({ escapedDescendant: true, stageVerdict: "STALLED", exitCode: 0 })
   })
 
-  it("retains failed configured-check output after Git candidate wrapping", async () => {
-
   it("retains net-new failed configured-check output after Git candidate wrapping", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
