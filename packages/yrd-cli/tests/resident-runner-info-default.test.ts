@@ -90,6 +90,50 @@ describe("resident follow-runner INFO-by-default", () => {
     }
   }, 30_000)
 
+  it("renders the human stderr as scannable timeline rows — no JSON payloads, journal chatter suppressed", async () => {
+    const { repo } = await runnerRepo()
+    const logFile = join(repo, "timeline.jsonl")
+    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
+      cwd: repo,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
+    })
+    const stdoutText = new Response(cli.stdout).text()
+    let stderrText = ""
+    const stderrStream = (async () => {
+      const reader = cli.stderr.getReader()
+      const decoder = new TextDecoder()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        stderrText += decoder.decode(value, { stream: true })
+      }
+    })()
+    try {
+      // Wait for at least one timeline compose settlement row on the human stream.
+      await vi.waitFor(() => expect(stderrText).toMatch(/^compose succeeded \S+$/mu), {
+        timeout: 20_000,
+        interval: 200,
+      })
+      cli.kill("SIGTERM")
+      expect(await cli.exited, stderrText).toBe(0)
+    } finally {
+      cli.kill("SIGKILL")
+      await cli.exited
+      await stdoutText
+      await stderrStream
+    }
+
+    // The human stream carries timeline rows, NOT raw JSON payloads, and the
+    // low-level journal:lock chatter is suppressed from it...
+    expect(stderrText).not.toContain('{"')
+    expect(stderrText).not.toContain("journal:lock")
+    // ...while the structured JSONL sink still retains the full journal detail.
+    const records = await readRecords(logFile)
+    expect(records.some((r) => String(r.name) === "yrd:journal:lock")).toBe(true)
+  }, 30_000)
+
   it("keeps one-shot non-runner commands at WARN — no yrd:journal:lock INFO spam", async () => {
     const { repo } = await runnerRepo()
     const logFile = join(repo, "one-shot.jsonl")

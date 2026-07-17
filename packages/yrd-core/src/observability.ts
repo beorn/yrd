@@ -22,6 +22,7 @@ export type YrdDeliveryIdentity = Readonly<{
   pr?: string
   revision?: number
   headSha?: string
+  branch?: string
   run?: string
   step?: string
   job?: string

@@ -67,6 +67,7 @@ import { loadYrdConfig, SignalRecipientSchema, type ResolvedYrdProjectConfig, ty
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
+import { formatResidentLogLine } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
@@ -1096,7 +1097,15 @@ export async function runYrdProcess(
         // included — print with timing; one-shot commands keep the WARN default.
         const observability =
           resident === undefined ? context.observability : residentObservability(context.observability)
-        log = createYrdLogger(observability, (text) => io.stderr(text))
+        // For the resident, the stderr log stream renders as scannable
+        // watch-timeline rows (JSON stays in the JSONL file sink); one-shot
+        // commands keep the default console format.
+        const human =
+          resident === undefined
+            ? undefined
+            : (event: Parameters<typeof formatResidentLogLine>[0]) =>
+                formatResidentLogLine(event, { color: io.color === true })
+        log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
         const activeHost = await createYrdRuntimeHost({ cwd: context.repo, env, log: runtimeLog }, resident)
         host = activeHost
