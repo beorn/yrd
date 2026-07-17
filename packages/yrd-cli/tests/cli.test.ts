@@ -90,6 +90,7 @@ import {
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
+import { queueTimeStats } from "../src/time-stats.ts"
 import { YRD_VERSION } from "../src/version.ts"
 import {
   jobAttemptTaskStatusOf,
@@ -3259,6 +3260,15 @@ describe("runYrd", () => {
           p90Ms: 100 * minute,
           maxMs: 100 * minute,
         },
+        // R2 (rejected, 20m) + R3 (env-refused, 30m); the failed complement.
+        failedOnly: {
+          n: 2,
+          minMs: 20 * minute,
+          avgMs: 25 * minute,
+          p50Ms: 25 * minute,
+          p90Ms: 30 * minute,
+          maxMs: 30 * minute,
+        },
       },
       queueWait: {
         n: 5,
@@ -3278,6 +3288,7 @@ describe("runYrd", () => {
       activeRun: {
         allTerminal: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
         integratedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
+        failedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
       },
       queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
     })
@@ -3338,6 +3349,52 @@ describe("runYrd", () => {
     expect(shared.oldestOpenMs).toBe(60 * minute)
     expect(shared.metrics.oldestOpenMs).toBe(60 * minute)
     expect(widened.metrics.oldestOpenMs).toBe(60 * minute)
+  })
+
+  it("keeps time-stats facts on the full horizon so WK/MON never inherit the 24h metrics window", () => {
+    const minute = 60_000
+    const hour = 60 * minute
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    const landing = (id: string, pr: string, sha: string, finishedAt: string) =>
+      fakeRun({
+        id,
+        status: "passed",
+        pr: { id: pr, revision: 1, headSha: sha, baseSha: BASE_SHA },
+        startedAt: finishedAt,
+        finishedAt,
+        steps: [],
+        integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
+      })
+    // One landing 8h ago (inside the 24h metrics window) and one 3 days ago
+    // (outside 24h, inside a week). Both are dropped from the 6h listing rows.
+    const recent = landing("R1", "PR1", "1".repeat(40), "2026-07-13T04:00:00.000Z")
+    const older = landing("R2", "PR2", "2".repeat(40), "2026-07-10T12:00:00.000Z")
+    const prs = [
+      { id: "PR1", status: "integrated", submittedAt: "2026-07-13T03:45:00.000Z", headSha: "1".repeat(40) },
+      { id: "PR2", status: "integrated", submittedAt: "2026-07-10T11:55:00.000Z", headSha: "2".repeat(40) },
+    ].map((pr) => ({ ...pr, branch: `topic/${pr.id}`, base: "main", revision: 1 })) as unknown as PR[]
+    const result: QueueStatusResult = { base: "main", prs, running: [], waiting: [], finished: [recent, older] }
+    const projection = queueTimelineProjection([result], {
+      now,
+      windowMs: 6 * hour,
+      metricsWindowMs: 24 * hour,
+      statuses: ["pending", "running", "rejected", "integrated", "other"],
+      terms: [],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes: new Map(prs.map((pr) => [queueRevisionKey(pr), pr.submittedAt!])),
+    })
+    // The 24h metrics window counts only the recent landing.
+    expect(projection.metrics.terminalAttempts).toBe(1)
+    // timeStatsFacts span the FULL retained horizon — both landings — so the
+    // TimeStatsBox windows read their own spans off it, never the 24h default.
+    expect(projection.timeStatsFacts.map((f) => f.run).toSorted()).toEqual(["R1", "R2"])
+    const windows = queueTimeStats(projection.timeStatsFacts, now, projection.earliestEventMs)
+    const attempts = (key: string) => windows.find((w) => w.key === key)!.metrics.terminalAttempts
+    expect(attempts("HR")).toBe(0) // last hour: neither
+    expect(attempts("DAY")).toBe(1) // 24h: the recent landing only
+    expect(attempts("WK")).toBe(2) // 7d: both, including the landing the 24h window drops
+    expect(attempts("MON")).toBe(2) // 30d: both
   })
 
   it("keeps one recut PR card with cumulative source-ready age and revision lineage", async () => {
@@ -3546,7 +3603,8 @@ describe("runYrd", () => {
     expect(rendered).not.toContain("R1·PR1,PR2")
     expect(rendered).not.toContain("siblings none")
     expect(rows.indexOf(rows.find((row) => row.trimStart().startsWith("FILTER "))!)).toBe(rows.indexOf(header!) - 1)
-    expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(rows.indexOf(second!))
+    // The windowed TimeStatsBox grid (respec item 6) leads with the FLOW box.
+    expect(rows.findIndex((row) => row.includes("FLOW"))).toBeGreaterThan(rows.indexOf(second!))
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3842,18 +3900,24 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          { width, height: 30, plain: true },
+          // Height fits the windowed TimeStatsBox grid (respec item 6). The
+          // standalone QueueTimelineView has no fillHeight list-scroll, so a box
+          // tuned to the old short STATS box would clip the header at a narrow
+          // tier (2x2 grid). Production (QueueWatchFrame) keeps the header via
+          // the scrolling list at any height.
+          { width, height: 44, plain: true },
         ),
       )
       const rows = fixed.split("\n")
       const filter = rows.find((row) => row.includes("FILTER "))
       expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
-      const flow = rows.find((row) => row.includes("FLOW "))
-      expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
-      // Throughput rides the FLOW row as a per-24h landed-rate fact (landed=1
-      // over the 6h window → 4/24h), appended after the existing facts. It sits
-      // past the 80-col truncation boundary, so only assert it where it fits.
-      if (width >= 120) expect.soft(flow).toContain("throughput=4/24h")
+      // The windowed TimeStatsBox grid (respec item 6) reads the SAME consolidated
+      // queueFlowMetrics aggregate, windowed per box, rather than a single FLOW
+      // stat row, so it leads with a bordered FLOW box (RUNS / INTEGRATED / FAILS)
+      // at every tier. The landed per-24h throughput fact stays in the aggregate
+      // (projection.metrics.throughput) for --json consumers.
+      expect.soft(rows.some((row) => row.includes("╭─ FLOW "))).toBe(true)
+      expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).not.toContain("STEP")
@@ -5693,7 +5757,10 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    expect(laterQueue.stdout()).toContain("oldest=1:00")
+    // The windowed TimeStatsBox grid (respec item 6) replaced the single STATS
+    // box; the old ROWS "oldest=" cell has no place among the FLOW / TIME boxes,
+    // so the queue renders the FLOW throughput box instead.
+    expect(laterQueue.stdout()).toContain("FLOW")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
