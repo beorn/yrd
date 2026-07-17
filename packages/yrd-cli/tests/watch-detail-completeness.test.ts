@@ -71,12 +71,12 @@ describe("watch detail completeness — run-level integration proof detail (item
 })
 
 describe("watch detail completeness — step artifacts + checkpoint (item J)", () => {
-  it("renders the artifacts label and checkpoint on the step PROOF row", () => {
+  it("renders the artifacts label and checkpoint on the step RUN LOGS row", () => {
     const data = integratedRunData()
     const [row] = data.steps
     if (row === undefined) throw new Error("fixture run produced no step rows")
     // Isolate the artifacts/checkpoint cells: no ART links or EVIDENCE JSON, so
-    // the single truncate PROOF row has room to show both new fields.
+    // the single truncate RUN LOGS row has room to show both fields.
     const stepData: QueueShowData = {
       ...data,
       steps: [{ ...row, artifacts: "vitest-report", checkpoint: "tests=125 failures=0", evidence: "-", locations: [] }],
@@ -85,7 +85,10 @@ describe("watch detail completeness — step artifacts + checkpoint (item J)", (
       createElement(QueueShowView, { data: stepData, compact: true, section: "steps" }),
     )
     try {
-      expect(app.text).toContain("STEP check#1")
+      // The step tab is the step summary now (item d), so the duplicate STEP
+      // header row is gone; the proof/artifacts row is labeled RUN LOGS (item e).
+      expect(app.text).not.toContain("STEP check#1")
+      expect(app.text).toContain("RUN LOGS")
       expect(app.text).toContain("ARTIFACTS vitest-report")
       expect(app.text).toContain("CHECKPOINT tests=125 failures=0")
     } finally {

@@ -20,11 +20,11 @@ import type { PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailPrFacts,
-  QueueEvidenceView,
+  QueueDetailSinglePrHeader,
+  QueueDetailTitle,
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
-  queueRowIdentity,
   queueTimelineFilterBuckets,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
@@ -35,11 +35,6 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
-import {
-  footerWithSelectionHint,
-  QUEUE_FOOTER_KEYS,
-  QUEUE_FOOTER_KEYS_NO_FILTERS,
-} from "./watch-footer.ts"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
@@ -251,19 +246,17 @@ function QueueWorkflowStepTabs({
   const [prsExpanded, setPrsExpanded] = useState(false)
   const activeStep = selectedStep !== undefined && names.includes(selectedStep) ? selectedStep : fallbackStep
 
+  // A single-PR run surfaces its TITLE + ISSUE directly under the title row
+  // (item b, 2026-07-16); batched runs keep every member behind the PRS header.
+  const singlePr = prs.length === 1 ? prs[0] : undefined
+  const singlePrHeader = singlePr === undefined ? null : <QueueDetailSinglePrHeader pr={singlePr} />
+
   // The batched members' review/comment/check-request/revision history (item J)
   // is a collapsed disclosure so it never pushes the step body past a short
   // viewport; its subject/activity live behind the "PRS" header.
   const prFacts =
     prs.length === 0 ? null : (
-      <Accordion
-        title="PRS"
-        expanded={prsExpanded}
-        onToggle={setPrsExpanded}
-        marginTop={1}
-        flexShrink={0}
-        minWidth={0}
-      >
+      <Accordion title="PRS" expanded={prsExpanded} onToggle={setPrsExpanded} marginTop={1} flexShrink={0} minWidth={0}>
         <QueueDetailPrFacts prs={prs} />
       </Accordion>
     )
@@ -271,7 +264,8 @@ function QueueWorkflowStepTabs({
   if (activeStep === undefined) {
     return (
       <Box flexDirection="column" flexGrow={1} minHeight={0}>
-        <QueueShowView data={data} compact={compact} highlightPr={highlightPr} />
+        {singlePrHeader}
+        <QueueShowView data={data} compact={compact} highlightPr={highlightPr} titleAbove />
         {prFacts}
         <QueueArtifactOutputView outputs={outputs} />
       </Box>
@@ -299,7 +293,8 @@ function QueueWorkflowStepTabs({
     // visual title of the step section, so step title + step contents read as
     // one grouped unit.
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      <QueueShowView data={data} compact={compact} highlightPr={highlightPr} section="run" />
+      {singlePrHeader}
+      <QueueShowView data={data} compact={compact} highlightPr={highlightPr} section="run" titleAbove />
       {prFacts}
       <Tabs value={activeStep} onChange={setSelectedStep} isActive={active}>
         <TabList>
@@ -320,7 +315,7 @@ function QueueWorkflowStepTabs({
                   render once above the tabs. */}
               <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} section="steps" />
               <Accordion
-                title="LOG"
+                title="RUN LOGS"
                 expanded={logExpanded}
                 onToggle={(expanded) => setExpandedLogs((current) => ({ ...current, [name]: expanded }))}
                 marginTop={1}
@@ -395,7 +390,6 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
     () => pr ?? rows.find((row) => row.key === defaultCursorKey)?.pr ?? rows[0]?.pr,
   )
   const [detailOpen, setDetailOpen] = useState(() => snapshot.projection === undefined || tier !== "full")
-  const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
   const [newRows, setNewRows] = useState(0)
   const previousTier = useRef(tier)
@@ -452,11 +446,6 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
     if (input === "r") toggleBucket("running")
     if (input === "f") toggleBucket("failed")
     if (input === "d") toggleBucket("done")
-    // `o` jumps to the EVIDENCE section of the detail body.
-    if (input === "o") {
-      setDetailOpen(true)
-      setEvidenceOpen(true)
-    }
   })
 
   const selectRow = (index: number): void => {
@@ -520,8 +509,9 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
         <QueueWatchView results={snapshot.results} now={snapshot.now} pr={detailPr} />
       )
     ) : (
-      // Evidence lives INSIDE the scrollable detail body as a disclosure
-      // section (user respec 2026-07-15); `o` expands it.
+      // The step logs and integration proof render as ONE merged RUN LOGS
+      // section inside the step tabs (item e, 2026-07-16) — no separate
+      // run-level EVIDENCE disclosure.
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
         <QueueWorkflowStepTabs
           key={detailData.run}
@@ -534,16 +524,6 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
           active={detailOpen}
           highlightPr={selectedRow?.pr}
         />
-        <Accordion
-          title="EVIDENCE"
-          expanded={evidenceOpen}
-          onToggle={setEvidenceOpen}
-          marginTop={1}
-          flexShrink={0}
-          minWidth={0}
-        >
-          <QueueEvidenceView data={detailData} />
-        </Accordion>
       </Box>
     )
   if (snapshot.projection === undefined) {
@@ -551,9 +531,6 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
       <Box flexDirection="column">
         {timeline}
         {detailPr === undefined ? null : <Box marginTop={1}>{selectedDetail}</Box>}
-        <Box marginTop={1}>
-          <Text color="$fg-muted">{footerWithSelectionHint(QUEUE_FOOTER_KEYS_NO_FILTERS, columns)}</Text>
-        </Box>
       </Box>
     )
   }
@@ -563,10 +540,10 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by a plain flush-top identity title naming the selected row
-  // (`<run> <PR>.<rev> <branch>`), never the word "DETAIL". One cell of
-  // horizontal padding keeps content off the pane edge; the header rows sit
-  // flush at the top.
+  // is headed by an emphasized identity title row (run + PR.rev + dimmed branch
+  // glyph) with the run's STATUS/OUTCOME right-aligned on it (items a/i), a
+  // blank row beneath it, then the body. One cell of horizontal padding keeps
+  // content off the pane edge; the title sits flush at the top.
   const framedTimeline = (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
       {timeline}
@@ -575,12 +552,13 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity needs the
   // full row (base/revision/branch) from `projectedRows` at the same index.
   const selectedProjectedRow = projectedRows?.[cursor]
-  const detailIdentity = selectedProjectedRow === undefined ? undefined : queueRowIdentity(selectedProjectedRow)
   const framedDetail = (
     <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
-      <Text bold wrap="truncate">
-        {detailIdentity ?? "No queue row selected."}
-      </Text>
+      <QueueDetailTitle
+        {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
+        {...(detailData === undefined ? {} : { data: detailData })}
+      />
+      <Box height={1} flexShrink={0} />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {detail}
       </Box>
@@ -606,13 +584,6 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
             secondary={framedDetail}
           />
         )}
-      </Box>
-      <Box height={1} flexShrink={0}>
-        {/* Keybinding footer (user respec 2026-07-15) + width-gated selection
-            affordance; rationale lives on SELECTION_FOOTER_HINT /
-            footerWithSelectionHint. On narrow terminals the hint is dropped
-            entirely (not clipped), so the user-specced keybindings never wrap. */}
-        <Text color="$fg-muted">{footerWithSelectionHint(QUEUE_FOOTER_KEYS, columns)}</Text>
       </Box>
     </Box>
   )

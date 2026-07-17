@@ -3797,7 +3797,8 @@ describe("runYrd", () => {
     expect(frame).toContain("AGE")
     expect(frame).toContain("WAIT")
     expect(frame).toContain("NO RUNNER - no drained run in window")
-    expect(frame).toContain("q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate")
+    // The bottom keybindings footer row was removed entirely (item h).
+    expect(frame).not.toContain("q quit")
     expect(frame).not.toContain("LIVE")
     expect(frame).not.toContain("p pause")
     expect(frame).not.toContain("PATH")
@@ -5306,16 +5307,14 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detailHuman.io)).toBe(0)
     expect(detailHuman.stdout()).toContain("RUN R1")
     expect(detailHuman.stdout()).not.toContain("RELATED RUNS")
-    expect(detailHuman.stdout()).toContain("JOB ")
-    expect(detailHuman.stdout()).toContain("RUNNER ")
-    // Present-facts rule (user respec 2026-07-15): an absent lease renders
-    // nothing rather than a `-` placeholder; the present CHANGED clock stays.
-    expect(detailHuman.stdout()).not.toContain("LEASE -")
-    expect(detailHuman.stdout()).toContain("CHANGED ")
-    // This run records no artifacts or evidence: the PROOF row is omitted
-    // entirely under the present-facts rule.
-    expect(detailHuman.stdout()).not.toContain("PROOF")
-    expect(detailHuman.stdout()).toContain("NEXT")
+    // JOB uuid / RUNNER / candidate REV are demoted behind the dim `> DETAILS`
+    // disclosure (item f, 2026-07-16); the step body stays signal-only.
+    expect(detailHuman.stdout()).toContain("DETAILS")
+    // This run records no artifacts or evidence: the RUN LOGS proof row is
+    // omitted entirely under the present-facts rule (item e).
+    expect(detailHuman.stdout()).not.toContain("RUN LOGS")
+    // NEXT is a failure-only cue now (item g): an integrated run never shows it.
+    expect(detailHuman.stdout()).not.toContain("NEXT")
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("log", "--base", "main", "--pr", "PR1", "--json"), scoped.io)).toBe(0)

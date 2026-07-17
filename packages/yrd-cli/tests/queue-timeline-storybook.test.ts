@@ -70,10 +70,13 @@ describe("queue timeline storybook", () => {
       expect(frame).toContain("QUEUE main")
       expect(frame).toContain("running")
       expect(frame).toContain("PRs PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
-      expect(frame).toContain("RUN R42 STATUS running OUTCOME running")
-      expect(frame).toContain("STEP check#2 running")
+      // Run identity + STATUS/OUTCOME live in the title row now (item a); the
+      // active check step is the tab, its output streams under RUN LOGS (items d/e).
+      expect(frame).toContain("main#42 PR42.1")
+      expect(frame).toContain("RUN LOGS")
       expect(frame).toContain("OUTPUT check#2")
-      expect(frame).toContain("q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate")
+      // The bottom keybindings footer was removed entirely (item h).
+      expect(frame).not.toContain("q quit")
       expect(frame).not.toContain("No matching queue rows.")
     } finally {
       handle.unmount()
@@ -94,9 +97,8 @@ describe("queue timeline storybook", () => {
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(timelineHeader()).not.toContain("BY")
-      expect(term.screen.getText()).toContain(
-        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
-      )
+      // The bottom keybindings footer was removed entirely (item h).
+      expect(term.screen.getText()).not.toContain("q quit")
 
       await act(async () => {
         await handle.press("Escape")
@@ -105,9 +107,7 @@ describe("queue timeline storybook", () => {
 
       await waitFor(() => timelineHeader()?.includes("BY") === true)
       expect(timelineHeader()).toContain("BY")
-      expect(term.screen.getText()).toContain(
-        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
-      )
+      expect(term.screen.getText()).not.toContain("q quit")
     } finally {
       handle.unmount()
     }
@@ -123,20 +123,18 @@ describe("queue timeline storybook", () => {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       expect(term.screen.getText()).toContain("PR42.1")
       expect(term.screen.getText()).toContain("PR43.1")
-      expect(term.screen.getText()).toContain(
-        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate",
-      )
+      // The bottom keybindings footer was removed entirely (item h).
+      expect(term.screen.getText()).not.toContain("q quit")
 
       await act(async () => {
         await handle.press("Enter")
         await handle.waitForLayoutStable()
       })
       const detail = term.screen.getText()
-      expect(detail).toContain("RUN R42 STATUS running OUTCOME running")
-      expect(detail).toContain("JOB J42-check RUNNER runner-herdr-07")
-      // Detail clocks share the timeline convention: local HH:MM:SS with a
-      // cross-day date qualifier (fixtures are 2026-07-13, tests run later).
-      expect(detail).toMatch(/LEASE \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/u)
+      // Run identity + STATUS/OUTCOME live in the title row (item a); the step
+      // internals (JOB/RUNNER/REV) are behind the dim `> DETAILS` disclosure (item f).
+      expect(detail).toContain("main#42 PR42.1")
+      expect(detail).toContain("DETAILS")
       expect(detail).not.toContain("QUEUE main")
     } finally {
       handle.unmount()
@@ -364,7 +362,9 @@ describe("queue timeline storybook", () => {
             await handle.press("Enter")
             await handle.waitForLayoutStable()
           })
-          expect(term.screen.getText(), name).toContain("RUN R4 STATUS passed")
+          // Run identity + STATUS/OUTCOME live in the title row now (item a).
+          expect(term.screen.getText(), name).toContain("main#4 PR4.1")
+          expect(term.screen.getText(), name).toContain("passed, integrated")
           expect(term.screen.getText(), name).toContain("LANDING bbbbbbbbbbbb@aaaaaaaaaaaa")
           expect(term.screen.getText(), name).not.toContain("QUEUE main")
         }
@@ -545,7 +545,7 @@ describe("queue timeline storybook", () => {
     }
   })
 
-  it("drives the status-filter toggles and evidence section from the documented controls", async () => {
+  it("drives the status-filter toggles from the documented controls", async () => {
     const story = queueTimelineStories["detail-controls"]
     const viewport = story.viewport
     if (viewport === undefined) throw new Error("detail-controls is missing its viewport")
@@ -556,7 +556,8 @@ describe("queue timeline storybook", () => {
     })
     try {
       expect(handle.text).toContain("PRs PR4")
-      expect(handle.text).toContain("p/r/f/d toggle filters")
+      // The FILTER row's checkboxes are the toggles (the footer hint row was
+      // removed, item h); the `[x] failed` indicator drives the assertions below.
 
       // `f` is the failed-bucket toggle (user respec 2026-07-15): the lone
       // integrated run stays visible and the checkbox flips off and back.
@@ -578,10 +579,8 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("PR4.1")
 
-      // `o` expands the EVIDENCE section inside the detail body.
-      await handle.press("o")
-      await handle.waitForLayoutStable()
-      expect(handle.text).toContain("EVIDENCE R4")
+      // The integration proof (LANDING) is a plain always-visible detail fact
+      // now (item e) — the separate EVIDENCE disclosure and its `o` jump are gone.
       expect(handle.text).toContain("LANDING")
 
       // Esc hides the detail pane; the list keeps running.
