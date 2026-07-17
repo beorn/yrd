@@ -1638,15 +1638,22 @@ type QueueRunMode = "follow" | "once"
  * `--follow` is the explicit spelling of the default; it may not combine with
  * `--once`, nor with selectors (follow drains the default queue as a whole, it
  * never targets a chosen PR).
+ *
+ * `--watch` is a DEPRECATED no-op alias of `--follow`, kept one release so the
+ * live resident runner + relaunch recipes survive the cutover (#62 removed it
+ * outright, which would have broken them). It carries no semantics of its own
+ * beyond selecting follow mode — every follow guard below applies to it
+ * identically — and followQueueRuns emits the single deprecation warn.
  */
 function resolveQueueRunMode(
   selectors: readonly string[],
-  options: Readonly<{ follow?: boolean; once?: boolean }>,
+  options: Readonly<{ follow?: boolean; once?: boolean; watch?: boolean }>,
 ): QueueRunMode {
-  if (options.follow === true && options.once === true) {
+  const follow = options.follow === true || options.watch === true
+  if (follow && options.once === true) {
     usage("queue run: --follow and --once are mutually exclusive")
   }
-  if (options.follow === true && selectors.length > 0) {
+  if (follow && selectors.length > 0) {
     usage("queue run: --follow drains the default queue; it cannot target PR selectors")
   }
   return selectors.length > 0 || options.once === true ? "once" : "follow"
@@ -2389,10 +2396,20 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { steps?: unknown; json?: boolean; interval?: number },
+  options: { steps?: unknown; json?: boolean; interval?: number; watch?: boolean },
   io: YrdCliIO,
   gate: () => Promise<void>,
 ): Promise<YrdCliExitCode> {
+  if (options.watch === true) {
+    // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
+    // here means it already resolved to follow mode; announce the one-time
+    // deprecation as a structured loggily warn — never a bare 'yrd:' stderr line,
+    // since the resident's stdout is a log stream — then behave identically to
+    // follow. Emitted exactly once, before the drain loop.
+    app.log.warn?.("deprecated: follow is the default; --watch is removed next release", {
+      action: "queue-run-watch-deprecated",
+    })
+  }
   const intervalSeconds = options.interval ?? 15
   if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds <= 0) {
     usage("--interval must be a positive number of seconds")
@@ -3084,6 +3101,7 @@ function buildProgram(
     .description("drain the queue — resident follow by default; --once or PR selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
     .option("--follow", "resident follow mode: keep draining the default queue (the default with no selector)")
+    .option("--watch", "deprecated no-op alias of --follow; removed next release")
     .option("--once", "drain the default queue exactly once, then exit")
     .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")

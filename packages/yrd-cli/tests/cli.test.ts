@@ -6900,13 +6900,19 @@ describe("queue run — follow-by-default mode selection (#62)", () => {
     expect(run.stdout()).toContain("STATE")
   })
 
-  it("rejects the removed --watch flag as an unknown option", async () => {
+  it("accepts --watch as a deprecated no-op alias that enters follow mode", async () => {
+    // #62 removed --watch outright; the alias amendment keeps it one release so
+    // the live resident runner + relaunch recipes survive the cutover. The parser
+    // must ACCEPT --watch (exit 0, never the exit-2 unknown-option refusal) and
+    // route it to the same resident follow loop as --follow: the loop sleeps once,
+    // then the tracked scope aborts it. The single deprecation warn is a loggily
+    // warn asserted at the followQueueRuns unit level (queue-run-watch-alias.test).
     const app = await createApp()
     await openAndSubmit(app)
-    const run = outputIO()
-    expect(await runYrd(app, yrd("queue", "run", "--watch"), run.io)).toBe(2)
-    expect(run.stdout()).toBe("")
-    expect(run.stderr()).toContain("--watch")
+    const tracked = trackedScope()
+    const run = outputIO({ scope: tracked.scope })
+    expect(await runYrd(app, yrd("queue", "run", "--watch", "--interval", "1"), run.io), run.stderr()).toBe(0)
+    expect(tracked.sleeps).toEqual([1_000])
   })
 
   it("refuses --follow combined with --once", async () => {
