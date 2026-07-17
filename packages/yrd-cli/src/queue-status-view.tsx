@@ -15,6 +15,7 @@ import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import {
+  Accordion,
   Box,
   Link,
   ListView,
@@ -34,6 +35,7 @@ import {
   PRStatusView,
   statusVariant,
   StatusValue,
+  taskStatusColor,
   TaskStatusGlyph,
   TaskStatusValue,
 } from "./status-view.tsx"
@@ -2720,11 +2722,6 @@ const BRANCH_ICON = ""
  */
 const BRANCH_ICON_COLOR = "$fg-muted"
 
-/** A branch name prefixed with the Powerline branch glyph (plain-string form). */
-function branchLabel(branch: string): string {
-  return `${BRANCH_ICON} ${branch}`
-}
-
 /**
  * Stable no-op passed as ListView `onItemHover` so hovering a queue row does
  * NOT move the cursor/selection (item P, 2026-07-16) — it overrides ListView's
@@ -2756,12 +2753,51 @@ function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): Time
 }
 
 /**
- * The DETAIL pane's flush-top identity title for a selected row (item M,
- * 2026-07-16): `<run> <PR>.<rev> <branch-glyph> <branch>` — e.g.
- * `main#488 PR359.2  topic/rss…`. Reads like the row, not the word "DETAIL".
+ * The DETAIL pane's flush-top identity title for a selected row (items a/i,
+ * 2026-07-16): the run identity emphasized like the QUEUE tab (`$fg-warning`
+ * bold) with the dim branch glyph (the shared `BRANCH_ICON_COLOR`, W2), and the
+ * run's STATUS + OUTCOME right-aligned on the same row, colorized by run outcome
+ * (`passed, integrated` green, `failed, rejected` red). Reads like the row, not
+ * the word "DETAIL".
  */
-export function queueRowIdentity(row: QueueTimelineProjectedRow): string {
-  return `${timelineRunCell(row, false).text} ${row.pr}.${row.revision} ${branchLabel(row.branch)}`
+export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRow; data?: QueueShowData }) {
+  if (row === undefined) {
+    return (
+      <Text bold color="$fg-warning" wrap="truncate">
+        No queue row selected.
+      </Text>
+    )
+  }
+  const outcome = detailStatusOutcome(data)
+  return (
+    <Box flexDirection="row" justifyContent="space-between" minWidth={0}>
+      <Text bold color="$fg-warning" wrap="truncate" minWidth={0}>
+        {timelineRunCell(row, false).text} {row.pr}.{row.revision} <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text>{" "}
+        {row.branch}
+      </Text>
+      {outcome === undefined ? null : (
+        <Text bold color={outcome.color} flexShrink={0}>
+          {outcome.text}
+        </Text>
+      )}
+    </Box>
+  )
+}
+
+/**
+ * The run's STATUS + OUTCOME as one colorized label (`passed, integrated`),
+ * deduped when the two words match, or undefined when neither is present.
+ */
+function detailStatusOutcome(data?: QueueShowData): Readonly<{ text: string; color: string }> | undefined {
+  if (data === undefined) return undefined
+  const status = presentFact(data.status)
+  const outcome = presentFact(data.outcome)
+  if (status === undefined && outcome === undefined) return undefined
+  const text =
+    status !== undefined && outcome !== undefined && status !== outcome
+      ? `${status}, ${outcome}`
+      : (outcome ?? status ?? "")
+  return { text, color: taskStatusColor(data.taskStatus) }
 }
 
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
@@ -4278,30 +4314,6 @@ function QueueShowMembersLine({ data, highlightPr }: { data: QueueShowData; high
   )
 }
 
-function QueueStepLifecycleView({ row }: { row: QueueShowRow }) {
-  const identity = [["JOB", presentFact(row.uuid)] as const, ["RUNNER", presentFact(row.runner)] as const].filter(
-    ([, value]) => value !== undefined,
-  )
-  const lease = [
-    ["LEASE", presentFact(row.lease) === undefined ? undefined : detailClock(row.lease)] as const,
-    ["CHANGED", presentFact(row.changed) === undefined ? undefined : detailClock(row.changed)] as const,
-  ].filter(([, value]) => value !== undefined)
-  const clocks = [
-    ["REQ", presentFact(row.requested) === undefined ? undefined : detailClock(row.requested)] as const,
-    ["START", presentFact(row.started) === undefined ? undefined : detailClock(row.started)] as const,
-    ["END", presentFact(row.finished) === undefined ? undefined : detailClock(row.finished)] as const,
-  ].filter(([, value]) => value !== undefined)
-  const factRow = (facts: readonly (readonly [string, string | undefined])[]): string =>
-    facts.map(([label, value]) => `${label} ${value}`).join(" ")
-  return (
-    <Box flexDirection="column" minWidth={0}>
-      {identity.length === 0 ? null : <Text wrap="truncate">{factRow(identity)}</Text>}
-      {lease.length === 0 ? null : <Text wrap="truncate">{factRow(lease)}</Text>}
-      {clocks.length === 0 ? null : <Text wrap="truncate">TIME {factRow(clocks)}</Text>}
-    </Box>
-  )
-}
-
 /**
  * Detail facts render only PRESENT facts (user respec 2026-07-15) — the same
  * non-default-only rule as the FILTER row. `-` placeholders never render.
@@ -4398,6 +4410,33 @@ function prCommentLine(comment: PR["comments"][number]): string {
   return `COMMENT ${comment.actor} ${detailClock(comment.at)}${note === undefined ? "" : ` — ${note}`}`
 }
 
+/**
+ * A single-PR run's TITLE + ISSUE, surfaced directly under the DETAIL title row
+ * so they read without expanding the PRS disclosure (item b, 2026-07-16). The
+ * fuller DESCRIPTION / review history stays in the disclosure. Empty fields
+ * omit (pre-r5 PRs carry neither — no placeholders). Batched runs keep every
+ * member's title on its own PRS disclosure summary row instead.
+ */
+export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
+  const title = presentFact(pr.title)
+  const issue = presentFact(pr.issue)
+  if (title === undefined && issue === undefined) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {title === undefined ? null : (
+        <Text wrap="truncate" bgConflict="ignore">
+          TITLE {title}
+        </Text>
+      )}
+      {issue === undefined ? null : (
+        <Text wrap="truncate">
+          ISSUE <IssueValue issue={issue} />
+        </Text>
+      )}
+    </Box>
+  )
+}
+
 // PR-level facts (item J, 2026-07-16): the batched members' subject, review /
 // comment / check-request activity, and revision history — none of which live
 // on the run's `PRSnapshot`, so they are threaded from the full status PRs.
@@ -4469,6 +4508,60 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
   )
 }
 
+/**
+ * The one compact timing row (item c, 2026-07-16): `<start> → <end> · <total>
+ * (wait <wait>) · landed <sha>`. The wait segment renders only when the queue
+ * wait was non-zero; the landed sha only when the run integrated. Replaces the
+ * separate START/END, TOTAL/ACTIVE/WAIT, and per-step clock rows.
+ */
+function queueRunTimingRow(data: QueueShowData): string | undefined {
+  const startClock = presentFact(data.started) === undefined ? undefined : detailClock(data.started)
+  const endClock = presentFact(data.finished) === undefined ? undefined : detailClock(data.finished)
+  const total = presentFact(data.totalDuration)
+  const waitShown =
+    data.waitDurationMs !== undefined && data.waitDurationMs > 0 ? presentFact(data.waitDuration) : undefined
+  const landed = data.integration === undefined ? undefined : data.integration.commit.slice(0, 12)
+  const clockSeg =
+    startClock === undefined ? undefined : endClock === undefined ? startClock : `${startClock} → ${endClock}`
+  const durSeg = total === undefined ? undefined : waitShown === undefined ? total : `${total} (wait ${waitShown})`
+  const landedSeg = landed === undefined ? undefined : `landed ${landed}`
+  const segments = [clockSeg, durSeg, landedSeg].filter((value): value is string => value !== undefined)
+  return segments.length === 0 ? undefined : segments.join(" · ")
+}
+
+/**
+ * NEXT guidance is a failure-only cue (item g, 2026-07-16): suppressed for
+ * integrated, passed, running, and waiting runs so the pane never shows the
+ * empty `NEXT none`.
+ */
+function queueShowNeedsNext(data: QueueShowData): boolean {
+  return data.status === "failed" || data.outcome === "rejected"
+}
+
+/**
+ * The per-step internals (item f, 2026-07-16): JOB uuid, RUNNER, and the
+ * candidate REV, demoted behind a dim `> DETAILS` disclosure so the default
+ * step view stays signal-only. Renders nothing when the step carries none.
+ */
+function QueueStepInternals({ row }: { row: QueueShowRow }) {
+  const revision = presentFact(row.revision)
+  const facts = [
+    ["JOB", presentFact(row.uuid)] as const,
+    ["RUNNER", presentFact(row.runner)] as const,
+    ["REV", revision === undefined ? undefined : revision.slice(0, 12)] as const,
+  ].filter(([, value]) => value !== undefined)
+  if (facts.length === 0) return null
+  return (
+    <Accordion title="DETAILS" defaultExpanded={false} color="$fg-muted" minWidth={0}>
+      {facts.map(([label, value]) => (
+        <Text key={label} wrap="truncate">
+          {label} {value}
+        </Text>
+      ))}
+    </Accordion>
+  )
+}
+
 // The watch detail pane's vertical facts layout (user respec 2026-07-15):
 // stacked label/value rows that always fit the pane width — never a
 // horizontally sprawling table. Only present facts render; timestamps share
@@ -4478,9 +4571,10 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
  * (user directive 2026-07-16, item H): `"run"` renders the run-level facts (+
  * LANDING/NEXT) once above the tabs, `"steps"` renders per-step facts under the
  * selected tab, `"all"` (default) renders everything in order for non-tab
- * contexts. Field completeness (item J): PARENT/ISO run facts and per-step
- * REV/DETAIL/LOST are surfaced; subprocess-derived strings (ERROR, DETAIL,
- * LOST, EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data keeps its
+ * contexts. When `titleAbove` is set the caller renders the run identity +
+ * STATUS/OUTCOME in a title row above, so the RUN header row is dropped here
+ * (items a/c, 2026-07-16). Subprocess-derived strings (ERROR, DETAIL, LOST,
+ * EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data keeps its
  * colors without crashing the event loop.
  */
 function CompactQueueShowView({
@@ -4488,6 +4582,7 @@ function CompactQueueShowView({
   highlightPr,
   section = "all",
   historyRevision,
+  titleAbove = false,
 }: {
   data: QueueShowData
   highlightPr?: string
@@ -4498,38 +4593,34 @@ function CompactQueueShowView({
    * is never read as the PR's current state (user-reported 2026-07-16).
    */
   historyRevision?: number
+  /** When true, the run identity + STATUS/OUTCOME live in a title row above,
+   *  so the RUN header row is omitted here (framedDetail title, item a). */
+  titleAbove?: boolean
 }) {
-  const durations = [
-    ["TOTAL", presentFact(data.totalDuration)] as const,
-    ["ACTIVE", presentFact(data.activeDuration)] as const,
-    ["WAIT", presentFact(data.waitDuration)] as const,
-  ].filter(([, value]) => value !== undefined)
   const runFacts = section !== "steps"
   const stepFacts = section !== "run"
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const proofDetail = data.integration === undefined ? undefined : integrationProofDetail(data.integration)
+  const timing = queueRunTimingRow(data)
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
     // detail pane instead of overflowing it (canonical CSS escape hatch).
     <Box flexDirection="column" minWidth={0}>
       {runFacts ? (
         <>
-          <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
-            RUN {data.run}
-            {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status} OUTCOME{" "}
-            {data.outcome}
-          </Text>
-          <Text wrap="truncate">
-            BASE {data.base} PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} /> RETRY {data.retries}
-          </Text>
-          <Text wrap="truncate">
-            START {detailClock(data.started)}
-            {presentFact(data.finished) === undefined ? "" : ` END ${detailClock(data.finished)}`}
-          </Text>
-          {durations.length === 0 ? null : (
-            <Text wrap="truncate">{durations.map(([label, value]) => `${label} ${value}`).join(" ")}</Text>
+          {titleAbove ? null : (
+            <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
+              RUN {data.run}
+              {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status}{" "}
+              OUTCOME {data.outcome}
+            </Text>
           )}
+          <Text wrap="truncate">
+            PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} />
+            {data.retries > 1 ? ` RETRY ${data.retries}` : ""}
+          </Text>
+          {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
           {parent === undefined && isolation === undefined ? null : (
             <Text wrap="truncate" color="$fg-muted">
               {parent === undefined ? "" : `PARENT ${parent}`}
@@ -4544,21 +4635,17 @@ function CompactQueueShowView({
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)
             const lost = presentFact(row.lost)
-            const revision = presentFact(row.revision)
             const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
-            // Item J completeness: the artifacts label + checkpoint join the
-            // step's PROOF row so the whole step record is on-screen.
+            // The artifacts label + checkpoint join the step's RUN LOGS row so
+            // the whole step record is on-screen (item e, 2026-07-16).
             const artifacts = presentFact(row.artifacts)
             const checkpoint = presentFact(row.checkpoint)
             const hasProof =
               row.locations.length > 0 || evidence !== undefined || artifacts !== undefined || checkpoint !== undefined
             return (
+              // The step tab (glyph + name + duration) is the step summary, so
+              // the duplicate STEP header row is dropped (item d, 2026-07-16).
               <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column" minWidth={0}>
-                <Text wrap="truncate">
-                  STEP {row.step}#{row.attempt} {row.status}
-                  {presentFact(row.duration) === undefined ? "" : ` DUR ${row.duration}`}
-                  {revision === undefined ? "" : ` REV ${revision.slice(0, 12)}`}
-                </Text>
                 {error === undefined ? null : (
                   <Text wrap="truncate" color="$fg-error" bgConflict="ignore">
                     ERROR {error}
@@ -4574,13 +4661,13 @@ function CompactQueueShowView({
                     LOST {lost}
                   </Text>
                 )}
-                <QueueStepLifecycleView row={row} />
+                <QueueStepInternals row={row} />
                 {!hasProof ? null : (
                   <Text wrap="truncate" bgConflict="ignore">
-                    PROOF
+                    RUN LOGS
                     {row.locations.length === 0 ? null : (
                       <>
-                        {" ART "}
+                        {" "}
                         <QueueLogLocationLinks entries={row.locations} compact={false} />
                       </>
                     )}
@@ -4598,11 +4685,11 @@ function CompactQueueShowView({
           {presentFact(data.landing) === undefined ? null : (
             <Text wrap="truncate">
               LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
-              {/* Item J: surface the integration proof beyond the landed SHA. */}
+              {/* The integration proof beyond the landed SHA (item e). */}
               {proofDetail === undefined ? "" : ` ${proofDetail}`}
             </Text>
           )}
-          <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text>
+          {queueShowNeedsNext(data) ? <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text> : null}
         </>
       ) : null}
     </Box>
@@ -4615,6 +4702,7 @@ export function QueueShowView({
   highlightPr,
   section = "all",
   historyRevision,
+  titleAbove = false,
 }: {
   data: QueueShowData
   compact?: boolean
@@ -4623,6 +4711,9 @@ export function QueueShowView({
   section?: "run" | "steps" | "all"
   /** Compact-only: mark this run as history for a now-superseded revision. */
   historyRevision?: number
+  /** Compact-only: the run identity + STATUS/OUTCOME live in a title row above,
+   *  so drop the RUN header row here (framedDetail title, item a). */
+  titleAbove?: boolean
 }) {
   if (compact)
     return (
@@ -4630,6 +4721,7 @@ export function QueueShowView({
         data={data}
         highlightPr={highlightPr}
         section={section}
+        titleAbove={titleAbove}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />
     )

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import { fixtureJob, fixturePr, fixtureRun, fixtureStep } from "../dev/queue-timeline-fixtures.ts"
 import { queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
 import { QueueWorkflowStepTabs, resolveStepLogExpanded, resolveStepTabSelection } from "../src/watch-pane.tsx"
+import type { QueueArtifactOutput } from "../src/watch-pane.tsx"
 
 // One PR / one run; the reconciliation contract (21106) is entirely about the
 // run's step statuses moving underneath a still-mounted detail pane.
@@ -22,6 +23,19 @@ function stepTabsData(steps: readonly StepState[]): QueueShowData {
   return queueShowData(run)
 }
 
+// Each step streams a distinctly-named output so the active step is readable
+// from the rendered RUN LOGS heading (the STEP <name>#<attempt> facts row was
+// dropped — the tab is the step summary now, item d of the 2026-07-16 redesign).
+function stepOutputs(steps: readonly StepState[]): readonly QueueArtifactOutput[] {
+  return steps.map((step) => ({
+    run: "R100",
+    step: step.name,
+    attempt: 1,
+    path: `/repo/.git/yrd/artifacts/R100/${step.name}/attempt-1/stdout.log`,
+    text: `live ${step.name} output\n`,
+  }))
+}
+
 // Mount with `first`, then flip to `second` after the first commit. React keeps
 // the SAME QueueWorkflowStepTabs fiber across the flip (no key change), so its
 // internal state survives exactly as it does for a live same-run snapshot
@@ -31,7 +45,13 @@ function SameRunAdvance({ first, second }: { first: readonly StepState[]; second
   useEffect(() => {
     setSteps(second)
   }, [second])
-  return h(QueueWorkflowStepTabs, { data: stepTabsData(steps), outputs: [], compact: true, active: false, prs: [] })
+  return h(QueueWorkflowStepTabs, {
+    data: stepTabsData(steps),
+    outputs: stepOutputs(steps),
+    compact: true,
+    active: false,
+    prs: [],
+  })
 }
 
 async function renderAdvance(first: readonly StepState[], second: readonly StepState[]): Promise<string> {
@@ -40,21 +60,25 @@ async function renderAdvance(first: readonly StepState[], second: readonly StepS
 
 async function renderOnce(steps: readonly StepState[]): Promise<string> {
   return renderString(
-    h(QueueWorkflowStepTabs, { data: stepTabsData(steps), outputs: [], compact: true, active: false, prs: [] }),
+    h(QueueWorkflowStepTabs, {
+      data: stepTabsData(steps),
+      outputs: stepOutputs(steps),
+      compact: true,
+      active: false,
+      prs: [],
+    }),
     { width: 100, height: 40, plain: true },
   )
 }
 
-// The active step is read from the selected TabPanel's step-facts block: only
-// the active panel renders its own `STEP <name>#<attempt> <status>` rows (the
-// dedicated `ACTIVE STEP` row was removed when run/step facts split around the
-// tabs — item G/H of the 2026-07-16 detail redesign; the tab labels themselves
-// carry no `STEP …#` shape, so the marker is unambiguous).
+// The active step is the only rendered TabPanel; its expanded RUN LOGS streams
+// that step's output under an `OUTPUT <name>#<attempt>` heading, so the active
+// running step names itself. A completed active step folds its log (no heading)
+// — which is exactly the frozen-selection bug this contract catches, so a
+// missing heading is a legitimate failure, not a detection gap.
 function activeStepName(frame: string): string {
-  const hit = frame.split("\n").find((row) => /\bSTEP \S+#/u.test(row))
-  if (hit === undefined) throw new Error(`no STEP <name>#<attempt> row in frame:\n${frame}`)
-  const match = /\bSTEP (\S+?)#/u.exec(hit)
-  if (match === null) throw new Error(`could not read active step from: '${hit}'`)
+  const match = /\bOUTPUT (\S+?)#/u.exec(frame)
+  if (match === null) throw new Error(`no OUTPUT <name>#<attempt> heading in frame:\n${frame}`)
   return match[1] as string
 }
 
@@ -78,9 +102,9 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
     const advanced = await renderAdvance(first, second)
     expect(activeStepName(advanced)).toBe("integrate")
 
-    // Expansion follows the live step too: the freshly-active step's LOG is
-    // open, so its empty-output placeholder is visible.
-    expect(advanced).toContain("Waiting for first output")
+    // Expansion follows the live step too: the freshly-active step's RUN LOGS
+    // is open, so its streamed output is visible.
+    expect(advanced).toContain("live integrate output")
   })
 
   it("folds a step's log once that step completes in the same run", async () => {
@@ -88,14 +112,13 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
     const first: readonly StepState[] = [{ name: "check", status: "running" }]
     const second: readonly StepState[] = [{ name: "check", status: "passed" }]
 
-    // While running, the log is open — the placeholder body renders.
-    expect(await renderOnce(first)).toContain("Waiting for first output")
+    // While running, the log is open — the streamed output renders.
+    expect(await renderOnce(first)).toContain("live check output")
 
-    // Once the step passes in the same run, a completed step folds: the body
-    // disappears behind the collapsed accordion.
+    // Once the step passes in the same run, a completed step folds: the output
+    // disappears behind the collapsed accordion (no OUTPUT heading remains).
     const advanced = await renderAdvance(first, second)
-    expect(activeStepName(advanced)).toBe("check")
-    expect(advanced).not.toContain("Waiting for first output")
+    expect(advanced).not.toContain("live check output")
   })
 
   it("selects the live step on a fresh mount, mirroring a new-run remount", async () => {
