@@ -117,7 +117,11 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
       // The RUNNER box and STATS box are each their own scope, nested inside the
       // QUEUE pane — a drag inside one never grows into the list or its sibling.
       const runnerScope = scopeAt(app, pointOf(text, "84042", 0, LEFT_MAX))
-      const statsScope = scopeAt(app, pointOf(text, "ACTIVE ALL", 0, LEFT_MAX))
+      // The stats surface is now the windowed TimeStatsBox grid; its leading FLOW
+      // box renders through the same scoped TitledBox, so it is still its own
+      // contain scope nested in QUEUE (anchor on "FLOW", the old "ACTIVE ALL" row
+      // no longer exists).
+      const statsScope = scopeAt(app, pointOf(text, "FLOW", 0, LEFT_MAX))
       expect(nestedWithin(runnerScope, queueScope), "RUNNER is its own scope inside QUEUE").toBe(true)
       expect(nestedWithin(statsScope, queueScope), "STATS is its own scope inside QUEUE").toBe(true)
       expect(sameScope(runnerScope, statsScope), "RUNNER and STATS are different scopes").toBe(false)
