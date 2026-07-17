@@ -66,7 +66,7 @@ import { cleanGitEnvironment } from "./git-environment.ts"
 import { loadYrdConfig, SignalRecipientSchema, type ResolvedYrdProjectConfig, type YrdStepConfig } from "./config.ts"
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
-import { createYrdLogger, resolveYrdObservability } from "./observability.ts"
+import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
@@ -779,28 +779,16 @@ async function closeRuntime(
 
 type ShutdownSignal = "SIGINT" | "SIGTERM"
 
-const GracefulShutdownMessage =
-  "Shutting down gracefully; please wait for the current job to\n" +
-  "finish. Press Ctrl-C again to force stop (the active run may\n" +
-  'require `yrd queue recover` and job will have status "job-lost").\n'
-
-function clearTerminalSignalEcho(io: YrdCliIO): boolean {
-  if (io.stderrIsTTY !== true) return false
-  try {
-    return io.clearStderrLine?.() === true
-  } catch {
-    return false
-  }
-}
-
-function reportGracefulShutdown(io: YrdCliIO, log: ConditionalLogger, signal: ShutdownSignal): void {
-  if (io.stderrIsTTY === true) {
-    io.stderr(`${clearTerminalSignalEcho(io) ? "" : "\n"}${GracefulShutdownMessage}`)
-  }
-  log.warn?.("Graceful drain requested", {
+/** Announce a graceful drain as ONE structured loggily line — never a bare
+ * wrapped stderr paragraph, since the resident runner's stderr IS its log
+ * stream. The force-stop hint and its consequences are structured FIELDS, so a
+ * viewer can surface them without parsing prose. */
+export function reportGracefulShutdown(log: ConditionalLogger, signal: ShutdownSignal): void {
+  log.warn?.("graceful drain requested — finishing the active run before exit", {
     signal,
     mode: "drain",
-    nextSignal: "force",
+    forceStop: "press Ctrl-C again to force stop",
+    onForceStop: 'the active run may need `yrd queue recover`; its job settles as "job-lost"',
     recovery: "yrd queue recover",
   })
 }
@@ -1102,8 +1090,13 @@ export async function runYrdProcess(
       ambientCwd: io.cwd ?? globalThis.process.cwd(),
       env,
       async load(context, options) {
-        log = createYrdLogger(context.observability, (text) => io.stderr(text))
         const resident = options.resident ? residentRunnerIdentity(env) : undefined
+        // The resident follow-runner logs at INFO-by-default (see
+        // residentObservability) so completed steps/runs/composes — successes
+        // included — print with timing; one-shot commands keep the WARN default.
+        const observability =
+          resident === undefined ? context.observability : residentObservability(context.observability)
+        log = createYrdLogger(observability, (text) => io.stderr(text))
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
         const activeHost = await createYrdRuntimeHost({ cwd: context.repo, env, log: runtimeLog }, resident)
         host = activeHost
@@ -1115,7 +1108,7 @@ export async function runYrdProcess(
             ? undefined
             : (signal) => {
                 drain.abort()
-                reportGracefulShutdown(io, runnerLog, signal)
+                reportGracefulShutdown(runnerLog, signal)
               },
         )
         return {
