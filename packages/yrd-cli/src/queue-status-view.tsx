@@ -2325,8 +2325,8 @@ export function PRDetailView({
         </Text>
       )}
       <Text>
-        <Text bold>SOURCE</Text> {branchLabel(pr.branch)} <Text bold>REV</Text> {pr.revision} <Text bold>HEAD</Text>{" "}
-        {pr.headSha}
+        <Text bold>SOURCE</Text> <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {pr.branch} <Text bold>REV</Text>{" "}
+        {pr.revision} <Text bold>HEAD</Text> {pr.headSha}
       </Text>
       <Text>
         <Text bold>BASE</Text> {pr.base}
@@ -2697,7 +2697,15 @@ const TIMELINE_STATE_CAP = 20
  */
 const BRANCH_ICON = ""
 
-/** A branch name prefixed with the Powerline branch glyph. */
+/**
+ * The branch glyph renders dim/subtle everywhere (user directive 2026-07-16,
+ * W2) — a quiet decoration on the branch name, never competing with it. On a
+ * cursor-selected row the glyph follows the selection foreground instead, so
+ * the whole row reads as one selected unit.
+ */
+const BRANCH_ICON_COLOR = "$fg-muted"
+
+/** A branch name prefixed with the Powerline branch glyph (plain-string form). */
 function branchLabel(branch: string): string {
   return `${BRANCH_ICON} ${branch}`
 }
@@ -3048,8 +3056,12 @@ function TimelineProjectedRow({
             {row.pr}.{row.revision}
           </Text>
           <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
+              {BRANCH_ICON}
+            </Text>
             <Text color={forcedFg} wrap="truncate" minWidth={0}>
-              {branchLabel(row.branch)}
+              {" "}
+              {row.branch}
             </Text>
             {step.text === "" ? null : (
               <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
