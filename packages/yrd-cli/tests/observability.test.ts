@@ -109,10 +109,79 @@ describe("Yrd lifecycle records", () => {
       started: "debug",
       progress: "trace",
       succeeded: "info",
+      // An aggregate that completed carrying an already-reported failure: the
+      // deepest failing job/step owns the single ERROR, so the enclosing
+      // run/compose settle at INFO instead of re-raising the same failure.
+      settled: "info",
       refused: "warn",
       recovered: "warn",
       failed: "error",
     })
+  })
+
+  it("classifies an aggregate settlement as INFO and applies a mixed-outcome label to the message", async () => {
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+
+    await expect(
+      observeYrdLifecycle(
+        log,
+        {
+          lifecycle: "compose",
+          outcome: () => "settled",
+          label: () => "settled: 1 failed, 1 passed",
+          now: () => 10,
+        },
+        async () => "done",
+      ),
+    ).resolves.toBe("done")
+
+    const settled = events.find(
+      (event): event is Extract<Event, { kind: "log" }> => event.kind === "log" && event.props?.outcome === "settled",
+    )
+    // Message carries the mixed label (not the flat outcome word), at INFO so it
+    // never re-reports the failure the deepest job already raised at ERROR.
+    expect(settled).toMatchObject({
+      namespace: "yrd:compose",
+      level: "info",
+      message: "compose settled: 1 failed, 1 passed",
+      props: expect.objectContaining({ outcome: "settled", summary: "settled: 1 failed, 1 passed" }),
+    })
+    log.end()
+  })
+
+  it("inherits scope-bound runner/host/pane without re-declaring them per event", async () => {
+    // The resident binds its identity ONCE at the logger scope (residentRunnerLog
+    // = log.child({ runner, host, pane })). A lifecycle observed under that scope
+    // must inherit those fields WITHOUT the observe options re-passing them, so
+    // per-event payloads carry only event-specific fields.
+    const events: Event[] = []
+    const root = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+    const scoped = root.child({ runner: "yrd-cli:42", host: "unimac", pane: "wC:p7" }).child("queue")
+
+    // Note: the observe options declare NO runner/host/pane — only the run id.
+    await observeYrdLifecycle(scoped, { lifecycle: "compose", identity: { run: "R7" }, now: () => 1 }, async () => "ok")
+
+    const done = events.find(
+      (event): event is Extract<Event, { kind: "log" }> => event.kind === "log" && event.props?.outcome === "succeeded",
+    )
+    expect(done).toMatchObject({
+      namespace: "yrd:queue:compose",
+      props: expect.objectContaining({ runner: "yrd-cli:42", host: "unimac", pane: "wC:p7", run: "R7" }),
+    })
+    root.end()
+  })
+
+  it("keeps the flat outcome word when no label is supplied", async () => {
+    const events: Event[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: Event) => events.push(event) }])
+    await observeYrdLifecycle(log, { lifecycle: "run", outcome: () => "settled", now: () => 5 }, async () => 0)
+    const settled = events.find(
+      (event): event is Extract<Event, { kind: "log" }> => event.kind === "log" && event.props?.outcome === "settled",
+    )
+    expect(settled).toMatchObject({ level: "info", message: "run settled" })
+    expect(settled?.props).not.toHaveProperty("summary")
+    log.end()
   })
 
   it("reuses delivery identities and records duration without journal facts", async () => {

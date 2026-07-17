@@ -254,6 +254,123 @@ describe("Queue", () => {
     log.end()
   })
 
+  it("reports ONE failure ERROR at the deepest job — the enclosing run and compose settle at INFO", async () => {
+    // A single failure must not fire ERROR three times (jobs:check + queue:run +
+    // queue:compose). The failing Job owns the one ERROR; the run and compose
+    // that merely contain it settle at INFO, so operators see the failure once.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createQueueApp(
+      { check: () => ({ status: "failed", error: { code: "check-failed", message: "candidate failed" } }) },
+      undefined,
+      undefined,
+      undefined,
+      log,
+    )
+    await submitBranch(app, "issue/one-error")
+    await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+
+    const errors = events
+      .filter((event): event is Extract<LogEvent, { kind: "log" }> => event.kind === "log" && event.level === "error")
+      .map((event) => event.namespace)
+    expect(errors).toEqual(["yrd:jobs:check"])
+
+    const run = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.namespace === "yrd:queue:run" && event.props?.outcome !== "started",
+    )
+    expect(run).toMatchObject({ level: "info", props: expect.objectContaining({ outcome: "settled", run: "R1" }) })
+    const compose = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.namespace === "yrd:queue:compose" && event.props?.outcome !== "started",
+    )
+    expect(compose).toMatchObject({ level: "info", props: expect.objectContaining({ outcome: "settled" }) })
+    log.end()
+  })
+
+  it("labels a mixed compose with per-run outcomes instead of a flat compose failed", async () => {
+    // A compose whose runs array carries a PASSED run alongside a failed one must
+    // not read "compose failed": the message names the mix so no passing run is
+    // misrepresented.
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createQueueApp(
+      {
+        batch: 1,
+        check: (input) =>
+          input.prs.some((pr) => pr.branch.includes("fail"))
+            ? { status: "failed", error: { code: "check-failed", message: "bad candidate" } }
+            : { status: "passed", output: { checked: true } },
+      },
+      undefined,
+      undefined,
+      undefined,
+      log,
+    )
+    await submitBranch(app, "issue/pass-me")
+    await submitBranch(app, "issue/fail-me")
+    const runs = await app.queue.run({ prs: ["PR1", "PR2"], steps: ["check"] }, runtime)
+    expect(runs.map((run) => run.status).sort()).toEqual(["failed", "passed"])
+
+    const compose = events.find(
+      (event): event is Extract<LogEvent, { kind: "log" }> =>
+        event.kind === "log" && event.namespace === "yrd:queue:compose" && event.props?.outcome === "settled",
+    )
+    expect(compose).toMatchObject({
+      level: "info",
+      message: "compose settled: 1 failed, 1 passed",
+      props: expect.objectContaining({ outcome: "settled", summary: "settled: 1 failed, 1 passed" }),
+    })
+    log.end()
+  })
+
+  it("never re-reports an already-terminal run as a fresh settlement on a later cycle", async () => {
+    // A terminal bisection parent whose isolated children are still waiting is
+    // re-encountered every drain cycle. Its own outcome is fixed, so its run
+    // lifecycle must emit exactly ONCE — never a fresh started/settled pair with
+    // a bogus few-millisecond duration on each later cycle (the "R603 re-reported
+    // 6 min later, durationMs:3" artifact).
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    await using app = await createQueueApp(
+      {
+        batch: 2,
+        // The 2-PR batch check fails (forcing a bisect); each isolated single-PR
+        // child then WAITS on an external check, so the batch parent stays
+        // terminal-failed with unsettled children across cycles.
+        check: (input) =>
+          input.prs.length > 1
+            ? { status: "failed", error: { code: "check-failed", message: "red batch" } }
+            : { status: "waiting", token: `remote-${input.prs[0]?.id}` },
+      },
+      undefined,
+      undefined,
+      undefined,
+      log,
+    )
+    await submitBranch(app, "issue/batch-a")
+    await submitBranch(app, "issue/batch-b")
+
+    const runStartedForR1 = () =>
+      events.filter(
+        (event) =>
+          event.kind === "log" &&
+          event.namespace === "yrd:queue:run" &&
+          event.props?.run === "R1" &&
+          event.props?.outcome === "started",
+      ).length
+
+    await app.queue.run({ prs: [] }, runtime)
+    expect(app.queue.get("R1")?.status).toBe("failed")
+    expect(runStartedForR1()).toBe(1)
+
+    // A second drain cycle re-encounters the still-unsettled bisection tree.
+    await app.queue.run({ prs: [] }, runtime)
+    // The terminal batch parent R1 did NOT re-emit its run lifecycle.
+    expect(runStartedForR1()).toBe(1)
+    log.end()
+  })
+
   it("classifies a waiting queue lifecycle as progress rather than failure", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])

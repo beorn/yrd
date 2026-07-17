@@ -1048,11 +1048,13 @@ notify:
       ),
       submitStderr,
     ).toBe(1)
+    // One failure, one ERROR: the failing base-health Job owns it. The enclosing
+    // run and admit settle at INFO (filtered here at the WARN default), so the
+    // former triple-report (jobs:main-health + queue:run + queue:admit all ERROR)
+    // collapses to the single deepest line.
     expect(submitStderr.trim().split("\n")).toEqual([
       expect.stringMatching(/\bWARN yrd:journal journal generation installed and verified\b/u),
       expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
-      expect.stringMatching(/\bERROR yrd:queue:run run failed\b/u),
-      expect.stringMatching(/\bERROR yrd:queue:admit admit failed\b/u),
     ])
     const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
     expect(submitted).toMatchObject({
