@@ -753,6 +753,174 @@ describe("withBays", () => {
     expect(app.bays.checksRequested("PR1")).toBe(false)
   })
 
+  it("journals declarative reviewer-request sets with latest-wins replace and terminal refusal", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "issue/request-review", headSha: HEAD_1 })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 1, requestedReviewers: [] })
+    expect(app.bays.needsReview("PR1")).toBe(false)
+
+    const arbitraryActor = "reviewer id/with spaces:7"
+    const first = await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })
+    expect(first.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      {
+        name: "pr/review-requested",
+        data: { pr: "PR1", reviewers: ["@cto", arbitraryActor], requestedBy: "operator" },
+      },
+    ])
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", arbitraryActor])
+
+    expect((await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", arbitraryActor] })).events).toEqual([])
+
+    const replaced = await app.bays.requestReview({ pr: "PR1", reviewers: ["@agent/5"], actor: "@chief" })
+    expect(replaced.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      { name: "pr/review-requested", data: { pr: "PR1", reviewers: ["@agent/5"], requestedBy: "@chief" } },
+    ])
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@agent/5"])
+
+    expect((await app.bays.requestReview({ pr: "PR1", reviewers: [] })).events).toHaveLength(1)
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual([])
+
+    await app.bays.closePr({ pr: "PR1" })
+    await expect(app.bays.requestReview({ pr: "PR1", reviewers: ["@cto"] })).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "terminal-target" },
+    })
+  })
+
+  it("projects the needs-review matrix from requested reviewers and revision-bound verdicts", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "issue/needs-review", headSha: HEAD_1 })
+    expect(app.bays.needsReview("PR1")).toBe(false)
+
+    await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto", "@agent/5"] })
+    expect(app.bays.needsReview("PR1")).toBe(true)
+    expect(app.bays.needsReview("PR1", "@cto")).toBe(true)
+    expect(app.bays.needsReview("PR1", "@stranger")).toBe(false)
+
+    await app.bays.review({ pr: "PR1", actor: "@stranger", decision: "approve", ref: "stranger-1" })
+    expect(app.bays.needsReview("PR1")).toBe(true)
+
+    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "reject", ref: "verdict-1" })
+    expect(app.bays.needsReview("PR1")).toBe(false)
+    expect(app.bays.needsReview("PR1", "@cto")).toBe(false)
+    expect(app.bays.needsReview("PR1", "@agent/5")).toBe(true)
+
+    await app.bays.intake({ branch: "issue/needs-review", headSha: HEAD_2, base: "main" })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 2 })
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", "@agent/5"])
+    expect(app.bays.needsReview("PR1")).toBe(false)
+
+    await app.bays.ready({ pr: "PR1" })
+    expect(app.bays.needsReview("PR1")).toBe(true)
+
+    await app.bays.requestReview({ pr: "PR1", reviewers: [] })
+    expect(app.bays.needsReview("PR1")).toBe(false)
+  })
+
+  it("keeps the requested set through recut and reopens needs-review when approval is not carried", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "issue/recut-request", headSha: HEAD_1, baseSha: BASE })
+    await app.bays.requestReview({ pr: "PR1", reviewers: ["@cto"] })
+    await app.bays.review({ pr: "PR1", actor: "@cto", decision: "approve", ref: "verdict-1" })
+    expect(app.bays.needsReview("PR1")).toBe(false)
+
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: HEAD_2,
+      baseSha: "b".repeat(40),
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 2 })
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto"])
+
+    await app.bays.ready({ pr: "PR1" })
+    expect(app.bays.needsReview("PR1")).toBe(true)
+    expect(app.bays.needsReview("PR1", "@cto")).toBe(true)
+  })
+
+  it("emits reviewer requests from submit right after the submission fact", async () => {
+    await using app = (await createHarness()).app
+
+    const result = await app.bays.submit({ branch: "issue/submit-reviewers", headSha: HEAD_1, reviewers: ["@cto"] })
+    expect(result.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted", "pr/review-requested"])
+    expect(result.events.at(-1)?.data).toEqual({ pr: "PR1", reviewers: ["@cto"], requestedBy: "operator" })
+    expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto"])
+
+    const draft = await app.bays.submit({
+      branch: "issue/submit-draft-reviewers",
+      headSha: HEAD_2,
+      draft: true,
+      reviewers: ["@agent/5"],
+    })
+    expect(draft.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/review-requested"])
+    expect(app.bays.pr("PR2")?.requestedReviewers).toEqual(["@agent/5"])
+    expect(app.bays.needsReview("PR2")).toBe(false)
+
+    const plain = await app.bays.submit({ branch: "issue/submit-no-reviewers", headSha: "3".repeat(40) })
+    expect(plain.events.map(({ name }) => name)).toEqual(["pr/pushed", "pr/submitted"])
+  })
+
+  it("replays journals containing pr/review-requested facts through the production decoder", async () => {
+    const nextId = ids()
+    const seededCommand = { id: nextId(), op: "fixture.review-requested" }
+    const at = "2026-01-01T00:00:00.000Z"
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: { pr: "PR1", branch: "topic/replay-request", base: "main", headSha: HEAD_1, revision: 1 },
+          },
+          {
+            id: nextId(),
+            name: "pr/submitted",
+            ts: at,
+            data: { pr: "PR1", revision: 1, headSha: HEAD_1 },
+          },
+          {
+            id: nextId(),
+            name: "pr/review-requested",
+            ts: at,
+            data: { pr: "PR1", reviewers: ["@cto"], requestedBy: "@chief" },
+          },
+          {
+            id: nextId(),
+            name: "pr/review-requested",
+            ts: at,
+            data: { pr: "PR1", reviewers: ["@agent/5", "@cto"], requestedBy: "@chief" },
+          },
+        ],
+      },
+    ])
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    await using app = await createYrd(definition, {
+      inject: { journal, clock: () => at, id: nextId },
+    })
+
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      requestedReviewers: ["@agent/5", "@cto"],
+    })
+    expect(app.bays.needsReview("PR1")).toBe(true)
+    expect(app.bays.needsReview("PR1", "@agent/5")).toBe(true)
+    expect(app.bays.needsReview("PR1", "@stranger")).toBe(false)
+  })
+
   it("recuts one immutable payload as a new revision of the same PR and carries exact approval", async () => {
     await using app = (await createHarness()).app
     const nextBase = "b".repeat(40)

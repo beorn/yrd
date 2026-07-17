@@ -338,6 +338,11 @@ export type PR = Readonly<{
   reviews: readonly PRReview[]
   comments: readonly PRComment[]
   checkRequests: readonly PRCheckRequest[]
+  /** Current requested-reviewer set (latest pr/review-requested fact wins;
+   * revision-independent, so recuts and new revisions keep the request).
+   * Optional like `regressions`: absent means no request was ever recorded,
+   * identical in meaning to the empty set. */
+  requestedReviewers?: readonly string[]
   regressions?: readonly PRRegression[]
   terminalRun?: string
   submittedAt?: string
@@ -359,6 +364,23 @@ export function reviewState(pr: PR): PRReviewState {
     ...(current === undefined ? {} : { current }),
     stale: pr.reviews.filter((review) => review.revision !== pr.revision || review.headSha !== pr.headSha),
   }
+}
+
+/** Requested-reviewer projection, never a stored status: a submitted PR whose
+ * requested set is non-empty and lacks a current-revision verdict from the
+ * given reviewer (or, with no reviewer argument, from any requested reviewer).
+ * Verdicts are revision-bound while requests are not, so a recut without a
+ * carried review naturally reopens this projection. */
+export function needsReview(pr: PR, reviewer?: string): boolean {
+  if (pr.status !== "submitted") return false
+  const requested = pr.requestedReviewers ?? []
+  if (requested.length === 0) return false
+  const hasCurrentVerdict = (actor: string) =>
+    pr.reviews.some(
+      (review) => review.revision === pr.revision && review.headSha === pr.headSha && review.actor === actor,
+    )
+  if (reviewer !== undefined) return requested.includes(reviewer) && !hasCurrentVerdict(reviewer)
+  return !requested.some(hasCurrentVerdict)
 }
 
 /** Mechanically certified revision ancestry for one logical PR payload.

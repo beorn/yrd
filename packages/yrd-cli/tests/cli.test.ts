@@ -2450,6 +2450,94 @@ describe("runYrd", () => {
     expect(JSON.parse(terminalInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
   })
 
+  it("drives reviewer requests through submit, request-review, and the reviewer-scoped inbox", async () => {
+    const app = await createApp()
+    const resolveRevision = () => Promise.resolve(HEAD_SHA)
+
+    const submit = outputIO({ resolveRevision })
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "submit", "topic/request-me", "--draft", "--reviewer", "@cto", "--reviewer", "@agent/5", "--json"),
+        submit.io,
+      ),
+      submit.stderr(),
+    ).toBe(0)
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", requestedReviewers: ["@cto", "@agent/5"] })
+
+    const draftInbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), draftInbox.io), draftInbox.stderr()).toBe(0)
+    expect(JSON.parse(draftInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+
+    await app.bays.ready({ pr: "PR1" })
+    const inbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), inbox.io), inbox.stderr()).toBe(0)
+    expect(JSON.parse(inbox.stdout())).toMatchObject({
+      command: "pr.list",
+      prs: [{ id: "PR1", requestedReviewers: ["@cto", "@agent/5"], needsReview: true }],
+    })
+
+    const strangerInbox = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "list", "--needs-review", "--reviewer", "@stranger", "--json"), strangerInbox.io),
+      strangerInbox.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(strangerInbox.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+
+    const review = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("pr", "review", "PR1", "--approve", "--by", "@cto", "--ref", "verdict-9", "--json"),
+        review.io,
+      ),
+      review.stderr(),
+    ).toBe(0)
+    const settled = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--needs-review", "--json"), settled.io), settled.stderr()).toBe(0)
+    expect(JSON.parse(settled.stdout())).toMatchObject({ command: "pr.list", prs: [] })
+    const openForAgent5 = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "list", "--needs-review", "--reviewer", "@agent/5", "--json"), openForAgent5.io),
+      openForAgent5.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(openForAgent5.stdout())).toMatchObject({
+      prs: [{ id: "PR1", needsReview: true }],
+    })
+
+    const replaced = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "request-review", "PR1", "@agent/9", "--by", "@chief", "--json"), replaced.io),
+      replaced.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(replaced.stdout())).toMatchObject({
+      command: "pr.request-review",
+      requestedReviewers: ["@agent/9"],
+      needsReview: true,
+    })
+
+    const cleared = outputIO()
+    expect(
+      await runYrd(app, yrd("pr", "request-review", "PR1", "--clear", "--json"), cleared.io),
+      cleared.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(cleared.stdout())).toMatchObject({
+      command: "pr.request-review",
+      requestedReviewers: [],
+      needsReview: false,
+    })
+
+    const missingActors = outputIO()
+    expect(await runYrd(app, yrd("pr", "request-review", "PR1"), missingActors.io)).toBe(2)
+    expect(missingActors.stderr()).toContain("requires reviewer actors or --clear")
+    const conflictingClear = outputIO()
+    expect(await runYrd(app, yrd("pr", "request-review", "PR1", "@cto", "--clear"), conflictingClear.io)).toBe(2)
+    expect(conflictingClear.stderr()).toContain("cannot combine with reviewer actors")
+    const reviewerWithoutInbox = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--reviewer", "@cto", "--json"), reviewerWithoutInbox.io)).toBe(2)
+    expect(reviewerWithoutInbox.stderr()).toContain("--reviewer requires --needs-review")
+  })
+
   it("keeps pr checks --follow read-only when no check fact was requested", async () => {
     const app = await createApp()
     await app.bays.submit({ branch: "topic/not-requested", headSha: HEAD_SHA, base: "main" })

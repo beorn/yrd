@@ -47,6 +47,7 @@ import {
   checksRequested,
   emptyBaysState,
   isLivePR,
+  needsReview,
   prForBay,
   PrCheckabilityConflict,
   reviewState,
@@ -126,6 +127,7 @@ const SubmitArgsSchema = z.union([
       actor: TextSchema.optional(),
       correlation: CorrelationSchema.optional(),
       composition: CompositionV1Schema.optional(),
+      reviewers: z.array(TextSchema).optional(),
     })
     .strict(),
 ])
@@ -181,6 +183,10 @@ const PrRecutArgsSchema = z
 export type PrRecutArgs = z.infer<typeof PrRecutArgsSchema>
 const PrRequestChecksArgsSchema = z.object({ pr: TextSchema, baseSha: GitShaSchema.optional() }).strict()
 export type PrRequestChecksArgs = z.infer<typeof PrRequestChecksArgsSchema>
+const PrRequestReviewArgsSchema = z
+  .object({ pr: TextSchema, reviewers: z.array(TextSchema), actor: TextSchema.optional() })
+  .strict()
+export type PrRequestReviewArgs = z.infer<typeof PrRequestReviewArgsSchema>
 
 const PRReviewDecisionSchema = z.enum(["approve", "reject"])
 const PrReviewArgsSchema = z
@@ -368,6 +374,9 @@ const PRCommentFactSchema = z
   })
   .strict()
 const PRCheckRequestFactSchema = PRRevisionIdentitySchema.extend({ baseSha: GitShaSchema.optional() }).strict()
+const PRReviewRequestFactSchema = z
+  .object({ pr: PRIdSchema, reviewers: z.array(TextSchema), requestedBy: TextSchema })
+  .strict()
 
 export type BayWorkspace = Readonly<{
   revision: string
@@ -435,6 +444,7 @@ export type BayCommands = Readonly<{
     review: CommandHandler<PrReviewArgs, BayState>
     comment: CommandHandler<PrCommentArgs, BayState>
     requestChecks: CommandHandler<PrRequestChecksArgs, BayState>
+    requestReview: CommandHandler<PrRequestReviewArgs, BayState>
     regression: CommandHandler<PrRegressionArgs, BayState>
   }>
 }>
@@ -446,6 +456,7 @@ export type Bays = Readonly<{
   pr(selector: string): DeepReadonly<PR> | undefined
   prs(): readonly DeepReadonly<PR>[]
   reviewState(selector: string): DeepReadonly<PRReviewState>
+  needsReview(selector: string, reviewer?: string): boolean
   checksRequested(selector: string): boolean
   open(args: OpenBayArgs): Promise<CommandResult>
   refresh(args: RefreshBayArgs): Promise<CommandResult>
@@ -460,6 +471,7 @@ export type Bays = Readonly<{
   review(args: PrReviewArgs): Promise<CommandResult>
   comment(args: PrCommentArgs): Promise<CommandResult>
   requestChecks(args: PrRequestChecksArgs): Promise<CommandResult>
+  requestReview(args: PrRequestReviewArgs): Promise<CommandResult>
   recordRegression(args: PrRegressionArgs): Promise<CommandResult>
 }>
 
@@ -479,6 +491,7 @@ type BayActions = Pick<
   | "review"
   | "comment"
   | "requestChecks"
+  | "requestReview"
   | "recordRegression"
 >
 
@@ -806,6 +819,7 @@ export function createBays(
     pr: (selector) => resolvePR(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
     reviewState: (selector) => reviewState(required(resolvePR(state(), selector), "PR", selector)),
+    needsReview: (selector, reviewer) => needsReview(required(resolvePR(state(), selector), "PR", selector), reviewer),
     checksRequested: (selector) => checksRequested(required(resolvePR(state(), selector), "PR", selector)),
     submitSelection,
     open,
@@ -820,6 +834,7 @@ export function createBays(
     review: actions.review,
     comment: actions.comment,
     requestChecks: actions.requestChecks,
+    requestReview: actions.requestReview,
     recordRegression: actions.recordRegression,
   })
 }
@@ -859,6 +874,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/reviewed": PRReviewFactSchema,
         "pr/commented": PRCommentFactSchema,
         "pr/checks-requested": PRCheckRequestFactSchema,
+        "pr/review-requested": PRReviewRequestFactSchema,
       },
       replayEvents: {
         "pr/pushed": LegacyPRPushedSchema,
@@ -890,6 +906,7 @@ export function withBays(options: WithBaysOptions) {
               review: (args) => yrd.dispatch(commands.pr.review, args),
               comment: (args) => yrd.dispatch(commands.pr.comment, args),
               requestChecks: (args) => yrd.dispatch(commands.pr.requestChecks, args),
+              requestReview: (args) => yrd.dispatch(commands.pr.requestReview, args),
               recordRegression: (args) => yrd.dispatch(commands.pr.regression, args),
             },
             { defaultBase, ...(options.resolveBase === undefined ? {} : { resolveBase: options.resolveBase }) },
@@ -990,6 +1007,12 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultActor: 
         title: "Request checks for a PR revision",
         params: PrRequestChecksArgsSchema,
         apply: (state: BayState, args: PrRequestChecksArgs) => requestPrChecks(state, args),
+      }),
+      requestReview: command({
+        title: "Replace the requested reviewers for a PR",
+        visibility: "public",
+        params: PrRequestReviewArgsSchema,
+        apply: (state: BayState, args: PrRequestReviewArgs) => requestPrReview(state, args, defaultActor),
       }),
       regression: command({
         title: "Record a completed escaped regression",
@@ -1153,6 +1176,9 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
               ...(args.correlation === undefined ? {} : { correlation: args.correlation }),
             }),
           ]),
+      ...(args.reviewers === undefined || args.reviewers.length === 0
+        ? []
+        : [event("pr/review-requested", { pr: id, reviewers: args.reviewers, requestedBy: actor })]),
     ],
   }
 }
@@ -1348,6 +1374,27 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
         successor,
         ...(args.composition === undefined ? {} : { composition: args.composition }),
       }),
+    ],
+  }
+}
+
+function requestPrReview(state: DeepReadonly<BayState>, args: PrRequestReviewArgs, defaultActor: string) {
+  const pr = required(resolvePR(state.bays, args.pr), "PR", args.pr)
+  if (pr.status !== "pushed" && pr.status !== "submitted") {
+    raiseFailure(
+      "refusal",
+      "terminal-target",
+      `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot change requested reviewers`,
+    )
+  }
+  const requested = pr.requestedReviewers ?? []
+  const unchanged =
+    requested.length === args.reviewers.length &&
+    requested.every((reviewer, index) => reviewer === args.reviewers[index])
+  if (unchanged) return { events: [] }
+  return {
+    events: [
+      event("pr/review-requested", { pr: pr.id, reviewers: args.reviewers, requestedBy: args.actor ?? defaultActor }),
     ],
   }
 }
@@ -1688,6 +1735,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
               reviews: [],
               comments: [],
               checkRequests: [],
+              requestedReviewers: [],
               regressions: [],
             }
           : {
@@ -2002,6 +2050,12 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       if (pr === undefined) return state
       const comment: PRComment = { ...commented, at: applied.ts }
       return patchPR(pr, { comments: [...pr.comments, comment] })
+    }
+    case "pr/review-requested": {
+      const requested = PRReviewRequestFactSchema.parse(data)
+      const pr = current.prs[requested.pr]
+      if (pr === undefined) return state
+      return patchPR(pr, { requestedReviewers: requested.reviewers })
     }
     case "pr/checks-requested": {
       const requested = PRCheckRequestFactSchema.parse(data)
