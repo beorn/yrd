@@ -839,6 +839,39 @@ function createQueue<Shape extends PRShape>(
 
   const settle = async (id: QueueRunId, options: RunJobOptions): Promise<QueueRun> => {
     const observed = current(id)
+    // Stale re-report guard #1: a run with nothing left to settle has ALREADY
+    // emitted its one run lifecycle at its real settlement. Return it untouched —
+    // no drive, no re-emit.
+    if (!needsSettlement(runtime(), observed)) return observed
+
+    const settleTree = async (): Promise<QueueRun> => {
+      const settled = await drive(id, options)
+      if (!bisectable(settled)) return settled
+      for (const part of [0, 1] as const) {
+        let snapshot = runtime()
+        let child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
+        if (child === undefined) {
+          await actions.isolate(settled.id, part)
+          snapshot = runtime()
+          child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
+        }
+        if (child === undefined) {
+          throw new Error(`yrd: queue run '${settled.id}' did not create isolation part ${part}`)
+        }
+        await settle(child.id, options)
+      }
+      return current(id)
+    }
+
+    // Stale re-report guard #2: a run that is ALREADY terminal at entry but still
+    // needs settlement is a bisection parent whose child runs are being driven
+    // this cycle. Its own status/outcome is fixed, so its run lifecycle was
+    // emitted when it first settled — progress the bisection tree WITHOUT
+    // re-observing the parent (re-emitting a terminal run each cycle with a bogus
+    // few-millisecond duration is the "R603 re-reported later, durationMs:3"
+    // artifact). The child runs observe their own settlements.
+    if (Queues.terminal(observed)) return settleTree()
+
     return observeYrdLifecycle(
       log,
       {
@@ -850,26 +883,14 @@ function createQueue<Shape extends PRShape>(
           steps: observed.steps.map((step) => step.name),
         },
         outcome: queueRunOutcome,
-        resultAttributes: (result) => ({ status: result.status }),
+        resultAttributes: (result) => ({
+          status: result.status,
+          // A run-owned failure (no step owns the ERROR) carries its JobError so
+          // the human row can render `err=<slug>`; harmless on a settled run.
+          ...(result.error === undefined ? {} : { error: result.error }),
+        }),
       },
-      async () => {
-        const settled = await drive(id, options)
-        if (!bisectable(settled)) return settled
-        for (const part of [0, 1] as const) {
-          let snapshot = runtime()
-          let child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
-          if (child === undefined) {
-            await actions.isolate(settled.id, part)
-            snapshot = runtime()
-            child = childQueue(snapshot.queues, snapshot.jobs, settled.id, part)
-          }
-          if (child === undefined) {
-            throw new Error(`yrd: queue run '${settled.id}' did not create isolation part ${part}`)
-          }
-          await settle(child.id, options)
-        }
-        return current(id)
-      },
+      settleTree,
     )
   }
 
@@ -996,6 +1017,7 @@ function createQueue<Shape extends PRShape>(
           lifecycle: "compose",
           attributes: { selectors: args.prs, steps: args.steps },
           outcome: queueRunsOutcome,
+          label: composeSettlementLabel,
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
@@ -1222,6 +1244,9 @@ function deliveryIdentity(pr: DeepReadonly<PRSnapshot>): YrdDeliveryIdentity {
     pr: pr.id,
     revision: pr.revision,
     headSha: pr.headSha,
+    // Carried so the resident runner's timeline rows can name the branch — the
+    // watch-pane grammar (`R604 PR411.2  branch (merge ✓)`) needs it.
+    branch: pr.branch,
     ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
   }
 }
@@ -1232,6 +1257,9 @@ function stepObservation(input: StepExecution): JobObservation {
     identity: { run: input.run, step: input.step },
     attributes: {
       index: input.index,
+      // The run's base, carried so the resident timeline can name a step row
+      // `[<base>#<run> <index>:<step>]`; every PR in a run shares its base.
+      ...(input.prs[0]?.base === undefined ? {} : { base: input.prs[0].base }),
       prs: input.prs.map(deliveryIdentity),
       ...(input.targetSha === undefined ? {} : { targetSha: input.targetSha }),
     },
@@ -1250,14 +1278,45 @@ function runEvidence(run: DeepReadonly<QueueRun>): Record<string, unknown> {
 
 function queueRunOutcome(run: DeepReadonly<QueueRun>): YrdLifecycleOutcome {
   if (run.status === "passed") return "succeeded"
-  if (run.status === "failed") return "failed"
+  if (run.status === "failed") {
+    // When a step Job failed, that step already owns the single ERROR
+    // (yrd:jobs:<step>); the run settles at INFO so one failure is not re-raised
+    // as a duplicate ERROR one level up. But a run that failed with NO step to
+    // own it — a pinned/stale-base refusal rejected before the step's Job ran
+    // (record.failure) — has no deeper ERROR. The run must own it, or the
+    // failure is silent: fail loud with a run-scoped ERROR.
+    const stepOwned = run.steps.some(
+      (step) =>
+        step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+    )
+    return stepOwned ? "settled" : "failed"
+  }
   return "progress"
 }
 
 function queueRunsOutcome(runs: readonly DeepReadonly<QueueRun>[]): YrdLifecycleOutcome {
-  if (runs.some((run) => run.status === "failed")) return "failed"
   if (runs.some((run) => run.status === "running" || run.status === "waiting")) return "progress"
+  // As with a single run, a batch that finished with failures does not re-raise
+  // ERROR: each failing run's deepest job already did. The compose settles at
+  // INFO, and composeSettlementLabel names the per-run mix on the message.
+  if (runs.some((run) => run.status === "failed")) return "settled"
   return "succeeded"
+}
+
+/** Name the per-run outcome mix of a settled compose so the flat "compose
+ * failed" never misrepresents a batch that also passed runs. Returns undefined
+ * for a uniform or still-running batch (the plain outcome word reads fine
+ * there); a mixed/all-failed terminal batch gets `settled: N failed, M passed`. */
+function composeSettlementLabel(runs: readonly DeepReadonly<QueueRun>[]): string | undefined {
+  if (runs.length === 0 || !runs.every(Queues.terminal)) return undefined
+  const failed = runs.filter((run) => run.status === "failed").length
+  if (failed === 0) return undefined
+  const passed = runs.filter((run) => run.status === "passed").length
+  const other = runs.length - failed - passed
+  const parts = [`${failed} failed`]
+  if (passed > 0) parts.push(`${passed} passed`)
+  if (other > 0) parts.push(`${other} other`)
+  return `settled: ${parts.join(", ")}`
 }
 
 function queueFailedEvent(

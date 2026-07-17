@@ -90,6 +90,65 @@ describe("resident follow-runner INFO-by-default", () => {
     }
   }, 30_000)
 
+  it("keeps the human stream scannable: friendly-prefixed rows, roll-ups and journal chatter dropped", async () => {
+    const { repo } = await runnerRepo()
+    const logFile = join(repo, "timeline.jsonl")
+    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
+      cwd: repo,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
+    })
+    const stdoutText = new Response(cli.stdout).text()
+    let stderrText = ""
+    const stderrStream = (async () => {
+      const reader = cli.stderr.getReader()
+      const decoder = new TextDecoder()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        stderrText += decoder.decode(value, { stream: true })
+      }
+    })()
+    try {
+      // The runner cycles once the structured sink records a compose settlement.
+      await vi.waitFor(
+        async () => {
+          const records = await readRecords(logFile)
+          expect(records.some((r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded")).toBe(true)
+        },
+        { timeout: 20_000, interval: 200 },
+      )
+      cli.kill("SIGTERM")
+      // The graceful-drain notice is a first-class human row (it is NOT a step
+      // roll-up), so it must surface before exit.
+      await vi.waitFor(() => expect(stderrText).toContain("graceful drain requested"), {
+        timeout: 20_000,
+        interval: 200,
+      })
+      expect(await cli.exited, stderrText).toBe(0)
+    } finally {
+      cli.kill("SIGKILL")
+      await cli.exited
+      await stdoutText
+      await stderrStream
+    }
+
+    // Every human row leads with the loggily prefix (time LEVEL scope …) — the
+    // structured JSON is a dimmed TAIL, so no row STARTS with a raw `{` dump.
+    expect(stderrText).not.toMatch(/^\s*\{/mu)
+    expect(stderrText).toMatch(/\bWARN yrd:runner graceful drain requested\b/u)
+    // The redundant compose settlement roll-up is dropped from the human stream,
+    // and low-level journal:lock chatter never reaches it...
+    expect(stderrText).not.toContain("compose succeeded")
+    expect(stderrText).not.toContain("journal:lock")
+    // ...while the structured JSONL sink still retains the full journal detail
+    // AND the full compose settlement record.
+    const records = await readRecords(logFile)
+    expect(records.some((r) => String(r.name) === "yrd:journal:lock")).toBe(true)
+    expect(records.some((r) => r.name === "yrd:queue:compose" && r.outcome === "succeeded")).toBe(true)
+  }, 40_000)
+
   it("keeps one-shot non-runner commands at WARN — no yrd:journal:lock INFO spam", async () => {
     const { repo } = await runnerRepo()
     const logFile = join(repo, "one-shot.jsonl")

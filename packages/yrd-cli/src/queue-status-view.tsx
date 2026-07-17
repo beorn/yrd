@@ -30,6 +30,7 @@ import {
   type TableColumn,
 } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
+import { TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
 import {
   formatDuration,
   PRStatusView,
@@ -1344,13 +1345,9 @@ const RECENT_ROW_LIMIT = 3
 // Canonical km/ag marker vocabulary: working disc, hollow pending, red
 // failure cross, muted completion check. Never ASCII slash spinners or
 // background fills; color is applied by the renderer, foreground-only.
-function statusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return "●"
-  if (["integrated", "passed"].includes(status)) return "✓"
-  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) return "×"
-  if (["withdrawn", "retired", "canceled"].includes(status)) return "-"
-  return "○"
-}
+// The status → glyph map lives in runner-timeline.ts (pure, no silvery) so the
+// headless resident runner shares this exact vocabulary.
+const statusGlyph = timelineStatusGlyph
 
 function failureFact(
   run: QueueRun | undefined,
@@ -2751,7 +2748,7 @@ const TIMELINE_STATE_CAP = 20
  * Powerline branch glyph (U+E0A0), prefixed on every rendered branch name in
  * the watch UI (user directive 2026-07-16), matching ag-code's `BRANCH_ICON`.
  */
-const BRANCH_ICON = ""
+const BRANCH_ICON = TIMELINE_BRANCH_ICON
 
 /**
  * The branch glyph renders dim/subtle everywhere (user directive 2026-07-16,

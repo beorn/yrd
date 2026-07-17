@@ -434,7 +434,12 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             : result.status === "running" || result.status === "waiting"
               ? "progress"
               : "failed",
-        resultAttributes: (result) => ({ status: result.status }),
+        resultAttributes: (result) => ({
+          status: result.status,
+          // Surface the failed Job's canonical error code so a human row can
+          // render `err=<slug>` — the failing step OWNS the single ERROR line.
+          ...(result.status === "failed" ? { error: result.error } : {}),
+        }),
       },
       async () => {
         await commit({

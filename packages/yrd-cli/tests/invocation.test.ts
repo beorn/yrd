@@ -62,19 +62,25 @@ describe("resolveYrdContext", () => {
       name: "CLI selector over environment",
       options: { repo: "../cli-repo" },
       env: { YRD_REPO: "../env-repo" },
-      context: { repo: resolve(ambient, "../cli-repo"), observability: { level: "warn", spans: false } },
+      context: {
+        repo: resolve(ambient, "../cli-repo"),
+        observability: { level: "warn", spans: false, explicitLevel: false },
+      },
     },
     {
       name: "environment selector over ambient discovery",
       options: {},
       env: { YRD_REPO: "../env-repo" },
-      context: { repo: resolve(ambient, "../env-repo"), observability: { level: "warn", spans: false } },
+      context: {
+        repo: resolve(ambient, "../env-repo"),
+        observability: { level: "warn", spans: false, explicitLevel: false },
+      },
     },
     {
       name: "ambient discovery when selectors are absent",
       options: {},
       env: {},
-      context: { repo: resolve(ambient), observability: { level: "warn", spans: false } },
+      context: { repo: resolve(ambient), observability: { level: "warn", spans: false, explicitLevel: false } },
     },
   ])("resolves $name against one captured ambient cwd", ({ options, env, context }) => {
     expect(resolveYrdContext(options, env, ambient)).toEqual(context)

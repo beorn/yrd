@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url"
 import type { Bay, PR } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
+import { formatDuration } from "./runner-timeline.ts"
 import { projectPRTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
 
 type EvaluationRow = Readonly<{
@@ -15,14 +16,10 @@ type EvaluationRow = Readonly<{
   evidenceHref?: string
 }>
 
-export function formatDuration(milliseconds: number): string {
-  const ms = Math.max(0, milliseconds)
-  if (ms < 1_000) return `${Math.round(ms)}ms`
-  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 1 : 0)}s`
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m`
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h`
-  return `${Math.floor(ms / 86_400_000)}d`
-}
+// formatDuration is the pure watch-timeline duration format, shared with the
+// headless resident runner via runner-timeline.ts (which imports no silvery).
+// Re-exported so existing `./status-view.tsx` consumers are unaffected.
+export { formatDuration }
 
 export function statusVariant(status: string): "default" | "accent" | "error" | "warning" | "success" | "info" {
   if (["active", "closed", "integrated", "passed", "passing", "promoted"].includes(status)) return "success"

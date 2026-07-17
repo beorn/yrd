@@ -5,6 +5,11 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   started: "debug",
   progress: "trace",
   succeeded: "info",
+  // An aggregate lifecycle (a run/compose) that completed carrying an
+  // already-reported failure. The deepest failing job/step owns the single
+  // ERROR; the enclosing levels settle at INFO so one failure is reported once,
+  // never re-raised as a duplicate ERROR up the tree.
+  settled: "info",
   refused: "warn",
   recovered: "warn",
   failed: "error",
@@ -17,6 +22,7 @@ export type YrdDeliveryIdentity = Readonly<{
   pr?: string
   revision?: number
   headSha?: string
+  branch?: string
   run?: string
   step?: string
   job?: string
@@ -35,6 +41,12 @@ export type YrdLifecycleOptions<Result> = Readonly<{
   attributes?: Readonly<Record<string, unknown>>
   outcome?: YrdLifecycleOutcome | ((result: Result) => YrdLifecycleOutcome)
   resultAttributes?: (result: Result) => Readonly<Record<string, unknown>>
+  /** Replace the flat outcome word in the completion message with a computed
+   * summary label (e.g. a mixed-outcome tally: `settled: 1 failed, 1 passed`).
+   * A returned string becomes both the message tail and a `summary` field; the
+   * severity still derives from `outcome`. Only consulted on a non-throwing
+   * result. */
+  label?: (result: Result) => string | undefined
   now?: () => number
 }>
 
@@ -55,7 +67,7 @@ export async function observeYrdLifecycle<Result>(
     lifecycle: options.lifecycle,
   }
   const span = log.span?.(undefined, () => spanProps)
-  emitLifecycle(log, options.lifecycle, "started", { ...spanProps, outcome: "started" })
+  emitLifecycle(log, options.lifecycle, "started", "started", { ...spanProps, outcome: "started" })
 
   const finish = (outcome: YrdLifecycleOutcome, error?: unknown, result?: Result): void => {
     const finishedAt = now()
@@ -63,15 +75,17 @@ export async function observeYrdLifecycle<Result>(
     const invalidDuration = !Number.isFinite(measuredDurationMs) || measuredDurationMs < 0
     const durationMs = invalidDuration ? 0 : measuredDurationMs
     const failure = error === undefined ? undefined : failureFact(error)
+    const summary = result === undefined ? undefined : options.label?.(result)
     Object.assign(spanProps, result === undefined ? {} : options.resultAttributes?.(result), {
       outcome,
       durationMs,
+      ...(summary === undefined ? {} : { summary }),
       ...(invalidDuration ? { diagnostic: "invalid-duration", startedAt, finishedAt } : {}),
       ...(failure === undefined ? {} : { failure }),
     })
     if (span !== undefined) Object.assign(span.spanData as Record<string, unknown>, spanProps)
     if (invalidDuration) log.error?.(`${options.lifecycle} duration invalid`, { ...spanProps })
-    emitLifecycle(log, options.lifecycle, outcome, { ...spanProps })
+    emitLifecycle(log, options.lifecycle, outcome, summary ?? outcome, { ...spanProps })
   }
 
   try {
@@ -98,9 +112,10 @@ function emitLifecycle(
   log: ConditionalLogger,
   lifecycle: string,
   outcome: YrdLifecycleOutcome,
+  descriptor: string,
   props: Record<string, unknown>,
 ): void {
-  const message = `${lifecycle} ${outcome}`
+  const message = `${lifecycle} ${descriptor}`
   switch (YRD_LIFECYCLE_LEVELS[outcome]) {
     case "trace":
       log.trace?.(message, props)

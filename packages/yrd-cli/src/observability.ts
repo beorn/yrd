@@ -1,5 +1,5 @@
 import { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, raiseFailure, type YrdDeliveryIdentity } from "@yrd/core"
-import { createLogger, type ConditionalLogger, type ConfigElement, type LogLevel } from "loggily"
+import { createLogger, type ConditionalLogger, type ConfigElement, type Event, type LogLevel } from "loggily"
 import { enableContextPropagation } from "loggily/context"
 
 export { YRD_LIFECYCLE_LEVELS, observeYrdLifecycle, type YrdDeliveryIdentity }
@@ -99,15 +99,33 @@ export function residentObservability(config: YrdObservability): YrdObservabilit
 }
 
 /** Create the one host-owned logger fan-out. Both sinks share the exact same
- * level and DEBUG namespace policy; the file sink is structured JSONL. */
-export function createYrdLogger(config: YrdObservability, stderr: (text: string) => unknown): ConditionalLogger {
+ * level and DEBUG namespace policy; the file sink is structured JSONL. When a
+ * `human` formatter is supplied (the resident follow-runner), the stderr sink
+ * renders each Event through it — a scannable timeline row, or `undefined` to
+ * suppress that line from the human stream — while the JSONL file sink keeps the
+ * full structured record. Without it, the default console format is used. */
+export function createYrdLogger(
+  config: YrdObservability,
+  stderr: (text: string) => unknown,
+  human?: (event: Event) => string | undefined,
+): ConditionalLogger {
   enableContextPropagation()
   const scope = {
     level: config.level,
     ...(config.debug === undefined ? {} : { ns: config.debug }),
     spans: config.spans,
   }
-  const pipeline: ConfigElement[] = [scope, { write: stderr, objectMode: false }]
+  const stderrSink: ConfigElement =
+    human === undefined
+      ? { write: stderr, objectMode: false }
+      : {
+          write: (event: Event) => {
+            const line = human(event)
+            if (line !== undefined) stderr(`${line}\n`)
+          },
+          objectMode: true,
+        }
+  const pipeline: ConfigElement[] = [scope, stderrSink]
   if (config.file !== undefined) pipeline.push({ file: config.file, format: "json" })
   const logger = createLogger("yrd", pipeline)
   let disposed = false
