@@ -2783,9 +2783,10 @@ type TimelineCellLayout = Readonly<{
 type TimelineRunCell = Readonly<{ text: string; color?: string }>
 
 // The RUN(id) part of the RUN·PR identity cell: main#N (or #N on the compact
-// tier); run-less rows render `pending` in blue — colored, never blank (15d).
+// tier); a run that has not started yet renders a plain muted dash (item 9),
+// never blank.
 function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): TimelineRunCell {
-  if (row.run === undefined) return { text: "pending", color: "$fg-info" }
+  if (row.run === undefined) return { text: "-", color: "$fg-muted" }
   const match = /^R(\d+)$/u.exec(row.run)
   if (match === null) return { text: row.run }
   return { text: compact ? `#${match[1]}` : `${row.base}#${match[1]}` }
@@ -2955,24 +2956,45 @@ export function queueTimelineDefaultCursorId(
  * Live-activity pulse cadence, matched to ag-code's activity indicator (item O,
  * user directive 2026-07-16). ag pulses a status color against `$fg-muted` on a
  * 1800 ms period; silvery's `Pulse` toggles once per `intervalMs`, so half the
- * period (900 ms) reproduces ag's blink. (ag additionally synchronizes every
- * indicator to one global phase via `useSynchronizedPulse`; silvery's per-node
- * timer is a close, primitive-native approximation — a shared-phase Pulse would
- * be the exact match, tracked as a silvery follow-up.)
+ * period (900 ms) reproduces ag's blink. Every activity indicator uses silvery's
+ * `synchronized` Pulse (items 10-13) so they share ONE app-scope phase clock —
+ * the exact-match shared phase the earlier per-node timer only approximated.
  */
 const AG_PULSE_INTERVAL_MS = 900
 
-function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
-  if (row.status === "running") {
-    if (live) {
-      return (
-        <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS}>
-          {row.glyph}
-        </Pulse>
-      )
-    }
-    return <Text color="$fg-info">{row.glyph}</Text>
+/** The universal "executing right now" pulse: blue against muted, shared phase
+ * (item 12). Static blue is never used for activity — if it is blue because
+ * something is in progress, it pulses. */
+const ACTIVITY_PULSE_COLORS: readonly [string, string] = ["$fg-info", "$fg-muted"]
+
+/**
+ * A synchronized blue activity pulse for any "in progress right now" content
+ * (items 12/13): the running row's status glyph + word, the active step's glyph
+ * + label. Pulses on the shared phase when `live`; static blue otherwise. It
+ * KEEPS the activity blue even under row selection (item 13) — `forceFg` is only
+ * applied to non-activity content by the caller, never routed here.
+ */
+function ActivityPulse({
+  live,
+  children,
+  ...rest
+}: { live: boolean; children: React.ReactNode } & Omit<TextProps, "color" | "children">) {
+  if (live) {
+    return (
+      <Pulse synchronized colors={ACTIVITY_PULSE_COLORS} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
+        {children}
+      </Pulse>
+    )
   }
+  return (
+    <Text color={ACTIVITY_PULSE_COLORS[0]} {...rest}>
+      {children}
+    </Text>
+  )
+}
+
+function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
+  if (row.status === "running") return <ActivityPulse live={live}>{row.glyph}</ActivityPulse>
   return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
 }
 
@@ -3120,12 +3142,26 @@ function TimelineProjectedRow({
       status={
         <>
           <Box width={1} flexShrink={0}>
-            {cursor ? <Text color={forcedFg}>{row.glyph}</Text> : <TimelineMarker row={row} live={live} />}
+            {/* A running row's glyph keeps its blue pulse even under selection
+                (items 12/13); other statuses take the selection fg. */}
+            {active || !cursor ? (
+              <TimelineMarker row={row} live={live} />
+            ) : (
+              <Text color={forcedFg}>{row.glyph}</Text>
+            )}
           </Box>
           <Box paddingLeft={1} minWidth={0} overflow="hidden">
-            <Text color={forcedFg ?? status.color} wrap="truncate">
-              {status.word}
-            </Text>
+            {/* The running status word pulses blue in the shared phase (item 12)
+                and stays blue when the row is selected (item 13). */}
+            {active ? (
+              <ActivityPulse live={live} wrap="truncate">
+                {status.word}
+              </ActivityPulse>
+            ) : (
+              <Text color={forcedFg ?? status.color} wrap="truncate">
+                {status.word}
+              </Text>
+            )}
           </Box>
         </>
       }
@@ -3370,24 +3406,33 @@ export function queueHealthMarker(projection: QueueTimelineProjection): QueueHea
 const QUEUE_HEALTH_GLYPH = "●"
 
 /**
- * The leading RUNNER-liveness marker at the front of the RUNNER box (item 4). It
- * pulses on the shared ag-code cadence while the runner is alive (blue when
- * processing, grey when idle; live pane only — the one-shot projection renders a
- * static dot), and is a solid red dot when the runner is down. `live` gates the
- * pulse exactly as `TimelineMarker` does.
+ * RUNNER-liveness activity (items 4/10/11): renders `children` on the marker's
+ * pulse, or statically in its on-colour when down or non-live. In the live pane
+ * the pulse is SYNCHRONIZED (silvery shared-phase clock, item 11) so the leading
+ * disc and the adjacent runner command text — and every other synchronized
+ * activity indicator — beat as one, never out of phase. `live` gates the pulse
+ * exactly as `TimelineMarker` does (the one-shot projection has no app scope).
  */
-function RunnerQueueMarker({ projection, live }: { projection: QueueTimelineProjection; live: boolean }) {
-  const marker = queueHealthMarker(projection)
+function RunnerActivity({
+  marker,
+  live,
+  children,
+  ...rest
+}: {
+  marker: QueueHealthMarker
+  live: boolean
+  children: React.ReactNode
+} & Omit<TextProps, "color" | "children">) {
   if (marker.pulse !== null && live) {
     return (
-      <Pulse colors={marker.pulse} intervalMs={AG_PULSE_INTERVAL_MS} flexShrink={0}>
-        {QUEUE_HEALTH_GLYPH}
+      <Pulse synchronized colors={marker.pulse} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
+        {children}
       </Pulse>
     )
   }
   return (
-    <Text color={marker.color} flexShrink={0}>
-      {QUEUE_HEALTH_GLYPH}
+    <Text color={marker.color} {...rest}>
+      {children}
     </Text>
   )
 }
@@ -3403,13 +3448,18 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   const runner = projection.runner
   const timing = runnerTiming(projection)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
+  // ONE marker drives both the leading disc AND the runner command text, so
+  // they pulse in the same synchronized phase (items 10/11).
+  const marker = queueHealthMarker(projection)
   if (runner === null) {
     const drained = timelineLastDrainedMs(projection)
     const now = Date.parse(projection.now)
     return (
       <TitledBox title="RUNNER" borderColor="$fg-error">
         <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-          <RunnerQueueMarker projection={projection} live={live} />
+          <RunnerActivity marker={marker} live={live} flexShrink={0}>
+            {QUEUE_HEALTH_GLYPH}
+          </RunnerActivity>
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
             {drained === null
               ? "NO RUNNER - no drained run in window"
@@ -3422,10 +3472,12 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   return (
     <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
       <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-        <RunnerQueueMarker projection={projection} live={live} />
-        <Text wrap="truncate" minWidth={0}>
+        <RunnerActivity marker={marker} live={live} flexShrink={0}>
+          {QUEUE_HEALTH_GLYPH}
+        </RunnerActivity>
+        <RunnerActivity marker={marker} live={live} wrap="truncate" minWidth={0}>
           [{runner.pid}] {runner.command ?? "resident runner"}
-        </Text>
+        </RunnerActivity>
         <Box flexGrow={1} flexBasis={0} minWidth={0} />
         <Text color="$fg-muted" flexShrink={0}>
           uptime {uptimeClock(timing?.uptimeMs ?? 0)}

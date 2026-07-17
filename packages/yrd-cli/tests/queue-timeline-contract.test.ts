@@ -177,7 +177,7 @@ describe("queue timeline 21106 contract", () => {
     // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend pending PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
+    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend\s+-\s+PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
       /^17:10:00 ● run\s+main#42 PR42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
     )
@@ -189,8 +189,8 @@ describe("queue timeline 21106 contract", () => {
     )
     expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+PR4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
 
-    // No row carries the removed clock glyph, and the pending row has no Run
-    // yet: blue `pending` instead of a run id, no run duration.
+    // No row carries the removed clock glyph, and a not-yet-started run shows a
+    // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
     for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("#")
   })
@@ -255,7 +255,8 @@ describe("queue timeline 21106 contract", () => {
         if (column < 0) throw new Error(`missing '${needle}' in the '${anchor}' row`)
         return styled.cell(column, row)
       }
-      const info = cell("pending", "PR1.1").fg
+      // Item 9: a not-yet-started run shows a muted "-", not a blue "pending"
+      // run id — the blue (info) reference is now the running working disc.
       const runningMarker = cell("●", "PR42.1").fg
       const successMarker = cell("✓", "PR4.1").fg
       const successText = cell("done", "PR4.1").fg
@@ -263,22 +264,20 @@ describe("queue timeline 21106 contract", () => {
       const mutedTime = cell("16:40:00", "PR1.1").fg
       const mutedAge = cell("50:00", "PR1.1").fg
 
-      for (const pinned of [info, runningMarker, successMarker, successText, failureText, mutedTime, mutedAge]) {
+      for (const pinned of [runningMarker, successMarker, successText, failureText, mutedTime, mutedAge]) {
         expect(pinned).not.toBeNull()
       }
-      // Blue pending identity matches the pulsing blue working disc.
-      expect(info).toEqual(runningMarker)
       // GREEN success marker + semantic success text (15d re-rule).
       expect(successMarker).toEqual(successText)
-      expect(successMarker).not.toEqual(info)
+      expect(successMarker).not.toEqual(runningMarker)
       expect(successMarker).not.toEqual(mutedTime)
       // Failure code keeps its own semantic foreground.
       expect(failureText).not.toEqual(successMarker)
-      expect(failureText).not.toEqual(info)
+      expect(failureText).not.toEqual(runningMarker)
       expect(failureText).not.toEqual(mutedTime)
       // TIME and AGE share the muted foreground.
       expect(mutedTime).toEqual(mutedAge)
-      expect(mutedTime).not.toEqual(info)
+      expect(mutedTime).not.toEqual(runningMarker)
     } finally {
       styled.unmount()
     }

@@ -133,7 +133,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("mutes real run ids like TIME while pending keeps its own color", async () => {
+  it("mutes real run ids like TIME while a not-yet-started run shows a muted dash", async () => {
     const projection = queueTimelineStories["contract-overview"].snapshot.projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
@@ -163,12 +163,17 @@ describe("queue timeline chrome 21106", () => {
       expect(iconFg, "branch glyph is muted, like TIME").toEqual(timeFg)
       expect(iconFg, "branch glyph is dimmer than the branch name").not.toEqual(branchFg)
 
+      // Item 9: a not-yet-started run shows a muted "-" in the RUN cell — no
+      // colored "pending" word there. The pending STATUS word keeps its info color.
       const pendingRowY = rowIndexOf(text, " pend ")
       const pendingRow = rowAt(text, pendingRowY)
-      const pendingX = pendingRow.lastIndexOf("pending")
-      expect(pendingX, "pending run cell present on the pending row").toBeGreaterThan(0)
-      const pendingFg = app.cell(pendingX, pendingRowY).fg
-      expect(pendingFg, "pending run cell keeps info color").not.toEqual(timeFg)
+      expect(pendingRow, "run-less row shows no colored pending run id").not.toContain("pending")
+      const pendStatusX = pendingRow.indexOf("pend")
+      expect(pendStatusX, "pending status word present").toBeGreaterThan(0)
+      expect(
+        app.cell(pendStatusX, pendingRowY).fg,
+        "pending status word keeps its own (info) color, distinct from muted TIME",
+      ).not.toEqual(timeFg)
     } finally {
       app.unmount()
     }
@@ -452,14 +457,15 @@ describe("queue timeline chrome 21106", () => {
       const cursorLine = rowAt(text, cursorY)
       const statusX = cursorLine.indexOf(" run ") + 1
       const timeX = cursorLine.search(/\d{2}:\d{2}:\d{2}/u)
-      const cursorFg = app.cell(statusX, cursorY).fg
-      const cursorBg = app.cell(statusX, cursorY).bg
-      expect(app.cell(timeX, cursorY).fg, "TIME cell forced to selection fg").toEqual(cursorFg)
+      // Sample the selection fg/bg from a NON-activity cell (TIME).
+      const cursorFg = app.cell(timeX, cursorY).fg
+      const cursorBg = app.cell(timeX, cursorY).bg
       expect(app.cell(timeX, cursorY).bg, "TIME cell selection bg").toEqual(cursorBg)
-      // Every sampled cell shares the same forced pair.
-      for (const x of [timeX, statusX]) {
-        expect(app.cell(x, cursorY).fg).toEqual(cursorFg)
-      }
+      // Item 13: the running status word keeps its BLUE activity fg under
+      // selection — it is NEVER forced to the selection fg — while the selection
+      // bg still covers it (the band is unbroken).
+      expect(app.cell(statusX, cursorY).fg, "running activity fg stays blue under selection").not.toEqual(cursorFg)
+      expect(app.cell(statusX, cursorY).bg, "selection bg still covers the activity cell").toEqual(cursorBg)
       // The selection band spans the FULL row width: the run-duration cell at
       // the right edge (now a bare dimmed time, no glyph — item S) AND the
       // inter-cell gap next to it carry the same selection background as the
