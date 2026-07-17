@@ -98,7 +98,7 @@ describe("resident follow-runner lifecycle levels", () => {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
+      env: { ...process.env, LOGGILY_FILE: logFile, LOG_LEVEL: "debug", NO_COLOR: "1" },
     })
     const stdoutText = new Response(cli.stdout).text()
     let stderrText = ""
@@ -112,7 +112,8 @@ describe("resident follow-runner lifecycle levels", () => {
       }
     })()
     try {
-      // The runner cycles once the structured sink records a compose settlement.
+      // DEBUG keeps routine lifecycle details in the structured sink while the
+      // human formatter below suppresses those same roll-up/chatter rows.
       await vi.waitFor(
         async () => {
           const records = await readRecords(logFile)
