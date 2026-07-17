@@ -18,9 +18,6 @@ import { fixturePr, fixtureResult, fixtureSnapshot, queueTimelineStories } from 
 import { queueLandingLabel } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
-const FOOTER =
-  "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate - ⇧-drag to select"
-
 function rowIndexOf(text: string, needle: string): number {
   return text.split("\n").findIndex((row) => row.includes(needle))
 }
@@ -43,15 +40,15 @@ describe("queueLandingLabel", () => {
 })
 
 describe("QueueWatchFrame 21106 interaction", () => {
-  it("renders the exact keybinding footer with pause/resume removed", async () => {
+  it("removes the bottom keybindings footer and keeps the detail clean", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      const rows = app.text.split("\n")
-      const footer = rows.findLast((row) => row.trim() !== "")
-      expect(footer?.trim()).toBe(FOOTER)
+      // The bottom keybindings footer row is gone entirely (item h).
+      expect(app.text).not.toContain("q quit")
+      expect(app.text).not.toContain("⇧-drag")
       expect(app.text).not.toContain("p pause")
       expect(app.text).not.toContain("PAUSED")
       expect(app.text).not.toContain("LIVE")
@@ -295,45 +292,17 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      // The detail pane is identity-headed now (item M), so its presence is
-      // marked by the run detail body (`OUTCOME`), not the word "DETAIL".
-      await waitFor(() => app.text.includes("OUTCOME"))
+      // The detail pane is identity-headed now (item a/M), so its presence is
+      // marked by the run detail body (the `PRs` members row), not "DETAIL".
+      await waitFor(() => app.text.includes("PRs PR42@r1"))
 
       await app.press("Escape")
-      await waitFor(() => !app.text.includes("OUTCOME"))
+      await waitFor(() => !app.text.includes("PRs PR42@r1"))
       // Esc at top never quits; the list is still live.
       expect(app.text).toContain("QUEUE main")
 
       await app.press("Enter")
-      await waitFor(() => app.text.includes("OUTCOME"))
-    } finally {
-      app.unmount()
-    }
-  })
-
-  it("jumps to the expanded EVIDENCE section of the detail body with o", async () => {
-    const snapshot = queueTimelineStories["production-overview"].snapshot
-    const render = createRenderer({ cols: 200, rows: 50 })
-    const app = render(createElement(QueueWatchFrame, { snapshot }))
-    try {
-      await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STEP check#"))
-      // Evidence lives INSIDE the scrollable detail body as a collapsed
-      // section; `o` expands it (and opens the detail when hidden).
-      expect(app.text).not.toContain("EVIDENCE R42")
-
-      await app.press("o")
-      await waitFor(() => app.text.includes("EVIDENCE R42"))
-      // A section of the detail body, not a replacement surface: the step
-      // tabs stay visible alongside the evidence.
-      expect(app.text).toContain("STEP check#")
-
-      // Esc still only hides the detail pane; o reopens straight to evidence.
-      await app.press("Escape")
-      await waitFor(() => !app.text.includes("EVIDENCE R42"))
-      await app.press("o")
-      await waitFor(() => app.text.includes("EVIDENCE R42"))
-      expect(app.text).toContain("STEP check#")
+      await waitFor(() => app.text.includes("PRs PR42@r1"))
     } finally {
       app.unmount()
     }

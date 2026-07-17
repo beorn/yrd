@@ -387,9 +387,9 @@ describe("queue timeline chrome 21106", () => {
       await waitFor(() => app.text.includes("STATS"))
       const text = app.text
       // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
-      // identity (`RUN R42` detail), not the word "DETAIL" — neither is boxed.
+      // identity title (`main#42 PR42.1`), not the word "DETAIL" — neither is boxed.
       expect(rowIndexOf(text, "QUEUE main"), "QUEUE pane tab").toBeGreaterThanOrEqual(0)
-      expect(text, "DETAIL pane shows the run identity, not a DETAIL box").toContain("RUN R42")
+      expect(text, "DETAIL pane shows the run identity title, not a DETAIL box").toContain("main#42 PR42.1")
       expect(text).not.toContain("╭─ DETAIL")
       expect(text).not.toContain("╭─ QUEUE")
       // Padded content: the TIME header sits inside the pane's horizontal padding.
@@ -398,13 +398,14 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(2)
       // Bottom-aligned STATS: the STATS block sits in the bottom band of the
-      // pane, directly above the footer, not right under the list rows.
+      // pane (the keybindings footer was removed, item h), so anchor on the
+      // last rendered row instead.
       const rows = text.split("\n")
-      const footerY = rows.findIndex((row) => row.includes("q quit"))
+      const lastY = rows.findLastIndex((row) => row.trim() !== "")
       const statsY = rowIndexOf(text, "STATS")
-      expect(footerY).toBeGreaterThan(0)
+      expect(lastY).toBeGreaterThan(0)
       expect(statsY).toBeGreaterThan(0)
-      expect(footerY - statsY, "STATS anchors to the bottom band").toBeLessThanOrEqual(12)
+      expect(lastY - statsY, "STATS anchors to the bottom band").toBeLessThanOrEqual(12)
     } finally {
       app.unmount()
     }

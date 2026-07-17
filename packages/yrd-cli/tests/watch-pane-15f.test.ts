@@ -12,36 +12,33 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STEP check#"))
+      // The active tab IS the step summary now (item d) — no STEP header row.
+      // The default active tab is the running check step; detect it by its
+      // streaming output under the RUN LOGS section (item e).
+      await waitFor(() => app.text.includes("125 tests collected"))
 
       const tabLine = app.text
         .split("\n")
         .find((row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"))
       expect(tabLine, app.text).toBeDefined()
-      expect(app.text).toContain("STEP check#")
-      expect(app.text).not.toContain("STEP prepare#")
-      expect(app.text).toContain("125 tests collected")
-      expect(app.text).toContain("v LOG")
-      expect(app.text.match(/(?:>|v) LOG/gu)).toHaveLength(1)
-      expect(app.text).toContain("h/j/k/l navigate")
+      expect(app.text).toContain("v RUN LOGS")
+      expect(app.text.match(/(?:>|v) RUN LOGS/gu)).toHaveLength(1)
 
       await app.press("h")
-      await waitFor(() => app.text.includes("STEP prepare#"))
-      expect(app.text).not.toContain("125 tests collected")
-      expect(app.text).toContain("> LOG")
+      await waitFor(() => !app.text.includes("125 tests collected"))
+      expect(app.text).toContain("> RUN LOGS")
 
       await app.press("l")
-      await waitFor(() => app.text.includes("STEP check#"))
+      await waitFor(() => app.text.includes("125 tests collected"))
       await app.press("ArrowRight")
-      await waitFor(() => app.text.includes("STEP integrate#"))
+      await waitFor(() => app.text.includes("Waiting for first output…"))
       expect(app.text).not.toContain("125 tests collected")
-      expect(app.text).toContain("v LOG")
-      expect(app.text).toContain("Waiting for first output…")
+      expect(app.text).toContain("v RUN LOGS")
 
       await app.press("ArrowLeft")
-      await waitFor(() => app.text.includes("STEP check#"))
+      await waitFor(() => app.text.includes("125 tests collected"))
       await app.press("ArrowRight")
-      await waitFor(() => app.text.includes("STEP integrate#"))
+      await waitFor(() => app.text.includes("Waiting for first output…"))
 
       const rows = app.text.split("\n")
       const tabsY = rows.findIndex(
@@ -49,24 +46,23 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       )
       const tabsLine = rows[tabsY]
       if (tabsLine === undefined) throw new Error("workflow-step tab bar did not render")
-      // The tab bar sits below the run header + PRS disclosure, so it can share a
-      // text row with a left-pane timeline cell that also reads `…:check`. Anchor
-      // on the tab bar's own `check`, which follows its `prepare` tab.
+      // The tab bar sits below the run facts, so it can share a text row with a
+      // left-pane timeline cell that also reads `…:check`. Anchor on the tab
+      // bar's own `check`, which follows its `prepare` tab.
       const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       expect(tabsY).toBeGreaterThanOrEqual(0)
       expect(checkX).toBeGreaterThanOrEqual(0)
       await app.click(checkX, tabsY)
-      await waitFor(() => app.text.includes("STEP check#"))
+      await waitFor(() => app.text.includes("125 tests collected"))
 
+      // j/k move the QUEUE cursor (not the tabs); the detail follows the cursor.
       await app.press("j")
       await app.press("j")
       await waitFor(() => app.text.includes("PRs PR7"))
-      expect(app.text).toContain("STEP check#")
 
       await app.press("k")
       await app.press("k")
       await waitFor(() => app.text.includes("PRs PR42"))
-      expect(app.text).toContain("STEP check#")
 
       await app.press("ArrowDown")
       await app.press("ArrowDown")
@@ -84,7 +80,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STEP check#"))
+      await waitFor(() => app.text.includes("125 tests collected"))
       const rows = app.text.split("\n")
       const tabsY = rows.findIndex(
         (row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"),
@@ -106,24 +102,28 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
     }
   })
 
-  it("orders the detail as run facts → step tabs → step content, with extra step fields (items H/J)", async () => {
+  it("orders the detail as run facts → step tabs → step content (items H/J)", async () => {
     const snapshot = queueTimelineStories["detail-full"].snapshot
     const app = createRenderer({ cols: 120, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       app.press("\r")
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("STEP integrate#"))
+      await waitFor(() => app.text.includes("RUN LOGS"))
       const rows = app.text.split("\n")
-      const runFactsY = rows.findIndex((l) => l.includes("RUN R") && l.includes("OUTCOME"))
-      const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("integrate") && !l.includes("STEP"))
-      const stepContentY = rows.findIndex((l) => l.includes("STEP integrate#"))
+      // Run facts are the batched-members row (the RUN header + STATUS/OUTCOME
+      // moved to the title row above, item a); the step content is the active
+      // tab's RUN LOGS section (item e).
+      const runFactsY = rows.findIndex((l) => l.includes("PRs "))
+      const tabsY = rows.findIndex((l) => l.includes("check") && l.includes("integrate"))
+      const stepContentY = rows.findIndex((l) => l.includes("RUN LOGS"))
       // H: run-level facts sit ABOVE the step tabs, which sit ABOVE the step content.
       expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
       expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
       expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
-      // J: the per-step row surfaces the revision field (REV).
-      expect(rows[stepContentY]).toContain("REV")
+      // J: the step internals (JOB/RUNNER/REV) live behind the `> DETAILS`
+      // disclosure (item f).
+      expect(app.text).toContain("DETAILS")
     } finally {
       app.unmount()
     }

@@ -415,22 +415,18 @@ describe("queue timeline 21106 contract", () => {
     }
   })
 
-  it("keeps the keybindings footer last and the batched detail highlighting the selected member", async () => {
+  it("drops the bottom keybindings footer and highlights the selected batched member", async () => {
     const story = queueTimelineStories["contract-overview"]
     const render = createRenderer({ cols: 200, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
       const rows = handle.text.split("\n")
-      const footer = rows.findLastIndex((row) => row.includes("q quit"))
-      expect(footer).toBeGreaterThan(0)
-      expect(rows.slice(footer + 1).every((row) => row.trim() === "")).toBe(true)
-      expect(rows[footer]?.trim()).toBe(
-        "q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate - ⇧-drag to select",
-      )
-      const statistics = rows.findIndex((row) => row.includes("STATS"))
-      expect(statistics).toBeGreaterThan(0)
-      expect(statistics).toBeLessThan(footer)
+      // The bottom keybindings footer row was removed entirely (item h).
+      expect(handle.text).not.toContain("q quit")
+      expect(handle.text).not.toContain("⇧-drag")
+      // STATS still renders in its own box.
+      expect(rows.findIndex((row) => row.includes("STATS"))).toBeGreaterThan(0)
 
       // Default cursor is the batch lead; the shared Run detail (agent8's
       // step-tabs composition) names every member of the batch.
