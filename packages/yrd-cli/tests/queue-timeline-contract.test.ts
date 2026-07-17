@@ -67,6 +67,21 @@ describe("queue timeline 21106 contract", () => {
     }
   })
 
+  it("omits normal runner state and folds exceptional runner facts into one STATUS box", async () => {
+    const normal = (await renderTimeline(contractProjection(), 120)).join("\n")
+    expect(normal).not.toContain("╭─ RUNNER ")
+    expect(normal).not.toContain("╭─ STATUS ")
+    expect(normal).not.toContain("[84042]")
+
+    const paused = queueTimelineStories.paused.snapshot.projection
+    if (paused === undefined) throw new Error("paused story is missing its projection")
+    const exceptional = (await renderTimeline(paused, 120)).join("\n")
+    expect(exceptional.match(/╭─ STATUS /gu)).toHaveLength(1)
+    expect(exceptional).not.toContain("╭─ RUNNER ")
+    expect(exceptional).toContain("HOLD THE LINE")
+    expect(exceptional).toContain("NO RUNNER")
+  })
+
   it("projects one selectable row per exact PR revision with composite cursor identity", () => {
     const projection = contractProjection()
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr, row.revision])).toEqual([
