@@ -3,13 +3,13 @@
  * @level l3
  * @consumer @yrd/cli signal observer
  */
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { Command, createMemoryJournal } from "@yrd/core"
 import { createJournal } from "@yrd/persistence"
-import type { ProcessRequest } from "@yrd/process"
+import type { Process, ProcessRequest } from "@yrd/process"
 import {
   createSignalObserver,
   createTribeSignalAdapter,
@@ -61,6 +61,21 @@ function rejectedFrame(eventId = "00000000-0000-7000-8000-000000000003") {
   }
 }
 
+function submittedFrame(eventId: string, actor: string, revision: number) {
+  const frame = rejectedFrame(eventId)
+  const event = frame.events[0]!
+  return {
+    ...frame,
+    events: [
+      {
+        ...event,
+        name: "pr/submitted",
+        data: { pr: "PR7", revision, headSha: "a".repeat(40), actor },
+      },
+    ],
+  }
+}
+
 function legacyRejectedFrame() {
   const frame = rejectedFrame("00000000-0000-7000-8000-000000000006")
   const event = frame.events[0]!
@@ -101,6 +116,15 @@ function recordingAdapter(deliveries: SignalDelivery[], closures: SignalClosure[
   return {
     send: (delivery) => void deliveries.push(delivery),
     close: (closure) => void closures.push(closure),
+  }
+}
+
+function recordingProcess(requests: ProcessRequest[]): Pick<Process, "run"> {
+  return {
+    async run(request) {
+      requests.push(request)
+      return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
+    },
   }
 }
 
@@ -232,19 +256,8 @@ describe("PR signal observer", () => {
   })
 
   it("routes a submitted revision to the configured reviewer only when review is required", async () => {
-    const frame = rejectedFrame("00000000-0000-7000-8000-000000000013")
-    const event = frame.events[0]!
     const journal = createMemoryJournal<unknown>([
-      {
-        ...frame,
-        events: [
-          {
-            ...event,
-            name: "pr/submitted",
-            data: { pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" },
-          },
-        ],
-      },
+      submittedFrame("00000000-0000-7000-8000-000000000013", "@agent/7", 3),
     ])
     const deliveries: SignalDelivery[] = []
     const observer = createSignalObserver({
@@ -548,26 +561,16 @@ describe("PR signal observer", () => {
     }
   })
 
-  it("delivers a rejected PR as a tracked Tribe request carrying its evidence", async () => {
+  it("delivers rejected PR evidence as a pull notification without opening a ball", async () => {
     const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
     const requests: ProcessRequest[] = []
     try {
-      const adapter = createTribeSignalAdapter({
-        async run(request) {
-          requests.push(request)
-          return {
-            exitCode: 0,
-            signal: null,
-            stdout: "",
-            stderr: "",
-            durationMs: 1,
-            timedOut: false,
-          }
-        },
-      })
+      const adapter = createTribeSignalAdapter(recordingProcess(requests))
       const raw = rejectedFrame().events[0]!
       await adapter.send({
-        recipient: "@agent/7",
+        // A configured route can outlive the seat. Evidence remains journaled for pull
+        // inspection, but must not create a semantic obligation owned by a dead handle.
+        recipient: "@superci",
         event: {
           id: raw.id,
           kind: "pr/rejected",
@@ -581,17 +584,94 @@ describe("PR signal observer", () => {
           argv: [
             "/usr/local/bin/tribe",
             "send",
-            "@agent/7",
+            "@superci",
             expect.stringContaining("evidence=/repo/.git/yrd/artifacts/R9/check/stderr.log"),
             "--type",
-            "request",
+            "notify",
             "--summary",
             "PR7 rejected at check",
-            "--request",
-            "yrd:pr/rejected:PR7:3:@agent/7",
+            "--delivery",
+            "pull",
           ],
           timeoutMs: 5_000,
         }),
+      ])
+    } finally {
+      which.mockRestore()
+    }
+  })
+
+  it("delivers failed Run evidence as a pull notification without opening a ball", async () => {
+    const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
+    const requests: ProcessRequest[] = []
+    try {
+      const adapter = createTribeSignalAdapter(recordingProcess(requests))
+      await adapter.send({
+        recipient: "@ci",
+        event: {
+          id: "00000000-0000-7000-8000-000000000021",
+          kind: "run/failed",
+          at: "2026-07-14T10:00:00.000Z",
+          run: "R9",
+          error: { code: "job-lost", message: "runner disappeared" },
+          prs: [{ pr: "PR7", revision: 3, headSha: "a".repeat(40), actor: "@agent/7" }],
+        },
+      })
+
+      expect(requests.map(({ argv }) => argv)).toEqual([
+        [
+          "/usr/local/bin/tribe",
+          "send",
+          "@ci",
+          expect.stringContaining("job-lost: runner disappeared"),
+          "--type",
+          "notify",
+          "--summary",
+          "R9 failed",
+          "--delivery",
+          "pull",
+        ],
+      ])
+    } finally {
+      which.mockRestore()
+    }
+  })
+
+  it("keeps needs-review actionable with an explicit ten-minute ball deadline", async () => {
+    const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
+    const requests: ProcessRequest[] = []
+    try {
+      const adapter = createTribeSignalAdapter(recordingProcess(requests))
+      await adapter.send({
+        recipient: "@cto",
+        event: {
+          id: "00000000-0000-7000-8000-000000000022",
+          kind: "pr/needs-review",
+          at: "2026-07-14T10:00:00.000Z",
+          pr: "PR7",
+          revision: 3,
+          headSha: "a".repeat(40),
+          actor: "@agent/7",
+        },
+      })
+
+      expect(requests.map(({ argv }) => argv)).toEqual([
+        [
+          "/usr/local/bin/tribe",
+          "send",
+          "@cto",
+          expect.stringContaining("needs review for PR7 revision 3"),
+          "--type",
+          "request",
+          "--summary",
+          "PR7 needs review",
+          "--delivery",
+          "push",
+          "--request",
+          "yrd:pr/needs-review:PR7:3:@cto",
+          "--expires-in-ms",
+          "600000",
+        ],
       ])
     } finally {
       which.mockRestore()
@@ -602,12 +682,7 @@ describe("PR signal observer", () => {
     const which = vi.spyOn(Bun, "which").mockReturnValue("/usr/local/bin/tribe")
     const requests: ProcessRequest[] = []
     try {
-      const adapter = createTribeSignalAdapter({
-        async run(request) {
-          requests.push(request)
-          return { exitCode: 0, signal: null, stdout: "", stderr: "", durationMs: 1, timedOut: false }
-        },
-      })
+      const adapter = createTribeSignalAdapter(recordingProcess(requests))
       await adapter.send({
         recipient: "*",
         event: {
@@ -637,34 +712,134 @@ describe("PR signal observer", () => {
           "notify",
           "--summary",
           "PR7 integrated",
+          "--delivery",
+          "pull",
         ],
-        [
-          "/usr/local/bin/tribe",
-          "pending",
-          "--owner",
-          "@agent/7",
-          "--close",
-          "yrd:pr/rejected:PR7:3:@agent/7",
-        ],
+        ["/usr/local/bin/tribe", "pending", "--owner", "@agent/7", "--close", "yrd:pr/rejected:PR7:3:@agent/7"],
       ])
     } finally {
       which.mockRestore()
     }
   })
 
+  it("does not record an evidence-only rejection as an opened request ball", async () => {
+    const dir = await stateDir()
+    const rejected = rejectedFrame("00000000-0000-7000-8000-000000000045")
+    const terminal = rejectedFrame("00000000-0000-7000-8000-000000000046")
+    const terminalEvent = terminal.events[0]!
+    const integrated = {
+      ...terminal,
+      events: [
+        {
+          ...terminalEvent,
+          name: "pr/integrated",
+          data: {
+            pr: "PR7",
+            revision: 3,
+            headSha: "a".repeat(40),
+            actor: "@agent/7",
+            run: "R9",
+            landingSha: "b".repeat(40),
+          },
+        },
+      ],
+    }
+
+    const opener = createSignalObserver({
+      journal: createMemoryJournal<unknown>([rejected]),
+      stateDir: dir,
+      routes: { "pr/rejected": ["@ci"] },
+      adapter: recordingAdapter([], []),
+    })
+    opener.start()
+    await opener.close()
+
+    const closures: SignalClosure[] = []
+    const settler = createSignalObserver({
+      journal: createMemoryJournal<unknown>([rejected, integrated]),
+      stateDir: dir,
+      routes: { "pr/integrated": ["broadcast"] },
+      adapter: recordingAdapter([], closures),
+    })
+    settler.start()
+    await settler.close()
+
+    expect(closures).toEqual([])
+  })
+
+  it("settles a rejection ball retained in a pre-policy opened ledger", async () => {
+    const dir = await stateDir()
+    const notifications = join(dir, "notifications")
+    await mkdir(notifications, { recursive: true })
+    await writeFile(
+      join(notifications, "cursor-v1.json"),
+      `${JSON.stringify({
+        version: 1,
+        cursor: 0,
+        sent: {},
+        opened: [
+          {
+            pr: "PR7",
+            revision: 1,
+            kind: "pr/rejected",
+            recipient: "@superci",
+            requestId: "yrd:pr/rejected:PR7:1:@superci",
+          },
+        ],
+      })}\n`,
+    )
+    const frame = rejectedFrame("00000000-0000-7000-8000-000000000047")
+    const event = frame.events[0]!
+    const journal = createMemoryJournal<unknown>([
+      {
+        ...frame,
+        events: [
+          {
+            ...event,
+            name: "pr/integrated",
+            data: {
+              pr: "PR7",
+              revision: 2,
+              headSha: "a".repeat(40),
+              actor: "@agent/7",
+              run: "R9",
+              landingSha: "b".repeat(40),
+            },
+          },
+        ],
+      },
+    ])
+    const closures: SignalClosure[] = []
+    const observer = createSignalObserver({
+      journal,
+      stateDir: dir,
+      routes: { "pr/integrated": ["broadcast"] },
+      adapter: recordingAdapter([], closures),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(closures).toEqual([
+      {
+        recipient: "@superci",
+        request: "yrd:pr/rejected:PR7:1:@superci",
+        pr: "PR7",
+        revision: 1,
+        kind: "pr/rejected",
+      },
+    ])
+  })
+
   it("closes the exact opened ball across an actor change on resubmission (opened-ledger authoritative)", async () => {
-    // rev-1 is rejected under submitter @agent/old; yrd legally reassigns the actor on the rev-2
+    // rev-1 needs review under submitter @agent/old; yrd legally reassigns the actor on the rev-2
     // resubmission, so the integration reports @agent/new. Re-deriving the rev-1 close id from the
     // terminal actor closes a ball that was never opened; the ledger closes the id actually sent.
-    const opened = rejectedFrame("00000000-0000-7000-8000-000000000050")
-    const openedEvent = opened.events[0]!
+    const opened = submittedFrame("00000000-0000-7000-8000-000000000050", "@agent/old", 1)
     const integrated = rejectedFrame("00000000-0000-7000-8000-000000000051")
     const integratedEvent = integrated.events[0]!
     const journal = createMemoryJournal<unknown>([
-      {
-        ...opened,
-        events: [{ ...openedEvent, data: { ...openedEvent.data, revision: 1, run: "R1", actor: "@agent/old" } }],
-      },
+      opened,
       {
         ...integrated,
         events: [
@@ -687,7 +862,8 @@ describe("PR signal observer", () => {
     const observer = createSignalObserver({
       journal,
       stateDir: await stateDir(),
-      routes: { "pr/rejected": ["submitter"], "pr/integrated": ["broadcast"] },
+      routes: { "pr/needs-review": ["submitter"], "pr/integrated": ["broadcast"] },
+      reviewRequired: true,
       adapter: recordingAdapter([], closures),
     })
 
@@ -696,22 +872,17 @@ describe("PR signal observer", () => {
 
     const ids = closures.map(({ recipient, request }) => `${recipient} ${request}`)
     // The ledger closes the ball actually opened for the rev-1 submitter…
-    expect(ids).toContain("@agent/old yrd:pr/rejected:PR7:1:@agent/old")
+    expect(ids).toContain("@agent/old yrd:pr/needs-review:PR7:1:@agent/old")
     // …and never re-derives rev-1 from the drifted terminal actor (r1's phantom, which left the real ball open).
-    expect(ids).not.toContain("@agent/new yrd:pr/rejected:PR7:1:@agent/new")
+    expect(ids).not.toContain("@agent/new yrd:pr/needs-review:PR7:1:@agent/new")
   })
 
   it("closes a ball opened under a since-removed route (route-drift, opened-ledger authoritative)", async () => {
-    // rev-1 rejected fans out to the submitter AND @ci. By the time the PR integrates the project
+    // rev-1 review fans out to the submitter AND @ci. By the time the PR integrates the project
     // has dropped @ci from its notify routes. Re-deriving from current routes never closes @ci's
     // ball; the ledger recorded it at open and closes it regardless of the later config.
     const dir = await stateDir()
-    const opened = rejectedFrame("00000000-0000-7000-8000-000000000052")
-    const openedEvent = opened.events[0]!
-    const openFrame = {
-      ...opened,
-      events: [{ ...openedEvent, data: { ...openedEvent.data, revision: 1, run: "R1", actor: "@agent/7" } }],
-    }
+    const openFrame = submittedFrame("00000000-0000-7000-8000-000000000052", "@agent/7", 1)
     const integrated = rejectedFrame("00000000-0000-7000-8000-000000000053")
     const integratedEvent = integrated.events[0]!
     const integrateFrame = {
@@ -736,7 +907,8 @@ describe("PR signal observer", () => {
     const opener = createSignalObserver({
       journal: createMemoryJournal<unknown>([openFrame]),
       stateDir: dir,
-      routes: { "pr/rejected": ["submitter", "@ci"] },
+      routes: { "pr/needs-review": ["submitter", "@ci"] },
+      reviewRequired: true,
       adapter: recordingAdapter([], []),
     })
     opener.start()
@@ -747,14 +919,15 @@ describe("PR signal observer", () => {
     const settler = createSignalObserver({
       journal: createMemoryJournal<unknown>([openFrame, integrateFrame]),
       stateDir: dir,
-      routes: { "pr/rejected": ["submitter"] },
+      routes: { "pr/needs-review": ["submitter"] },
+      reviewRequired: true,
       adapter: recordingAdapter([], closures),
     })
     settler.start()
     await settler.close()
 
     const ids = closures.map(({ recipient, request }) => `${recipient} ${request}`)
-    expect(ids).toContain("@ci yrd:pr/rejected:PR7:1:@ci")
-    expect(ids).toContain("@agent/7 yrd:pr/rejected:PR7:1:@agent/7")
+    expect(ids).toContain("@ci yrd:pr/needs-review:PR7:1:@ci")
+    expect(ids).toContain("@agent/7 yrd:pr/needs-review:PR7:1:@agent/7")
   })
 })
