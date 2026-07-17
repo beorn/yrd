@@ -3,7 +3,7 @@
  * @level l3
  * @consumer @yrd/cli signal observer
  */
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -167,6 +167,88 @@ describe("PR signal observer", () => {
         }),
       },
     ])
+  })
+
+  it("migrates a top-level opened ledger without replaying delivered signals", async () => {
+    const dir = await stateDir()
+    const cursorPath = join(dir, "notifications", "cursor-v1.json")
+    const opened = {
+      pr: "PR7",
+      revision: 3,
+      kind: "pr/rejected",
+      recipient: "@agent/old",
+      requestId: "yrd:pr/rejected:PR7:3:@agent/old",
+    }
+    await mkdir(join(dir, "notifications"), { recursive: true })
+    await writeFile(
+      cursorPath,
+      `${JSON.stringify({ version: 1, cursor: 1, sent: { "in-flight": ["@ci"] }, opened: [opened] })}\n`,
+    )
+    const journal = createMemoryJournal<unknown>([rejectedFrame()])
+    const deliveries: SignalDelivery[] = []
+    const closures: SignalClosure[] = []
+
+    const migrated = createSignalObserver({
+      journal,
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: recordingAdapter(deliveries, closures),
+    })
+    migrated.start()
+    await migrated.close()
+
+    expect(deliveries).toEqual([])
+    expect(JSON.parse(await readFile(cursorPath, "utf8"))).toEqual({
+      version: 1,
+      cursor: 1,
+      sent: { "in-flight": ["@ci"], "yrd:opened:v1": [JSON.stringify(opened)] },
+    })
+
+    const rejected = rejectedFrame("00000000-0000-7000-8000-000000000030")
+    const event = rejected.events[0]!
+    await journal.append(
+      {
+        ...rejected,
+        events: [
+          {
+            ...event,
+            name: "pr/integrated",
+            data: {
+              pr: "PR7",
+              revision: 3,
+              headSha: "a".repeat(40),
+              actor: "@agent/new",
+              run: "R10",
+              landingSha: "b".repeat(40),
+            },
+          },
+        ],
+      },
+      1,
+    )
+    const restarted = createSignalObserver({
+      journal,
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: recordingAdapter(deliveries, closures),
+    })
+    restarted.start()
+    await restarted.close()
+
+    expect(deliveries).toEqual([])
+    expect(closures).toContainEqual({
+      recipient: "@agent/old",
+      request: "yrd:pr/rejected:PR7:3:@agent/old",
+      pr: "PR7",
+      revision: 3,
+      kind: "pr/rejected",
+    })
+    expect(closures).not.toContainEqual(expect.objectContaining({ recipient: "@agent/new", pr: "PR7", revision: 3 }))
+    expect(JSON.parse(await readFile(cursorPath, "utf8"))).toEqual({
+      version: 1,
+      cursor: 2,
+      sent: { "in-flight": ["@ci"] },
+    })
   })
 
   it("advances past pre-notification rejection history before routing current events", async () => {
@@ -638,14 +720,7 @@ describe("PR signal observer", () => {
           "--summary",
           "PR7 integrated",
         ],
-        [
-          "/usr/local/bin/tribe",
-          "pending",
-          "--owner",
-          "@agent/7",
-          "--close",
-          "yrd:pr/rejected:PR7:3:@agent/7",
-        ],
+        ["/usr/local/bin/tribe", "pending", "--owner", "@agent/7", "--close", "yrd:pr/rejected:PR7:3:@agent/7"],
       ])
     } finally {
       which.mockRestore()

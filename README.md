@@ -801,7 +801,7 @@ Yrd stores local authority under the primary worktree's common Git directory:
   receiver-inbox/    crash-safe receive-hook handoff
   artifacts/         command, evaluator, and contest evidence
   notifications/
-    cursor-v1.json    journal cursor plus successful event-recipient sends
+    cursor-v1.json    journal cursor, successful sends, and opened-request ledger
 ```
 
 `events-v3.jsonl` is the source of truth. Each command appends one versioned,

@@ -7,7 +7,7 @@ import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
-import type { SignalKind, SignalRouteTarget, SignalRoutes } from "./config.ts"
+import type { SignalRouteTarget, SignalRoutes } from "./config.ts"
 
 const TextSchema = z.string().trim().min(1)
 const RevisionSchema = z.number().int().positive()
@@ -135,7 +135,7 @@ export function createSignalObserver(
 
   const drain = async (): Promise<void> => {
     await exclusive.run(async () => {
-      let state = await readCursor(cursorPath)
+      let state = await readAndMigrateCursor(cursorPath)
       for await (const batch of options.journal.read(state.cursor)) {
         const completed = new Set<string>()
         for (const value of batch.values) {
@@ -301,18 +301,22 @@ const OpenedBallSchema = z
   .strict()
 type OpenedBall = z.infer<typeof OpenedBallSchema>
 
-const CursorStateSchema = z
+const OPENED_LEDGER_SENT_KEY = "yrd:opened:v1"
+const CursorFileSchema = z
   .object({
     version: z.literal(1),
     cursor: z.number().int().nonnegative(),
     sent: z.record(z.string().min(1), z.array(TextSchema)),
-    // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
-    // was rejected or put up for review. A terminal signal closes precisely these — immune to the
-    // actor/route drift that makes an id synthesized from current config miss the real ball. Optional
-    // and defaulted so cursor files written before the ledger existed still load.
-    opened: z.array(OpenedBallSchema).default([]),
   })
   .strict()
+const CursorStateSchema = CursorFileSchema.extend({
+  // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
+  // was rejected or put up for review. A terminal signal closes precisely these — immune to the
+  // actor/route drift that makes an id synthesized from current config miss the real ball. The
+  // optional top-level field reads the short-lived drifted format and is immediately migrated into
+  // the v1 `sent` record, which older worktree readers already preserve and ignore.
+  opened: z.array(OpenedBallSchema).default([]),
+}).strict()
 type CursorState = z.infer<typeof CursorStateSchema>
 
 function errorDetail(error: unknown): string {
@@ -473,13 +477,21 @@ function requestId(signal: RoutableSignal, recipient: string): string | undefine
   return undefined
 }
 
-function requestIdForPR(kind: "pr/rejected" | "pr/needs-review", pr: string, revision: number, recipient: string): string {
+function requestIdForPR(
+  kind: "pr/rejected" | "pr/needs-review",
+  pr: string,
+  revision: number,
+  recipient: string,
+): string {
   return `yrd:${kind}:${pr}:${revision}:${recipient}`
 }
 
-async function readCursor(path: string): Promise<CursorState> {
+async function readAndMigrateCursor(path: string): Promise<CursorState> {
   try {
-    return CursorStateSchema.parse(JSON.parse(await readFile(path, "utf8")))
+    const raw: unknown = JSON.parse(await readFile(path, "utf8"))
+    const state = decodeCursorState(CursorStateSchema.parse(raw))
+    if (typeof raw === "object" && raw !== null && Object.hasOwn(raw, "opened")) await writeCursor(path, state)
+    return state
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
       return { version: 1, cursor: 0, sent: {}, opened: [] }
@@ -492,11 +504,28 @@ async function writeCursor(path: string, state: CursorState): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await writeFile(temporary, `${JSON.stringify(CursorStateSchema.parse(state))}\n`, { flag: "wx" })
+    const sent = { ...state.sent }
+    delete sent[OPENED_LEDGER_SENT_KEY]
+    if (state.opened.length > 0) {
+      sent[OPENED_LEDGER_SENT_KEY] = state.opened.map((ball) => JSON.stringify(OpenedBallSchema.parse(ball)))
+    }
+    const file = CursorFileSchema.parse({ version: 1, cursor: state.cursor, sent })
+    await writeFile(temporary, `${JSON.stringify(file)}\n`, { flag: "wx" })
     await rename(temporary, path)
   } finally {
     await rm(temporary, { force: true })
   }
+}
+
+function decodeCursorState(state: CursorState): CursorState {
+  const sent = { ...state.sent }
+  const encoded = sent[OPENED_LEDGER_SENT_KEY] ?? []
+  delete sent[OPENED_LEDGER_SENT_KEY]
+  const opened = new Map<string, OpenedBall>()
+  for (const ball of [...encoded.map((value) => OpenedBallSchema.parse(JSON.parse(value))), ...state.opened]) {
+    opened.set(`${ball.recipient}:${ball.requestId}`, ball)
+  }
+  return { ...state, sent, opened: [...opened.values()] }
 }
 
 function addSent(state: CursorState, event: string, recipient: string): CursorState {
