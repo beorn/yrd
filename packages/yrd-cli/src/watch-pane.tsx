@@ -40,6 +40,7 @@ import {
   QUEUE_FOOTER_KEYS,
   QUEUE_FOOTER_KEYS_NO_FILTERS,
 } from "./watch-footer.ts"
+import { reduceRunCancelKey } from "./watch-cancel.ts"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
@@ -102,6 +103,7 @@ export type QueueWatchPaneProps = Readonly<{
   load(): Promise<QueueWatchSnapshot>
   intervalMs: number
   pr?: string
+  onCancelRun?: (run: string) => void | Promise<void>
 }>
 
 type QueueArtifactOutputLine = Readonly<{
@@ -278,14 +280,7 @@ export function QueueWorkflowStepTabs({
   // viewport; its subject/activity live behind the "PRS" header.
   const prFacts =
     prs.length === 0 ? null : (
-      <Accordion
-        title="PRS"
-        expanded={prsExpanded}
-        onToggle={setPrsExpanded}
-        marginTop={1}
-        flexShrink={0}
-        minWidth={0}
-      >
+      <Accordion title="PRS" expanded={prsExpanded} onToggle={setPrsExpanded} marginTop={1} flexShrink={0} minWidth={0}>
         <QueueDetailPrFacts prs={prs} />
       </Accordion>
     )
@@ -365,7 +360,15 @@ export function QueueWorkflowStepTabs({
   )
 }
 
-export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot; pr?: string }) {
+export function QueueWatchFrame({
+  snapshot,
+  pr,
+  onCancelRun,
+}: {
+  snapshot: QueueWatchSnapshot
+  pr?: string
+  onCancelRun?: (run: string) => void | Promise<void>
+}) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
   // The four operator buckets (user respec 2026-07-15): p/r/f/d toggle them
@@ -425,6 +428,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
   const [newRows, setNewRows] = useState(0)
+  const [cancelArmed, setCancelArmed] = useState(false)
   const previousTier = useRef(tier)
   const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
   const cursor = Math.max(
@@ -464,6 +468,21 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   }, [tier])
 
   useInput((input, key) => {
+    // Cancel affordance for the SELECTED run: `x` arms a confirmation, then
+    // `y`/Enter confirms and any other key (incl. a second `x`, Escape) dismisses.
+    // Wired to the SAME path as the `run cancel <R>` CLI (onCancelRun). Intercepted
+    // before the detail/filter keys so the armed prompt captures its confirming
+    // keypress rather than opening the detail pane.
+    if (onCancelRun !== undefined && (cancelArmed || input === "x")) {
+      const decision = reduceRunCancelKey(
+        { char: input, escape: key.escape === true, return: key.return === true },
+        cancelArmed,
+        rows[cursor]?.run,
+      )
+      setCancelArmed(decision.armed)
+      if (decision.cancel !== undefined) void onCancelRun(decision.cancel)
+      return
+    }
     if (key.escape) {
       setDetailOpen(false)
       return
@@ -669,14 +688,24 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
         {/* Keybinding footer (user respec 2026-07-15) + width-gated selection
             affordance; rationale lives on SELECTION_FOOTER_HINT /
             footerWithSelectionHint. On narrow terminals the hint is dropped
-            entirely (not clipped), so the user-specced keybindings never wrap. */}
-        <Text color="$fg-muted">{footerWithSelectionHint(QUEUE_FOOTER_KEYS, columns)}</Text>
+            entirely (not clipped), so the user-specced keybindings never wrap.
+            When a run cancel is armed (Tip B, #59) the confirmation banner
+            replaces the footer until it resolves. The ≤80-col respec footer no
+            longer spells the `x cancel run` key, but `x` still arms the
+            affordance (handled in the input reducer above). */}
+        {cancelArmed && selectedRow?.run !== undefined ? (
+          <Text color="$fg-warning" bold>
+            Cancel run {selectedRow.run}? Its PRs re-queue, not rejected. y/Enter to confirm, any other key to abort.
+          </Text>
+        ) : (
+          <Text color="$fg-muted">{footerWithSelectionHint(QUEUE_FOOTER_KEYS, columns)}</Text>
+        )}
       </Box>
     </Box>
   )
 }
 
-export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPaneProps) {
+export function QueueWatchPane({ initial, load, intervalMs, pr, onCancelRun }: QueueWatchPaneProps) {
   const [snapshot, setSnapshot] = useState(initial)
   const [failure, setFailure] = useState<Error | undefined>()
 
@@ -703,5 +732,11 @@ export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPane
   )
 
   if (failure !== undefined) throw failure
-  return <QueueWatchFrame snapshot={snapshot} {...(pr === undefined ? {} : { pr })} />
+  return (
+    <QueueWatchFrame
+      snapshot={snapshot}
+      {...(pr === undefined ? {} : { pr })}
+      {...(onCancelRun === undefined ? {} : { onCancelRun })}
+    />
+  )
 }

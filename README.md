@@ -416,7 +416,7 @@ yrd queue list [filter...] [--base <branch>]
 yrd queue ls [filter...] [the same options]
 yrd queue [filter...] [the same options]
 yrd watch [filter...] [the same options except --watch is implied]
-yrd queue run [selector...] [--steps [step...]] [--watch] [--json]
+yrd queue run [selector...] [--steps [step...]] [--follow | --once] [--interval <seconds>] [--json]
 yrd queue pause [base] [--json]
 yrd queue pause [base] --reason <text> [--allow [pr...]] [--json]
 yrd queue resume [base] [--json]
@@ -431,7 +431,7 @@ yrd queue deinit [base] [--json]
 | Command             | Input                                             | Output and state                                                                        |
 | ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
-| `run`               | Zero or more eligible PRs                         | Sole drain imperative; one pass by default, foreground supervised drain under `--watch` |
+| `run`               | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
 | `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
 | `resume`            | Optional base                                     | Removes the queue pause                                                                 |
 | `recover`           | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
@@ -456,7 +456,7 @@ check authority for its exact head; check admission consumes the check fact,
 and an integrating Queue run consumes the submit fact. Queue commands cannot
 mint or refresh either authority.
 
-To stop a resident `queue run --watch`, send `SIGINT` (Ctrl-C) or `SIGTERM`.
+To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new admission, lets the active run finish, and exits with
 that run's result; an idle runner exits cleanly. Send either signal again to
 force the existing hard shutdown and job-tree reap.

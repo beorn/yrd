@@ -1764,6 +1764,54 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
   )
 }
 
+type QueueRunMode = "follow" | "once"
+
+/**
+ * `queue run` is follow-by-default (user respec 2026-07-15: "by default it
+ * should be follow"; "not confused with the watch command"). With no PR
+ * selector and no `--once`, it IS the resident follow-runner — the long-lived
+ * loop that keeps draining the default queue (the old `--watch` behavior, now
+ * the default and renamed to avoid confusion with the `queue watch` viewer).
+ *
+ * A single pass is requested explicitly: by naming PR selectors
+ * (`queue run PR7`) or with `--once` (drain the whole default queue once).
+ * `--follow` is the explicit spelling of the default; it may not combine with
+ * `--once`, nor with selectors (follow drains the default queue as a whole, it
+ * never targets a chosen PR).
+ *
+ * `--watch` is a DEPRECATED no-op alias of `--follow`, kept one release so the
+ * live resident runner + relaunch recipes survive the cutover (#62 removed it
+ * outright, which would have broken them). It carries no semantics of its own
+ * beyond selecting follow mode — every follow guard below applies to it
+ * identically — and followQueueRuns emits the single deprecation warn.
+ */
+function resolveQueueRunMode(
+  selectors: readonly string[],
+  options: Readonly<{ follow?: boolean; once?: boolean; watch?: boolean }>,
+): QueueRunMode {
+  const follow = options.follow === true || options.watch === true
+  if (follow && options.once === true) {
+    usage("queue run: --follow and --once are mutually exclusive")
+  }
+  if (follow && selectors.length > 0) {
+    usage("queue run: --follow drains the default queue; it cannot target PR selectors")
+  }
+  return selectors.length > 0 || options.once === true ? "once" : "follow"
+}
+
+/**
+ * True when a `queue run` invocation is resident follow mode, mirroring
+ * {@link resolveQueueRunMode} at the pre-action boundary where only the parsed
+ * Commander action is available. The runner identity (`yrd-cli:` prefix, the
+ * exclusive resident lease) is granted only to the follow-runner, so the two
+ * decisions must agree.
+ */
+function queueRunIsFollow(action: Readonly<{ opts(): unknown; args: readonly string[] }>): boolean {
+  const opts = action.opts() as Readonly<{ once?: boolean }>
+  if (opts.once === true) return false
+  return action.args.length === 0
+}
+
 async function runQueues(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -1778,6 +1826,29 @@ async function runQueues(
     },
     runtimeOptions(io),
   )
+}
+
+async function cancelQueueRun(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ reason?: string }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  if (options.reason !== undefined && options.reason.trim() === "") usage("--reason requires text")
+  const run = await app.queue.cancelRun({
+    run: selector,
+    by: io.runner ?? "operator",
+    reason: options.reason ?? "run canceled by operator",
+  })
+  // A canceled run is NOT rejected: its member PRs stay submitted and re-queue on
+  // a future drain. State that in the human summary so the distinction is legible.
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "run.cancel", run: projectQueueRunTaskStatus(run) },
+    `${run.id} canceled; ${run.prs.length} PR(s) re-queued (submitted), not rejected`,
+  )
+  return 0
 }
 
 async function pauseQueue(
@@ -2491,13 +2562,23 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   return undefined
 }
 
-export async function watchQueueRuns(
+export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
-  options: { steps?: unknown; json?: boolean; interval?: number },
+  options: { steps?: unknown; json?: boolean; interval?: number; watch?: boolean },
   io: YrdCliIO,
   gate: () => Promise<void>,
 ): Promise<YrdCliExitCode> {
+  if (options.watch === true) {
+    // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
+    // here means it already resolved to follow mode; announce the one-time
+    // deprecation as a structured loggily warn — never a bare 'yrd:' stderr write,
+    // since the resident's stdout is a log stream — then behave identically to
+    // follow. Emitted exactly once, before the drain loop.
+    app.log.warn?.("deprecated: follow is the default; --watch is removed next release", {
+      action: "queue-run-watch-deprecated",
+    })
+  }
   const intervalSeconds = options.interval ?? 15
   if (!Number.isSafeInteger(intervalSeconds) || intervalSeconds <= 0) {
     usage("--interval must be a positive number of seconds")
@@ -2516,7 +2597,7 @@ export async function watchQueueRuns(
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
       io.stdout(
-        `Queue runner ${io.runner} active; watching the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
+        `Queue runner ${io.runner} active; following the default queue every ${intervalSeconds}s (Ctrl-C drains).\n`,
       )
     }
     while (true) {
@@ -2562,7 +2643,7 @@ export async function watchQueueRuns(
       // runner's log. (#undead: runner-loggily-only)
       if (jsonEnabled(options)) {
         for (const run of runs) {
-          io.stdout(stableJson({ command: "queue.run", mode: "watch", run: projectQueueRunTaskStatus(run) }))
+          io.stdout(stableJson({ command: "queue.run", mode: "follow", run: projectQueueRunTaskStatus(run) }))
         }
       }
       const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
@@ -2627,6 +2708,12 @@ async function watchQueue(
         load,
         intervalMs: interval,
         ...(options.pr === undefined ? {} : { pr: options.pr }),
+        // The watch `x`+confirm affordance shares the CLI's cancel path exactly:
+        // cancel journals a run cancellation whose PRs re-queue (not reject), and
+        // the pane's poll loop reflects it on the next cycle.
+        onCancelRun: async (run: string) => {
+          await app.queue.cancelRun({ run, by: io.runner ?? "operator", reason: "run canceled from watch" })
+        },
       }),
       {
         signal: scope.signal,
@@ -2956,7 +3043,7 @@ function addQueueExamples(queue: CliCommand, name: string): void {
     [`$ ${name} pr runs PR7`, "show step-level run evidence and proofs"],
     [`$ ${name} queue pause --reason maintenance --allow PR7`, "pause all but selected PRs"],
     [`$ ${name} queue recover --json`, "recover expired runner leases"],
-    [`$ ${name} queue run --watch`, "keep the default queue moving"],
+    [`$ ${name} queue run`, "resident follow-runner: keep the default queue moving"],
   ])
 }
 
@@ -3008,10 +3095,14 @@ function buildProgram(
         logLevel?: string
       }>
       const selected = resolveYrdContext(globals, bootstrap.env, bootstrap.ambientCwd)
-      const resident =
-        action.name() === "run" &&
-        action.parent?.name() === "queue" &&
-        (action.opts() as Readonly<{ watch?: boolean }>).watch === true
+      // `queue run` resident detection now derives from the run MODE (Tip B):
+      // follow is the default, `--once` opts out, and the deprecated `--watch`
+      // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
+      // at the pre-action boundary). `queue list --watch` is a DIFFERENT command
+      // — the live VIEWER — whose `--watch` is untouched by the run-mode cutover,
+      // so its detection stays on the parsed `.watch` flag. bootstrap.load
+      // requires both flags (RuntimeBootstrap.load type).
+      const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
       const viewer =
         action.name() === "list" &&
         action.parent?.name() === "queue" &&
@@ -3195,15 +3286,17 @@ function buildProgram(
     .action(async (options) => recoverQueue(installed(), options, io))
   queue
     .command("run [selector...]")
-    .description("run queue steps for PRs")
+    .description("drain the queue — resident follow by default; --once or PR selectors for a single pass")
     .option("--steps [step...]", "registered step names, comma-separated or repeated")
-    .option("--watch", "keep draining the default queue")
-    .option("--interval <seconds>", "watch interval in seconds", int)
+    .option("--follow", "resident follow mode: keep draining the default queue (the default with no selector)")
+    .option("--watch", "deprecated no-op alias of --follow; removed next release")
+    .option("--once", "drain the default queue exactly once, then exit")
+    .option("--interval <seconds>", "follow-mode poll interval in seconds", int)
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => {
       const gate = () => requireFreshInstalledBaseline(installedServices())
-      if (options.watch === true) {
-        setExit(await watchQueueRuns(installed(), selectors, options, io, gate))
+      if (resolveQueueRunMode(selectors, options) === "follow") {
+        setExit(await followQueueRuns(installed(), selectors, options, io, gate))
         return
       }
       await gate()
@@ -3234,6 +3327,15 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => finishQueue(installed(), selector, options, io))
   addQueueExamples(queue, name)
+
+  const runGroup = program.command("run").description("act on individual queue runs")
+  runGroup.helpCommand(false)
+  runGroup
+    .command("cancel <selector>")
+    .description("cancel a waiting or running run; its PRs re-queue for a future drain, they are NOT rejected")
+    .option("--reason <text>", "human-readable cancellation reason")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
 
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)

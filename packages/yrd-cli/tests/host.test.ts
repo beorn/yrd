@@ -689,7 +689,7 @@ notify:
       commandBlock
         .split("\n")
         .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
-    ).toEqual(["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime"])
+    ).toEqual(["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime", "run"])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
@@ -1419,16 +1419,7 @@ notify:
     await submitter.close()
 
     const cli = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dirname, "../../../bin/yrd.ts"),
-        "queue",
-        "run",
-        "--watch",
-        "--interval",
-        "1",
-        "--json",
-      ],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--interval", "1", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     const stdout = new Response(cli.stdout).text()
@@ -1471,16 +1462,7 @@ notify:
     await submitter.close()
 
     const cli = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dirname, "../../../bin/yrd.ts"),
-        "queue",
-        "run",
-        "--watch",
-        "--interval",
-        "1",
-        "--json",
-      ],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--interval", "1", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     const stdout = new Response(cli.stdout).text()
@@ -1528,7 +1510,7 @@ notify:
     if (cleanupError !== undefined) throw cleanupError
   }, 30_000)
 
-  it("refuses a second resident watch with the active runner identity", async () => {
+  it("refuses a second resident follow-runner with the active runner identity", async () => {
     const { repo, featureSha } = await repository()
     const startedPath = join(repo, "resident-check.started")
     const executionsPath = join(repo, "resident-check.executions")
@@ -1547,11 +1529,16 @@ notify:
     await git(repo, "commit", "-qm", "second")
     const secondSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
-    await using submitter = await createYrdHost({ cwd: repo })
-    await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-    await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
-    await submitter.close()
-    const spawnWatch = (selector: string, pane: string) => {
+    // #62: the resident runner is now `queue run` in its follow-by-default form
+    // (no selector, no --once). Follow drains the WHOLE default queue, so to keep
+    // each resident bound to exactly one PR, PR1 is submitted first and PR2 only
+    // after the first runner releases the lease.
+    {
+      await using submitter = await createYrdHost({ cwd: repo })
+      await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+      await submitter.close()
+    }
+    const spawnFollow = (pane: string) => {
       const logPath = join(repo, `resident-${pane.replace(/[^a-z0-9]+/giu, "-")}.log`)
       const child = Bun.spawn(
         [
@@ -1559,8 +1546,6 @@ notify:
           join(import.meta.dirname, "../../../bin/yrd.ts"),
           "queue",
           "run",
-          selector,
-          "--watch",
           "--interval",
           "1",
           "--json",
@@ -1579,29 +1564,42 @@ notify:
       )
       return { child, logPath, stdout: new Response(child.stdout).text(), stderr: new Response(child.stderr).text() }
     }
-    const first = spawnWatch("PR1", "w1:p1")
-    let second: ReturnType<typeof spawnWatch> | undefined
-    let replacement: ReturnType<typeof spawnWatch> | undefined
+    const first = spawnFollow("w1:p1")
+    let second: ReturnType<typeof spawnFollow> | undefined
+    let replacement: ReturnType<typeof spawnFollow> | undefined
     try {
       await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), {
         timeout: 5_000,
       })
-      second = spawnWatch("PR2", "w1:p2")
+      // A second resident follow-runner is refused while the first holds the lease.
+      second = spawnFollow("w1:p2")
 
       const outcome = await Promise.race([
         second.child.exited.then((exitCode) => ({ exitCode })),
-        Bun.sleep(1_000).then(() => ({ exitCode: "still-running" as const })),
+        Bun.sleep(2_000).then(() => ({ exitCode: "still-running" as const })),
       ])
       expect(outcome).toEqual({ exitCode: 1 })
       expect(await second.stderr).toContain(
         `resident-runner-active: writer lock is busy (owner=yrd-cli:${first.child.pid}; contender=yrd-cli:${second.child.pid}`,
       )
       expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run"])
+      // A graceful drain (SIGTERM) lets the first exit after finishing PR1's run.
+      first.child.kill("SIGTERM")
       await expect(first.child.exited).resolves.toBe(0)
 
-      replacement = spawnWatch("PR2", "w1:p3")
+      // With the lease released, submit PR2 and let a replacement reclaim + drain it.
+      {
+        await using submitter = await createYrdHost({ cwd: repo })
+        await submitter.app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+        await submitter.close()
+      }
+      replacement = spawnFollow("w1:p3")
+      await vi.waitFor(
+        async () => expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run", "run"]),
+        { timeout: 8_000 },
+      )
+      replacement.child.kill("SIGTERM")
       await expect(replacement.child.exited).resolves.toBe(0)
-      expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run", "run"])
 
       await using settled = await createYrdHost({ cwd: repo })
       const runIds = Object.keys(settled.app.state().queues.records)
@@ -1634,7 +1632,7 @@ notify:
       await first.stdout
       await first.stderr
     }
-  })
+  }, 60_000)
 
   it("replaces a dead resident owner after the OS releases its lease", async () => {
     const { repo } = await repository()
@@ -1644,7 +1642,6 @@ notify:
       join(import.meta.dirname, "../../../bin/yrd.ts"),
       "queue",
       "run",
-      "--watch",
       "--interval",
       "1",
       "--json",
@@ -1712,16 +1709,7 @@ notify:
     await submitter.close()
 
     const cli = Bun.spawn(
-      [
-        process.execPath,
-        join(import.meta.dirname, "../../../bin/yrd.ts"),
-        "queue",
-        "run",
-        "--watch",
-        "--interval",
-        "1",
-        "--json",
-      ],
+      [process.execPath, join(import.meta.dirname, "../../../bin/yrd.ts"), "queue", "run", "--interval", "1", "--json"],
       { cwd: repo, stdout: "pipe", stderr: "pipe" },
     )
     const stdout = new Response(cli.stdout).text()

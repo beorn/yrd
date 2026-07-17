@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest"
 import { PrCheckabilityConflict } from "@yrd/bay"
 import { QueueRunningConflict } from "@yrd/queue"
-import { watchQueueRuns } from "../src/run.ts"
+import { followQueueRuns } from "../src/run.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
 type WarnCall = Readonly<{ message: string; props: Record<string, unknown> }>
@@ -61,7 +61,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
       },
     ])
 
-    await expect(watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
 
     // Survived the busy cycle AND reached the next interval's work.
     expect(h.runCalls()).toBe(2)
@@ -77,7 +77,7 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
     // Recovery-by-defer is only for the looping resident watch. A targeted
     // `queue run PR1` propagates the refusal so the caller sees the outcome.
     const h = harness([() => Promise.reject(new QueueRunningConflict("main", "R551"))])
-    await expect(watchQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
+    await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
       "queue 'main' is running 'R551'",
     )
     expect(h.warnings).toEqual([])
@@ -98,7 +98,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
       },
     ])
 
-    await expect(watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
 
     expect(h.runCalls()).toBe(2)
     expect(h.warnings).toContainEqual(
@@ -110,7 +110,7 @@ describe("resident runner — a PR withdrawn mid-compose never kills the watch l
 
   it("still dies on a not-checkable refusal for a one-shot targeted run", async () => {
     const h = harness([() => Promise.reject(new PrCheckabilityConflict("PR364", "withdrawn"))])
-    await expect(watchQueueRuns(h.app, ["PR364"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
+    await expect(followQueueRuns(h.app, ["PR364"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
       "PR 'PR364' is withdrawn, not checkable",
     )
     expect(h.warnings).toEqual([])
@@ -126,7 +126,7 @@ describe("resident runner — tolerated skips are loggily-only (Defect 3)", () =
         return Promise.resolve([])
       },
     ])
-    await watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)
+    await followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)
     // Loud via the structured log stream…
     expect(h.warnings.length).toBeGreaterThan(0)
     // …and NOT duplicated as a bare human-readable stderr echo in resident mode.
@@ -141,7 +141,7 @@ describe("resident runner — tolerated skips are loggily-only (Defect 3)", () =
         return Promise.resolve([])
       },
     ])
-    await watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)
+    await followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)
     expect(h.stderr.join("")).toBe("")
   })
 })

@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest"
 import { JobStateConflict } from "@yrd/job"
-import { watchQueueRuns } from "../src/run.ts"
+import { followQueueRuns } from "../src/run.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
 
 const JOB_ID = "00000000-0000-7000-8000-00000000abcd"
@@ -62,7 +62,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
       },
     ])
 
-    await expect(watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).resolves.toBe(0)
 
     // Survived the race AND reached the next interval's work.
     expect(h.runCalls()).toBe(2)
@@ -80,7 +80,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
     // A conflict whose Job is NOT terminal signals a real invalid transition
     // (single-writer bug), not a losable race. It must propagate (fail-loud).
     const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "running", "requested"))])
-    await expect(watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
       `yrd: job '${JOB_ID}' is running, not requested`,
     )
     expect(h.runCalls()).toBe(1)
@@ -89,7 +89,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
 
   it("propagates any non-settlement error unchanged", async () => {
     const h = harness([() => Promise.reject(new Error("boom: unexpected"))])
-    await expect(watchQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow("boom: unexpected")
+    await expect(followQueueRuns(h.app, [], { interval: 1 }, h.io, h.gate)).rejects.toThrow("boom: unexpected")
     expect(h.warnings).toEqual([])
   })
 
@@ -97,7 +97,7 @@ describe("resident runner — a concurrently-canceled Job never kills the watch 
     // Recovery-by-skip is only for the looping resident watch. A targeted
     // `queue run PR1` propagates the race so the caller sees the outcome.
     const h = harness([() => Promise.reject(new JobStateConflict(JOB_ID, "canceled", "running or waiting"))])
-    await expect(watchQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
+    await expect(followQueueRuns(h.app, ["PR1"], { interval: 1 }, h.io, h.gate)).rejects.toThrow(
       `yrd: job '${JOB_ID}' is canceled, not running or waiting`,
     )
     expect(h.warnings).toEqual([])

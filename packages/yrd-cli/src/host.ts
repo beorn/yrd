@@ -746,7 +746,7 @@ async function acquireResidentRunner(
       raiseFailure(
         "refusal",
         "resident-runner-active",
-        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run --watch' before starting another.`,
+        `yrd: resident-runner-active: ${detail}. Stop the active 'yrd queue run' before starting another.`,
       )
     }
     throw error
