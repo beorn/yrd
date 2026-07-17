@@ -87,6 +87,7 @@ import {
   type QueueLogCoverage,
   type QueueStatusResult,
   type QueueTerminalFact,
+  type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
@@ -924,13 +925,13 @@ describe("runYrd", () => {
 
     const fresh = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io), fresh.stderr()).toBe(0)
-    const defaults = JSON.parse(fresh.stdout()).projection
+    const defaults = (JSON.parse(fresh.stdout()) as { projection: QueueTimelineProjection }).projection
     expect(defaults.filters.windowMs).toBe(QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS)
     expect(defaults.metrics.windowMs).toBe(24 * 60 * 60_000)
 
     const scoped = outputIO()
     expect(await runYrd(app, yrd("queue", "list", "--since", "3h", "--json"), scoped.io), scoped.stderr()).toBe(0)
-    const explicit = JSON.parse(scoped.stdout()).projection
+    const explicit = (JSON.parse(scoped.stdout()) as { projection: QueueTimelineProjection }).projection
     expect(explicit.filters.windowMs).toBe(3 * 60 * 60_000)
     expect(explicit.metrics.windowMs).toBe(3 * 60 * 60_000)
   })
@@ -1638,6 +1639,63 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
     expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
     expect(app.bays.pr("PR1")?.revisions).toHaveLength(2)
+  })
+
+  it("recomputes the certificate after an authored revision supersedes a recut head", async () => {
+    const app = await createApp()
+    const branch = "issue/recut-then-author"
+    const recutHead = "2".repeat(40)
+    const authoredHead = "3".repeat(40)
+    const successorHead = "4".repeat(40)
+    const oldTreeSha = "c".repeat(40)
+    const oldPatchId = "d".repeat(40)
+    const nextTreeSha = "e".repeat(40)
+    const nextPatchId = "f".repeat(40)
+
+    await app.bays.submit({ branch, headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recutHead,
+      baseSha: BASE_SHA,
+      treeSha: oldTreeSha,
+      patchId: oldPatchId,
+      reviewCarried: false,
+    })
+    await app.bays.intake({ branch, headSha: authoredHead, base: "main", baseSha: BASE_SHA })
+
+    const requests: unknown[] = []
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          requests.push(input)
+          return Promise.resolve({
+            headSha: successorHead,
+            baseSha: "b".repeat(40),
+            treeSha: nextTreeSha,
+            patchId: nextPatchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "recut", "PR1", "--json"), output.io, services)).toBe(0)
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).not.toHaveProperty("current")
+    expect(app.bays.pr("PR1")).toMatchObject({
+      revision: 4,
+      headSha: successorHead,
+      recut: { fromRevision: 3, treeSha: nextTreeSha, patchId: nextPatchId },
+      revisions: [
+        { revision: 1, headSha: HEAD_SHA },
+        { revision: 2, headSha: recutHead, recut: { fromRevision: 1, treeSha: oldTreeSha, patchId: oldPatchId } },
+        { revision: 3, headSha: authoredHead },
+        { revision: 4, headSha: successorHead, recut: { fromRevision: 3 } },
+      ],
+    })
   })
 
   it("refuses to recut a PR whose current head already holds a passing check unless forced", async () => {
@@ -3637,8 +3695,9 @@ describe("runYrd", () => {
     expect(header).toBeDefined()
     for (const label of ["TIME", "STATUS", "RUN", "PR", "BY", "AGE"]) expect(header).toContain(label)
     // STEP folded into the PR cell (item Q), so it is no longer a header column.
-    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"])
+    for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) {
       expect(header).not.toContain(removed)
+    }
     const first = rows.find((row) => row.includes("PR1.1"))
     const second = rows.find((row) => row.includes("PR2.1"))
     expect(first).toContain("main#1")
@@ -7644,7 +7703,7 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
 }
 
 describe("typed issue landing bridge", () => {
-  it("projects every native PR state from exact issue ownership at one journal cursor", async () => {
+  it("projects every native PR state in JSON and human views from one exact journal cursor", async () => {
     for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
       const issueRef = `@km/all/21091-${status}`
       const app = await createApp({ failingCheck: status === "rejected" })
@@ -7700,6 +7759,15 @@ describe("typed issue landing bridge", () => {
         if (status === "rejected") {
           expect(delivery).toMatchObject({ bounce: { run: "R1", detail: "check failed" } })
         }
+
+        const human = outputIO()
+        expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
+        expect(human.stdout()).toContain(issueRef)
+        expect(human.stdout()).toContain("DELIVERIES")
+        expect(human.stdout()).toContain(`PR1 rev1 ${status}`)
+        expect(human.stdout()).toContain(`HEAD ${HEAD_SHA}`)
+        if (status === "integrated") expect(human.stdout()).toContain(MERGED_SHA)
+        if (status === "rejected") expect(human.stdout()).toContain("BOUNCE R1 check failed")
       } finally {
         await app.close()
       }
@@ -8045,6 +8113,19 @@ describe("typed issue landing bridge", () => {
         regressions: [{ ...expected, recordedAt: "2026-07-09T15:00:00.000Z" }],
       }),
     ])
+
+    const human = outputIO()
+    expect(await runYrd(app, yrd("issue", "view", originalIssue), human.io), human.stderr()).toBe(0)
+    for (const visibleFact of [
+      "REGRESSION high DETECTED 2026-07-09T13:00:00.000Z RECORDED 2026-07-09T15:00:00.000Z",
+      `ORIGINAL ${originalIssue} PR1 R1 LANDING ${originalLanding}`,
+      "artifact://tty/21091-red",
+      "hab:turn/original-implementation",
+      "tribe:verdict/original-review",
+      `REPAIR ${repairIssue} PR2 R2 LANDING ${repairLanding}`,
+    ]) {
+      expect(human.stdout()).toContain(visibleFact)
+    }
   })
 
   it("retries a racing pr runs snapshot and refuses three exhausted cuts without partial JSON", async () => {

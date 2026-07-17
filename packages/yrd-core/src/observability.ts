@@ -15,6 +15,12 @@ export const YRD_LIFECYCLE_LEVELS = Object.freeze({
   failed: "error",
 } as const satisfies Record<string, Exclude<LogLevel, "silent">>)
 
+// Lock acquisition and composition are routine per-cycle plumbing. Their
+// failures remain loud, while successful completion is useful only when an
+// operator explicitly enables DEBUG. Run/check/merge successes remain INFO
+// because they are delivery milestones.
+const DEBUG_SUCCESS_LIFECYCLES = new Set(["lock", "compose"])
+
 export type YrdLifecycleOutcome = keyof typeof YRD_LIFECYCLE_LEVELS
 
 export type YrdDeliveryIdentity = Readonly<{
@@ -116,7 +122,9 @@ function emitLifecycle(
   props: Record<string, unknown>,
 ): void {
   const message = `${lifecycle} ${descriptor}`
-  switch (YRD_LIFECYCLE_LEVELS[outcome]) {
+  const level =
+    outcome === "succeeded" && DEBUG_SUCCESS_LIFECYCLES.has(lifecycle) ? "debug" : YRD_LIFECYCLE_LEVELS[outcome]
+  switch (level) {
     case "trace":
       log.trace?.(message, props)
       break

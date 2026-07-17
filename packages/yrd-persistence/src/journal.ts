@@ -222,6 +222,8 @@ type JournalOptions = Readonly<{
   }>
 }>
 
+type JournalMode = "mutable" | "read-only"
+
 type InternalInject = NonNullable<JournalOptions["inject"]> &
   Readonly<{
     thresholds?: Readonly<{ bytes?: number; frames?: number; snapshotFrames?: number }>
@@ -321,6 +323,20 @@ function createJournalContext(options: JournalOptions): JournalContext {
 }
 
 export function createJournal(options: JournalOptions): Journal<unknown> {
+  return createJournalWithMode(options, "mutable")
+}
+
+/**
+ * Opens journal authority for observation only. This path never acquires the
+ * writer lock, repairs on-disk state, seeds caches, or exposes a projection
+ * checkpoint store. Authority that needs recovery is refused loudly so a
+ * viewer cannot turn a read into an implicit mutation.
+ */
+export function createReadOnlyJournal(options: JournalOptions): Journal<unknown> {
+  return createJournalWithMode(options, "read-only")
+}
+
+function createJournalWithMode(options: JournalOptions, mode: JournalMode): Journal<unknown> {
   const { runtime, exclusive, thresholds, platform, log } = createJournalContext(options)
 
   const checkpoint: NonNullable<Journal<unknown>["checkpoint"]> = {
@@ -430,7 +446,10 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
       if (before !== undefined) assertCursor(before)
 
       const startedAt = performance.now()
-      const snapshot = await exclusive.run(() => acquireReadSnapshot(runtime, after, before))
+      const snapshot =
+        mode === "read-only"
+          ? await acquireReadSnapshot(runtime, after, before, mode)
+          : await exclusive.run(() => acquireReadSnapshot(runtime, after, before, mode))
       await runtime.phase("after-read-snapshot", {
         generation: snapshot.generation,
         logicalEnd: snapshot.logicalEnd,
@@ -451,7 +470,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
           }
         }
 
-        const collect: string[] | null = cache.kind === "bypass" ? null : []
+        const collect: string[] | null = mode === "read-only" || cache.kind === "bypass" ? null : []
         let replayed = 0
         for (const part of snapshot.parts) {
           const logicalStart = part.kind === "segment" ? part.descriptor.logicalStart : part.logicalStart
@@ -490,6 +509,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
           })
         }
         if (
+          mode === "mutable" &&
           collect !== null &&
           snapshot.active !== null &&
           platform !== "win32" &&
@@ -542,6 +562,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
 
     append(value, expectedCursor) {
       assertCursor(expectedCursor)
+      if (mode === "read-only") return Promise.reject(new Error("yrd: read-only journal cannot append"))
       const frame = parseFrame(value)
       const encoded = encode(frame)
       return observeYrdLifecycle(
@@ -575,7 +596,7 @@ export function createJournal(options: JournalOptions): Journal<unknown> {
       )
     },
   }
-  Object.defineProperty(journal, "checkpoint", { value: checkpoint, enumerable: false })
+  if (mode === "mutable") Object.defineProperty(journal, "checkpoint", { value: checkpoint, enumerable: false })
   return journal
 }
 
@@ -1140,17 +1161,32 @@ async function sealMigratedV3(runtime: Runtime, recovery: Recovery, manifest: Ma
   await installV3Cutover(runtime)
 }
 
-async function ensureV3Cutover(runtime: Runtime): Promise<void> {
+async function ensureV3Cutover(runtime: Runtime, mode: JournalMode = "mutable", manifest?: Manifest): Promise<void> {
   const path = join(runtime.dir, V3_FILE)
   let raw: Buffer
   try {
     raw = await readFile(path)
   } catch (error) {
     if (!isMissing(error)) throw error
+    if (mode === "read-only") {
+      const migratedFromV3 =
+        manifest?.segments.some(
+          (segment) => segment.sourceGeneration === 3 && segment.sourceTailIdentity === V3_FILE,
+        ) === true
+      if (!migratedFromV3) return
+      throw new Error(
+        `yrd: journal recovery is required before read-only access: legacy v3 cutover marker is missing at ${path}`,
+      )
+    }
     await installV3Cutover(runtime)
     return
   }
   if (raw.equals(V3_CUTOVER)) return
+  if (mode === "read-only") {
+    throw new Error(
+      `yrd: journal recovery is required before read-only access: legacy v3 cutover marker is invalid at ${path}`,
+    )
+  }
   throw new Error(`yrd: legacy v3 journal changed after v4 cutover at ${path}; preserve it for reconciliation`)
 }
 
@@ -1345,8 +1381,9 @@ async function verifyProjectionCheckpointAuthority(
   const coveredTailBytes = Math.max(0, cursor - view.tailLogicalStart)
   if (coveredTailBytes === 0) return true
   const tail = snapshot.parts.find((part) => part.kind === "tail")
-  if (tail === undefined || tail.kind !== "tail")
+  if (tail === undefined || tail.kind !== "tail") {
     throw new Error("yrd: v4 read snapshot is missing its pinned tail part")
+  }
   const observed = sha256(await readExactly(tail.file, 0, coveredTailBytes, runtime.io))
   if (observed === tailPrefixSha256) return true
   runtime.log.warn?.("journal projection checkpoint rejected: covered tail bytes changed on disk", {
@@ -1551,8 +1588,19 @@ async function writeSnapshotCache(
   }
 }
 
-async function acquireReadSnapshot(runtime: Runtime, after: number, before?: number): Promise<ReadSnapshot> {
-  await recoverPending(runtime)
+async function assertNoPendingRecovery(runtime: Runtime): Promise<void> {
+  if ((await loadRecovery(runtime.dir)) === null) return
+  throw new Error(`yrd: journal recovery is required before read-only access (${join(runtime.dir, RECOVERY_FILE)})`)
+}
+
+async function acquireReadSnapshot(
+  runtime: Runtime,
+  after: number,
+  before?: number,
+  mode: JournalMode = "mutable",
+): Promise<ReadSnapshot> {
+  if (mode === "read-only") await assertNoPendingRecovery(runtime)
+  else await recoverPending(runtime)
   const manifestRecord = await loadManifestRecord(runtime.dir)
   if (manifestRecord === null) {
     const path = join(runtime.dir, V3_FILE)
@@ -1578,7 +1626,7 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
       const logicalEnd = await committedExtent(file)
       const end = before ?? logicalEnd
       validateRange(after, end, logicalEnd)
-      return {
+      const snapshot: ReadSnapshot = {
         parts: [{ kind: "tail", path: V3_FILE, logicalStart: 0, logicalEnd, rawBytes: logicalEnd, file }],
         after,
         before: end,
@@ -1589,14 +1637,16 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
         generation: 3,
         active: null,
       }
+      if (mode === "read-only") await assertNoPendingRecovery(runtime)
+      return snapshot
     } catch (error) {
       await file.close()
       throw error
     }
   }
 
-  await ensureV3Cutover(runtime)
-  const active = await loadActive(runtime, manifestRecord)
+  await ensureV3Cutover(runtime, mode, manifestRecord.manifest)
+  const active = await loadActive(runtime, manifestRecord, mode)
   const logicalEnd = active.state.logicalEnd
   const end = before ?? logicalEnd
   validateRange(after, end, logicalEnd)
@@ -1613,7 +1663,7 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
       rawBytes: active.state.committedBytes,
       file: await open(join(runtime.dir, active.manifest.tail.path), "r"),
     })
-    return {
+    const snapshot: ReadSnapshot = {
       parts,
       after,
       before: end,
@@ -1624,6 +1674,8 @@ async function acquireReadSnapshot(runtime: Runtime, after: number, before?: num
       generation: active.manifest.generation,
       active,
     }
+    if (mode === "read-only") await assertNoPendingRecovery(runtime)
+    return snapshot
   } catch (error) {
     await closeParts(parts)
     throw error
@@ -1642,14 +1694,18 @@ async function readSegment(descriptor: Segment, file: FileHandle, io: JournalIO)
   return raw
 }
 
-async function loadActive(runtime: Runtime, record?: ManifestRecord): Promise<ActiveState> {
+async function loadActive(
+  runtime: Runtime,
+  record?: ManifestRecord,
+  mode: JournalMode = "mutable",
+): Promise<ActiveState> {
   const manifestRecord = record ?? (await loadManifestRecord(runtime.dir))
   if (manifestRecord === null) throw new Error("yrd: v4 manifest is missing")
   const state = await loadTailState(runtime.dir, manifestRecord.manifest.tailState.path)
   validateActive(manifestRecord.manifest, state)
 
   const path = join(runtime.dir, manifestRecord.manifest.tail.path)
-  const file = await open(path, "r+")
+  const file = await open(path, mode === "read-only" ? "r" : "r+")
   try {
     const { size } = await file.stat()
     if (size < state.committedBytes) {
@@ -1664,6 +1720,11 @@ async function loadActive(runtime: Runtime, record?: ManifestRecord): Promise<Ac
       throw new Error(`yrd: journal tail ${path} is shorter than committed state (${size} < ${state.committedBytes})`)
     }
     if (size > state.committedBytes) {
+      if (mode === "read-only") {
+        throw new Error(
+          `yrd: journal recovery is required before read-only access: tail ${path} has ${size - state.committedBytes} uncommitted byte(s)`,
+        )
+      }
       await file.truncate(state.committedBytes)
       await runtime.io.datasync(file)
       runtime.log.warn?.("journal truncated bytes beyond the durable tail state", {

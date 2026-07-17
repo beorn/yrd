@@ -72,11 +72,18 @@ import { submittedPrPositions } from "./queue-position.ts"
 import { prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
 import { diagnostic, printHuman, printResult } from "./output.tsx"
-import { BayStatusView, ContestStatusView, IssueLensView, type IssueLensRow } from "./status-view.tsx"
+import {
+  BayStatusView,
+  ContestStatusView,
+  IssueLensView,
+  type IssueDeliveryRow,
+  type IssueLensRow,
+} from "./status-view.tsx"
 import {
   checkTaskStatusOf,
   issueTaskStatusOf,
   jobAttemptTaskStatusOf,
+  prTaskStatusOf,
   projectPRTaskStatus,
   projectQueueRunTaskStatus,
   taskStatusFields,
@@ -505,6 +512,27 @@ function trackerBridge(
     .filter((delivery): delivery is TrackerDelivery => delivery !== undefined && include(delivery))
     .toSorted((left, right) => left.pr.localeCompare(right.pr, undefined, { numeric: true }))
   return { version: 1, asOf: snapshot.asOf, deliveries }
+}
+
+function issueDeliveryRows(bridge: TrackerBridge): IssueDeliveryRow[] {
+  return bridge.deliveries.map((delivery) => {
+    const taskStatus = prTaskStatusOf(delivery)
+    return {
+      pr: delivery.pr,
+      revision: delivery.revision,
+      headSha: delivery.headSha,
+      status: delivery.status,
+      runs: delivery.runs,
+      ...taskStatusFields(taskStatus),
+      ...(delivery.status === "integrated"
+        ? {
+            landingSha: delivery.landingSha,
+            ...(delivery.regressions === undefined ? {} : { regressions: delivery.regressions }),
+          }
+        : {}),
+      ...(delivery.status === "rejected" ? { bounce: delivery.bounce } : {}),
+    }
+  })
 }
 
 type RuntimeBootstrap = Readonly<{
@@ -1745,6 +1773,7 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
   for (let read = 0; read < 3; read += 1) {
     const snapshot = await app.journalSnapshot()
     const issues = issueRows(app, snapshot.state, selected)
+    const bridge = trackerBridge(snapshot, ({ issueRef }) => selected === undefined || issueRef === selected)
     const confirmed = await app.journalSnapshot()
     if (confirmed.asOf.cursor !== snapshot.asOf.cursor) continue
     await printResult(
@@ -1753,9 +1782,12 @@ async function listIssues(app: YrdCliApp, options: JsonOption, io: YrdCliIO, sel
       {
         command: selected === undefined ? "issue.list" : "issue.view",
         issues,
-        trackerBridge: trackerBridge(snapshot, ({ issueRef }) => selected === undefined || issueRef === selected),
+        trackerBridge: bridge,
       },
-      createElement(IssueLensView, { rows: issues }),
+      createElement(IssueLensView, {
+        rows: issues,
+        ...(selected === undefined ? {} : { deliveries: issueDeliveryRows(bridge) }),
+      }),
     )
     return
   }
@@ -3100,13 +3132,16 @@ function buildProgram(
       // alias still selects follow (queueRunIsFollow mirrors resolveQueueRunMode
       // at the pre-action boundary). `queue list --watch` is a DIFFERENT command
       // — the live VIEWER — whose `--watch` is untouched by the run-mode cutover,
-      // so its detection stays on the parsed `.watch` flag. bootstrap.load
-      // requires both flags (RuntimeBootstrap.load type).
+      // so its detection stays on the parsed `.watch` flag. The static `pr list`
+      // projection is also a viewer: listing must never drain receiver receipts
+      // or settle notifications. bootstrap.load requires both flags
+      // (RuntimeBootstrap.load type).
       const resident = action.name() === "run" && action.parent?.name() === "queue" && queueRunIsFollow(action)
       const viewer =
-        action.name() === "list" &&
-        action.parent?.name() === "queue" &&
-        (action.opts() as Readonly<{ watch?: boolean }>).watch === true
+        (action.name() === "list" &&
+          action.parent?.name() === "queue" &&
+          (action.opts() as Readonly<{ watch?: boolean }>).watch === true) ||
+        (action.name() === "list" && action.parent?.name() === "pr")
       const loaded = await bootstrap.load(selected, { resident, viewer })
       runtimeApp = loaded.app
       runtimeServices = loaded.services

@@ -4,7 +4,7 @@
  * @consumer @yrd/persistence
  */
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, readdir, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
+import { appendFile, mkdtemp, readFile, readdir, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -22,7 +22,7 @@ import {
   type Event,
   type Journal,
 } from "@yrd/core"
-import { createJournal, type Exclusive, type ExclusiveOptions } from "@yrd/persistence"
+import { createJournal, createReadOnlyJournal, type Exclusive, type ExclusiveOptions } from "@yrd/persistence"
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import { describe, expect, expectTypeOf, it } from "vitest"
@@ -251,7 +251,7 @@ describe("filesystem Journal", () => {
         expect.objectContaining({
           kind: "log",
           namespace: "yrd:journal:lock",
-          level: "info",
+          level: "debug",
           props: expect.objectContaining({ lifecycle: "lock", outcome: "succeeded", durationMs: expect.any(Number) }),
         }),
         expect.objectContaining({
@@ -731,6 +731,71 @@ describe("filesystem Journal", () => {
       expect(await missing(join(dir, RECOVERY))).toBe(true)
     },
   )
+
+  it("keeps empty and populated read-only journals byte-pure", async () => {
+    const parent = await directory()
+    const emptyDir = join(parent, "absent")
+    const empty = createReadOnlyJournal({ dir: emptyDir })
+    await expect(Array.fromAsync(empty.read())).resolves.toEqual([])
+    expect(await missing(emptyDir)).toBe(true)
+    expect(empty.checkpoint).toBeUndefined()
+    await expect(empty.append(frame("read-only-refusal"), 0)).rejects.toThrow("read-only journal cannot append")
+    expect(await missing(emptyDir)).toBe(true)
+
+    const dir = await directory()
+    const cursor = await accepted(createJournal({ dir }), frame("read-only-seed"), 0)
+    const namesBefore = (await readdir(dir)).toSorted()
+    const lockBefore = await readFile(join(dir, "writer.lock"))
+    const readOnly = createReadOnlyJournal({ dir })
+    await expect(Array.fromAsync(readOnly.read())).resolves.toEqual([{ cursor, values: [frame("read-only-seed")] }])
+    expect(readOnly.checkpoint).toBeUndefined()
+    expect((await readdir(dir)).toSorted()).toEqual(namesBefore)
+    expect(await readFile(join(dir, "writer.lock"))).toEqual(lockBefore)
+    expect(await missing(join(dir, "snapshot-v1.json"))).toBe(true)
+    expect(await missing(join(dir, "projection-checkpoint-v1.json"))).toBe(true)
+  })
+
+  it("fails read-only replay loudly instead of repairing interrupted authority", async () => {
+    const recoveryDir = await directory()
+    const cursor = await accepted(createJournal({ dir: recoveryDir }), frame("read-only-recovery-seed"), 0)
+    const interrupted = testJournal(recoveryDir, {
+      thresholds: { bytes: Number.MAX_SAFE_INTEGER, frames: 1 },
+      phase(phase) {
+        if (phase === "before-cleanup") throw new Error("injected read-only recovery")
+      },
+    })
+    await expect(interrupted.append(frame("read-only-recovery-attempt"), cursor)).rejects.toThrow(
+      "injected read-only recovery",
+    )
+    const recoveryBefore = await readFile(join(recoveryDir, RECOVERY))
+    const lockBefore = await readFile(join(recoveryDir, "writer.lock"))
+    await expect(Array.fromAsync(createReadOnlyJournal({ dir: recoveryDir }).read())).rejects.toThrow(
+      "journal recovery is required before read-only access",
+    )
+    expect(await readFile(join(recoveryDir, RECOVERY))).toEqual(recoveryBefore)
+    expect(await readFile(join(recoveryDir, "writer.lock"))).toEqual(lockBefore)
+
+    const tailDir = await directory()
+    await accepted(createJournal({ dir: tailDir }), frame("read-only-tail-seed"), 0)
+    const active = await manifest(tailDir)
+    const tailPath = join(tailDir, active.tail.path)
+    await appendFile(tailPath, "uncommitted")
+    const tailBefore = await readFile(tailPath)
+    await expect(Array.fromAsync(createReadOnlyJournal({ dir: tailDir }).read())).rejects.toThrow(
+      "journal recovery is required before read-only access",
+    )
+    expect(await readFile(tailPath)).toEqual(tailBefore)
+
+    const cutoverDir = await directory()
+    const legacy = Buffer.from(v3Line(frame("read-only-cutover-legacy")))
+    await writeFile(join(cutoverDir, V3), legacy)
+    await accepted(createJournal({ dir: cutoverDir }), frame("read-only-cutover-next"), legacy.length)
+    await rm(join(cutoverDir, V3))
+    await expect(Array.fromAsync(createReadOnlyJournal({ dir: cutoverDir }).read())).rejects.toThrow(
+      "legacy v3 cutover marker is missing",
+    )
+    expect(await missing(join(cutoverDir, V3))).toBe(true)
+  })
 
   it("refuses Windows before creating the journal directory or any authority", async () => {
     const parent = await directory()

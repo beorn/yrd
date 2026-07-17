@@ -57,7 +57,7 @@ import {
   runtimeBaselineDrift,
   writeInstalledBaseline,
 } from "./installed-baseline.ts"
-import { createExclusive, createJournal, importOrphanJournal } from "@yrd/persistence"
+import { createExclusive, createJournal, createReadOnlyJournal, importOrphanJournal } from "@yrd/persistence"
 import { createProcess, shellCommand, type Process } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
@@ -862,6 +862,46 @@ export async function createYrdHost(options: YrdHostOptions = {}): Promise<YrdHo
   return createYrdRuntimeHost(options, undefined, "active")
 }
 
+function createViewerWorkspace(): BayWorkspace {
+  const refuse = () => ({
+    status: "failed" as const,
+    error: { code: "viewer-read-only", message: "yrd: viewer runtime cannot mutate bay workspaces" },
+  })
+  return Object.freeze({
+    revision: "yrd-viewer-read-only-v1",
+    provision: refuse,
+    refresh: refuse,
+    deprovision: refuse,
+  })
+}
+
+async function createViewerReceiver(repository: YrdRepository, process: Process): Promise<GitPushReceiver> {
+  const result = await process.run({
+    argv: ["git", "-C", repository.repo, "rev-parse", "--show-object-format"],
+    cwd: repository.repo,
+  })
+  const objectFormat = result.stdout.trim()
+  if (result.exitCode !== 0 || (objectFormat !== "sha1" && objectFormat !== "sha256")) {
+    throw new Error(result.stderr.trim() || `yrd: unsupported Git object format '${objectFormat}'`)
+  }
+  const refuse = (): never => {
+    throw new Error("yrd: viewer runtime cannot mutate or drain the push receiver")
+  }
+  return Object.freeze({
+    version: 1,
+    receiverPath: join(repository.stateDir, "prs.git"),
+    mainRepo: repository.repo,
+    stateDir: repository.stateDir,
+    inboxDir: join(repository.stateDir, "receiver-inbox"),
+    objectFormat,
+    shaLength: objectFormat === "sha1" ? 40 : 64,
+    process,
+    prepare: refuse,
+    finalize: refuse,
+    drain: refuse,
+  })
+}
+
 async function createYrdRuntimeHost(
   options: YrdHostOptions,
   resident: ResidentRunnerIdentity | undefined,
@@ -885,12 +925,18 @@ async function createYrdRuntimeHost(
     if (resident !== undefined) residentLease = await acquireResidentRunner(repository.stateDir, resident, log)
     using _setupSpan = log.span?.("setup", { phase: "pre-worktree", repo: repository.repo })
     const loaded = await loadYrdConfig({ repo: repository.repo, defaultBase: repository.defaultBase })
-    const receiver = await createGitPushReceiver({
-      mainRepo: repository.repo,
-      stateDir: repository.stateDir,
-      process,
-    })
-    const journal = createJournal({ dir: repository.stateDir, inject: { log } })
+    const receiver =
+      mode === "active"
+        ? await createGitPushReceiver({
+            mainRepo: repository.repo,
+            stateDir: repository.stateDir,
+            process,
+          })
+        : await createViewerReceiver(repository, process)
+    const journal =
+      mode === "active"
+        ? createJournal({ dir: repository.stateDir, inject: { log } })
+        : createReadOnlyJournal({ dir: repository.stateDir, inject: { log } })
     const routes = loaded.config.notify ?? {}
     const defaultActor = env.TRIBE_NAME?.trim() || "operator"
     if (mode === "active") {
@@ -920,17 +966,19 @@ async function createYrdRuntimeHost(
         })
       }
     }
-    candidatePool = createCandidatePool({
-      repo: repository.repo,
-      parent: repository.baysRoot,
-      git: createCandidatePoolGit(process, env),
-      log,
-    })
+    if (mode === "active") {
+      candidatePool = createCandidatePool({
+        repo: repository.repo,
+        parent: repository.baysRoot,
+        git: createCandidatePoolGit(process, env),
+        log,
+      })
+    }
     app = await createDefaultYrdApp({
       repo: repository.repo,
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
-      receiverPath: receiver.receiverPath,
+      ...(mode === "active" ? { receiverPath: receiver.receiverPath } : { workspace: createViewerWorkspace() }),
       journal: signals?.journal ?? journal,
       process,
       config: loaded.config,
@@ -944,6 +992,7 @@ async function createYrdRuntimeHost(
     const resolveTarget = receiverTarget(runtimeApp)
     const receiverLog = log.child("receiver")
     const drain = async (): Promise<void> => {
+      if (mode === "viewer") throw new Error("yrd: viewer runtime cannot drain the push receiver")
       using _span = receiverLog.span?.("drain")
       const result = await receiver.drain({
         resolveTarget,

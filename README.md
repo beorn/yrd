@@ -517,6 +517,11 @@ terminal Queue run, and one journal `asOf` cursor; integrated deliveries alone
 carry `landingSha`. Rejected deliveries carry their typed bounce run. Canceled
 and withdrawn are distinct terminal outcomes.
 
+The human `yrd issue view <issue>` surface projects those same typed facts: it
+prints exact PR revision/head, Queue runs, native status, landing or bounce, and
+the original/repair provenance of every recorded regression. Bare `yrd issue`
+keeps the compact multi-issue table.
+
 `yrd migrate terminal-associations` is the explicit compatibility cutover for
 legacy rejected-PR events that predate the typed Queue run field. Its default
 dry-run lists every unassociated terminal, either with one revision/head-bound
@@ -663,14 +668,25 @@ the current revision must approve. Comments never gate, and omitting
 ### PR Signals
 
 `notify` routes an enumerated journal transition without turning delivery into
-a Queue step. `pr/rejected`, `pr/needs-review`, and `run/failed` are tracked
-requests: `submitter` resolves to the actor recorded on the exact PR revision,
-while an explicit `@name` routes to that Tribe member. Rejection carries the PR,
-revision, failed step, Run, and evidence path; needs-review is projected from a
-committed submission only when `requires: [review]`; Run failure names every
-affected PR. `pr/integrated: [broadcast]` aggregates all PRs sharing one landing
-fact into one ambient `yrd:integrated` notification and wakes nobody. It also
-closes the deterministic rejected/review request ids for those PR revisions.
+a Queue step. Its Tribe intake policy is explicit:
+
+| Signal            | Message type | Delivery | Pending ball        | Deadline   |
+| ----------------- | ------------ | -------- | ------------------- | ---------- |
+| `pr/rejected`     | notify       | pull     | none                | —          |
+| `pr/needs-review` | request      | push     | exact recipient/id  | 10 minutes |
+| `pr/integrated`   | notify       | pull     | none                | —          |
+| `run/failed`      | notify       | pull     | none                | —          |
+
+`pr/needs-review` is projected from a committed submission only when
+`requires: [review]`. Rejection and Run failure are outcome evidence, so even a
+route that outlives its seat cannot own a semantic response obligation.
+`submitter` resolves to the actor recorded on the exact PR revision, while an
+explicit `@name` routes to that Tribe member. Rejection carries the PR,
+revision, failed step, Run, and evidence path; Run failure names every affected
+PR. `pr/integrated: [broadcast]` aggregates all PRs sharing one landing fact
+into one pull notification and wakes nobody. Terminal PR signals close the
+exact review requests recorded in the durable opened ledger, plus deterministic
+rejection ids retained for pre-policy legacy cleanup.
 
 Signal delivery starts only after the journal append commits and never blocks
 the Run. A cursor under `.git/yrd/notifications/` records journal progress and
@@ -796,7 +812,7 @@ Yrd stores local authority under the primary worktree's common Git directory:
   receiver-inbox/    crash-safe receive-hook handoff
   artifacts/         command, evaluator, and contest evidence
   notifications/
-    cursor-v1.json    journal cursor plus successful event-recipient sends
+    cursor-v1.json    journal cursor, successful sends, and opened-request ledger
 ```
 
 `events-v3.jsonl` is the source of truth. Each command appends one versioned,

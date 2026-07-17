@@ -1132,6 +1132,7 @@ describe("Queue", () => {
           headSha: pr.headSha,
           run: "R1",
           correlation,
+          actor: "operator",
           by: "@chief",
           reason: "authorization revoked",
         },

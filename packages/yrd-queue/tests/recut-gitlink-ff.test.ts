@@ -3,11 +3,11 @@
  * @level l2
  * @consumer @yrd/queue Git PR recutter
  */
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createProcess } from "@yrd/process"
+import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createGitPRRecutter } from "@yrd/queue"
 
 const roots: string[] = []
@@ -33,6 +33,10 @@ async function isAncestor(repo: string, ancestor: string, descendant: string): P
     stderr: "pipe",
   })
   return (await child.exited) === 0
+}
+
+async function gitlinkAt(repo: string, ref: string, path = "dep"): Promise<string> {
+  return git(repo, ["ls-tree", "--format=%(objectname)", ref, "--", path])
 }
 
 /**
@@ -85,6 +89,63 @@ async function carrier(repo: string, sourceBase: string, carrierPin: string): Pr
   return git(repo, ["rev-parse", "HEAD"])
 }
 
+/** Author the gitlink bump and unrelated file as two immutable carrier commits. */
+async function multiCommitCarrier(
+  repo: string,
+  sourceBase: string,
+  carrierPin: string,
+  order: "gitlink-first" | "file-first" = "gitlink-first",
+): Promise<string> {
+  await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
+  const commitGitlink = async () => {
+    await git(repo, ["update-index", "--cacheinfo", `160000,${carrierPin},dep`])
+    await git(repo, ["commit", "-qm", "carrier: bump dep"])
+  }
+  const commitFile = async () => {
+    await writeFile(join(repo, "feature.txt"), "feature\n")
+    await git(repo, ["add", "feature.txt"])
+    await git(repo, ["commit", "-qm", "carrier: add feature"])
+  }
+  if (order === "gitlink-first") {
+    await commitGitlink()
+    await commitFile()
+  } else {
+    await commitFile()
+    await commitGitlink()
+  }
+  return git(repo, ["rev-parse", "HEAD"])
+}
+
+/** Author one mixed gitlink+file commit followed by another ordinary patch. */
+async function mixedCommitCarrier(repo: string, sourceBase: string, carrierPin: string): Promise<string> {
+  await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${carrierPin},dep`])
+  await writeFile(join(repo, "feature.txt"), "feature\n")
+  await git(repo, ["add", "feature.txt"])
+  await git(repo, ["commit", "-qm", "carrier: bump dep + feature"])
+  await writeFile(join(repo, "tail.txt"), "tail\n")
+  await git(repo, ["add", "tail.txt"])
+  await git(repo, ["commit", "-qm", "carrier: add tail"])
+  return git(repo, ["rev-parse", "HEAD"])
+}
+
+/** Author a mixed carrier whose merge shape the direct recutter cannot retain. */
+async function mergeCarrier(repo: string, sourceBase: string, carrierPin: string): Promise<string> {
+  await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${carrierPin},dep`])
+  await git(repo, ["commit", "-qm", "carrier: bump dep"])
+  await git(repo, ["switch", "-qc", "issue/side", sourceBase])
+  await writeFile(join(repo, "side.txt"), "side\n")
+  await git(repo, ["add", "side.txt"])
+  await git(repo, ["commit", "-qm", "carrier: add side"])
+  await git(repo, ["switch", "-q", "issue/feature"])
+  await writeFile(join(repo, "feature.txt"), "feature\n")
+  await git(repo, ["add", "feature.txt"])
+  await git(repo, ["commit", "-qm", "carrier: add feature"])
+  await git(repo, ["merge", "-q", "--no-ff", "issue/side", "-m", "carrier: merge side"])
+  return git(repo, ["rev-parse", "HEAD"])
+}
+
 /** Advance authoritative main: pin `dep` to `basePin` plus an unrelated file. */
 async function advanceBase(repo: string, basePin: string): Promise<string> {
   await git(repo, ["switch", "-q", "main"])
@@ -120,12 +181,222 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(result.unchanged).toBe(false)
     expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
     // Lands the carrier's descendant pin (B), not the base pin (C).
-    expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(moduleB)
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
     expect((await git(repo, ["diff", "--name-only", target, result.headSha])).split("\n").toSorted()).toEqual([
       "dep",
       "feature.txt",
     ])
     expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+  })
+
+  it.each([{ order: "gitlink-first" }, { order: "file-first" }] as const)(
+    "preserves a two-commit carrier ($order) when the base pin is its ancestor",
+    async ({ order }) => {
+      const { repo, module, moduleA, sourceBase } = await baseRepo()
+      const moduleC = await moduleCommit(module, "main", moduleA, "c")
+      const moduleB = await moduleCommit(module, "main", moduleC, "b")
+      await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+      const headSha = await multiCommitCarrier(repo, sourceBase, moduleB, order)
+      const target = await advanceBase(repo, moduleC)
+
+      const dirtyBefore = await git(repo, ["status", "--porcelain"])
+      await using process = createProcess()
+      const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      })
+
+      expect(await git(repo, ["rev-list", "--count", `${target}..${result.headSha}`])).toBe("2")
+      expect(await git(repo, ["rev-parse", `${result.headSha}~2`])).toBe(target)
+      expect(
+        (await git(repo, ["log", "--reverse", "--format=%s", `${target}..${result.headSha}`])).split("\n"),
+      ).toEqual(
+        order === "gitlink-first"
+          ? ["carrier: bump dep", "carrier: add feature"]
+          : ["carrier: add feature", "carrier: bump dep"],
+      )
+      expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+      expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
+      expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+    },
+  )
+
+  it("retains a non-gitlink patch in the same commit as an FF-certified gitlink", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+    const headSha = await mixedCommitCarrier(repo, sourceBase, moduleB)
+    const target = await advanceBase(repo, moduleC)
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
+    })
+
+    expect(await git(repo, ["rev-parse", `${result.headSha}~2`])).toBe(target)
+    expect((await git(repo, ["log", "--reverse", "--format=%s", `${target}..${result.headSha}`])).split("\n")).toEqual([
+      "carrier: bump dep + feature",
+      "carrier: add tail",
+    ])
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+    expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
+    expect(await git(repo, ["show", `${result.headSha}:tail.txt`])).toBe("tail")
+  })
+
+  it("refuses a lossy UTF-8 collision in an FF-gitlink patch certificate", async () => {
+    const { repo, module, moduleA } = await baseRepo()
+    const encoder = new TextEncoder()
+    const basePayload = "authority: base\nkeep a\nkeep b\nkeep c\nmarker: old\n"
+    await writeFile(join(repo, "payload.txt"), basePayload)
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", "add overlap payload"])
+    const sourceBase = await git(repo, ["rev-parse", "HEAD"])
+
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    await git(repo, ["switch", "-qc", "issue/bytes", sourceBase])
+    await git(repo, ["update-index", "--cacheinfo", `160000,${moduleB},dep`])
+    await writeFile(join(repo, "payload.txt"), basePayload.replace("marker: old", "marker: �("))
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", "carrier: bump dep + exact bytes"])
+    const headSha = await git(repo, ["rev-parse", "HEAD"])
+
+    await git(repo, ["switch", "-q", "main"])
+    await git(repo, ["update-index", "--cacheinfo", `160000,${moduleC},dep`])
+    const currentPayload = basePayload.replace("authority: base", "authority: current")
+    await writeFile(join(repo, "payload.txt"), currentPayload)
+    await git(repo, ["add", "payload.txt"])
+    await git(repo, ["commit", "-qm", "base: bump dep + overlap payload"])
+
+    const invalidPayload = new Uint8Array([
+      ...encoder.encode(currentPayload.replace("marker: old\n", "marker: ")),
+      0xc3,
+      0x28,
+      0x0a,
+    ])
+    await using delegate = createProcess()
+    let tamper = true
+    const process = {
+      run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        const result = await delegate.run(request)
+        if (tamper && result.exitCode === 0 && request.argv.includes("rebase")) {
+          tamper = false
+          const path = request.cwd ?? repo
+          await writeFile(join(path, "payload.txt"), invalidPayload)
+          await git(path, ["add", "payload.txt"])
+          await git(path, [
+            "-c",
+            "user.name=Yrd Queue",
+            "-c",
+            "user.email=yrd-queue@example.invalid",
+            "commit",
+            "--amend",
+            "-qm",
+            "tamper raw payload bytes",
+          ])
+        }
+        return result
+      },
+    }
+
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/bytes",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("changed stable patch identity"),
+      },
+    })
+  })
+
+  it("refuses a same-tree recut that squashes an FF gitlink commit into its neighbor", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+    const headSha = await multiCommitCarrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+    const hook = join(repo, ".git", "hooks", "post-rewrite")
+    await writeFile(
+      hook,
+      [
+        "#!/bin/sh",
+        "set -eu",
+        'target=$(git rev-parse "HEAD~2")',
+        'tree=$(git rev-parse "HEAD^{tree}")',
+        'squashed=$(printf "%s\\n" "carrier: squashed" | git commit-tree "$tree" -p "$target")',
+        'git update-ref HEAD "$squashed"',
+        "",
+      ].join("\n"),
+    )
+    await chmod(hook, 0o755)
+
+    await using process = createProcess()
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("not commit-sequence equivalent"),
+      },
+    })
+  })
+
+  it("keeps mixed merge carriers fail-closed when merge shape cannot be retained", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    const headSha = await mergeCarrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+
+    await using process = createProcess()
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("no stable commit-sequence identity"),
+      },
+    })
   })
 
   it("resolves to the base pin when the carrier pin is its ancestor (reverse ff)", async () => {
@@ -153,9 +424,81 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
     // The carrier's dep bump is superseded by the base descendant (C); only the
     // unrelated authored file survives, and dep keeps the base pin.
-    expect(await git(repo, ["ls-tree", result.headSha, "dep"])).toContain(moduleC)
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleC)
     expect(await git(repo, ["diff", "--name-only", target, result.headSha])).toBe("feature.txt")
     expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+  })
+
+  it.each([{ order: "gitlink-first" }, { order: "file-first" }] as const)(
+    "drops only the absorbed gitlink commit from a two-commit carrier ($order)",
+    async ({ order }) => {
+      const { repo, module, moduleA, sourceBase } = await baseRepo()
+      const moduleB = await moduleCommit(module, "main", moduleA, "b")
+      const moduleC = await moduleCommit(module, "main", moduleB, "c")
+      await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+      const headSha = await multiCommitCarrier(repo, sourceBase, moduleB, order)
+      const target = await advanceBase(repo, moduleC)
+
+      const dirtyBefore = await git(repo, ["status", "--porcelain"])
+      await using process = createProcess()
+      const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      })
+
+      expect(await git(repo, ["rev-list", "--count", `${target}..${result.headSha}`])).toBe("1")
+      expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
+      expect(await git(repo, ["log", "-1", "--format=%s", result.headSha])).toBe("carrier: add feature")
+      expect(await gitlinkAt(repo, result.headSha)).toBe(moduleC)
+      expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
+      expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+    },
+  )
+
+  it("refuses transient absorbed-pin commits injected into the recut range", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleB = await moduleCommit(module, "main", moduleA, "b")
+    const moduleC = await moduleCommit(module, "main", moduleB, "c")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+    const headSha = await multiCommitCarrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+    const hook = join(repo, ".git", "hooks", "post-rewrite")
+    await writeFile(
+      hook,
+      [
+        "#!/bin/sh",
+        "set -eu",
+        `git update-index --cacheinfo 160000,${moduleB},dep`,
+        'git commit -qm "tamper: restore absorbed pin"',
+        `git update-index --cacheinfo 160000,${moduleC},dep`,
+        'git commit -qm "tamper: restore authoritative pin"',
+        "",
+      ].join("\n"),
+    )
+    await chmod(hook, 0o755)
+
+    await using process = createProcess()
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("no stable commit-sequence identity"),
+      },
+    })
   })
 
   it("refuses loudly when the carrier and base pins have truly diverged", async () => {
@@ -188,6 +531,161 @@ describe("recut fast-forward gitlink resolution", () => {
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+  })
+
+  /**
+   * 21461: when the recut's scratch worktree has the submodule CHECKED OUT,
+   * git's merge machinery proves the gitlink ancestry itself and fast-forwards
+   * with NO conflict — the conflict-time classification never runs. These rows
+   * force that environment by initializing the submodule inside the scratch
+   * right after `worktree add` (the integrator's persistent-worktree shape),
+   * and pin the mechanism by asserting the rebase succeeded first try with no
+   * conflict-resolution `update-index --cacheinfo` call.
+   */
+  function scratchAutoFfProcess(delegate: { run(request: ProcessRequest): Promise<ProcessResult> }) {
+    const seen: string[][] = []
+    const process = {
+      run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        seen.push([...request.argv])
+        const result = await delegate.run(request)
+        const argv = request.argv
+        const worktreeAt = argv.indexOf("worktree")
+        if (result.exitCode === 0 && worktreeAt !== -1 && argv[worktreeAt + 1] === "add") {
+          // argv tail is `… worktree add --detach <path> <ref>`.
+          const scratchPath = argv[argv.length - 2]
+          if (scratchPath === undefined) throw new Error(`unexpected worktree-add argv: ${argv.join(" ")}`)
+          await git(scratchPath, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "dep"])
+        }
+        return result
+      },
+    }
+    const initialRebases = () =>
+      seen.filter((argv) => argv.includes("rebase") && !argv.includes("--abort") && !argv.includes("--continue"))
+    const conflictResolutions = () =>
+      seen.filter((argv) => argv.includes("update-index") && argv.includes("--cacheinfo"))
+    return { process, initialRebases, conflictResolutions }
+  }
+
+  it("certifies a carrier gitlink git auto-fast-forwarded without a conflict (21461)", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    const target = await advanceBase(repo, moduleC)
+
+    const dirtyBefore = await git(repo, ["status", "--porcelain"])
+    await using delegate = createProcess()
+    const { process, initialRebases, conflictResolutions } = scratchAutoFfProcess(delegate)
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
+    })
+
+    // Mechanism pin: the rebase fast-forwarded the gitlink itself — one initial
+    // rebase, no `rebase --continue`, zero conflict-time pin resolutions.
+    // Without this, the row silently degenerates to the already-tested
+    // conflict path.
+    expect(initialRebases()).toHaveLength(1)
+    expect(conflictResolutions()).toHaveLength(0)
+
+    expect(result.unchanged).toBe(false)
+    expect(await git(repo, ["rev-parse", `${result.headSha}^`])).toBe(target)
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+    expect((await git(repo, ["diff", "--name-only", target, result.headSha])).split("\n").toSorted()).toEqual([
+      "dep",
+      "feature.txt",
+    ])
+    expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
+  })
+
+  it("still refuses non-gitlink tampering on the auto-fast-forward path", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
+
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+
+    await using delegate = createProcess()
+    const inner = scratchAutoFfProcess(delegate)
+    let tamper = true
+    const process = {
+      run: async (request: ProcessRequest): Promise<ProcessResult> => {
+        const result = await inner.process.run(request)
+        if (tamper && result.exitCode === 0 && request.argv.includes("rebase")) {
+          tamper = false
+          const path = request.cwd ?? repo
+          await writeFile(join(path, "feature.txt"), "tampered\n")
+          await git(path, ["add", "feature.txt"])
+          await git(path, [
+            "-c",
+            "user.name=Yrd Queue",
+            "-c",
+            "user.email=yrd-queue@example.invalid",
+            "commit",
+            "--amend",
+            "-qm",
+            "tamper authored payload",
+          ])
+        }
+        return result
+      },
+    }
+
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-identity",
+        message: expect.stringContaining("changed blob, mode, status, path, or gitlink identity"),
+      },
+    })
+  })
+
+  it("stays fail-closed when the auto-fast-forward cannot be re-proved in the integrator's store", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const moduleC = await moduleCommit(module, "main", moduleA, "c")
+    const moduleB = await moduleCommit(module, "main", moduleC, "b")
+    // Deliberately NO fetch into repo/dep: the scratch's fresh submodule clone
+    // lets git fast-forward, but the integrator's own submodule store cannot
+    // re-prove the ancestry — the path must stay unclassified and the strict
+    // certificate must refuse rather than trust the scratch.
+    const headSha = await carrier(repo, sourceBase, moduleB)
+    await advanceBase(repo, moduleC)
+
+    await using delegate = createProcess()
+    const { process } = scratchAutoFfProcess(delegate)
+    await expect(
+      createGitPRRecutter({ inject: { process }, repo }).recut({
+        id: "PR1",
+        branch: "issue/feature",
+        base: "main",
+        revision: 1,
+        headSha,
+        baseSha: sourceBase,
+      }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "refusal",
+        code: "payload-certificate",
+        message: expect.stringContaining("changed stable patch identity"),
+      },
+    })
   })
 
   it("refuses loudly and names the object when the carrier pin is absent locally", async () => {
