@@ -4,7 +4,8 @@
  * @consumer @yrd/cli host
  */
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -42,6 +43,29 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 
 async function journalEnvelope(repo: string) {
   return Array.fromAsync(createJournal({ dir: join(repo, ".git", "yrd") }).read())
+}
+
+async function byteManifest(root: string): Promise<readonly string[]> {
+  const entries: string[] = []
+  const walk = async (directory: string, prefix: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      const relativePath = prefix === "" ? entry.name : join(prefix, entry.name)
+      if (entry.isDirectory()) {
+        entries.push(`directory\t${relativePath}`)
+        await walk(path, relativePath)
+      } else if (entry.isSymbolicLink()) {
+        entries.push(`symlink\t${relativePath}\t${await readlink(path)}`)
+      } else {
+        const digest = createHash("sha256")
+          .update(await readFile(path))
+          .digest("hex")
+        entries.push(`file\t${relativePath}\t${digest}`)
+      }
+    }
+  }
+  await walk(root, "")
+  return entries.toSorted()
 }
 
 async function repository(): Promise<{ repo: string; featureSha: string }> {
@@ -590,6 +614,96 @@ notify:
     expect(mounted).toBe(true)
     expect(stderr).not.toContain("set TRIBE_NAME")
     expect(await Bun.file(join(repo, ".git", "yrd", "notifications", "cursor-v1.json")).exists()).toBe(false)
+  })
+
+  it("runs the literal PR-list viewer without Tribe identity or notification settlement", async () => {
+    const { repo } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+notify:
+  pr/rejected: [submitter]
+`,
+    )
+    const tribeName = process.env.TRIBE_NAME
+    const stateDir = join(repo, ".git", "yrd")
+    const configBefore = await git(repo, "config", "--local", "--list")
+    const refsBefore = await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")
+    expect(existsSync(stateDir)).toBe(false)
+    delete process.env.TRIBE_NAME
+    let stdout = ""
+    let stderr = ""
+    try {
+      expect(
+        await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+          cwd: repo,
+          stdout: (text) => {
+            stdout += text
+          },
+          stderr: (text) => {
+            stderr += text
+          },
+        }),
+        stderr,
+      ).toBe(0)
+    } finally {
+      if (tribeName === undefined) delete process.env.TRIBE_NAME
+      else process.env.TRIBE_NAME = tribeName
+    }
+
+    expect(JSON.parse(stdout)).toMatchObject({ command: "pr.list", prs: [] })
+    expect(stderr).not.toContain("set TRIBE_NAME")
+    expect(await Bun.file(join(repo, ".git", "yrd", "notifications", "cursor-v1.json")).exists()).toBe(false)
+    expect(await Bun.file(join(repo, ".git", "yrd", "prs.git", "HEAD")).exists()).toBe(false)
+    expect(await Bun.file(join(repo, ".git", "yrd", "receiver-inbox")).exists()).toBe(false)
+    expect(existsSync(stateDir)).toBe(false)
+    expect(await git(repo, "config", "--local", "--list")).toBe(configBefore)
+    expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
+  })
+
+  it("preserves every Yrd state byte while listing a populated PR journal", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "true" }
+merge: {}
+`,
+    )
+    await using seeded = await createYrdHost({ cwd: repo, env: { ...process.env, TRIBE_NAME: "@agent/6" } })
+    await seeded.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await seeded.close()
+
+    const stateDir = join(repo, ".git", "yrd")
+    const stateBefore = await byteManifest(stateDir)
+    const configBefore = await git(repo, "config", "--local", "--list")
+    const refsBefore = await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")
+    let stdout = ""
+    let stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "pr", "list", "--json"], {
+        cwd: repo,
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+
+    expect(JSON.parse(stdout)).toMatchObject({
+      command: "pr.list",
+      prs: [expect.objectContaining({ branch: "issue/feature", headSha: featureSha })],
+    })
+    expect(await byteManifest(stateDir)).toEqual(stateBefore)
+    expect(await git(repo, "config", "--local", "--list")).toBe(configBefore)
+    expect(await git(repo, "for-each-ref", "--format=%(refname)%09%(objectname)")).toBe(refsBefore)
   })
 
   it("refuses a needs-review route when review is not an eligibility requirement", async () => {
