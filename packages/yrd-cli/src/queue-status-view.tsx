@@ -3551,6 +3551,27 @@ export function queueTimelineDateSeparatorLabel(
 }
 
 /**
+ * The YYYY-MM-DD header to show above the row at `index`. The boundary rule is
+ * the r5 rule (a header strictly BETWEEN two adjacent rows whose local calendar
+ * day differs). In `leading` mode (the fill pane, item 1) the first timed row
+ * ALSO gets a header — the fill TIME cell is time-of-day only, so the top day
+ * needs its own anchor; the one-shot print path keeps the boundary-only rule
+ * because its inline-date TIME cell already anchors the first day.
+ */
+export function queueTimelineDateHeaderAt(
+  rows: readonly QueueTimelineProjectedRow[],
+  index: number,
+  leading: boolean,
+): string | null {
+  const current = rows[index]
+  if (current === undefined) return null
+  if (leading && index === 0) {
+    return current.timestamp === null ? null : timelineLocalCalendarDay(current.timestamp)
+  }
+  return queueTimelineDateSeparatorLabel(rows[index - 1], current)
+}
+
+/**
  * The FILTER row (user respec 2026-07-15): only non-default dimensions render
  * — `since=` always has a value, `terms=` only when terms were passed, `latest`
  * only when on; no `none`/`no`/`all` placeholders. The four status buckets
@@ -3637,9 +3658,13 @@ function ProjectedQueueTimeline({
 }) {
   const rows = queueTimelineVisibleRows(projection, visibleBuckets, fillHeight)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
-  const includeDate = rows.some(
-    (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
-  )
+  // In the fill pane the TIME cell is time-of-day only (item 1) and the day is
+  // carried by YYYY-MM-DD header rows (leading + per-boundary, below). The
+  // one-shot print path is pinned: it keeps the inline-date TIME cell when the
+  // visible window spans more than one local day.
+  const includeDate =
+    !fillHeight &&
+    rows.some((row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10))
   const layout = timelineCellLayout(rows, includeDate, columns)
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
@@ -3734,11 +3759,9 @@ function ProjectedQueueTimeline({
               // `cursorKey`/`onCursor`/`onSelect` all keep their existing
               // one-entry-per-row index contract with the caller (watch-pane's
               // externally computed `cursor` indexes this exact `rows` array).
-              estimateHeight={(index) =>
-                queueTimelineDateSeparatorLabel(rows[index - 1], rows[index]!) === null ? 1 : 2
-              }
+              estimateHeight={(index) => (queueTimelineDateHeaderAt(rows, index, fillHeight) === null ? 1 : 2)}
               renderItem={(row, index, meta) => {
-                const dateSeparator = queueTimelineDateSeparatorLabel(rows[index - 1], row)
+                const dateSeparator = queueTimelineDateHeaderAt(rows, index, fillHeight)
                 const entry = (
                   <TimelineProjectedRow
                     row={row}
