@@ -3,10 +3,11 @@
  * @level l3
  * @consumer @yrd/cli signal observer
  */
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import type { ConditionalLogger } from "loggily"
 import { Command, createMemoryJournal } from "@yrd/core"
 import { createJournal } from "@yrd/persistence"
 import type { ProcessRequest } from "@yrd/process"
@@ -102,6 +103,25 @@ function recordingAdapter(deliveries: SignalDelivery[], closures: SignalClosure[
     send: (delivery) => void deliveries.push(delivery),
     close: (closure) => void closures.push(closure),
   }
+}
+
+function capturingLog(warnings: string[]): ConditionalLogger {
+  const logger = {
+    child: () => logger,
+    warn: (message: string) => void warnings.push(message),
+    info: () => {},
+    debug: () => {},
+    error: () => {},
+    trace: () => {},
+    fatal: () => {},
+  }
+  return logger as unknown as ConditionalLogger
+}
+
+async function seedCursor(dir: string, cursor: unknown): Promise<void> {
+  const notifications = join(dir, "notifications")
+  await mkdir(notifications, { recursive: true })
+  await writeFile(join(notifications, "cursor-v1.json"), `${JSON.stringify(cursor)}\n`)
 }
 
 describe("PR signal observer", () => {
@@ -756,5 +776,59 @@ describe("PR signal observer", () => {
     const ids = closures.map(({ recipient, request }) => `${recipient} ${request}`)
     expect(ids).toContain("@ci yrd:pr/rejected:PR7:1:@ci")
     expect(ids).toContain("@agent/7 yrd:pr/rejected:PR7:1:@agent/7")
+  })
+
+  it("reads a cursor carrying the opened ledger cleanly, with no warnings, and keeps delivering", async () => {
+    const dir = await stateDir()
+    await seedCursor(dir, {
+      version: 1,
+      cursor: 0,
+      sent: {},
+      opened: [
+        { pr: "PR7", revision: 1, kind: "pr/rejected", recipient: "@agent/7", requestId: "yrd:pr/rejected:PR7:1:@agent/7" },
+      ],
+    })
+    const warnings: string[] = []
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal: createMemoryJournal<unknown>([rejectedFrame()]),
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: recordingAdapter(deliveries),
+      log: capturingLog(warnings),
+    })
+
+    observer.start()
+    await observer.close()
+
+    expect(deliveries.map(({ recipient }) => recipient)).toEqual(["@agent/7"])
+    expect(warnings).toEqual([])
+  })
+
+  it("keeps delivering when the cursor carries a key a newer yrd wrote (forward-compatible read)", async () => {
+    const dir = await stateDir()
+    // A cursor a NEWER yrd persisted, carrying a top-level field THIS build does not model. A strict
+    // reader rejects the whole file and defers ALL delivery; the reader must instead read what it
+    // understands and continue.
+    await seedCursor(dir, { version: 1, cursor: 0, sent: {}, opened: [], settledAt: "2026-07-16T00:00:00.000Z" })
+    const warnings: string[] = []
+    const deliveries: SignalDelivery[] = []
+    const observer = createSignalObserver({
+      journal: createMemoryJournal<unknown>([rejectedFrame()]),
+      stateDir: dir,
+      routes: { "pr/rejected": ["submitter"] },
+      adapter: recordingAdapter(deliveries),
+      log: capturingLog(warnings),
+    })
+
+    observer.start()
+    await observer.close()
+
+    // Delivery is NOT wedged — the unknown key was tolerated.
+    expect(deliveries.map(({ recipient }) => recipient)).toEqual(["@agent/7"])
+    // And it said so loudly, not silently: one forward-compat warning naming the unknown key, and
+    // NOT a "delivery deferred".
+    expect(warnings.some((warning) => warning.includes("does not recognize"))).toBe(true)
+    expect(warnings.some((warning) => warning.includes("delivery deferred"))).toBe(false)
   })
 })

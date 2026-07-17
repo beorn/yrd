@@ -135,7 +135,7 @@ export function createSignalObserver(
 
   const drain = async (): Promise<void> => {
     await exclusive.run(async () => {
-      let state = await readCursor(cursorPath)
+      let state = await readCursor(cursorPath, log)
       for await (const batch of options.journal.read(state.cursor)) {
         const completed = new Set<string>()
         for (const value of batch.values) {
@@ -301,18 +301,21 @@ const OpenedBallSchema = z
   .strict()
 type OpenedBall = z.infer<typeof OpenedBallSchema>
 
-const CursorStateSchema = z
-  .object({
-    version: z.literal(1),
-    cursor: z.number().int().nonnegative(),
-    sent: z.record(z.string().min(1), z.array(TextSchema)),
-    // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
-    // was rejected or put up for review. A terminal signal closes precisely these — immune to the
-    // actor/route drift that makes an id synthesized from current config miss the real ball. Optional
-    // and defaulted so cursor files written before the ledger existed still load.
-    opened: z.array(OpenedBallSchema).default([]),
-  })
-  .strict()
+// One home for the cursor shape. The writer validates against the strict view (never persist a key
+// we did not intend); the reader validates against the lenient view (tolerate top-level keys a NEWER
+// yrd added — see readCursor — instead of wedging all signal delivery on an unknown field).
+const cursorStateShape = {
+  version: z.literal(1),
+  cursor: z.number().int().nonnegative(),
+  sent: z.record(z.string().min(1), z.array(TextSchema)),
+  // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
+  // was rejected or put up for review. A terminal signal closes precisely these — immune to the
+  // actor/route drift that makes an id synthesized from current config miss the real ball. Optional
+  // and defaulted so cursor files written before the ledger existed still load.
+  opened: z.array(OpenedBallSchema).default([]),
+} as const
+const CursorStateSchema = z.object(cursorStateShape).strict()
+const CursorStateReadSchema = z.object(cursorStateShape)
 type CursorState = z.infer<typeof CursorStateSchema>
 
 function errorDetail(error: unknown): string {
@@ -477,15 +480,41 @@ function requestIdForPR(kind: "pr/rejected" | "pr/needs-review", pr: string, rev
   return `yrd:${kind}:${pr}:${revision}:${recipient}`
 }
 
-async function readCursor(path: string): Promise<CursorState> {
+/** The unknown top-level keys of a failed strict cursor parse, or undefined when the failure is
+ * anything OTHER than purely-unrecognized keys — a genuinely malformed cursor must still throw. */
+function unrecognizedTopLevelKeys(error: z.ZodError): readonly string[] | undefined {
+  const keys = new Set<string>()
+  for (const issue of error.issues) {
+    if (issue.code !== "unrecognized_keys" || issue.path.length !== 0) return undefined
+    for (const key of issue.keys) keys.add(key)
+  }
+  return keys.size > 0 ? [...keys] : undefined
+}
+
+async function readCursor(path: string, log?: ConditionalLogger): Promise<CursorState> {
+  let raw: unknown
   try {
-    return CursorStateSchema.parse(JSON.parse(await readFile(path, "utf8")))
+    raw = JSON.parse(await readFile(path, "utf8"))
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
       return { version: 1, cursor: 0, sent: {}, opened: [] }
     }
     throw new Error(`yrd: notification cursor is invalid (${path}): ${errorDetail(error)}`, { cause: error })
   }
+  const strict = CursorStateSchema.safeParse(raw)
+  if (strict.success) return strict.data
+  // Forward-compat: if the ONLY defect is top-level keys this build does not model, the cursor was
+  // written by a NEWER yrd. Read the fields we understand and continue — rejecting the whole file
+  // would defer ALL signal delivery, the exact fleet-wide wedge this guards. Loud, never silent.
+  const unknownKeys = unrecognizedTopLevelKeys(strict.error)
+  if (unknownKeys !== undefined) {
+    log?.warn?.(
+      "notification cursor has keys this yrd build does not recognize; ignoring them and continuing — the cursor was written by a newer yrd, so restart this process to load the current build",
+      { cursor: path, unknownKeys },
+    )
+    return CursorStateReadSchema.parse(raw)
+  }
+  throw new Error(`yrd: notification cursor is invalid (${path}): ${errorDetail(strict.error)}`, { cause: strict.error })
 }
 
 async function writeCursor(path: string, state: CursorState): Promise<void> {
