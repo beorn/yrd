@@ -3,11 +3,15 @@
  * @level l2
  * @consumer @yrd/cli run cancel + watch x-to-cancel
  */
+import { createElement } from "react"
+import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { JobStateConflict } from "@yrd/job"
+import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import { followQueueRuns } from "../src/run.ts"
 import { reduceRunCancelKey } from "../src/watch-cancel.ts"
 import type { YrdCliApp, YrdCliIO } from "../src/types.ts"
+import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const idle = { char: "", escape: false, return: false }
 
@@ -94,5 +98,35 @@ describe("run cancel of an ACTIVE (merging) run never deadlocks the resident", (
     )
     // Resident output stays loggily-only — no bare 'yrd:' stderr duplicate.
     expect(h.stderr.join("")).toBe("")
+  })
+})
+
+describe("watch x-to-cancel confirmation banner (render)", () => {
+  it("renders a VISIBLE standalone confirm when armed and dismisses it on another key", async () => {
+    // The keybindings footer was removed (W3 detail rework), so the cancel
+    // affordance can no longer render its confirm via the footer path. Arming
+    // must still surface a visible confirmation as a STANDALONE banner row — a
+    // silent armed state (confirm rendered nowhere) would be a regression. This
+    // asserts the banner itself, not any footer text.
+    const snapshot = queueTimelineStories["contract-overview"].snapshot
+    const render = createRenderer({ cols: 200, rows: 50 })
+    const app = render(createElement(QueueWatchFrame, { snapshot, onCancelRun: () => undefined }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text, "no confirm renders before arming").not.toContain("Cancel run")
+
+      // `x` arms the confirmation for the default-selected (running) run.
+      await app.press("x")
+      await waitFor(() => app.text.includes("Cancel run"))
+      expect(app.text, "the armed confirm names the fire/abort keys").toContain(
+        "y/Enter to confirm, any other key to abort",
+      )
+
+      // Any other key dismisses without firing; the standalone banner disappears.
+      await app.press("z")
+      await waitFor(() => !app.text.includes("Cancel run"))
+    } finally {
+      app.unmount()
+    }
   })
 })
