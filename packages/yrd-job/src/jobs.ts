@@ -468,7 +468,12 @@ export function createJobs(options: CreateJobsOptions): Jobs {
               if (!Job.owns(active, attempt, parsed.runner, "running")) {
                 throw new Error(`yrd: job '${id}' lost execution ownership`)
               }
-              if (!renew) return
+              if (!renew) {
+                if (Date.parse(active.leaseExpiresAt) <= now()) {
+                  throw new ProgressLeaseExpiredError(id, active.leaseExpiresAt)
+                }
+                return
+              }
               await commit({
                 type: "heartbeat",
                 id,
@@ -485,7 +490,13 @@ export function createJobs(options: CreateJobsOptions): Jobs {
 
         const active = current(id)
         if (!Job.owns(active, attempt, parsed.runner, "running")) return active
-        const result = outcome.heartbeatError ? failed("heartbeat-failed", outcome.heartbeatError) : outcome.result
+        const result =
+          outcome.heartbeatError === undefined
+            ? outcome.result
+            : failed(
+                outcome.heartbeatError instanceof ProgressLeaseExpiredError ? "progress-stalled" : "heartbeat-failed",
+                outcome.heartbeatError,
+              )
         await commit(settlement(id, attempt, parsed.runner, result))
         return current(id)
       },
@@ -722,6 +733,12 @@ function projectJobs(state: DeepReadonly<{ jobs: JobsState }>, applied: Event): 
   }
 }
 
+class ProgressLeaseExpiredError extends Error {
+  constructor(job: string, leaseExpiresAt: string) {
+    super(`yrd: job '${job}' progress lease expired at ${leaseExpiresAt}`)
+  }
+}
+
 async function executeWithHeartbeat(
   scope: JobScope,
   execute: (progress: Readonly<{ signal: AbortSignal; observe(): void; report(): void }>) => Promise<JobResult>,
@@ -733,7 +750,9 @@ async function executeWithHeartbeat(
   let observesProgress = false
   let progressRevision = 0
   let renewedRevision = 0
+  let detachExecution = false
   const executionScope = scope.child("execute")
+  const heartbeatFailure = Promise.withResolvers<void>()
   const cancelHeartbeat = scope.interval(() => {
     const renew = !observesProgress || progressRevision !== renewedRevision
     if (renew) renewedRevision = progressRevision
@@ -743,7 +762,9 @@ async function executeWithHeartbeat(
           await heartbeat(renew)
         } catch (error) {
           heartbeatError = error
+          detachExecution = true
           await executionScope[Symbol.asyncDispose]()
+          heartbeatFailure.resolve()
         }
       }
       return undefined
@@ -762,15 +783,27 @@ async function executeWithHeartbeat(
   scope.use({
     async [Symbol.asyncDispose]() {
       cancelHeartbeat()
+      if (detachExecution) {
+        void execution.catch(() => undefined)
+        return
+      }
       await execution.catch(() => undefined)
     },
   })
 
   let result: JobResult
   try {
-    result = await execution
-  } catch (error) {
-    result = failed("runner-error", error)
+    const settled = await Promise.race([
+      execution.then(
+        (value) => ({ type: "result" as const, value }),
+        (error: unknown) => ({ type: "error" as const, error }),
+      ),
+      heartbeatFailure.promise.then(() => ({ type: "heartbeat" as const })),
+    ])
+    result =
+      settled.type === "result"
+        ? settled.value
+        : failed("runner-error", settled.type === "error" ? settled.error : heartbeatError)
   } finally {
     await scope[Symbol.asyncDispose]()
     await heartbeats
