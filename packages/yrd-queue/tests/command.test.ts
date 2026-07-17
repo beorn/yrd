@@ -17,6 +17,7 @@ import { createProcess, shellCommand, type Process, type ProcessRequest, type Pr
 import * as z from "zod"
 import {
   CommandEvidenceSchema,
+  GitCheckComparisonRefusalEvidenceSchema,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
   IntegrationProofSchema,
@@ -2041,13 +2042,19 @@ describe("Queue command adapters", () => {
   })
 
   it("retains failed configured-check output after Git candidate wrapping", async () => {
+
+  it("retains net-new failed configured-check output after Git candidate wrapping", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     const baseSha = await git(repo, ["rev-parse", "main"])
     await using process = createProcess()
     await using app = await checkedQueue(
       process,
       repo,
-      shellCommand("printf 'check stdout\\n'; printf 'check stderr\\n' >&2; exit 17"),
+      shellCommand(
+        "printf 'src/base.ts:1:1 - baseline\\n'; " +
+          "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; fi; " +
+          "printf 'check stderr\\n' >&2; exit 17",
+      ),
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
@@ -2062,14 +2069,97 @@ describe("Queue command adapters", () => {
       baseSha,
       candidateRef: expectedCandidateRef("R1", "check", job.id, job.attempt, evidence.candidateSha),
       artifacts: [{ name: "stdout" }, { name: "stderr" }],
+      comparison: {
+        parent: { exitCode: 17 },
+        netNewDiagnostics: [{ file: "src/feature.ts", [sourceRowKey]: 2, column: 1, message: "net-new" }],
+        resolvedDiagnostics: [],
+      },
     })
     expect(evidence.candidateSha).toHaveLength(40)
     const artifacts = new Map(evidence.artifacts.map((artifact) => [artifact.name, artifact.path]))
     const stdoutArtifact = artifacts.get("stdout")
     const stderrArtifact = artifacts.get("stderr")
     if (stdoutArtifact === undefined || stderrArtifact === undefined) throw new Error("missing command artifacts")
-    expect(await readFile(stdoutArtifact, "utf8")).toBe("check stdout\n")
+    expect(await readFile(stdoutArtifact, "utf8")).toBe("src/base.ts:1:1 - baseline\nsrc/feature.ts:2:1 - net-new\n")
     expect(await readFile(stderrArtifact, "utf8")).toBe("check stderr\n")
+  })
+
+  it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        "if test -f feature.txt; then " +
+          "printf '%s\\n' 'src/b.ts:2:1 - shared-b' 'src/a.ts:1:1 - shared-a' 'src/a.ts:1:1 - shared-a'; " +
+          "else printf '%s\\n' 'src/a.ts:1:1 - shared-a' 'src/b.ts:2:1 - shared-b'; fi; exit 17",
+      ),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("baseline-identical check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+
+    expect(evidence.exitCode).toBe(17)
+    expect(evidence.comparison).toMatchObject({
+      parent: { exitCode: 17 },
+      netNewDiagnostics: [],
+      resolvedDiagnostics: [],
+    })
+  })
+
+  it("passes a candidate without requiring its failing parent gate to pass", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand("if test -f feature.txt; then exit 0; else printf 'src/base.ts:7:3 - existing\\n'; exit 17; fi"),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "passed" })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "passed") throw new Error("candidate-first check did not pass")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+
+    expect(evidence.exitCode).toBe(0)
+    expect(evidence.comparison).toBeUndefined()
+  })
+
+  it("refuses unavailable parent diagnostics without rejecting the immutable candidate", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; " +
+          "else printf 'opaque parent failure\\n'; fi; exit 17",
+      ),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "queue-environment-refused" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("parent evidence refusal did not fail the run")
+    const refusal = GitCheckComparisonRefusalEvidenceSchema.parse(job.error.evidence)
+
+    expect(refusal).toMatchObject({
+      kind: "check-comparison-refusal",
+      phase: "parent",
+      error: { code: "check-failed" },
+      parent: { exitCode: 17, detail: "opaque parent failure" },
+      retryable: true,
+    })
+    expect(await git(repo, ["rev-parse", refusal.candidateRef])).toBe(refusal.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("preserves a legacy R1 attempt ref when an empty journal reuses the display run id", async () => {
@@ -2196,7 +2286,9 @@ describe("Queue command adapters", () => {
       repo,
       shellCommand(
         'printf "[yrd-base-health] base aaaaaaaaaaaa is red: test:fast failed\\n"; ' +
-          'printf "src/model.ts:12:4 - error TS2322: type mismatch\\n" >&2; exit 17',
+          'printf "src/base.ts:1:1 - baseline guard failure\\n" >&2; ' +
+          "if test -f feature.txt; then " +
+          'printf "src/model.ts:12:4 - error TS2322: type mismatch\\n" >&2; fi; exit 17',
       ),
       { classification: "base" },
     )
@@ -2211,7 +2303,16 @@ describe("Queue command adapters", () => {
       command: ["sh", "-c", expect.stringContaining("test:fast failed")],
       exitCode: 17,
       classification: "base",
-      diagnostics: [{ file: "src/model.ts", [sourceRowKey]: 12, column: 4, message: "error TS2322: type mismatch" }],
+      diagnostics: [
+        { file: "src/base.ts", [sourceRowKey]: 1, column: 1, message: "baseline guard failure" },
+        { file: "src/model.ts", [sourceRowKey]: 12, column: 4, message: "error TS2322: type mismatch" },
+      ],
+      comparison: {
+        netNewDiagnostics: [
+          { file: "src/model.ts", [sourceRowKey]: 12, column: 4, message: "error TS2322: type mismatch" },
+        ],
+        resolvedDiagnostics: [],
+      },
       baseSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
       candidateSha: expect.stringMatching(/^[0-9a-f]{40}$/u),
       candidateRef: expect.stringContaining("refs/yrd/candidates/"),
