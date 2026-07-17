@@ -152,11 +152,11 @@ describe("queue timeline 21106 contract", () => {
     expect(rows.join("\n")).not.toContain("NO RUNNER")
     expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
-    // The windowed TimeStatsBox grid (respec item 6) replaces the single STATS
-    // box: a FLOW throughput box plus TIME INTEGRATED / TIME FAILED / TIME WAIT
-    // duration boxes, each headed by the rolling windows HR / DAY / WK / MON.
+    // The windowed TimeStatsBox grid replaces the single STATS box: a FLOW
+    // throughput box beside a TIME box whose INTEGRATED / FAILED / WAIT sections
+    // stack, both headed by the rolling windows HR / DAY / WK / MON.
     const statisticsText = rows.slice(flowBoxLine).join("\n")
-    for (const cell of ["RUNS", "INTEGRATED", "FAILS", "TIME WAIT", "AVG", "p90"]) {
+    for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90"]) {
       expect(statisticsText).toContain(cell)
     }
     for (const window of ["HR", "DAY", "WK", "MON"]) expect(statisticsText).toContain(window)
@@ -284,7 +284,7 @@ describe("queue timeline 21106 contract", () => {
     const wide = await renderTimeline(contractProjection(), 200)
     // The windowed TimeStatsBox grid fills the full capped width with no dead
     // gutter. The leading FLOW box opens with a rounded top-left corner
-    // `╭─ FLOW `, and the whole box row (four boxes side by side) spans the cap.
+    // `╭─ FLOW `, and the whole box row (FLOW + TIME side by side) spans the cap.
     const wideBorder = wide[rowIndex(wide, "FLOW")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
     expect(wideBorder.startsWith("╭─ FLOW ")).toBe(true)

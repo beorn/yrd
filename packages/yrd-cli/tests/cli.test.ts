@@ -3623,9 +3623,12 @@ describe("runYrd", () => {
     expect(projection.metrics).toMatchObject({ terminalAttempts: 1, outcomes: { integrated: 1 } })
 
     const rendered = stripOsc8Targets(
+      // Height fits the FLOW + stacked-TIME grid; a standalone QueueTimelineView
+      // has no fillHeight list-scroll, so a box tuned to the old short grid would
+      // clip the FILTER/header rows. Production (QueueWatchFrame) scrolls the list.
       await renderString(createElement(QueueTimelineView, { projection, columns: 140 }), {
         width: 140,
-        height: 20,
+        height: 44,
         plain: true,
       }),
     )
@@ -3942,10 +3945,10 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          // Height fits the windowed TimeStatsBox grid (respec item 6). The
-          // standalone QueueTimelineView has no fillHeight list-scroll, so a box
-          // tuned to the old short STATS box would clip the header at a narrow
-          // tier (2x2 grid). Production (QueueWatchFrame) keeps the header via
+          // Height fits the windowed TimeStatsBox grid. The standalone
+          // QueueTimelineView has no fillHeight list-scroll, so a box tuned to the
+          // old short STATS box would clip the header at a narrow tier (FLOW + the
+          // stacked TIME box). Production (QueueWatchFrame) keeps the header via
           // the scrolling list at any height.
           { width, height: 44, plain: true },
         ),
@@ -3985,7 +3988,9 @@ describe("runYrd", () => {
       expect(integratedLine).toContain("✓ done")
       expect(integratedLine?.trimEnd()).toMatch(/15:00 10:00$/u)
     }
-    const renderStyledTimeline = createRenderer({ cols: 200, rows: 30 })
+    // Height fits the FLOW + stacked-TIME grid so the list rows are not clipped
+    // by the taller stats block (standalone view has no fillHeight list-scroll).
+    const renderStyledTimeline = createRenderer({ cols: 200, rows: 44 })
     const styled = renderStyledTimeline(
       createElement(QueueTimelineView, {
         projection: { ...projection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },

@@ -1,10 +1,15 @@
 /**
- * TimeStatsBox — the reusable bordered statistics box the queue watch renders
- * side by side in place of the old single STATS box. Each box carries a title,
- * a dim header row of the four rolling-window columns (HR / DAY / WK / MON), and
- * a set of labelled value rows. `TimeStatsBoxes` binds the windowed projection
- * to four boxes and arranges them responsively — four across on a wide pane,
- * wrapping to a 2x2 grid, then a single column as the pane narrows.
+ * TimeStatsBox — the reusable bordered statistics box the queue watch renders in
+ * place of the old single STATS box. The queue watch shows two side by side: a
+ * FLOW throughput box and a TIME duration box whose INTEGRATED / FAILED / WAIT
+ * sections stack vertically, all across the four rolling-window columns (HR / DAY
+ * / WK / MON). They arrange side by side on a wide pane and stack into one column
+ * as the pane narrows.
+ *
+ * Both boxes share one row model: the window-key header is just the first row
+ * (blank label for FLOW, the INTEGRATED section label for TIME); section headers
+ * are rows with blank value cells; metric rows are indented. Blank cells render a
+ * space so every column keeps one cell per row and the grid stays aligned.
  *
  * Extraction note: TimeStatsBox lives in yrd-cli today because it is the only
  * consumer. If a second surface needs a windowed-metric box, promote it into
@@ -19,14 +24,18 @@ import { type QueueTimeWindowStats, queueTimeStats } from "./time-stats.ts"
 /** The AVG / p50 / p90 fields both DurationDistribution and QueueWaitDistribution share. */
 type WindowDistribution = Readonly<{ avgMs: number | null; p50Ms: number | null; p90Ms: number | null }>
 
-/** One labelled row of a box: a label plus one pre-formatted cell per window. */
-type StatRow = Readonly<{ label: string; indent?: boolean; cells: readonly string[] }>
+/**
+ * One row of a box: a label plus one pre-formatted cell per window.
+ * - `keys` marks the window-key header row (dim cells).
+ * - `indent` marks an indented, muted metric row (avg/p50/p90, FLOW sub-shares).
+ * - a section header carries the section name as `label` with blank `cells`.
+ */
+type BoxRow = Readonly<{ label: string; indent?: boolean; keys?: boolean; cells: readonly string[] }>
 
 /** Readable floor for a single box (label column + four value cells + border and
- * padding). The grid thresholds derive from it so there is one number to tune. */
+ * padding). The two-across threshold derives from it so there is one number to tune. */
 const BOX_MIN_WIDTH = 34
 const GRID_GAP = 1
-const FOUR_ACROSS_MIN = 4 * BOX_MIN_WIDTH + 3 * GRID_GAP
 const TWO_ACROSS_MIN = 2 * BOX_MIN_WIDTH + GRID_GAP
 
 function percent(fraction: number): string {
@@ -61,8 +70,9 @@ function failsOf(stats: QueueTimeWindowStats): number {
   return rejected + environmentRefused + canceled
 }
 
-function flowRows(stats: readonly QueueTimeWindowStats[]): readonly StatRow[] {
+function flowRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
   return [
+    { label: "", keys: true, cells: windowKeys },
     { label: "RUNS", cells: stats.map((s) => formatCount(s.covered, s.metrics.terminalAttempts)) },
     { label: "INTEGRATED", cells: stats.map((s) => formatCount(s.covered, s.metrics.outcomes.integrated)) },
     { label: "FAILS", cells: stats.map((s) => formatShareOfRuns(s.covered, failsOf(s), s.metrics.terminalAttempts)) },
@@ -84,14 +94,31 @@ function flowRows(stats: readonly QueueTimeWindowStats[]): readonly StatRow[] {
   ]
 }
 
-function durationRows(
+/**
+ * One TIME section: a header row (the INTEGRATED section also carries the window
+ * keys; later sections leave the header cells blank so the keys render once) plus
+ * the avg / p50 / p90 metric rows.
+ */
+function timeSection(
+  label: string,
   stats: readonly QueueTimeWindowStats[],
+  keys: readonly string[] | null,
   pick: (metrics: QueueTimeWindowStats["metrics"]) => WindowDistribution,
-): readonly StatRow[] {
+): readonly BoxRow[] {
+  const header: BoxRow = keys === null ? { label, cells: stats.map(() => "") } : { label, keys: true, cells: keys }
   return [
-    { label: "AVG", cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).avgMs)) },
-    { label: "p50", cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p50Ms)) },
-    { label: "p90", cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p90Ms)) },
+    header,
+    { label: "avg", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).avgMs)) },
+    { label: "p50", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p50Ms)) },
+    { label: "p90", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p90Ms)) },
+  ]
+}
+
+function timeRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
+  return [
+    ...timeSection("INTEGRATED", stats, windowKeys, (m) => m.activeRun.integratedOnly),
+    ...timeSection("FAILED", stats, null, (m) => m.activeRun.failedOnly),
+    ...timeSection("WAIT", stats, null, (m) => m.queueWait),
   ]
 }
 
@@ -101,31 +128,25 @@ function chunk<T>(items: readonly T[], size: number): readonly (readonly T[])[] 
   return groups
 }
 
-/** One bordered box: title, dim window-key header, then the value rows. */
-export function TimeStatsBox({
-  title,
-  windowKeys,
-  rows,
-}: Readonly<{ title: string; windowKeys: readonly string[]; rows: readonly StatRow[] }>) {
+/** One bordered box: title, then the rows (window-key header, sections, metrics). */
+export function TimeStatsBox({ title, rows }: Readonly<{ title: string; rows: readonly BoxRow[] }>) {
+  const windowCount = rows.reduce((count, row) => Math.max(count, row.cells.length), 0)
   return (
     <TitledBox title={title}>
       <Box flexDirection="row" gap={GRID_GAP} minWidth={0}>
         <Box flexDirection="column" flexShrink={0}>
-          {/* Header spacer keeps the label column aligned with the value rows. */}
-          <Text> </Text>
-          {rows.map((row) => (
-            <Text key={row.label} color={row.indent ? "$fg-muted" : undefined}>
+          {rows.map((row, index) => (
+            <Text key={index} color={row.indent ? "$fg-muted" : undefined}>
               {row.indent ? "  " : ""}
-              {row.label}
+              {row.label === "" ? " " : row.label}
             </Text>
           ))}
         </Box>
-        {windowKeys.map((key, column) => (
-          <Box key={key} flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0} alignItems="flex-end">
-            <Text color="$fg-muted">{key}</Text>
-            {rows.map((row) => (
-              <Text key={row.label} wrap="truncate">
-                {row.cells[column]}
+        {Array.from({ length: windowCount }, (_, column) => (
+          <Box key={column} flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0} alignItems="flex-end">
+            {rows.map((row, index) => (
+              <Text key={index} color={row.keys ? "$fg-muted" : undefined} wrap="truncate">
+                {row.cells[column] === undefined || row.cells[column] === "" ? " " : row.cells[column]}
               </Text>
             ))}
           </Box>
@@ -136,7 +157,8 @@ export function TimeStatsBox({
 }
 
 /**
- * Bind the windowed projection to the four boxes and arrange them for the pane.
+ * Bind the windowed projection to the FLOW + TIME boxes and arrange them for the
+ * pane — side by side when wide, stacked into one column when narrow.
  *
  * @param facts  every retained terminal Run fact (the projection folds these once)
  * @param now    the snapshot clock as an ISO instant
@@ -159,19 +181,17 @@ export function TimeStatsBoxes({
   const stats = queueTimeStats(facts, nowMs, earliestEventMs)
   const windowKeys = stats.map((entry) => entry.key)
   const boxes = [
-    { title: "FLOW", rows: flowRows(stats) },
-    { title: "TIME INTEGRATED", rows: durationRows(stats, (metrics) => metrics.activeRun.integratedOnly) },
-    { title: "TIME FAILED", rows: durationRows(stats, (metrics) => metrics.activeRun.failedOnly) },
-    { title: "TIME WAIT", rows: durationRows(stats, (metrics) => metrics.queueWait) },
+    { title: "FLOW", rows: flowRows(stats, windowKeys) },
+    { title: "TIME", rows: timeRows(stats, windowKeys) },
   ]
-  const perRow = width >= FOUR_ACROSS_MIN ? 4 : width >= TWO_ACROSS_MIN ? 2 : 1
+  const perRow = width >= TWO_ACROSS_MIN ? 2 : 1
   return (
     <Box flexDirection="column" marginTop={1} minWidth={0}>
       {chunk(boxes, perRow).map((group, index) => (
-        <Box key={windowKeys.length + index} flexDirection="row" gap={GRID_GAP} minWidth={0}>
+        <Box key={index} flexDirection="row" gap={GRID_GAP} minWidth={0} alignItems="flex-start">
           {group.map((box) => (
             <Box key={box.title} flexGrow={1} flexBasis={0} minWidth={0}>
-              <TimeStatsBox title={box.title} windowKeys={windowKeys} rows={box.rows} />
+              <TimeStatsBox title={box.title} rows={box.rows} />
             </Box>
           ))}
         </Box>
