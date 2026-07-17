@@ -3,15 +3,22 @@ import type { Event } from "loggily"
 /**
  * Pure (no silvery/React) watch-timeline grammar shared by the interactive
  * queue view and the resident follow-runner's human log lines. The runner's
- * stdout IS a log stream, so its INFO/ERROR lines read like the watch pane's
- * timeline rows — one scannable line each — while the full JSON payload goes
- * only to the structured/file sink. Keeping these helpers here (not in the
- * queue-status view .tsx) means the headless logger never imports silvery.
+ * stdout IS a log stream, so its INFO/ERROR rows read one step per row — a
+ * scannable `[<base>#<run> <index>:<step>] done|failed <duration>` prefix over
+ * the full structured record. Keeping these helpers here (not in the queue view
+ * .tsx) means the headless logger never imports silvery.
+ *
+ * The resident stream reports EACH step exactly once — success at INFO, failure
+ * at ERROR. The enclosing run/compose settlements are redundant roll-ups of what
+ * a step row already carried, so they are dropped from the human stream (they
+ * stay, full-fidelity, in the JSONL file sink). A run that failed with no step
+ * to own the ERROR (a pinned/stale-base refusal rejected before the step's Job
+ * ran) escalates to a run-scoped ERROR row, so no failure is ever silent.
  */
 
 /** Powerline branch glyph (U+E0A0), the same BRANCH_ICON the watch UI prefixes
  * onto every branch name (user directive 2026-07-16). */
-export const TIMELINE_BRANCH_ICON = ""
+export const TIMELINE_BRANCH_ICON = ""
 
 /** The status → row glyph map (mirrors the watch timeline's statusGlyph). */
 export function timelineStatusGlyph(status: string): string {
@@ -32,15 +39,36 @@ export function formatDuration(milliseconds: number): string {
   return `${Math.floor(ms / 86_400_000)}d`
 }
 
+/** Displayed scope for the step/run timeline rows. The events originate at
+ * `yrd:jobs:<step>` (per-step Jobs) and `yrd:queue:run` (run-owned failures);
+ * the human stream presents them under ONE static run scope so the numbered
+ * `<index>:<step>` prefix carries the per-step distinction WITHOUT polluting the
+ * namespace taxonomy with unbounded per-run child scopes (user ruling
+ * 2026-07-16). The JSONL sink keeps each event's real namespace. */
+const RUN_SCOPE = "yrd:queue:run"
+
+/**
+ * Where the `<index>:<step>` token sits on a step row. `"bracket"` (Option A,
+ * the default) keeps it inside the identity bracket — `[main#324 2:merge]` —
+ * which scans best; `"trailing"` (Option B) lifts it to a `step=` field after
+ * the verb — `[main#324] failed step=2:merge`. Switching layouts is this one
+ * constant; both share the same pure {@link renderOutcomeRow}. */
+const STEP_LAYOUT: "bracket" | "trailing" = "bracket"
+
+/** Session-constant identity bound ONCE at the resident logger scope
+ * (runner/host/pane). Elided from every row's JSON tail so a constant never
+ * dominates the human stream; the JSONL file sink still records it in full. */
+const SESSION_SCOPE_FIELDS = new Set(["runner", "host", "pane"])
+
 const ANSI = Object.freeze({
   reset: "\x1b[0m",
   bold: "\x1b[1m",
   dim: "\x1b[2m",
   green: "\x1b[32m",
   red: "\x1b[31m",
-  blue: "\x1b[34m",
   yellow: "\x1b[33m",
-  grey: "\x1b[90m",
+  blue: "\x1b[34m",
+  cyan: "\x1b[36m",
 })
 
 type Paint = (text: string) => string
@@ -50,123 +78,166 @@ const paint =
   (text) =>
     color ? `${code}${text}${ANSI.reset}` : text
 
-// Same semantic mapping the watch timeline uses for status foregrounds.
-function statusPaint(status: string, color: boolean): Paint {
-  if (!color) return identity
-  if (["integrated", "passed"].includes(status)) return paint(color, ANSI.green)
-  if (["running", "waiting", "checking", "pending"].includes(status)) return paint(color, ANSI.blue)
-  if (["canceled", "withdrawn", "retired"].includes(status)) return paint(color, ANSI.grey)
-  if (status === "environment-refused") return paint(color, ANSI.yellow)
-  return paint(color, ANSI.red)
-}
+type PRProps = Readonly<{ pr?: string; revision?: number; branch?: string }>
 
-// Scope-bound identity (bound once via residentRunnerLog) plus internals that a
-// timeline row renders positionally — never repeated inline on the human line.
-const SUPPRESSED_FIELDS = new Set([
-  "runner",
-  "host",
-  "pane",
-  "lifecycle",
-  "outcome",
-  "durationMs",
-  "run",
-  "prs",
-  "runs",
-  "steps",
-  "base",
-  "status",
-  "step",
-  "summary",
-  "diagnostic",
-  "startedAt",
-  "finishedAt",
-])
-
-type LifecycleProps = Readonly<{
+type OutcomeProps = Readonly<{
   run?: string
-  status?: string
+  base?: string
   step?: string
-  steps?: readonly string[]
-  durationMs?: number
-  summary?: string
+  index?: number
+  attempt?: number
+  status?: string
   outcome?: string
-  prs?: readonly Readonly<{ pr?: string; revision?: number; branch?: string }>[]
+  durationMs?: number
+  diagnostic?: string
+  error?: Readonly<{ code?: string }>
+  failure?: Readonly<{ code?: string }>
+  prs?: readonly PRProps[]
 }>
 
-function durationCell(props: LifecycleProps, color: boolean): string {
-  return props.durationMs === undefined ? "" : ` ${paint(color, ANSI.dim)(formatDuration(props.durationMs))}`
+/** `HH:MM:SS` from an epoch-ms event time — loggily's own console time cell. */
+function eventTime(time: number): string {
+  return new Date(time).toISOString().split("T")[1]?.split(".")[0] ?? ""
 }
 
-function prRow(namespace: string, props: LifecycleProps, color: boolean): string | undefined {
-  const run = props.run
-  const pr = props.prs?.[0]
-  if (run === undefined || pr?.pr === undefined) return undefined
-  const status = props.status ?? props.outcome ?? "unknown"
-  // The step for a jobs:<step> row is its own step; a run row settles on its
-  // last step (e.g. "merge"), falling back to the status word.
-  const label = namespace.startsWith("yrd:jobs:") ? (props.step ?? status) : (props.steps?.at(-1) ?? status)
-  const identityCell = `${run} ${paint(color, ANSI.bold)(`${pr.pr}.${pr.revision ?? 1}`)}`
-  const extra = props.prs !== undefined && props.prs.length > 1 ? ` +${props.prs.length - 1}` : ""
-  const branchCell = pr.branch === undefined ? "" : `  ${TIMELINE_BRANCH_ICON} ${pr.branch}`
-  const stepCell = statusPaint(status, color)(`(${label} ${timelineStatusGlyph(status)})`)
-  return `${identityCell}${extra}${branchCell} ${stepCell}${durationCell(props, color)}`
+/** The loggily console level word, colored as loggily colors it. */
+function levelWord(level: string, color: boolean): string {
+  const label = level.toUpperCase()
+  if (!color) return label
+  if (level === "info") return paint(color, ANSI.blue)(label)
+  if (level === "warn") return paint(color, ANSI.yellow)(label)
+  if (level === "error") return paint(color, ANSI.red)(label)
+  return paint(color, ANSI.dim)(label)
 }
 
-function composeRow(props: LifecycleProps, color: boolean): string {
-  const label = props.summary ?? props.outcome ?? "settled"
-  return `${paint(color, ANSI.bold)("compose")} ${label}${durationCell(props, color)}`
+/** The loggily-style lead-in: dim time, colored level, cyan scope. */
+function prefix(time: number, level: string, scope: string, color: boolean): string {
+  return `${paint(color, ANSI.dim)(eventTime(time))} ${levelWord(level, color)} ${paint(color, ANSI.cyan)(scope)}`
 }
 
-function compactFields(props: LifecycleProps & Record<string, unknown>): string {
-  const parts: string[] = []
-  for (const [key, value] of Object.entries(props)) {
-    if (SUPPRESSED_FIELDS.has(key)) continue
-    if (value === undefined || value === null || typeof value === "object") continue
-    parts.push(`${key}=${String(value)}`)
+/** `<base>#<run-number>` — the run identity a human scans, e.g. `main#324` from
+ * base `main` and run id `R324`. Falls back to the raw run id when base is
+ * absent, and to the raw id when it is not the canonical `R<n>` shape. */
+function runRef(props: OutcomeProps): string {
+  const run = props.run ?? "?"
+  const number = /^R\d+$/u.test(run) ? run.slice(1) : run
+  return props.base === undefined ? run : `${props.base}#${number}`
+}
+
+/** `<index>:<step>` in execution order (1-based), suffixed `#<attempt>` on a
+ * retry (attempt > 1), e.g. `1:check` or `2:merge#2`. `undefined` for a
+ * run-owned row that no single step owns. */
+function stepToken(props: OutcomeProps): string | undefined {
+  if (props.step === undefined) return undefined
+  const numbered = typeof props.index === "number" ? `${props.index + 1}:${props.step}` : props.step
+  return props.attempt !== undefined && props.attempt > 1 ? `${numbered}#${props.attempt}` : numbered
+}
+
+/** Dimmed batch identity so multi-PR runs stay identifiable — especially on a
+ * failure. One PR shows `PR.rev branch`; a batch lists refs (capped `+N`). */
+function prTail(props: OutcomeProps, color: boolean): string {
+  const prs = props.prs
+  if (prs === undefined || prs.length === 0) return ""
+  const refs = prs.filter((pr) => pr.pr !== undefined).map((pr) => `${pr.pr}.${pr.revision ?? 1}`)
+  if (refs.length === 0) return ""
+  const CAP = 4
+  const shown = refs.slice(0, CAP).join(" ")
+  const overflow = refs.length > CAP ? ` +${refs.length - CAP}` : ""
+  const branch = refs.length === 1 && prs[0]?.branch !== undefined ? ` ${prs[0].branch}` : ""
+  return ` ${paint(color, ANSI.dim)(`· ${shown}${branch}${overflow}`)}`
+}
+
+/** The canonical failure slug for `err=<slug>`: the JobError code a failed step
+ * carries, else the FailureFact code a thrown refusal/failure carries. */
+function errSlug(props: OutcomeProps): string | undefined {
+  return props.error?.code ?? props.failure?.code
+}
+
+/** `done` (INFO/success) or `failed` (ERROR/failure), or `undefined` when the
+ * event is not a terminal step/run OUTCOME (e.g. a duration-invalid diagnostic,
+ * which carries its own `diagnostic` field and must NOT masquerade as a row). */
+function outcomeVerb(props: OutcomeProps, level: string): "done" | "failed" | undefined {
+  if (props.diagnostic !== undefined) return undefined
+  if (props.outcome === "succeeded" || props.status === "passed") return "done"
+  if (
+    props.outcome === "failed" ||
+    props.outcome === "settled" ||
+    ["failed", "lost", "canceled", "rejected", "environment-refused"].includes(props.status ?? "")
+  ) {
+    return "failed"
   }
-  return parts.length === 0 ? "" : ` · ${parts.join(" ")}`
+  if (level === "error") return "failed"
+  if (level === "info") return "done"
+  return undefined
 }
 
-function noticeLine(event: Extract<Event, { kind: "log" }>, color: boolean): string {
-  const levelPaint =
-    event.level === "error" ? paint(color, ANSI.red) : event.level === "warn" ? paint(color, ANSI.yellow) : identity
-  const props = (event.props ?? {}) as LifecycleProps & Record<string, unknown>
-  return `${levelPaint(event.level.toUpperCase())} ${event.message}${compactFields(props)}${durationCell(props, color)}`
+/** Render one step/run outcome as the scannable grammar, Option A or B. Bolds
+ * the run ref, greens `done` / reds `failed`, dims the duration; appends
+ * `err=<slug>` on a failure and the dimmed PR tail. `undefined` when the event
+ * is not a terminal outcome (the caller then renders a plain notice). */
+function renderOutcomeRow(props: OutcomeProps, level: string, color: boolean): string | undefined {
+  const verb = outcomeVerb(props, level)
+  if (verb === undefined) return undefined
+  const ref = paint(color, ANSI.bold)(runRef(props))
+  const token = stepToken(props)
+  const verbCell = paint(color, verb === "done" ? ANSI.green : ANSI.red)(verb)
+  const durationCell = props.durationMs === undefined ? "" : ` ${paint(color, ANSI.dim)(formatDuration(props.durationMs))}`
+  const errCell = verb === "failed" && errSlug(props) !== undefined ? ` err=${errSlug(props)}` : ""
+  const head =
+    STEP_LAYOUT === "bracket" && token !== undefined
+      ? `[${ref} ${token}] ${verbCell}`
+      : STEP_LAYOUT === "trailing" && token !== undefined
+        ? `[${ref}] ${verbCell} step=${token}`
+        : `[${ref}] ${verbCell}`
+  return `${head}${durationCell}${errCell}${prTail(props, color)}`
+}
+
+/** The full structured record as a dimmed JSON tail, minus the session-constant
+ * scope identity — loggily's own "message then {fields}" shape, so the friendly
+ * grammar is a readable prefix to the record, never a replacement for it. */
+function jsonTail(props: Record<string, unknown>, color: boolean): string {
+  const entries = Object.entries(props).filter(([key, value]) => !SESSION_SCOPE_FIELDS.has(key) && value !== undefined)
+  if (entries.length === 0) return ""
+  return ` ${paint(color, ANSI.dim)(JSON.stringify(Object.fromEntries(entries)))}`
 }
 
 /**
  * Format one resident-runner log Event as a human line, or `undefined` to
  * suppress it from the human stream (it still reaches the JSONL file sink).
- * Lifecycle completions render as timeline rows; low-level journal chatter is
- * suppressed; warns/errors render as a compact level+message notice. Scope-bound
- * runner/host/pane never appear inline.
+ *
+ * - `yrd:jobs:<step>` completions → the scannable step row under the run scope.
+ * - `yrd:queue:run` / `yrd:queue:compose` INFO/DEBUG settlements → suppressed
+ *   (redundant roll-ups of step rows), a run-owned ERROR/WARN still surfaces.
+ * - `yrd:journal:*` INFO/DEBUG chatter → suppressed.
+ * - every other event → a loggily-style notice (prefix + message + JSON tail),
+ *   so runner start, drain, refusals, recovery, and diagnostics never go silent.
  */
 export function formatResidentLogLine(event: Event, options: Readonly<{ color: boolean }>): string | undefined {
   if (event.kind !== "log") return undefined
   const { color } = options
   const namespace = event.namespace
-  const props = (event.props ?? {}) as LifecycleProps
+  const level = event.level
+  const props = (event.props ?? {}) as OutcomeProps & Record<string, unknown>
 
-  // Low-level journal bookkeeping is noise on the human line — keep it in the
-  // JSONL sink only. Its warn/error escalations still surface as notices.
-  if (namespace.startsWith("yrd:journal:") && (event.level === "info" || event.level === "debug")) return undefined
+  // Low-level journal bookkeeping is noise on the human line — JSONL sink only.
+  // Its warn/error escalations still surface below as notices.
+  if (namespace.startsWith("yrd:journal:") && (level === "info" || level === "debug")) return undefined
 
-  if (event.level === "warn" || event.level === "error") {
-    // A failed lifecycle row still reads best as a timeline row (jobs:<step>
-    // ERROR). Other warns/errors are compact notices.
-    if (namespace.startsWith("yrd:jobs:") || namespace === "yrd:queue:run") {
-      const row = prRow(namespace, props, color)
-      if (row !== undefined) return row
-    }
-    return noticeLine(event, color)
+  // The per-run / per-cycle roll-ups a step row already reported. A genuine
+  // non-step failure escalates to ERROR (queueRunOutcome) or WARN (a refusal)
+  // and falls through to a row/notice below — it is never suppressed here.
+  if ((namespace === RUN_SCOPE || namespace === "yrd:queue:compose") && (level === "info" || level === "debug")) {
+    return undefined
   }
 
-  if (namespace === "yrd:queue:compose") return composeRow(props, color)
-  if (namespace === "yrd:queue:run" || namespace.startsWith("yrd:jobs:")) {
-    const row = prRow(namespace, props, color)
-    if (row !== undefined) return row
+  // Step completions and run-owned failures render as the one-row-per-step
+  // grammar, presented under the single run scope.
+  if (namespace.startsWith("yrd:jobs:") || namespace === RUN_SCOPE) {
+    const row = renderOutcomeRow(props, level, color)
+    if (row !== undefined) return `${prefix(event.time, level, RUN_SCOPE, color)} ${row}${jsonTail(props, color)}`
   }
-  // Other info (lease acquired/released, etc.) — a compact notice keeps it
-  // readable without a JSON dump.
-  return noticeLine(event, color)
+
+  // Everything else: runner start/lease, graceful drain, compose refusals,
+  // recovery warns, duration diagnostics — a compact notice, never dropped.
+  return `${prefix(event.time, level, namespace, color)} ${event.message}${jsonTail(props, color)}`
 }

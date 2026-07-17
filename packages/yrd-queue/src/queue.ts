@@ -883,7 +883,12 @@ function createQueue<Shape extends PRShape>(
           steps: observed.steps.map((step) => step.name),
         },
         outcome: queueRunOutcome,
-        resultAttributes: (result) => ({ status: result.status }),
+        resultAttributes: (result) => ({
+          status: result.status,
+          // A run-owned failure (no step owns the ERROR) carries its JobError so
+          // the human row can render `err=<slug>`; harmless on a settled run.
+          ...(result.error === undefined ? {} : { error: result.error }),
+        }),
       },
       settleTree,
     )
@@ -1252,6 +1257,9 @@ function stepObservation(input: StepExecution): JobObservation {
     identity: { run: input.run, step: input.step },
     attributes: {
       index: input.index,
+      // The run's base, carried so the resident timeline can name a step row
+      // `[<base>#<run> <index>:<step>]`; every PR in a run shares its base.
+      ...(input.prs[0]?.base === undefined ? {} : { base: input.prs[0].base }),
       prs: input.prs.map(deliveryIdentity),
       ...(input.targetSha === undefined ? {} : { targetSha: input.targetSha }),
     },
@@ -1270,11 +1278,19 @@ function runEvidence(run: DeepReadonly<QueueRun>): Record<string, unknown> {
 
 function queueRunOutcome(run: DeepReadonly<QueueRun>): YrdLifecycleOutcome {
   if (run.status === "passed") return "succeeded"
-  // A failed run is an aggregate over its steps: the failing step's Job already
-  // owns the single ERROR (yrd:jobs:<step>). The enclosing run settles at INFO
-  // (carrying status:"failed") so one failure is not re-raised as a duplicate
-  // ERROR one level up.
-  if (run.status === "failed") return "settled"
+  if (run.status === "failed") {
+    // When a step Job failed, that step already owns the single ERROR
+    // (yrd:jobs:<step>); the run settles at INFO so one failure is not re-raised
+    // as a duplicate ERROR one level up. But a run that failed with NO step to
+    // own it — a pinned/stale-base refusal rejected before the step's Job ran
+    // (record.failure) — has no deeper ERROR. The run must own it, or the
+    // failure is silent: fail loud with a run-scoped ERROR.
+    const stepOwned = run.steps.some(
+      (step) =>
+        step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+    )
+    return stepOwned ? "settled" : "failed"
+  }
   return "progress"
 }
 
