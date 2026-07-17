@@ -357,6 +357,11 @@ type WatchOptions = QueueListOptions
 
 type JsonOption = { json?: boolean }
 
+const QUEUE_TIMELINE_DEFAULT_WINDOW_MS = 6 * 60 * 60 * 1_000
+// Flow metrics default to a 24h horizon (median/p90 wait, run durations,
+// rejection rate, throughput) independent of the tighter listing window; an
+// explicit --since overrides both.
+const QUEUE_METRICS_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1_000
 const QUEUE_TIMELINE_STATUSES: readonly QueueTimelineStatusFilter[] = [
   "pending",
   "running",
@@ -385,6 +390,12 @@ function queueTimelineWindow(value: string | undefined): number {
     usage("--since must be a finite non-negative duration")
   }
   return milliseconds
+}
+
+// The flow-metrics window: 24h by default, but an explicit --since wins so the
+// stats track the same span the operator scoped the listing to.
+function queueMetricsWindow(value: string | undefined): number {
+  return value === undefined ? QUEUE_METRICS_DEFAULT_WINDOW_MS : queueTimelineWindow(value)
 }
 
 function queueTimelineStatuses(value: string | undefined): QueueTimelineStatusFilter[] {
@@ -1950,6 +1961,7 @@ export async function queueListSnapshot(
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
+    metricsWindowMs: queueMetricsWindow(options.since),
     statuses: queueTimelineStatuses(options.status),
     terms: filters,
     latest: options.latest === true,
@@ -3045,7 +3057,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope watch to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window (default: everything)")
+    .option("--since <duration>", "listing window (default 6h; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--json", "emit stable JSON")
     .action(async (filters, options) => {
@@ -3065,7 +3077,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window (default: everything)")
+    .option("--since <duration>", "listing window (default 6h; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")
@@ -3082,7 +3094,7 @@ function buildProgram(
     .option("--base <branch>", "select one base queue")
     .option("--pr <pr>", "scope the queue timeline to one PR")
     .option("--status <statuses>", "comma-separated pending,running,rejected,integrated,other")
-    .option("--since <duration>", "timeline window (default: everything)")
+    .option("--since <duration>", "listing window (default 6h; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
     .option("--json", "emit stable JSON")

@@ -913,6 +913,23 @@ describe("runYrd", () => {
     }
   })
 
+  it("defaults flow metrics to a 24h window while the listing window stays 6h; --since wins both", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+
+    const fresh = outputIO()
+    expect(await runYrd(app, yrd("queue", "list", "--json"), fresh.io), fresh.stderr()).toBe(0)
+    const defaults = JSON.parse(fresh.stdout()).projection
+    expect(defaults.filters.windowMs).toBe(6 * 60 * 60_000)
+    expect(defaults.metrics.windowMs).toBe(24 * 60 * 60_000)
+
+    const scoped = outputIO()
+    expect(await runYrd(app, yrd("queue", "list", "--since", "3h", "--json"), scoped.io), scoped.stderr()).toBe(0)
+    const explicit = JSON.parse(scoped.stdout()).projection
+    expect(explicit.filters.windowMs).toBe(3 * 60 * 60_000)
+    expect(explicit.metrics.windowMs).toBe(3 * 60 * 60_000)
+  })
+
   it("canonicalizes pause allowlists and queue administration base selectors", async () => {
     const app = await createApp()
     await openAndSubmit(app)
@@ -3124,11 +3141,15 @@ describe("runYrd", () => {
       fact("R-future", "rejected", 1_000, [1_000], now + 1),
     ]
 
+    // windowMs = 6h so the per-24h projection is 4× the landed count (2 → 8);
+    // oldestOpenMs is a live-queue fact the caller supplies, null when absent.
     expect(queueFlowMetrics(facts, { now, windowMs: 6 * 60 * minute })).toEqual({
       windowMs: 6 * 60 * minute,
       terminalAttempts: 4,
       outcomes: { integrated: 2, rejected: 1, environmentRefused: 1, canceled: 0 },
       decisionRejection: { rejected: 1, decisions: 3, rate: 1 / 3 },
+      throughput: { landed: 2, per24h: 8 },
+      oldestOpenMs: null,
       activeRun: {
         allTerminal: {
           n: 4,
@@ -3155,17 +3176,76 @@ describe("runYrd", () => {
         maxMs: 95 * minute,
       },
     })
-    expect(queueFlowMetrics([], { now, windowMs: 6 * 60 * minute })).toEqual({
+    expect(queueFlowMetrics([], { now, windowMs: 6 * 60 * minute, oldestOpenMs: 42 * minute })).toEqual({
       windowMs: 6 * 60 * minute,
       terminalAttempts: 0,
       outcomes: { integrated: 0, rejected: 0, environmentRefused: 0, canceled: 0 },
       decisionRejection: { rejected: 0, decisions: 0, rate: null },
+      throughput: { landed: 0, per24h: 0 },
+      oldestOpenMs: 42 * minute,
       activeRun: {
         allTerminal: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
         integratedOnly: { n: 0, minMs: null, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
       },
       queueWait: { n: 0, avgMs: null, p50Ms: null, p90Ms: null, maxMs: null },
     })
+  })
+
+  it("windows flow metrics independently of the timeline row-listing window", () => {
+    const minute = 60_000
+    const now = Date.parse("2026-07-13T12:00:00.000Z")
+    // One landed Run that finished 8h ago: outside a 6h listing window, inside 24h.
+    const landed = fakeRun({
+      id: "R1",
+      status: "passed",
+      pr: { id: "PR1", revision: 1, headSha: "1".repeat(40), baseSha: BASE_SHA },
+      startedAt: "2026-07-13T03:50:00.000Z",
+      finishedAt: "2026-07-13T04:00:00.000Z",
+      steps: [],
+      integration: { commit: MERGED_SHA, baseSha: BASE_SHA },
+    })
+    const prs = [
+      { id: "PR1", status: "integrated", submittedAt: "2026-07-13T03:45:00.000Z" },
+      { id: "PR5", status: "submitted", submittedAt: "2026-07-13T11:00:00.000Z" },
+    ].map((pr) => ({
+      ...pr,
+      branch: `topic/${pr.id}`,
+      base: "main",
+      revision: 1,
+      headSha: pr.id === "PR1" ? "1".repeat(40) : "5".repeat(40),
+    })) as unknown as PR[]
+    const result: QueueStatusResult = { base: "main", prs, running: [], waiting: [], finished: [landed] }
+    const submissionTimes = new Map(prs.map((pr) => [queueRevisionKey(pr), pr.submittedAt!]))
+    const base = {
+      now,
+      statuses: ["pending", "running", "rejected", "integrated", "other"] as const,
+      terms: [] as string[],
+      latest: false,
+      rowLimit: 20,
+      submissionTimes,
+    }
+
+    const shared = queueTimelineProjection([result], { ...base, windowMs: 6 * 60 * minute })
+    const widened = queueTimelineProjection([result], {
+      ...base,
+      windowMs: 6 * 60 * minute,
+      metricsWindowMs: 24 * 60 * minute,
+    })
+
+    // The 6h listing window drops the 8h-old landing from both projections' rows.
+    expect(shared.rows.map((row) => row.pr)).toEqual(["PR5"])
+    expect(widened.rows.map((row) => row.pr)).toEqual(["PR5"])
+    // Metrics honor their own window: 6h sees no landing, 24h counts it.
+    expect(shared.metrics.terminalAttempts).toBe(0)
+    expect(shared.metrics.throughput).toEqual({ landed: 0, per24h: 0 })
+    expect(widened.metrics.terminalAttempts).toBe(1)
+    expect(widened.metrics.outcomes.integrated).toBe(1)
+    expect(widened.metrics.throughput).toEqual({ landed: 1, per24h: 1 })
+    expect(widened.metrics.windowMs).toBe(24 * 60 * minute)
+    // Oldest-open is a live-queue fact, independent of either window.
+    expect(shared.oldestOpenMs).toBe(60 * minute)
+    expect(shared.metrics.oldestOpenMs).toBe(60 * minute)
+    expect(widened.metrics.oldestOpenMs).toBe(60 * minute)
   })
 
   it("keeps one recut PR card with cumulative source-ready age and revision lineage", async () => {
@@ -3555,6 +3635,10 @@ describe("runYrd", () => {
     expect(projection.siblingBases).toEqual(["release"])
     expect(projection.pause).toMatchObject({ reason: "operator freeze", allowedPRs: ["PR6"] })
     expect(projection.oldestOpenMs).toBe(80 * minute)
+    // The flow aggregate is self-contained: it carries the same oldest-open age
+    // and a per-24h throughput projected from the landed count over the window.
+    expect(projection.metrics.oldestOpenMs).toBe(80 * minute)
+    expect(projection.metrics.throughput).toEqual({ landed: 1, per24h: 4 })
     expect(projection.rows.map((row) => [row.group, row.status, row.run ?? row.pr, row.pr])).toEqual([
       ["pending", "pending", "PR4", "PR4"],
       ["pending", "pending", "PR6", "PR6"],
@@ -3674,6 +3758,10 @@ describe("runYrd", () => {
       expect.soft(filter?.trim()).toBe("FILTER since=6:00:00 [x] pending [x] running [x] failed [x] done")
       const flow = rows.find((row) => row.includes("FLOW "))
       expect.soft(flow).toContain("FLOW attempts=44 integrated=39 rejected=5 decision=11.4% env=0 canceled=0")
+      // Throughput rides the FLOW row as a per-24h landed-rate fact (landed=1
+      // over the 6h window → 4/24h), appended after the existing facts. It sits
+      // past the 80-col truncation boundary, so only assert it where it fits.
+      if (width >= 120) expect.soft(flow).toContain("throughput=4/24h")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).not.toContain("STEP")

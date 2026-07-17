@@ -137,6 +137,12 @@ export type QueueTimelineProjection = Readonly<{
 export type QueueTimelineProjectionOptions = Readonly<{
   now: number
   windowMs: number
+  /**
+   * Window for the flow-metrics aggregate. Defaults to `windowMs` when omitted,
+   * so a caller can widen the metrics horizon (e.g. 24h) while the listing rows
+   * stay on the tighter `windowMs`. Never narrows the display set.
+   */
+  metricsWindowMs?: number
   statuses: readonly QueueTimelineStatusFilter[]
   terms: readonly string[]
   latest: boolean
@@ -191,6 +197,13 @@ export type QueueFlowMetrics = Readonly<{
     decisions: number
     rate: number | null
   }>
+  // Landed count over the window projected to a per-24h rate. per24h is null
+  // only for a zero-width window.
+  throughput: Readonly<{ landed: number; per24h: number | null }>
+  // Oldest OPEN queue age at snapshot time — a live-queue fact the caller
+  // supplies (it is not derivable from terminal facts). null when nothing is
+  // queued. Folded in so the aggregate is one self-contained JSON key.
+  oldestOpenMs: number | null
   activeRun: Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
@@ -605,9 +618,11 @@ function waitDistribution(values: readonly number[]): QueueWaitDistribution {
   return { n, avgMs, p50Ms, p90Ms, maxMs }
 }
 
+const FLOW_DAY_MS = 24 * 60 * 60_000
+
 export function queueFlowMetrics(
   facts: Iterable<QueueTerminalFact>,
-  options: Readonly<{ now: number; windowMs: number }>,
+  options: Readonly<{ now: number; windowMs: number; oldestOpenMs?: number | null }>,
 ): QueueFlowMetrics {
   const now = finiteNonnegative(options.now, "FLOW snapshot time")
   const windowMs = finiteNonnegative(options.windowMs, "FLOW window")
@@ -652,6 +667,8 @@ export function queueFlowMetrics(
       decisions,
       rate: decisions === 0 ? null : rejected / decisions,
     },
+    throughput: { landed: integrated, per24h: windowMs === 0 ? null : (integrated * FLOW_DAY_MS) / windowMs },
+    oldestOpenMs: options.oldestOpenMs ?? null,
     activeRun: {
       allTerminal: durationDistribution(activeAll),
       integratedOnly: durationDistribution(activeIntegrated),
@@ -1667,9 +1684,16 @@ export function queueTimelineProjection(
   if (!Number.isFinite(options.windowMs) || options.windowMs < 0) {
     throw new TypeError("yrd: timeline window is invalid")
   }
+  if (
+    options.metricsWindowMs !== undefined &&
+    (!Number.isFinite(options.metricsWindowMs) || options.metricsWindowMs < 0)
+  ) {
+    throw new TypeError("yrd: timeline metrics window is invalid")
+  }
   if (!Number.isFinite(options.rowLimit) || options.rowLimit < 0) {
     throw new TypeError("yrd: timeline row limit is invalid")
   }
+  const metricsWindowMs = options.metricsWindowMs ?? options.windowMs
   const nowIso = new Date(options.now).toISOString()
   const sinceMs = options.now - options.windowMs
   const since = new Date(sinceMs).toISOString()
@@ -1683,15 +1707,26 @@ export function queueTimelineProjection(
       timelineRunMemberRows(result, run, nowIso, options.submissionTimes, options.state, options.attempts ?? []),
     ),
   ])
-  const filtered = rawRows
-    .filter((row) => selectedStatuses.has(timelineStatusFilter(row.status)))
-    .filter((row) => row.timestampMs === null || (row.timestampMs >= sinceMs && row.timestampMs <= options.now))
-    .filter((row) => timelineMatches(row, terms))
-  const rows = (options.latest ? latestTimelineRows(filtered) : filtered).toSorted(timelineSort)
+  // Status + window + term filtering, then the optional latest-per-PR fold.
+  // Shared by the display window and the (possibly wider) metrics window so
+  // both apply identical criteria and only the window bound differs.
+  const selectRows = (windowStartMs: number): QueueTimelineProjectedRow[] => {
+    const filtered = rawRows
+      .filter((row) => selectedStatuses.has(timelineStatusFilter(row.status)))
+      .filter((row) => row.timestampMs === null || (row.timestampMs >= windowStartMs && row.timestampMs <= options.now))
+      .filter((row) => timelineMatches(row, terms))
+    return options.latest ? latestTimelineRows(filtered) : filtered
+  }
+  const displayed = selectRows(sinceMs)
+  const rows = displayed.toSorted(timelineSort)
+  // Terminal facts drive the flow aggregate over the metrics window, which may
+  // reach further back than the listing window; reuse the display set when the
+  // windows coincide.
+  const metricsRows = metricsWindowMs === options.windowMs ? displayed : selectRows(options.now - metricsWindowMs)
   // Metrics stay per-Run: member rows of one batched Run fold into one
   // terminal fact carrying every visible member's queue wait.
   const terminalFactByRun = new Map<string, QueueTerminalFact>()
-  for (const row of rows) {
+  for (const row of metricsRows) {
     if (row.group !== "completed" || row.timestampMs === null || row.run === undefined) continue
     const key = `${row.base}:${row.run}`
     const fact = terminalFactByRun.get(key)
@@ -1751,7 +1786,7 @@ export function queueTimelineProjection(
     display: { limit, shown: Math.min(rows.length, limit), hidden: Math.max(0, rows.length - limit) },
     rows,
     details,
-    metrics: queueFlowMetrics(terminalFacts, { now: options.now, windowMs: options.windowMs }),
+    metrics: queueFlowMetrics(terminalFacts, { now: options.now, windowMs: metricsWindowMs, oldestOpenMs }),
   }
 }
 
@@ -3263,6 +3298,12 @@ function TimelineStatLine({ label, facts }: { label: string; facts: readonly (re
   )
 }
 
+function timelineThroughput(throughput: QueueFlowMetrics["throughput"]): string {
+  if (throughput.per24h === null) return "-"
+  const rounded = Math.round(throughput.per24h * 10) / 10
+  return `${Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)}/24h`
+}
+
 function TimelineStatistics({ projection }: { projection: QueueTimelineProjection }) {
   const metrics = projection.metrics
   const decision = metrics.decisionRejection.rate
@@ -3299,6 +3340,7 @@ function TimelineStatistics({ projection }: { projection: QueueTimelineProjectio
             ["decision", decision === null ? "-" : `${(decision * 100).toFixed(1)}%`],
             ["env", String(metrics.outcomes.environmentRefused)],
             ["canceled", String(metrics.outcomes.canceled)],
+            ["throughput", timelineThroughput(metrics.throughput)],
           ]}
         />
         <TimelineStatLine label="ACTIVE ALL" facts={distribution(all)} />
