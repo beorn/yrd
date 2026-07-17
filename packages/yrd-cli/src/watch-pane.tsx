@@ -384,9 +384,14 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
       return next
     })
   }
+  // The interactive pane renders fill-height (below), so the cursor set is the
+  // uncapped fill set — the ListView shows every retained row and virtualizes.
+  // Cursor indices index THIS array, so it must match the ListView's items.
   const projectedRows = useMemo(
     () =>
-      snapshot.projection === undefined ? undefined : queueTimelineVisibleRows(snapshot.projection, visibleBuckets),
+      snapshot.projection === undefined
+        ? undefined
+        : queueTimelineVisibleRows(snapshot.projection, visibleBuckets, true),
     [snapshot.projection, visibleBuckets],
   )
   const rows = useMemo(
@@ -410,7 +415,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   const defaultCursorKey =
     snapshot.projection === undefined
       ? rows[0]?.key
-      : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets)
+      : queueTimelineVisibleDefaultCursorId(snapshot.projection, visibleBuckets, true)
   const [manualCursor, setManualCursor] = useState(false)
   const [cursorRowKey, setCursorRowKey] = useState<string | undefined>(() => defaultCursorKey)
   const [selectedPr, setSelectedPr] = useState<string | undefined>(
@@ -490,6 +495,20 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
     setNewRows(0)
   }
 
+  // Jump-to-newest (item 4-new): the `↓ N new` cue resumes default-follow at
+  // the newest row (first running, else newest finished) and clears the count.
+  // It reuses the exact `defaultCursorKey` the un-pinned pane already follows,
+  // so clicking the cue lands where the cursor would sit without a manual pin.
+  const jumpToNewest = (): void => {
+    const targetKey = defaultCursorKey ?? rows[0]?.key
+    if (targetKey === undefined) return
+    const target = rows.find((row) => row.key === targetKey)
+    setManualCursor(false)
+    setCursorRowKey(targetKey)
+    setSelectedPr(target?.pr ?? pr)
+    setNewRows(0)
+  }
+
   const selectedRow = rows[cursor]
   const detailPr = pr ?? selectedPr
   const detailData =
@@ -532,6 +551,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
         visibleBuckets={visibleBuckets}
         onToggleBucket={toggleBucket}
         freshRows={newRows}
+        onJumpToNewest={jumpToNewest}
       />
     )
   const selectedDetail =
@@ -590,7 +610,12 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   // horizontal padding keeps content off the pane edge; the header rows sit
   // flush at the top.
   const framedTimeline = (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
+    // The QUEUE pane is its own selection scope (item 4a): a drag started here
+    // resolves to this Box as the nearest `contain` boundary, so it never grows
+    // across the SplitPane divider into the DETAIL pane. `contain` keeps the
+    // rows selectable while bounding the range; the RUNNER/STATS boxes nest
+    // their own tighter scopes inside it.
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1} userSelect="contain">
       {timeline}
     </Box>
   )
@@ -599,7 +624,18 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   const selectedProjectedRow = projectedRows?.[cursor]
   const detailIdentity = selectedProjectedRow === undefined ? undefined : queueRowIdentity(selectedProjectedRow)
   const framedDetail = (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} paddingX={1}>
+    // The DETAIL pane is its own selection scope (item 4a): a drag inside the
+    // detail body resolves to this Box as the nearest `contain` boundary, so it
+    // cannot grow back across the divider into the QUEUE pane.
+    <Box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      minWidth={0}
+      minHeight={0}
+      paddingX={1}
+      userSelect="contain"
+    >
       <Text bold wrap="truncate">
         {detailIdentity ?? "No queue row selected."}
       </Text>

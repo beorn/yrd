@@ -3187,6 +3187,12 @@ export function TitledBox({
       flexShrink={fill ? 1 : 0}
       flexGrow={fill ? 1 : undefined}
       marginTop={marginTop}
+      // Each titled box (RUNNER / STATUS / STATS) is its own selection scope
+      // (item 4a): a drag started inside it resolves to this box as the nearest
+      // `contain` boundary, so it never grows into a sibling box or the pane
+      // around it. Nested inside the pane's own scope; `contain` keeps content
+      // selectable while bounding the range.
+      userSelect="contain"
     >
       <Box flexDirection="row" width="100%" flexShrink={0} minWidth={0}>
         <Text color={border} flexShrink={0}>
@@ -3249,13 +3255,69 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
+/** The whole-queue health the leading RUNNER marker summarizes (item 4b). */
+export type QueueHealthKind = "active" | "failed" | "stale" | "healthy"
+
+export type QueueHealthMarker = Readonly<{ kind: QueueHealthKind; color: string }>
+
+/**
+ * The single whole-queue health the RUNNER box's leading marker shows (item 4b),
+ * derived from the projection's own runner + rows/metrics — no new plumbing:
+ *
+ * - `active`  — a run is checking right now (pulsing info dot, ag-code cadence).
+ * - `failed`  — recent terminal failures in the window (red).
+ * - `stale`   — the resident runner is missing or its heartbeat went stale (yellow).
+ * - `healthy` — idle, drained, runner fresh (green).
+ *
+ * Precedence is severity-ordered: an in-flight run reads as activity even when
+ * older failures sit in the window; a fresh failure outranks a stale runner.
+ */
+export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
+  if (projection.rows.some((row) => row.status === "running")) return { kind: "active", color: "$fg-info" }
+  const outcomes = projection.metrics.outcomes
+  if (outcomes.rejected + outcomes.environmentRefused + outcomes.canceled > 0) {
+    return { kind: "failed", color: "$fg-error" }
+  }
+  const timing = runnerTiming(projection)
+  if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
+    return { kind: "stale", color: "$fg-warning" }
+  }
+  return { kind: "healthy", color: "$fg-success" }
+}
+
+/** The status-dot glyph — same filled disc the per-row running marker uses. */
+const QUEUE_HEALTH_GLYPH = "●"
+
+/**
+ * The leading whole-queue marker at the front of the RUNNER box (item 4b). It
+ * pulses on the shared ag-code cadence while a run is active (live pane only —
+ * the one-shot projection renders the static info dot), and is a colorized
+ * status dot otherwise. `live` gates the pulse exactly as `TimelineMarker` does.
+ */
+function RunnerQueueMarker({ projection, live }: { projection: QueueTimelineProjection; live: boolean }) {
+  const marker = queueHealthMarker(projection)
+  if (marker.kind === "active" && live) {
+    return (
+      <Pulse colors={["$fg-info", "$fg-muted"]} intervalMs={AG_PULSE_INTERVAL_MS} flexShrink={0}>
+        {QUEUE_HEALTH_GLYPH}
+      </Pulse>
+    )
+  }
+  return (
+    <Text color={marker.color} flexShrink={0}>
+      {QUEUE_HEALTH_GLYPH}
+    </Text>
+  )
+}
+
 /**
  * The RUNNER box renders the runner fact exactly once (15d), restyled per the
  * 2026-07-15 user spec: absent → one all-red `NO RUNNER - queue last drained
  * <age> ago` banner; present → `[pid] <command>` with a right-aligned
- * `uptime H:MM`; a stale heartbeat keeps its loud red banner inside the box.
+ * `uptime H:MM`; a stale heartbeat keeps its loud red banner inside the box. A
+ * leading whole-queue health marker (item 4b) heads the box in both states.
  */
-function TimelineRunnerBox({ projection }: { projection: QueueTimelineProjection }) {
+function TimelineRunnerBox({ projection, live = false }: { projection: QueueTimelineProjection; live?: boolean }) {
   const runner = projection.runner
   const timing = runnerTiming(projection)
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
@@ -3264,17 +3326,21 @@ function TimelineRunnerBox({ projection }: { projection: QueueTimelineProjection
     const now = Date.parse(projection.now)
     return (
       <TitledBox title="RUNNER" borderColor="$fg-error">
-        <Text color="$fg-error" bold wrap="truncate">
-          {drained === null
-            ? "NO RUNNER - no drained run in window"
-            : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
-        </Text>
+        <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+          <RunnerQueueMarker projection={projection} live={live} />
+          <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
+            {drained === null
+              ? "NO RUNNER - no drained run in window"
+              : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
+          </Text>
+        </Box>
       </TitledBox>
     )
   }
   return (
     <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
       <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+        <RunnerQueueMarker projection={projection} live={live} />
         <Text wrap="truncate" minWidth={0}>
           [{runner.pid}] {runner.command ?? "resident runner"}
         </Text>
@@ -3405,11 +3471,22 @@ export function queueTimelineFilterBuckets(
   return buckets
 }
 
+/**
+ * The rows the timeline renders. In the default (one-shot print) mode the set
+ * is capped to `display.shown` and the residue surfaces as `... N more`. In
+ * `fill` mode (the interactive pane, item 5) the cap is dropped and every
+ * retained row is returned: the pane's ListView virtualizes and shows as many
+ * as physically fit, scrolling the rest, so the row set is bounded by pane
+ * height rather than a fixed pre-slice. `fill` widens the set to a superset of
+ * the capped prefix, so an externally computed cursor over the capped set stays
+ * valid against the fill set.
+ */
 export function queueTimelineVisibleRows(
   projection: Pick<QueueTimelineProjection, "rows" | "display">,
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>,
+  fill = false,
 ): readonly QueueTimelineProjectedRow[] {
-  const rows = projection.rows.slice(0, projection.display.shown)
+  const rows = fill ? projection.rows : projection.rows.slice(0, projection.display.shown)
   if (visibleBuckets === undefined) return rows
   return rows.filter((row) => visibleBuckets.has(queueTimelineStatusBucket(row.status)))
 }
@@ -3417,8 +3494,9 @@ export function queueTimelineVisibleRows(
 export function queueTimelineVisibleDefaultCursorId(
   projection: Pick<QueueTimelineProjection, "rows" | "display">,
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>,
+  fill = false,
 ): string | undefined {
-  const rows = queueTimelineVisibleRows(projection, visibleBuckets)
+  const rows = queueTimelineVisibleRows(projection, visibleBuckets, fill)
   return queueTimelineDefaultCursorId(rows) ?? rows[0]?.id
 }
 
@@ -3527,6 +3605,7 @@ function ProjectedQueueTimeline({
   visibleBuckets,
   onToggleBucket,
   freshRows = 0,
+  onJumpToNewest,
 }: {
   projection: QueueTimelineProjection
   nav: boolean
@@ -3539,8 +3618,9 @@ function ProjectedQueueTimeline({
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
   freshRows?: number
+  onJumpToNewest?: () => void
 }) {
-  const rows = queueTimelineVisibleRows(projection, visibleBuckets)
+  const rows = queueTimelineVisibleRows(projection, visibleBuckets, fillHeight)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
   const includeDate = rows.some(
     (row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10),
@@ -3558,9 +3638,13 @@ function ProjectedQueueTimeline({
             <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
             {freshRows === 0 ? null : (
-              <Text color="$fg-warning" flexShrink={0}>
-                {freshRows} new
-              </Text>
+              // The anchored-freshness cue is a click-to-jump affordance (item
+              // 4-new): `↓ N new` jumps the cursor to the newest row and clears
+              // the count. Pointer-only — the count reflects rows that arrived
+              // above a pinned cursor; clicking resumes follow at the newest.
+              <Box flexShrink={0} onClick={onJumpToNewest}>
+                <Text color="$fg-warning">↓ {freshRows} new</Text>
+              </Box>
             )}
             <QueueUpdatedClock now={projection.now} />
           </Box>
@@ -3572,7 +3656,7 @@ function ProjectedQueueTimeline({
             </Box>
           </>
         )}
-        <TimelineRunnerBox projection={projection} />
+        <TimelineRunnerBox projection={projection} live={nav} />
         <TimelineStatusBox projection={projection} />
         {/* A blank row sets the FILTER/coverage row apart from the boxes above
             it (item D, 2026-07-16). */}
@@ -3583,13 +3667,18 @@ function ProjectedQueueTimeline({
             always render (the filter is always live); the coverage text only
             appears when rows exceed the pane or the window is bounded. */}
         <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
+          {/* In fill mode (Tip A, item 5) the interactive rows Box virtualizes
+              and scrolls every retained row, so nothing is permanently hidden:
+              the coverage cell degrades to EMPTY (no awkward "... 0 more") and
+              the row shows pills-only. Off fill (print / one-shot) the coverage
+              text renders exactly as W1b placed it. The pills always render. */}
           <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
-            {projection.display.hidden === 0 ? null : (
+            {fillHeight || projection.display.hidden === 0 ? null : (
               <Text color="$fg-muted" wrap="truncate">
                 ... {projection.display.hidden} more
               </Text>
             )}
-            {projection.coverage.complete ? null : (
+            {fillHeight || projection.coverage.complete ? null : (
               <Text color="$fg-warning" wrap="truncate">
                 retained since {projection.coverage.retainedSince}
               </Text>
@@ -3600,7 +3689,17 @@ function ProjectedQueueTimeline({
         {rows.length === 0 ? (
           <Text color="$fg-muted">No matching queue rows.</Text>
         ) : (
-          <Box flexDirection="column" minWidth={0} flexShrink={1} minHeight={0}>
+          // In fill mode (item 5) the row block claims the pane's vertical
+          // slack so the virtualizing ListView shows as many rows as fit and
+          // scrolls the rest; STATS then anchors at the bottom. Off fill it
+          // stays content-sized.
+          <Box
+            flexDirection="column"
+            minWidth={0}
+            flexShrink={1}
+            minHeight={0}
+            flexGrow={fillHeight ? 1 : undefined}
+          >
             <TimelineHeader layout={layout} />
             <ListView
               items={rows}
@@ -3646,7 +3745,12 @@ function ProjectedQueueTimeline({
             />
           </Box>
         )}
-        {fillHeight ? <Box flexGrow={1} minHeight={0} /> : null}
+        {/* Empty fill panes still anchor STATS at the bottom; a non-empty fill
+            pane grows its row block instead (the rows Box above grows under
+            fill), so no spacer competes with it. The pre-slice residue
+            ("... N more") and retained-since coverage live in the merged FILTER
+            row above the list (W1b) — never a post-list coverage block. */}
+        {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
         <TimelineStatistics projection={projection} />
       </Box>
     </Box>
@@ -3669,6 +3773,7 @@ export function QueueTimelineView({
   visibleBuckets,
   onToggleBucket,
   freshRows,
+  onJumpToNewest,
 }: {
   projection?: QueueTimelineProjection
   results?: readonly QueueStatusResult[]
@@ -3685,6 +3790,7 @@ export function QueueTimelineView({
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
   freshRows?: number
+  onJumpToNewest?: () => void
 }) {
   if (projection !== undefined) {
     // 15e: the list is left-flush — no gutter, no centering; the surface
@@ -3703,6 +3809,7 @@ export function QueueTimelineView({
         visibleBuckets={visibleBuckets}
         onToggleBucket={onToggleBucket}
         freshRows={freshRows}
+        {...(onJumpToNewest === undefined ? {} : { onJumpToNewest })}
       />
     )
   }
