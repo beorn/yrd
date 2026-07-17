@@ -35,6 +35,7 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
+import { reduceRunCancelKey } from "./watch-cancel.ts"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
@@ -97,6 +98,7 @@ export type QueueWatchPaneProps = Readonly<{
   load(): Promise<QueueWatchSnapshot>
   intervalMs: number
   pr?: string
+  onCancelRun?: (run: string) => void | Promise<void>
 }>
 
 type QueueArtifactOutputLine = Readonly<{
@@ -251,14 +253,7 @@ function QueueWorkflowStepTabs({
   // viewport; its subject/activity live behind the "PRS" header.
   const prFacts =
     prs.length === 0 ? null : (
-      <Accordion
-        title="PRS"
-        expanded={prsExpanded}
-        onToggle={setPrsExpanded}
-        marginTop={1}
-        flexShrink={0}
-        minWidth={0}
-      >
+      <Accordion title="PRS" expanded={prsExpanded} onToggle={setPrsExpanded} marginTop={1} flexShrink={0} minWidth={0}>
         <QueueDetailPrFacts prs={prs} />
       </Accordion>
     )
@@ -338,7 +333,15 @@ function QueueWorkflowStepTabs({
   )
 }
 
-export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot; pr?: string }) {
+export function QueueWatchFrame({
+  snapshot,
+  pr,
+  onCancelRun,
+}: {
+  snapshot: QueueWatchSnapshot
+  pr?: string
+  onCancelRun?: (run: string) => void | Promise<void>
+}) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
   // The four operator buckets (user respec 2026-07-15): p/r/f/d toggle them
@@ -393,6 +396,7 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
   const [newRows, setNewRows] = useState(0)
+  const [cancelArmed, setCancelArmed] = useState(false)
   const previousTier = useRef(tier)
   const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
   const cursor = Math.max(
@@ -432,6 +436,21 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
   }, [tier])
 
   useInput((input, key) => {
+    // Cancel affordance for the SELECTED run: `x` arms a confirmation, then
+    // `y`/Enter confirms and any other key (incl. a second `x`, Escape) dismisses.
+    // Wired to the SAME path as the `run cancel <R>` CLI (onCancelRun). Intercepted
+    // before the detail/filter keys so the armed prompt captures its confirming
+    // keypress rather than opening the detail pane.
+    if (onCancelRun !== undefined && (cancelArmed || input === "x")) {
+      const decision = reduceRunCancelKey(
+        { char: input, escape: key.escape === true, return: key.return === true },
+        cancelArmed,
+        rows[cursor]?.run,
+      )
+      setCancelArmed(decision.armed)
+      if (decision.cancel !== undefined) void onCancelRun(decision.cancel)
+      return
+    }
     if (key.escape) {
       setDetailOpen(false)
       return
@@ -604,14 +623,23 @@ export function QueueWatchFrame({ snapshot, pr }: { snapshot: QueueWatchSnapshot
       </Box>
       <Box height={1} flexShrink={0}>
         {/* Exact keybinding footer (user respec 2026-07-15). Pause/resume is
-            removed; `N new` moved to the pane header's temporal-trust row. */}
-        <Text color="$fg-muted">q quit - enter/esc show/hide detail - p/r/f/d toggle filters - h/j/k/l navigate</Text>
+            removed; `N new` moved to the pane header's temporal-trust row. The
+            armed cancel confirmation replaces the footer until it is resolved. */}
+        {cancelArmed && selectedRow?.run !== undefined ? (
+          <Text color="$fg-warning" bold>
+            Cancel run {selectedRow.run}? Its PRs re-queue, not rejected. y/Enter to confirm, any other key to abort.
+          </Text>
+        ) : (
+          <Text color="$fg-muted">
+            q quit - enter/esc show/hide detail - p/r/f/d toggle filters - x cancel run - h/j/k/l navigate
+          </Text>
+        )}
       </Box>
     </Box>
   )
 }
 
-export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPaneProps) {
+export function QueueWatchPane({ initial, load, intervalMs, pr, onCancelRun }: QueueWatchPaneProps) {
   const [snapshot, setSnapshot] = useState(initial)
   const [failure, setFailure] = useState<Error | undefined>()
 
@@ -638,5 +666,11 @@ export function QueueWatchPane({ initial, load, intervalMs, pr }: QueueWatchPane
   )
 
   if (failure !== undefined) throw failure
-  return <QueueWatchFrame snapshot={snapshot} {...(pr === undefined ? {} : { pr })} />
+  return (
+    <QueueWatchFrame
+      snapshot={snapshot}
+      {...(pr === undefined ? {} : { pr })}
+      {...(onCancelRun === undefined ? {} : { onCancelRun })}
+    />
+  )
 }

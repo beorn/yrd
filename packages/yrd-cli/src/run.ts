@@ -1688,6 +1688,29 @@ async function runQueues(
   )
 }
 
+async function cancelQueueRun(
+  app: YrdCliApp,
+  selector: string,
+  options: JsonOption & Readonly<{ reason?: string }>,
+  io: YrdCliIO,
+): Promise<YrdCliExitCode> {
+  if (options.reason !== undefined && options.reason.trim() === "") usage("--reason requires text")
+  const run = await app.queue.cancelRun({
+    run: selector,
+    by: io.runner ?? "operator",
+    reason: options.reason ?? "run canceled by operator",
+  })
+  // A canceled run is NOT rejected: its member PRs stay submitted and re-queue on
+  // a future drain. State that in the human summary so the distinction is legible.
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "run.cancel", run: projectQueueRunTaskStatus(run) },
+    `${run.id} canceled; ${run.prs.length} PR(s) re-queued (submitted), not rejected`,
+  )
+  return 0
+}
+
 async function pauseQueue(
   app: YrdCliApp,
   base: string | undefined,
@@ -2403,7 +2426,7 @@ export async function followQueueRuns(
   if (options.watch === true) {
     // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
     // here means it already resolved to follow mode; announce the one-time
-    // deprecation as a structured loggily warn — never a bare 'yrd:' stderr line,
+    // deprecation as a structured loggily warn — never a bare 'yrd:' stderr write,
     // since the resident's stdout is a log stream — then behave identically to
     // follow. Emitted exactly once, before the drain loop.
     app.log.warn?.("deprecated: follow is the default; --watch is removed next release", {
@@ -2539,6 +2562,12 @@ async function watchQueue(
         load,
         intervalMs: interval,
         ...(options.pr === undefined ? {} : { pr: options.pr }),
+        // The watch `x`+confirm affordance shares the CLI's cancel path exactly:
+        // cancel journals a run cancellation whose PRs re-queue (not reject), and
+        // the pane's poll loop reflects it on the next cycle.
+        onCancelRun: async (run: string) => {
+          await app.queue.cancelRun({ run, by: io.runner ?? "operator", reason: "run canceled from watch" })
+        },
       }),
       {
         signal: scope.signal,
@@ -3139,6 +3168,15 @@ function buildProgram(
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => finishQueue(installed(), selector, options, io))
   addQueueExamples(queue, name)
+
+  const runGroup = program.command("run").description("act on individual queue runs")
+  runGroup.helpCommand(false)
+  runGroup
+    .command("cancel <selector>")
+    .description("cancel a waiting or running run; its PRs re-queue for a future drain, they are NOT rejected")
+    .option("--reason <text>", "human-readable cancellation reason")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
 
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)

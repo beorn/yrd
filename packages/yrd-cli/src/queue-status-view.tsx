@@ -1108,9 +1108,11 @@ function stepOutput(step: QueueStep): string {
   return "-"
 }
 
-function queueOutcome(run: QueueRun): "passed" | "integrated" | "rejected" | "running" | "waiting" {
+function queueOutcome(run: QueueRun): "passed" | "integrated" | "rejected" | "canceled" | "running" | "waiting" {
   if (run.status === "passed") return queueIntegration(run) === undefined ? "passed" : "integrated"
   if (run.status === "failed") return "rejected"
+  // "canceled" is a distinct terminal outcome — a canceled run is NOT rejected;
+  // its PRs re-queue. "running"/"waiting" fall through unchanged.
   return run.status
 }
 

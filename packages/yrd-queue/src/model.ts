@@ -181,7 +181,7 @@ export type QueueRunAuthority = Readonly<{
   missingSubmits: readonly string[]
   missingChecks: readonly string[]
   released?: Readonly<{
-    reason: "queue-environment-refused" | "job-lost"
+    reason: "queue-environment-refused" | "job-lost" | "run-canceled"
     ref: string
   }>
 }>
@@ -222,6 +222,13 @@ export type QueueRecord = Readonly<{
   parent?: QueueRunId
   isolationPart?: 0 | 1
   failure?: QueueFailure
+  // Run-level cancellation (the `run cancel` surface): a run aborted before it lands,
+  // but — unlike a failure — its member PRs are NOT rejected/canceled; they stay
+  // submitted so a future drain re-queues them. Projection-only; no started run
+  // carries these, so QueueRecordSchema stays unchanged.
+  canceledAt?: string
+  canceledBy?: string
+  cancelReason?: string
 }>
 
 export type QueueStep = InstalledStep & Readonly<{ job?: Job }>
@@ -230,7 +237,7 @@ export type QueueRun = Omit<QueueRecord, "initialIntegration" | "initialResults"
   Readonly<{
     cursor: number
     integration?: IntegrationProof
-    status: "running" | "waiting" | "passed" | "failed"
+    status: "running" | "waiting" | "passed" | "failed" | "canceled"
     steps: readonly QueueStep[]
     shape: PRShape | IntegratedShape
     finishedAt?: string
@@ -473,6 +480,6 @@ export const Queues = Object.freeze({
   },
 
   terminal(run: QueueRun): boolean {
-    return run.status === "passed" || run.status === "failed"
+    return run.status === "passed" || run.status === "failed" || run.status === "canceled"
   },
 })

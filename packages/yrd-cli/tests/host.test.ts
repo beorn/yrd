@@ -645,7 +645,7 @@ notify:
       commandBlock
         .split("\n")
         .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
-    ).toEqual(["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime"])
+    ).toEqual(["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime", "run"])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)

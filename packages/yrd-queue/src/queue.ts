@@ -169,6 +169,14 @@ const QueueFailedPRSchema = z
 const LegacyQueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
 const QueueFailedSchema = LegacyQueueFailedSchema.extend({ prs: z.array(QueueFailedPRSchema).min(1) }).strict()
 const ReplayQueueFailedSchema = z.union([QueueFailedSchema, LegacyQueueFailedSchema])
+const CancelRunArgsSchema = z
+  .object({
+    run: QueueRunIdSchema,
+    by: z.string().trim().min(1),
+    reason: z.string().trim().min(1),
+  })
+  .strict()
+export type CancelRunArgs = Readonly<z.infer<typeof CancelRunArgsSchema>>
 const QueueAuthorityTokenFactSchema = z.object({
   pr: PRIdSchema,
   revision: z.number().int().positive(),
@@ -341,6 +349,7 @@ export type QueueCommands = Readonly<{
     resume: CommandHandler<Readonly<{ base: string }>, RuntimeState>
     advance: CommandHandler<Readonly<{ run: QueueRunId }>, RuntimeState>
     isolate: CommandHandler<Readonly<{ run: QueueRunId; part: 0 | 1 }>, RuntimeState>
+    cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
   }>
 }>
@@ -406,6 +415,7 @@ export type Queue<Shape extends PRShape = PRShape> = Readonly<{
   waiting(selector: string, step?: string): WaitingQueueStep
   finish(selector: string, completion: FinishQueueArgs, options: RunJobOptions): Promise<QueueRun>
   cancel(args: CancelQueueArgs): Promise<readonly QueueRun[]>
+  cancelRun(args: CancelRunArgs): Promise<QueueRun>
   recover(options: RecoverQueueOptions): Promise<readonly QueueRun[]>
   audit(): QueueAuditResult
   eligibility(selector: string): PREligibility
@@ -468,6 +478,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       events: {
         "queue/run/started": z.object({ run: QueueStartSchema }).strict(),
         "queue/run/failed": QueueFailedSchema,
+        "queue/run/canceled": CancelRunArgsSchema,
         "queue/paused": PauseQueueArgsSchema,
         "queue/resumed": ResumeQueueArgsSchema,
         "queue/batch/isolated": z
@@ -482,6 +493,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
       replayEvents: {
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
         "queue/run/failed": ReplayQueueFailedSchema,
+        "queue/run/canceled": CancelRunArgsSchema,
       },
       projectionVersion: "queues-v1",
       project: projectQueues,
@@ -500,6 +512,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               resume: (base) => yrd.dispatch(commands.queue.resume, { base }),
               advance: (run) => yrd.dispatch(commands.queue.advance, { run }),
               isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
+              cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
               requestChecks: (pr, baseSha) =>
                 yrd.bays.requestChecks({ pr, ...(baseSha === undefined ? {} : { baseSha }) }),
@@ -525,6 +538,7 @@ type QueueActions = Readonly<{
   resume(base: string): Promise<CommandResult>
   advance(run: QueueRunId): Promise<CommandResult>
   isolate(run: QueueRunId, part: 0 | 1): Promise<CommandResult>
+  cancelRun(args: CancelRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
   requestChecks(pr: string, baseSha?: string): Promise<CommandResult>
 }>
@@ -1090,6 +1104,36 @@ function createQueue<Shape extends PRShape>(
       }
       return affected.map(current)
     },
+    async cancelRun(args) {
+      const record = Queues.resolve(runtime().queues, args.run)
+      if (record === undefined) raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
+      const run = materializeRun(record, runtime().jobs)
+      if (Queues.terminal(run)) {
+        raiseFailure(
+          "refusal",
+          "run-terminal",
+          `yrd: queue run '${args.run}' is ${run.status}; only a running or waiting run can be canceled`,
+        )
+      }
+      // Multi-tenant, deadlock-free cancel. This runs as a SEPARATE cli process
+      // from the resident follow-runner. Journal the run cancellation FIRST: it
+      // marks the record canceled (advanceQueue then stops reconciling it, so no
+      // pr/canceled) and releases authority so the still-submitted PRs re-queue on
+      // a future drain. THEN cancel the active job to abort in-flight work. We
+      // NEVER synchronously cancel our own loop's active merge from inside the
+      // drive loop (that deadlocks: the loop holds the queue writer while blocked
+      // mid-merge). When the run's merge is in flight in the resident, this
+      // journaled job cancellation surfaces there as a typed settlement conflict
+      // that residentCycleRecovery honors at the next safe cycle boundary — no
+      // second scheduler, no daemon.
+      await actions.cancelRun(args)
+      const active = run.steps[run.cursor]?.job
+      const cancelable = active?.status === "requested" || active?.status === "running" || active?.status === "waiting"
+      if (cancelable) {
+        await jobs.cancel({ id: active.id, attempt: active.attempt, by: args.by, reason: args.reason })
+      }
+      return current(args.run)
+    },
     async recover(recoverOptions) {
       return observeYrdLifecycle(
         log,
@@ -1482,7 +1526,28 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
     },
   })
 
-  return { queue: { admit, run, pause, resume, advance, isolate, associateTerminals } }
+  const cancelRun = command({
+    title: "Cancel queue run",
+    visibility: "public",
+    params: CancelRunArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: CancelRunArgs) {
+      const record = Queues.resolve(state.queues, args.run)
+      if (record === undefined) {
+        raiseFailure("refusal", "run-not-found", `yrd: no queue run '${args.run}'`)
+      }
+      const run = materializeRun(record, state.jobs)
+      if (Queues.terminal(run)) {
+        raiseFailure(
+          "refusal",
+          "run-terminal",
+          `yrd: queue run '${args.run}' is ${run.status}; only a running or waiting run can be canceled`,
+        )
+      }
+      return { events: [event("queue/run/canceled", { run: args.run, by: args.by, reason: args.reason })] }
+    },
+  })
+
+  return { queue: { admit, run, pause, resume, advance, isolate, cancelRun, associateTerminals } }
 }
 
 type QueueAuthorityKind = "submit" | "checks"
@@ -1920,6 +1985,33 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       },
     }
   }
+  if (applied.name === "queue/run/canceled") {
+    const canceled = CancelRunArgsSchema.parse(applied.data)
+    const record = state.queues.records[canceled.run]
+    if (record === undefined) throw new Error(`yrd: no queue run '${canceled.run}'`)
+    // A canceled run is terminal, but — unlike a failure — its member PRs are NOT
+    // rejected. Release the run's queue authority (mirroring queue/run/failed) so
+    // the still-submitted PRs are re-admissible on a future drain, and mark the
+    // record canceled so advanceQueue stops reconciling it (no pr/canceled emission).
+    return {
+      queues: {
+        ...state.queues,
+        authority: releaseRunAuthority(state.queues.authority, record, {
+          reason: "run-canceled",
+          ref: applied.id,
+        }),
+        records: {
+          ...state.queues.records,
+          [record.id]: {
+            ...record,
+            canceledAt: applied.ts,
+            canceledBy: canceled.by,
+            cancelReason: canceled.reason,
+          },
+        },
+      },
+    }
+  }
   return state
 }
 
@@ -2038,6 +2130,10 @@ function advanceQueue(
   steps: ReadonlyMap<string, RuntimeStep>,
 ): Readonly<{ events: readonly EventDraft[] }> {
   if (record.failure !== undefined) return { events: [] }
+  // A run-canceled record is terminal: never emit pr/canceled or pr/rejected for
+  // its members. Their status is untouched (still submitted), so a future drain
+  // re-queues them — cancel is a re-queue, not a rejection.
+  if (record.canceledAt !== undefined) return { events: [] }
   const stale = pinnedPRError(state.bays, record.prs)
   if (stale !== undefined) {
     return { events: [queueFailedEvent(state, record, stale)] }
@@ -2184,17 +2280,20 @@ function materializeRun(record: DeepReadonly<QueueRecord>, jobs: DeepReadonly<Jo
   const waiting = steps.some((step) => step.job?.status === "waiting")
   const passed = steps.every((step) => step.job?.status === "passed")
   const status =
-    record.failure !== undefined
-      ? "failed"
-      : failed !== undefined
+    record.canceledAt !== undefined
+      ? "canceled"
+      : record.failure !== undefined
         ? "failed"
-        : waiting
-          ? "waiting"
-          : passed
-            ? "passed"
-            : "running"
+        : failed !== undefined
+          ? "failed"
+          : waiting
+            ? "waiting"
+            : passed
+              ? "passed"
+              : "running"
   const last = steps.at(-1)?.job
   const finishedAt =
+    record.canceledAt ??
     record.failure?.at ??
     (failed?.status === "failed" || failed?.status === "lost" || failed?.status === "canceled"
       ? failed.finishedAt

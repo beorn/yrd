@@ -1402,6 +1402,48 @@ describe("runYrd", () => {
     })
   })
 
+  it("run cancel re-queues a waiting run's PRs (submitted), not rejected (#59)", async () => {
+    const app = await createApp({ waitingCheck: true })
+    await openAndSubmit(app)
+    // Drain PR1 into a resident run: the waiting check leaves R1 non-terminal.
+    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })).toMatchObject([
+      { id: "R1", status: "waiting", prs: [{ id: "PR1", revision: 1 }] },
+    ])
+
+    const cancel = outputIO()
+    expect(await runYrd(app, yrd("run", "cancel", "R1"), cancel.io), cancel.stderr()).toBe(0)
+    expect(cancel.stdout()).toContain("re-queued")
+
+    // The run is terminal-canceled and its active check job is aborted...
+    expect(app.queue.get("R1")).toMatchObject({ status: "canceled" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "canceled" })
+    // ...but the member PR is NOT rejected/canceled — it stays submitted, so a
+    // future drain re-queues it. That is the cancel-vs-reject distinction.
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 1 })
+    expect(app.queue.eligibility("PR1")).toMatchObject({ runnable: true })
+
+    // A recovery pass reconciles runs whose active job is terminal (the canceled
+    // check job qualifies). The canceled run must STAY inert here — recovery must
+    // not turn a cancel into a pr/canceled and strip PR1 out of the queue. This is
+    // the load-bearing guard: without it, recovery rejects/cancels the member PR.
+    await app.queue.recover({ recoveryTime: "2026-07-09T12:05:00.000Z", reason: "resident restart" })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 1 })
+
+    // Prove the re-queue: a fresh drain admits PR1 into a NEW run, not R1.
+    const redrain = await app.queue.run({ prs: ["PR1"] }, { runner: "cli-test", leaseMs: 60_000 })
+    expect(redrain.some((run) => run.id !== "R1" && run.prs.some((member) => member.id === "PR1"))).toBe(true)
+  })
+
+  it("run cancel refuses a terminal run (#59)", async () => {
+    const app = await createApp()
+    await openAndSubmit(app)
+    // Drain PR1 to completion: R1 is terminal (passed/integrated), not cancelable.
+    expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), outputIO().io)).toBe(0)
+    const cancel = outputIO()
+    expect(await runYrd(app, yrd("run", "cancel", "R1"), cancel.io)).not.toBe(0)
+    expect(cancel.stderr()).toContain("only a running or waiting run")
+  })
+
   it("admits only the recut target when an unrelated terminal predecessor consumed checks authority", async () => {
     const behavior = { failingCheck: true, waitingCheck: false }
     const app = await createApp(behavior)

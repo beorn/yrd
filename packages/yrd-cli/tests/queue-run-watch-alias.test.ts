@@ -32,8 +32,8 @@ function harness(runResponses: readonly (() => Promise<readonly unknown[]>)[]) {
     },
   } as unknown as YrdCliApp
   const io = {
-    stdout: (line: string) => stdout.push(line),
-    stderr: (line: string) => stderr.push(line),
+    stdout: (text: string) => stdout.push(text),
+    stderr: (text: string) => stderr.push(text),
   } as unknown as YrdCliIO
   const gate = async (): Promise<void> => undefined
   return { app, io, gate, signal, warnings, stderr, stdout, runCalls: () => runCalls }
