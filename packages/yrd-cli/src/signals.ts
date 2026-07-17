@@ -12,6 +12,7 @@ import type { SignalRouteTarget, SignalRoutes } from "./config.ts"
 const TextSchema = z.string().trim().min(1)
 const RevisionSchema = z.number().int().positive()
 const GitShaSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu)
+const REVIEW_BALL_TTL_MS = 10 * 60_000
 const SignalPRSchema = z
   .object({
     pr: TextSchema,
@@ -20,15 +21,15 @@ const SignalPRSchema = z
     actor: TextSchema.optional(),
   })
   .strict()
-const SubmittedSignalDataSchema = SignalPRSchema.passthrough()
-const IntegratedSignalDataSchema = SignalPRSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).passthrough()
+const SubmittedSignalDataSchema = SignalPRSchema.loose()
+const IntegratedSignalDataSchema = SignalPRSchema.extend({ run: TextSchema, landingSha: GitShaSchema }).loose()
 const RunFailedSignalDataSchema = z
   .object({
     run: TextSchema,
-    error: z.object({ code: TextSchema, message: z.string() }).passthrough(),
+    error: z.object({ code: TextSchema, message: z.string() }).loose(),
     prs: z.array(SignalPRSchema).min(1),
   })
-  .passthrough()
+  .loose()
 
 export type SignalPR = Readonly<z.infer<typeof SignalPRSchema>>
 
@@ -265,7 +266,8 @@ export function createTribeSignalAdapter(process: Pick<Process, "run">): SignalD
   }
   return Object.freeze({
     async send(delivery) {
-      const request = requestId(delivery.event, delivery.recipient)
+      const request = trackedRequestId(delivery.event, delivery.recipient)
+      const tracked = request !== undefined
       await execute(
         [
           executable,
@@ -273,10 +275,13 @@ export function createTribeSignalAdapter(process: Pick<Process, "run">): SignalD
           delivery.recipient,
           deliveryText(delivery),
           "--type",
-          delivery.event.kind === "pr/integrated" ? "notify" : "request",
+          tracked ? "request" : "notify",
           "--summary",
           deliverySummary(delivery),
+          "--delivery",
+          tracked ? "push" : "pull",
           ...(request === undefined ? [] : ["--request", request]),
+          ...(tracked ? ["--expires-in-ms", String(REVIEW_BALL_TTL_MS)] : []),
         ],
         "delivery",
       )
@@ -311,8 +316,8 @@ const CursorFileSchema = z
   .strict()
 const CursorStateSchema = CursorFileSchema.extend({
   // Durable opened-ledger: the EXACT request ball (id + recipient) recorded when each PR revision
-  // was rejected or put up for review. A terminal signal closes precisely these — immune to the
-  // actor/route drift that makes an id synthesized from current config miss the real ball. The
+  // was put up for review. The schema retains legacy rejection entries written before rejection
+  // became evidence-only, so terminal signals still close exactly those historical balls. The
   // optional top-level field reads the short-lived drifted format and is immediately migrated into
   // the v1 `sent` record, which older worktree readers already preserve and ignore.
   opened: z.array(OpenedBallSchema).default([]),
@@ -468,13 +473,9 @@ function closuresFor(signal: TerminalSignal, routes: SignalRoutes): readonly Sig
   return [...closures.values()]
 }
 
-function requestId(signal: RoutableSignal, recipient: string): string | undefined {
-  if (signal.kind === "pr/rejected" || signal.kind === "pr/needs-review") {
-    return requestIdForPR(signal.kind, signal.pr, signal.revision, recipient)
-  }
-  if (signal.kind === "run/failed") return `yrd:run/failed:${signal.run}:${recipient}`
-  // Integrated broadcasts and terminal-only closures are never tracked as request balls.
-  return undefined
+function trackedRequestId(signal: RoutableSignal, recipient: string): string | undefined {
+  if (signal.kind !== "pr/needs-review") return undefined
+  return requestIdForPR(signal.kind, signal.pr, signal.revision, recipient)
 }
 
 function requestIdForPR(
@@ -547,8 +548,9 @@ function coverageKey(pr: string, revision: number, kind: "pr/rejected" | "pr/nee
 }
 
 function recordOpened(state: CursorState, signal: RoutableSignal, recipient: string): CursorState {
-  if (signal.kind !== "pr/rejected" && signal.kind !== "pr/needs-review") return state
-  const requestId = requestIdForPR(signal.kind, signal.pr, signal.revision, recipient)
+  if (signal.kind !== "pr/needs-review") return state
+  const requestId = trackedRequestId(signal, recipient)
+  if (requestId === undefined) return state
   if (state.opened.some((ball) => ball.requestId === requestId && ball.recipient === recipient)) return state
   const ball: OpenedBall = { pr: signal.pr, revision: signal.revision, kind: signal.kind, recipient, requestId }
   return { ...state, opened: [...state.opened, ball] }
