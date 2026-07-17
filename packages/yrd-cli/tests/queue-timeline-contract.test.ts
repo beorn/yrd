@@ -413,17 +413,17 @@ describe("queue timeline 21106 contract", () => {
     try {
       await handle.waitForLayoutStable()
       // No running rows: the newest finished run R12 is the default.
-      expect(handle.text).toContain("PRs PR12")
+      expect(handle.text).toContain("PRs      PR12")
 
       // A manual move is sticky: the arriving newer run R13 must not steal
       // the cursor.
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs PR11")
+      expect(handle.text).toContain("PRs      PR11")
       handle.rerender(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs PR11")
-      expect(handle.text).not.toContain("PRs PR13")
+      expect(handle.text).toContain("PRs      PR11")
+      expect(handle.text).not.toContain("PRs      PR13")
     } finally {
       handle.unmount()
     }
@@ -433,7 +433,7 @@ describe("queue timeline 21106 contract", () => {
     const reopened = fresh(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
     try {
       await reopened.waitForLayoutStable()
-      expect(reopened.text).toContain("PRs PR13")
+      expect(reopened.text).toContain("PRs      PR13")
     } finally {
       reopened.unmount()
     }
@@ -456,9 +456,9 @@ describe("queue timeline 21106 contract", () => {
 
       // Default cursor is the batch lead; the shared Run detail (agent8's
       // step-tabs composition) names every member of the batch.
-      expect(handle.text).toContain("PRs PR42@r1")
+      expect(handle.text).toContain("PRs      PR42@r1")
       expect(handle.text).toContain("PR43@r1")
-      const members = rows.findIndex((row) => row.includes("PRs PR42@r1"))
+      const members = rows.findIndex((row) => row.includes("PRs      PR42@r1"))
       const lead = rows[members]?.indexOf("PR42") ?? -1
       const sibling = rows[members]?.indexOf("PR43") ?? -1
       expect(handle.cell(lead, members).bold).toBe(true)

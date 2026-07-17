@@ -26,6 +26,7 @@ import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
 import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
+import { loadYrdConfig } from "./config.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import {
   canonicalizeYrdCommandAliases,
@@ -2132,11 +2133,24 @@ export async function queueListSnapshot(
   })
   const outputs =
     includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(results, io.artifactRoot) : []
+  const commands = includeOutputs
+    ? Object.fromEntries(
+        Object.entries(
+          (
+            await loadYrdConfig({
+              repo: io.cwd ?? process.cwd(),
+              defaultBase: base,
+            })
+          ).config.definitions,
+        ).flatMap(([name, definition]) => (definition.run === undefined ? [] : [[name, definition.run] as const])),
+      )
+    : undefined
   return {
     results,
     now,
     projection,
     ...(outputs.length === 0 ? {} : { outputs }),
+    ...(commands === undefined || Object.keys(commands).length === 0 ? {} : { commands }),
   }
 }
 

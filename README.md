@@ -275,9 +275,12 @@ description, with a trailing `Issue: <ref>` reference appended when `--issue` is
 present. Explicit flags always win, and `pr edit` re-sets any of them on a live
 PR. Both are mutable delivery metadata (unlike the immutable issue join) and are
 carried forward unchanged across `pr recut` and `pr ready` revisions. The `pr
-list` SUBJECT column shows the title over the branch name, and `pr view` and the
-watch detail pane render the title, an OSC 8 issue hyperlink (when the reference
-is a URL or path), and the description block.
+list` SUBJECT column shows the title over the branch name. `pr view` and the
+watch detail pane render the title and description block; issue URLs, paths, and
+path-form ids render as OSC 8 links (path-form ids use km's internal-link URI).
+The watch detail keeps run identity/status at the top, then
+`ISSUE / PRs / TIMELINE / LANDING` facts, equal-width workflow-step tabs,
+inline step details, and the executed command immediately above its logs.
 
 `open --from` uses an existing branch; there is no `adopt` command. Direct
 branch submission does not provision a worktree:

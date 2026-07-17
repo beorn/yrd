@@ -14,11 +14,26 @@ import type { QueueArtifactOutput } from "../src/watch-pane.tsx"
 // run's step statuses moving underneath a still-mounted detail pane.
 const STEP_PR = fixturePr("PR100", "submitted", "2026-07-13T11:30:00.000Z", "Reconcile the live step")
 
-type StepState = Readonly<{ name: string; status: "requested" | "running" | "passed" }>
+type StepState = Readonly<{
+  name: string
+  status: "requested" | "running" | "passed" | "failed"
+  error?: Readonly<{ code: string; message: string }>
+  startedAt?: string
+  finishedAt?: string
+}>
 
 function stepTabsData(steps: readonly StepState[]): QueueShowData {
   const run = fixtureRun("R100", [STEP_PR], "running", "2026-07-13T11:40:00.000Z", {
-    steps: steps.map((step) => fixtureStep(step.name, fixtureJob(`J100-${step.name}`, step.status))),
+    steps: steps.map((step) =>
+      fixtureStep(
+        step.name,
+        fixtureJob(`J100-${step.name}`, step.status, {
+          ...(step.error === undefined ? {} : { error: step.error }),
+          ...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
+          ...(step.finishedAt === undefined ? {} : { finishedAt: step.finishedAt }),
+        }),
+      ),
+    ),
   })
   return queueShowData(run)
 }
@@ -83,6 +98,60 @@ function activeStepName(frame: string): string {
 }
 
 describe("queue step tabs same-run reconciliation (21106)", () => {
+  it("right-aligns durations within wide equal-width tabs", async () => {
+    const startedAt = "2026-07-13T11:30:00.000Z"
+    const frame = await renderOnce([
+      { name: "prepare", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:27.000Z" },
+      { name: "check", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:42.000Z" },
+      { name: "integrate", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:15.000Z" },
+    ])
+    const tabRow = frame.split("\n").find((row) => row.includes("prepare") && row.includes("integrate")) ?? ""
+    const prepareX = tabRow.indexOf("prepare")
+    const checkX = tabRow.indexOf("check", prepareX)
+    const integrateX = tabRow.indexOf("integrate", checkX)
+    const firstStride = checkX - prepareX
+    const secondStride = integrateX - checkX
+    expect(firstStride).toBeGreaterThanOrEqual(20)
+    expect(Math.abs(firstStride - secondStride)).toBeLessThanOrEqual(2)
+
+    const segment = tabRow.slice(prepareX)
+    const durations = [...segment.matchAll(/\b(?:27s|42s|15s)\b/gu)]
+    expect(durations.map((match) => match[0])).toEqual(["27s", "42s", "15s"])
+    const ends = durations.map((match) => (match.index ?? -1) + match[0].length)
+    expect(ends[0]).toBe((ends[1] ?? 0) - firstStride)
+    expect(ends[1]).toBe((ends[2] ?? 0) - secondStride)
+  })
+
+  it("keeps detailed failure text in the active pane content, never in the tab label", async () => {
+    const frame = await renderOnce([
+      {
+        name: "check",
+        status: "failed",
+        error: { code: "check-failed", message: "typecheck found three unsafe assignments" },
+      },
+      { name: "integrate", status: "requested" },
+    ])
+    const tabRow = frame.split("\n").find((row) => row.includes("check") && row.includes("integrate")) ?? ""
+    expect(tabRow).not.toContain("typecheck found three unsafe assignments")
+    expect(frame).toContain("typecheck found three unsafe assignments")
+  })
+
+  it("shows the run's recorded command instead of a newer config value", async () => {
+    const frame = await renderString(
+      h(QueueWorkflowStepTabs, {
+        data: stepTabsData([{ name: "check", status: "running" }]),
+        outputs: [],
+        commands: { check: "bun test:stale-config" },
+        compact: true,
+        active: false,
+        prs: [],
+      }),
+      { width: 100, height: 30, plain: true },
+    )
+    expect(frame).toContain("[ $ bun vitest run ]")
+    expect(frame).not.toContain("stale-config")
+  })
+
   it("follows the newly-active step when a running step passes underneath the pane", async () => {
     // First: check is running (auto-selected), integrate is still queued.
     const first: readonly StepState[] = [

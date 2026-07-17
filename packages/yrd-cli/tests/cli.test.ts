@@ -5662,8 +5662,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detailHuman.io)).toBe(0)
     expect(detailHuman.stdout()).toContain("RUN R1")
     expect(detailHuman.stdout()).not.toContain("RELATED RUNS")
-    // JOB uuid / RUNNER / candidate REV are demoted behind the dim `> DETAILS`
-    // disclosure (item f, 2026-07-16); the step body stays signal-only.
+    // JOB uuid / RUNNER / candidate REV share the one dim inline DETAILS row
+    // (item f, 2026-07-16); the step body stays signal-only.
     expect(detailHuman.stdout()).toContain("DETAILS")
     // This run records no artifacts or evidence: the RUN LOGS proof row is
     // omitted entirely under the present-facts rule (item e).
@@ -8533,7 +8533,7 @@ describe("PR metadata — title, description, and issue link", () => {
     expect(rendered).toContain("]8;;https://example.test/issues/9")
   })
 
-  it("keeps a plain-text issue reference unlinked when it is not a URL or path", async () => {
+  it("renders a path-form issue reference as a km-style internal link", async () => {
     const rendered = await renderString(
       createElement(QueueDetailPrFacts, {
         prs: [metadataPr({ issue: "@km/all/21091-plain", description: undefined })],
@@ -8541,11 +8541,24 @@ describe("PR metadata — title, description, and issue link", () => {
       { width: 120, height: 20 },
     )
     expect(rendered).toContain("@km/all/21091-plain")
-    expect(rendered).not.toContain("]8;;")
+    expect(rendered).toContain("]8;;km:@km/all/21091-plain")
   })
 })
 
 describe("watch viewer — frozen projection under a live clock (task #64)", () => {
+  it("projects configured step commands into human watch snapshots", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-watch-commands-"))
+    writeFileSync(join(repo, ".yrd.yml"), 'steps: [check, merge]\ncheck: "bun vitest run"\nmerge: {}\n')
+    const app = await createApp()
+    try {
+      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ cwd: repo }).io, true)
+      expect(snapshot.commands).toEqual({ check: "bun vitest run" })
+    } finally {
+      await app.close()
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
   it("queueListSnapshot tails out-of-process journal appends instead of serving the mount-time projection", async () => {
     // `queue watch` builds ONE long-lived app and reloads on a timer, while a
     // separate resident-runner process appends to the shared journal. The viewer

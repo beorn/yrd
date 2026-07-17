@@ -91,6 +91,8 @@ export type QueueWatchSnapshot = Readonly<{
   now: number
   projection?: QueueTimelineProjection
   outputs?: readonly QueueArtifactOutput[]
+  /** Resolved project commands for the live step headers. */
+  commands?: Readonly<Record<string, string>>
 }>
 
 export type QueueWatchPaneProps = Readonly<{
@@ -244,6 +246,7 @@ export function resolveStepLogExpanded(autoExpanded: boolean, userToggled: boole
 export function QueueWorkflowStepTabs({
   data,
   outputs,
+  commands,
   compact,
   active,
   highlightPr,
@@ -251,6 +254,7 @@ export function QueueWorkflowStepTabs({
 }: {
   data: QueueShowData
   outputs: readonly QueueArtifactOutput[]
+  commands?: Readonly<Record<string, string>>
   compact: boolean
   active: boolean
   highlightPr?: string
@@ -270,7 +274,7 @@ export function QueueWorkflowStepTabs({
   const [prsExpanded, setPrsExpanded] = useState(false)
   const activeStep = resolveStepTabSelection(names, liveStep, userSelectedStep)
 
-  // A single-PR run surfaces its TITLE + ISSUE directly under the title row
+  // A single-PR run surfaces its unlabelled title + linked ISSUE directly under the identity row
   // (item b, 2026-07-16); batched runs keep every member behind the PRS header.
   const singlePr = prs.length === 1 ? prs[0] : undefined
   const singlePrHeader = singlePr === undefined ? null : <QueueDetailSinglePrHeader pr={singlePr} />
@@ -300,14 +304,27 @@ export function QueueWorkflowStepTabs({
   // #undead re-report 2026-07-16): e.g. `✓ check 55s`. The glyph is colorized by
   // status; the name + duration inherit the Tab's own active/inactive highlight
   // so the selected step stays visible (the removed `ACTIVE STEP` row, item G).
+  const stepTabWidth = Math.max(
+    20,
+    ...names.map((name) => {
+      const rep = data.steps.filter((row) => row.step === name).at(-1)
+      const duration = rep?.duration === undefined || rep.duration === "-" ? "" : rep.duration
+      return 2 + name.length + (duration === "" ? 0 : duration.length + 1)
+    }),
+  )
   const stepTabLabel = (name: string) => {
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
     if (rep === undefined) return name
+    const duration = rep.duration === "-" ? "" : rep.duration
+    const left = ` ${name}`
+    const spacer = " ".repeat(Math.max(1, stepTabWidth - 1 - left.length - duration.length))
     return (
       <>
-        <Text color={taskStatusColor(rep.taskStatus)}>{rep.glyph}</Text> {name}
-        {rep.duration ? ` ${rep.duration}` : ""}
+        <Text color={taskStatusColor(rep.taskStatus)}>{rep.glyph}</Text>
+        {left}
+        {spacer}
+        {duration}
       </>
     )
   }
@@ -332,11 +349,21 @@ export function QueueWorkflowStepTabs({
           const stepRows = data.steps.filter((row) => row.step === name)
           const stepOutputs = outputs.filter((output) => output.step === name)
           const stepData: QueueShowData = { ...data, steps: stepRows }
+          // The job input is durable proof of what this run actually executed;
+          // current config is only a preview for a step that has no job yet.
+          const command = stepRows.at(-1)?.command ?? commands?.[name]
           const logExpanded = resolveStepLogExpanded(stepLogStartsExpanded(data, name), userToggledLogs[name])
           return (
             <TabPanel key={name} value={name}>
               {/* Only the step-level facts here (item H); the run-level facts
                   render once above the tabs. */}
+              {command === undefined ? null : (
+                <Box marginTop={1} flexShrink={0} minWidth={0}>
+                  <Text bold color="$fg" wrap="truncate">
+                    [ $ {command} ]
+                  </Text>
+                </Box>
+              )}
               <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} section="steps" />
               <Accordion
                 title="RUN LOGS"
@@ -585,6 +612,7 @@ export function QueueWatchFrame({
           key={detailData.run}
           data={detailData}
           outputs={detailOutputs}
+          {...(snapshot.commands === undefined ? {} : { commands: snapshot.commands })}
           prs={detailFullPrs}
           // Detail facts always stack vertically (user respec 2026-07-15):
           // label/value rows that fit the pane width, never a sprawling table.
@@ -609,9 +637,9 @@ export function QueueWatchFrame({
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
   // is headed by an emphasized identity title row (run + PR.rev + dimmed branch
-  // glyph) with the run's STATUS/OUTCOME right-aligned on it (items a/i), a
-  // blank row beneath it, then the body. One cell of horizontal padding keeps
-  // content off the pane edge; the title sits flush at the top.
+  // glyph) with STATUS/OUTCOME right-aligned and total time directly beneath
+  // it, then the body. One cell of horizontal padding keeps content off the
+  // pane edge; the title sits flush at the top.
   const framedTimeline = (
     // The QUEUE pane is its own selection scope (item 4a): a drag started here
     // resolves to this Box as the nearest `contain` boundary, so it never grows
@@ -634,14 +662,13 @@ export function QueueWatchFrame({
         {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
         {...(detailData === undefined ? {} : { data: detailData })}
       />
-      <Box height={1} flexShrink={0} />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {detail}
       </Box>
     </Box>
   )
   return (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0}>
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} userSelect="none">
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>

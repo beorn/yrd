@@ -70,15 +70,15 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("PRs PR42@r1"))
+      await waitFor(() => app.text.includes("PRs      PR42@r1"))
 
       const rowY = rowIndexOf(app.text, "PR4.1")
       const rowX = app.text.split("\n")[rowY]?.indexOf("PR4.1") ?? -1
       expect(rowY).toBeGreaterThan(0)
       expect(rowX).toBeGreaterThan(0)
       await app.click(rowX, rowY)
-      await waitFor(() => app.text.includes("PRs PR4@r1"))
-      expect(app.text).not.toContain("PRs PR42@r1")
+      await waitFor(() => app.text.includes("PRs      PR4@r1"))
+      expect(app.text).not.toContain("PRs      PR42@r1")
     } finally {
       app.unmount()
     }
@@ -90,7 +90,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const handle = await run(createElement(QueueWatchFrame, { snapshot }), term, { mouse: true, selection: false })
     try {
       // Default cursor is the first running row (PR42), so the detail opens on it.
-      await waitFor(() => term.screen.getText().includes("PRs PR42@r1"))
+      await waitFor(() => term.screen.getText().includes("PRs      PR42@r1"))
       const text = term.screen.getText()
       const row4Y = rowIndexOf(text, "PR4.1")
       const row4X = text.split("\n")[row4Y]?.indexOf("PR4.1") ?? -1
@@ -100,14 +100,14 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // Hover over PR4.1's row — the detail must STAY on PR42, not follow the pointer.
       await term.mouse.move(row4X, row4Y)
       await handle.waitForLayoutStable()
-      expect(term.screen.getText(), "hover must not switch the detail selection").toContain("PRs PR42@r1")
-      expect(term.screen.getText()).not.toContain("PRs PR4@r1")
+      expect(term.screen.getText(), "hover must not switch the detail selection").toContain("PRs      PR42@r1")
+      expect(term.screen.getText()).not.toContain("PRs      PR4@r1")
 
       // Click PR4.1's row — NOW the detail follows the click to PR4.
       await term.mouse.down(row4X, row4Y)
       await term.mouse.up(row4X, row4Y)
-      await waitFor(() => term.screen.getText().includes("PRs PR4@r1"))
-      expect(term.screen.getText()).not.toContain("PRs PR42@r1")
+      await waitFor(() => term.screen.getText().includes("PRs      PR4@r1"))
+      expect(term.screen.getText()).not.toContain("PRs      PR42@r1")
     } finally {
       handle.unmount()
     }
@@ -120,7 +120,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
     try {
       await app.waitForLayoutStable()
       // Default cursor is the first running row (PR42); its detail is open.
-      await waitFor(() => app.text.includes("PRs PR42@r1"))
+      await waitFor(() => app.text.includes("PRs      PR42@r1"))
       const rows = app.text.split("\n")
 
       // A non-cursor QUEUE list row (clock-prefixed, so we never match the
@@ -147,8 +147,8 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // ...it is the hover tint, NOT the selection background...
       expect(hoverBg, "hover affordance is distinct from selection").not.toEqual(selectionBg)
       // ...and hover never moves the cursor/detail (hover paints, click selects).
-      expect(app.text, "hover must not switch the detail selection").toContain("PRs PR42@r1")
-      expect(app.text).not.toContain("PRs PR4@r1")
+      expect(app.text, "hover must not switch the detail selection").toContain("PRs      PR42@r1")
+      expect(app.text).not.toContain("PRs      PR4@r1")
       expect(app.cell(cursorX, cursorY).bg, "cursor selection is unchanged by hover").toEqual(selectionBg)
 
       // Moving the pointer onto the cursor row clears the prior affordance
@@ -196,13 +196,13 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("PRs PR42@r1"))
+      await waitFor(() => app.text.includes("PRs      PR42@r1"))
       // The detail pane docks right; wheel well inside it.
       const detailX = 170
       const detailY = 20
       for (let index = 0; index < 8; index += 1) await app.wheel(detailX, detailY, 3)
       await app.waitForLayoutStable()
-      expect(app.text).toContain("PRs PR42@r1")
+      expect(app.text).toContain("PRs      PR42@r1")
     } finally {
       app.unmount()
     }
@@ -216,7 +216,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       selection: false,
     })
     try {
-      await waitFor(() => term.screen.getText().includes("PRs PR3@r1"))
+      await waitFor(() => term.screen.getText().includes("PRs      PR3@r1"))
       const initialDivider = findGlyphColumn(term, "│", 0)
       expect(initialDivider).toBeGreaterThan(0)
 
@@ -297,15 +297,15 @@ describe("QueueWatchFrame 21106 interaction", () => {
       await app.waitForLayoutStable()
       // The detail pane is identity-headed now (item a/M), so its presence is
       // marked by the run detail body (the `PRs` members row), not "DETAIL".
-      await waitFor(() => app.text.includes("PRs PR42@r1"))
+      await waitFor(() => app.text.includes("PRs      PR42@r1"))
 
       await app.press("Escape")
-      await waitFor(() => !app.text.includes("PRs PR42@r1"))
+      await waitFor(() => !app.text.includes("PRs      PR42@r1"))
       // Esc at top never quits; the list is still live.
       expect(app.text).toContain("QUEUE main")
 
       await app.press("Enter")
-      await waitFor(() => app.text.includes("PRs PR42@r1"))
+      await waitFor(() => app.text.includes("PRs      PR42@r1"))
     } finally {
       app.unmount()
     }

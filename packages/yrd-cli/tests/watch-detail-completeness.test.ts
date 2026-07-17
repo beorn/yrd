@@ -62,7 +62,7 @@ describe("watch detail completeness — run-level integration proof detail (item
     )
     try {
       expect(app.text).toContain("RUN R4 STATUS passed OUTCOME integrated")
-      expect(app.text).toContain("LANDING bbbbbbbbbbbb@aaaaaaaaaaaa REWRITES 1")
+      expect(app.text).toContain("LANDING  bbbbbbbbbbbb@aaaaaaaaaaaa REWRITES 1")
       expect(app.text).not.toMatch(NO_RAW_ISO)
     } finally {
       app.unmount()

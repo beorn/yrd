@@ -118,6 +118,19 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
       expect(sameScope(detailScope, queueScope), "QUEUE and DETAIL are different scopes").toBe(false)
       expect(queueScope.right, "QUEUE scope ends before DETAIL scope begins").toBeLessThan(detailScope.left)
 
+      // The reported regression starts in EMPTY space under RUN LOGS, not on
+      // a glyph. The DETAIL surface must therefore fill the pane all the way
+      // down: hit-testing a blank cell near its bottom still resolves to the
+      // same contain boundary as its visible body. If the detail only hugs its
+      // content, this point falls through to the screen root and a drag can
+      // incorrectly range over QUEUE rows.
+      const blankDetailPoint = [RIGHT_MIN + 24, 48] as const
+      const blankDetailScope = scopeAt(app, blankDetailPoint)
+      expect(
+        sameScope(blankDetailScope, detailScope),
+        "blank detail body stays inside the full-height DETAIL scope",
+      ).toBe(true)
+
       // The exceptional STATUS box and STATS box are each their own scope, nested inside the
       // QUEUE pane — a drag inside one never grows into the list or its sibling.
       const statusScope = scopeAt(app, pointOf(text, "HOLD THE LINE", 0, LEFT_MAX))

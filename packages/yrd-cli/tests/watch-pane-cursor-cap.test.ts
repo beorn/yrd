@@ -60,11 +60,11 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
 
       // The mandated default cursor is the first RUNNING row. Now that it
       // renders, detail resolves that running run (its RUN LOGS section and
-      // `PRs PRR` header) — the cursor names a rendered row. The detail rework
+      // `PRs      PRR` header) — the cursor names a rendered row. The detail rework
       // (W3) prints the run status inline rather than an "OUTCOME" label, so
       // anchor on the RUN LOGS accordion the detail body renders.
       expect(app.text, "detail resolves the running run's log section").toContain("RUN LOGS")
-      expect(app.text, "detail resolves the running run's PR").toContain("PRs PRR")
+      expect(app.text, "detail resolves the running run's PR").toContain("PRs      PRR")
     } finally {
       app.unmount()
     }

@@ -58,18 +58,18 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       // j/k move the QUEUE cursor (not the tabs); the detail follows the cursor.
       await app.press("j")
       await app.press("j")
-      await waitFor(() => app.text.includes("PRs PR7"))
+      await waitFor(() => app.text.includes("PRs      PR7"))
 
       await app.press("k")
       await app.press("k")
-      await waitFor(() => app.text.includes("PRs PR42"))
+      await waitFor(() => app.text.includes("PRs      PR42"))
 
       await app.press("ArrowDown")
       await app.press("ArrowDown")
-      await waitFor(() => app.text.includes("PRs PR7"))
+      await waitFor(() => app.text.includes("PRs      PR7"))
       await app.press("ArrowUp")
       await app.press("ArrowUp")
-      await waitFor(() => app.text.includes("PRs PR42"))
+      await waitFor(() => app.text.includes("PRs      PR42"))
     } finally {
       app.unmount()
     }
@@ -97,6 +97,15 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       const glyphCell = app.cell(checkX - 2, tabsY)
       const nameCell = app.cell(checkX, tabsY)
       expect(glyphCell.fg, "step glyph is status-colored, not the plain label fg").not.toEqual(nameCell.fg)
+
+      // Recovered 21514 IA: tabs are deliberately wide and equal rather than
+      // a compact run of content-sized pills.
+      const prepareX = tabsLine.indexOf("prepare")
+      const integrateX = tabsLine.indexOf("integrate", checkX)
+      const firstStride = checkX - prepareX
+      const secondStride = integrateX - checkX
+      expect(firstStride, "step tabs have a wide hit/read target").toBeGreaterThanOrEqual(20)
+      expect(Math.abs(firstStride - secondStride), "step tabs have equal widths").toBeLessThanOrEqual(2)
     } finally {
       app.unmount()
     }
@@ -121,9 +130,17 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       expect(runFactsY, "run facts present").toBeGreaterThanOrEqual(0)
       expect(tabsY, "step tabs below run facts").toBeGreaterThan(runFactsY)
       expect(stepContentY, "step content below the tabs").toBeGreaterThan(tabsY)
-      // J: the step internals (JOB/RUNNER/REV) live behind the `> DETAILS`
-      // disclosure (item f).
+      // J: the step internals (JOB/RUNNER/REV) live in one inline DETAILS row.
       expect(app.text).toContain("DETAILS")
+
+      // The command owns a boxed, bold header above logs. It is step content,
+      // never compressed into the tab label.
+      const commandY = rows.findIndex((line) => line.includes("[ $ bun vitest run ]"))
+      expect(commandY, "boxed command header present").toBeGreaterThan(tabsY)
+      expect(commandY, "command header sits above logs").toBeLessThan(stepContentY)
+      const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
+      expect(app.cell(commandX, commandY).bold).toBe(true)
+      expect(app.cell(commandX, commandY).fg).not.toBeNull()
     } finally {
       app.unmount()
     }

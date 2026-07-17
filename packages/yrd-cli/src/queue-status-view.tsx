@@ -15,7 +15,6 @@ import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
 import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
 import {
-  Accordion,
   Box,
   Link,
   ListView,
@@ -462,6 +461,7 @@ type QueueShowRow = Readonly<{
   finished: string
   duration: string
   durationMs?: number
+  command?: string
   errorCode: string
   error: string
   lost: string
@@ -1229,6 +1229,23 @@ function stepDetail(step: QueueStep): string {
   return "-"
 }
 
+function commandText(command: unknown): string | undefined {
+  if (typeof command === "string") return presentFact(command)
+  if (Array.isArray(command) && command.every((part): part is string => typeof part === "string")) {
+    if (command.length === 3 && command[0] === "sh" && command[1] === "-c") return presentFact(command[2])
+    return presentFact(command.join(" "))
+  }
+  return undefined
+}
+
+function stepCommand(step: QueueStep): string | undefined {
+  const output = step.job !== undefined && "output" in step.job ? step.job.output : undefined
+  const recorded = isObjectValue(output) ? commandText(output.command) : undefined
+  if (recorded !== undefined) return recorded
+  const input = step.job?.input
+  return isObjectValue(input) ? commandText(input.command) : undefined
+}
+
 function stepDuration(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
@@ -1277,16 +1294,17 @@ function CellLink({ href, children }: { href: string; children: string }) {
   )
 }
 
-/** An OSC 8 target for an issue reference that is a URL or a filesystem path.
- * Plain tracker ids (`@km/...`, `#123`, `owner/repo#5`) stay unlinked text. */
+/** An OSC 8 target for an issue reference. Path-form ids use km's canonical
+ * internal URI shape; URLs and filesystem paths retain their native targets. */
 function issueHref(issue: string): string | undefined {
   if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(issue)) return issue
   if (/^(?:\/|\.\.?\/)/u.test(issue)) return pathToFileURL(resolve(issue)).href
+  if (/^@[^/\s]+(?:\/[^/\s]+)+$/u.test(issue)) return `km:${issue}`
   return undefined
 }
 
-/** An issue reference rendered as an OSC 8 hyperlink when it resolves to a URL
- * or path, and as plain text otherwise. */
+/** An issue reference rendered as an OSC 8 hyperlink whenever it has a
+ * meaningful native or km-internal target. */
 function IssueValue({ issue }: { issue: string }) {
   const href = issueHref(issue)
   return href === undefined ? <>{issue}</> : <CellLink href={href}>{issue}</CellLink>
@@ -2807,17 +2825,23 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
     )
   }
   const outcome = detailStatusOutcome(data)
+  const total = presentFact(data?.totalDuration) ?? (row.totalMs === null ? undefined : preciseDuration(row.totalMs))
   return (
-    <Box flexDirection="row" justifyContent="space-between" minWidth={0}>
-      <Text bold color="$fg-warning" wrap="truncate" minWidth={0}>
-        {timelineRunCell(row, false).text} {row.pr}.{row.revision} <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text>{" "}
-        {row.branch}
-      </Text>
-      {outcome === undefined ? null : (
-        <Text bold color={outcome.color} flexShrink={0}>
-          {outcome.text}
+    <Box flexDirection="column" width="100%" minWidth={0} flexShrink={0}>
+      <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0}>
+        <Text bold color="$fg-warning" wrap="truncate" minWidth={0}>
+          {timelineRunCell(row, false).text} {row.pr}.{row.revision}{" "}
+          <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {row.branch}
         </Text>
-      )}
+        {outcome === undefined ? null : (
+          <Text bold color={outcome.color} flexShrink={0}>
+            {outcome.text}
+          </Text>
+        )}
+      </Box>
+      <Box width="100%" height={1} flexDirection="row" justifyContent="flex-end" flexShrink={0}>
+        {total === undefined ? null : <Text color="$fg-muted">{total}</Text>}
+      </Box>
     </Box>
   )
 }
@@ -2835,7 +2859,8 @@ function detailStatusOutcome(data?: QueueShowData): Readonly<{ text: string; col
     status !== undefined && outcome !== undefined && status !== outcome
       ? `${status}, ${outcome}`
       : (outcome ?? status ?? "")
-  return { text, color: taskStatusColor(data.taskStatus) }
+  const marker = presentFact(data.glyph)
+  return { text: marker === undefined ? text : `${marker} ${text}`, color: taskStatusColor(data.taskStatus) }
 }
 
 // Preserve the leading semantic unit instead of clipping an arbitrary suffix.
@@ -4039,6 +4064,7 @@ function correlationField(pr: QueueRun["prs"][number] | PR | undefined): Readonl
 function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
+  const command = stepCommand(step)
   const taskStatus = stepTaskStatusOf(step)
   const stepDurationMs =
     step.job === undefined || !("startedAt" in step.job) || !("finishedAt" in step.job)
@@ -4062,6 +4088,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
         : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
     duration: step.job === undefined ? "-" : stepDuration(step),
     ...(stepDurationMs === undefined ? {} : { durationMs: stepDurationMs }),
+    ...(command === undefined ? {} : { command }),
     errorCode: stepErrorCode(step),
     error: stepError(step),
     lost: stepLost(step),
@@ -4377,7 +4404,8 @@ function prCommentLine(comment: PR["comments"][number]): string {
 }
 
 /**
- * A single-PR run's TITLE + ISSUE, surfaced directly under the DETAIL title row
+ * A single-PR run's unlabelled title + linked ISSUE, surfaced directly under
+ * the DETAIL identity row
  * so they read without expanding the PRS disclosure (item b, 2026-07-16). The
  * fuller DESCRIPTION / review history stays in the disclosure. Empty fields
  * omit (pre-r5 PRs carry neither — no placeholders). Batched runs keep every
@@ -4390,13 +4418,17 @@ export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
   return (
     <Box flexDirection="column" minWidth={0}>
       {title === undefined ? null : (
-        <Text wrap="truncate" bgConflict="ignore">
-          TITLE {title}
-        </Text>
+        <>
+          <Text bold wrap="truncate" bgConflict="ignore">
+            {title}
+          </Text>
+          <Box height={1} flexShrink={0} />
+        </>
       )}
       {issue === undefined ? null : (
         <Text wrap="truncate">
-          ISSUE <IssueValue issue={issue} />
+          {"ISSUE".padEnd(9, " ")}
+          <IssueValue issue={issue} />
         </Text>
       )}
     </Box>
@@ -4475,10 +4507,9 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
 }
 
 /**
- * The one compact timing row (item c, 2026-07-16): `<start> → <end> · <total>
- * (wait <wait>) · landed <sha>`. The wait segment renders only when the queue
- * wait was non-zero; the landed sha only when the run integrated. Replaces the
- * separate START/END, TOTAL/ACTIVE/WAIT, and per-step clock rows.
+ * The one compact TIMELINE value: `<start> → <end> · <total> (wait <wait>)`.
+ * LANDING owns the integration proof on its separate key/value row, so the SHA
+ * is never duplicated here.
  */
 function queueRunTimingRow(data: QueueShowData): string | undefined {
   const startClock = presentFact(data.started) === undefined ? undefined : detailClock(data.started)
@@ -4486,12 +4517,10 @@ function queueRunTimingRow(data: QueueShowData): string | undefined {
   const total = presentFact(data.totalDuration)
   const waitShown =
     data.waitDurationMs !== undefined && data.waitDurationMs > 0 ? presentFact(data.waitDuration) : undefined
-  const landed = data.integration === undefined ? undefined : data.integration.commit.slice(0, 12)
   const clockSeg =
     startClock === undefined ? undefined : endClock === undefined ? startClock : `${startClock} → ${endClock}`
   const durSeg = total === undefined ? undefined : waitShown === undefined ? total : `${total} (wait ${waitShown})`
-  const landedSeg = landed === undefined ? undefined : `landed ${landed}`
-  const segments = [clockSeg, durSeg, landedSeg].filter((value): value is string => value !== undefined)
+  const segments = [clockSeg, durSeg].filter((value): value is string => value !== undefined)
   return segments.length === 0 ? undefined : segments.join(" · ")
 }
 
@@ -4505,9 +4534,9 @@ function queueShowNeedsNext(data: QueueShowData): boolean {
 }
 
 /**
- * The per-step internals (item f, 2026-07-16): JOB uuid, RUNNER, and the
- * candidate REV, demoted behind a dim `> DETAILS` disclosure so the default
- * step view stays signal-only. Renders nothing when the step carries none.
+ * The per-step internals are one aligned DETAILS key/value row. They stay
+ * visible (the user explicitly removed the disclosure), and each fact appears
+ * exactly once.
  */
 function QueueStepInternals({ row }: { row: QueueShowRow }) {
   const revision = presentFact(row.revision)
@@ -4518,13 +4547,10 @@ function QueueStepInternals({ row }: { row: QueueShowRow }) {
   ].filter(([, value]) => value !== undefined)
   if (facts.length === 0) return null
   return (
-    <Accordion title="DETAILS" defaultExpanded={false} color="$fg-muted" minWidth={0}>
-      {facts.map(([label, value]) => (
-        <Text key={label} wrap="truncate">
-          {label} {value}
-        </Text>
-      ))}
-    </Accordion>
+    <Text wrap="truncate" color="$fg-muted">
+      {"DETAILS".padEnd(9, " ")}
+      {facts.map(([label, value]) => `${label} ${value}`).join(" · ")}
+    </Text>
   )
 }
 
@@ -4583,10 +4609,16 @@ function CompactQueueShowView({
             </Text>
           )}
           <Text wrap="truncate">
-            PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} />
-            {data.retries > 1 ? ` RETRY ${data.retries}` : ""}
+            {"PRs".padEnd(9, " ")}
+            <QueueShowMembersValue data={data} highlightPr={highlightPr} />
           </Text>
-          {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
+          {data.retries > 1 ? <Text wrap="truncate">RETRY {data.retries}</Text> : null}
+          {timing === undefined ? null : (
+            <Text wrap="truncate">
+              {"TIMELINE".padEnd(9, " ")}
+              {timing}
+            </Text>
+          )}
           {parent === undefined && isolation === undefined ? null : (
             <Text wrap="truncate" color="$fg-muted">
               {parent === undefined ? "" : `PARENT ${parent}`}
@@ -4614,17 +4646,20 @@ function CompactQueueShowView({
               <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column" minWidth={0}>
                 {error === undefined ? null : (
                   <Text wrap="truncate" color="$fg-error" bgConflict="ignore">
-                    ERROR {error}
+                    {"ERROR".padEnd(9, " ")}
+                    {error}
                   </Text>
                 )}
                 {detail === undefined ? null : (
                   <Text wrap="truncate" color="$fg-muted" bgConflict="ignore">
-                    DETAIL {detail}
+                    {"DETAIL".padEnd(9, " ")}
+                    {detail}
                   </Text>
                 )}
                 {lost === undefined ? null : (
                   <Text wrap="truncate" color="$fg-warning" bgConflict="ignore">
-                    LOST {lost}
+                    {"LOST".padEnd(9, " ")}
+                    {lost}
                   </Text>
                 )}
                 <QueueStepInternals row={row} />
@@ -4650,7 +4685,8 @@ function CompactQueueShowView({
         <>
           {presentFact(data.landing) === undefined ? null : (
             <Text wrap="truncate">
-              LANDING <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
+              {"LANDING".padEnd(9, " ")}
+              <Text color="$fg-muted">{queueLandingLabel(data.landing)}</Text>
               {/* The integration proof beyond the landed SHA (item e). */}
               {proofDetail === undefined ? "" : ` ${proofDetail}`}
             </Text>
