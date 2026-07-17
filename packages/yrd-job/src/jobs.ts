@@ -470,7 +470,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             heartbeatMs,
             async (renew) => {
               const active = current(id)
-              if (!Job.owns(active, attempt, parsed.runner, "running")) {
+              if (active.status !== "running" || !Job.owns(active, attempt, parsed.runner, "running")) {
                 throw new Error(`yrd: job '${id}' lost execution ownership`)
               }
               if (!renew) {

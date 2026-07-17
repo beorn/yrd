@@ -28,6 +28,7 @@ import {
   TogglePill,
   TogglePillGroup,
   type TableColumn,
+  type TextProps,
 } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
