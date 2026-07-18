@@ -98,9 +98,18 @@ type OutcomeProps = Readonly<{
   prs?: readonly PRProps[]
 }>
 
+/** The system-local wall-clock cell shared by queue watch and runner logs. */
+export function formatLocalClock(when: Date, includeDate = false): string {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
+  if (!includeDate) return clock
+  const day = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
+  return `${day}T${clock}`
+}
+
 /** `HH:MM:SS` from an epoch-ms event time — loggily's own console time cell. */
 function eventTime(time: number): string {
-  return new Date(time).toISOString().split("T")[1]?.split(".")[0] ?? ""
+  return formatLocalClock(new Date(time))
 }
 
 /** The loggily console level word, colored as loggily colors it. */

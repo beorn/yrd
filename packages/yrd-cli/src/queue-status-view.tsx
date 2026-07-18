@@ -30,7 +30,7 @@ import {
   type TextProps,
 } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
-import { TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
+import { formatLocalClock, TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
 import {
   formatDuration,
   PRStatusView,
@@ -964,12 +964,8 @@ function queueLogClock(timestamp: string, compact: boolean, includeDate: boolean
   // Operators read the queue in their own wall-clock time, so render the
   // system-local timezone rather than UTC. The include-date decision upstream
   // stays calendar-day-in-UTC; only the displayed value is localized.
-  const pad = (value: number) => String(value).padStart(2, "0")
-  const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
-  if (includeDate) {
-    const day = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
-    return `${day}T${clock}`
-  }
+  const clock = formatLocalClock(when, includeDate)
+  if (includeDate) return clock
   return compact ? clock.slice(0, 5) : clock
 }
 
@@ -3612,8 +3608,8 @@ export function queueTimelineDisplayRows(
       group.push(candidate)
       next += 1
     }
-    const last = group.at(-1)
-    if (group.length === 1 || first.timestamp === null || last === undefined || last.timestamp === null) {
+    const last = group.at(-1) ?? first
+    if (group.length === 1 || first.timestamp === null || last.timestamp === null) {
       display.push(...group)
       index = next
       continue
@@ -3675,8 +3671,9 @@ export function queueTimelineDateSeparatorLabel(
   previous: QueueTimelineProjectedRow | undefined,
   current: QueueTimelineProjectedRow,
 ): string | null {
-  if (previous === undefined || previous.timestamp === null || current.timestamp === null) return null
-  const previousDay = timelineLocalCalendarDay(previous.timestamp)
+  const previousTimestamp = previous?.timestamp
+  if (previousTimestamp === undefined || previousTimestamp === null || current.timestamp === null) return null
+  const previousDay = timelineLocalCalendarDay(previousTimestamp)
   const currentDay = timelineLocalCalendarDay(current.timestamp)
   return previousDay === currentDay ? null : currentDay
 }

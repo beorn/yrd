@@ -3,7 +3,7 @@
  * @level l2
  * @consumer @yrd/cli resident follow-runner operators
  */
-import { describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { Event } from "loggily"
 import { formatResidentLogLine } from "../src/runner-timeline.ts"
 
@@ -12,6 +12,16 @@ const AT = Date.parse("2026-07-16T18:40:23.000Z")
 
 // The session-constant identity the resident binds ONCE at its logger scope.
 const RUNNER_SCOPE = { runner: "yrd-cli:42", host: "unimac", pane: "wC:p7" }
+
+let priorTZ: string | undefined
+beforeAll(() => {
+  priorTZ = process.env.TZ
+  process.env.TZ = "UTC"
+})
+afterAll(() => {
+  if (priorTZ === undefined) delete process.env.TZ
+  else process.env.TZ = priorTZ
+})
 
 function log(namespace: string, level: string, message: string, props: Record<string, unknown>): Event {
   return { kind: "log", namespace, level, message, time: AT, props } as unknown as Event
@@ -43,6 +53,16 @@ describe("resident runner step-row grammar", () => {
     expect(grammar(plain)).toBe("18:40:23 INFO yrd:queue:run [main#324 1:check] done 34s · PR411.2 topic/six")
     // Exactly one row.
     expect(plain?.split("\n").filter(Boolean)).toHaveLength(1)
+  })
+
+  it("renders the same system-local clock as queue watch", () => {
+    process.env.TZ = "Asia/Kolkata"
+    try {
+      const plain = formatResidentLogLine(stepPassed, { color: false })
+      expect(grammar(plain)).toBe("00:10:23 INFO yrd:queue:run [main#324 1:check] done 34s · PR411.2 topic/six")
+    } finally {
+      process.env.TZ = "UTC"
+    }
   })
 
   it("presents the step under the single run scope, never a per-run child namespace", () => {
@@ -89,7 +109,9 @@ describe("resident runner step-row grammar", () => {
 
   it("reports a failing step as ONE ERROR row with the canonical err slug", () => {
     const plain = formatResidentLogLine(stepFailed, { color: false })
-    expect(grammar(plain)).toBe("18:40:23 ERROR yrd:queue:run [main#324 2:merge] failed 3.4s err=merge-conflict · PR411.2 topic/six")
+    expect(grammar(plain)).toBe(
+      "18:40:23 ERROR yrd:queue:run [main#324 2:merge] failed 3.4s err=merge-conflict · PR411.2 topic/six",
+    )
     const colored = formatResidentLogLine(stepFailed, { color: true })
     expect(colored).toContain("\x1b[31mERROR") // red level
     expect(colored).toContain("\x1b[31mfailed") // red verb
