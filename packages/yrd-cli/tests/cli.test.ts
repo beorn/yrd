@@ -4063,10 +4063,10 @@ describe("runYrd", () => {
       // Markers are semantic-foreground only — the canonical km/ag glyphs,
       // never a colored STATUS background band.
       for (const [glyph, anchor] of [
-        ["○", "PR6.1"],
-        ["●", "PR5.1"],
-        ["-", "PR7.1"],
-        ["×", "PR3.1"],
+        ["▢", "PR6.1"],
+        ["▢", "PR5.1"],
+        ["−", "PR7.1"],
+        ["⧗", "PR3.1"],
         ["✓", "PR2.1"],
       ] as const) {
         const row = styled.lines.findIndex((row) => row.includes(anchor))

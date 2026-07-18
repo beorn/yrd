@@ -16,6 +16,11 @@ const TASK_STATUS_GLYPHS = {
   dropped: "−",
 } as const satisfies Record<TaskStatus, string>
 
+const TASK_FOLD_GLYPHS = {
+  collapsed: "▸",
+  expanded: "•",
+} as const
+
 export type StatusGlyph = (typeof TASK_STATUS_GLYPHS)[TaskStatus]
 
 export type TaskStatusFields = Readonly<{
@@ -25,6 +30,11 @@ export type TaskStatusFields = Readonly<{
 
 export function taskStatusGlyph(taskStatus: TaskStatus): StatusGlyph {
   return TASK_STATUS_GLYPHS[taskStatus]
+}
+
+/** Exact width-one km tree disclosure vocabulary. */
+export function taskFoldGlyph(expanded: boolean): (typeof TASK_FOLD_GLYPHS)[keyof typeof TASK_FOLD_GLYPHS] {
+  return expanded ? TASK_FOLD_GLYPHS.expanded : TASK_FOLD_GLYPHS.collapsed
 }
 
 export function taskStatusFields(taskStatus: TaskStatus): TaskStatusFields {

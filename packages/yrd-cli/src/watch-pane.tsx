@@ -25,6 +25,7 @@ import {
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
+  queueTimelineDisplayRows,
   queueTimelineFilterBuckets,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
@@ -35,6 +36,7 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
+import { taskFoldGlyph } from "./task-status.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
 
 const LIST_NATURAL_WIDTH = 80
@@ -260,7 +262,7 @@ function QueueDisclosure({
   return (
     <Box flexDirection="column" {...rest}>
       <Box flexDirection="row" gap={1} mouseCursor="pointer" onMouseDown={() => onToggle(!expanded)}>
-        <Text>{expanded ? "•" : "▸"}</Text>
+        <Text>{taskFoldGlyph(expanded)}</Text>
         <Text>{title}</Text>
       </Box>
       {expanded ? <Box flexDirection="column">{children}</Box> : null}
@@ -445,6 +447,7 @@ export function QueueWatchFrame({
       ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)
       : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
   )
+  const [expandedStorms, setExpandedStorms] = useState<ReadonlySet<string>>(() => new Set())
   const toggleBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets((current) => {
       const next = new Set(current)
@@ -456,13 +459,35 @@ export function QueueWatchFrame({
   // The interactive pane renders fill-height (below), so the cursor set is the
   // uncapped fill set — the ListView shows every retained row and virtualizes.
   // Cursor indices index THIS array, so it must match the ListView's items.
-  const projectedRows = useMemo(
+  const visibleProjectedRows = useMemo(
     () =>
       snapshot.projection === undefined
         ? undefined
         : queueTimelineVisibleRows(snapshot.projection, visibleBuckets, true),
     [snapshot.projection, visibleBuckets],
   )
+  const projectedRows = useMemo(
+    () =>
+      visibleProjectedRows === undefined ? undefined : queueTimelineDisplayRows(visibleProjectedRows, expandedStorms),
+    [expandedStorms, visibleProjectedRows],
+  )
+  const visibleStormKeys = useMemo(
+    () =>
+      new Set(
+        visibleProjectedRows === undefined
+          ? []
+          : queueTimelineDisplayRows(visibleProjectedRows).flatMap((row) =>
+              row.repeat === undefined ? [] : [row.repeat.key],
+            ),
+      ),
+    [visibleProjectedRows],
+  )
+  useEffect(() => {
+    setExpandedStorms((current) => {
+      const retained = new Set([...current].filter((key) => visibleStormKeys.has(key)))
+      return retained.size === current.size ? current : retained
+    })
+  }, [visibleStormKeys])
   const rows = useMemo(
     () =>
       snapshot.projection === undefined
@@ -574,6 +599,18 @@ export function QueueWatchFrame({
     setNewRows(0)
   }
 
+  const activateRow = (index: number): void => {
+    selectRow(index)
+    const repeat = projectedRows?.[index]?.repeat
+    if (repeat === undefined) return
+    setExpandedStorms((current) => {
+      const next = new Set(current)
+      if (repeat.collapsed) next.add(repeat.key)
+      else next.delete(repeat.key)
+      return next
+    })
+  }
+
   // Jump-to-newest (item 4-new): the `↓ N new` cue resumes default-follow at
   // the newest row (first running, else newest finished) and clears the count.
   // It reuses the exact `defaultCursorKey` the un-pinned pane already follows,
@@ -615,7 +652,7 @@ export function QueueWatchFrame({
         nav
         cursorKey={cursor}
         onCursor={selectRow}
-        onSelect={selectRow}
+        onSelect={activateRow}
       />
     ) : (
       <QueueTimelineView
@@ -624,10 +661,11 @@ export function QueueWatchFrame({
         nav
         cursorKey={cursor}
         onCursor={selectRow}
-        onSelect={selectRow}
+        onSelect={activateRow}
         paneChrome
         fillHeight
         visibleBuckets={visibleBuckets}
+        expandedStorms={expandedStorms}
         onToggleBucket={toggleBucket}
         freshRows={newRows}
         onJumpToNewest={jumpToNewest}

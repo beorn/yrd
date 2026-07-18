@@ -117,6 +117,16 @@ export type QueueTimelineProjectedRow = Readonly<{
   queueWaitMs: number | null
 }>
 
+export type QueueTimelineRepeat = Readonly<{
+  key: string
+  count: number
+  firstTimestamp: string
+  lastTimestamp: string
+  collapsed: boolean
+}>
+
+export type QueueTimelineDisplayRow = QueueTimelineProjectedRow & Readonly<{ repeat?: QueueTimelineRepeat }>
+
 export type QueueTimelineRunner = Readonly<{
   pid: number
   startedAt: string
@@ -1361,9 +1371,9 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
 const QUEUE_ROW_LIMIT = 5
 const RECENT_ROW_LIMIT = 3
 
-// Canonical km/ag marker vocabulary: working disc, hollow pending, red
-// failure cross, muted completion check. Never ASCII slash spinners or
-// background fills; color is applied by the renderer, foreground-only.
+// Canonical km task marker vocabulary: warning ballot for pending/running,
+// hourglass for blocked, muted minus for dropped, completion check for done.
+// Never ASCII slash spinners or background fills; color is foreground-only.
 // The status → glyph map lives in runner-timeline.ts (pure, no silvery) so the
 // headless resident runner shares this exact vocabulary.
 const statusGlyph = timelineStatusGlyph
@@ -2808,6 +2818,10 @@ function timelineRunCell(row: QueueTimelineProjectedRow, compact: boolean): Time
   return { text: compact ? `#${match[1]}` : `${row.base}#${match[1]}` }
 }
 
+function timelineBranchLabel(branch: string): string {
+  return branch.replace(/^task\//u, "")
+}
+
 /**
  * The DETAIL pane's flush-top identity title for a selected row (items a/i,
  * 2026-07-16): the run identity emphasized like the QUEUE tab (`$fg-warning`
@@ -2831,7 +2845,7 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
       <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0}>
         <Text bold color="$fg-warning" wrap="truncate" minWidth={0}>
           {timelineRunCell(row, false).text} {row.pr}.{row.revision}{" "}
-          <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {row.branch}
+          <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {timelineBranchLabel(row.branch)}
         </Text>
         {outcome === undefined ? null : (
           <Text bold color={outcome.color} flexShrink={0}>
@@ -2931,6 +2945,12 @@ function timelineClockCell(row: QueueTimelineProjectedRow, layout: TimelineCellL
   return row.timestamp === null ? "-" : queueLogClock(row.timestamp, false, layout.includeDate)
 }
 
+function timelineRepeatLabel(repeat: QueueTimelineRepeat): string {
+  const first = queueLogClock(repeat.firstTimestamp, false, false).slice(0, 5)
+  const last = queueLogClock(repeat.lastTimestamp, false, false).slice(0, 5)
+  return `×${repeat.count} · ${first}–${last}`
+}
+
 function timelineByCell(row: QueueTimelineProjectedRow): string {
   return row.submitter ?? "-"
 }
@@ -2972,7 +2992,7 @@ export function queueTimelineDefaultCursorId(
   return (finished ?? rows[0])?.id
 }
 
-// The working disc pulses only in the live pane; the one-shot projection has
+// The working task glyph pulses only in the live pane; the one-shot projection has
 // no app scope (and a static print cannot pulse), so it renders the same
 // glyph statically — byte-identical plain output either way.
 /**
@@ -2985,40 +3005,55 @@ export function queueTimelineDefaultCursorId(
  */
 const AG_PULSE_INTERVAL_MS = 900
 
-/** The universal "executing right now" pulse: blue against muted, shared phase
- * (item 12). Static blue is never used for activity — if it is blue because
- * something is in progress, it pulses. */
+/** The default "executing right now" pulse: blue against muted, shared phase
+ * (item 12). Callers may supply another semantic pair — the km WIP marker uses
+ * warning against muted while the queue activity word remains blue. */
 const ACTIVITY_PULSE_COLORS: readonly [string, string] = ["$fg-info", "$fg-muted"]
+const TASK_ACTIVITY_PULSE_COLORS: readonly [string, string] = [taskStatusColor("wip"), "$fg-muted"]
 
 /**
- * A synchronized blue activity pulse for any "in progress right now" content
- * (items 12/13): the running row's status glyph + word, the active step's glyph
- * + label. Pulses on the shared phase when `live`; static blue otherwise. It
- * KEEPS the activity blue even under row selection (item 13) — `forceFg` is only
- * applied to non-activity content by the caller, never routed here.
+ * A synchronized semantic activity pulse for "in progress right now" content
+ * (items 12/13). It pulses the caller's color pair when `live` and keeps that
+ * pair under row selection; `forceFg` applies only to non-activity content.
  */
 function ActivityPulse({
   live,
+  colors = ACTIVITY_PULSE_COLORS,
   children,
   ...rest
-}: { live: boolean; children: React.ReactNode } & Omit<TextProps, "color" | "children">) {
+}: {
+  live: boolean
+  colors?: readonly [string, string]
+  children: React.ReactNode
+} & Omit<TextProps, "color" | "children">) {
   if (live) {
     return (
-      <Pulse synchronized colors={ACTIVITY_PULSE_COLORS} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
+      <Pulse synchronized colors={colors} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
         {children}
       </Pulse>
     )
   }
   return (
-    <Text color={ACTIVITY_PULSE_COLORS[0]} {...rest}>
+    <Text color={colors[0]} {...rest}>
       {children}
     </Text>
   )
 }
 
 function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
-  if (row.status === "running") return <ActivityPulse live={live}>{row.glyph}</ActivityPulse>
-  return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
+  const taskStatus = runTaskStatusOf({ status: row.status })
+  if (row.status === "running") {
+    return (
+      <ActivityPulse live={live} colors={TASK_ACTIVITY_PULSE_COLORS} bold>
+        {row.glyph}
+      </ActivityPulse>
+    )
+  }
+  return (
+    <Text color={taskStatusColor(taskStatus)} bold={taskStatus === "wip"}>
+      {row.glyph}
+    </Text>
+  )
 }
 
 /**
@@ -3134,7 +3169,7 @@ function TimelineProjectedRow({
   layout,
   live,
 }: {
-  row: QueueTimelineProjectedRow
+  row: QueueTimelineDisplayRow
   cursor: boolean
   hovered: boolean
   layout: TimelineCellLayout
@@ -3165,8 +3200,8 @@ function TimelineProjectedRow({
       status={
         <>
           <Box width={1} flexShrink={0}>
-            {/* A running row's glyph keeps its blue pulse even under selection
-                (items 12/13); other statuses take the selection fg. */}
+            {/* A running row's glyph keeps its km warning pulse even under
+                selection; other statuses take the selection fg. */}
             {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
           </Box>
           <Box paddingLeft={1} minWidth={0} overflow="hidden">
@@ -3200,13 +3235,18 @@ function TimelineProjectedRow({
           <Text bold color={forcedFg} flexShrink={0}>
             {row.pr}.{row.revision}
           </Text>
+          {row.repeat?.collapsed === true ? (
+            <Text color={forcedFg ?? "$fg-warning"} flexShrink={0}>
+              {` ${timelineRepeatLabel(row.repeat)}`}
+            </Text>
+          ) : null}
           <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
             <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
               {BRANCH_ICON}
             </Text>
             <Text color={forcedFg} wrap="truncate" minWidth={0}>
               {" "}
-              {row.branch}
+              {timelineBranchLabel(row.branch)}
             </Text>
             {step.text === "" ? null : (
               <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
@@ -3537,6 +3577,66 @@ export function queueTimelineVisibleRows(
   return rows.filter((row) => visibleBuckets.has(queueTimelineStatusBucket(row.status)))
 }
 
+function timelineOutcomeKey(row: QueueTimelineProjectedRow): string {
+  return JSON.stringify([row.base, row.pr, row.revision, row.headSha, row.status, row.failure?.code ?? ""])
+}
+
+function sameTimelineOutcome(left: QueueTimelineProjectedRow, right: QueueTimelineProjectedRow): boolean {
+  return (
+    left.group === "completed" && right.group === "completed" && timelineOutcomeKey(left) === timelineOutcomeKey(right)
+  )
+}
+
+function timelineRepeatKey(row: QueueTimelineProjectedRow, boundaryId: string): string {
+  return JSON.stringify([timelineOutcomeKey(row), boundaryId])
+}
+
+/**
+ * Fold consecutive retries of the same immutable PR revision and terminal
+ * outcome for display only. The projection stays lossless for metrics, JSON,
+ * detail lookup, and expansion; an expanded group returns every source row.
+ */
+export function queueTimelineDisplayRows(
+  rows: readonly QueueTimelineProjectedRow[],
+  expanded: ReadonlySet<string> = new Set(),
+): readonly QueueTimelineDisplayRow[] {
+  const display: QueueTimelineDisplayRow[] = []
+  for (let index = 0; index < rows.length; ) {
+    const first = rows[index]
+    if (first === undefined) break
+    const group = [first]
+    let next = index + 1
+    while (next < rows.length) {
+      const candidate = rows[next]
+      if (candidate === undefined || !sameTimelineOutcome(first, candidate)) break
+      group.push(candidate)
+      next += 1
+    }
+    const last = group.at(-1)
+    if (group.length === 1 || first.timestamp === null || last === undefined || last.timestamp === null) {
+      display.push(...group)
+      index = next
+      continue
+    }
+    // The next row is the stable boundary of this occurrence. New retries
+    // prepend to a storm, so anchoring on `first.id` would collapse an open
+    // group on every refresh; the following row also distinguishes disjoint
+    // storms with the same PR/outcome identity.
+    const key = timelineRepeatKey(first, rows[next]?.id ?? "$tail")
+    const repeat = {
+      key,
+      count: group.length,
+      firstTimestamp: last.timestamp,
+      lastTimestamp: first.timestamp,
+      collapsed: !expanded.has(key),
+    } satisfies QueueTimelineRepeat
+    if (repeat.collapsed) display.push({ ...first, repeat })
+    else display.push({ ...first, repeat }, ...group.slice(1))
+    index = next
+  }
+  return display
+}
+
 export function queueTimelineVisibleDefaultCursorId(
   projection: Pick<QueueTimelineProjection, "rows" | "display">,
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>,
@@ -3681,6 +3781,7 @@ function ProjectedQueueTimeline({
   paneChrome = false,
   fillHeight = false,
   visibleBuckets,
+  expandedStorms,
   onToggleBucket,
   freshRows = 0,
   onJumpToNewest,
@@ -3694,11 +3795,20 @@ function ProjectedQueueTimeline({
   paneChrome?: boolean
   fillHeight?: boolean
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
+  expandedStorms?: ReadonlySet<string>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
   freshRows?: number
   onJumpToNewest?: () => void
 }) {
-  const rows = queueTimelineVisibleRows(projection, visibleBuckets, fillHeight)
+  // Fold the complete visible set before applying the one-shot row cap. A
+  // retry storm must cost one display line everywhere, not `limit` lines plus
+  // a misleading raw-row remainder outside the interactive fill pane.
+  const displayRows = queueTimelineDisplayRows(
+    queueTimelineVisibleRows(projection, visibleBuckets, true),
+    expandedStorms,
+  )
+  const rows = fillHeight ? displayRows : displayRows.slice(0, projection.display.shown)
+  const hiddenDisplayRows = Math.max(0, displayRows.length - rows.length)
   const buckets = visibleBuckets ?? queueTimelineFilterBuckets(projection.filters.statuses)
   // In the fill pane the TIME cell is time-of-day only (item 1) and the day is
   // carried by YYYY-MM-DD header rows (leading + per-boundary, below). The
@@ -3807,9 +3917,9 @@ function ProjectedQueueTimeline({
             W1b placed it. */}
         <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
           <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
-            {fillHeight || projection.display.hidden === 0 ? null : (
+            {fillHeight || hiddenDisplayRows === 0 ? null : (
               <Text color="$fg-muted" wrap="truncate">
-                ... {projection.display.hidden} more
+                ... {hiddenDisplayRows} more
               </Text>
             )}
             {fillHeight || projection.coverage.complete ? null : (
@@ -3845,6 +3955,7 @@ export function QueueTimelineView({
   paneChrome = false,
   fillHeight = false,
   visibleBuckets,
+  expandedStorms,
   onToggleBucket,
   freshRows,
   onJumpToNewest,
@@ -3862,6 +3973,7 @@ export function QueueTimelineView({
   paneChrome?: boolean
   fillHeight?: boolean
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
+  expandedStorms?: ReadonlySet<string>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
   freshRows?: number
   onJumpToNewest?: () => void
@@ -3881,6 +3993,7 @@ export function QueueTimelineView({
         paneChrome={paneChrome}
         fillHeight={fillHeight}
         visibleBuckets={visibleBuckets}
+        expandedStorms={expandedStorms}
         onToggleBucket={onToggleBucket}
         freshRows={freshRows}
         {...(onJumpToNewest === undefined ? {} : { onJumpToNewest })}
