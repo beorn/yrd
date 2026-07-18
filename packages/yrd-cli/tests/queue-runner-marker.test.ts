@@ -1,4 +1,4 @@
-// @failure Runner liveness is conflated with job activity, so a down runner is not raised as an exceptional red STATUS while healthy runner state consumes permanent chrome.
+// @failure Runner liveness disappears from its dedicated box or is conflated with queue pause/status chrome.
 // @level l2
 // @consumer @yrd/cli watch
 
@@ -15,8 +15,7 @@ import {
 } from "../dev/queue-timeline-fixtures.ts"
 import { QueueTimelineView, type QueueTimelineProjection } from "../src/queue-status-view.tsx"
 
-// Item 4 — runner-down is exceptional chrome; healthy liveness is silent and
-// job activity remains on the queue row.
+// Runner liveness is always explicit; job activity remains on the queue row.
 
 function idleProjection(): QueueTimelineProjection {
   const pending = fixturePr("PRA", "submitted", "2026-07-13T11:10:00.000Z", "Alpha")
@@ -42,16 +41,15 @@ function discPointOnRow(text: string, rowNeedle: string): readonly [number, numb
 }
 
 describe("queue liveness status render (item 4)", () => {
-  it("omits healthy runner chrome while preserving the active row marker", async () => {
+  it("shows healthy runner chrome while preserving the active row marker", async () => {
     const projection = processingProjection()
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      expect(app.text).not.toContain("[84042]")
-      // Row activity remains visible even though healthy runner liveness is silent.
+      expect(app.text).toContain("[84042]")
       const statusAt = discPointOnRow(app.text, "PRR.1")
       expect(app.cell(statusAt[0], statusAt[1]).fg).not.toBeNull()
     } finally {
@@ -65,8 +63,8 @@ describe("queue liveness status render (item 4)", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("╭─ STATUS ")
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).not.toContain("╭─ STATUS ")
+      expect(app.text).toContain("╭─ RUNNER ")
       const markerAt = discPointOnRow(app.text, "NO RUNNER")
       const bannerX = app.text.split("\n")[markerAt[1]]!.indexOf("NO RUNNER")
       expect(markerAt[0], "marker precedes the NO RUNNER banner").toBeLessThan(bannerX)

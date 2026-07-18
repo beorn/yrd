@@ -243,7 +243,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).toContain("PR5.1")
       // The status buckets are TogglePills now (label constant, state by colour),
       // so the toggle is verified by the rows appearing/disappearing, not by an
-      // [x]/[ ] checkbox glyph. Item 3: pills are plain words, no [f] brackets.
+      // ✓/▢ checkbox glyph. Item 3: pills are plain words, no [f] brackets.
       expect(app.text, "the failed pill renders").toContain("failed")
 
       await app.press("f")

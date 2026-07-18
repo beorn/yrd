@@ -58,7 +58,7 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 }
 
 describe("queue timeline storybook", () => {
-  it.fails("renders the recovered queue IA without legacy task or disclosure chrome", async () => {
+  it("renders the recovered queue IA without legacy task or disclosure chrome", async () => {
     using term = createTermless({ cols: 200, rows: 50 })
     const handle = await run(
       createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),

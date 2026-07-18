@@ -268,7 +268,7 @@ export async function startResidentRunnerHeartbeat(
     return new Date(now).toISOString()
   }
   const startedAt = nowIso()
-  // Exceptional STATUS renders this verbatim for a stale runner: `[pid] <command>`.
+  // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
   const write = async (): Promise<void> => {
     await mkdir(directory, { recursive: true })

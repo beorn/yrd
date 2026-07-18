@@ -1,8 +1,7 @@
 /**
- * TimeStatsBox — the queue watch's single bordered STATS box. Inside it, the
- * FLOW throughput and TIME duration sections share the same four rolling-window
- * columns (HR / DAY / WK / MON). The sections arrange side by side on a wide pane
- * and stack into one column as the pane narrows, without becoming separate boxes.
+ * TimeStatsBox — the queue watch's separately bordered STATS and TIME boxes.
+ * Both share the same four rolling-window columns (HR / DAY / WK / MON). The
+ * frames arrange side by side on a wide pane and stack as the pane narrows.
  *
  * Both sections share one compact row model: their first row carries the section
  * name plus the window keys, and TIME prefixes each distribution row with its
@@ -113,20 +112,14 @@ function timeMetricRows(
 
 function timeRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
   return [
-    { label: "TIME", keys: true, heading: true, cells: windowKeys },
+    { label: "", keys: true, cells: windowKeys },
     ...timeMetricRows("INTEGRATED", stats, (m) => m.activeRun.integratedOnly),
     ...timeMetricRows("FAILED", stats, (m) => m.activeRun.failedOnly),
     ...timeMetricRows("WAIT", stats, (m) => m.queueWait),
   ]
 }
 
-function chunk<T>(items: readonly T[], size: number): readonly (readonly T[])[] {
-  const groups: T[][] = []
-  for (let i = 0; i < items.length; i += size) groups.push(items.slice(i, i + size))
-  return groups
-}
-
-/** One unframed section inside the shared STATS box. */
+/** One metric grid inside its titled frame. */
 function TimeStatsSection({ rows }: Readonly<{ rows: readonly BoxRow[] }>) {
   const windowCount = rows.reduce((count, row) => Math.max(count, row.cells.length), 0)
   return (
@@ -155,8 +148,8 @@ function TimeStatsSection({ rows }: Readonly<{ rows: readonly BoxRow[] }>) {
 }
 
 /**
- * Bind the windowed projection to one full-width STATS box. Its FLOW + TIME
- * sections sit side by side when wide and stack inside the same frame when narrow.
+ * Bind the windowed projection to independently bordered STATS + TIME frames.
+ * They sit side by side when wide and stack when narrow.
  *
  * @param facts  every retained terminal Run fact (the projection folds these once)
  * @param now    the snapshot clock as an ISO instant
@@ -178,22 +171,36 @@ export function TimeStatsBox({
   if (Number.isNaN(nowMs)) throw new Error(`yrd: invalid time-stats snapshot '${now}'`)
   const stats = queueTimeStats(facts, nowMs, earliestEventMs)
   const windowKeys = stats.map((entry) => entry.key)
-  const sections = [
-    { title: "FLOW", rows: flowRows(stats, windowKeys) },
-    { title: "TIME", rows: timeRows(stats, windowKeys) },
-  ]
   const perRow = width >= TWO_ACROSS_MIN ? 2 : 1
   return (
-    <TitledBox title="STATS" marginTop={1}>
-      {chunk(sections, perRow).map((group, index) => (
-        <Box key={index} flexDirection="row" gap={GRID_GAP} minWidth={0} alignItems="flex-start">
-          {group.map((section) => (
-            <Box key={section.title} flexGrow={1} flexBasis={0} minWidth={0}>
-              <TimeStatsSection rows={section.rows} />
-            </Box>
-          ))}
-        </Box>
-      ))}
-    </TitledBox>
+    <Box
+      flexDirection={perRow === 2 ? "row" : "column"}
+      gap={GRID_GAP}
+      minWidth={0}
+      alignItems="flex-start"
+      marginTop={1}
+      flexShrink={0}
+    >
+      <Box
+        width={perRow === 1 ? "100%" : undefined}
+        flexGrow={perRow === 2 ? 1 : undefined}
+        flexBasis={perRow === 2 ? 0 : undefined}
+        minWidth={0}
+      >
+        <TitledBox title="STATS">
+          <TimeStatsSection rows={flowRows(stats, windowKeys)} />
+        </TitledBox>
+      </Box>
+      <Box
+        width={perRow === 1 ? "100%" : undefined}
+        flexGrow={perRow === 2 ? 1 : undefined}
+        flexBasis={perRow === 2 ? 0 : undefined}
+        minWidth={0}
+      >
+        <TitledBox title="TIME">
+          <TimeStatsSection rows={timeRows(stats, windowKeys)} />
+        </TitledBox>
+      </Box>
+    </Box>
   )
 }

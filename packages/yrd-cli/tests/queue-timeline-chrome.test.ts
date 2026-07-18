@@ -196,7 +196,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("omits healthy runner chrome from the normal queue", async () => {
+  it("keeps healthy runner chrome visible in the normal queue", async () => {
     const story = queueTimelineStories["contract-overview"].snapshot.projection
     const projection: QueueTimelineProjection = {
       ...story,
@@ -211,10 +211,10 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 120 }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      expect(app.text).not.toContain("[342]")
-      expect(app.text).not.toContain("uptime 03:45")
+      expect(app.text).toContain("[342]")
+      expect(app.text).toContain("uptime 03:45")
     } finally {
       app.unmount()
     }
@@ -236,8 +236,8 @@ describe("queue timeline chrome 21106", () => {
       const message = `NO RUNNER - queue last drained ${expectedAge} ago`
       const messageY = rowIndexOf(app.text, "NO RUNNER")
       expect(messageY, app.text).toBeGreaterThanOrEqual(0)
-      expect(app.text).toContain("╭─ STATUS ")
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).not.toContain("╭─ STATUS ")
+      expect(app.text).toContain("╭─ RUNNER ")
       expect(rowAt(app.text, messageY)).toContain(message)
       // All-red: every glyph of the message shares one fg matching the failed
       // status word's error fg.
@@ -327,10 +327,9 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("╭─ STATS "))
       const rows = app.text.split("\n")
-      // In a normal queue, STATS is the only compact information frame.
+      // Normal chrome includes runner liveness and the two metric frames.
       expect(app.text).not.toContain("╭─ STATUS ")
-      expect(app.text).not.toContain("╭─ RUNNER ")
-      for (const label of ["STATS"]) {
+      for (const label of ["RUNNER", "STATS", "TIME"]) {
         const topY = rows.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = rows[topY]
@@ -349,18 +348,17 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("heads the QUEUE pane with a tab row carrying the updated clock and sibling tabs (items L + C)", async () => {
+  it("heads the QUEUE pane with one clean tab carrying the updated clock (items L + C)", async () => {
     // The QUEUE pane is headed by its tab-style label (item L); the `updated`
     // clock rides that same tab row (item C — flush with the QUEUE tab), and
-    // sibling bases render as their own tabs — no surrounding box border.
+    // sibling branch names do not wrap through the table header.
     const snapshot = queueTimelineStories["production-overview"].snapshot
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("╭─ STATS "))
       const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
-      // The QUEUE tab row itself carries the sibling tab and the updated clock.
-      expect(queueLine, "QUEUE tab row carries the sibling tab").toContain("release/")
+      expect(queueLine, "QUEUE tab row omits sibling branch noise").not.toContain("release/")
       expect(queueLine, "updated rides the QUEUE tab row").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
       // No rounded box border around the QUEUE pane.
       expect(app.text).not.toContain("╭─ QUEUE")
@@ -369,7 +367,7 @@ describe("queue timeline chrome 21106", () => {
     }
   })
 
-  it("turns the STATUS label and border red together when the heartbeat is stale", async () => {
+  it("turns the RUNNER label and border red together when the heartbeat is stale", async () => {
     // Directive 2 (2026-07-16): the error-red case colors both the border AND
     // the label, matching the STALE banner's error fg.
     const story = queueTimelineStories["contract-overview"].snapshot.projection
@@ -387,12 +385,12 @@ describe("queue timeline chrome 21106", () => {
     )
     try {
       await app.waitForLayoutStable()
-      const titleY = rowIndexOf(app.text, "╭─ STATUS ")
+      const titleY = rowIndexOf(app.text, "╭─ RUNNER ")
       const titleLine = rowAt(app.text, titleY)
-      const titleX = titleLine.indexOf("STATUS")
-      const fillX = titleLine.indexOf("─", titleX + "STATUS".length + 1)
-      expect(app.cell(titleX, titleY).fg, "stale STATUS label fg == border fg").toEqual(app.cell(fillX, titleY).fg)
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      const titleX = titleLine.indexOf("RUNNER")
+      const fillX = titleLine.indexOf("─", titleX + "RUNNER".length + 1)
+      expect(app.cell(titleX, titleY).fg, "stale RUNNER label fg == border fg").toEqual(app.cell(fillX, titleY).fg)
+      expect(app.text).not.toContain("╭─ STATUS ")
       const staleY = rowIndexOf(app.text, "RUNNER STALE")
       expect(staleY, "stale banner present").toBeGreaterThan(titleY)
       const staleLine = rowAt(app.text, staleY)
@@ -422,7 +420,7 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader).not.toBeNull()
       expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(1)
-      // Bottom-aligned statistics: the singular STATS box is pushed to the
+      // Bottom-aligned statistics: the STATS + TIME frames are pushed to the
       // bottom of the pane by a flex spacer. The keybindings footer was removed
       // (item h), so the box's bottom border hugs the pane's last content row.
       const rows = text.split("\n")

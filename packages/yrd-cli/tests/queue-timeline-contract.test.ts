@@ -52,7 +52,7 @@ describe("queue timeline 21106 contract", () => {
     else process.env.TZ = priorTZ
   })
 
-  it("renders one full-width STATS box after the list", async () => {
+  it("renders separately bordered STATS and TIME boxes after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
     const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
@@ -61,23 +61,23 @@ describe("queue timeline 21106 contract", () => {
     expect(statsLine).toBeGreaterThan(pillsLine)
     expect(rows[statsLine]?.length).toBe(120)
     expect(frame).not.toContain("╭─ FLOW ")
-    expect(frame).not.toContain("╭─ TIME ")
+    expect(frame).toContain("╭─ TIME ")
     for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90", "HR", "DAY", "WK", "MON"]) {
       expect(frame).toContain(cell)
     }
   })
 
-  it("omits normal runner state and folds exceptional runner facts into one STATUS box", async () => {
+  it("renders resident health in RUNNER and reserves STATUS for queue pause", async () => {
     const normal = (await renderTimeline(contractProjection(), 120)).join("\n")
-    expect(normal).not.toContain("╭─ RUNNER ")
+    expect(normal).toContain("╭─ RUNNER ")
     expect(normal).not.toContain("╭─ STATUS ")
-    expect(normal).not.toContain("[84042]")
+    expect(normal).toContain("[84042]")
 
     const paused = queueTimelineStories.paused.snapshot.projection
     if (paused === undefined) throw new Error("paused story is missing its projection")
     const exceptional = (await renderTimeline(paused, 120)).join("\n")
     expect(exceptional.match(/╭─ STATUS /gu)).toHaveLength(1)
-    expect(exceptional).not.toContain("╭─ RUNNER ")
+    expect(exceptional.match(/╭─ RUNNER /gu)).toHaveLength(1)
     expect(exceptional).toContain("HOLD THE LINE")
     expect(exceptional).toContain("NO RUNNER")
 
@@ -86,8 +86,8 @@ describe("queue timeline 21106 contract", () => {
       runner: { pid: 84042, startedAt: "2026-07-13T11:00:00.000Z", lastTickAt: "2026-07-13T11:00:00.000Z" },
     }
     const staleFrame = (await renderTimeline(stale, 120)).join("\n")
-    expect(staleFrame.match(/╭─ STATUS /gu)).toHaveLength(1)
-    expect(staleFrame).not.toContain("╭─ RUNNER ")
+    expect(staleFrame).not.toContain("╭─ STATUS ")
+    expect(staleFrame.match(/╭─ RUNNER /gu)).toHaveLength(1)
     expect(staleFrame).toContain("[84042]")
     expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
   })
@@ -136,7 +136,7 @@ describe("queue timeline 21106 contract", () => {
       "@agent/2",
       "@agent/7",
     ])
-    // RUNNER: probed lease liveness rides the projection for JSON and exceptional STATUS.
+    // RUNNER: probed lease liveness rides the projection and its dedicated box.
     expect(projection.runner).toEqual({
       pid: 84042,
       startedAt: "2026-07-13T11:00:00.000Z",
@@ -157,7 +157,7 @@ describe("queue timeline 21106 contract", () => {
     expect(projection.metrics.queueWait.n).toBe(2)
   })
 
-  it("renders the five information groups in the contract order with no status box when normal", async () => {
+  it("renders the information groups in order with RUNNER but no STATUS when normal", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const queueLine = rowIndex(rows, "QUEUE")
     const updatedLine = rowIndex(rows, "updated 17:30:00")
@@ -187,17 +187,16 @@ describe("queue timeline 21106 contract", () => {
     expect(header).not.toContain("DETAIL")
     expect(header).not.toContain("TOTAL")
     expect(header).toContain("STATUS")
-    // Healthy runner state is intentionally silent. STATUS is reserved for
-    // actionable pause or runner-failure facts.
-    expect(rows.join("\n")).not.toContain("╭─ RUNNER ")
+    // RUNNER is always visible; STATUS is reserved for actionable queue pause.
+    expect(rows.join("\n")).toContain("╭─ RUNNER ")
     expect(rows.join("\n")).not.toContain("╭─ STATUS ")
-    expect(rows.join("\n")).not.toContain("[84042]")
+    expect(rows.join("\n")).toContain("[84042]")
     expect(rows.join("\n")).not.toContain("NO RUNNER")
     expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
-    // One full-width STATS box contains the FLOW and TIME sections, both headed
-    // by the rolling windows HR / DAY / WK / MON.
+    // Separately framed STATS and TIME share the rolling windows.
     const statisticsText = rows.slice(statsBoxLine).join("\n")
+    expect(statisticsText).toContain("╭─ TIME ")
     for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90"]) {
       expect(statisticsText).toContain(cell)
     }
@@ -298,7 +297,7 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
-    // The singular STATS box fills the full capped width with no dead gutter.
+    // The STATS + TIME row fills the full capped width with no dead gutter.
     const wideBorder = wide[rowIndex(wide, "╭─ STATS ")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
     expect(wideBorder.startsWith("╭─ STATS ")).toBe(true)
@@ -543,10 +542,10 @@ describe("queue timeline 21106 contract", () => {
     }
     const frame = rows.join("\n")
     expect(frame).toContain(`updated ${wallClock(projection.now)}`)
-    // The healthy runner fact remains available to JSON/projection consumers,
-    // but renders no normal-state status chrome.
+    // The healthy runner fact is visible while STATUS remains absent.
     expect(projection.runner).not.toBeNull()
-    expect(frame).not.toContain("[84042]")
+    expect(frame).toContain("[84042]")
+    expect(frame).toContain("╭─ RUNNER ")
     expect(frame).not.toContain("╭─ STATUS ")
 
     for (const row of projection.rows) {

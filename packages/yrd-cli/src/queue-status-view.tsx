@@ -3232,28 +3232,15 @@ function TimelineProjectedRow({
   )
 }
 
-// The QUEUE pane is headed by a TAB, not a titled box (user directive
-// 2026-07-16, item L): the primary tab reads `QUEUE <base>` and any sibling
-// bases follow as their own tabs, all in the canonical Silvery Tabs idiom the
-// detail step tabs use.
-function QueueTabsLine({
-  base,
-  siblings,
-  showLabel = true,
-}: {
-  base: string
-  siblings: readonly string[]
-  showLabel?: boolean
-}) {
+// The QUEUE pane is headed by one TAB, not a titled box (user directive
+// 2026-07-16, item L). Sibling branch names are queue data, not navigation;
+// putting arbitrary-length names into this one-row header made Tab text wrap
+// through the TIME/STATUS table header in the live pane.
+function QueueTabsLine({ base, showLabel = true }: { base: string; showLabel?: boolean }) {
   return (
     <Tabs value={base} isActive={false}>
       <TabList>
         <Tab value={base}>{showLabel ? `QUEUE ${base}` : base}</Tab>
-        {siblings.map((value) => (
-          <Tab key={value} value={value}>
-            {value}
-          </Tab>
-        ))}
       </TabList>
     </Tabs>
   )
@@ -3387,59 +3374,116 @@ function timelineLastDrainedMs(projection: QueueTimelineProjection): number | nu
   return newest
 }
 
-/** The status-dot glyph — same filled disc the per-row running marker uses. */
+/** The RUNNER liveness reflected by the leading marker. */
+export type QueueHealthKind = "down" | "processing" | "idle"
+
+export type QueueHealthMarker = Readonly<{
+  kind: QueueHealthKind
+  color: string
+  pulse: readonly [string, string] | null
+}>
+
+/** Missing/stale is solid red; active is pulsing blue; idle is pulsing grey. */
+export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
+  const timing = runnerTiming(projection)
+  if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
+    return { kind: "down", color: "$fg-error", pulse: null }
+  }
+  if (projection.rows.some((row) => row.status === "running")) {
+    return { kind: "processing", color: "$fg-info", pulse: ["$fg-info", "$fg-muted"] }
+  }
+  return { kind: "idle", color: "$fg-muted", pulse: ["$fg-muted", "$bg-surface-default"] }
+}
+
 const QUEUE_HEALTH_GLYPH = "●"
 
-/**
- * Project only actionable runner state. Healthy runner facts stay out of the
- * normal queue surface; missing/stale facts become one compact STATUS row.
- */
-function queueRunnerException(projection: QueueTimelineProjection): string | null {
+function RunnerActivity({
+  marker,
+  live,
+  children,
+  ...rest
+}: {
+  marker: QueueHealthMarker
+  live: boolean
+  children: React.ReactNode
+} & Omit<TextProps, "color" | "children">) {
+  if (marker.pulse !== null && live) {
+    return (
+      <Pulse synchronized colors={marker.pulse} intervalMs={AG_PULSE_INTERVAL_MS} {...rest}>
+        {children}
+      </Pulse>
+    )
+  }
+  return (
+    <Text color={marker.color} {...rest}>
+      {children}
+    </Text>
+  )
+}
+
+/** Resident runner status is always visible in its own RUNNER frame. */
+function TimelineRunnerBox({ projection, live = false }: { projection: QueueTimelineProjection; live?: boolean }) {
   const runner = projection.runner
   const timing = runnerTiming(projection)
+  const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
+  const marker = queueHealthMarker(projection)
   if (runner === null) {
     const drained = timelineLastDrainedMs(projection)
     const now = Date.parse(projection.now)
-    return drained === null
-      ? "NO RUNNER - no drained run in window"
-      : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`
-  }
-  if (timing === null || timing.ageMs <= RUNNER_STALE_MS) return null
-  return `RUNNER STALE — last tick ${mediaDuration(timing.ageMs)} ago · [${runner.pid}] ${runner.command ?? "resident runner"} · uptime ${uptimeClock(timing.uptimeMs)}`
-}
-
-/**
- * STATUS is exceptional-only. It owns both queue pause and unhealthy resident
- * runner state; a healthy, unpaused queue renders no status frame at all.
- */
-function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection }) {
-  const runnerException = queueRunnerException(projection)
-  const pause = projection.pause
-  if (pause === undefined && runnerException === null) return null
-  const allowed = pause === undefined ? null : pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
-  return (
-    <TitledBox title="STATUS" borderColor={runnerException === null ? "$fg-warning" : "$fg-error"}>
-      {pause === undefined ? null : (
-        <Text color="$fg-warning" wrap="truncate">
-          HOLD THE LINE — {pause.reason} · allowed {allowed}
-        </Text>
-      )}
-      {runnerException === null ? null : (
+    return (
+      <TitledBox title="RUNNER" borderColor="$fg-error">
         <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-          <Text color="$fg-error" flexShrink={0}>
+          <RunnerActivity marker={marker} live={live} flexShrink={0}>
             {QUEUE_HEALTH_GLYPH}
-          </Text>
+          </RunnerActivity>
           <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
-            {runnerException}
+            {drained === null
+              ? "NO RUNNER - no drained run in window"
+              : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
           </Text>
         </Box>
-      )}
+      </TitledBox>
+    )
+  }
+  return (
+    <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
+      <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+        <RunnerActivity marker={marker} live={live} flexShrink={0}>
+          {QUEUE_HEALTH_GLYPH}
+        </RunnerActivity>
+        <RunnerActivity marker={marker} live={live} wrap="truncate" minWidth={0}>
+          [{runner.pid}] {runner.command ?? "resident runner"}
+        </RunnerActivity>
+        <Box flexGrow={1} flexBasis={0} minWidth={0} />
+        <Text color="$fg-muted" flexShrink={0}>
+          uptime {uptimeClock(timing?.uptimeMs ?? 0)}
+        </Text>
+      </Box>
+      {runnerStale && timing !== null ? (
+        <Text color="$fg-error" bold wrap="truncate">
+          RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
+        </Text>
+      ) : null}
     </TitledBox>
   )
 }
 
-// The single STATS box contains a FLOW throughput section beside a TIME section
-// whose INTEGRATED/FAILED/WAIT groups stack. It renders from
+/** STATUS owns the queue pause exception; RUNNER owns runner health. */
+function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection }) {
+  const pause = projection.pause
+  if (pause === undefined) return null
+  const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
+  return (
+    <TitledBox title="STATUS" borderColor="$fg-warning">
+      <Text color="$fg-warning" wrap="truncate">
+        HOLD THE LINE — {pause.reason} · allowed {allowed}
+      </Text>
+    </TitledBox>
+  )
+}
+
+// The separately bordered STATS and TIME boxes share one rolling-window model;
+// TIME's INTEGRATED/FAILED/WAIT groups stack. They render from
 // `time-stats-box.tsx`, which windows the SAME
 // consolidated `queueFlowMetrics` aggregate (throughput + per-24h +
 // oldestOpenMs, landed 36effce43e) across HR/DAY/WK/MON via `time-stats.ts`.
@@ -3673,7 +3717,7 @@ function ProjectedQueueTimeline({
           // right of that same tab row (item C — flush with the QUEUE tab),
           // and the anchored-freshness `N new` cue sits between them.
           <Box height={1} flexDirection="row" gap={1} minWidth={0}>
-            <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
+            <QueueTabsLine base={projection.base} />
             <Box flexGrow={1} flexBasis={0} minWidth={0} />
             {freshRows === 0 ? null : (
               // The anchored-freshness cue is a click-to-jump affordance (item
@@ -3688,12 +3732,13 @@ function ProjectedQueueTimeline({
           </Box>
         ) : (
           <>
-            <QueueTabsLine base={projection.base} siblings={projection.siblingBases} />
+            <QueueTabsLine base={projection.base} />
             <Box height={1} flexDirection="row" justifyContent="flex-end" gap={1} minWidth={0}>
               <QueueUpdatedClock now={projection.now} />
             </Box>
           </>
         )}
+        <TimelineRunnerBox projection={projection} live={nav} />
         <TimelineStatusBox projection={projection} />
         {/* No blank row above the table header (item 5): the header sits flush
             under the boxes above it. The pills + coverage row moved BELOW the

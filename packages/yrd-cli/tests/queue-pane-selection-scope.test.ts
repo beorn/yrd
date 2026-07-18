@@ -86,7 +86,7 @@ function twoPaneSnapshot() {
 }
 
 describe("queue watch per-pane selection scopes (item 4a)", () => {
-  it("gives QUEUE, DETAIL, exceptional STATUS, and STATS each their own contain scope", async () => {
+  it("gives QUEUE, DETAIL, RUNNER, exceptional STATUS, STATS, and TIME their own contain scopes", async () => {
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot: twoPaneSnapshot() }))
     try {
@@ -131,13 +131,18 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
         "blank detail body stays inside the full-height DETAIL scope",
       ).toBe(true)
 
-      // The exceptional STATUS box and STATS box are each their own scope, nested inside the
-      // QUEUE pane — a drag inside one never grows into the list or its sibling.
+      // Every titled box is its own scope nested inside the QUEUE pane.
+      const runnerScope = scopeAt(app, pointOf(text, "RUNNER", 0, LEFT_MAX))
       const statusScope = scopeAt(app, pointOf(text, "HOLD THE LINE", 0, LEFT_MAX))
       const statsScope = scopeAt(app, pointOf(text, "STATS", 0, LEFT_MAX))
+      const timeScope = scopeAt(app, pointOf(text, "╭─ TIME ", 0, LEFT_MAX))
+      expect(nestedWithin(runnerScope, queueScope), "RUNNER is its own scope inside QUEUE").toBe(true)
       expect(nestedWithin(statusScope, queueScope), "STATUS is its own scope inside QUEUE").toBe(true)
       expect(nestedWithin(statsScope, queueScope), "STATS is its own scope inside QUEUE").toBe(true)
+      expect(nestedWithin(timeScope, queueScope), "TIME is its own scope inside QUEUE").toBe(true)
+      expect(sameScope(runnerScope, statusScope), "RUNNER and STATUS are different scopes").toBe(false)
       expect(sameScope(statusScope, statsScope), "STATUS and STATS are different scopes").toBe(false)
+      expect(sameScope(statsScope, timeScope), "STATS and TIME are different scopes").toBe(false)
     } finally {
       app.unmount()
     }

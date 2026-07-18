@@ -48,7 +48,7 @@ describe("synchronized activity pulse (items 12-13)", () => {
     )
     try {
       await app.waitForLayoutStable()
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
       // The running row's status disc and its `run` word share one activity colour.
       const glyphFg = cellOf(app, "●", "PRR.1").fg

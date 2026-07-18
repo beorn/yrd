@@ -193,7 +193,7 @@ describe("pr withdraw", () => {
           status: "withdrawn",
           withdrawReason: "superseded by rework",
           taskStatus: "dropped",
-          glyph: "[-]",
+          glyph: "−",
         },
       ],
     })
@@ -218,7 +218,7 @@ describe("pr withdraw", () => {
     const retired = outputIO()
     expect(await runYrd(app, yrd("log", "--pr", "PR2", "--json"), retired.io), retired.stderr()).toBe(0)
     expect((JSON.parse(retired.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
-      expect.objectContaining({ pr: "PR2", run: "-", outcome: "retired", glyph: "[-]" }),
+      expect.objectContaining({ pr: "PR2", run: "-", outcome: "retired", glyph: "−" }),
     ])
   })
 
@@ -275,7 +275,7 @@ describe("pr withdraw journal replay", () => {
         const log = outputIO()
         expect(await runYrd(second, yrd("log", "--pr", "PR1", "--json"), log.io), log.stderr()).toBe(0)
         expect((JSON.parse(log.stdout()) as { rows: Record<string, unknown>[] }).rows).toEqual([
-          expect.objectContaining({ pr: "PR1", run: "-", outcome: "retired", glyph: "[-]" }),
+          expect.objectContaining({ pr: "PR1", run: "-", outcome: "retired", glyph: "−" }),
         ])
       } finally {
         await second.close()
