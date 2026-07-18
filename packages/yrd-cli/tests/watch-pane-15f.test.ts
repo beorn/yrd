@@ -94,7 +94,7 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       const doneGlyph = app.cell(prepareX - 3, tabsY + 1)
       const runningGlyph = app.cell(checkX - 3, tabsY + 1)
       expect(statusLine).toContain("✓ passed")
-      expect(statusLine).toContain("▢ running")
+      expect(statusLine).toContain("● running")
       expect(doneGlyph.fg, "done and running glyphs retain distinct semantic colors").not.toEqual(runningGlyph.fg)
 
       // Recovered 21514 IA: tabs are deliberately wide and equal rather than
@@ -111,7 +111,10 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
   it("orders the detail as run facts → step tabs → step content (items H/J)", async () => {
     const snapshot = queueTimelineStories["detail-full"].snapshot
-    const app = createRenderer({ cols: 120, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
+    // Use the wide tier for an order assertion so the below-tier split does
+    // not intentionally clip the tail of a long integrated detail. The 80×24
+    // full-tier story separately proves DETAILS remains visible when narrow.
+    const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       app.press("\r")

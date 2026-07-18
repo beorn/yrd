@@ -1,5 +1,5 @@
 /**
- * TimeStatsBox — the queue watch's separately bordered STATS and TIME boxes.
+ * TimeStatsBox — the queue watch's separately bordered FLOW and TIME boxes.
  * Both share the same four rolling-window columns (HR / DAY / WK / MON). The
  * frames arrange side by side on a wide pane and stack as the pane narrows.
  *
@@ -36,11 +36,11 @@ type BoxRow = Readonly<{
 }>
 
 /** Readable floor for a section (label column + four value cells). The
- * two-across threshold also accounts for the shared STATS border and padding. */
+ * two-across threshold also accounts for the shared FLOW border and padding. */
 const BOX_MIN_WIDTH = 34
 const GRID_GAP = 1
-const STATS_FRAME_CHROME = 4
-const TWO_ACROSS_MIN = 2 * BOX_MIN_WIDTH + GRID_GAP + STATS_FRAME_CHROME
+const FLOW_FRAME_CHROME = 4
+const TWO_ACROSS_MIN = 2 * BOX_MIN_WIDTH + GRID_GAP + FLOW_FRAME_CHROME
 
 function percent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`
@@ -148,7 +148,7 @@ function TimeStatsSection({ rows }: Readonly<{ rows: readonly BoxRow[] }>) {
 }
 
 /**
- * Bind the windowed projection to independently bordered STATS + TIME frames.
+ * Bind the windowed projection to independently bordered FLOW + TIME frames.
  * They sit side by side when wide and stack when narrow.
  *
  * @param facts  every retained terminal Run fact (the projection folds these once)
@@ -187,7 +187,7 @@ export function TimeStatsBox({
         flexBasis={perRow === 2 ? 0 : undefined}
         minWidth={0}
       >
-        <TitledBox title="STATS">
+        <TitledBox title="FLOW">
           <TimeStatsSection rows={flowRows(stats, windowKeys)} />
         </TitledBox>
       </Box>

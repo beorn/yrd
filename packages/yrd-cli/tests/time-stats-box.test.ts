@@ -1,4 +1,4 @@
-// @failure The separate STATS/TIME boxes lose a section, rolling-window values, responsive layout, coverage honesty, or border integrity.
+// @failure The separate FLOW/TIME boxes lose a section, rolling-window values, responsive layout, coverage honesty, or border integrity.
 // @level l1
 // @consumer yrd queue watch statistics surface
 
@@ -84,11 +84,11 @@ function assertBoxClean(text: string, title: string): void {
 }
 
 describe("TimeStatsBox", () => {
-  it("renders separately titled STATS and TIME boxes", () => {
+  it("renders separately titled FLOW and TIME boxes", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
-    expect(app.text).toContain("╭─ STATS ")
-    expect(app.text).not.toContain("╭─ FLOW ")
+    expect(app.text).toContain("╭─ FLOW ")
+    expect(app.text).not.toContain("╭─ STATS ")
     expect(app.text).toContain("╭─ TIME ")
     expect(app.text).toContain("FLOW")
     expect(app.text).toContain("TIME")
@@ -132,22 +132,20 @@ describe("TimeStatsBox", () => {
     expect(app.text).toContain("-")
   })
 
-  it("places clean STATS and TIME frames side by side at the live pane width", () => {
+  it("places clean FLOW and TIME frames side by side at the live pane width", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
-    expect(rowContaining(app, "╭─ STATS ")).toContain("╭─ TIME ")
-    assertBoxClean(app.text, "STATS")
+    expect(rowContaining(app, "╭─ FLOW ")).toContain("╭─ TIME ")
+    assertBoxClean(app.text, "FLOW")
     assertBoxClean(app.text, "TIME")
   })
 
-  it("stacks the independently framed STATS and TIME boxes on a narrow pane", () => {
+  it("stacks the independently framed FLOW and TIME boxes on a narrow pane", () => {
     const render = createRenderer({ cols: 48, rows: 60 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 48 }))
     const rows = app.text.split("\n")
-    expect(rows.findIndex((r) => r.includes("╭─ TIME "))).toBeGreaterThan(
-      rows.findIndex((r) => r.includes("╭─ STATS ")),
-    )
-    assertBoxClean(app.text, "STATS")
+    expect(rows.findIndex((r) => r.includes("╭─ TIME "))).toBeGreaterThan(rows.findIndex((r) => r.includes("╭─ FLOW ")))
+    assertBoxClean(app.text, "FLOW")
     assertBoxClean(app.text, "TIME")
   })
 })

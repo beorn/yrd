@@ -1,5 +1,4 @@
 import type { Event } from "loggily"
-import { taskStatusGlyph } from "./task-status.ts"
 
 /**
  * Pure (no silvery/React) watch-timeline grammar shared by the interactive
@@ -21,15 +20,13 @@ import { taskStatusGlyph } from "./task-status.ts"
  * onto every branch name (user directive 2026-07-16). */
 export const TIMELINE_BRANCH_ICON = ""
 
-/** The status → row glyph map, projected through the shared km task vocabulary. */
+/** Distinct queue lifecycle markers from the settled km/ag watch vocabulary. */
 export function timelineStatusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return taskStatusGlyph("wip")
-  if (["integrated", "passed"].includes(status)) return taskStatusGlyph("done")
-  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) {
-    return taskStatusGlyph("blocked")
-  }
-  if (["withdrawn", "retired", "canceled"].includes(status)) return taskStatusGlyph("dropped")
-  return taskStatusGlyph("todo")
+  if (["checking", "running", "waiting"].includes(status)) return "●"
+  if (["integrated", "passed"].includes(status)) return "✓"
+  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) return "×"
+  if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
+  return "○"
 }
 
 /** Coarse human duration (largest unit): the watch timeline's formatDuration. */

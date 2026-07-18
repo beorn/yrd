@@ -71,7 +71,7 @@ describe("watch detail completeness — run-level integration proof detail (item
 })
 
 describe("watch detail completeness — step artifacts + checkpoint (item J)", () => {
-  it("renders the artifacts label and checkpoint on the step RUN LOGS row", () => {
+  it("renders artifacts and checkpoint on a proof row distinct from RUN LOGS", () => {
     const data = integratedRunData()
     const [row] = data.steps
     if (row === undefined) throw new Error("fixture run produced no step rows")
@@ -86,11 +86,51 @@ describe("watch detail completeness — step artifacts + checkpoint (item J)", (
     )
     try {
       // The step tab is the step summary now (item d), so the duplicate STEP
-      // header row is gone; the proof/artifacts row is labeled RUN LOGS (item e).
+      // header row is gone; durable proof remains distinct from the one RUN LOGS disclosure.
       expect(app.text).not.toContain("STEP check#1")
-      expect(app.text).toContain("RUN LOGS")
+      expect(app.text).toContain("PROOF")
       expect(app.text).toContain("ARTIFACTS vitest-report")
       expect(app.text).toContain("CHECKPOINT tests=125 failures=0")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("lets RUN LOGS own raw locations and artifact names without hiding non-log proof", () => {
+    const data = integratedRunData()
+    const [row] = data.steps
+    if (row === undefined) throw new Error("fixture run produced no step rows")
+    const stepData: QueueShowData = {
+      ...data,
+      steps: [
+        {
+          ...row,
+          artifacts: "stdout",
+          checkpoint: "tests=125 failures=0",
+          evidence: "-",
+          locations: [
+            {
+              label: "stdout",
+              display: "stdout.log",
+              location: { url: "file:///repo/.git/yrd/artifacts/R4/check/stdout.log" },
+            },
+          ],
+        },
+      ],
+    }
+    const app = createRenderer({ cols: 120, rows: 30 })(
+      createElement(QueueShowView, {
+        data: stepData,
+        compact: true,
+        section: "steps",
+        showLogArtifacts: false,
+      }),
+    )
+    try {
+      expect(app.text).toContain("PROOF")
+      expect(app.text).toContain("CHECKPOINT tests=125 failures=0")
+      expect(app.text).not.toContain("stdout.log")
+      expect(app.text).not.toContain("ARTIFACTS stdout")
     } finally {
       app.unmount()
     }

@@ -27,6 +27,7 @@ import {
   queueShowData,
   type QueueShowData,
 } from "../src/queue-status-view.tsx"
+import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
 const BRANCH_GLYPH = ""
 
@@ -309,6 +310,37 @@ describe("detail step facts — aligned inline DETAILS without duplication", () 
       app.unmount()
     }
   })
+
+  it("labels subprocess detail as MESSAGE so it cannot collide with DETAILS", async () => {
+    const pr = fixturePr("PR11", "submitted", "2026-07-13T10:30:00.000Z", "Explain a long failure")
+    const run = fixtureRun("R11", [pr], "failed", "2026-07-13T10:40:00.000Z", {
+      finishedAt: "2026-07-13T10:42:00.000Z",
+      steps: [
+        fixtureStep(
+          "check",
+          fixtureJob("J11-check", "failed", {
+            detail: `The subprocess explained this failure ${"without clipping a word ".repeat(8)}`,
+          }),
+        ),
+      ],
+    })
+    const app = createRenderer({ cols: 70, rows: 60 })(
+      createElement(QueueWatchFrame, { snapshot: fixtureSnapshot(fixtureResult([pr], [run])) }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      await app.press("Enter")
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("MESSAGE")
+      expect(app.text).not.toMatch(/^DETAIL\s/mu)
+      expect(app.text.match(/DETAILS/gu)).toHaveLength(1)
+      const messageLine = app.text.split("\n").find((line) => line.includes("MESSAGE"))
+      expect(messageLine, "the MESSAGE row is visible at the narrow full-detail tier").toBeDefined()
+      expect(messageLine?.trimEnd(), "MESSAGE ends with an ellipsis instead of clipping mid-word").toMatch(/…$/u)
+    } finally {
+      app.unmount()
+    }
+  })
 })
 
 describe("detail single-PR header — unlabelled bold title + linked ISSUE", () => {
@@ -328,7 +360,8 @@ describe("detail single-PR header — unlabelled bold title + linked ISSUE", () 
       const rows = app.text.split("\n")
       const titleRow = rows.findIndex((row) => row.includes("Wire the detail surface"))
       const issueRow = rows.findIndex((row) => row.includes("ISSUE    @yrd/core/21106-queue-timeline"))
-      expect(titleRow).toBeGreaterThanOrEqual(0)
+      expect(titleRow).toBeGreaterThan(0)
+      expect(rows[titleRow - 1]?.trim()).toBe("")
       expect(rows[titleRow + 1]?.trim()).toBe("")
       expect(issueRow).toBe(titleRow + 2)
 
@@ -341,9 +374,9 @@ describe("detail single-PR header — unlabelled bold title + linked ISSUE", () 
     }
   })
 
-  it("renders nothing when the PR carries neither title nor issue", () => {
+  it("renders nothing when the PR carries neither subject nor issue", () => {
     const pr = fixturePr("PR6", "submitted", "2026-07-13T10:30:00.000Z", "Fixture PR6")
-    const bare = { ...pr, title: undefined, issue: undefined }
+    const bare = { ...pr, name: "", title: undefined, issue: undefined }
     const app = createRenderer({ cols: 80, rows: 4 })(createElement(QueueDetailSinglePrHeader, { pr: bare }))
     try {
       expect(app.text.trim()).toBe("")

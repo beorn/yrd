@@ -5,7 +5,7 @@
  * shared header/row column geometry (fixed TIME/STATUS/RUN + flex PR +
  * right-anchored STEP/BY/AGE/RUN cells), split RUN and PR header labels,
  * muted run ids, exceptional STATUS title-in-border chrome,
- * bottom-aligned STATS, pane frames with padding, selection color forcing,
+ * bottom-aligned FLOW/TIME, pane frames with padding, selection color forcing,
  * the failed/done status vocabulary, and the non-default-only FILTER row.
  */
 
@@ -325,11 +325,11 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("╭─ STATS "))
+      await waitFor(() => app.text.includes("╭─ FLOW "))
       const rows = app.text.split("\n")
       // Normal chrome includes runner liveness and the two metric frames.
       expect(app.text).not.toContain("╭─ STATUS ")
-      for (const label of ["RUNNER", "STATS", "TIME"]) {
+      for (const label of ["RUNNER", "FLOW", "TIME"]) {
         const topY = rows.findIndex((l) => l.includes(`╭─ ${label} `))
         expect(topY, `${label} rounded top-left corner + left label`).toBeGreaterThanOrEqual(0)
         const topLine = rows[topY]
@@ -356,7 +356,7 @@ describe("queue timeline chrome 21106", () => {
     const app = createRenderer({ cols: 160, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("╭─ STATS "))
+      await waitFor(() => app.text.includes("╭─ FLOW "))
       const queueLine = rowAt(app.text, rowIndexOf(app.text, "QUEUE main"))
       expect(queueLine, "QUEUE tab row omits sibling branch noise").not.toContain("release/")
       expect(queueLine, "updated rides the QUEUE tab row").toMatch(/updated \d{2}:\d{2}:\d{2}/u)
@@ -407,7 +407,7 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("╭─ STATS "))
+      await waitFor(() => app.text.includes("╭─ FLOW "))
       const text = app.text
       // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
       // identity title (`main#42 PR42.1`), not the word "DETAIL" — neither is boxed.
@@ -420,15 +420,15 @@ describe("queue timeline chrome 21106", () => {
       expect(timeHeader).not.toBeNull()
       expect(timeHeader!.x).toBeGreaterThanOrEqual(1)
       expect(timeHeader!.y).toBeGreaterThanOrEqual(1)
-      // Bottom-aligned statistics: the STATS + TIME frames are pushed to the
+      // Bottom-aligned statistics: the FLOW + TIME frames are pushed to the
       // bottom of the pane by a flex spacer. The keybindings footer was removed
       // (item h), so the box's bottom border hugs the pane's last content row.
       const rows = text.split("\n")
       const lastY = rows.findLastIndex((row) => row.trim() !== "")
-      const statsY = rowIndexOf(text, "╭─ STATS ")
+      const flowY = rowIndexOf(text, "╭─ FLOW ")
       const lastBoxBottomY = rows.findLastIndex((row) => row.includes("╰"))
       expect(lastY).toBeGreaterThan(0)
-      expect(statsY, "STATS box renders below the list header").toBeGreaterThan(timeHeader!.y)
+      expect(flowY, "FLOW box renders below the list header").toBeGreaterThan(timeHeader!.y)
       expect(lastBoxBottomY).toBeGreaterThan(0)
       expect(lastY - lastBoxBottomY, "the grid's last box border hugs the pane bottom band").toBeLessThanOrEqual(1)
     } finally {

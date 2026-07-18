@@ -72,17 +72,20 @@ describe("queue timeline storybook", () => {
 
       expect(frame).not.toMatch(/\[(?: |\/|!|x|-)\]/u)
       expect(frame).not.toMatch(/(?:^|\s)[>v]\s+(?:PRS|RUN LOGS)/mu)
-      expect(frame).toMatch(/[▸•] PRS/u)
+      expect(frame).toMatch(/[▸•] PRs/u)
       expect(frame).toMatch(/[▸•] RUN LOGS/u)
+      expect(frame.match(/\bPRS\b/giu), "the PRs group renders once, never as a fact plus disclosure").toHaveLength(1)
+      expect(frame.match(/RUN LOGS/gu), "run logs render once, never as a fact plus disclosure").toHaveLength(1)
+      expect(frame).toContain("ISSUE    @hab/super/21135-herdr-keybindings")
       expect(frame).toContain("╭─ RUNNER ")
-      expect(frame).toContain("╭─ STATS ")
+      expect(frame).toContain("╭─ FLOW ")
       expect(frame).toContain("╭─ TIME ")
 
       const prepareRowIndex = lines.findIndex((line) => line.includes("1: prepare"))
       expect(prepareRowIndex).toBeGreaterThan(0)
-      expect(lines[prepareRowIndex]).not.toMatch(/passed|running|pending|failed/u)
+      expect(lines[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
       expect(lines.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
-        /(?:✓|▢|⧗|−)\s+(?:passed|running|pending|failed|skipped)/u,
+        /(?:✓|●|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
       )
 
       const commandRowIndex = lines.findIndex((line) => line.includes("[ $ "))
@@ -116,6 +119,19 @@ describe("queue timeline storybook", () => {
       expect(frame).not.toContain("No matching queue rows.")
     } finally {
       handle.unmount()
+    }
+  })
+
+  it("renders one PRs group and one RUN LOGS surface in rejected detail", async () => {
+    const render = createRenderer({ cols: 200, rows: 50 })
+    const app = render(createElement(QueueWatchFrame, { snapshot: queueTimelineStories["selected-rejected"].snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text.match(/\bPRS\b/giu)).toHaveLength(1)
+      expect(app.text.match(/RUN LOGS/gu)).toHaveLength(1)
+      expect(app.text.match(/DETAILS/gu)).toHaveLength(1)
+    } finally {
+      app.unmount()
     }
   })
 
@@ -340,9 +356,9 @@ describe("queue timeline storybook", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     const header = (frame: string) =>
       frame.split("\n").find((row) => row.includes("TIME") && row.includes("RUN") && row.includes("PR"))
-    // Height fits the singular STATS box; the standalone
+    // Height fits the FLOW/TIME boxes; the standalone
     // QueueTimelineView has no fillHeight list-scroll, so a fixed box tuned to the
-    // old short STATS box would clip the header. Production (QueueWatchFrame) keeps
+    // old short metrics box would clip the header. Production (QueueWatchFrame) keeps
     // the header at any height via the scrolling list.
     const wide = await renderString(createElement(QueueTimelineView, { projection, columns: 120 }), {
       width: 120,
@@ -639,7 +655,14 @@ describe("queue timeline storybook", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR PR1 STATUS")
+      expect(handle.text).toContain("- PR1.1")
+      expect(handle.text).toContain("○ pending")
+      expect(handle.text).toContain("Prepare release notes")
+      expect(handle.text).toContain("ISSUE    @yrd/core/21120-pr-state-notifications")
+      expect(handle.text).toContain("PRs      PR1@r1")
+      expect(handle.text).not.toContain("PR PR1 STATUS")
+      expect(handle.text).not.toContain("SOURCE ")
+      expect(handle.text).not.toContain("BASE ")
 
       const rows = handle.text.split("\n")
       const pr2Y = rows.findIndex((row) => row.includes("PR2.1"))
@@ -650,8 +673,9 @@ describe("queue timeline storybook", () => {
       expect(pr2X, "PR2 screen column").toBeGreaterThanOrEqual(0)
       await handle.click(pr2X, pr2Y)
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR PR2 STATUS")
-      expect(handle.text).not.toContain("PR PR1 STATUS")
+      expect(handle.text).toContain("- PR2.1")
+      expect(handle.text).toContain("○ pending")
+      expect(handle.text).not.toContain("- PR1.1")
     } finally {
       handle.unmount()
     }

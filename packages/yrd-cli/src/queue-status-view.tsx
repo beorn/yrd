@@ -159,7 +159,7 @@ export type QueueTimelineProjection = Readonly<{
   rows: readonly QueueTimelineProjectedRow[]
   details: readonly QueueShowData[]
   metrics: QueueFlowMetrics
-  /** Every retained completed-Run terminal fact, for the windowed STATS box. */
+  /** Every retained completed-Run terminal fact, for the windowed FLOW/TIME boxes. */
   timeStatsFacts: readonly QueueTerminalFact[]
   /** Oldest timestamped journal record (ms), or null when none — drives the "-" coverage gate. */
   earliestEventMs: number | null
@@ -239,7 +239,7 @@ export type QueueFlowMetrics = Readonly<{
     allTerminal: DurationDistribution
     integratedOnly: DurationDistribution
     // Active duration of the failed Runs (rejected + env-refused + canceled).
-    // Drives the STATS / TIME / FAILED section; the complement of integratedOnly.
+    // Drives the FLOW / TIME / FAILED section; the complement of integratedOnly.
     failedOnly: DurationDistribution
   }>
   queueWait: QueueWaitDistribution
@@ -1367,9 +1367,9 @@ function QueueLogLocationLinks({ entries, compact }: { entries: readonly QueueLo
 const QUEUE_ROW_LIMIT = 5
 const RECENT_ROW_LIMIT = 3
 
-// Canonical km task marker vocabulary: warning ballot for pending/running,
-// hourglass for blocked, muted minus for dropped, completion check for done.
-// Never ASCII slash spinners or background fills; color is foreground-only.
+// Canonical queue marker vocabulary: working disc, neutral pending ring, red
+// failure cross, muted minus, and completion check. Each lifecycle class stays
+// distinguishable before color; color is foreground-only.
 // The status → glyph map lives in runner-timeline.ts (pure, no silvery) so the
 // headless resident runner shares this exact vocabulary.
 const statusGlyph = timelineStatusGlyph
@@ -1804,7 +1804,7 @@ export function queueTimelineProjection(
   // Metrics stay per-Run: member rows of one batched Run fold into one terminal
   // fact carrying every visible member's queue wait.
   const terminalFacts = foldTerminalFacts(metricsRows)
-  // The windowed STATS box reads its own rolling windows (hour/day/week/
+  // The windowed FLOW/TIME boxes read their own rolling windows (hour/day/week/
   // month) off the SAME consolidated queueFlowMetrics aggregate. It folds the
   // FULL retained fact horizon (rawRows, before any window bound), NOT the
   // display `windowMs` listing nor the 24h `metricsWindowMs` default — so WK/MON
@@ -2834,7 +2834,7 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
       </Text>
     )
   }
-  const outcome = detailStatusOutcome(data)
+  const outcome = detailStatusOutcome(row, data)
   const total = presentFact(data?.totalDuration) ?? (row.totalMs === null ? undefined : preciseDuration(row.totalMs))
   return (
     <Box flexDirection="column" width="100%" minWidth={0} flexShrink={0}>
@@ -2860,16 +2860,23 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
  * The run's STATUS + OUTCOME as one colorized label (`passed, integrated`),
  * deduped when the two words match, or undefined when neither is present.
  */
-function detailStatusOutcome(data?: QueueShowData): Readonly<{ text: string; color: string }> | undefined {
-  if (data === undefined) return undefined
+function detailStatusOutcome(
+  row: QueueTimelineProjectedRow,
+  data?: QueueShowData,
+): Readonly<{ text: string; color: string }> {
+  if (data === undefined) {
+    return { text: `${row.glyph} ${row.status}`, color: timelineStatusColor(row) }
+  }
   const status = presentFact(data.status)
   const outcome = presentFact(data.outcome)
-  if (status === undefined && outcome === undefined) return undefined
+  if (status === undefined && outcome === undefined) {
+    return { text: `${row.glyph} ${row.status}`, color: timelineStatusColor(row) }
+  }
   const text =
     status !== undefined && outcome !== undefined && status !== outcome
       ? `${status}, ${outcome}`
       : (outcome ?? status ?? "")
-  const marker = presentFact(data.glyph)
+  const marker = presentFact(row.glyph)
   return { text: marker === undefined ? text : `${marker} ${text}`, color: taskStatusColor(data.taskStatus) }
 }
 
@@ -3001,11 +3008,8 @@ export function queueTimelineDefaultCursorId(
  */
 const AG_PULSE_INTERVAL_MS = 900
 
-/** The default "executing right now" pulse: blue against muted, shared phase
- * (item 12). Callers may supply another semantic pair — the km WIP marker uses
- * warning against muted while the queue activity word remains blue. */
+/** The default "executing right now" pulse: blue against muted, shared phase. */
 const ACTIVITY_PULSE_COLORS: readonly [string, string] = ["$fg-info", "$fg-muted"]
-const TASK_ACTIVITY_PULSE_COLORS: readonly [string, string] = [taskStatusColor("wip"), "$fg-muted"]
 
 /**
  * A synchronized semantic activity pulse for "in progress right now" content
@@ -3037,19 +3041,8 @@ function ActivityPulse({
 }
 
 function TimelineMarker({ row, live }: { row: QueueTimelineProjectedRow; live: boolean }) {
-  const taskStatus = runTaskStatusOf({ status: row.status })
-  if (row.status === "running") {
-    return (
-      <ActivityPulse live={live} colors={TASK_ACTIVITY_PULSE_COLORS} bold>
-        {row.glyph}
-      </ActivityPulse>
-    )
-  }
-  return (
-    <Text color={taskStatusColor(taskStatus)} bold={taskStatus === "wip"}>
-      {row.glyph}
-    </Text>
-  )
+  if (row.status === "running") return <ActivityPulse live={live}>{row.glyph}</ActivityPulse>
+  return <Text color={timelineStatusColor(row)}>{row.glyph}</Text>
 }
 
 /**
@@ -3342,7 +3335,7 @@ export function TitledBox({
       flexShrink={fill ? 1 : 0}
       flexGrow={fill ? 1 : undefined}
       marginTop={marginTop}
-      // Each titled box (STATUS / STATS) is its own selection scope
+      // Each titled box (STATUS / FLOW / TIME) is its own selection scope
       // (item 4a): a drag started inside it resolves to this box as the nearest
       // `contain` boundary, so it never grows into a sibling box or the pane
       // around it. Nested inside the pane's own scope; `contain` keeps content
@@ -3487,9 +3480,9 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
         <RunnerActivity marker={marker} live={live} flexShrink={0}>
           {QUEUE_HEALTH_GLYPH}
         </RunnerActivity>
-        <RunnerActivity marker={marker} live={live} wrap="truncate" minWidth={0}>
+        <Text color={marker.color} wrap="truncate" minWidth={0}>
           [{runner.pid}] {runner.command ?? "resident runner"}
-        </RunnerActivity>
+        </Text>
         <Box flexGrow={1} flexBasis={0} minWidth={0} />
         <Text color="$fg-muted" flexShrink={0}>
           uptime {uptimeClock(timing?.uptimeMs ?? 0)}
@@ -3518,7 +3511,7 @@ function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection
   )
 }
 
-// The separately bordered STATS and TIME boxes share one rolling-window model;
+// The separately bordered FLOW and TIME boxes share one rolling-window model;
 // TIME's INTEGRATED/FAILED/WAIT groups stack. They render from
 // `time-stats-box.tsx`, which windows the SAME
 // consolidated `queueFlowMetrics` aggregate (throughput + per-24h +
@@ -3855,7 +3848,7 @@ function ProjectedQueueTimeline({
         ) : (
           // In fill mode (item 5) the row block claims the pane's vertical
           // slack so the virtualizing ListView shows as many rows as fit and
-          // scrolls the rest; STATS then anchors at the bottom. Off fill it
+          // scrolls the rest; FLOW/TIME then anchor at the bottom. Off fill it
           // stays content-sized.
           <Box flexDirection="column" minWidth={0} flexShrink={1} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
             <TimelineHeader layout={layout} />
@@ -3901,12 +3894,12 @@ function ProjectedQueueTimeline({
             />
           </Box>
         )}
-        {/* An empty fill pane's spacer pushes the pills + STATS box to
+        {/* An empty fill pane's spacer pushes the pills + FLOW/TIME boxes to
             the bottom; a non-empty fill pane grows its row block instead, so no
             spacer competes with it. */}
         {fillHeight && rows.length === 0 ? <Box flexGrow={1} minHeight={0} /> : null}
         {/* FILTER pills + coverage row — BELOW the list (item 2, new vertical
-            order optional STATUS → header → rows → pills → STATS). The "... N more" /
+            order optional STATUS → header → rows → pills → FLOW/TIME). The "... N more" /
             retained coverage reads on the left, the very-dim toggle-pills
             right-align. In fill mode the coverage degrades to EMPTY (the rows
             virtualize and scroll, so nothing is permanently hidden — no "... 0
@@ -4559,21 +4552,25 @@ function prCommentLine(comment: PR["comments"][number]): string {
 }
 
 /**
- * A single-PR run's unlabelled title + linked ISSUE, surfaced directly under
+ * The selected PR's unlabelled title + linked ISSUE, surfaced directly under
  * the DETAIL identity row
  * so they read without expanding the PRS disclosure (item b, 2026-07-16). The
  * fuller DESCRIPTION / review history stays in the disclosure. Empty fields
- * omit (pre-r5 PRs carry neither — no placeholders). Batched runs keep every
- * member's title on its own PRS disclosure summary row instead.
+ * omit (pre-r5 PRs carry neither — no placeholders). In a batch, the selected
+ * member still owns this header while the disclosure carries every member.
  */
 export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
-  const title = presentFact(pr.title)
+  // PR `name` is the durable subject for older/pending records that predate
+  // the optional richer `title` field. One template must not make pending rows
+  // lose their subject merely because no Run exists yet.
+  const title = presentFact(pr.title) ?? presentFact(pr.name)
   const issue = presentFact(pr.issue)
   if (title === undefined && issue === undefined) return null
   return (
     <Box flexDirection="column" minWidth={0}>
       {title === undefined ? null : (
         <>
+          <Box height={1} flexShrink={0} />
           <Text bold wrap="truncate" bgConflict="ignore">
             {title}
           </Text>
@@ -4720,7 +4717,7 @@ function QueueStepInternals({ row }: { row: QueueShowRow }) {
  * selected tab, `"all"` (default) renders everything in order for non-tab
  * contexts. When `titleAbove` is set the caller renders the run identity +
  * STATUS/OUTCOME in a title row above, so the RUN header row is dropped here
- * (items a/c, 2026-07-16). Subprocess-derived strings (ERROR, DETAIL, LOST,
+ * (items a/c, 2026-07-16). Subprocess-derived strings (ERROR, MESSAGE, LOST,
  * EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data keeps its
  * colors without crashing the event loop.
  */
@@ -4730,6 +4727,8 @@ function CompactQueueShowView({
   section = "all",
   historyRevision,
   titleAbove = false,
+  showMembers = true,
+  showLogArtifacts = true,
 }: {
   data: QueueShowData
   highlightPr?: string
@@ -4743,6 +4742,10 @@ function CompactQueueShowView({
   /** When true, the run identity + STATUS/OUTCOME live in a title row above,
    *  so the RUN header row is omitted here (framedDetail title, item a). */
   titleAbove?: boolean
+  /** False when the watch's PRs disclosure already owns this fact. */
+  showMembers?: boolean
+  /** False when a surrounding RUN LOGS disclosure owns locations/artifact names. */
+  showLogArtifacts?: boolean
 }) {
   const runFacts = section !== "steps"
   const stepFacts = section !== "run"
@@ -4750,10 +4753,12 @@ function CompactQueueShowView({
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const proofDetail = data.integration === undefined ? undefined : integrationProofDetail(data.integration)
   const timing = queueRunTimingRow(data)
+  const latestStepRowIndexes = new Map<string, number>()
+  data.steps.forEach((row, index) => latestStepRowIndexes.set(row.step, index))
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
     // detail pane instead of overflowing it (canonical CSS escape hatch).
-    <Box flexDirection="column" minWidth={0}>
+    <Box flexDirection="column" minWidth={0} flexShrink={0}>
       {runFacts ? (
         <>
           {titleAbove ? null : (
@@ -4763,10 +4768,12 @@ function CompactQueueShowView({
               OUTCOME {data.outcome}
             </Text>
           )}
-          <Text wrap="truncate">
-            {"PRs".padEnd(9, " ")}
-            <QueueShowMembersValue data={data} highlightPr={highlightPr} />
-          </Text>
+          {showMembers ? (
+            <Text wrap="truncate">
+              {"PRs".padEnd(9, " ")}
+              <QueueShowMembersValue data={data} highlightPr={highlightPr} />
+            </Text>
+          ) : null}
           {data.retries > 1 ? <Text wrap="truncate">RETRY {data.retries}</Text> : null}
           {timing === undefined ? null : (
             <Text wrap="truncate">
@@ -4784,21 +4791,32 @@ function CompactQueueShowView({
         </>
       ) : null}
       {stepFacts
-        ? data.steps.map((row) => {
+        ? data.steps.map((row, rowIndex) => {
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)
             const lost = presentFact(row.lost)
             const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
-            // The artifacts label + checkpoint join the step's RUN LOGS row so
-            // the whole step record is on-screen (item e, 2026-07-16).
+            // Artifact/checkpoint facts stay in the selected step body while
+            // the surrounding disclosure owns the single RUN LOGS label.
             const artifacts = presentFact(row.artifacts)
             const checkpoint = presentFact(row.checkpoint)
+            const visibleArtifacts = showLogArtifacts ? artifacts : undefined
+            const visibleLocations = showLogArtifacts ? row.locations : []
             const hasProof =
-              row.locations.length > 0 || evidence !== undefined || artifacts !== undefined || checkpoint !== undefined
+              visibleLocations.length > 0 ||
+              evidence !== undefined ||
+              visibleArtifacts !== undefined ||
+              checkpoint !== undefined
             return (
               // The step tab (glyph + name + duration) is the step summary, so
               // the duplicate STEP header row is dropped (item d, 2026-07-16).
-              <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column" minWidth={0}>
+              <Box
+                key={`${row.uuid}:${row.attempt}:compact`}
+                flexDirection="column"
+                width="100%"
+                minWidth={0}
+                overflow="hidden"
+              >
                 {error === undefined ? null : (
                   <Text wrap="truncate" color="$fg-error" bgConflict="ignore">
                     {"ERROR".padEnd(9, " ")}
@@ -4806,10 +4824,22 @@ function CompactQueueShowView({
                   </Text>
                 )}
                 {detail === undefined ? null : (
-                  <Text wrap="truncate" color="$fg-muted" bgConflict="ignore">
-                    {"DETAIL".padEnd(9, " ")}
-                    {detail}
-                  </Text>
+                  <Box flexDirection="row" width="100%" minWidth={0} overflow="hidden">
+                    <Text color="$fg-muted" flexShrink={0}>
+                      {"MESSAGE".padEnd(9, " ")}
+                    </Text>
+                    <Text
+                      flexGrow={1}
+                      flexBasis={0}
+                      flexShrink={1}
+                      wrap="truncate"
+                      minWidth={0}
+                      color="$fg-muted"
+                      bgConflict="ignore"
+                    >
+                      {detail}
+                    </Text>
+                  </Box>
                 )}
                 {lost === undefined ? null : (
                   <Text wrap="truncate" color="$fg-warning" bgConflict="ignore">
@@ -4817,17 +4847,17 @@ function CompactQueueShowView({
                     {lost}
                   </Text>
                 )}
-                <QueueStepInternals row={row} />
+                {latestStepRowIndexes.get(row.step) === rowIndex ? <QueueStepInternals row={row} /> : null}
                 {!hasProof ? null : (
-                  <Text wrap="truncate" bgConflict="ignore">
-                    RUN LOGS
-                    {row.locations.length === 0 ? null : (
+                  <Text wrap="truncate" minWidth={0} bgConflict="ignore">
+                    {"PROOF".padEnd(9, " ")}
+                    {visibleLocations.length === 0 ? null : (
                       <>
                         {" "}
-                        <QueueLogLocationLinks entries={row.locations} compact={false} />
+                        <QueueLogLocationLinks entries={visibleLocations} compact={false} />
                       </>
                     )}
-                    {artifacts === undefined ? "" : ` ARTIFACTS ${artifacts}`}
+                    {visibleArtifacts === undefined ? "" : ` ARTIFACTS ${visibleArtifacts}`}
                     {evidence === undefined ? "" : ` EVIDENCE ${evidence}`}
                     {checkpoint === undefined ? "" : ` CHECKPOINT ${checkpoint}`}
                   </Text>
@@ -4860,6 +4890,8 @@ export function QueueShowView({
   section = "all",
   historyRevision,
   titleAbove = false,
+  showMembers = true,
+  showLogArtifacts = true,
 }: {
   data: QueueShowData
   compact?: boolean
@@ -4871,6 +4903,10 @@ export function QueueShowView({
   /** Compact-only: the run identity + STATUS/OUTCOME live in a title row above,
    *  so drop the RUN header row here (framedDetail title, item a). */
   titleAbove?: boolean
+  /** Compact-only: hide the PRs row when a surrounding PRs disclosure owns it. */
+  showMembers?: boolean
+  /** Compact-only: hide log locations/artifact names owned by surrounding RUN LOGS. */
+  showLogArtifacts?: boolean
 }) {
   if (compact) {
     return (
@@ -4879,6 +4915,8 @@ export function QueueShowView({
         highlightPr={highlightPr}
         section={section}
         titleAbove={titleAbove}
+        showMembers={showMembers}
+        showLogArtifacts={showLogArtifacts}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />
     )
