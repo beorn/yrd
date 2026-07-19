@@ -34,7 +34,7 @@ import {
   type JsonValue,
 } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
-import { createJournal } from "@yrd/persistence"
+import { createExclusive, createJournal } from "@yrd/persistence"
 import {
   type QueueRun,
   type QueueSummary,
@@ -93,6 +93,7 @@ import { withLiveRenderer } from "../src/live-renderer.ts"
 import * as runInternals from "../src/run.ts"
 import { queueTimeStats } from "../src/time-stats.ts"
 import { YRD_VERSION } from "../src/version.ts"
+import { writeInstalledBaseline } from "../src/installed-baseline.ts"
 import {
   jobAttemptTaskStatusOf,
   prTaskStatusOf,
@@ -3815,6 +3816,160 @@ describe("runYrd", () => {
       expect(await runYrd(app, yrd("queue", "list"), absent.io), absent.stderr()).toBe(0)
       expect(absent.stdout()).toContain("NO RUNNER - no drained run in window")
     } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("queue list --check is a typed lease probe with drift remedies and git distance", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "yrd-runner-health-check-"))
+    execFileSync("git", ["init", "-q", "-b", "main", repo])
+    execFileSync("git", ["-C", repo, "config", "user.name", "Yrd Test"])
+    execFileSync("git", ["-C", repo, "config", "user.email", "yrd@example.invalid"])
+    writeFileSync(join(repo, "README.md"), "base\n")
+    execFileSync("git", ["-C", repo, "add", "README.md"])
+    execFileSync("git", ["-C", repo, "commit", "-qm", "base"])
+    const baseSha = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+    const stateDir = join(repo, ".git", "yrd")
+    await writeInstalledBaseline(stateDir, {
+      base: "main",
+      baseSha,
+      installedAt: "2026-07-09T11:00:00.000Z",
+      steps: [{ name: "check", title: "check", revision: "check-v1", integrates: false, needsIntegration: false }],
+    })
+    writeFileSync(join(repo, "distance.txt"), "ahead\n")
+    execFileSync("git", ["-C", repo, "add", "distance.txt"])
+    execFileSync("git", ["-C", repo, "commit", "-qm", "ahead"])
+    writeFileSync(join(repo, "untracked-divergence.txt"), "local\n")
+
+    const app = await createApp()
+    let findings: Array<{ code: string; message: string }> = []
+    const services: YrdCliServices = { queue: { auditEnvironment: async () => ({ findings }) } }
+    const lockRelease = Promise.withResolvers<void>()
+    const lockAcquired = Promise.withResolvers<void>()
+    let lock: Promise<void> | undefined
+    try {
+      const absent = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), absent.io, services)).toBe(1)
+      expect(JSON.parse(absent.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        service: "yrd-runner",
+        state: "absent",
+        running: false,
+        facts: { lease: "free", git: { dirty: true, baselines: [{ base: "main", ahead: 1, behind: 0 }] } },
+      })
+
+      lock = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
+        lockAcquired.resolve()
+        await lockRelease.promise
+      })
+      await lockAcquired.promise
+      mkdirSync(join(stateDir, "resident-runner"), { recursive: true })
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+          command: "yrd queue run --follow",
+        }),
+      )
+
+      const healthy = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), healthy.io, services)).toBe(0)
+      expect(JSON.parse(healthy.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "healthy",
+        running: true,
+        facts: { lease: "held", runnerStatus: "fresh" },
+      })
+
+      const failedAudit = outputIO({ cwd: repo })
+      const failedAuditServices: YrdCliServices = {
+        queue: {
+          auditEnvironment: async () => {
+            throw new Error("audit unavailable")
+          },
+        },
+      }
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), failedAudit.io, failedAuditServices)).toBe(2)
+      expect(JSON.parse(failedAudit.stdout())).toMatchObject({
+        state: "unhealthy",
+        running: true,
+        error: { code: "runner-health-failed" },
+        facts: { lease: "held" },
+      })
+
+      const failedBootstrap = outputIO({ cwd: repo })
+      expect(
+        await runInternals.runYrdProcessRuntime(yrd("queue", "list", "--check", "--json"), failedBootstrap.io, {
+          ambientCwd: repo,
+          env: process.env,
+          load: async () => {
+            throw new Error("no event definition for 'bay/handoff-certified'")
+          },
+        }),
+      ).toBe(2)
+      expect(JSON.parse(failedBootstrap.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: true,
+        error: { code: "runner-health-failed", cause: "no event definition for 'bay/handoff-certified'" },
+        facts: { lease: "held" },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:40.000Z",
+        }),
+      )
+      const stale = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), stale.io, services)).toBe(2)
+      expect(JSON.parse(stale.stdout())).toMatchObject({
+        state: "unhealthy",
+        running: true,
+        error: { code: "resident-runner-unhealthy" },
+        facts: { lease: "held", runnerStatus: "stale", runnerAgeMs: 20_000 },
+      })
+
+      writeFileSync(
+        join(stateDir, "resident-runner", "status.json"),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: "2026-07-09T12:00:00.000Z",
+          lastTickAt: "2026-07-09T12:00:58.000Z",
+        }),
+      )
+
+      findings = [
+        {
+          code: "config-drift",
+          message:
+            "queue base 'main' installed baseline is stale. Run 'yrd queue deinit main' then 'yrd queue init main' to migrate it.",
+        },
+      ]
+      const unhealthy = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check", "--json"), unhealthy.io, services)).toBe(2)
+      expect(JSON.parse(unhealthy.stdout())).toMatchObject({
+        schema: "hab-service-health/1",
+        state: "unhealthy",
+        running: true,
+        error: {
+          code: "config-drift",
+          resolution: ["yrd queue deinit main", "yrd queue init main"],
+        },
+      })
+
+      const human = outputIO({ cwd: repo })
+      expect(await runYrd(app, yrd("queue", "list", "--check"), human.io, services)).toBe(2)
+      expect(human.stdout()).toContain("err=config-drift")
+      expect(human.stdout()).toContain("resolve: yrd queue deinit main")
+      expect(human.stdout()).toContain("resolve: yrd queue init main")
+    } finally {
+      lockRelease.resolve()
+      await lock
       rmSync(repo, { recursive: true, force: true })
     }
   })

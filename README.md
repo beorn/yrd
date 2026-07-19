@@ -469,7 +469,7 @@ turning actor attribution into a hidden side effect of `bay open`.
 
 ```text
 yrd queue list [filter...] [--base <branch>]
-  [--status <statuses>] [--since <duration>] [--latest] [--watch] [--json]
+  [--status <statuses>] [--since <duration>] [--latest] [--watch | --check] [--json]
 yrd queue ls [filter...] [the same options]
 yrd queue [filter...] [the same options]
 yrd watch [filter...] [the same options except --watch is implied]
@@ -488,6 +488,7 @@ yrd queue deinit [base] [--json]
 | Command             | Input                                             | Output and state                                                                        |
 | ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
+| `list --check`       | Repository                                        | Typed resident lease/heartbeat/baseline health plus installed-base Git distance         |
 | `run`               | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
 | `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
 | `resume`            | Optional base                                     | Removes the queue pause                                                                 |
@@ -504,6 +505,14 @@ positional filters are case-insensitive OR terms over PR, Run, branch, subject,
 and failure code. `--latest` is the opt-in one-row-per-PR lens; the default
 preserves every matching Run. `--json` carries the same rows and summary fields
 losslessly.
+
+`queue list --check` is the process-health affordance for supervisors. It
+tries the resident's existing OS lease (it never creates a second authority),
+checks heartbeat freshness and installed-baseline drift, and emits
+`hab-service-health/1`. Exit 0 means a healthy resident owns the lease; exit 1
+means no resident owns it; exit 2 means unhealthy and carries a typed error
+with `cause` and `resolution` steps. `--json` also reports the checkout HEAD
+and ahead/behind distance from each installed base SHA.
 
 `--steps` narrows a run. Omitted means the configured default sequence. An
 explicit empty `--steps` runs no steps. Re-entry is PR-owner-authorized: inspect
