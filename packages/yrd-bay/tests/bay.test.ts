@@ -225,6 +225,86 @@ describe("withBays", () => {
     expect(stable).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
   })
 
+  it("rejects a landed branch identity and accepts a fresh delivery-nonce branch", async () => {
+    const nextId = ids()
+    const seededCommand = { id: nextId(), op: "fixture.integrated-branch" }
+    const at = "2026-01-01T00:00:00.000Z"
+    const journal = createMemoryJournal([
+      {
+        command: seededCommand,
+        cause: {
+          id: nextId(),
+          commandId: seededCommand.id,
+          op: seededCommand.op,
+          commandHash: Command.hash(seededCommand),
+        },
+        events: [
+          {
+            id: nextId(),
+            name: "pr/pushed",
+            ts: at,
+            data: {
+              pr: "PR1",
+              branch: "topic/landed",
+              base: "main",
+              headSha: HEAD_1,
+              baseSha: BASE,
+              revision: 1,
+            },
+          },
+          {
+            id: nextId(),
+            name: "pr/submitted",
+            ts: at,
+            data: { pr: "PR1", revision: 1, headSha: HEAD_1 },
+          },
+          {
+            id: nextId(),
+            name: "pr/integrated",
+            ts: at,
+            data: {
+              pr: "PR1",
+              revision: 1,
+              headSha: HEAD_1,
+              run: "R1",
+              commit: BASE,
+              landingSha: BASE,
+              baseSha: BASE,
+            },
+          },
+        ],
+      },
+    ])
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs, defaultBase: "main" }))
+    await using app = await createYrd(definition, {
+      inject: { journal, clock: () => at, id: nextId },
+    })
+    const submitOptions = {
+      base: "main",
+      resolveRevision: async () => HEAD_2,
+      run: runtime,
+    }
+    const before = await Array.fromAsync(app.events())
+    const reused = app.bays.submitSelection("topic/landed", submitOptions)
+
+    await expect(reused).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "terminal-branch-identity" },
+    })
+    await expect(reused).rejects.toThrow(
+      "push the reviewed tip to a fresh delivery branch such as 'topic/landed-delivery-<nonce>'",
+    )
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+
+    const delivered = await app.bays.submitSelection("topic/landed-delivery-r2", submitOptions)
+    expect(delivered).toMatchObject({
+      id: "PR2",
+      branch: "topic/landed-delivery-r2",
+      headSha: HEAD_2,
+      status: "submitted",
+    })
+  })
+
   it("refuses a terminal receipt that does not transition the current PR revision", async () => {
     const journal = createMemoryJournal()
     const staleWithdraw = command({

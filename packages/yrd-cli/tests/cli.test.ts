@@ -818,6 +818,35 @@ describe("runYrd", () => {
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
   })
 
+  it("fails terminal branch reuse with delivery-nonce recovery and admits the fresh identity", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    expect(app.bays.pr("PR1")).toMatchObject({ branch: "topic/landed", status: "integrated" })
+    const before = await Array.fromAsync(app.events())
+
+    const refused = outputIO({ resolveRevision: async () => "2".repeat(40) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), refused.io)).toBe(1)
+    expect(refused.stdout()).toBe("")
+    expect(refused.stderr()).toContain("terminal PR 'PR1' (integrated)")
+    expect(refused.stderr()).toContain("topic/landed-delivery-<nonce>")
+    expect(refused.stderr()).toContain("then run yrd pr submit <fresh-branch>")
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+
+    const fresh = outputIO({
+      resolveRevision: async (ref) => (ref === "topic/landed-delivery-r2" ? "2".repeat(40) : undefined),
+    })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/landed-delivery-r2", "--draft", "--json"), fresh.io),
+      fresh.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(fresh.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR2", branch: "topic/landed-delivery-r2", status: "pushed" }],
+    })
+  })
+
   it.each([
     {
       surface: "pr view",
