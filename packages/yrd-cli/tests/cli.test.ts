@@ -188,14 +188,16 @@ function overlapProbe(): OverlapProbe {
   }
 }
 
-function workspace(options: { dirty?: boolean; refreshedHead?: string; probe?: OverlapProbe } = {}): BayWorkspace {
+function workspace(
+  options: { dirty?: boolean; path?: string; refreshedHead?: string; probe?: OverlapProbe } = {},
+): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     async provision(input) {
       await options.probe?.pause("bay")
       return {
         status: "passed",
-        output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
+        output: { path: options.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
       }
     },
     refresh(input) {
@@ -269,6 +271,7 @@ async function createApp(
   options: {
     waitingCheck?: boolean
     dirtyBay?: boolean
+    bayPath?: string
     refreshedHead?: string
     probe?: OverlapProbe
     baseResolutions?: string[]
@@ -290,7 +293,12 @@ async function createApp(
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
   const bayJobs = createBayJobDefs(
-    workspace({ dirty: options.dirtyBay, refreshedHead: options.refreshedHead, probe: options.probe }),
+    workspace({
+      dirty: options.dirtyBay,
+      path: options.bayPath,
+      refreshedHead: options.refreshedHead,
+      probe: options.probe,
+    }),
   )
   const check = withStep(
     "check",
@@ -2287,12 +2295,13 @@ describe("runYrd", () => {
     })
   })
 
-  it("refuses missing, ambiguous, and inactive Bay paths without mutating state", async () => {
+  it("refuses missing, ambiguous, inactive, and non-absolute Bay paths without mutating state", async () => {
     const app = await createApp()
 
     const missing = outputIO()
     expect(await runYrd(app, yrd("bay", "path", "missing"), missing.io)).toBe(1)
     expect(missing.stderr()).toContain("no bay 'missing'")
+    expect(missing.stderr()).toContain("yrd bay")
 
     const first = outputIO()
     expect(await runYrd(app, yrd("bay", "open", "shared", "--from", "topic/one"), first.io), first.stderr()).toBe(0)
@@ -2311,7 +2320,18 @@ describe("runYrd", () => {
     const inactive = outputIO()
     expect(await runYrd(app, yrd("bay", "path", "B1"), inactive.io)).toBe(1)
     expect(inactive.stderr()).toContain("bay 'B1' is closed; expected an active bay")
+    expect(inactive.stderr()).toContain("yrd bay open <name>")
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterClose)
+
+    const relativeApp = await createApp({ bayPath: "relative/B1" })
+    const relativeOpen = outputIO()
+    expect(await runYrd(relativeApp, yrd("bay", "open", "relative"), relativeOpen.io), relativeOpen.stderr()).toBe(0)
+    const beforeRelative = await Array.fromAsync(relativeApp.events()).then((events) => events.length)
+    const relative = outputIO()
+    expect(await runYrd(relativeApp, yrd("bay", "path", "B1"), relative.io)).toBe(1)
+    expect(relative.stderr()).toContain("bay 'B1' has no absolute workspace path")
+    expect(relative.stderr()).toContain("yrd bay --json")
+    expect(await Array.fromAsync(relativeApp.events()).then((events) => events.length)).toBe(beforeRelative)
   })
 
   it("records tracker-neutral issue and actor links when opening a bay", async () => {
