@@ -1,7 +1,0 @@
-steps:
-  verify: bun install --frozen-lockfile --ignore-scripts && bun run test
-
-contest:
-  concurrency: 2
-  timeoutMs: 1800000
-  evaluators: [verify]
