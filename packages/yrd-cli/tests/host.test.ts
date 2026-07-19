@@ -9,12 +9,13 @@ import { mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, writeFile } 
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
+import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
-import { GitCheckEvidenceSchema, IntegrationProofSchema } from "@yrd/queue"
+import { GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
-import { createLogger } from "loggily"
+import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
 import { queueStepRevision } from "../src/host-revision.ts"
@@ -42,7 +43,14 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 async function journalEnvelope(repo: string) {
-  return Array.fromAsync(createJournal({ dir: join(repo, ".git", "yrd") }).read())
+  return Array.fromAsync(testJournal(join(repo, ".git", "yrd")).read())
+}
+
+function testJournal(dir: string, log?: ConditionalLogger) {
+  return createJournal({
+    dir,
+    inject: { sqliteVersion: "3.53.0", ...(log === undefined ? {} : { log }) },
+  } as unknown as Parameters<typeof createJournal>[0])
 }
 
 async function byteManifest(root: string): Promise<readonly string[]> {
@@ -51,6 +59,10 @@ async function byteManifest(root: string): Promise<readonly string[]> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name)
       const relativePath = prefix === "" ? entry.name : join(prefix, entry.name)
+      // SQLite's shared-memory coordination bytes are volatile even for a
+      // read-only WAL viewer. The DB, WAL, and every directory entry remain in
+      // the byte-purity assertion; only this documented coordination file is excluded.
+      if (relativePath === "journal.sqlite-shm") continue
       if (entry.isDirectory()) {
         entries.push(`directory\t${relativePath}`)
         await walk(path, relativePath)
@@ -164,7 +176,6 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
   it("activates projection checkpoints for the complete built-in projector stack", async () => {
     const { repo, featureSha } = await repository()
     const stateDir = join(repo, ".git", "yrd")
-    const checkpointPath = join(stateDir, "projection-checkpoint-v1.json")
     const events: unknown[] = []
     const log = createLogger("test", [{ level: "trace" }, { write: (value: unknown) => events.push(value) }])
     const messages = () =>
@@ -185,7 +196,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         repo,
         stateDir,
         baysRoot: join(repo, ".bays"),
-        journal: createJournal({ dir: stateDir, inject: { log } }),
+        journal: testJournal(stateDir, log),
         process: runtimeProcess,
         config,
         log,
@@ -200,8 +211,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
         "projection checkpoint identity could not be derived; replaying journal authority",
       )
       expect(messages()).not.toContain("projection checkpoint write failed; journal remains authoritative")
-      expect(existsSync(checkpointPath)).toBe(true)
-      const checkpoint = JSON.parse(await readFile(checkpointPath, "utf8")) as { checkpoint: { cursor: number } }
+      using database = new Database(join(stateDir, "journal.sqlite"), { readonly: true, strict: true })
+      const checkpoint = database
+        .query<{ cursor: number; checkpoint_json: string }, []>(
+          "SELECT cursor, checkpoint_json FROM journal_snapshot WHERE singleton = 1",
+        )
+        .get()
+      if (checkpoint === null) throw new Error("expected SQLite projection checkpoint")
+      expect(JSON.parse(checkpoint.checkpoint_json)).toMatchObject({ cursor: checkpoint.cursor })
 
       events.length = 0
       const restored = await createApp()
@@ -211,7 +228,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
           expect.objectContaining({
             kind: "span",
             namespace: "test:core:replay",
-            props: expect.objectContaining({ fromCursor: checkpoint.checkpoint.cursor }),
+            props: expect.objectContaining({ fromCursor: checkpoint.cursor }),
           }),
         )
       } finally {
@@ -263,6 +280,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       "review",
       "comment",
       "requestChecks",
+      "requestReview",
       "regression",
     ])
     expect(app.commands.bay.intake.metadata?.visibility).toBe("internal")
@@ -1211,7 +1229,6 @@ notify:
     // former triple-report (jobs:main-health + queue:run + queue:admit all ERROR)
     // collapses to the single deepest line.
     expect(submitStderr.trim().split("\n")).toEqual([
-      expect.stringMatching(/\bWARN yrd:journal journal generation installed and verified\b/u),
       expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
     ])
     const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
@@ -1547,7 +1564,7 @@ notify:
       expect(await cli.exited, await stderr).toBe(0)
 
       await using settled = await createYrdHost({ cwd: repo })
-      expect(Object.keys(settled.app.state().queues.records)).toEqual(["R1"])
+      expect(Queues.ids(settled.app.state().queues)).toEqual(["R1"])
       expect(settled.app.queue.get("R1")?.status).toBe("passed")
     } finally {
       cli.kill("SIGKILL")
@@ -1718,7 +1735,7 @@ notify:
       await expect(replacement.child.exited).resolves.toBe(0)
 
       await using settled = await createYrdHost({ cwd: repo })
-      const runIds = Object.keys(settled.app.state().queues.records)
+      const runIds = Queues.ids(settled.app.state().queues)
       expect(runIds).toEqual(["R1", "R2"])
       expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["passed", "passed"])
       expect(
@@ -1837,7 +1854,7 @@ notify:
       expect(await cli.exited, await stderr).toBe(0)
 
       await using settled = await createYrdHost({ cwd: repo })
-      const runIds = Object.keys(settled.app.state().queues.records)
+      const runIds = Queues.ids(settled.app.state().queues)
       expect(runIds).toEqual(["R1", "R2"])
       expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["failed", "passed"])
     } finally {
@@ -2067,9 +2084,7 @@ notify:
       command: "bay.submit",
       prs: [{ id: "PR1", branch: "issue/feature", headSha: featureSha }],
     })
-    expect(selected.stderr.trim().split("\n")).toEqual([
-      expect.stringMatching(/\bWARN yrd:journal journal generation installed and verified\b/u),
-    ])
+    expect(selected.stderr).toBe("")
 
     const diff = await run(["pr", "diff", "PR1", "--repo", relativeRepo, "--json"], poisoned)
     expect(diff.exitCode, diff.stderr).toBe(0)

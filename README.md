@@ -555,7 +555,8 @@ dry-run lists every unassociated terminal, either with one revision/head-bound
 failed-run proof or with a typed refusal such as missing, chronology-invalid,
 or ambiguous candidates. `--apply` appends one `pr/terminal-associated` event
 for each uniquely proven row and leaves every refused row untouched. It never
-rewrites JSONL, fabricates a run, or weakens new `pr/rejected` events; repeating
+rewrites committed journal facts, fabricates a run, or weakens new
+`pr/rejected` events; repeating
 `--apply` after the proven rows land appends nothing.
 
 `pr regression` records a completed repair without rewriting either integration.
@@ -831,8 +832,10 @@ Yrd stores local authority under the primary worktree's common Git directory:
 
 ```text
 .git/yrd/
-  events-v3.jsonl    append-only authority
-  writer.lock        short cross-process append lock
+  journal.sqlite     event journal + exact snapshot authority (WAL)
+  writer.lock        short cross-process transaction lock
+  journal-v4-pre-sqlite-*/
+                     preserved migration recovery evidence
   resident-runner/
     writer.lock      process-lifetime resident Queue lease
   prs.git/           bare PR ref/object receiver
@@ -842,14 +845,18 @@ Yrd stores local authority under the primary worktree's common Git directory:
     cursor-v1.json    journal cursor, successful sends, and opened-request ledger
 ```
 
-`events-v3.jsonl` is the source of truth. Each command appends one versioned,
-checksummed transaction as one JSONL record, containing the Command, its cause,
-its domain events, optional result value, and Job requests. Startup folds
-committed records into Bay, PR, Queue, Job, and Contest state. An unterminated
-final record is uncommitted and is truncated under the writer lock; malformed
-newline-committed records are
-reported as corruption. There is no second mutable database or read-model
-cache to reconcile.
+`journal.sqlite` is the source of truth. Each command appends one checksummed
+transaction containing the Command, its cause, domain events, optional result
+value, and Job requests. Startup restores the validated Core snapshot and folds
+only its bounded SQL tail into Bay, PR, Queue, Job, and Contest state. Snapshot
+publication retains an exact cursor-addressable prefix before deleting covered
+tail rows, so lagging notification and bridge cursors remain valid. There is no
+second mutable database or read-model authority to reconcile.
+
+The Journal uses WAL with `synchronous=FULL`, an external POSIX writer lock,
+explicitly closed connections, and a runtime `sqlite_version()` safety gate.
+Read-only commands never initialize or migrate authority. SQLite's volatile
+`-shm` coordination file is not logical authority.
 
 New terminal PR facts are revision/head-bound. Queue terminals also name their
 exact Run; integration facts expose `landingSha`, which must equal the
@@ -858,8 +865,8 @@ remain readable, but the current append schema is never widened for them.
 
 Pre-cutover `.git/yrd/events.jsonl` and `.git/bay/journal.jsonl` files remain
 opaque, read-only legacy data. Yrd never decodes, migrates, appends, or rewrites
-them; `yrd log --all --json` reports their paths and frame counts only as a coverage
-pointer while all new authority starts in `events-v3.jsonl`. The same lossless
+them; `yrd log --all --json` reports their paths and frame counts only as a
+coverage pointer while all new authority starts in `journal.sqlite`. The same lossless
 view includes complete typed Queue runs and every historical Job attempt, including
 failed output, artifacts, lost reasons, runner identity, and integration proof.
 
@@ -940,7 +947,7 @@ The low-level packages remain usable by a single developer with no agent fleet.
 | Package            | Responsibility                                                   |
 | ------------------ | ---------------------------------------------------------------- |
 | `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal      |
-| `@yrd/persistence` | Checksummed JSONL Journal and cross-process append exclusion     |
+| `@yrd/persistence` | WAL SQLite Journal, snapshots, migration, and writer exclusion   |
 | `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
 | `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |
 | `@yrd/issue`       | Issue references, snapshots, and source adapters                 |

@@ -13,6 +13,17 @@ import {
 import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
+import {
+  projectionLookupGet,
+  projectionLookupSet,
+  projectionLookupValues,
+  type QueueProjectionLookup,
+} from "./projection-lookup.ts"
+export type {
+  QueueProjectionLookup,
+  QueueProjectionLookupEntry,
+  QueueProjectionLookupNode,
+} from "./projection-lookup.ts"
 
 export type QueueRunId = string
 export type StepName = string
@@ -211,11 +222,27 @@ export type QueueAuthorityState = Readonly<{
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
-  runs: Readonly<Record<QueueRunId, QueueRunAuthority>>
+  claims: Readonly<Record<string, QueueAuthorityToken>>
+  runs: QueueProjectionLookup<QueueRunAuthority>
+}>
+
+export type QueueProjectionPlan = Readonly<{
+  latestExact?: QueueRunId
+  latestPrefix?: QueueRunId
+  releasedAdmissionFailures?: number
+}>
+
+export type QueueProjectionIndex = Readonly<{
+  version: 1
+  nextRunNumber: number
+  childByParentPart: QueueProjectionLookup<QueueRunId>
+  plans: QueueProjectionLookup<QueueProjectionPlan>
 }>
 
 export type QueueRecord = Readonly<{
   id: QueueRunId
+  /** New-run marker. Its absence identifies pre-settlement Queue journals. */
+  settlement?: "explicit"
   prs: readonly PRSnapshot[]
   base: string
   steps: readonly InstalledStep[]
@@ -269,7 +296,8 @@ export type QueuesState = Readonly<{
   defaultSteps?: readonly StepName[]
   requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
-  records: Readonly<Record<QueueRunId, QueueRecord>>
+  records: QueueProjectionLookup<QueueRecord>
+  index: QueueProjectionIndex
   authority: QueueAuthorityState
   terminalAssociations: QueueTerminalAssociations
 }>
@@ -411,12 +439,13 @@ const queueRecordShape = {
 }
 
 export const QueueRecordSchema = z
-  .object({ ...queueRecordShape, stepSelection: StepSelectionSchema.optional() })
+  .object({ ...queueRecordShape, settlement: z.literal("explicit"), stepSelection: StepSelectionSchema.optional() })
   .strict()
 
 export const ReplayQueueRecordSchema = z
   .object({
     ...queueRecordShape,
+    settlement: z.literal("explicit").optional(),
     stepSelection: z.union([StepSelectionSchema, LegacyStepSelectionSchema]).optional(),
   })
   .strict()
@@ -424,9 +453,17 @@ export const ReplayQueueRecordSchema = z
 function resolveQueueRecord(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
   return resolveSelector(
     id,
-    Object.values(state.records).map((record) => ({ canonical: record.id, value: record })),
+    queueRecordValues(state).map((record) => ({ canonical: record.id, value: record })),
     { kind: "queue run" },
   )
+}
+
+function compareQueueRunIds(left: QueueRunId, right: QueueRunId): number {
+  return left.localeCompare(right, undefined, { numeric: true })
+}
+
+function queueRecordValues(state: QueuesState): readonly QueueRecord[] {
+  return projectionLookupValues(state.records).toSorted((left, right) => compareQueueRunIds(left.id, right.id))
 }
 
 export const Queues = Object.freeze({
@@ -443,7 +480,13 @@ export const Queues = Object.freeze({
       requires: options.requires ?? [],
       pauses: {},
       records: {},
-      authority: { statuses: {}, current: {}, submits: {}, checks: {}, runs: {} },
+      index: {
+        version: 1,
+        nextRunNumber: 1,
+        childByParentPart: {},
+        plans: {},
+      },
+      authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       terminalAssociations: { pending: {}, applied: {} },
     }
   },
@@ -452,8 +495,31 @@ export const Queues = Object.freeze({
     return resolveQueueRecord(state, id)
   },
 
+  get(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
+    return projectionLookupGet(state.records, id)
+  },
+
+  values(state: QueuesState): readonly QueueRecord[] {
+    return queueRecordValues(state)
+  },
+
+  ids(state: QueuesState): readonly QueueRunId[] {
+    return queueRecordValues(state).map((record) => record.id)
+  },
+
+  authorityRun(authority: QueueAuthorityState, id: QueueRunId): QueueRunAuthority | undefined {
+    return projectionLookupGet(authority.runs, id)
+  },
+
+  set(
+    records: Readonly<QueueProjectionLookup<QueueRecord>>,
+    record: Readonly<QueueRecord>,
+  ): QueueProjectionLookup<QueueRecord> {
+    return projectionLookupSet(records, record.id, record)
+  },
+
   record(state: QueuesState, id: QueueRunId): QueueRecord {
-    const direct = state.records[id]
+    const direct = projectionLookupGet(state.records, id)
     if (direct !== undefined) return direct
     const record = resolveQueueRecord(state, id)
     if (record === undefined) throw new Error(`yrd: no queue run '${id}'`)
@@ -461,10 +527,7 @@ export const Queues = Object.freeze({
   },
 
   nextId(state: QueuesState): QueueRunId {
-    const values = Object.keys(state.records)
-      .filter((id) => /^R\d+$/u.test(id))
-      .map((id) => Number(id.slice(1)))
-    return `R${Math.max(0, ...values) + 1}`
+    return `R${state.index.nextRunNumber}`
   },
 
   snapshot(pr: PR): PRSnapshot {

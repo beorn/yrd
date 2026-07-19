@@ -1,2 +1,2 @@
-export * from "./journal.ts"
+export * from "./sqlite.ts"
 export * from "./lock.ts"

@@ -3,11 +3,22 @@
  * @level l1
  * @consumer @yrd/core + @yrd/persistence checkpoint seam
  */
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { access, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { command, createYrd, createYrdDef, event, type CommandTree, type Journal, type YrdDef } from "@yrd/core"
-import { createJournal } from "@yrd/persistence"
+import { Database } from "bun:sqlite"
+import {
+  command,
+  createYrd,
+  createYrdDef,
+  event,
+  type CommandTree,
+  type Journal,
+  type JournalCheckpoint,
+  type YrdDef,
+} from "@yrd/core"
+import { createJournal as createSqliteJournal } from "@yrd/persistence"
 import { createLogger, type Event as LogEvent } from "loggily"
 import { afterEach, describe, expect, it } from "vitest"
 import * as z from "zod"
@@ -25,6 +36,43 @@ async function stateDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "yrd-core-checkpoint-"))
   roots.push(root)
   return root
+}
+
+function createJournal(options: Parameters<typeof createSqliteJournal>[0]): Journal<unknown> {
+  const inject = options.inject ?? {}
+  return createSqliteJournal({
+    ...options,
+    inject: { ...inject, sqliteVersion: "3.53.0" },
+  } as unknown as Parameters<typeof createSqliteJournal>[0])
+}
+
+function storedCheckpoint(dir: string): JournalCheckpoint | undefined {
+  using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
+  const row = database
+    .query<{ checkpoint_json: string | null }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton=1")
+    .get()
+  return row?.checkpoint_json === null || row === null
+    ? undefined
+    : (JSON.parse(row.checkpoint_json) as JournalCheckpoint)
+}
+
+function storedCheckpointBytes(dir: string): string {
+  using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
+  const row = database
+    .query<
+      {
+        cursor: number
+        checkpoint_identity: string | null
+        checkpoint_json: string | null
+        checkpoint_sha256: string | null
+      },
+      []
+    >(
+      `SELECT cursor, checkpoint_identity, checkpoint_json, checkpoint_sha256
+       FROM journal_snapshot WHERE singleton=1`,
+    )
+    .get()
+  return JSON.stringify(row)
 }
 
 function ids() {
@@ -119,6 +167,157 @@ describe("persistent Core projection checkpoint", () => {
     expect(saves).toBe(0)
   })
 
+  it("never schedules a checkpoint write when a read-only journal exposes load only", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const journal = {
+      read() {
+        return (async function* () {})()
+      },
+      append() {
+        return Promise.reject(new Error("append is not expected"))
+      },
+      checkpoint: {
+        load() {
+          return Promise.resolve(undefined)
+        },
+      },
+    } as unknown as Journal<unknown>
+
+    await using runtime = await createYrd(counterDefinition(), { inject: { journal, log, id: ids() } })
+    expect(runtime.state().counter.value).toBe(0)
+    expect(events.filter((event) => event.props?.reason === "projection-checkpoint-write-failed")).toEqual([])
+  })
+
+  it("checkpoints a long-lived writer after 256 projected frames without waiting for close", async () => {
+    const values: unknown[] = []
+    const saves: number[] = []
+    const journal: Journal<unknown> = {
+      async *read(after = 0) {
+        if (after < values.length) yield { cursor: values.length, values: values.slice(after) }
+      },
+      append(value, expectedCursor) {
+        if (expectedCursor !== values.length) {
+          return Promise.resolve({ appended: false as const, cursor: values.length })
+        }
+        values.push(value)
+        return Promise.resolve({ appended: true as const, cursor: values.length })
+      },
+      checkpoint: {
+        load() {
+          return Promise.resolve(undefined)
+        },
+        save(checkpoint) {
+          saves.push(checkpoint.cursor)
+          return Promise.resolve(true)
+        },
+      },
+    }
+    await using runtime = await createYrd(counterDefinition(), { inject: { journal, id: ids() } })
+    expect(saves).toEqual([0])
+
+    for (let index = 0; index < 255; index += 1) {
+      await runtime.dispatch({ op: "counter.add", args: { by: 1 } })
+    }
+    await Promise.resolve()
+    expect(saves).toEqual([0])
+
+    await runtime.dispatch({ op: "counter.add", args: { by: 1 } })
+    await Promise.resolve()
+    expect(saves).toEqual([0, 256])
+  })
+
+  it("does not busy-retry a refused background checkpoint without new projection work", async () => {
+    const values: unknown[] = []
+    const saves: number[] = []
+    const retry = Promise.withResolvers<boolean>()
+    let savesAtRefreshCursor = 0
+    const journal: Journal<unknown> = {
+      async *read(after = 0) {
+        if (after < values.length) yield { cursor: values.length, values: values.slice(after) }
+      },
+      append(value, expectedCursor) {
+        if (expectedCursor !== values.length) {
+          return Promise.resolve({ appended: false as const, cursor: values.length })
+        }
+        values.push(value)
+        return Promise.resolve({ appended: true as const, cursor: values.length })
+      },
+      checkpoint: {
+        load() {
+          return Promise.resolve(undefined)
+        },
+        save(checkpoint) {
+          saves.push(checkpoint.cursor)
+          if (checkpoint.cursor !== 256) return Promise.resolve(true)
+          savesAtRefreshCursor += 1
+          return savesAtRefreshCursor === 1 ? Promise.resolve(false) : retry.promise
+        },
+      },
+    }
+    const runtime = await createYrd(counterDefinition(), { inject: { journal, id: ids() } })
+
+    for (let index = 0; index < 256; index += 1) {
+      await runtime.dispatch({ op: "counter.add", args: { by: 1 } })
+    }
+    await Promise.resolve()
+    await Promise.resolve()
+    const observed = [...saves]
+
+    retry.resolve(true)
+    await runtime.close()
+    expect(observed).toEqual([0, 256])
+  })
+
+  it("holds frame 513 behind the hard checkpoint high-water while one coalesced save is in flight", async () => {
+    const values: unknown[] = []
+    const saves: number[] = []
+    let releaseFirst: ((saved: boolean) => void) | undefined
+    const firstSave = new Promise<boolean>((resolve) => {
+      releaseFirst = resolve
+    })
+    const journal: Journal<unknown> = {
+      async *read(after = 0) {
+        if (after < values.length) yield { cursor: values.length, values: values.slice(after) }
+      },
+      append(value, expectedCursor) {
+        if (expectedCursor !== values.length) {
+          return Promise.resolve({ appended: false as const, cursor: values.length })
+        }
+        values.push(value)
+        return Promise.resolve({ appended: true as const, cursor: values.length })
+      },
+      checkpoint: {
+        load() {
+          return Promise.resolve(undefined)
+        },
+        save(checkpoint) {
+          saves.push(checkpoint.cursor)
+          return checkpoint.cursor === 256 ? firstSave : Promise.resolve(true)
+        },
+      },
+    }
+    await using runtime = await createYrd(counterDefinition(), { inject: { journal, id: ids() } })
+    for (let index = 0; index < 512; index += 1) {
+      await runtime.dispatch({ op: "counter.add", args: { by: 1 } })
+    }
+    expect(saves).toEqual([0, 256])
+
+    let settled = false
+    const blocked = runtime.dispatch({ op: "counter.add", args: { by: 1 } }).then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(values).toHaveLength(512)
+
+    releaseFirst?.(true)
+    await blocked
+    expect(saves).toEqual([0, 256, 512])
+    expect(values).toHaveLength(513)
+  })
+
   it("restores state and retry registries, then folds only the post-checkpoint tail", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
@@ -127,11 +326,9 @@ describe("persistent Core projection checkpoint", () => {
     const receipt = await first.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable" })
     await first.close()
 
-    const seeded = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
-      checkpoint: { identity: string; cursor: number }
-    }
-    expect(seeded.checkpoint).toMatchObject({ cursor: expect.any(Number), identity: expect.any(String) })
-    expect(seeded.checkpoint.cursor).toBeGreaterThan(0)
+    const seeded = storedCheckpoint(dir)
+    expect(seeded).toMatchObject({ cursor: expect.any(Number), identity: expect.any(String) })
+    expect(seeded!.cursor).toBeGreaterThan(0)
 
     const tail = await createYrd(definition, { inject: { journal: withoutCheckpoint(createJournal({ dir })), id } })
     await tail.dispatch({ op: "counter.add", args: { by: 2 } })
@@ -148,7 +345,7 @@ describe("persistent Core projection checkpoint", () => {
     await expect(warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable" })).resolves.toEqual(receipt)
     expect(warm.state().counter.value).toBe(3)
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
-      props: { fromCursor: seeded.checkpoint.cursor, toCursor: expect.any(Number) },
+      props: { fromCursor: seeded!.cursor, toCursor: expect.any(Number) },
     })
   })
 
@@ -160,9 +357,7 @@ describe("persistent Core projection checkpoint", () => {
     await original.dispatch({ op: "counter.add", args: { by: 2 } })
     await original.close()
 
-    const before = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
-      checkpoint: { identity: string }
-    }
+    const before = storedCheckpoint(dir)
     const events: LogEvent[] = []
     const log = createLogger("test", [
       { level: "trace" },
@@ -177,13 +372,110 @@ describe("persistent Core projection checkpoint", () => {
     expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
       props: { fromCursor: 0 },
     })
-    const after = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
-      checkpoint: { identity: string }
-    }
-    expect(after.checkpoint.identity).not.toBe(before.checkpoint.identity)
+    const after = storedCheckpoint(dir)
+    expect(after?.identity).not.toBe(before?.identity)
   })
 
-  it("never parses or rewrites historical snapshot values on an unchanged warm start", async () => {
+  it("rejects a re-signed checkpoint whose receipt breaks the command/cause binding", async () => {
+    const dir = await stateDir()
+    const definition = counterDefinition()
+    const seed = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    await seed.dispatch({ op: "counter.add", args: { by: 2 } })
+    await seed.close()
+
+    using database = new Database(join(dir, "journal.sqlite"), { strict: true })
+    const row = database
+      .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton=1")
+      .get()
+    if (row === null) throw new Error("expected a persisted checkpoint")
+    const poisoned = JSON.parse(row.checkpoint_json) as {
+      value: { receipts: Array<{ command: { id: string }; cause: { commandId: string } }> }
+    }
+    poisoned.value.receipts[0]!.cause.commandId = "00000000-0000-7000-8000-ffffffffffff"
+    const checkpointJson = JSON.stringify(poisoned)
+    const checkpointSha256 = createHash("sha256").update(checkpointJson).digest("hex")
+    database
+      .query(
+        `UPDATE journal_snapshot
+         SET checkpoint_json = ?, checkpoint_sha256 = ?
+         WHERE singleton=1`,
+      )
+      .run(checkpointJson, checkpointSha256)
+
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
+    await using warm = await createYrd(definition, {
+      inject: { journal: createJournal({ dir }), log, id: ids() },
+    })
+
+    expect(warm.state().counter.value).toBe(2)
+    expect(events.filter((entry) => entry.props?.reason === "projection-checkpoint-invalid")).toHaveLength(1)
+    expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
+      props: { fromCursor: 0 },
+    })
+    const repaired = storedCheckpoint(dir)
+    expect(repaired?.value).toMatchObject({
+      receipts: [{ command: { id: expect.any(String) }, cause: { commandId: expect.any(String) } }],
+    })
+    if (repaired === undefined) throw new Error("expected repaired checkpoint")
+    const [receipt] = (
+      repaired.value as {
+        receipts: Array<{ command: { id: string }; cause: { commandId: string } }>
+      }
+    ).receipts
+    expect(receipt?.cause.commandId).toBe(receipt?.command.id)
+  })
+
+  it("rejects a re-signed checkpoint whose command intent no longer matches its cause hash", async () => {
+    const dir = await stateDir()
+    const definition = counterDefinition()
+    const seed = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
+    await seed.dispatch({ op: "counter.add", args: { by: 2 } })
+    await seed.close()
+
+    using database = new Database(join(dir, "journal.sqlite"), { strict: true })
+    const row = database
+      .query<{ checkpoint_json: string }, []>("SELECT checkpoint_json FROM journal_snapshot WHERE singleton=1")
+      .get()
+    if (row === null) throw new Error("expected a persisted checkpoint")
+    const poisoned = JSON.parse(row.checkpoint_json) as {
+      value: { receipts: Array<{ command: { args: { by: number } }; cause: { commandHash: string } }> }
+    }
+    const receipt = poisoned.value.receipts[0]
+    if (receipt === undefined) throw new Error("expected a persisted receipt")
+    const originalHash = receipt.cause.commandHash
+    receipt.command.args.by = 999
+    expect(receipt.cause.commandHash).toBe(originalHash)
+    const checkpointJson = JSON.stringify(poisoned)
+    const checkpointSha256 = createHash("sha256").update(checkpointJson).digest("hex")
+    database
+      .query(
+        `UPDATE journal_snapshot
+         SET checkpoint_json = ?, checkpoint_sha256 = ?
+         WHERE singleton=1`,
+      )
+      .run(checkpointJson, checkpointSha256)
+
+    const events: LogEvent[] = []
+    const log = createLogger("test", [
+      { level: "trace" },
+      { write: (value: unknown) => events.push(value as LogEvent) },
+    ])
+    await using warm = await createYrd(definition, {
+      inject: { journal: createJournal({ dir }), log, id: ids() },
+    })
+
+    expect(warm.state().counter.value).toBe(2)
+    expect(events.filter((entry) => entry.props?.reason === "projection-checkpoint-invalid")).toHaveLength(1)
+    expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
+      props: { fromCursor: 0 },
+    })
+  })
+
+  it("restores a warm checkpoint and bounded tail without materializing the historical SQL prefix", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()
     const id = ids()
@@ -191,13 +483,16 @@ describe("persistent Core projection checkpoint", () => {
     await first.dispatch({ op: "counter.add", args: { by: 2 } })
     await first.close()
 
-    const checkpointPath = join(dir, "projection-checkpoint-v1.json")
+    const firstCheckpoint = storedCheckpoint(dir)
     const tail = await createYrd(definition, { inject: { journal: withoutCheckpoint(createJournal({ dir })), id } })
     await tail.dispatch({ op: "counter.add", args: { by: 3 } })
     await tail.close()
 
-    const poisonedSnapshot = '{"v":1,"values":[THIS MUST NOT BE PARSED'
-    await writeFile(join(dir, "snapshot-v4.json"), poisonedSnapshot)
+    const originalCheckpoint = storedCheckpointBytes(dir)
+    {
+      using database = new Database(join(dir, "journal.sqlite"), { readwrite: true, strict: true })
+      database.query("UPDATE journal_snapshot SET prefix_json = prefix_json || ' '").run()
+    }
     const events: LogEvent[] = []
     const log = createLogger("test", [
       { level: "trace" },
@@ -206,18 +501,18 @@ describe("persistent Core projection checkpoint", () => {
 
     const warm = await createYrd(definition, { inject: { journal: createJournal({ dir, inject: { log } }), log } })
     expect(warm.state().counter.value).toBe(5)
-    expect(await Array.fromAsync(warm.events())).toHaveLength(2)
-    const advancedCheckpoint = await readFile(checkpointPath, "utf8")
+    await expect(Array.fromAsync(createJournal({ dir }).read())).rejects.toThrow("snapshot prefix checksum mismatch")
     await warm.close()
-    expect(await readFile(checkpointPath, "utf8")).toBe(advancedCheckpoint)
-    expect(await readFile(join(dir, "snapshot-v4.json"), "utf8")).toBe(poisonedSnapshot)
-    expect(events.some((entry) => JSON.stringify(entry).includes("snapshot-hit"))).toBe(true)
+    expect(storedCheckpointBytes(dir)).toBe(originalCheckpoint)
+    expect(events.some((entry) => entry.props?.reason === "checkpoint-write-failed")).toBe(true)
+    expect(events.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
+      props: { fromCursor: firstCheckpoint?.cursor },
+    })
 
     const unchanged = await createYrd(definition, { inject: { journal: createJournal({ dir }), id } })
     expect(unchanged.state().counter.value).toBe(5)
     await unchanged.close()
-    expect(await readFile(checkpointPath, "utf8")).toBe(advancedCheckpoint)
-    expect(await readFile(join(dir, "snapshot-v4.json"), "utf8")).toBe(poisonedSnapshot)
+    expect(storedCheckpointBytes(dir)).toBe(originalCheckpoint)
   })
 
   it("disables projection checkpoints when reducer semantics are not explicitly versioned", async () => {
@@ -233,8 +528,8 @@ describe("persistent Core projection checkpoint", () => {
     await runtime.dispatch({ op: "counter.add", args: { by: 2 } })
     await runtime.close()
 
+    expect(storedCheckpoint(dir)).toBeUndefined()
     await expect(access(join(dir, "snapshot-v4.json"))).rejects.toMatchObject({ code: "ENOENT" })
-    await expect(access(join(dir, "projection-checkpoint-v1.json"))).rejects.toMatchObject({ code: "ENOENT" })
     expect(events.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(1)
   })
 
@@ -246,13 +541,12 @@ describe("persistent Core projection checkpoint", () => {
     expect(Object.hasOwn(first.state().values, "__proto__")).toBe(true)
     await first.close()
 
-    const persisted = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
-      checkpoint: { cursor: number }
-      checkpointValue: { state: PrototypeKeyState }
-    }
-    expect(persisted.checkpoint.cursor).toBeGreaterThan(0)
-    expect(Object.hasOwn(persisted.checkpointValue.state.values, "__proto__")).toBe(true)
-    expect(persisted.checkpointValue.state.values.__proto__).toBe("preserved")
+    const persisted = storedCheckpoint(dir)
+    if (persisted === undefined) throw new Error("expected persisted checkpoint")
+    const persistedState = (persisted.value as { state: PrototypeKeyState }).state
+    expect(persisted?.cursor).toBeGreaterThan(0)
+    expect(Object.hasOwn(persistedState.values, "__proto__")).toBe(true)
+    expect(persistedState.values.__proto__).toBe("preserved")
 
     await using warm = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
     expect(Object.hasOwn(warm.state().values, "__proto__")).toBe(true)
@@ -264,9 +558,7 @@ describe("persistent Core projection checkpoint", () => {
     const seed = await createYrd(counterDefinition(), { inject: { journal: createJournal({ dir }), id: ids() } })
     await seed.dispatch({ op: "counter.add", args: { by: 2 } })
     await seed.close()
-    const stale = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
-      checkpoint: { identity: string }
-    }
+    const stale = storedCheckpoint(dir)
 
     // A projector-semantics change shifts the derived identity; the stored checkpoint now carries the old one.
     const mismatchEvents: LogEvent[] = []
@@ -278,13 +570,11 @@ describe("persistent Core projection checkpoint", () => {
       inject: { journal: createJournal({ dir, inject: { log: mismatchLog } }), log: mismatchLog, id: ids() },
     })
     // Read the checkpoint after activation but before close: a read-only invocation that never closes must still heal.
-    const refreshed = JSON.parse(await readFile(join(dir, "projection-checkpoint-v1.json"), "utf8")) as {
-      checkpoint: { identity: string; cursor: number }
-    }
+    const refreshed = storedCheckpoint(dir)
     await rewritten.close()
     expect(mismatchEvents.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(1)
-    expect(refreshed.checkpoint.identity).not.toBe(stale.checkpoint.identity)
-    expect(refreshed.checkpoint.cursor).toBeGreaterThan(0)
+    expect(refreshed?.identity).not.toBe(stale?.identity)
+    expect(refreshed?.cursor).toBeGreaterThan(0)
 
     // The very next invocation under the new identity must load warm: no warning, replay only from the fresh checkpoint.
     const warmEvents: LogEvent[] = []
@@ -298,13 +588,12 @@ describe("persistent Core projection checkpoint", () => {
     expect(warm.state().counter.value).toBe(3)
     expect(warmEvents.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(0)
     expect(warmEvents.find((entry) => entry.kind === "span" && entry.namespace === "test:core:replay")).toMatchObject({
-      props: { fromCursor: refreshed.checkpoint.cursor },
+      props: { fromCursor: refreshed?.cursor },
     })
   })
 
   it("never writes a checkpoint and warns on every open while the projector identity is underivable", async () => {
     const dir = await stateDir()
-    const checkpointPath = join(dir, "projection-checkpoint-v1.json")
     const firstEvents: LogEvent[] = []
     const firstLog = createLogger("test", [
       { level: "trace" },
@@ -318,7 +607,7 @@ describe("persistent Core projection checkpoint", () => {
     expect(firstEvents.filter((entry) => JSON.stringify(entry).includes("identity could not be derived"))).toHaveLength(
       1,
     )
-    await expect(access(checkpointPath)).rejects.toMatchObject({ code: "ENOENT" })
+    expect(storedCheckpoint(dir)).toBeUndefined()
 
     const secondEvents: LogEvent[] = []
     const secondLog = createLogger("test", [
@@ -332,7 +621,7 @@ describe("persistent Core projection checkpoint", () => {
     expect(
       secondEvents.filter((entry) => JSON.stringify(entry).includes("identity could not be derived")),
     ).toHaveLength(1)
-    await expect(access(checkpointPath)).rejects.toMatchObject({ code: "ENOENT" })
+    expect(storedCheckpoint(dir)).toBeUndefined()
   })
 
   it("does not warn or rewrite the checkpoint when the projector identity is unchanged", async () => {
@@ -341,8 +630,7 @@ describe("persistent Core projection checkpoint", () => {
     const seed = await createYrd(definition, { inject: { journal: createJournal({ dir }), id: ids() } })
     await seed.dispatch({ op: "counter.add", args: { by: 2 } })
     await seed.close()
-    const checkpointPath = join(dir, "projection-checkpoint-v1.json")
-    const stored = await readFile(checkpointPath, "utf8")
+    const stored = storedCheckpointBytes(dir)
 
     const events: LogEvent[] = []
     const log = createLogger("test", [
@@ -354,6 +642,6 @@ describe("persistent Core projection checkpoint", () => {
     })
     expect(warm.state().counter.value).toBe(2)
     expect(events.filter((entry) => JSON.stringify(entry).includes("identity changed"))).toHaveLength(0)
-    expect(await readFile(checkpointPath, "utf8")).toBe(stored)
+    expect(storedCheckpointBytes(dir)).toBe(stored)
   })
 })

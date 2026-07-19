@@ -252,9 +252,15 @@ describe("Yrd domain objects", () => {
 
     expect(cache.reads[0]).toBe(saved?.cursor)
     expect(warm.state().counter.value).toBe(3)
-    await expect(warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })).resolves.toEqual(
-      receipt,
-    )
+    const retried = await warm.dispatch({ op: "counter.add", args: { by: 1 } }, { key: "stable-retry" })
+    expect(retried).toEqual(receipt)
+    expect(retried).not.toBe(receipt)
+    expect(Object.isFrozen(retried)).toBe(true)
+    expect(Object.isFrozen(retried.command)).toBe(true)
+    expect(Object.isFrozen(retried.command.args)).toBe(true)
+    expect(Object.isFrozen(retried.events)).toBe(true)
+    expect(Object.isFrozen(retried.events[0])).toBe(true)
+    expect(Object.isFrozen(retried.events[0]?.data)).toBe(true)
     expect(warm.state().counter.value).toBe(3)
   })
 

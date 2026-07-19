@@ -1857,11 +1857,17 @@ describe("Queue command adapters", () => {
     expect(progressing.mergeRuns).toEqual(["merge"])
 
     await using stalled = await controlledQueue()
-    const stalledRun = stalled.app.queue.run({ prs: ["PR1"] }, { runner: "same-runner", leaseMs: 80, heartbeatMs: 20 })
+    const stalledRun = stalled.app.queue.run(
+      { prs: ["PR1"] },
+      { runner: "same-runner", leaseMs: 200, heartbeatMs: 150 },
+    )
     await stalled.started.promise
     await Bun.sleep(120)
     const recovered = await stalled.app.queue.recover({
-      recoveryTime: new Date().toISOString(),
+      // Advance the operator's recovery cutoff beyond the still-live lease;
+      // the resident heartbeat has not yet sampled, so external recovery owns
+      // this transition deterministically instead of racing self-settlement.
+      recoveryTime: new Date(Date.now() + 1_000).toISOString(),
     })
     const ownershipAborted = await Promise.race([
       stalled.aborted.promise.then(() => true),

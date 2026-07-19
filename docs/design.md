@@ -249,13 +249,22 @@ concluded success`. Reviews participate as asynchronous required checks
   pure `apply(Event, State) → State` → signals. `CommandResult` returns
   `{ command, events, value? }`.
 - `Frame` is the Journal's atomic append envelope only. It leaves the public
-  core surface. Journal semantics (compare-and-append, checksummed JSONL,
-  replay, cross-process single-writer) are unchanged.
+  core surface. Journal semantics remain compare-and-append, checksummed replay,
+  and cross-process single-writer; SQLite changes the container, not the model.
 - Event/cause/command ids are process-unique (UUIDv7). Domain object ids stay
   human counters (PR1/C1/R1/B1) — safe because journal CAS forces replay and
   re-decision on cursor conflict, so colliding counters cannot commit.
-- `events-v3.jsonl` authoritative; `index.sqlite` rebuildable; Git stores named
-  by content (`prs.git`; candidate refs under `refs/yrd/candidates/`).
+- `journal.sqlite` is the sole authority. Its Core checkpoint and Queue lookup
+  indexes are replay-derived acceleration, never a second status store. Queue's
+  exact/prefix/retry metadata, record history, and run-authority history share
+  one JSON-compatible persistent SHA-256 radix lookup; an immutable update
+  copies only its bounded digest path rather than the complete history map.
+  New Queue starts explicitly declare settlement ownership. A pre-settlement
+  journal may migrate only after every legacy root is terminal; an unfinished
+  legacy root refuses startup until the prior writer is quiesced, rather than
+  guessing whether the historical start still owns work. Git stores remain
+  named by content (`prs.git`; candidate refs under
+  `refs/yrd/candidates/`).
 - Event names are namespaced by owning plugin (`pr/…`, `queue/…`, `job/…`).
 
 ## C. Decisions the packet left implicit (now explicit)
@@ -305,15 +314,12 @@ reverts the merge: the base branch advance stands, the PR stays
 retryable (`--retry`). Un-landing is a human/git decision outside Yrd.
 
 **C9. Journal migration stance (pre-1.0).** No general event-upcaster or
-history-rewrite machinery. A narrow compatibility cutover may append an
-explicit compensating event only when the owning domain can prove the missing
-relation and expose typed refusal rows for everything it cannot prove. The
-model upgrade otherwise ships as journal schema v2: a repository re-inits Yrd
-state,
-open PRs are re-submitted (a scripted `yrd migrate` walk of live PRs is
-acceptable if cheap), and the old journal is archived read-only next to the
-new one. Change-is-free applies to our own pre-1.0 surface; carrying
-dual-decode paths for a single-digit number of live deployments is waste.
+history-rewrite machinery. The JSONL-to-SQLite container cutover preserves
+every validated frame, identity, and committed opaque cursor exactly, then
+makes the complete SQL file irrevocable authority. Domain-shape compatibility
+still uses an explicit compensating event only when the owner can prove the
+missing relation and expose typed refusals for everything it cannot prove;
+container migration never invents domain facts.
 
 **C10. Security invariants (absorbed from the standing P0).** Event/cause/
 command ids unique across fresh CLI processes; all subprocess execution is

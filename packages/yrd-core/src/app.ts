@@ -75,6 +75,10 @@ type Project<State extends object> = (state: DeepReadonly<State>, event: Event, 
 type Empty = Readonly<Record<never, never>>
 const projectionVersions = Symbol("yrd.projectionVersions")
 const PROJECTION_CHECKPOINT_VERSION = 1
+const PROJECTION_CHECKPOINT_REFRESH_FRAMES = 256
+const PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES = 512
+const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+const SHA256_PATTERN = /^[0-9a-f]{64}$/u
 const ProjectionCheckpointSchema = z
   .object({
     v: z.literal(PROJECTION_CHECKPOINT_VERSION),
@@ -225,6 +229,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 
   type Projection = Readonly<{
     cursor: Cursor
+    revision: number
     at?: string
     state: DeepReadonly<State>
     receiptsById: ReadonlyMap<string, JournalFrame>
@@ -235,6 +240,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 
   const emptyProjection = (): Projection => ({
     cursor: 0,
+    revision: 0,
     state: state(),
     receiptsById: new Map(),
     receiptsByKey: new Map(),
@@ -248,6 +254,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
   const checkpointStore = journal.checkpoint
   let checkpointIdentity: string | undefined
   let checkpointCursor: Cursor | undefined
+  let checkpointRevision = 0
+  let checkpointWork: Promise<void> | undefined
   let checkpointWarning = false
 
   const warnCheckpoint = (message: string, error: unknown): void => {
@@ -320,6 +328,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
     const at = frame.events.at(-1)?.ts ?? base.at
     return {
       ...base,
+      revision: base.revision + 1,
       state: nextState,
       receiptsById,
       receiptsByKey,
@@ -330,6 +339,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const restoreProjection = (checkpoint: JournalCheckpoint): Projection => {
+    const restoreStarted = performance.now()
     if (checkpoint.identity !== checkpointIdentity) {
       throw new Error("checkpoint identity does not match this projection")
     }
@@ -337,18 +347,21 @@ export async function createYrd<State extends object, Commands extends CommandTr
       throw new Error("checkpoint cursor must be a non-negative safe integer")
     }
     const parsed = ProjectionCheckpointSchema.parse(checkpoint.value)
+    const envelopeParsedAt = performance.now()
     const state = projectionCheckpointState(parsed.state)
     if (typeof state !== "object" || state === null || Array.isArray(state)) {
       throw new Error("checkpoint state must be a JSON object")
     }
+    const stateValidatedAt = performance.now()
 
     const receiptsById = new Map<string, JournalFrame>()
     const receiptsByKey = new Map<string, JournalFrame>()
     const expectedCauseIds = new Set<string>()
     const expectedEventIds = new Set<string>()
+    const commandHashes = new Map<string, string>()
     let expectedAt: string | undefined
     for (const value of parsed.receipts) {
-      const frame = parseJournalFrame(value)
+      const frame = parseCheckpointFrame(value, commandHashes)
       if (receiptsById.has(frame.command.id)) throw new Error(`checkpoint repeats command id '${frame.command.id}'`)
       receiptsById.set(frame.command.id, frame)
       if (frame.cause.key !== undefined) {
@@ -363,16 +376,29 @@ export async function createYrd<State extends object, Commands extends CommandTr
         expectedAt = applied.ts
       }
     }
+    const receiptsValidatedAt = performance.now()
     const causeIds = new Set(parsed.causeIds)
     const eventIds = new Set(parsed.eventIds)
     if (!setsEqual(causeIds, expectedCauseIds)) throw new Error("checkpoint cause registry does not match receipts")
     if (!setsEqual(eventIds, expectedEventIds)) throw new Error("checkpoint event registry does not match receipts")
     if (parsed.at !== expectedAt) throw new Error("checkpoint event-order timestamp does not match receipts")
+    const registriesValidatedAt = performance.now()
+    coreLog.debug?.("projection checkpoint restored", {
+      envelopeMs: envelopeParsedAt - restoreStarted,
+      stateMs: stateValidatedAt - envelopeParsedAt,
+      receiptsMs: receiptsValidatedAt - stateValidatedAt,
+      registriesMs: registriesValidatedAt - receiptsValidatedAt,
+      totalMs: registriesValidatedAt - restoreStarted,
+      receipts: parsed.receipts.length,
+      causeIds: parsed.causeIds.length,
+      eventIds: parsed.eventIds.length,
+    })
 
     return {
       cursor: checkpoint.cursor,
+      revision: 0,
       ...(parsed.at === undefined ? {} : { at: parsed.at }),
-      state: cloneFrozen(state as State) as DeepReadonly<State>,
+      state: freeze(state as State) as DeepReadonly<State>,
       receiptsById,
       receiptsByKey,
       causeIds,
@@ -395,13 +421,14 @@ export async function createYrd<State extends object, Commands extends CommandTr
     }
   }
 
-  const saveProjection = async (next: Projection): Promise<void> => {
-    if (checkpointStore === undefined || checkpointIdentity === undefined || checkpointCursor === next.cursor) {
-      return
+  const saveProjection = async (next: Projection): Promise<boolean> => {
+    const save = checkpointStore?.save
+    if (save === undefined || checkpointIdentity === undefined || checkpointCursor === next.cursor) {
+      return checkpointCursor === next.cursor
     }
     try {
       const stateValue = projectionCheckpointState(next.state)
-      const saved = await checkpointStore.save({
+      const saved = await save({
         identity: checkpointIdentity,
         cursor: next.cursor,
         value: {
@@ -414,19 +441,84 @@ export async function createYrd<State extends object, Commands extends CommandTr
         },
       })
       if (saved) checkpointCursor = next.cursor
+      return saved
     } catch (error) {
       coreLog.error?.("projection checkpoint write failed; journal remains authoritative", {
         action: "skipped",
         reason: "projection-checkpoint-write-failed",
         error: error instanceof Error ? error.message : String(error),
       })
+      return false
     }
   }
+
+  const checkpointDebt = (): number => projection.revision - checkpointRevision
+
+  const startCheckpoint = (): Promise<void> => {
+    if (checkpointWork !== undefined) return checkpointWork
+    const operation = (async (): Promise<boolean> => {
+      let progressed = false
+      while (checkpointStore?.save !== undefined && checkpointIdentity !== undefined) {
+        const target = projection
+        const revision = target.revision
+        if (!(await saveProjection(target))) return progressed
+        progressed = true
+        checkpointRevision = Math.max(checkpointRevision, revision)
+        if (checkpointDebt() < PROJECTION_CHECKPOINT_REFRESH_FRAMES) return progressed
+      }
+      return progressed
+    })()
+    checkpointWork = operation.then(
+      (progressed) => {
+        checkpointWork = undefined
+        // A false save is a normal stale-CAS/refusal outcome. Re-arm only after
+        // a successful save when projection work arrived during completion.
+        if (progressed && !closing && checkpointDebt() >= PROJECTION_CHECKPOINT_REFRESH_FRAMES) {
+          void startCheckpoint()
+        }
+        return undefined
+      },
+      (error: unknown) => {
+        checkpointWork = undefined
+        throw error
+      },
+    )
+    return checkpointWork
+  }
+
+  const scheduleCheckpoint = (): void => {
+    if (
+      closing ||
+      checkpointStore?.save === undefined ||
+      checkpointIdentity === undefined ||
+      checkpointDebt() < PROJECTION_CHECKPOINT_REFRESH_FRAMES
+    ) {
+      return
+    }
+    void startCheckpoint()
+  }
+
+  const enforceCheckpointHighWater = async (): Promise<void> => {
+    while (checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
+      const before = checkpointRevision
+      await startCheckpoint()
+      if (checkpointRevision === before && checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
+        throw new Error(
+          `yrd: projection checkpoint high-water ${PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES} could not flush`,
+        )
+      }
+    }
+  }
+
+  scope.defer(async () => {
+    await checkpointWork
+  })
 
   const publish = (next: Projection): void => {
     if (next.cursor <= projection.cursor) return
     projection = next
     state(next.state)
+    scheduleCheckpoint()
   }
 
   const assertOpen = (): void => {
@@ -484,6 +576,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
 
     while (!closing && !scope.signal.aborted) {
       const current = await fold(projection)
+      publish(current)
       const byId = current.receiptsById.get(canonical.id)
       const byKey = trace?.key === undefined ? undefined : current.receiptsByKey.get(trace.key)
       if (byId !== undefined && byKey !== undefined && byId !== byKey) {
@@ -505,6 +598,8 @@ export async function createYrd<State extends object, Commands extends CommandTr
         publish(current)
         return commandResult(receipt)
       }
+
+      await enforceCheckpointHighWater()
 
       const context = { state: current.state, cause, command: canonical }
       const unavailable = unavailableReason(selected.isAvailable?.(context))
@@ -554,7 +649,9 @@ export async function createYrd<State extends object, Commands extends CommandTr
         await scope[Symbol.asyncDispose]()
       } finally {
         await Promise.allSettled(active)
-        await saveProjection(projection)
+        await checkpointWork
+        const target = projection
+        if (await saveProjection(target)) checkpointRevision = Math.max(checkpointRevision, target.revision)
       }
     })()
     return closePromise
@@ -603,7 +700,7 @@ export async function createYrd<State extends object, Commands extends CommandTr
       }
     }
     state(projection.state)
-    await saveProjection(projection)
+    if (await saveProjection(projection)) checkpointRevision = projection.revision
     const features = definition.create(core)
     return mergeFields(core, features, "feature")
   } catch (error) {
@@ -741,6 +838,120 @@ function projectionCheckpointState(value: unknown, path = "$state"): JsonValue {
   // Define dynamic keys as own data properties. Assignment into `{}` would
   // invoke the inherited __proto__ setter and silently drop valid JSON state.
   return Object.fromEntries(entries)
+}
+
+/**
+ * Checkpoint bytes are independently checksummed and bound to the complete
+ * projector identity. Validate the frame envelope and command/cause binding
+ * here without repeating replay's full Zod clone for every already-validated
+ * receipt. Semantic checks still share the canonical command-hash and event
+ * timestamp validators used by the authoritative journal path.
+ */
+function parseCheckpointFrame(value: unknown, commandHashes: Map<string, string>): JournalFrame {
+  if (!plainRecord(value) || !plainRecord(value.command) || !plainRecord(value.cause) || !Array.isArray(value.events)) {
+    throw new Error("checkpoint contains an invalid journal frame")
+  }
+  const command = value.command
+  const cause = value.cause
+  const jsonPostorder: object[] = []
+  if (
+    !exactKeys(command, ["id", "op", "args"]) ||
+    !exactKeys(cause, ["id", "commandId", "op", "commandHash", "key", "traceId", "spanId"]) ||
+    typeof command.id !== "string" ||
+    !UUID_V7_PATTERN.test(command.id) ||
+    typeof command.op !== "string" ||
+    command.op === "" ||
+    (Object.hasOwn(command, "args") && !checkpointJson(command.args, jsonPostorder)) ||
+    typeof cause.id !== "string" ||
+    !UUID_V7_PATTERN.test(cause.id) ||
+    typeof cause.commandId !== "string" ||
+    typeof cause.op !== "string" ||
+    cause.commandId !== command.id ||
+    cause.op !== command.op ||
+    typeof cause.commandHash !== "string" ||
+    !SHA256_PATTERN.test(cause.commandHash) ||
+    !optionalNonemptyString(cause.key) ||
+    !optionalNonemptyString(cause.traceId) ||
+    !optionalNonemptyString(cause.spanId) ||
+    (Object.hasOwn(value, "value") && !checkpointJson(value.value, jsonPostorder)) ||
+    !exactKeys(value, ["cause", "command", "events", "value"])
+  ) {
+    throw new Error("checkpoint contains an invalid journal frame")
+  }
+  for (const applied of value.events) {
+    if (
+      !plainRecord(applied) ||
+      !exactKeys(applied, ["id", "name", "ts", "data"]) ||
+      typeof applied.id !== "string" ||
+      !UUID_V7_PATTERN.test(applied.id) ||
+      typeof applied.name !== "string" ||
+      applied.name === "" ||
+      typeof applied.ts !== "string" ||
+      !EventSchema.shape.ts.safeParse(applied.ts).success ||
+      !checkpointJson(applied.data, jsonPostorder)
+    ) {
+      throw new Error("checkpoint contains an invalid journal event")
+    }
+  }
+  assertCheckpointCause(command, cause, commandHashes)
+  // checkpointJson already walked every dynamic JSON subtree. Freeze those
+  // nodes in child-first order, then freeze the fixed frame envelope without
+  // paying for a second recursive walk over the same receipt.
+  for (const node of jsonPostorder) Object.freeze(node)
+  Object.freeze(command)
+  Object.freeze(cause)
+  for (const applied of value.events) Object.freeze(applied)
+  Object.freeze(value.events)
+  return Object.freeze(value) as JournalFrame
+}
+
+function checkpointJson(value: unknown, postorder: object[]): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true
+  if (typeof value === "number") return Number.isFinite(value) && !Object.is(value, -0)
+  if (Array.isArray(value)) {
+    if (!value.every((entry) => checkpointJson(entry, postorder))) return false
+    postorder.push(value)
+    return true
+  }
+  if (!plainRecord(value)) return false
+  if (!Object.values(value).every((entry) => entry !== undefined && checkpointJson(entry, postorder))) return false
+  postorder.push(value)
+  return true
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+  const prototype = Reflect.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function assertCheckpointCause(
+  command: Record<string, unknown>,
+  cause: Record<string, unknown>,
+  hashes: Map<string, string>,
+): void {
+  const intent = Object.hasOwn(command, "args") ? { op: command.op, args: command.args } : { op: command.op }
+  const encoded = canonicalize(intent)
+  if (encoded === undefined) throw new Error("checkpoint command intent is not canonical JSON")
+  // Command ids are outside the hashed intent, so retries and repeated
+  // eventless operations often share the exact canonical bytes. Reuse only
+  // that deterministic digest; distinct intents are still hashed separately.
+  let actual = hashes.get(encoded)
+  if (actual === undefined) {
+    actual = createHash("sha256").update(encoded).digest("hex")
+    hashes.set(encoded, actual)
+  }
+  if (cause.commandHash !== actual) {
+    throw new Error("yrd: command hash does not match its command")
+  }
+}
+
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowed.includes(key))
+}
+
+function optionalNonemptyString(value: unknown): boolean {
+  return value === undefined || (typeof value === "string" && value !== "")
 }
 
 function setsEqual(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
