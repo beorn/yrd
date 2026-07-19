@@ -1091,12 +1091,6 @@ describe("Queue command adapters", () => {
       headSha: featureSha,
       baseSha,
     })
-    // Advance the authoritative base with a change that does not touch payload.txt.
-    await writeFile(join(repo, "other.txt"), "advanced\n")
-    await git(repo, ["add", "other.txt"])
-    await git(repo, ["commit", "-qm", "advance base disjoint"])
-    expect(await git(repo, ["rev-parse", "main"])).not.toBe(baseSha)
-
     await using app = await checkedQueue(process, repo, ["true"])
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main", baseSha, draft: true })
     await app.bays.recut({
@@ -1109,6 +1103,15 @@ describe("Queue command adapters", () => {
       reviewCarried: false,
     })
     await app.bays.ready({ pr: "PR1" })
+
+    // Production refreshes the check identity after a recut when main advances.
+    // The admission base may move, but it must not replace the base certified by the recut revision.
+    await writeFile(join(repo, "other.txt"), "advanced\n")
+    await git(repo, ["add", "other.txt"])
+    await git(repo, ["commit", "-qm", "advance base disjoint"])
+    const advancedBaseSha = await git(repo, ["rev-parse", "main"])
+    expect(advancedBaseSha).not.toBe(baseSha)
+    await app.bays.requestChecks({ pr: "PR1", baseSha: advancedBaseSha })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 

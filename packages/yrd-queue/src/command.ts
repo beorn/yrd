@@ -1686,16 +1686,21 @@ type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: b
 /**
  * Classify how the authoritative candidate base relates to the reviewed recut base
  * for a `pr.recut` snapshot. `repo` is the candidate worktree; its HEAD is the base
- * this candidate is actually built on. A recut certifies a mechanical rebase of the
- * reviewed revision, so the recorded base must be an *ancestor* of the candidate base:
+ * this candidate is actually built on. `pr.baseSha` is the refreshable check/admission
+ * identity; `pr.recut.baseSha` is the immutable base certified by the recut revision.
+ * A recut certifies a mechanical rebase of the reviewed revision, so its certified base
+ * must be an *ancestor* of the candidate base:
  * either the same commit (no movement) or a forward advance the reviewed change can be
  * re-anchored onto. A missing or non-ancestor base cannot be mechanically re-anchored
  * and stays a hard recut-certificate refusal.
  */
 async function recutBaseMovement(git: Git, repo: string, pr: StepExecution["prs"][number]): Promise<RecutBaseMovement> {
-  const baseSha = pr.baseSha
+  const baseSha = pr.recut?.baseSha
   if (baseSha === undefined) {
-    return candidateFailure("recut-certificate", `PR '${pr.id}' recut revision ${pr.revision} has no immutable base`)
+    return candidateFailure(
+      "recut-certificate",
+      `PR '${pr.id}' recut revision ${pr.revision} has no immutable certified base`,
+    )
   }
   const head = await git.commit(repo, "HEAD")
   if (head === baseSha) return { status: "moved", moved: false, baseSha, head }
