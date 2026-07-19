@@ -4,7 +4,7 @@
  * @consumer @yrd/queue warm candidate pool
  */
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -81,9 +81,21 @@ function capturingLog(): CapturingLog {
   return { log, events }
 }
 
-function makePool(repo: string, baysRoot: string, capacity: number, log: CapturingLog["log"]): CandidatePool {
+function makePool(
+  repo: string,
+  baysRoot: string,
+  capacity: number,
+  log: CapturingLog["log"],
+  environment: NodeJS.ProcessEnv = process.env,
+): CandidatePool {
   const process = createProcess({ cwd: repo })
-  const pool = createCandidatePool({ repo, parent: baysRoot, capacity, git: createCandidatePoolGit(process), log })
+  const pool = createCandidatePool({
+    repo,
+    parent: baysRoot,
+    capacity,
+    git: createCandidatePoolGit(process, environment),
+    log,
+  })
   disposers.push(async () => {
     await pool.close()
     await process.close()
@@ -134,7 +146,11 @@ function percentile(values: readonly number[], p: number): number {
   return sorted[index] ?? 0
 }
 
-function deferred<T = void>(): Readonly<{ promise: Promise<T>; resolve: (value: T) => void; reject: (cause: unknown) => void }> {
+function deferred<T = void>(): Readonly<{
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (cause: unknown) => void
+}> {
   let resolve!: (value: T) => void
   let reject!: (cause: unknown) => void
   const promise = new Promise<T>((res, rej) => {
@@ -244,7 +260,7 @@ describe("warm candidate pool", () => {
     expect(pool.stats().misses).toBe(2)
   })
 
-  it("materializes submodules on a warm worktree and keeps them pinned across reuse", async () => {
+  it("materializes submodules from the local store and keeps them pinned across reuse", async () => {
     const { repo, baseSha, baysRoot } = await repository()
     const module = join(repo, "..", "module")
     await Bun.$`git init -q -b main ${module}`.quiet()
@@ -255,21 +271,39 @@ describe("warm candidate pool", () => {
     await git(module, ["commit", "-qm", "module"])
     await git(repo, ["config", "protocol.file.allow", "always"])
     await git(repo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", module, "dep"])
+    const unreachable = "never://network.example/dep.git"
+    await git(repo, ["config", "-f", ".gitmodules", "submodule.dep.url", unreachable])
+    await git(repo, ["config", "submodule.dep.url", unreachable])
     await git(repo, ["commit", "-qam", "add dep"])
     const withSubmodule = await git(repo, ["rev-parse", "HEAD"])
+    const unexpectedHookSync = join(repo, "..", "unexpected-post-checkout-submodule-sync")
+    await writeFile(
+      join(repo, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh\n[ "\${KM_NO_AUTO_SUBMODULE_UPDATE:-}" = "1" ] || : > "${unexpectedHookSync}"\n`,
+    )
+    await chmod(join(repo, ".git", "hooks", "post-checkout"), 0o755)
 
     const { log, events } = capturingLog()
-    const pool = makePool(repo, baysRoot, 1, log)
+    const pool = makePool(repo, baysRoot, 1, log, { ...process.env, KM_NO_AUTO_SUBMODULE_UPDATE: "0" })
 
     for (const ref of [withSubmodule, withSubmodule]) {
       await pool.withCandidate(ref, async (path) => {
         expect(existsSync(join(path, "dep", "version.txt"))).toBe(true)
+        const moduleGitDir = await git(join(path, "dep"), ["rev-parse", "--absolute-git-dir"])
+        expect((await readFile(join(moduleGitDir, "objects", "info", "alternates"), "utf8")).trim()).toBe(
+          join(await realpath(repo), ".git", "modules", "dep", "objects"),
+        )
+        expect(await git(join(path, "dep"), ["remote", "get-url", "origin"])).toBe(unreachable)
+        const objects = join(moduleGitDir, "objects")
+        expect((await readdir(objects)).filter((name) => name !== "info" && name !== "pack")).toEqual([])
+        expect(existsSync(join(objects, "pack")) ? await readdir(join(objects, "pack")) : []).toEqual([])
         return passed
       })
     }
 
     expect(pool.stats()).toEqual({ hits: 1, misses: 1, evictions: 0 })
     expect(spans(events, "materialize").length).toBeGreaterThanOrEqual(2)
+    expect(existsSync(unexpectedHookSync)).toBe(false)
     void baseSha
   })
 
@@ -350,7 +384,12 @@ describe("warm candidate pool", () => {
     let foreachCleanFailsLeft = 0
     const fault: { current: GitFault } = {
       current: (args) => {
-        if (args[0] === "submodule" && args[1] === "foreach" && args[3] === "git clean -fdx" && foreachCleanFailsLeft > 0) {
+        if (
+          args[0] === "submodule" &&
+          args[1] === "foreach" &&
+          args[3] === "git clean -fdx" &&
+          foreachCleanFailsLeft > 0
+        ) {
           foreachCleanFailsLeft -= 1
           return true
         }
@@ -460,10 +499,12 @@ describe("warm candidate pool", () => {
     }
     const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
 
-    const error = await pool.withCandidate(ref, async () => passed).then(
-      () => undefined,
-      (cause: unknown) => cause,
-    )
+    const error = await pool
+      .withCandidate(ref, async () => passed)
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      )
     expect(error).toBeInstanceOf(AggregateError)
     const aggregate = error as AggregateError
     const detail = aggregate.errors.map((cause) => String((cause as Error).message)).join(" | ")
@@ -488,10 +529,12 @@ describe("warm candidate pool", () => {
     const fault: { current: GitFault } = { current: (args) => args.includes("submodule") && args.includes("update") }
     const pool = makeFaultingPool(repo, baysRoot, 1, log, fault)
 
-    const error = await pool.withCandidate(ref, async () => passed).then(
-      () => undefined,
-      (cause: unknown) => cause,
-    )
+    const error = await pool
+      .withCandidate(ref, async () => passed)
+      .then(
+        () => undefined,
+        (cause: unknown) => cause,
+      )
     expect(error).toBeInstanceOf(Error)
     expect(error).not.toBeInstanceOf(AggregateError)
     expect(String((error as Error).message)).toContain("submodule update")

@@ -24,6 +24,7 @@ import {
   type QueueConflictStage,
   type QueueTreeConflict,
 } from "./submodule-composition.ts"
+import { materializeSubmodules } from "@yrd/bay"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -510,8 +511,7 @@ function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose:
   if (
     outcome.status === "failed" &&
     outcome.error.code === `${purpose}-failed` &&
-    outcome.output !== undefined &&
-    outcome.output.diagnostics !== undefined &&
+    outcome.output?.diagnostics !== undefined &&
     outcome.output.diagnostics.length > 0 &&
     outcome.output.diagnosticsTruncated !== true
   ) {
@@ -782,6 +782,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
   env.GIT_NO_REPLACE_OBJECTS = "1"
+  env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   const execute = async (
     repo: string,
     args: readonly string[],
@@ -1080,10 +1081,12 @@ async function assertCurrentRecutCertificate(
         }
         const payload = await changedPaths(git, sourceRepo, source.baseSha, source.tipSha)
         const patchId = await git.stablePatchId(sourceRepo, source.baseSha, source.tipSha)
-        if (!samePaths(payload, source.payload))
+        if (!samePaths(payload, source.payload)) {
           throw currentCompositionFailure(`source '${source.repo}' payload differs`)
-        if (patchId === undefined)
+        }
+        if (patchId === undefined) {
           throw currentCompositionFailure(`source '${source.repo}' patch certificate does not replay`)
+        }
         const staged = await git.run(
           path,
           ["update-index", "--cacheinfo", `160000,${source.tipSha},${source.repo}`],
@@ -3740,11 +3743,7 @@ async function rollbackQueueBase(
     if (checkedOut !== undefined) {
       if ((await git.commit(checkedOut, "HEAD")) !== landing.sha) return `'${base.branch}' moved during rollback`
       const rolledBack = await git.run(checkedOut, ["reset", "--merge", base.sha], true)
-      const restored = await git.run(
-        checkedOut,
-        ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
-        true,
-      )
+      const restored = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
       if (rolledBack.code !== 0 || restored.code !== 0) {
         const detail = [rolledBack.stderr, restored.stderr].filter((value) => value !== "").join("\n")
         return detail || `could not restore '${base.branch}' after source ref loss`
@@ -3783,7 +3782,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
           checked.candidateSha,
           tmpdir(),
           async (path): Promise<JobResult<IntegrationProof>> => {
-            const submodules = await git.run(path, ["submodule", "update", "--init", "--recursive"], true)
+            const submodules = await materializeSubmodules(git, { worktree: path, referenceWorktree: repo })
             if (submodules.code !== 0) {
               return failed(
                 "candidate-submodules-failed",
@@ -3844,18 +3843,10 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if (cancellation !== undefined) return cancellation
         const moved = await git.run(checkedOut, ["merge", "--ff-only", checked.candidateSha], true)
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
-        const aligned = await git.run(
-          checkedOut,
-          ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
-          true,
-        )
+        const aligned = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
         if (aligned.code !== 0) {
           const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
-          const restored = await git.run(
-            checkedOut,
-            ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
-            true,
-          )
+          const restored = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
           if (rolledBack.code !== 0 || restored.code !== 0) {
             return failed(
               "merge-rollback-failed",
@@ -3870,11 +3861,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         const sourceRefError = await sourceCandidateRefError(git, repo, checked.sourceRewrites ?? [])
         if (sourceRefError !== undefined) {
           const rolledBack = await git.run(checkedOut, ["reset", "--merge", baseSha], true)
-          const restored = await git.run(
-            checkedOut,
-            ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"],
-            true,
-          )
+          const restored = await materializeSubmodules(git, { worktree: checkedOut, referenceWorktree: repo })
           if (rolledBack.code !== 0 || restored.code !== 0) {
             return failed(
               "merge-rollback-failed",

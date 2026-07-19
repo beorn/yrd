@@ -4158,7 +4158,9 @@ describe("Queue command adapters", () => {
           }
           if (
             request.argv[0] === "git" &&
-            ((executor === "native-remote" && request.argv[3] === "submodule" && request.argv[4] === "update") ||
+            ((executor === "native-remote" &&
+              request.argv[3] === "config" &&
+              request.argv.includes("submodule.alternateLocation")) ||
               (executor !== "native-remote" &&
                 request.argv[3] === "merge-base" &&
                 request.argv[4] === "--is-ancestor" &&

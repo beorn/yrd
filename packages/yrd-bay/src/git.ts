@@ -13,6 +13,7 @@ import type {
   RefreshBayInput,
   RefreshedBay,
 } from "./model.ts"
+import { materializeSubmodules } from "./submodule-materialization.ts"
 
 export type GitWorkspaceOptions = Readonly<{
   repo: string
@@ -232,6 +233,10 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
           await git.commit(repo, input.from)
           await git.run(repo, ["worktree", "add", path, input.from])
         }
+        const materialized = await materializeSubmodules(git, { worktree: path, referenceWorktree: repo })
+        if (materialized.code !== 0) {
+          throw new Error(materialized.stderr || materialized.stdout || "could not materialize Bay submodules")
+        }
         const headSha = await git.commit(path, "HEAD")
         if (options.intakeRemote !== undefined) {
           await configureIntake(git, path, options.intakeRemote)
@@ -292,7 +297,10 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
 }
 
 function cleanGitEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
-  )
+  return {
+    ...Object.fromEntries(
+      Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
+    ),
+    KM_NO_AUTO_SUBMODULE_UPDATE: "1",
+  }
 }
