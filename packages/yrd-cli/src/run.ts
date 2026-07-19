@@ -823,14 +823,18 @@ async function certifyBayHandoff(
   })
   const certified = app.bays.get(bay.id)
   if (certified === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after handoff certification`)
+  const certification = certified.handoff
+  if (certification?.headSha !== options.head || certification.evidence !== options.evidence) {
+    throw new Error(`yrd: bay '${bay.id}' did not retain the exact handoff certification`)
+  }
   const lifecycle = app.bays.branchLifecycles().find((candidate) => candidate.bay === certified.id)
-  if (lifecycle?.status !== "handoff-ready") {
-    throw new Error(`yrd: bay '${bay.id}' did not become handoff-ready`)
+  if (lifecycle === undefined || lifecycle.status === "open" || lifecycle.status === "unmanaged") {
+    throw new Error(`yrd: bay '${bay.id}' did not project a certified lifecycle state`)
   }
   await printResult(
     io,
     jsonEnabled(options),
-    { command: "bay.handoff", lifecycle },
+    { command: "bay.handoff", certification, lifecycle },
     createElement(BayStatusView, { bays: [certified] }),
   )
 }
@@ -3440,7 +3444,7 @@ function buildProgram(
       }
       await listQueues(installed(), filters, options, io)
     })
-  const queueList = queue
+  queue
     .command("list [filter...]")
     .description("show the queue timeline")
     .option("--base <branch>", "select one base queue")

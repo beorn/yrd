@@ -203,6 +203,13 @@ export type BranchLifecycle =
   | Readonly<BranchLifecycleBase & { status: "open"; headSha?: string }>
   | Readonly<
       BranchLifecycleBase & {
+        status: "unmanaged"
+        headSha?: string
+        reason: "archive-proof-unavailable"
+      }
+    >
+  | Readonly<
+      BranchLifecycleBase & {
         status: "handoff-ready"
         headSha: string
         ready: Readonly<{ at: string; eventId: string; evidence: string }>
@@ -232,11 +239,7 @@ export type BranchLifecycle =
 
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
-const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>([
-  "integrated",
-  "withdrawn",
-  "canceled",
-])
+const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>(["integrated", "withdrawn", "canceled"])
 
 /** A PR can only accept new check requests while pushed/submitted/rejected; once
  * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer
@@ -614,9 +617,7 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
       const revision =
         bay.headSha === undefined || pr?.headSha !== bay.headSha
           ? undefined
-          : pr.revisions.find(
-              (candidate) => candidate.revision === pr.revision && candidate.headSha === bay.headSha,
-            )
+          : pr.revisions.find((candidate) => candidate.revision === pr.revision && candidate.headSha === bay.headSha)
       if (
         bay.headSha !== undefined &&
         pr !== undefined &&
@@ -631,10 +632,23 @@ export function projectBranchLifecycles(state: BaysState): readonly BranchLifecy
           submitted: { pr: pr.id, revision: pr.revision, at: revision.submittedAt },
         }
       }
+      if (bay.status === "closed") {
+        // Historical deprovision results did not retain both the exact head and
+        // preservation ref. Keep that absence explicit instead of aliasing a
+        // closed workspace to either open or proof-bearing archived.
+        return {
+          ...base,
+          status: "unmanaged",
+          ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }),
+          reason: "archive-proof-unavailable",
+        }
+      }
       if (
         bay.headSha !== undefined &&
         bay.handoff?.headSha === bay.headSha &&
-        (pr === undefined || (pr.headSha === bay.headSha && pr.status === "pushed"))
+        (pr === undefined ||
+          (pr.headSha === bay.headSha &&
+            (pr.status === "pushed" || pr.status === "withdrawn" || pr.status === "canceled")))
       ) {
         return {
           ...base,

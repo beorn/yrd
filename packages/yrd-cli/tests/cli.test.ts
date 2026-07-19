@@ -2333,9 +2333,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "--json"), before.io), before.stderr()).toBe(0)
     expect(JSON.parse(before.stdout())).toMatchObject({
       command: "bay.list",
-      lifecycles: [
-        { bay: "B1", branch: "issue/handoff-cli", headSha: HEAD_SHA, status: "open" },
-      ],
+      lifecycles: [{ bay: "B1", branch: "issue/handoff-cli", headSha: HEAD_SHA, status: "open" }],
     })
 
     const handoff = outputIO()
@@ -2360,6 +2358,7 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(handoff.stdout())).toMatchObject({
       command: "bay.handoff",
+      certification: { headSha: HEAD_SHA, evidence: "@km/handoff/handoff-cli.md" },
       lifecycle: {
         bay: "B1",
         branch: "issue/handoff-cli",
@@ -2367,6 +2366,37 @@ describe("runYrd", () => {
         status: "handoff-ready",
         ready: { evidence: "@km/handoff/handoff-cli.md" },
       },
+    })
+  })
+
+  it("returns the durable certification when an exact handoff retry is already submitted", async () => {
+    const app = await createApp()
+    const evidence = "@km/handoff/submitted-retry.md"
+    const args = yrd(
+      "bay",
+      "handoff",
+      "B1",
+      "--branch",
+      "issue/submitted-retry",
+      "--head",
+      HEAD_SHA,
+      "--evidence",
+      evidence,
+      "--json",
+    )
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "submitted-retry", "--json"), open.io), open.stderr()).toBe(0)
+    const first = outputIO()
+    expect(await runYrd(app, args, first.io), first.stderr()).toBe(0)
+    await app.bays.intake({ bay: "B1", headSha: HEAD_SHA })
+    await app.bays.submit({ pr: "PR1" })
+
+    const retry = outputIO()
+    expect(await runYrd(app, args, retry.io), retry.stderr()).toBe(0)
+    expect(JSON.parse(retry.stdout())).toMatchObject({
+      command: "bay.handoff",
+      certification: { headSha: HEAD_SHA, evidence },
+      lifecycle: { bay: "B1", headSha: HEAD_SHA, status: "submitted" },
     })
   })
 

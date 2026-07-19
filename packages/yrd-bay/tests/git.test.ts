@@ -119,7 +119,7 @@ describe("createGitWorkspace", () => {
 
     await runRequested(app, await app.bays.open({ name: "safe-push" }))
     const bay = app.bays.get("B1")
-    if (bay?.path === undefined) throw new Error("expected active Bay path")
+    if (bay?.path === undefined || bay.headSha === undefined) throw new Error("expected active Bay head and path")
     expect(await git(bay.path, ["config", "--worktree", "--get", "remote.pushDefault"])).toMatchObject({
       stdout: "bay",
     })
@@ -137,6 +137,13 @@ describe("createGitWorkspace", () => {
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect(existsSync(bay.path)).toBe(false)
     expect(await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"])).toMatchObject({ code: 0 })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      bay: "B1",
+      branch: "issue/safe-push",
+      headSha: bay.headSha,
+      status: "archived",
+      archived: { preservedRef: "refs/yrd/closed/B1" },
+    })
   })
 
   it("closes a clean worktree whose repository contains submodules", async () => {

@@ -852,6 +852,29 @@ describe("withBays", () => {
     })
   })
 
+  it("keeps a replay-compatible close without archive proof explicitly unmanaged", async () => {
+    const harness = createWorkspaceHarness()
+    const adapter: BayWorkspace = {
+      ...harness.adapter,
+      revision: "legacy-workspace-v1",
+      deprovision(input): JobResult<DeprovisionedBay> {
+        return { status: "passed", output: { preservedRef: `refs/yrd/closed/${input.bay}` } }
+      },
+    }
+    await using app = await createApp(adapter)
+    await finishJob(app, await app.bays.open({ name: "legacy-close" }))
+
+    await finishJob(app, await app.bays.close({ bay: "B1" }))
+
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      bay: "B1",
+      branch: "issue/legacy-close",
+      headSha: HEAD_1,
+      status: "unmanaged",
+      reason: "archive-proof-unavailable",
+    })
+  })
+
   it("projects an exact integrated revision as landed even after its Bay closes", async () => {
     const integrate = command({
       title: "Integrate the lifecycle fixture",
