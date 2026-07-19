@@ -4,7 +4,7 @@
 
 import { createElement } from "react"
 import { createRenderer } from "silvery/test"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   fixtureJob,
   fixturePr,
@@ -38,7 +38,35 @@ function cellOf(app: ReturnType<ReturnType<typeof createRenderer>>, needle: stri
 }
 
 describe("synchronized activity pulse (items 12-13)", () => {
-  it("uses km's bold WIP marker while the running word keeps its activity color", async () => {
+  it("pulses only the RUNNER marker while the command stays static (round-3 d)", async () => {
+    const projection = processingSnapshot().projection
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const render = createRenderer({ cols: 120, rows: 40 })
+    const tree = () => createElement(QueueTimelineView, { projection, columns: 120, nav: true })
+    const app = render(tree())
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("● [84042] resident runner")
+      const markerBefore = cellOf(app, "●", "resident runner").fg
+      const commandBefore = cellOf(app, "resident", "resident runner").fg
+
+      await vi.advanceTimersByTimeAsync(900)
+      app.rerender(tree())
+
+      expect(cellOf(app, "●", "resident runner").fg, "marker advances to the next pulse phase").not.toEqual(
+        markerBefore,
+      )
+      expect(cellOf(app, "resident", "resident runner").fg, "command remains static across marker phases").toEqual(
+        commandBefore,
+      )
+    } finally {
+      app.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it("pulses the running row's marker and status word in one shared activity phase", async () => {
     const projection = processingSnapshot().projection
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(
@@ -48,10 +76,9 @@ describe("synchronized activity pulse (items 12-13)", () => {
       await app.waitForLayoutStable()
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      const glyph = cellOf(app, "▢", "PRR.1")
+      const glyph = cellOf(app, "●", "PRR.1")
       const word = cellOf(app, "run", "PRR.1")
-      expect(glyph.bold, "km WIP marker is bold").toBe(true)
-      expect(word.fg, "queue activity word remains distinct from the km state marker").not.toEqual(glyph.fg)
+      expect(word.fg, "running marker and word share the activity phase").toEqual(glyph.fg)
     } finally {
       app.unmount()
     }
@@ -68,15 +95,16 @@ describe("synchronized activity pulse (items 12-13)", () => {
       const runY = rows.findIndex((row) => /^\s*\d{2}:\d{2}:\d{2}.*\brun\b/u.test(row))
       expect(runY, "selected running row renders").toBeGreaterThan(0)
       const runRow = rows[runY]!
-      const glyphX = runRow.indexOf("▢")
+      const glyphX = runRow.indexOf("●")
       const wordX = runRow.indexOf("run")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
       const selectionFg = app.cell(timeX, runY).fg
-      // Both activity indicators retain their semantic colors — never the
-      // selection foreground — and the km WIP marker stays bold.
-      expect(app.cell(glyphX, runY).fg, "selected running glyph keeps km state color").not.toEqual(selectionFg)
-      expect(app.cell(glyphX, runY).bold, "selected running glyph stays bold").toBe(true)
-      expect(app.cell(wordX, runY).fg, "selected running word stays blue").not.toEqual(selectionFg)
+      // The shared activity phase survives selection instead of inheriting
+      // the selection foreground.
+      expect(app.cell(glyphX, runY).fg, "selected running marker stays blue").not.toEqual(selectionFg)
+      expect(app.cell(wordX, runY).fg, "selected running word shares the marker phase").toEqual(
+        app.cell(glyphX, runY).fg,
+      )
       // The selection background still covers the activity cells (unbroken band).
       const timeBg = app.cell(timeX, runY).bg
       expect(app.cell(glyphX, runY).bg, "selection bg covers the activity glyph").toEqual(timeBg)

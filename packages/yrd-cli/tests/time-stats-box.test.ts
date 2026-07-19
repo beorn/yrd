@@ -1,4 +1,4 @@
-// @failure The separate STATS/TIME boxes lose a section, rolling-window values, responsive layout, coverage honesty, or border integrity.
+// @failure The separate FLOW/TIME boxes lose a section, rolling-window values, responsive layout, coverage honesty, or border integrity.
 // @level l1
 // @consumer yrd queue watch statistics surface
 
@@ -58,7 +58,7 @@ function rowContaining(app: { text: string }, needle: string): string {
  * `╰──…──╯`. This catches a row drawn over a box border (the reported glitch),
  * since a content glyph landing where a border cell belongs fails the check.
  */
-function assertBoxClean(text: string, title: string): void {
+function assertBoxClean(text: string, title: string): number {
   const rows = text.split("\n")
   const topIndex = rows.findIndex((row) => row.includes(`╭─ ${title} `))
   expect(topIndex, `top border for ${title}`).toBeGreaterThanOrEqual(0)
@@ -81,14 +81,15 @@ function assertBoxClean(text: string, title: string): void {
   const bottom = rows[bottomIndex]!
   expect(bottom[right], `${title} bottom-right corner`).toBe("╯")
   expect(/^[─]+$/u.test(bottom.slice(left + 1, right)), `${title} bottom edge unbroken`).toBe(true)
+  return bottomIndex
 }
 
 describe("TimeStatsBox", () => {
-  it("renders separately titled STATS and TIME boxes", () => {
+  it("renders separately titled FLOW and TIME boxes", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
-    expect(app.text).toContain("╭─ STATS ")
-    expect(app.text).not.toContain("╭─ FLOW ")
+    expect(app.text).toContain("╭─ FLOW ")
+    expect(app.text).not.toContain("╭─ STATS ")
     expect(app.text).toContain("╭─ TIME ")
     expect(app.text).toContain("FLOW")
     expect(app.text).toContain("TIME")
@@ -111,6 +112,30 @@ describe("TimeStatsBox", () => {
     expect(monCount).toBe(2)
   })
 
+  it("groups TIME metrics under one heading per state instead of repeating state prefixes", () => {
+    const render = createRenderer({ cols: 126, rows: 40 })
+    const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
+    const rows = app.text.split("\n")
+    const timeX = rowContaining(app, "╭─ TIME ").indexOf("╭─ TIME ")
+    const timeRows = rows.map((row) => row.slice(timeX))
+    const timeText = timeRows.join("\n")
+    expect(
+      timeRows.find((row) => row.includes("HR")),
+      "TIME names the metric column before its windows",
+    ).toMatch(/METRIC\s+HR/u)
+
+    for (const section of ["INTEGRATED", "FAILED", "WAIT"]) {
+      expect(timeText.match(new RegExp(section, "gu")), `${section} is named once in TIME`).toHaveLength(1)
+      const sectionY = timeRows.findIndex((row) => row.includes(section))
+      expect(sectionY, `${section} heading exists`).toBeGreaterThanOrEqual(0)
+      expect(timeRows[sectionY]).not.toMatch(/\b(?:avg|p50|p90)\b/u)
+      expect(
+        timeRows.slice(sectionY + 1, sectionY + 4).map((row) => row.replace(/^│\s*/u, "").split(/\s+/u)[0]),
+      ).toEqual(["avg", "p50", "p90"])
+    }
+    expect(timeText).not.toMatch(/(?:INTEGRATED|FAILED|WAIT) (?:avg|p50|p90)/u)
+  })
+
   it("shows covered counts, the fail share, and integrated durations", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
@@ -130,24 +155,24 @@ describe("TimeStatsBox", () => {
     expect(app.text).not.toContain("33%")
     expect(rowContaining(app, "RUNS")).not.toMatch(/RUNS\s+3\b/u)
     expect(app.text).toContain("-")
+    expect(app.text).toContain("- no full window")
   })
 
-  it("places clean STATS and TIME frames side by side at the live pane width", () => {
+  it("places clean FLOW and TIME frames side by side at the live pane width", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
-    expect(rowContaining(app, "╭─ STATS ")).toContain("╭─ TIME ")
-    assertBoxClean(app.text, "STATS")
-    assertBoxClean(app.text, "TIME")
+    expect(rowContaining(app, "╭─ FLOW ")).toContain("╭─ TIME ")
+    const flowBottom = assertBoxClean(app.text, "FLOW")
+    const timeBottom = assertBoxClean(app.text, "TIME")
+    expect(flowBottom, "side-by-side boxes share one bottom edge").toBe(timeBottom)
   })
 
-  it("stacks the independently framed STATS and TIME boxes on a narrow pane", () => {
+  it("stacks the independently framed FLOW and TIME boxes on a narrow pane", () => {
     const render = createRenderer({ cols: 48, rows: 60 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 48 }))
     const rows = app.text.split("\n")
-    expect(rows.findIndex((r) => r.includes("╭─ TIME "))).toBeGreaterThan(
-      rows.findIndex((r) => r.includes("╭─ STATS ")),
-    )
-    assertBoxClean(app.text, "STATS")
+    expect(rows.findIndex((r) => r.includes("╭─ TIME "))).toBeGreaterThan(rows.findIndex((r) => r.includes("╭─ FLOW ")))
+    assertBoxClean(app.text, "FLOW")
     assertBoxClean(app.text, "TIME")
   })
 })

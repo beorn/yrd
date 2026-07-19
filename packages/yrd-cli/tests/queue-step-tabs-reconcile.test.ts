@@ -151,7 +151,8 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
       }),
       { width: 100, height: 30, plain: true },
     )
-    expect(frame).toContain("[ $ bun vitest run ]")
+    expect(frame).toContain("COMMAND $ bun vitest run")
+    expect(frame).not.toContain("[ $")
     expect(frame).not.toContain("stale-config")
   })
 

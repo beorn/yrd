@@ -3710,7 +3710,7 @@ describe("runYrd", () => {
     expect(projection.metrics).toMatchObject({ terminalAttempts: 1, outcomes: { integrated: 1 } })
 
     const rendered = stripOsc8Targets(
-      // Height fits the singular STATS box; a standalone QueueTimelineView
+      // Height fits the FLOW + TIME boxes; a standalone QueueTimelineView
       // has no fillHeight list-scroll, so a box tuned to the old short grid would
       // clip the FILTER/header rows. Production (QueueWatchFrame) scrolls the list.
       await renderString(createElement(QueueTimelineView, { projection, columns: 140 }), {
@@ -3739,8 +3739,8 @@ describe("runYrd", () => {
     // the header) and dropped its "FILTER" label — plain-word pills now.
     const pillsRowIndex = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
     expect(pillsRowIndex, "pills row renders below the rows").toBeGreaterThan(rows.indexOf(second!))
-    const statsIndex = rows.findIndex((row) => row.includes("╭─ STATS "))
-    expect(statsIndex).toBeGreaterThan(pillsRowIndex)
+    const flowIndex = rows.findIndex((row) => row.includes("╭─ FLOW "))
+    expect(flowIndex).toBeGreaterThan(pillsRowIndex)
   })
 
   it("projects fresh, stale, and absent resident runner heartbeats", async () => {
@@ -3819,7 +3819,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("builds one filtered one-revision timeline and deduplicated STATS projection", async () => {
+  it("builds one filtered one-revision timeline and deduplicated FLOW/TIME projection", async () => {
     const minute = 60_000
     const now = Date.parse("2026-07-13T12:00:00.000Z")
     const member = (id: string, revision: number, headSha: string) => ({
@@ -4016,7 +4016,10 @@ describe("runYrd", () => {
         projection: { ...constrainedProjection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
         columns: 200,
       }),
-      { width: 200, height: 32, plain: true },
+      // Round 5 groups three TIME distributions under explicit headings. Give
+      // the complete static surface enough rows; production printHuman uses a
+      // 10,000-row render target and is never terminal-height clipped.
+      { width: 200, height: 44, plain: true },
     )
     expect(rendered).toContain("TIME")
     expect(rendered).toContain("STATUS")
@@ -4036,7 +4039,7 @@ describe("runYrd", () => {
             },
             columns: width,
           }),
-          // Height fits the singular STATS box. The standalone
+          // Height fits the FLOW + TIME boxes. The standalone
           // QueueTimelineView has no fillHeight list-scroll, so a box tuned to the
           // old short statistics surface would clip the header at a narrow tier.
           // Production (QueueWatchFrame) keeps the header via
@@ -4051,10 +4054,10 @@ describe("runYrd", () => {
       // than owning the whole row (W1, 2026-07-16). Item 3: no "FILTER" label,
       // no [p] brackets — the since= dimension survives, pills are plain words.
       expect.soft(filter).toContain("since=6:00:00 pending running failed done")
-      // The singular STATS box reads the SAME consolidated queueFlowMetrics
+      // The FLOW + TIME boxes read the SAME consolidated queueFlowMetrics
       // aggregate at every tier. The landed per-24h throughput fact stays in the
       // aggregate (projection.metrics.throughput) for --json consumers.
-      expect.soft(rows.some((row) => row.includes("╭─ STATS "))).toBe(true)
+      expect.soft(rows.some((row) => row.includes("╭─ FLOW "))).toBe(true)
       expect.soft(fixed).toContain("RUNS")
       expect(Math.max(...rows.map((row) => Array.from(row).length))).toBeLessThanOrEqual(width)
       const header = rows.find((row) => row.includes("TIME") && row.includes("PR"))
@@ -4092,10 +4095,10 @@ describe("runYrd", () => {
       // Markers are semantic-foreground only — the canonical km/ag glyphs,
       // never a colored STATUS background band.
       for (const [glyph, anchor] of [
-        ["▢", "PR6.1"],
-        ["▢", "PR5.1"],
+        ["○", "PR6.1"],
+        ["●", "PR5.1"],
         ["−", "PR7.1"],
-        ["⧗", "PR3.1"],
+        ["×", "PR3.1"],
         ["✓", "PR2.1"],
       ] as const) {
         const row = styled.lines.findIndex((row) => row.includes(anchor))
@@ -4167,26 +4170,33 @@ describe("runYrd", () => {
     expect(mounted?.type).toBe(QueueWatchPane)
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)
-    const frame = stripOsc8Targets(
-      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial }), {
-        width: 200,
-        height: 50,
-        plain: true,
-      }),
-    )
-    expect(frame).toContain("PR1.1")
-    expect(frame).toContain("QUEUE main")
-    expect(frame).toContain("pending")
-    expect(frame).not.toContain("position 1")
-    expect(frame).toContain("AGE")
-    expect(frame).toContain("WAIT")
-    expect(frame).toContain("NO RUNNER - no drained run in window")
-    // The bottom keybindings footer row was removed entirely (item h).
-    expect(frame).not.toContain("q quit")
-    expect(frame).not.toContain("LIVE")
-    expect(frame).not.toContain("p pause")
-    expect(frame).not.toContain("PATH")
-    expect(frame).not.toContain("file:///repo/.bays/B1")
+    // Exercise the live runtime so useWindowSize sees the mounted 200×50
+    // viewport; renderString's first synchronous frame intentionally reports
+    // the fallback 80×24 hook size and cannot certify responsive watch IA.
+    const frameHandle = await run(createElement(QueueWatchFrame, { snapshot: props.initial }), {
+      writable: { write: () => {} },
+      cols: 200,
+      rows: 50,
+    })
+    try {
+      await frameHandle.waitForLayoutStable()
+      const frame = stripOsc8Targets(frameHandle.text)
+      expect(frame).toContain("PR1.1")
+      expect(frame).toContain("QUEUE main")
+      expect(frame).toContain("pending")
+      expect(frame).not.toContain("position 1")
+      expect(frame).toContain("AGE")
+      expect(frame).toContain("WAIT")
+      expect(frame).toContain("NO RUNNER - no drained run in window")
+      // The bottom keybindings footer row was removed entirely (item h).
+      expect(frame).not.toContain("q quit")
+      expect(frame).not.toContain("LIVE")
+      expect(frame).not.toContain("p pause")
+      expect(frame).not.toContain("PATH")
+      expect(frame).not.toContain("file:///repo/.bays/B1")
+    } finally {
+      frameHandle.unmount()
+    }
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 
@@ -4231,18 +4241,18 @@ describe("runYrd", () => {
 
     try {
       expect(handle.text).toContain("> 2m submitted PR1")
-      expect(handle.text).toContain("PR PR1 STATUS")
+      expect(handle.text).toContain("PRs      PR1@r1:")
 
       await handle.press("j")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("> 1m submitted PR2")
-      expect(handle.text).toContain("PR PR2 STATUS")
-      expect(handle.text).not.toContain("PR PR1 STATUS")
+      expect(handle.text).toContain("PRs      PR2@r1:")
+      expect(handle.text).not.toContain("PRs      PR1@r1:")
 
       await handle.press("Enter")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR PR2 STATUS")
-      expect(handle.text).not.toContain("PR PR1 STATUS")
+      expect(handle.text).toContain("PRs      PR2@r1:")
+      expect(handle.text).not.toContain("PRs      PR1@r1:")
     } finally {
       handle.unmount()
     }
@@ -4294,29 +4304,29 @@ describe("runYrd", () => {
       // Right-docked: the DETAIL pane's identity title (item M — the selected
       // `PR.rev`) shares the top row with the QUEUE tab.
       expect(wide.text.split("\n")[0]).toMatch(/PR\d+\.\d+/u)
-      expect(wide.text).toContain("PR PR1 STATUS")
+      expect(wide.text).toContain("PRs      PR1@r1:")
       await wide.press("Escape")
       await wide.waitForLayoutStable()
-      expect(wide.text).not.toContain("PR PR1 STATUS")
+      expect(wide.text).not.toContain("PRs      PR1@r1:")
       await wide.press("Enter")
       await wide.waitForLayoutStable()
-      expect(wide.text).toContain("PR PR1 STATUS")
+      expect(wide.text).toContain("PRs      PR1@r1:")
 
       expect(below.text).toContain("─")
       // Below-docked: the detail identity title is not on the top row.
       expect(below.text.split("\n")[0]).not.toMatch(/PR\d+\.\d+/u)
-      expect(below.text).toContain("PR PR1 STATUS")
+      expect(below.text).toContain("PRs      PR1@r1:")
 
       expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain("PR PR1 STATUS")
+      expect(compact.text).not.toContain("PRs      PR1@r1:")
       await compact.press("Enter")
       await compact.waitForLayoutStable()
-      expect(compact.text).toContain("PR PR1 STATUS")
+      expect(compact.text).toContain("PRs      PR1@r1:")
       expect(compact.text).not.toContain("QUEUE main")
       await compact.press("Escape")
       await compact.waitForLayoutStable()
       expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain("PR PR1 STATUS")
+      expect(compact.text).not.toContain("PRs      PR1@r1:")
     } finally {
       wide.unmount()
       below.unmount()
@@ -5896,8 +5906,8 @@ describe("runYrd", () => {
 
     const laterQueue = outputIO({ columns: 120, now: () => Date.parse("2026-07-09T12:21:00.000Z") })
     expect(await runYrd(app, yrd("queue"), laterQueue.io), laterQueue.stderr()).toBe(0)
-    // The old ROWS "oldest=" cell has no place in the windowed STATS surface.
-    expect(laterQueue.stdout()).toContain("STATS")
+    // The old ROWS "oldest=" cell has no place in the windowed FLOW surface.
+    expect(laterQueue.stdout()).toContain("FLOW")
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)

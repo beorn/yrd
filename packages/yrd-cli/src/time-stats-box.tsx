@@ -1,12 +1,12 @@
 /**
- * TimeStatsBox — the queue watch's separately bordered STATS and TIME boxes.
+ * TimeStatsBox — the queue watch's separately bordered FLOW and TIME boxes.
  * Both share the same four rolling-window columns (HR / DAY / WK / MON). The
  * frames arrange side by side on a wide pane and stack as the pane narrows.
  *
- * Both sections share one compact row model: their first row carries the section
- * name plus the window keys, and TIME prefixes each distribution row with its
- * sample (INTEGRATED / FAILED / WAIT). Blank cells render a space so every
- * column keeps one cell per row and the grid stays aligned.
+ * Both sections share one compact row model. Their first row names the metric
+ * column plus the window keys; TIME then groups avg/p50/p90 beneath one heading
+ * for each sample (INTEGRATED / FAILED / WAIT). Blank cells render a space so
+ * every column keeps one cell per row and the grid stays aligned.
  *
  * Extraction note: TimeStatsBox lives in yrd-cli today because it is the only
  * consumer. If a second surface needs a windowed-metric box, promote it into
@@ -36,11 +36,11 @@ type BoxRow = Readonly<{
 }>
 
 /** Readable floor for a section (label column + four value cells). The
- * two-across threshold also accounts for the shared STATS border and padding. */
+ * two-across threshold also accounts for the shared FLOW border and padding. */
 const BOX_MIN_WIDTH = 34
 const GRID_GAP = 1
-const STATS_FRAME_CHROME = 4
-const TWO_ACROSS_MIN = 2 * BOX_MIN_WIDTH + GRID_GAP + STATS_FRAME_CHROME
+const FLOW_FRAME_CHROME = 4
+export const TIME_STATS_TWO_ACROSS_MIN_WIDTH = 2 * BOX_MIN_WIDTH + GRID_GAP + FLOW_FRAME_CHROME
 
 function percent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`
@@ -63,9 +63,10 @@ function formatShareOfFails(covered: boolean, part: number, fails: number): stri
   return percent(part / fails)
 }
 
-/** A human duration; `-` when uncovered or when the sample set is empty. */
+/** A human duration; `-` when uncovered, `none` for a covered empty sample. */
 function formatDuration(covered: boolean, ms: number | null): string {
-  return covered ? timelineMetric(ms) : "-"
+  if (!covered) return "-"
+  return ms === null ? "none" : timelineMetric(ms)
 }
 
 /** Failed Runs in a window = rejected + env-refused + canceled. */
@@ -76,7 +77,7 @@ function failsOf(stats: QueueTimeWindowStats): number {
 
 function flowRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
   return [
-    { label: "FLOW", keys: true, heading: true, cells: windowKeys },
+    { label: "METRIC", keys: true, heading: true, cells: windowKeys },
     { label: "RUNS", cells: stats.map((s) => formatCount(s.covered, s.metrics.terminalAttempts)) },
     { label: "INTEGRATED", cells: stats.map((s) => formatCount(s.covered, s.metrics.outcomes.integrated)) },
     { label: "FAILS", cells: stats.map((s) => formatShareOfRuns(s.covered, failsOf(s), s.metrics.terminalAttempts)) },
@@ -104,18 +105,22 @@ function timeMetricRows(
   pick: (metrics: QueueTimeWindowStats["metrics"]) => WindowDistribution,
 ): readonly BoxRow[] {
   return [
-    { label: `${label} avg`, indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).avgMs)) },
-    { label: `${label} p50`, indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p50Ms)) },
-    { label: `${label} p90`, indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p90Ms)) },
+    { label, heading: true, cells: [] },
+    { label: "avg", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).avgMs)) },
+    { label: "p50", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p50Ms)) },
+    { label: "p90", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p90Ms)) },
   ]
 }
 
 function timeRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
   return [
-    { label: "", keys: true, cells: windowKeys },
+    { label: "METRIC", keys: true, heading: true, cells: windowKeys },
     ...timeMetricRows("INTEGRATED", stats, (m) => m.activeRun.integratedOnly),
     ...timeMetricRows("FAILED", stats, (m) => m.activeRun.failedOnly),
     ...timeMetricRows("WAIT", stats, (m) => m.queueWait),
+    ...(stats.some((entry) => !entry.covered)
+      ? [{ label: "- no full window", indent: true, cells: [] } satisfies BoxRow]
+      : []),
   ]
 }
 
@@ -148,7 +153,7 @@ function TimeStatsSection({ rows }: Readonly<{ rows: readonly BoxRow[] }>) {
 }
 
 /**
- * Bind the windowed projection to independently bordered STATS + TIME frames.
+ * Bind the windowed projection to independently bordered FLOW + TIME frames.
  * They sit side by side when wide and stack when narrow.
  *
  * @param facts  every retained terminal Run fact (the projection folds these once)
@@ -171,7 +176,13 @@ export function TimeStatsBox({
   if (Number.isNaN(nowMs)) throw new Error(`yrd: invalid time-stats snapshot '${now}'`)
   const stats = queueTimeStats(facts, nowMs, earliestEventMs)
   const windowKeys = stats.map((entry) => entry.key)
-  const perRow = width >= TWO_ACROSS_MIN ? 2 : 1
+  const perRow = width >= TIME_STATS_TWO_ACROSS_MIN_WIDTH ? 2 : 1
+  const flow = flowRows(stats, windowKeys)
+  const time = timeRows(stats, windowKeys)
+  const alignedFlow =
+    perRow === 2 && flow.length < time.length
+      ? [...flow, ...Array.from({ length: time.length - flow.length }, () => ({ label: "", cells: [] }) as BoxRow)]
+      : flow
   return (
     <Box
       flexDirection={perRow === 2 ? "row" : "column"}
@@ -187,8 +198,8 @@ export function TimeStatsBox({
         flexBasis={perRow === 2 ? 0 : undefined}
         minWidth={0}
       >
-        <TitledBox title="STATS">
-          <TimeStatsSection rows={flowRows(stats, windowKeys)} />
+        <TitledBox title="FLOW">
+          <TimeStatsSection rows={alignedFlow} />
         </TitledBox>
       </Box>
       <Box
@@ -198,7 +209,7 @@ export function TimeStatsBox({
         minWidth={0}
       >
         <TitledBox title="TIME">
-          <TimeStatsSection rows={timeRows(stats, windowKeys)} />
+          <TimeStatsSection rows={time} />
         </TitledBox>
       </Box>
     </Box>

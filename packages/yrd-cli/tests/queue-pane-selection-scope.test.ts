@@ -1,4 +1,4 @@
-// @failure Cross-pane mouse drags select the whole screen because the QUEUE / DETAIL / STATUS / STATS surfaces declare no selection scope, so a drag resolves to their common screen root.
+// @failure Cross-pane mouse drags select the whole screen because the QUEUE / DETAIL / STATUS / FLOW / TIME surfaces declare no selection scope, so a drag resolves to their common screen root.
 // @level l2
 // @consumer @yrd/cli watch
 
@@ -86,7 +86,7 @@ function twoPaneSnapshot() {
 }
 
 describe("queue watch per-pane selection scopes (item 4a)", () => {
-  it("gives QUEUE, DETAIL, RUNNER, exceptional STATUS, STATS, and TIME their own contain scopes", async () => {
+  it("gives QUEUE, DETAIL, RUNNER, exceptional STATUS, FLOW, and TIME their own contain scopes", async () => {
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot: twoPaneSnapshot() }))
     try {
@@ -134,15 +134,15 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
       // Every titled box is its own scope nested inside the QUEUE pane.
       const runnerScope = scopeAt(app, pointOf(text, "RUNNER", 0, LEFT_MAX))
       const statusScope = scopeAt(app, pointOf(text, "HOLD THE LINE", 0, LEFT_MAX))
-      const statsScope = scopeAt(app, pointOf(text, "STATS", 0, LEFT_MAX))
+      const flowScope = scopeAt(app, pointOf(text, "FLOW", 0, LEFT_MAX))
       const timeScope = scopeAt(app, pointOf(text, "╭─ TIME ", 0, LEFT_MAX))
       expect(nestedWithin(runnerScope, queueScope), "RUNNER is its own scope inside QUEUE").toBe(true)
       expect(nestedWithin(statusScope, queueScope), "STATUS is its own scope inside QUEUE").toBe(true)
-      expect(nestedWithin(statsScope, queueScope), "STATS is its own scope inside QUEUE").toBe(true)
+      expect(nestedWithin(flowScope, queueScope), "FLOW is its own scope inside QUEUE").toBe(true)
       expect(nestedWithin(timeScope, queueScope), "TIME is its own scope inside QUEUE").toBe(true)
       expect(sameScope(runnerScope, statusScope), "RUNNER and STATUS are different scopes").toBe(false)
-      expect(sameScope(statusScope, statsScope), "STATUS and STATS are different scopes").toBe(false)
-      expect(sameScope(statsScope, timeScope), "STATS and TIME are different scopes").toBe(false)
+      expect(sameScope(statusScope, flowScope), "STATUS and FLOW are different scopes").toBe(false)
+      expect(sameScope(flowScope, timeScope), "FLOW and TIME are different scopes").toBe(false)
     } finally {
       app.unmount()
     }

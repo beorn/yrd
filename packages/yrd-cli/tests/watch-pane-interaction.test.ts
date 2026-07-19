@@ -172,7 +172,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
     try {
       await app.waitForLayoutStable()
       // Default cursor: the first pending row; the detail pane follows it.
-      await waitFor(() => app.text.includes("PR PR1 STATUS"))
+      await waitFor(() => app.text.includes("PRs      PR1@r1"))
       expect(app.text).toContain("PR1.1")
       expect(app.text).not.toContain("PR24.1")
 
@@ -184,7 +184,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       await waitFor(() => app.text.includes("PR24.1"))
       // Contract literal: scrolling never activates a different run — the
       // detail pane still shows the selected pending PR1.
-      expect(app.text).toContain("PR PR1 STATUS")
+      expect(app.text).toContain("PRs      PR1@r1")
     } finally {
       app.unmount()
     }
@@ -243,7 +243,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).toContain("PR5.1")
       // The status buckets are TogglePills now (label constant, state by colour),
       // so the toggle is verified by the rows appearing/disappearing, not by an
-      // ✓/▢ checkbox glyph. Item 3: pills are plain words, no [f] brackets.
+      // ✓/○ lifecycle glyph. Item 3: pills are plain words, no [f] brackets.
       expect(app.text, "the failed pill renders").toContain("failed")
 
       await app.press("f")

@@ -91,15 +91,24 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       expect(durationLine).toMatch(/◷\s+\d+(?:m|s|:\d{2})/u)
       const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
       const prepareX = tabsLine.indexOf("prepare")
+      const integrateX = tabsLine.indexOf("integrate", checkX)
       const doneGlyph = app.cell(prepareX - 3, tabsY + 1)
       const runningGlyph = app.cell(checkX - 3, tabsY + 1)
       expect(statusLine).toContain("✓ passed")
-      expect(statusLine).toContain("▢ running")
+      expect(statusLine).toContain("● running")
       expect(doneGlyph.fg, "done and running glyphs retain distinct semantic colors").not.toEqual(runningGlyph.fg)
+
+      // Round 4: the selected step is a filled tab, not one of several
+      // bordered cards. The fill is the stable selected-state discriminator;
+      // an inactive sibling stays on the pane background.
+      const selectedTab = app.cell(checkX, tabsY)
+      const inactiveTab = app.cell(prepareX, tabsY)
+      expect(selectedTab.bg, "selected step tab has a solid background").not.toBeNull()
+      expect(selectedTab.bg, "selected and inactive tabs use different surfaces").not.toEqual(inactiveTab.bg)
+      expect(rows[tabsY - 1]?.slice(prepareX, integrateX + 20), "step tabs have no top box borders").not.toContain("╭")
 
       // Recovered 21514 IA: tabs are deliberately wide and equal rather than
       // a compact run of content-sized pills.
-      const integrateX = tabsLine.indexOf("integrate", checkX)
       const firstStride = checkX - prepareX
       const secondStride = integrateX - checkX
       expect(firstStride, "step tabs have a wide hit/read target").toBeGreaterThanOrEqual(20)
@@ -111,7 +120,10 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
 
   it("orders the detail as run facts → step tabs → step content (items H/J)", async () => {
     const snapshot = queueTimelineStories["detail-full"].snapshot
-    const app = createRenderer({ cols: 120, rows: 40 })(createElement(QueueWatchFrame, { snapshot }))
+    // Use the wide tier for an order assertion so the below-tier split does
+    // not intentionally clip the tail of a long integrated detail. The 80×24
+    // full-tier story separately proves DETAILS remains visible when narrow.
+    const app = createRenderer({ cols: 200, rows: 50 })(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
       app.press("\r")
@@ -131,16 +143,16 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       // J: the step internals (JOB/RUNNER/REV) live in one inline DETAILS row.
       expect(app.text).toContain("DETAILS")
 
-      // The command owns a boxed, bold header above logs. It is step content,
-      // never compressed into the tab label.
-      const commandY = rows.findIndex((line) => line.includes("[ $ bun vitest run ]"))
-      expect(commandY, "boxed command header present").toBeGreaterThan(tabsY)
+      // Round 4 removes checkbox-like `[ ]` chrome. The command remains bold,
+      // visually grouped step content above the logs on a subtle filled row.
+      const commandY = rows.findIndex((line) => line.includes("$ bun vitest run"))
+      expect(commandY, "command header present").toBeGreaterThan(tabsY)
       expect(commandY, "command header sits above logs").toBeLessThan(stepContentY)
       const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
       expect(app.cell(commandX, commandY).bold).toBe(true)
       expect(app.cell(commandX, commandY).fg).not.toBeNull()
-      expect(rows[commandY - 1]).toContain("╭")
-      expect(rows[commandY + 1]).toContain("╰")
+      expect(rows[commandY]).not.toContain("[ $")
+      expect(app.cell(commandX, commandY).bg, "command row has a deliberate filled surface").not.toBeNull()
     } finally {
       app.unmount()
     }
