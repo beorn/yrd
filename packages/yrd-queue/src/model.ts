@@ -19,6 +19,11 @@ export type StepName = string
 export type BatchConfig = false | number
 export type QueueRequirement = "review"
 
+const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
+  /** Immutable base certified by this recut revision. Optional only for replaying legacy queue records. */
+  baseSha: GitShaSchema.optional(),
+}).strict()
+
 export const PRSnapshotSchema = z
   .object({
     id: PRIdSchema,
@@ -31,7 +36,7 @@ export const PRSnapshotSchema = z
     baseSha: GitShaSchema.optional(),
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
-    recut: PRRecutProofSchema.optional(),
+    recut: PRSnapshotRecutProofSchema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -475,7 +480,9 @@ export const Queues = Object.freeze({
       ...(baseSha === undefined ? {} : { baseSha }),
       ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
       ...(pr.composition === undefined ? {} : { composition: pr.composition }),
-      ...(pr.recut === undefined ? {} : { recut: pr.recut }),
+      ...(pr.recut === undefined
+        ? {}
+        : { recut: { ...pr.recut, ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }) } }),
     })
   },
 
