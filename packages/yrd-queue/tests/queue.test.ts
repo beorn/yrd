@@ -1733,6 +1733,29 @@ describe("Queue", () => {
     expect(app.queue.get("R2")?.prs).toMatchObject([{ baseSha: UPDATED }])
   })
 
+  it("resolves each queue base once per cycle instead of once per PR", async () => {
+    const resolvedBases: string[] = []
+    await using app = await createQueueApp({
+      batch: 2,
+      resolveBaseSha: (base) => {
+        resolvedBases.push(base)
+        return BASE
+      },
+    })
+    const runCycle = async (branches: readonly [string, string]): Promise<void> => {
+      const prs = []
+      for (const branch of branches) prs.push(await submitBranch(app, branch))
+      for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
+      await app.queue.run({ prs: prs.map((pr) => pr.id) }, runtime)
+    }
+
+    await runCycle(["issue/cycle-one-a", "issue/cycle-one-b"])
+    expect(resolvedBases).toEqual(["main"])
+
+    await runCycle(["issue/cycle-two-a", "issue/cycle-two-b"])
+    expect(resolvedBases).toEqual(["main", "main"])
+  })
+
   it("refuses integration when a clear main-health admission turns green then same-base red", async () => {
     let mainHealth: "clear" | "green" | "red" = "clear"
     let checks = 0
