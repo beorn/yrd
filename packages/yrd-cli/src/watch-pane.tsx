@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Box,
+  Divider,
   ListView,
+  ScrollArea,
   SplitPane,
   Tab,
   TabList,
@@ -13,6 +15,7 @@ import {
   useFocusManager,
   useInput,
   useScopeEffect,
+  useScrollController,
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
@@ -21,7 +24,6 @@ import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailRunPrBlocks,
   QueueDetailTitle,
-  QueueIntegrationFacts,
   QueueShowView,
   QueueTimelineView,
   queueShowData,
@@ -140,52 +142,55 @@ type QueueArtifactOutputLine = Readonly<{
   kind: "heading" | "muted" | "body"
 }>
 
+function queueArtifactOutputLines(
+  outputs: readonly QueueArtifactOutput[],
+  inline: boolean,
+): readonly QueueArtifactOutputLine[] {
+  return outputs.flatMap((output) => {
+    const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
+    const textLines = output.text.split("\n")
+    if (textLines.at(-1) === "") textLines.pop()
+    return [
+      ...(inline
+        ? []
+        : [
+            {
+              key: `${outputKey}:heading`,
+              text: `OUTPUT ${output.step}#${output.attempt}`,
+              kind: "heading" as const,
+            },
+          ]),
+      ...(output.truncatedBytes === undefined
+        ? []
+        : [
+            {
+              key: `${outputKey}:truncated`,
+              text: `... ${output.truncatedBytes} earlier bytes`,
+              kind: "muted" as const,
+            },
+          ]),
+      ...(textLines.length === 0
+        ? [
+            {
+              key: `${outputKey}:waiting`,
+              text: inline ? "No output recorded." : "Waiting for output...",
+              kind: "body" as const,
+            },
+          ]
+        : textLines.map((text, index) => ({
+            key: `${outputKey}:line:${index}`,
+            text,
+            kind: "body" as const,
+          }))),
+    ] satisfies readonly QueueArtifactOutputLine[]
+  })
+}
+
 function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueArtifactOutput[]; inline: boolean }) {
   const listRef = useRef<ListViewHandle | null>(null)
   const [atEnd, setAtEnd] = useState(true)
   const [unseenLines, setUnseenLines] = useState(0)
-  const lines = useMemo<readonly QueueArtifactOutputLine[]>(
-    () =>
-      outputs.flatMap((output) => {
-        const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
-        const textLines = output.text.split("\n")
-        if (textLines.at(-1) === "") textLines.pop()
-        return [
-          ...(inline
-            ? []
-            : [
-                {
-                  key: `${outputKey}:heading`,
-                  text: `OUTPUT ${output.step}#${output.attempt}`,
-                  kind: "heading" as const,
-                },
-              ]),
-          ...(output.truncatedBytes === undefined
-            ? []
-            : [
-                {
-                  key: `${outputKey}:truncated`,
-                  text: `... ${output.truncatedBytes} earlier bytes`,
-                  kind: "muted" as const,
-                },
-              ]),
-          ...(textLines.length === 0
-            ? [
-                {
-                  key: `${outputKey}:waiting`,
-                  text: inline ? "No output recorded." : "Waiting for output...",
-                  kind: "body" as const,
-                },
-              ]
-            : textLines.map((text, index) => ({
-                key: `${outputKey}:line:${index}`,
-                text,
-                kind: "body" as const,
-              }))),
-        ] satisfies readonly QueueArtifactOutputLine[]
-      }),
-    [inline, outputs],
-  )
+  const lines = useMemo(() => queueArtifactOutputLines(outputs, inline), [inline, outputs])
   const previousLineCount = useRef(lines.length)
 
   useEffect(() => {
@@ -284,9 +289,38 @@ export function resolveStepTabSelection(
   return userSelectedStep !== null && names.includes(userSelectedStep) ? userSelectedStep : liveStep
 }
 
-/** Step output is inline, muted, permanently expanded, and still scrollable. */
-function QueueInlineArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
-  return <QueueArtifactOutputList outputs={outputs} inline />
+/** Step output is static inside the single scroll owner shared by its tab. */
+function QueueInlineArtifactOutputRows({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  const lines = useMemo(() => queueArtifactOutputLines(outputs, true), [outputs])
+  if (lines.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      {lines.map((row) => (
+        <Text key={row.key} color="$fg-muted" bgConflict="ignore" wrap="wrap">
+          {row.text === "" ? " " : row.text}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
+function QueueTabScrollArea({ children, followEnd = false }: { children: ReactNode; followEnd?: boolean }) {
+  const controller = useScrollController()
+  const previousGeometry = useRef({ contentHeight: 0, maxScroll: 0 })
+
+  useEffect(() => {
+    const previous = previousGeometry.current
+    const contentGrew = controller.contentHeight > previous.contentHeight
+    const wasAtEnd = previous.maxScroll === 0 || controller.scrollOffset >= previous.maxScroll
+    previousGeometry.current = { contentHeight: controller.contentHeight, maxScroll: controller.maxScroll }
+    if (followEnd && contentGrew && wasAtEnd) controller.setScrollOffset(controller.maxScroll)
+  }, [controller, followEnd])
+
+  return (
+    <ScrollArea controller={controller} userSelect="text">
+      {children}
+    </ScrollArea>
+  )
 }
 
 function usableStepOutput(output: string | undefined): string | undefined {
@@ -313,6 +347,77 @@ function stepSummaryOutput(data: QueueShowData, step: string, output: string | u
   const recorded = usableStepOutput(output)
   if (recorded !== undefined) return recorded.split("\n")
   return ["No output recorded."]
+}
+
+type QueueStepExecution = Readonly<{
+  command?: string
+  outputs: readonly QueueArtifactOutput[]
+}>
+
+function queueStepExecutions({
+  data,
+  name,
+  stepRows,
+  stepOutputs,
+  commands,
+}: {
+  data: QueueShowData
+  name: string
+  stepRows: QueueShowData["steps"]
+  stepOutputs: readonly QueueArtifactOutput[]
+  commands?: Readonly<Record<string, string>>
+}): readonly QueueStepExecution[] {
+  const fallbackCommand = nativeMergeCommand(data, name) ?? commands?.[name]
+  if (stepRows.length > 0) {
+    return stepRows.map((stepRow) => {
+      const attempt = syntheticArtifactAttempt(stepRow.attempt)
+      const recorded = stepOutputs.filter((output) => output.attempt === attempt)
+      const command = usableStepOutput(stepRow.command) ?? fallbackCommand
+      return {
+        ...(command === undefined ? {} : { command }),
+        outputs:
+          recorded.length > 0
+            ? recorded
+            : [
+                {
+                  run: data.run,
+                  step: name,
+                  attempt,
+                  path: "",
+                  text: stepSummaryOutput(data, name, stepRow.output).join("\n"),
+                },
+              ],
+      }
+    })
+  }
+
+  const outputsByAttempt = new Map<number, QueueArtifactOutput[]>()
+  for (const output of stepOutputs) {
+    const attemptOutputs = outputsByAttempt.get(output.attempt) ?? []
+    attemptOutputs.push(output)
+    outputsByAttempt.set(output.attempt, attemptOutputs)
+  }
+  if (outputsByAttempt.size > 0) {
+    return [...outputsByAttempt.values()].map((attemptOutputs) => ({
+      ...(fallbackCommand === undefined ? {} : { command: fallbackCommand }),
+      outputs: attemptOutputs,
+    }))
+  }
+
+  return [
+    {
+      ...(fallbackCommand === undefined ? {} : { command: fallbackCommand }),
+      outputs: [
+        {
+          run: data.run,
+          step: name,
+          attempt: syntheticArtifactAttempt(undefined),
+          path: "",
+          text: stepSummaryOutput(data, name, undefined).join("\n"),
+        },
+      ],
+    },
+  ]
 }
 
 /** Synthetic inline summaries only need a stable positive artifact key. */
@@ -363,29 +468,35 @@ function QueueSubmitDiff({
   )
   if (diff === undefined || "unavailable" in diff) {
     return (
-      <Text color="$fg-muted">
-        {diff === undefined || diff.unavailable === "refs-pruned"
-          ? "diff unavailable (refs pruned)"
-          : "diff unavailable (git error)"}
-      </Text>
+      <Box flexDirection="column" minWidth={0}>
+        <Box height={1} flexShrink={0} />
+        <Text color="$fg-muted">
+          {diff === undefined || diff.unavailable === "refs-pruned"
+            ? "diff unavailable (refs pruned)"
+            : "diff unavailable (git error)"}
+        </Text>
+        <Box height={1} flexShrink={0} />
+        <Divider />
+      </Box>
     )
   }
   const summary = `Diff +${diff.additions} / -${diff.deletions} lines`
   return (
-    <Box flexDirection="column" minWidth={0}>
+    <Box flexDirection="column" minWidth={0} userSelect="text" {...(expanded ? { onClick: onToggle } : {})}>
+      <Box height={1} flexShrink={0} />
       <Box
         testID={focusId}
         focusable
-        mouseCursor="pointer"
-        onClick={onToggle}
+        {...(expanded ? {} : { onClick: onToggle })}
         userSelect="text"
         minWidth={0}
         backgroundColor={focused ? "$bg-selected" : undefined}
       >
         <Text wrap="truncate" color={focused ? "$fg-on-selected" : undefined}>
-          {summary} — click to {expanded ? "collapse" : "expand"}
+          {summary}
         </Text>
       </Box>
+      <Box height={1} flexShrink={0} />
       {expanded ? (
         <>
           <Text color="$fg-muted">Files ({diff.files.length})</Text>
@@ -394,19 +505,14 @@ function QueueSubmitDiff({
               - {file}
             </Text>
           ))}
-          <QueueInlineArtifactOutputView
-            outputs={[
-              {
-                run: data.run,
-                step: "submit",
-                attempt: 1,
-                path: "",
-                text: diff.patch,
-              },
-            ]}
-          />
+          {diff.patch.split("\n").map((line, index) => (
+            <Text key={`patch:${index}`} color="$fg-muted" bgConflict="ignore" wrap="wrap">
+              {line === "" ? " " : line}
+            </Text>
+          ))}
         </>
       ) : null}
+      <Divider />
     </Box>
   )
 }
@@ -591,6 +697,7 @@ export function QueueWorkflowStepTabs({
             showIntegration={false}
           />
           <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
+            <Box height={1} flexShrink={0} />
             <TabList>
               {tabNames.map((name) => (
                 <Box
@@ -605,18 +712,21 @@ export function QueueWorkflowStepTabs({
                 </Box>
               ))}
             </TabList>
+            <Box height={1} flexShrink={0} />
             {tabNames.map((name) => {
               if (name === "submit") {
                 return (
                   <TabPanel key={name} value={name}>
-                    <QueueSubmitPanel
-                      data={data}
-                      row={row}
-                      rows={runRows}
-                      prs={prs}
-                      runDetails={runDetails}
-                      diffs={diffs}
-                    />
+                    <QueueTabScrollArea>
+                      <QueueSubmitPanel
+                        data={data}
+                        row={row}
+                        rows={runRows}
+                        prs={prs}
+                        runDetails={runDetails}
+                        diffs={diffs}
+                      />
+                    </QueueTabScrollArea>
                   </TabPanel>
                 )
               }
@@ -625,41 +735,42 @@ export function QueueWorkflowStepTabs({
               const stepData: QueueShowData = { ...data, steps: stepRows }
               // The job input is durable proof of what this run actually executed;
               // current config is only a preview for a step that has no job yet.
-              const latestStep = stepRows.at(-1)
-              const command = nativeMergeCommand(data, name) ?? latestStep?.command ?? commands?.[name]
-              const fallbackOutput = stepSummaryOutput(data, name, latestStep?.output)
-              const inlineOutputs =
-                stepOutputs.length > 0
-                  ? stepOutputs
-                  : [
-                      {
-                        run: data.run,
-                        step: name,
-                        attempt: syntheticArtifactAttempt(latestStep?.attempt),
-                        path: "",
-                        text: fallbackOutput.join("\n"),
-                      },
-                    ]
+              const executions = queueStepExecutions({ data, name, stepRows, stepOutputs, commands })
               return (
                 <TabPanel key={name} value={name}>
-                  {name === "merge" ? <QueueIntegrationFacts data={data} /> : null}
-                  {/* Only the step-level facts here (item H); the run-level facts
-                  render once above the tabs. */}
-                  <QueueShowView
-                    data={stepData}
-                    compact={compact}
-                    highlightPr={highlightPr}
-                    section="steps"
-                    showLogArtifacts={false}
-                  />
-                  {command === undefined ? null : (
-                    <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
-                      <Text bold color="$fg" wrap="truncate">
-                        $ {command}
-                      </Text>
-                    </Box>
-                  )}
-                  <QueueInlineArtifactOutputView outputs={inlineOutputs} />
+                  <QueueTabScrollArea followEnd>
+                    {/* Only the step-level facts here (item H); the run-level facts
+                    render once above the tabs. */}
+                    <QueueShowView
+                      data={stepData}
+                      compact={compact}
+                      highlightPr={highlightPr}
+                      section="steps"
+                      showLogArtifacts={false}
+                      {...(selectedPr?.issue === undefined ? {} : { stepIssue: selectedPr.issue })}
+                    />
+                    {name === "merge" && data.integration !== undefined ? (
+                      <>
+                        <Text wrap="truncate">COMMIT {data.integration.commit}</Text>
+                        <Text wrap="truncate">
+                          PARENTS {[data.integration.baseSha, ...data.prs.map((pr) => pr.headSha)].join(" ")}
+                        </Text>
+                      </>
+                    ) : null}
+                    {executions.map((execution, index) => (
+                      <Box key={`${name}:execution:${index}`} flexDirection="column" minWidth={0}>
+                        <Box height={1} flexShrink={0} />
+                        {execution.command === undefined ? null : (
+                          <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
+                            <Text bold wrap="truncate">
+                              $ {execution.command}
+                            </Text>
+                          </Box>
+                        )}
+                        <QueueInlineArtifactOutputRows outputs={execution.outputs} />
+                      </Box>
+                    ))}
+                  </QueueTabScrollArea>
                 </TabPanel>
               )
             })}
