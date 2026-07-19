@@ -12,6 +12,7 @@ import {
   PRDetailView,
   queueTimelineAdmissionTimes,
   queueTimelineDefaultCursorId,
+  queueTimelineDisplayRows,
   queueTimelineProjection,
   prDetailData,
   type QueueTimelineProjection,
@@ -52,7 +53,7 @@ describe("queue timeline 21106 contract", () => {
     else process.env.TZ = priorTZ
   })
 
-  it("renders one full-width STATS box after the list", async () => {
+  it("renders separately bordered STATS and TIME boxes after the list", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const frame = rows.join("\n")
     const pillsLine = rows.findIndex((row) => /pending.*running.*failed.*done/u.test(row))
@@ -61,23 +62,23 @@ describe("queue timeline 21106 contract", () => {
     expect(statsLine).toBeGreaterThan(pillsLine)
     expect(rows[statsLine]?.length).toBe(120)
     expect(frame).not.toContain("╭─ FLOW ")
-    expect(frame).not.toContain("╭─ TIME ")
+    expect(frame).toContain("╭─ TIME ")
     for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90", "HR", "DAY", "WK", "MON"]) {
       expect(frame).toContain(cell)
     }
   })
 
-  it("omits normal runner state and folds exceptional runner facts into one STATUS box", async () => {
+  it("renders resident health in RUNNER and reserves STATUS for queue pause", async () => {
     const normal = (await renderTimeline(contractProjection(), 120)).join("\n")
-    expect(normal).not.toContain("╭─ RUNNER ")
+    expect(normal).toContain("╭─ RUNNER ")
     expect(normal).not.toContain("╭─ STATUS ")
-    expect(normal).not.toContain("[84042]")
+    expect(normal).toContain("[84042]")
 
     const paused = queueTimelineStories.paused.snapshot.projection
     if (paused === undefined) throw new Error("paused story is missing its projection")
     const exceptional = (await renderTimeline(paused, 120)).join("\n")
     expect(exceptional.match(/╭─ STATUS /gu)).toHaveLength(1)
-    expect(exceptional).not.toContain("╭─ RUNNER ")
+    expect(exceptional.match(/╭─ RUNNER /gu)).toHaveLength(1)
     expect(exceptional).toContain("HOLD THE LINE")
     expect(exceptional).toContain("NO RUNNER")
 
@@ -86,8 +87,8 @@ describe("queue timeline 21106 contract", () => {
       runner: { pid: 84042, startedAt: "2026-07-13T11:00:00.000Z", lastTickAt: "2026-07-13T11:00:00.000Z" },
     }
     const staleFrame = (await renderTimeline(stale, 120)).join("\n")
-    expect(staleFrame.match(/╭─ STATUS /gu)).toHaveLength(1)
-    expect(staleFrame).not.toContain("╭─ RUNNER ")
+    expect(staleFrame).not.toContain("╭─ STATUS ")
+    expect(staleFrame.match(/╭─ RUNNER /gu)).toHaveLength(1)
     expect(staleFrame).toContain("[84042]")
     expect(staleFrame).toContain("RUNNER STALE — last tick 1:00:00 ago")
   })
@@ -127,7 +128,7 @@ describe("queue timeline 21106 contract", () => {
       27 * minute,
       25 * minute,
     ])
-    expect(projection.rows.map((row) => row.glyph)).toEqual(["○", "●", "●", "×", "✓"])
+    expect(projection.rows.map((row) => row.glyph)).toEqual(["▢", "▢", "▢", "⧗", "✓"])
     // BY: the submitting actor of each exact PR revision, lossless in JSON.
     expect(projection.rows.map((row) => row.submitter)).toEqual([
       "@cto",
@@ -136,7 +137,7 @@ describe("queue timeline 21106 contract", () => {
       "@agent/2",
       "@agent/7",
     ])
-    // RUNNER: probed lease liveness rides the projection for JSON and exceptional STATUS.
+    // RUNNER: probed lease liveness rides the projection and its dedicated box.
     expect(projection.runner).toEqual({
       pid: 84042,
       startedAt: "2026-07-13T11:00:00.000Z",
@@ -157,7 +158,7 @@ describe("queue timeline 21106 contract", () => {
     expect(projection.metrics.queueWait.n).toBe(2)
   })
 
-  it("renders the five information groups in the contract order with no status box when normal", async () => {
+  it("renders the information groups in order with RUNNER but no STATUS when normal", async () => {
     const rows = (await renderTimeline(contractProjection(), 120)).map((row) => row.trimEnd())
     const queueLine = rowIndex(rows, "QUEUE")
     const updatedLine = rowIndex(rows, "updated 17:30:00")
@@ -187,17 +188,16 @@ describe("queue timeline 21106 contract", () => {
     expect(header).not.toContain("DETAIL")
     expect(header).not.toContain("TOTAL")
     expect(header).toContain("STATUS")
-    // Healthy runner state is intentionally silent. STATUS is reserved for
-    // actionable pause or runner-failure facts.
-    expect(rows.join("\n")).not.toContain("╭─ RUNNER ")
+    // RUNNER is always visible; STATUS is reserved for actionable queue pause.
+    expect(rows.join("\n")).toContain("╭─ RUNNER ")
     expect(rows.join("\n")).not.toContain("╭─ STATUS ")
-    expect(rows.join("\n")).not.toContain("[84042]")
+    expect(rows.join("\n")).toContain("[84042]")
     expect(rows.join("\n")).not.toContain("NO RUNNER")
     expect(rows.join("\n")).not.toContain("RUNNER STALE")
     expect(rows.join("\n")).not.toContain("oldest open")
-    // One full-width STATS box contains the FLOW and TIME sections, both headed
-    // by the rolling windows HR / DAY / WK / MON.
+    // Separately framed STATS and TIME share the rolling windows.
     const statisticsText = rows.slice(statsBoxLine).join("\n")
+    expect(statisticsText).toContain("╭─ TIME ")
     for (const cell of ["RUNS", "INTEGRATED", "FAILS", "FAILED", "WAIT", "avg", "p90"]) {
       expect(statisticsText).toContain(cell)
     }
@@ -216,15 +216,15 @@ describe("queue timeline 21106 contract", () => {
     // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend\s+-\s+PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
+    expect(pending?.trim()).toMatch(/^16:40:00 ▢ pend\s+-\s+PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 PR42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
+      /^17:10:00 ▢ run\s+main#42 PR42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
     )
     expect(partner?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 PR43\.1\s+\S topic\/pr43 \(2:check\)\s+@agent\/5 34:00 20:00$/u,
+      /^17:10:00 ▢ run\s+main#42 PR43\.1\s+\S topic\/pr43 \(2:check\)\s+@agent\/5 34:00 20:00$/u,
     )
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × fail\s+main#5\s+PR5\.1\s+\S topic\/pr5 \(typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
+      /^16:42:00 ⧗ fail\s+main#5\s+PR5\.1\s+\S topic\/pr5 \(typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
     )
     expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+PR4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
 
@@ -232,6 +232,111 @@ describe("queue timeline 21106 contract", () => {
     // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
     for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("#")
+  })
+
+  it("uses the shared km task glyphs and removes the redundant task/ branch prefix", async () => {
+    const source = contractProjection()
+    const projection = {
+      ...source,
+      rows: source.rows.map((row) => ({ ...row, branch: `task/${row.branch}` })),
+    }
+    const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
+    const pending = rows[rowIndex(rows, "PR1.1")]
+    const running = rows[rowIndex(rows, "PR42.1")]
+    const rejected = rows[rowIndex(rows, "PR5.1")]
+    const integrated = rows[rowIndex(rows, "PR4.1")]
+
+    expect(pending).toContain("▢ pend")
+    expect(running).toContain("▢ run")
+    expect(rejected).toContain("⧗ fail")
+    expect(integrated).toContain("✓ done")
+    for (const row of [pending, running, rejected, integrated]) expect(row).not.toContain("task/")
+
+    const production = queueTimelineStories["production-overview"].snapshot.projection
+    if (production === undefined) throw new Error("production-overview is missing its projection")
+    const productionRows = (await renderTimeline(production, 160)).map((row) => row.trimEnd())
+    const environment = productionRows[rowIndex(productionRows, "PR6.1")]
+    expect(environment).toContain("⧗ env")
+    expect(environment).toContain("(queue-environment)")
+  })
+
+  it("folds a consecutive same-PR outcome storm to one selectable row and expands it on select", async () => {
+    const story = queueTimelineStories["production-overview"]
+    const projection = story.snapshot.projection
+    if (projection === undefined) throw new Error("production-overview is missing its projection")
+    const environment = projection.rows.find((row) => row.pr === "PR6")
+    if (environment === undefined || environment.timestampMs === null) {
+      throw new Error("production-overview is missing its environment-refused row")
+    }
+    const environmentTimestampMs = environment.timestampMs
+    const stormRows = Array.from({ length: 21 }, (_, index) => {
+      const timestampMs = environmentTimestampMs - index * 30_000
+      return {
+        ...environment,
+        id: `main:run:R${909 - index}:PR6:1`,
+        run: `R${909 - index}`,
+        timestampMs,
+        timestamp: new Date(timestampMs).toISOString(),
+      }
+    })
+    const stormProjection = {
+      ...projection,
+      rows: stormRows,
+      display: { limit: 5, shown: 5, hidden: stormRows.length - 5 },
+      details: [],
+    }
+    const oneShot = (await renderTimeline(stormProjection, 200)).join("\n")
+    expect(oneShot.match(/PR6\.1/gu)).toHaveLength(1)
+    expect(oneShot).toMatch(/×21 · \d{2}:\d{2}–\d{2}:\d{2}/u)
+    expect(oneShot).not.toContain("... 16 more")
+
+    const render = createRenderer({ cols: 200, rows: 117 })
+    const app = render(
+      createElement(QueueWatchFrame, {
+        snapshot: { ...story.snapshot, projection: stormProjection },
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      await app.press("Escape")
+      await app.waitForLayoutStable()
+      const stormVisibleRows = () =>
+        app.text.split("\n").filter((row) => row.includes("⧗ env") && row.includes("PR6.1"))
+      expect(stormVisibleRows()).toHaveLength(1)
+      expect(app.text).toMatch(/×21 · \d{2}:\d{2}–\d{2}:\d{2}/u)
+
+      await app.press("Enter")
+      await app.waitForLayoutStable()
+      expect(stormVisibleRows()).toHaveLength(21)
+      expect(app.text).not.toMatch(/×21 · \d{2}:\d{2}–\d{2}:\d{2}/u)
+
+      await app.press("Enter")
+      await app.waitForLayoutStable()
+      expect(stormVisibleRows()).toHaveLength(1)
+      expect(app.text).toMatch(/×21 · \d{2}:\d{2}–\d{2}:\d{2}/u)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("expands only the selected occurrence when matching storms are separated", () => {
+    const projection = queueTimelineStories["production-overview"].snapshot.projection
+    if (projection === undefined) throw new Error("production-overview is missing its projection")
+    const environment = projection.rows.find((row) => row.pr === "PR6")
+    const separator = projection.rows.find((row) => row.pr !== "PR6" && row.group === "completed")
+    if (environment === undefined || separator === undefined)
+      throw new Error("production-overview fixtures are incomplete")
+    const row = (id: string) => ({ ...environment, id, run: id })
+    const source = [row("A-new"), row("A-old"), separator, row("B-new"), row("B-old")]
+    const folded = queueTimelineDisplayRows(source)
+    const firstKey = folded[0]?.repeat?.key
+
+    expect(folded.map((entry) => entry.id)).toEqual(["A-new", separator.id, "B-new"])
+    expect(firstKey).toBeDefined()
+    expect(folded[0]?.repeat?.key).not.toEqual(folded[2]?.repeat?.key)
+    const expanded = queueTimelineDisplayRows(source, new Set([firstKey!]))
+    expect(expanded.map((entry) => entry.id)).toEqual(["A-new", "A-old", separator.id, "B-new"])
+    expect(expanded[3]?.repeat?.collapsed).toBe(true)
   })
 
   it("falls back to the compact #run form and keeps fixed fields intact at 80 columns", async () => {
@@ -246,7 +351,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead).not.toContain("◷")
     // The BY column is the first casualty on narrow tiers — dropped before
     // any identity, clock, or measurement column.
-    expect(lead?.trimStart().startsWith("17:10:00 ● run")).toBe(true)
+    expect(lead?.trimStart().startsWith("17:10:00 ▢ run")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
     const rejected = rows[rowIndex(rows, "PR5.1")]
@@ -269,8 +374,8 @@ describe("queue timeline 21106 contract", () => {
         return styled.cell(column, row)
       }
       // Item 9: a not-yet-started run shows a muted "-", not a blue "pending"
-      // run id — the blue (info) reference is now the running working disc.
-      const runningMarker = cell("●", "PR42.1").fg
+      // run id — the blue (info) reference is now the running km task glyph.
+      const runningMarker = cell("▢", "PR42.1").fg
       const successMarker = cell("✓", "PR4.1").fg
       const successText = cell("done", "PR4.1").fg
       const failureText = cell("typecheck-failed", "PR5.1").fg
@@ -298,7 +403,7 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the list left-flush with the 160-cell cap and no dead gutter", async () => {
     const wide = await renderTimeline(contractProjection(), 200)
-    // The singular STATS box fills the full capped width with no dead gutter.
+    // The STATS + TIME row fills the full capped width with no dead gutter.
     const wideBorder = wide[rowIndex(wide, "╭─ STATS ")]
     if (wideBorder === undefined) throw new Error("expected the statistics border row")
     expect(wideBorder.startsWith("╭─ STATS ")).toBe(true)
@@ -307,7 +412,7 @@ describe("queue timeline 21106 contract", () => {
     // Left-anchored surfaces start at column 0; only right-aligned facts
     // (the updated clock, the bucket checkboxes) carry leading padding. Box
     // borders anchor at column 0 with their rounded corner glyph.
-    for (const anchor of ["QUEUE", "16:40:00 ○ pend", "╭─ STATS"]) {
+    for (const anchor of ["QUEUE", "16:40:00 ▢ pend", "╭─ STATS"]) {
       expect(wide[rowIndex(wide, anchor)]?.startsWith(anchor.slice(0, 1)), anchor).toBe(true)
     }
     expect(wide[rowIndex(wide, "TIME")]?.indexOf("TIME")).toBe(0)
@@ -317,6 +422,43 @@ describe("queue timeline 21106 contract", () => {
     if (narrowBorder === undefined) throw new Error("expected the statistics border row")
     expect(narrowBorder.startsWith("╭─ STATS ")).toBe(true)
     expect(narrowBorder.trimEnd().length).toBe(100)
+  })
+
+  it("contains long raw JSON output inside the detail side of the split divider", async () => {
+    const story = queueTimelineStories["production-overview"]
+    const sentinel = `JSON_EDGE_SENTINEL ${JSON.stringify({ payload: "¤".repeat(800) })}`
+    const snapshot = {
+      ...story.snapshot,
+      outputs: [
+        {
+          run: "R42",
+          step: "check",
+          attempt: 2,
+          path: "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/raw.json",
+          text: sentinel,
+        },
+      ],
+    }
+    const render = createRenderer({ cols: 200, rows: 50 })
+    const app = render(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const divider = rows[0]?.indexOf("│") ?? -1
+      expect(divider).toBeGreaterThan(0)
+      const sentinelRows = rows.filter((row) => row.includes("JSON_EDGE_SENTINEL"))
+      expect(sentinelRows).toHaveLength(1)
+      for (const row of sentinelRows) {
+        expect(row.indexOf("JSON_EDGE_SENTINEL")).toBeGreaterThan(divider)
+        expect(row.slice(0, divider)).not.toContain("JSON_EDGE_SENTINEL")
+        expect(Array.from(row).length).toBeLessThanOrEqual(200)
+      }
+      const payloadRows = rows.filter((row) => row.includes("¤"))
+      expect(payloadRows.length).toBeGreaterThan(1)
+      for (const row of rows) expect(row.slice(0, divider)).not.toContain("¤")
+    } finally {
+      app.unmount()
+    }
   })
 
   it("attaches the right-aligned pills row directly below the list (item 2)", async () => {
@@ -543,10 +685,10 @@ describe("queue timeline 21106 contract", () => {
     }
     const frame = rows.join("\n")
     expect(frame).toContain(`updated ${wallClock(projection.now)}`)
-    // The healthy runner fact remains available to JSON/projection consumers,
-    // but renders no normal-state status chrome.
+    // The healthy runner fact is visible while STATUS remains absent.
     expect(projection.runner).not.toBeNull()
-    expect(frame).not.toContain("[84042]")
+    expect(frame).toContain("[84042]")
+    expect(frame).toContain("╭─ RUNNER ")
     expect(frame).not.toContain("╭─ STATUS ")
 
     for (const row of projection.rows) {
@@ -580,7 +722,7 @@ describe("queue timeline 21106 contract", () => {
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""
-      for (const anchor of ["\u25cf", "PR42.1", "2:check"]) {
+      for (const anchor of ["▢", "PR42.1", "2:check"]) {
         const column = cursorText.indexOf(anchor)
         expect(column, anchor).toBeGreaterThanOrEqual(0)
         expect(handle.cell(column, cursorRow).bg, `selection bg under ${anchor}`).not.toBeNull()

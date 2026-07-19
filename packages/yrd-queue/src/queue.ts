@@ -904,7 +904,9 @@ function createQueue<Shape extends PRShape>(
     if (resolveBaseSha === undefined) return
     for (const pr of prs) {
       if (!checksRequested(pr)) continue
-      await actions.requestChecks(pr.id, await resolveBaseSha(pr.base))
+      const baseSha = await resolveBaseSha(pr.base)
+      if (checkRequest(pr)?.baseSha === baseSha) continue
+      await actions.requestChecks(pr.id, baseSha)
     }
   }
 
@@ -1286,8 +1288,7 @@ function queueRunOutcome(run: DeepReadonly<QueueRun>): YrdLifecycleOutcome {
     // (record.failure) — has no deeper ERROR. The run must own it, or the
     // failure is silent: fail loud with a run-scoped ERROR.
     const stepOwned = run.steps.some(
-      (step) =>
-        step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
+      (step) => step.job?.status === "failed" || step.job?.status === "lost" || step.job?.status === "canceled",
     )
     return stepOwned ? "settled" : "failed"
   }
@@ -2750,6 +2751,34 @@ function checkRunStatus(run: QueueRun, selectedCount: number): PREligibility["ch
   return run.status === "failed" ? "failed" : "checking"
 }
 
+const AUTOMATIC_ADMISSION_RETRIES = 1
+
+function automaticAdmissionAttemptsExhausted(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+  snapshot: DeepReadonly<PRSnapshot>,
+  selected: readonly RuntimeStep[],
+): boolean {
+  const exactRequests = pr.checkRequests.filter(
+    (request) =>
+      request.revision === snapshot.revision &&
+      request.headSha === snapshot.headSha &&
+      (request.baseSha ?? pr.baseSha) === snapshot.baseSha,
+  ).length
+  if (exactRequests === 0) return false
+  const releasedFailures = orderedQueues(state.queues, state.jobs).filter(
+    (run) =>
+      run.stepSelection?.authority === "admission" &&
+      run.prs.length === 1 &&
+      run.prs[0] !== undefined &&
+      sameSnapshot(run.prs[0], snapshot) &&
+      samePlan(run.steps, selected) &&
+      checkRunStatus(run, selected.length) === "failed" &&
+      state.queues.authority.runs[run.id]?.released !== undefined,
+  ).length
+  return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
+}
+
 function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): PR[] {
   const selected = admissionSteps(state.queues, steps)
   if (selected.length === 0) return []
@@ -2762,7 +2791,8 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
       if (run === undefined) return true
       return (
         checkRunStatus(run, selected.length) === "failed" &&
-        availableAuthorityToken(state.queues.authority.checks[pr.id], snapshot)
+        availableAuthorityToken(state.queues.authority.checks[pr.id], snapshot) &&
+        !automaticAdmissionAttemptsExhausted(state, pr, snapshot, selected)
       )
     })
     .toSorted((left, right) => {
@@ -3000,6 +3030,9 @@ function prEligibility(
     ...(reviewed.current?.ref === undefined ? {} : { ref: reviewed.current.ref }),
   }
   const checks = checkEligibility(state, pr, steps)
+  const exhaustedAutomaticAdmissions =
+    checks.status === "failed" &&
+    automaticAdmissionAttemptsExhausted(state, pr, Queues.snapshot(pr), admissionSteps(state.queues, steps))
   const result = (reason?: PREligibility["reason"]): PREligibility => ({
     pr: pr.id,
     revision: pr.revision,
@@ -3030,7 +3063,9 @@ function prEligibility(
     if (
       options.ignoreChecks !== true &&
       checks.status === "failed" &&
-      (checks.run === undefined || state.queues.authority.runs[checks.run]?.released === undefined)
+      (checks.run === undefined ||
+        state.queues.authority.runs[checks.run]?.released === undefined ||
+        exhaustedAutomaticAdmissions)
     ) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
       return result({

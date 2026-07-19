@@ -21,19 +21,19 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
         .split("\n")
         .find((row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"))
       expect(tabLine, app.text).toBeDefined()
-      expect(app.text).toContain("v RUN LOGS")
-      expect(app.text.match(/(?:>|v) RUN LOGS/gu)).toHaveLength(1)
+      expect(app.text).toContain("• RUN LOGS")
+      expect(app.text.match(/[▸•] RUN LOGS/gu)).toHaveLength(1)
 
       await app.press("h")
       await waitFor(() => !app.text.includes("125 tests collected"))
-      expect(app.text).toContain("> RUN LOGS")
+      expect(app.text).toContain("▸ RUN LOGS")
 
       await app.press("l")
       await waitFor(() => app.text.includes("125 tests collected"))
       await app.press("ArrowRight")
       await waitFor(() => app.text.includes("Waiting for first output…"))
       expect(app.text).not.toContain("125 tests collected")
-      expect(app.text).toContain("v RUN LOGS")
+      expect(app.text).toContain("• RUN LOGS")
 
       await app.press("ArrowLeft")
       await waitFor(() => app.text.includes("125 tests collected"))
@@ -86,21 +86,19 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
         (row) => row.includes("prepare") && row.includes("check") && row.includes("integrate"),
       )
       const tabsLine = rows[tabsY] ?? ""
-      // Durations ride the tab labels (e.g. `check 7m`) — the tab bar carries at
-      // least one duration token, which the old bare name-only labels lacked.
-      expect(tabsLine, tabsLine).toMatch(/\d+(?:m|s|:\d{2})/u)
-      // The glyph immediately left of a step name is colorized by status, so its
-      // fg differs from the plain (uncolored) space separating labels. Anchor on
-      // the tab bar's own `check` (after `prepare`), not a left-pane `…:check`
-      // cell the tab bar now shares a row with.
+      const statusLine = rows[tabsY + 1] ?? ""
+      const durationLine = rows[tabsY + 2] ?? ""
+      expect(durationLine).toMatch(/◷\s+\d+(?:m|s|:\d{2})/u)
       const checkX = tabsLine.indexOf("check", tabsLine.indexOf("prepare"))
-      const glyphCell = app.cell(checkX - 2, tabsY)
-      const nameCell = app.cell(checkX, tabsY)
-      expect(glyphCell.fg, "step glyph is status-colored, not the plain label fg").not.toEqual(nameCell.fg)
+      const prepareX = tabsLine.indexOf("prepare")
+      const doneGlyph = app.cell(prepareX - 3, tabsY + 1)
+      const runningGlyph = app.cell(checkX - 3, tabsY + 1)
+      expect(statusLine).toContain("✓ passed")
+      expect(statusLine).toContain("▢ running")
+      expect(doneGlyph.fg, "done and running glyphs retain distinct semantic colors").not.toEqual(runningGlyph.fg)
 
       // Recovered 21514 IA: tabs are deliberately wide and equal rather than
       // a compact run of content-sized pills.
-      const prepareX = tabsLine.indexOf("prepare")
       const integrateX = tabsLine.indexOf("integrate", checkX)
       const firstStride = checkX - prepareX
       const secondStride = integrateX - checkX
@@ -141,6 +139,8 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
       expect(app.cell(commandX, commandY).bold).toBe(true)
       expect(app.cell(commandX, commandY).fg).not.toBeNull()
+      expect(rows[commandY - 1]).toContain("╭")
+      expect(rows[commandY + 1]).toContain("╰")
     } finally {
       app.unmount()
     }

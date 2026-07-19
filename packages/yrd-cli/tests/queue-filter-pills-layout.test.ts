@@ -67,7 +67,7 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
       const pillsY = rowIndex(app.text, /pending.*running.*failed.*done/u)
       const statsY = rowIndex(app.text, /╭─ STATS /u)
 
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
       expect(headerY, "table header renders").toBeGreaterThanOrEqual(0)
       expect(firstRowY, "rows render below the header").toBeGreaterThan(headerY)

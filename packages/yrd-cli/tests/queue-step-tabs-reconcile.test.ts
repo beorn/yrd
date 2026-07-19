@@ -105,16 +105,19 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
       { name: "check", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:42.000Z" },
       { name: "integrate", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:15.000Z" },
     ])
-    const tabRow = frame.split("\n").find((row) => row.includes("prepare") && row.includes("integrate")) ?? ""
-    const prepareX = tabRow.indexOf("prepare")
-    const checkX = tabRow.indexOf("check", prepareX)
-    const integrateX = tabRow.indexOf("integrate", checkX)
+    const lines = frame.split("\n")
+    const tabRowIndex = lines.findIndex((row) => row.includes("1: prepare") && row.includes("3: integrate"))
+    const tabRow = lines[tabRowIndex] ?? ""
+    const prepareX = tabRow.indexOf("1: prepare")
+    const checkX = tabRow.indexOf("2: check", prepareX)
+    const integrateX = tabRow.indexOf("3: integrate", checkX)
     const firstStride = checkX - prepareX
     const secondStride = integrateX - checkX
     expect(firstStride).toBeGreaterThanOrEqual(20)
     expect(Math.abs(firstStride - secondStride)).toBeLessThanOrEqual(2)
 
-    const segment = tabRow.slice(prepareX)
+    const durationRow = lines[tabRowIndex + 2] ?? ""
+    const segment = durationRow.slice(prepareX)
     const durations = [...segment.matchAll(/\b(?:27s|42s|15s)\b/gu)]
     expect(durations.map((match) => match[0])).toEqual(["27s", "42s", "15s"])
     const ends = durations.map((match) => (match.index ?? -1) + match[0].length)

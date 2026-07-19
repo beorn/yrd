@@ -797,14 +797,14 @@ describe("runYrd", () => {
     ).toBe(0)
     expect(JSON.parse(submit.stdout())).toMatchObject({
       command: "pr.submit",
-      prs: [{ branch: "topic/direct", status: "submitted", taskStatus: "wip", glyph: "[/]" }],
+      prs: [{ branch: "topic/direct", status: "submitted", taskStatus: "wip", glyph: "▢" }],
     })
 
     const status = outputIO({ currentBranch: () => "topic/direct" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
     expect(JSON.parse(status.stdout())).toMatchObject({
       command: "pr.status",
-      pr: { branch: "topic/direct", status: "submitted", taskStatus: "wip", glyph: "[/]" },
+      pr: { branch: "topic/direct", status: "submitted", taskStatus: "wip", glyph: "▢" },
     })
 
     const prime = outputIO({ currentBranch: () => "topic/direct" })
@@ -825,6 +825,35 @@ describe("runYrd", () => {
     const dashboard = outputIO()
     expect(await runYrd(app, yrd("--json"), dashboard.io), dashboard.stderr()).toBe(0)
     expect(JSON.parse(dashboard.stdout())).toMatchObject({ command: "dashboard" })
+  })
+
+  it("fails terminal branch reuse with delivery-nonce recovery and admits the fresh identity", async () => {
+    const app = await createApp()
+    await app.bays.submit({ branch: "topic/landed", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
+    await app.bays.requestChecks({ pr: "PR1" })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+    expect(app.bays.pr("PR1")).toMatchObject({ branch: "topic/landed", status: "integrated" })
+    const before = await Array.fromAsync(app.events())
+
+    const refused = outputIO({ resolveRevision: async () => "2".repeat(40) })
+    expect(await runYrd(app, yrd("pr", "submit", "topic/landed", "--json"), refused.io)).toBe(1)
+    expect(refused.stdout()).toBe("")
+    expect(refused.stderr()).toContain("terminal PR 'PR1' (integrated)")
+    expect(refused.stderr()).toContain("topic/landed-delivery-<nonce>")
+    expect(refused.stderr()).toContain("then run yrd pr submit <fresh-branch>")
+    expect(await Array.fromAsync(app.events())).toEqual(before)
+
+    const fresh = outputIO({
+      resolveRevision: async (ref) => (ref === "topic/landed-delivery-r2" ? "2".repeat(40) : undefined),
+    })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/landed-delivery-r2", "--draft", "--json"), fresh.io),
+      fresh.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(fresh.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ id: "PR2", branch: "topic/landed-delivery-r2", status: "pushed" }],
+    })
   })
 
   it.each([
@@ -1012,11 +1041,11 @@ describe("runYrd", () => {
       (["pending", "running", "failed", "passed", "skipped"] as const).map((status) => stepTaskStatusOf({ status })),
     ).toEqual(["todo", "wip", "blocked", "done", "dropped"])
     expect((["todo", "wip", "blocked", "done", "dropped"] as const).map(taskStatusGlyph)).toEqual([
-      "[ ]",
-      "[/]",
-      "[!]",
-      "[x]",
-      "[-]",
+      "▢",
+      "▢",
+      "⧗",
+      "✓",
+      "−",
     ])
   })
 
@@ -1027,7 +1056,7 @@ describe("runYrd", () => {
     const json = outputIO()
     expect(await runYrd(app, yrd("pr", "view", "PR1", "--json"), json.io), json.stderr()).toBe(0)
     const projected = (JSON.parse(json.stdout()) as { pr: { taskStatus: string; glyph: string } }).pr
-    expect(projected).toMatchObject({ taskStatus: "wip", glyph: "[/]" })
+    expect(projected).toMatchObject({ taskStatus: "wip", glyph: "▢" })
 
     const human = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), human.io), human.stderr()).toBe(0)
@@ -1050,7 +1079,7 @@ describe("runYrd", () => {
     expect(humanStatus.stdout()).toContain("STATUS submitted")
     expect(humanStatus.stdout()).toContain("POSITION 6")
     expect(humanStatus.stdout()).toContain("PR6")
-    expect(humanStatus.stdout()).toContain("[/]")
+    expect(humanStatus.stdout()).toContain("▢")
 
     const status = outputIO({ currentBranch: () => "topic/6" })
     expect(await runYrd(app, yrd("pr", "status", "--json"), status.io), status.stderr()).toBe(0)
@@ -1893,11 +1922,11 @@ describe("runYrd", () => {
         why,
       })),
     ).toEqual([
-      { id: "PR1", state: "pushed", glyph: "[ ]", review: "n/a", checks: "n/a", why: "draft" },
-      { id: "PR2", state: "submitted", glyph: "[/]", review: "need", checks: "n/a", why: "review-required" },
-      { id: "PR3", state: "pushed", glyph: "[ ]", review: "n/a", checks: "fail", why: "checks-failed" },
-      { id: "PR4", state: "rejected", glyph: "[!]", review: "n/a", checks: "n/a", why: "rejected" },
-      { id: "PR5", state: "integrated", glyph: "[x]", review: "ok", checks: "pass", why: "terminal" },
+      { id: "PR1", state: "pushed", glyph: "▢", review: "n/a", checks: "n/a", why: "draft" },
+      { id: "PR2", state: "submitted", glyph: "▢", review: "need", checks: "n/a", why: "review-required" },
+      { id: "PR3", state: "pushed", glyph: "▢", review: "n/a", checks: "fail", why: "checks-failed" },
+      { id: "PR4", state: "rejected", glyph: "⧗", review: "n/a", checks: "n/a", why: "rejected" },
+      { id: "PR5", state: "integrated", glyph: "✓", review: "ok", checks: "pass", why: "terminal" },
     ])
     expect(rows[2]?.target).toBe("release/2.0")
 
@@ -1915,8 +1944,8 @@ describe("runYrd", () => {
       }
       expect(physical[0]).not.toContain("READY")
       expect(physical[0]).not.toMatch(/\sC$/u)
-      expect(human).toContain("[!] rejected")
-      expect(human).toContain("[x] integrated")
+      expect(human).toContain("⧗ rejected")
+      expect(human).toContain("✓ integrated")
       expect(human).not.toContain(entries[0]!.pr.branch)
       expect(physical[0]?.trim().split(/\s+/u).includes("AGE")).toBe(columns === 120)
       expect(physical[0]?.includes("BASE")).toBe(columns === 120)
@@ -3844,7 +3873,7 @@ describe("runYrd", () => {
           pid: process.pid,
           startedAt: "2026-07-13T12:00:00.000Z",
           lastTickAt: "2026-07-13T12:00:00.000Z",
-          // Exceptional STATUS renders stale-runner details as `[pid] <command>`.
+          // The dedicated RUNNER box renders stale-runner details as `[pid] <command>`.
           command: expect.any(String),
         })
         now += 1_000
@@ -4136,10 +4165,10 @@ describe("runYrd", () => {
       // Markers are semantic-foreground only — the canonical km/ag glyphs,
       // never a colored STATUS background band.
       for (const [glyph, anchor] of [
-        ["○", "PR6.1"],
-        ["●", "PR5.1"],
-        ["-", "PR7.1"],
-        ["×", "PR3.1"],
+        ["▢", "PR6.1"],
+        ["▢", "PR5.1"],
+        ["−", "PR7.1"],
+        ["⧗", "PR3.1"],
         ["✓", "PR2.1"],
       ] as const) {
         const row = styled.lines.findIndex((row) => row.includes(anchor))
@@ -5057,7 +5086,7 @@ describe("runYrd", () => {
       expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 1 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
-      expect.soft(status.stdout()).toContain("[!]")
+      expect.soft(status.stdout()).toContain("⧗")
       expect.soft(status.stdout()).toContain("apply-conflict: PR 'PR1' could not be applied")
       expect.soft(status.stdout()).toContain(`evidence: ${artifact}`)
       expect.soft(status.stdout()).not.toContain("next:")
@@ -5648,14 +5677,14 @@ describe("runYrd", () => {
 
     const dashboard = outputIO({ now, resolveQueueTarget })
     expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
-    expect.soft(dashboard.stdout()).toContain("1. [/] PR1")
-    expect.soft(dashboard.stdout()).toContain("2. [/] PR2")
+    expect.soft(dashboard.stdout()).toContain("1. ▢ PR1")
+    expect.soft(dashboard.stdout()).toContain("2. ▢ PR2")
 
     const status = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("pr", "status"), status.io), status.stderr()).toBe(0)
     expect.soft(status.stdout()).toContain("STATUS submitted")
     expect.soft(status.stdout()).toContain("POSITION 2")
-    expect.soft(status.stdout()).toContain("[/]")
+    expect.soft(status.stdout()).toContain("▢")
 
     const prime = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("prime", "--json"), prime.io), prime.stderr()).toBe(0)
@@ -5767,7 +5796,7 @@ describe("runYrd", () => {
     const human = outputIO({ color: true, columns: 120 })
     expect(await runYrd(app, yrd("log", "--base", "main"), human.io)).toBe(0)
     expect(human.stdout()).not.toMatch(/^\s*(?:TIME|RUN|OUTCOME)\b/mu)
-    expect(human.stdout()).not.toContain("[x]")
+    expect(human.stdout()).not.toContain("✓")
     expect(human.stdout()).toContain("(rev1, run1)")
     expect(human.stdout()).toContain("PR1")
     expect(human.stdout()).toContain("integrated")
@@ -5800,16 +5829,16 @@ describe("runYrd", () => {
     expect(parsed.runs[0]?.run).toBe("R1")
     expect((parsed as { pr?: { taskStatus?: string; glyph?: string } }).pr).toMatchObject({
       taskStatus: "done",
-      glyph: "[x]",
+      glyph: "✓",
     })
-    expect(parsed.runs[0]).toMatchObject({ taskStatus: "done", glyph: "[x]" })
+    expect(parsed.runs[0]).toMatchObject({ taskStatus: "done", glyph: "✓" })
     expect(parsed.runs[0]?.steps).toHaveLength(2)
     expect(parsed.runs[0]?.steps[0]).toMatchObject({
       step: "check",
       revision: "check-v1",
       status: "passed",
       taskStatus: "done",
-      glyph: "[x]",
+      glyph: "✓",
     })
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("detail")
     expect(parsed.runs[0]?.steps[0]).toHaveProperty("output")
@@ -6497,7 +6526,7 @@ describe("runYrd", () => {
     expect(show).toMatchObject({
       run: "R4",
       taskStatus: "done",
-      glyph: "[x]",
+      glyph: "✓",
       totalDuration: "48m07s",
       totalDurationMs: 2_887_405,
       activeDuration: "11m26s",
@@ -6511,7 +6540,7 @@ describe("runYrd", () => {
       attempt: 1,
       outcome: "failed",
       taskStatus: "blocked",
-      glyph: "[!]",
+      glyph: "⧗",
       startedAt: "2026-07-12T11:08:36.218Z",
       finishedAt: "2026-07-12T11:12:18.300Z",
       durationMs: 222_082,
@@ -6533,7 +6562,7 @@ describe("runYrd", () => {
           attempt: "1",
           status: "failed",
           taskStatus: "blocked",
-          glyph: "[!]",
+          glyph: "⧗",
           duration: "3m42s",
           error: "merge stalled",
         }),
@@ -6542,7 +6571,7 @@ describe("runYrd", () => {
           attempt: "2",
           status: "passed",
           taskStatus: "done",
-          glyph: "[x]",
+          glyph: "✓",
           duration: "25s",
         }),
       ]),
@@ -6560,8 +6589,8 @@ describe("runYrd", () => {
     expect(showHuman).toContain("11m26s")
     expect(showHuman).toContain("36m42s")
     expect(showHuman).toContain("merge-stalled")
-    expect(showHuman).toContain("[!] failed")
-    expect(showHuman).toContain("[x] passed")
+    expect(showHuman).toContain("⧗ failed")
+    expect(showHuman).toContain("✓ passed")
     expect(showHuman).toContain("ART art:stdout+stderr")
     expect(showHuman.split("\n").filter((row) => row.trimStart().startsWith("merge"))).toHaveLength(2)
 
@@ -6579,9 +6608,9 @@ describe("runYrd", () => {
         activeDurationMs: 685_869,
         waitDurationMs: 2_201_536,
         attempts: [
-          { attempt: 1, taskStatus: "done", glyph: "[x]" },
-          { attempt: 1, taskStatus: "blocked", glyph: "[!]" },
-          { attempt: 2, taskStatus: "done", glyph: "[x]" },
+          { attempt: 1, taskStatus: "done", glyph: "✓" },
+          { attempt: 1, taskStatus: "blocked", glyph: "⧗" },
+          { attempt: 2, taskStatus: "done", glyph: "✓" },
         ],
       },
     })
@@ -6637,7 +6666,7 @@ describe("runYrd", () => {
       const physicalRows = human.split("\n").filter((row) => row.includes("R4"))
       expect(human).not.toMatch(/^\s*(?:TIME|LEVEL|BASE|PR|REV·RUN|OUTCOME|SUBJECT|AGE|TOTAL|ACTIVE|WAIT)\b/mu)
       expect(human).not.toContain("GLYPH")
-      expect(human).not.toContain("[x]")
+      expect(human).not.toContain("✓")
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
       expect(physicalRows[0]).toContain("PR23")
@@ -6924,7 +6953,7 @@ describe("runYrd", () => {
     expect(rows[0]).toMatchObject({
       branch: "fix(cli): bounded operator history",
       subject: "fix(cli): bounded operator history",
-      glyph: "[!]",
+      glyph: "⧗",
     })
 
     for (const width of [80, 120]) {
@@ -6937,7 +6966,7 @@ describe("runYrd", () => {
       expect(physicalRows).toHaveLength(20)
       expect(physicalRows[0]).toContain(width === 80 ? "r1/R22" : "(rev1, run22)")
       expect(physicalRows.at(-1)).toContain(width === 80 ? "r1/R3" : "(rev1, run3)")
-      expect(physicalRows[0]).not.toContain("[!]")
+      expect(physicalRows[0]).not.toContain("⧗")
       expect(physicalRows[0]).toContain("fix(")
       expect(Math.max(...human.split("\n").map((row) => row.length))).toBeLessThanOrEqual(width)
       expect(human).not.toMatch(width === 80 ? /r1\/R2\s/u : /\(rev1, run2\)\s/u)

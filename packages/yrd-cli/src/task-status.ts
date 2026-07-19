@@ -6,12 +6,20 @@ import type { PRCheckRecord, QueueRun, QueueStep } from "@yrd/queue"
 export type TaskStatus = "todo" | "wip" | "blocked" | "done" | "dropped"
 
 const TASK_STATUS_GLYPHS = {
-  todo: "[ ]",
-  wip: "[/]",
-  blocked: "[!]",
-  done: "[x]",
-  dropped: "[-]",
+  // Exact width-one km task-state vocabulary. Yrd remains standalone (and
+  // therefore cannot import the higher-level @km/tui package), so this leaf
+  // mapping mirrors km/packages/km-tui/src/icons.ts::getStatusIcon verbatim.
+  todo: "▢",
+  wip: "▢",
+  blocked: "⧗",
+  done: "✓",
+  dropped: "−",
 } as const satisfies Record<TaskStatus, string>
+
+const TASK_FOLD_GLYPHS = {
+  collapsed: "▸",
+  expanded: "•",
+} as const
 
 export type StatusGlyph = (typeof TASK_STATUS_GLYPHS)[TaskStatus]
 
@@ -22,6 +30,11 @@ export type TaskStatusFields = Readonly<{
 
 export function taskStatusGlyph(taskStatus: TaskStatus): StatusGlyph {
   return TASK_STATUS_GLYPHS[taskStatus]
+}
+
+/** Exact width-one km tree disclosure vocabulary. */
+export function taskFoldGlyph(expanded: boolean): (typeof TASK_FOLD_GLYPHS)[keyof typeof TASK_FOLD_GLYPHS] {
+  return expanded ? TASK_FOLD_GLYPHS.expanded : TASK_FOLD_GLYPHS.collapsed
 }
 
 export function taskStatusFields(taskStatus: TaskStatus): TaskStatusFields {

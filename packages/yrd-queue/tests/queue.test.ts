@@ -1593,6 +1593,68 @@ describe("Queue", () => {
     expect(checks).toBe(1)
   })
 
+  it("bounds environment-refused admission retries and parks unchanged check authority", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let refuseEnvironment = true
+    let checks = 0
+    const options = {
+      resolveBaseSha: () => BASE,
+      check: () => {
+        checks++
+        return refuseEnvironment
+          ? {
+              status: "failed",
+              error: {
+                code: "queue-environment-refused",
+                message: "inherited-red check environment is unavailable",
+              },
+            }
+          : { status: "passed", output: { checked: true } }
+      },
+    } satisfies Parameters<typeof queuePlugin>[0]
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/bounded-admission-retry")
+      await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
+
+      let drainTurns = 0
+      const refused = await app.queue.run({ prs: [pr.id] }, { ...runtime, continueAdmissions: () => ++drainTurns <= 6 })
+
+      expect(refused.map(({ id }) => id)).toEqual(["R1", "R2"])
+      expect(checks).toBe(2)
+      expect(app.queue.eligibility(pr.id)).toMatchObject({
+        runnable: false,
+        reason: { code: "checks-failed" },
+        checks: { status: "failed", run: "R2" },
+      })
+      expect(
+        (await Array.fromAsync(app.events()))
+          .filter(({ name }) => name === "queue/run/failed")
+          .map(({ data }) => (data as Readonly<{ run: string }>).run),
+      ).toEqual(["R1", "R2"])
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    expect(replayed.queue.eligibility("PR1")).toMatchObject({
+      runnable: false,
+      reason: { code: "checks-failed" },
+      checks: { status: "failed", run: "R2" },
+    })
+
+    let residentTurns = 0
+    expect(await replayed.queue.run({}, { ...runtime, continueAdmissions: () => ++residentTurns <= 3 })).toEqual([])
+    expect(checks).toBe(2)
+    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+
+    refuseEnvironment = false
+    await replayed.bays.requestChecks({ pr: "PR1", baseSha: BASE })
+    expect(await replayed.queue.run({ prs: ["PR1"] }, runtime)).toMatchObject([
+      { id: "R4", status: "passed", reusedFrom: "R3" },
+    ])
+    expect(checks).toBe(3)
+  })
+
   it("does not let an unrelated waiting admission monopolize Queue capacity", async () => {
     await using app = await createQueueApp({
       check: (input) =>

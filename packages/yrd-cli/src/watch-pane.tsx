@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
-  Accordion,
   Box,
   ListView,
   SplitPane,
@@ -14,6 +13,7 @@ import {
   useInput,
   useScopeEffect,
   useWindowSize,
+  type BoxProps,
   type ListViewHandle,
 } from "silvery"
 import type { PR } from "@yrd/bay"
@@ -25,6 +25,7 @@ import {
   QueueShowView,
   QueueTimelineView,
   QueueWatchView,
+  queueTimelineDisplayRows,
   queueTimelineFilterBuckets,
   queueTimelineRows,
   queueTimelineVisibleDefaultCursorId,
@@ -35,6 +36,7 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
+import { taskFoldGlyph } from "./task-status.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
 
 const LIST_NATURAL_WIDTH = 80
@@ -243,6 +245,31 @@ export function resolveStepLogExpanded(autoExpanded: boolean, userToggled: boole
   return userToggled ?? autoExpanded
 }
 
+/** Queue-specific fold chrome using the same width-one markers as km trees. */
+function QueueDisclosure({
+  title,
+  expanded,
+  onToggle,
+  children,
+  ...rest
+}: Readonly<{
+  title: string
+  expanded: boolean
+  onToggle: (expanded: boolean) => void
+  children: ReactNode
+}> &
+  Omit<BoxProps, "children">) {
+  return (
+    <Box flexDirection="column" {...rest}>
+      <Box flexDirection="row" gap={1} mouseCursor="pointer" onMouseDown={() => onToggle(!expanded)}>
+        <Text>{taskFoldGlyph(expanded)}</Text>
+        <Text>{title}</Text>
+      </Box>
+      {expanded ? <Box flexDirection="column">{children}</Box> : null}
+    </Box>
+  )
+}
+
 export function QueueWorkflowStepTabs({
   data,
   outputs,
@@ -284,9 +311,16 @@ export function QueueWorkflowStepTabs({
   // viewport; its subject/activity live behind the "PRS" header.
   const prFacts =
     prs.length === 0 ? null : (
-      <Accordion title="PRS" expanded={prsExpanded} onToggle={setPrsExpanded} marginTop={1} flexShrink={0} minWidth={0}>
+      <QueueDisclosure
+        title="PRS"
+        expanded={prsExpanded}
+        onToggle={setPrsExpanded}
+        marginTop={1}
+        flexShrink={0}
+        minWidth={0}
+      >
         <QueueDetailPrFacts prs={prs} />
-      </Accordion>
+      </QueueDisclosure>
     )
 
   if (activeStep === undefined) {
@@ -300,31 +334,36 @@ export function QueueWorkflowStepTabs({
     )
   }
 
-  // Each step tab label carries the step's status glyph + duration (item I,
-  // #undead re-report 2026-07-16): e.g. `✓ check 55s`. The glyph is colorized by
-  // status; the name + duration inherit the Tab's own active/inactive highlight
-  // so the selected step stays visible (the removed `ACTIVE STEP` row, item G).
+  // Each step tab is a three-row card from the recovered mock: numbered step,
+  // state, then a right-aligned clock. Every label has the same measured width;
+  // the surrounding flex boxes divide the whole row equally.
   const stepTabWidth = Math.max(
-    20,
+    compact ? 18 : 28,
     ...names.map((name) => {
       const rep = data.steps.filter((row) => row.step === name).at(-1)
       const duration = rep?.duration === undefined || rep.duration === "-" ? "" : rep.duration
-      return 2 + name.length + (duration === "" ? 0 : duration.length + 1)
+      return Math.max(
+        `${names.indexOf(name) + 1}: ${name}`.length,
+        `${rep?.glyph ?? ""} ${rep?.status ?? ""}`.length,
+        duration.length + 2,
+      )
     }),
   )
   const stepTabLabel = (name: string) => {
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
     if (rep === undefined) return name
-    const duration = rep.duration === "-" ? "" : rep.duration
-    const left = ` ${name}`
-    const spacer = " ".repeat(Math.max(1, stepTabWidth - 1 - left.length - duration.length))
+    const duration = rep.duration === "-" ? "" : `◷ ${rep.duration}`
+    const number = names.indexOf(name) + 1
     return (
       <>
-        <Text color={taskStatusColor(rep.taskStatus)}>{rep.glyph}</Text>
-        {left}
-        {spacer}
-        {duration}
+        {`${number}: ${name}`.padEnd(stepTabWidth)}
+        {"\n"}
+        <Text color={taskStatusColor(rep.taskStatus)} bold={rep.taskStatus === "wip"}>
+          {`${rep.glyph} ${rep.status}`.padEnd(stepTabWidth)}
+        </Text>
+        {"\n"}
+        {(duration === "" ? " " : duration).padStart(stepTabWidth)}
       </>
     )
   }
@@ -340,9 +379,9 @@ export function QueueWorkflowStepTabs({
       <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
         <TabList>
           {names.map((name) => (
-            <Tab key={name} value={name}>
-              {stepTabLabel(name)}
-            </Tab>
+            <Box key={name} borderStyle="round" paddingLeft={1} flexGrow={1} flexBasis={0} minWidth={0}>
+              <Tab value={name}>{stepTabLabel(name)}</Tab>
+            </Box>
           ))}
         </TabList>
         {names.map((name) => {
@@ -358,14 +397,14 @@ export function QueueWorkflowStepTabs({
               {/* Only the step-level facts here (item H); the run-level facts
                   render once above the tabs. */}
               {command === undefined ? null : (
-                <Box marginTop={1} flexShrink={0} minWidth={0}>
+                <Box borderStyle="round" paddingX={1} marginTop={1} flexShrink={0} minWidth={0}>
                   <Text bold color="$fg" wrap="truncate">
                     [ $ {command} ]
                   </Text>
                 </Box>
               )}
               <QueueShowView data={stepData} compact={compact} highlightPr={highlightPr} section="steps" />
-              <Accordion
+              <QueueDisclosure
                 title="RUN LOGS"
                 expanded={logExpanded}
                 onToggle={(expanded) => setUserToggledLogs((current) => ({ ...current, [name]: expanded }))}
@@ -380,7 +419,7 @@ export function QueueWorkflowStepTabs({
                     <QueueArtifactOutputView outputs={stepOutputs} />
                   </Box>
                 )}
-              </Accordion>
+              </QueueDisclosure>
             </TabPanel>
           )
         })}
@@ -408,6 +447,7 @@ export function QueueWatchFrame({
       ? new Set(QUEUE_TIMELINE_STATUS_BUCKETS)
       : queueTimelineFilterBuckets(snapshot.projection.filters.statuses),
   )
+  const [expandedStorms, setExpandedStorms] = useState<ReadonlySet<string>>(() => new Set())
   const toggleBucket = (bucket: QueueTimelineStatusBucket): void => {
     setVisibleBuckets((current) => {
       const next = new Set(current)
@@ -419,13 +459,35 @@ export function QueueWatchFrame({
   // The interactive pane renders fill-height (below), so the cursor set is the
   // uncapped fill set — the ListView shows every retained row and virtualizes.
   // Cursor indices index THIS array, so it must match the ListView's items.
-  const projectedRows = useMemo(
+  const visibleProjectedRows = useMemo(
     () =>
       snapshot.projection === undefined
         ? undefined
         : queueTimelineVisibleRows(snapshot.projection, visibleBuckets, true),
     [snapshot.projection, visibleBuckets],
   )
+  const projectedRows = useMemo(
+    () =>
+      visibleProjectedRows === undefined ? undefined : queueTimelineDisplayRows(visibleProjectedRows, expandedStorms),
+    [expandedStorms, visibleProjectedRows],
+  )
+  const visibleStormKeys = useMemo(
+    () =>
+      new Set(
+        visibleProjectedRows === undefined
+          ? []
+          : queueTimelineDisplayRows(visibleProjectedRows).flatMap((row) =>
+              row.repeat === undefined ? [] : [row.repeat.key],
+            ),
+      ),
+    [visibleProjectedRows],
+  )
+  useEffect(() => {
+    setExpandedStorms((current) => {
+      const retained = new Set([...current].filter((key) => visibleStormKeys.has(key)))
+      return retained.size === current.size ? current : retained
+    })
+  }, [visibleStormKeys])
   const rows = useMemo(
     () =>
       snapshot.projection === undefined
@@ -537,6 +599,18 @@ export function QueueWatchFrame({
     setNewRows(0)
   }
 
+  const activateRow = (index: number): void => {
+    selectRow(index)
+    const repeat = projectedRows?.[index]?.repeat
+    if (repeat === undefined) return
+    setExpandedStorms((current) => {
+      const next = new Set(current)
+      if (repeat.collapsed) next.add(repeat.key)
+      else next.delete(repeat.key)
+      return next
+    })
+  }
+
   // Jump-to-newest (item 4-new): the `↓ N new` cue resumes default-follow at
   // the newest row (first running, else newest finished) and clears the count.
   // It reuses the exact `defaultCursorKey` the un-pinned pane already follows,
@@ -578,7 +652,7 @@ export function QueueWatchFrame({
         nav
         cursorKey={cursor}
         onCursor={selectRow}
-        onSelect={selectRow}
+        onSelect={activateRow}
       />
     ) : (
       <QueueTimelineView
@@ -587,10 +661,11 @@ export function QueueWatchFrame({
         nav
         cursorKey={cursor}
         onCursor={selectRow}
-        onSelect={selectRow}
+        onSelect={activateRow}
         paneChrome
         fillHeight
         visibleBuckets={visibleBuckets}
+        expandedStorms={expandedStorms}
         onToggleBucket={toggleBucket}
         freshRows={newRows}
         onJumpToNewest={jumpToNewest}

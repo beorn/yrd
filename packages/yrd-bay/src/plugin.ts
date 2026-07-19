@@ -663,6 +663,15 @@ export function createBays(
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
+    if (pr !== undefined && !isLivePR(pr.status) && selector.toLowerCase() === pr.branch.toLowerCase()) {
+      raiseFailure(
+        "refusal",
+        "terminal-branch-identity",
+        `yrd: branch '${pr.branch}' already belongs to terminal PR '${pr.id}' (${pr.status}); ` +
+          `push the reviewed tip to a fresh delivery branch such as '${pr.branch}-delivery-<nonce>', ` +
+          "then run yrd pr submit <fresh-branch>",
+      )
+    }
     if (pr?.status === "integrated") return bindSubmission(pr, options)
 
     if (bay?.status === "active") {

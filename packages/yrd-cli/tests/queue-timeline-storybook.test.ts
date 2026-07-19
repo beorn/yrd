@@ -58,6 +58,42 @@ function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string,
 }
 
 describe("queue timeline storybook", () => {
+  it("renders the recovered queue IA without legacy task or disclosure chrome", async () => {
+    using term = createTermless({ cols: 200, rows: 50 })
+    const handle = await run(
+      createElement(QueueWatchFrame, { snapshot: queueTimelineStories["production-overview"].snapshot }),
+      term,
+      { mouse: true, selection: false },
+    )
+    try {
+      await waitFor(() => term.screen.getText().includes("QUEUE main"))
+      const frame = term.screen.getText()
+      const lines = frame.split("\n")
+
+      expect(frame).not.toMatch(/\[(?: |\/|!|x|-)\]/u)
+      expect(frame).not.toMatch(/(?:^|\s)[>v]\s+(?:PRS|RUN LOGS)/mu)
+      expect(frame).toMatch(/[▸•] PRS/u)
+      expect(frame).toMatch(/[▸•] RUN LOGS/u)
+      expect(frame).toContain("╭─ RUNNER ")
+      expect(frame).toContain("╭─ STATS ")
+      expect(frame).toContain("╭─ TIME ")
+
+      const prepareRowIndex = lines.findIndex((line) => line.includes("1: prepare"))
+      expect(prepareRowIndex).toBeGreaterThan(0)
+      expect(lines[prepareRowIndex]).not.toMatch(/passed|running|pending|failed/u)
+      expect(lines.slice(prepareRowIndex + 1, prepareRowIndex + 3).join("\n")).toMatch(
+        /(?:✓|▢|⧗|−)\s+(?:passed|running|pending|failed|skipped)/u,
+      )
+
+      const commandRowIndex = lines.findIndex((line) => line.includes("[ $ "))
+      expect(commandRowIndex).toBeGreaterThan(0)
+      expect(lines[commandRowIndex - 1]).toContain("╭")
+      expect(lines[commandRowIndex + 1]).toContain("╰")
+    } finally {
+      handle.unmount()
+    }
+  })
+
   it("opens on meaningful production queue rows and selected run detail", async () => {
     using term = createTermless({ cols: 200, rows: 50 })
     const handle = await run(createElement(QueueTimelineStorybook), term, {

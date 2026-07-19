@@ -60,15 +60,18 @@ export function StatusValue({ value, href }: { value: string; href?: string }) {
 }
 
 export function taskStatusColor(taskStatus: TaskStatus): string {
-  if (taskStatus === "wip") return "$fg-info"
-  if (taskStatus === "blocked") return "$fg-error"
+  if (taskStatus === "todo" || taskStatus === "wip" || taskStatus === "blocked") return "$fg-warning"
   if (taskStatus === "done") return "$fg-success"
   if (taskStatus === "dropped") return "$fg-muted"
   return "$fg"
 }
 
 export function TaskStatusGlyph({ taskStatus, glyph }: TaskStatusFields) {
-  return <Text color={taskStatusColor(taskStatus)}>{glyph}</Text>
+  return (
+    <Text color={taskStatusColor(taskStatus)} bold={taskStatus === "wip"}>
+      {glyph}
+    </Text>
+  )
 }
 
 export function TaskStatusValue({

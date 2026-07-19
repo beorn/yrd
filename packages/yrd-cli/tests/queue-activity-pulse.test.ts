@@ -1,4 +1,4 @@
-// @failure The running row's glyph and status word drift out of phase, or a selected running row loses its blue activity signal.
+// @failure The running row loses either its km task marker presentation or its selected-row activity signal.
 // @level l2
 // @consumer @yrd/cli watch
 
@@ -16,11 +16,9 @@ import {
 import { QueueTimelineView } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
 
-// Items 12-13 — every visible "executing right now" row indicator pulses blue
-// on ONE shared app-scope phase. The synchronized clock guarantees activity cells
-// carry the SAME colour on every frame, so equality across frames is the robust
-// invariant (no need to sample a specific phase). Activity blue also survives
-// row selection (item 13).
+// Items 12-13 plus 21525: the status word keeps the blue activity pulse while
+// the glyph uses km's warning-colored, bold WIP presentation. Both pulses use
+// the shared app-scope phase and survive row selection.
 
 function processingSnapshot() {
   const runningPr = fixturePr("PRR", "submitted", "2026-07-13T11:25:00.000Z", "Running")
@@ -40,20 +38,20 @@ function cellOf(app: ReturnType<ReturnType<typeof createRenderer>>, needle: stri
 }
 
 describe("synchronized activity pulse (items 12-13)", () => {
-  it("pulses the running row's glyph AND status word blue in the shared phase (item 12)", async () => {
+  it("uses km's bold WIP marker while the running word keeps its activity color", async () => {
     const projection = processingSnapshot().projection
     const render = createRenderer({ cols: 120, rows: 40 })
     const app = render(
-      createElement(QueueTimelineView, { projection, nav: true, columns: 120, paneChrome: true, fillHeight: true }),
+      createElement(QueueTimelineView, { projection, columns: 120, paneChrome: true, fillHeight: true }),
     )
     try {
       await app.waitForLayoutStable()
-      expect(app.text).not.toContain("╭─ RUNNER ")
+      expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      // The running row's status disc and its `run` word share one activity colour.
-      const glyphFg = cellOf(app, "●", "PRR.1").fg
-      const wordFg = cellOf(app, "run", "PRR.1").fg
-      expect(wordFg, "running glyph + word pulse the same blue").toEqual(glyphFg)
+      const glyph = cellOf(app, "▢", "PRR.1")
+      const word = cellOf(app, "run", "PRR.1")
+      expect(glyph.bold, "km WIP marker is bold").toBe(true)
+      expect(word.fg, "queue activity word remains distinct from the km state marker").not.toEqual(glyph.fg)
     } finally {
       app.unmount()
     }
@@ -70,13 +68,15 @@ describe("synchronized activity pulse (items 12-13)", () => {
       const runY = rows.findIndex((row) => /^\s*\d{2}:\d{2}:\d{2}.*\brun\b/u.test(row))
       expect(runY, "selected running row renders").toBeGreaterThan(0)
       const runRow = rows[runY]!
-      const glyphX = runRow.indexOf("●")
+      const glyphX = runRow.indexOf("▢")
       const wordX = runRow.indexOf("run")
       const timeX = runRow.search(/\d{2}:\d{2}:\d{2}/u)
       const selectionFg = app.cell(timeX, runY).fg
-      // The running glyph + word keep their (shared) blue — never the selection fg.
-      expect(app.cell(glyphX, runY).fg, "selected running glyph stays blue").not.toEqual(selectionFg)
-      expect(app.cell(wordX, runY).fg, "selected running word stays blue").toEqual(app.cell(glyphX, runY).fg)
+      // Both activity indicators retain their semantic colors — never the
+      // selection foreground — and the km WIP marker stays bold.
+      expect(app.cell(glyphX, runY).fg, "selected running glyph keeps km state color").not.toEqual(selectionFg)
+      expect(app.cell(glyphX, runY).bold, "selected running glyph stays bold").toBe(true)
+      expect(app.cell(wordX, runY).fg, "selected running word stays blue").not.toEqual(selectionFg)
       // The selection background still covers the activity cells (unbroken band).
       const timeBg = app.cell(timeX, runY).bg
       expect(app.cell(glyphX, runY).bg, "selection bg covers the activity glyph").toEqual(timeBg)

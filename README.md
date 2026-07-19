@@ -301,6 +301,13 @@ Both submission surfaces accept `--correlation <namespace:id>`. The namespace
 and opaque id bind to the exact PR revision and remain on its terminal facts;
 rebinding a live PR to a different correlation is refused.
 
+A branch name is one delivery identity. Once its PR is integrated, withdrawn,
+or canceled, submitting that branch again fails with
+`terminal-branch-identity` before changing any PR metadata. Push the reviewed
+tip under a fresh identity such as `<old-branch>-delivery-<nonce>`, then submit
+that fresh branch. Rejected revisions remain live and are resubmitted on their
+existing PR.
+
 ### PR Eligibility and Checks
 
 ```text

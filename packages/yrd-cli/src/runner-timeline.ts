@@ -1,4 +1,5 @@
 import type { Event } from "loggily"
+import { taskStatusGlyph } from "./task-status.ts"
 
 /**
  * Pure (no silvery/React) watch-timeline grammar shared by the interactive
@@ -20,13 +21,15 @@ import type { Event } from "loggily"
  * onto every branch name (user directive 2026-07-16). */
 export const TIMELINE_BRANCH_ICON = ""
 
-/** The status → row glyph map (mirrors the watch timeline's statusGlyph). */
+/** The status → row glyph map, projected through the shared km task vocabulary. */
 export function timelineStatusGlyph(status: string): string {
-  if (["checking", "running", "waiting"].includes(status)) return "●"
-  if (["integrated", "passed"].includes(status)) return "✓"
-  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) return "×"
-  if (["withdrawn", "retired", "canceled"].includes(status)) return "-"
-  return "○"
+  if (["checking", "running", "waiting"].includes(status)) return taskStatusGlyph("wip")
+  if (["integrated", "passed"].includes(status)) return taskStatusGlyph("done")
+  if (["rejected", "failed", "lost", "environment-refused"].includes(status)) {
+    return taskStatusGlyph("blocked")
+  }
+  if (["withdrawn", "retired", "canceled"].includes(status)) return taskStatusGlyph("dropped")
+  return taskStatusGlyph("todo")
 }
 
 /** Coarse human duration (largest unit): the watch timeline's formatDuration. */
@@ -95,9 +98,18 @@ type OutcomeProps = Readonly<{
   prs?: readonly PRProps[]
 }>
 
+/** The system-local wall-clock cell shared by queue watch and runner logs. */
+export function formatLocalClock(when: Date, includeDate = false): string {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  const clock = `${pad(when.getHours())}:${pad(when.getMinutes())}:${pad(when.getSeconds())}`
+  if (!includeDate) return clock
+  const day = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}`
+  return `${day}T${clock}`
+}
+
 /** `HH:MM:SS` from an epoch-ms event time — loggily's own console time cell. */
 function eventTime(time: number): string {
-  return new Date(time).toISOString().split("T")[1]?.split(".")[0] ?? ""
+  return formatLocalClock(new Date(time))
 }
 
 /** The loggily console level word, colored as loggily colors it. */
@@ -181,7 +193,8 @@ function renderOutcomeRow(props: OutcomeProps, level: string, color: boolean): s
   const ref = paint(color, ANSI.bold)(runRef(props))
   const token = stepToken(props)
   const verbCell = paint(color, verb === "done" ? ANSI.green : ANSI.red)(verb)
-  const durationCell = props.durationMs === undefined ? "" : ` ${paint(color, ANSI.dim)(formatDuration(props.durationMs))}`
+  const durationCell =
+    props.durationMs === undefined ? "" : ` ${paint(color, ANSI.dim)(formatDuration(props.durationMs))}`
   const errCell = verb === "failed" && errSlug(props) !== undefined ? ` err=${errSlug(props)}` : ""
   const head =
     STEP_LAYOUT === "bracket" && token !== undefined
