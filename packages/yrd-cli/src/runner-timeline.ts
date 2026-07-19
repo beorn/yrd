@@ -1,4 +1,5 @@
 import type { Event } from "loggily"
+import { failureSlug } from "./failure-slug.ts"
 
 /**
  * Pure (no silvery/React) watch-timeline grammar shared by the interactive
@@ -159,7 +160,8 @@ function prTail(props: OutcomeProps, color: boolean): string {
 /** The canonical failure slug for `err=<slug>`: the JobError code a failed step
  * carries, else the FailureFact code a thrown refusal/failure carries. */
 function errSlug(props: OutcomeProps): string | undefined {
-  return props.error?.code ?? props.failure?.code
+  const code = props.error?.code ?? props.failure?.code
+  return code === undefined ? undefined : failureSlug(code)
 }
 
 /** `done` (INFO/success) or `failed` (ERROR/failure), or `undefined` when the

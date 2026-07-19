@@ -1,3 +1,5 @@
+import { failureSlug } from "./failure-slug.ts"
+
 export type FailureLike = Readonly<{ code: string; message: string }>
 
 /** Human-facing failure contract. Journal/domain facts deliberately remain the
@@ -93,7 +95,7 @@ export function actionableFailure(failure: FailureLike): ActionableFailure {
 }
 
 export function errorCodeLabel(code: string): string {
-  return `err=${code}`
+  return `err=${failureSlug(code)}`
 }
 
 export function actionableFailureSummary(failure: ActionableFailure): string {
