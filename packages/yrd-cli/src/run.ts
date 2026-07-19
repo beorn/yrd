@@ -1401,6 +1401,14 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   await printResult(io, jsonEnabled(options), { command: "bay.list", bays }, createElement(BayStatusView, { bays }))
 }
 
+async function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const bay = resolveBay(stateOf(app).bays, selector)
+  if (bay === undefined) refusal(`no bay '${selector}'`)
+  if (bay.status !== "active") refusal(`bay '${bay.id}' is ${bay.status}; expected an active bay`)
+  if (bay.path === undefined || !isAbsolute(bay.path)) refusal(`bay '${bay.id}' has no absolute workspace path`)
+  await printResult(io, jsonEnabled(options), { command: "bay.path", bay: bay.id, path: bay.path }, bay.path)
+}
+
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
@@ -3203,6 +3211,11 @@ function buildProgram(
     .option("--actor <id>", "record the worker or implementation identity")
     .option("--json", "emit stable JSON")
     .action(async (workName, options) => openBay(installed(), workName, options, io))
+  bay
+    .command("path <selector>")
+    .description("print an active bay workspace path")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => pathBay(installed(), selector, options, io))
   bay
     .command("refresh [selector...]")
     .description("refresh work bays")
