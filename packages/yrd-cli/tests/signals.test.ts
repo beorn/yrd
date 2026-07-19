@@ -705,7 +705,7 @@ describe("PR signal observer", () => {
           "/usr/local/bin/tribe",
           "send",
           "@ci",
-          expect.stringContaining("job-lost: runner disappeared"),
+          expect.stringMatching(/err=job-lost.*cause: runner disappeared.*resolve:/su),
           "--type",
           "notify",
           "--summary",

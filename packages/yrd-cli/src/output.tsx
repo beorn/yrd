@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { Text, renderString } from "silvery"
-import { stableJson, unrecognizedKeyFailure } from "./invocation.ts"
+import { actionableFailure, formatActionableFailure, type ActionableFailure } from "./actionable-error.ts"
+import { classifyFailure, stableJson, unrecognizedKeyFailure } from "./invocation.ts"
 import type { YrdCliIO } from "./types.ts"
 import { formatYrdRuntimeVersion } from "./version.ts"
 
@@ -38,15 +39,21 @@ export async function diagnostic(
   const message = error instanceof Error ? error.message : String(error)
   const detail = message.replace(/^yrd:\s*/u, "")
   const skew = unrecognizedKeyFailure(error)
-  if (skew === undefined) {
-    io.stderr(await rendered(io, <Text color="$fg-error">{`${program}: ${detail}`}</Text>))
-    return
-  }
-  const guidance =
-    `${program}: cannot read this repository's Yrd journal: rows carry fields this build does not recognize ` +
-    `(${skew.keys.join(", ")}). The journal was likely written by a newer yrd than the one running ` +
-    `(${formatYrdRuntimeVersion()}); refusing to render a stale or partial view. Run yrd from the checkout this ` +
-    `repository pins (its vendored/submodule copy, e.g. a current-main worktree), or update this checkout, then ` +
-    `retry.${options.verbose === true ? `\n${detail}` : " Re-run with -v for the raw validation detail."}`
-  io.stderr(await rendered(io, <Text color="$fg-error">{guidance}</Text>))
+  const failure: ActionableFailure =
+    skew === undefined
+      ? actionableFailure(classifyFailure(error).failure)
+      : {
+          code: "journal-version-skew",
+          cause:
+            `This Yrd cannot read the repository journal because rows contain newer fields ` +
+            `(${skew.keys.join(", ")}); refusing a stale or partial view with ${formatYrdRuntimeVersion()}.`,
+          resolution: [
+            "Run yrd from the checkout this repository pins (for example, its vendored copy in a current-main worktree).",
+            "Update this checkout, then retry the same Yrd command.",
+            ...(options.verbose === true ? [] : ["Re-run with -v to include the raw validation detail."]),
+          ],
+        }
+  const renderedFailure = formatActionableFailure(failure, `${program}: `)
+  const verboseDetail = skew !== undefined && options.verbose === true ? `\ndetail: ${detail}` : ""
+  io.stderr(await rendered(io, <Text color="$fg-error">{`${renderedFailure}${verboseDetail}`}</Text>))
 }

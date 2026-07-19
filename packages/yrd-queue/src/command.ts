@@ -1265,11 +1265,15 @@ async function recutDirectPR(
         }
         if (resolution.kind === "unresolved") break
         if (resolution.kind === "refuse") {
+          const replayedRoot = (await git.optionalCommit(path, "REBASE_HEAD")) ?? input.headSha
           await git.run(path, ["rebase", "--abort"], true)
           throw createFailure({
             kind: "refusal",
             code: "recut-gitlink-conflict",
-            message: `yrd: PR '${input.id}' could not recut onto '${target.sha}': ${resolution.message}`,
+            message:
+              `yrd: PR '${input.id}' could not recut: target root '${target.sha}' pins submodule ` +
+              `'${resolution.path}' to '${resolution.basePin}'; replayed authored root '${replayedRoot}' pins it to ` +
+              `'${resolution.authoredPin}'; ancestry walk failed because ${resolution.message}`,
           })
         }
         const staged = await git.run(
@@ -1830,7 +1834,7 @@ function candidateFailure(
 }
 
 function authoredRootWorkflow(pr: string): string {
-  return `authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr} --queue' on that same PR; no composition manifest or manual recut is needed`
+  return `authored root carriers use 'yrd pr submit <branch> --draft', then 'yrd pr recut ${pr} --queue --force' on that same PR; no composition manifest or manual recut is needed`
 }
 
 function withAuthoredRootWorkflow(failure: CandidateFailure, pr: string): CandidateFailure {
@@ -2174,7 +2178,7 @@ async function readGitlink(git: Git, repo: string, ref: string, path: string): P
 
 type GitlinkFastForward =
   | Readonly<{ kind: "resolved"; side: "carrier" | "base"; sha: string }>
-  | Readonly<{ kind: "refuse"; message: string }>
+  | Readonly<{ kind: "refuse"; path: string; basePin: string; authoredPin: string; message: string }>
   | Readonly<{ kind: "unresolved" }>
 
 /**
@@ -2204,6 +2208,9 @@ async function resolveGitlinkFastForward(
   } catch {
     return {
       kind: "refuse",
+      path,
+      basePin: ours,
+      authoredPin: theirs,
       message: `submodule '${path}' is not initialized locally; run git submodule update --init and retry`,
     }
   }
@@ -2212,6 +2219,9 @@ async function resolveGitlinkFastForward(
     if (present.code !== 0) {
       return {
         kind: "refuse",
+        path,
+        basePin: ours,
+        authoredPin: theirs,
         message: `submodule '${path}' commit '${oid}' is not present in its local store; fetch it and retry`,
       }
     }
@@ -2220,7 +2230,10 @@ async function resolveGitlinkFastForward(
   if (await isAncestor(git, submodule, theirs, ours)) return { kind: "resolved", side: "base", sha: ours }
   return {
     kind: "refuse",
-    message: `submodule '${path}' pins '${ours}' and '${theirs}' have diverged; neither is an ancestor of the other — resolve it in the submodule and resubmit`,
+    path,
+    basePin: ours,
+    authoredPin: theirs,
+    message: "neither submodule commit is an ancestor of the other",
   }
 }
 

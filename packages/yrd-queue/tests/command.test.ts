@@ -707,7 +707,7 @@ describe("Queue command adapters", () => {
       baseSha: currentBase,
     }
     await expect(recutter.recut(input)).rejects.toThrow(
-      /could not recut onto .+ submodule 'dep' pins .+ have diverged; neither is an ancestor of the other/u,
+      /target root '.+' pins submodule 'dep' to '.+'; replayed authored root '.+' pins it to '.+'; ancestry walk failed because neither submodule commit is an ancestor of the other/u,
     )
 
     const currentCompositions = [
@@ -1506,7 +1506,7 @@ describe("Queue command adapters", () => {
       error: {
         code: "authored-gitlink",
         message: expect.stringMatching(
-          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue.*same PR.*no composition manifest or manual recut/iu,
+          /yrd pr submit <branch> --draft.*yrd pr recut PR1 --queue --force.*same PR.*no composition manifest or manual recut/iu,
         ),
       },
     })

@@ -195,7 +195,9 @@ describe("run gate", () => {
           auditEnvironment: async () => ({ findings: [{ code: "config-drift", message: "stale baseline" }] }),
         },
       }),
-    ).rejects.toThrow(/stale baseline/u)
+    ).rejects.toMatchObject({
+      failure: { kind: "refusal", code: "config-drift", message: "stale baseline" },
+    })
     await requireFreshInstalledBaseline({})
     await requireFreshInstalledBaseline({
       queue: { auditEnvironment: async () => ({ findings: [{ code: "operator-finding", message: "inspect" }] }) },

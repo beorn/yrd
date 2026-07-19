@@ -44,6 +44,13 @@ import {
   TaskStatusValue,
 } from "./status-view.tsx"
 import {
+  actionableFailure,
+  actionableFailureSummary,
+  errorCodeLabel,
+  type ActionableFailure,
+  type FailureLike,
+} from "./actionable-error.ts"
+import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
   prTaskStatusOf,
@@ -446,11 +453,11 @@ type Row = Readonly<{
   path?: string
 }>
 
-export type HumanFailureProjection = Readonly<{
-  code: string
-  summary: string
-  evidence?: Readonly<{ text: string; href?: string }>
-}>
+export type HumanFailureProjection = ActionableFailure &
+  Readonly<{
+    summary: string
+    evidence?: Readonly<{ text: string; href?: string }>
+  }>
 
 export type HumanPRProjection = Row &
   Readonly<{
@@ -501,6 +508,7 @@ type QueueShowRow = Readonly<{
   command?: string
   errorCode: string
   error: string
+  failure?: HumanFailureProjection
   lost: string
   detail: string
   output: string
@@ -1413,17 +1421,13 @@ function failureFact(
   return run?.error
 }
 
-function causalSummary(message: string): string {
-  const parts = message
-    .split(/\r?\n/u)
-    .map((part) => part.trim())
-    .filter((part) => part !== "" && !/^at\s+/u.test(part))
-  const candidate = parts.find((part) => !/^hint:/iu.test(part)) ?? parts[0] ?? "failed"
-  const first = candidate.replace(/^hint:\s*/iu, "")
-  const [rawCause, hint] = first.split(/\s+hint:\s*/iu, 2)
-  const cause = rawCause ?? first
-  const usefulHint = hint === undefined || /^(?:please|this can|[-])/iu.test(hint) ? undefined : hint
-  return boundedQueue(`${cause.replace(/[:\s]+$/u, "")}${usefulHint === undefined ? "" : `: ${usefulHint}`}`, 104)
+function projectFailure(fact: FailureLike, evidence?: HumanFailureProjection["evidence"]): HumanFailureProjection {
+  const failure = actionableFailure(fact)
+  return {
+    ...failure,
+    summary: actionableFailureSummary(failure),
+    ...(evidence === undefined ? {} : { evidence }),
+  }
 }
 
 const ENVIRONMENT_REFUSAL_CODES = new Set(["queue-environment-refused", "stale-pr", "stale-check", "job-lost"])
@@ -1581,7 +1585,7 @@ function timelineRunMemberRows(
         : step === undefined
           ? run.status
           : `${step.name}: ${jobStatus(step)}`
-      : `${failure.code}: ${causalSummary(failure.message)}`
+      : actionableFailureSummary(actionableFailure(failure))
   const queueWaits = timelineQueueWaits(run, submissionTimes)
   const ageEndIso = running ? nowIso : (run.finishedAt ?? nowIso)
   return run.prs.map((member, index) => {
@@ -1981,14 +1985,7 @@ function projectPR(
       : undefined)
   const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
   const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
-  const failure =
-    fact === undefined || run === undefined
-      ? undefined
-      : {
-          code: fact.code,
-          summary: `${fact.code}: ${causalSummary(fact.message)}`,
-          ...(evidence === undefined ? {} : { evidence }),
-        }
+  const failure = fact === undefined || run === undefined ? undefined : projectFailure(fact, evidence)
   return {
     pr: pr.id,
     revision: projectedRevision,
@@ -2385,17 +2382,26 @@ function diagnosticBlocker(
   now: number,
 ): string | undefined {
   const job = step?.job
-  if (job?.status === "failed") return `${job.error.code}: ${singleQueue(job.error.message)}`
-  if (job?.status === "lost") return `job-lost: ${singleQueue(job.lostReason)}`
-  if (job?.status === "canceled") return `job-canceled: ${singleQueue(job.cancelReason)}`
+  if (job?.status === "failed") return actionableFailureSummary(actionableFailure(job.error))
+  if (job?.status === "lost") {
+    return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }))
+  }
+  if (job?.status === "canceled") {
+    return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }))
+  }
   if (job?.status === "running") {
     const leaseExpiresAt = Date.parse(job.leaseExpiresAt)
     if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) {
-      return `job-lease-expired: ${job.leaseExpiresAt} (${formatDuration(now - leaseExpiresAt)} ago)`
+      return actionableFailureSummary(
+        actionableFailure({
+          code: "job-lease-expired",
+          message: `${job.leaseExpiresAt} (${formatDuration(now - leaseExpiresAt)} ago)`,
+        }),
+      )
     }
   }
   if (job?.status === "waiting") return `waiting: ${singleQueue(job.detail ?? job.url ?? job.token)}`
-  if (run?.error !== undefined) return `${run.error.code}: ${singleQueue(run.error.message)}`
+  if (run?.error !== undefined) return actionableFailureSummary(actionableFailure(run.error))
   if (pr.detail !== undefined) return singleQueue(pr.detail)
   return undefined
 }
@@ -2580,6 +2586,23 @@ function FailureQueues({ failure }: { failure: HumanFailureProjection }) {
           </Text>
         </Box>
       )}
+    </Box>
+  )
+}
+
+function ActionableFailureView({ failure }: { failure: ActionableFailure }) {
+  return (
+    <Box flexDirection="column" minWidth={0}>
+      <Text color="$fg-error" wrap="wrap">
+        ERROR {errorCodeLabel(failure.code)}
+      </Text>
+      <Text wrap="wrap">CAUSE {failure.cause}</Text>
+      {failure.resolution.map((step, index) => (
+        <Text key={`${failure.code}:resolution:${index}`} wrap="wrap">
+          RESOLVE {step}
+        </Text>
+      ))}
+      {failure.reference === undefined ? null : <Text wrap="wrap">REFERENCE {failure.reference}</Text>}
     </Box>
   )
 }
@@ -2982,7 +3005,7 @@ function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
   if (row.failure !== undefined) {
     return {
-      text: fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP),
+      text: fitTimelineLabel(errorCodeLabel(row.failure.code), TIMELINE_STATE_CAP),
       color:
         row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
     }
@@ -4294,6 +4317,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const locations = stepLocations(step)
   const command = stepCommand(step)
   const taskStatus = stepTaskStatusOf(step)
+  const stepFailure = failureFact(undefined, step)
   const stepDurationMs =
     step.job === undefined || !("startedAt" in step.job) || !("finishedAt" in step.job)
       ? undefined
@@ -4319,6 +4343,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     ...(command === undefined ? {} : { command }),
     errorCode: stepErrorCode(step),
     error: stepError(step),
+    ...(stepFailure === undefined ? {} : { failure: projectFailure(stepFailure) }),
     lost: stepLost(step),
     detail: stepDetail(step),
     output: stepOutput(step),
@@ -4350,6 +4375,12 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
   const artifacts = attemptArtifacts(attempt)
   const detail = isObjectValue(output) && typeof output.detail === "string" ? output.detail : undefined
   const taskStatus = jobAttemptTaskStatusOf(attempt)
+  const attemptFailure =
+    attempt.result.status === "failed"
+      ? projectFailure(attempt.result.error)
+      : attempt.result.status === "lost"
+        ? projectFailure({ code: "job-lost", message: attempt.result.reason })
+        : undefined
   return {
     step: attempt.step,
     revision: attempt.revision,
@@ -4367,6 +4398,7 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
     durationMs: attempt.durationMs,
     errorCode: attempt.result.status === "failed" ? attempt.result.error.code : "-",
     error: attempt.result.status === "failed" ? attempt.result.error.message : "-",
+    ...(attemptFailure === undefined ? {} : { failure: attemptFailure }),
     lost: attempt.result.status === "lost" ? attempt.result.reason : "-",
     detail: detail ?? (attempt.result.status === "failed" ? attempt.result.error.message : "-"),
     output:
@@ -4418,9 +4450,7 @@ export function queueShowData(
     integration: run.status === "passed" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
-    ...(runFailure === undefined
-      ? {}
-      : { failure: { code: runFailure.code, summary: `${runFailure.code}: ${causalSummary(runFailure.message)}` } }),
+    ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure) }),
     prs: run.prs,
     ...(revisionClock === undefined ? {} : { revisionClock }),
     attempts: runAttempts,
@@ -4511,6 +4541,8 @@ export function QueueLogView({
 function queueShowNextAction(data: QueueShowData): string {
   if (data.outcome === "integrated") return "none — landing proof is recorded"
   if (data.status === "running" || data.status === "waiting") return "follow live output or wait for the current step"
+  const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
+  if (actionable !== undefined) return actionable.resolution.join("; then ")
   const errorCode = data.steps.find((step) => step.errorCode !== "-")?.errorCode
   if (["queue-environment-refused", "stale-pr", "stale-check", "job-lost"].includes(errorCode ?? "")) {
     return "repair the queue environment, then rerun the PR"
@@ -4704,7 +4736,7 @@ function runFailureReason(data: QueueShowData | undefined): string | undefined {
   const code = presentFact(failed.errorCode)
   const message = presentFact(failed.error) ?? presentFact(failed.lost) ?? presentFact(failed.detail)
   if (code === undefined) return message
-  return message === undefined || message.startsWith(`${code}:`) ? (message ?? code) : `${code}: ${message}`
+  return actionableFailureSummary(actionableFailure({ code, message: message ?? "failed" }))
 }
 
 function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly QueueShowData[]): readonly string[] {
@@ -5099,10 +5131,11 @@ function CompactQueueShowView({
                 overflow="hidden"
               >
                 {latestStepRowIndexes.get(row.step) === rowIndex ? <QueueStepInternals row={row} /> : null}
-                {error === undefined ? null : (
-                  <Text wrap="truncate" color="$fg-error" bgConflict="ignore">
-                    {"ERROR".padEnd(9, " ")}
-                    {error}
+                {row.failure !== undefined ? (
+                  <ActionableFailureView failure={row.failure} />
+                ) : error === undefined ? null : (
+                  <Text wrap="wrap" color="$fg-error" bgConflict="ignore">
+                    ERROR {errorCodeLabel(error)}
                   </Text>
                 )}
                 {detail === undefined ? null : (
@@ -5260,9 +5293,12 @@ export function QueueShowView({
             {
               header: "ERROR",
               key: "errorCode",
-              minWidth: 15,
+              minWidth: 22,
+              maxWidth: 32,
               grow: true,
-              render: (row) => <Text wrap="truncate">{row.errorCode}</Text>,
+              render: (row) => (
+                <Text wrap="truncate">{row.errorCode === "-" ? "-" : errorCodeLabel(row.errorCode)}</Text>
+              ),
             },
             { header: "START", key: "started", grow: true },
             { header: "END", key: "finished", grow: true },
@@ -5314,6 +5350,15 @@ export function QueueShowView({
           padding={1}
         />
       </Box>
+      {data.steps.some((step) => step.failure !== undefined) ? (
+        <Box marginTop={1} flexDirection="column">
+          {data.steps.flatMap((step, index) =>
+            step.failure === undefined
+              ? []
+              : [<ActionableFailureView key={`${step.step}:${index}`} failure={step.failure} />],
+          )}
+        </Box>
+      ) : null}
       <Box marginTop={1}>
         <QueueProofView data={data} />
       </Box>

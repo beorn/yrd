@@ -1133,7 +1133,7 @@ describe("runYrd", () => {
     expect(submitHelp.stdout()).toContain("Authored root carrier")
     expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch> --draft")
     expect(submitHelp.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(submitHelp.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
+    expect(submitHelp.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
@@ -1143,7 +1143,7 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("Authored root carrier")
     expect(help.stdout()).toContain("$ yrd pr submit <branch> --draft")
     expect(help.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(help.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
+    expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
   })
 
   it("draft-registers an authored carrier and queues a recut revision on the same PR", async () => {
@@ -5025,7 +5025,7 @@ describe("runYrd", () => {
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
       expect.soft(status.stdout()).toContain("⧗")
-      expect.soft(status.stdout()).toContain("apply-conflict: PR 'PR1' could not be applied")
+      expect.soft(status.stdout()).toContain("err=apply-conflict — PR 'PR1' could not be applied")
       expect.soft(status.stdout()).toContain(`evidence: ${artifact}`)
       expect.soft(status.stdout()).not.toContain("next:")
       expect.soft(status.stdout()).not.toContain("hint:")
@@ -5052,7 +5052,7 @@ describe("runYrd", () => {
       expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
       expect.soft(frame).toContain("OPEN 1")
       expect.soft(frame).toContain("feat(cli): keep runnable work visible")
-      expect.soft(frame).toContain("apply-conflict: PR 'PR1' could not be applied")
+      expect.soft(frame).toContain("err=apply-conflict — PR 'PR1' could not be applied")
       expect.soft(frame).toContain(`evidence: ${artifact}`)
       expect.soft(frame).not.toContain("next:")
       expect.soft(frame).not.toContain("released maintenance")
@@ -6518,7 +6518,7 @@ describe("runYrd", () => {
 
     const showHuman = await renderString(createElement(QueueShowView, { data: show }), {
       width: 120,
-      height: 20,
+      height: 40,
       plain: true,
     })
     expect(showHuman).toContain("TOTAL")
@@ -7068,11 +7068,15 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "adopt", "old-branch"), usage.io)).toBe(2)
     expect(usage.stdout()).toBe("")
     expect(usage.stderr()).toContain("too many arguments")
+    expect(usage.stderr()).toContain("err=invalid-arguments")
+    expect(usage.stderr()).toContain("resolve:")
 
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
     expect(refusal.stdout()).toBe("")
     expect(refusal.stderr()).toContain("no bay 'missing'")
+    expect(refusal.stderr()).toContain("err=request-refused")
+    expect(refusal.stderr()).toContain("cause:")
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
@@ -7119,6 +7123,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd(), infrastructure.io)).toBe(3)
     expect(infrastructure.stdout()).toBe("")
     expect(infrastructure.stderr()).toContain("corrupt event log")
+    expect(infrastructure.stderr()).toContain("err=unexpected")
+    expect(infrastructure.stderr()).toContain("resolve:")
   })
 
   it("projects installed queue administration and cancels an idle watch deterministically", async () => {
@@ -7156,7 +7162,20 @@ describe("runYrd", () => {
 
     const audit = outputIO()
     expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io, services)).toBe(1)
-    expect(JSON.parse(audit.stdout())).toMatchObject({ findings: [{ code: "operator-finding" }] })
+    expect(JSON.parse(audit.stdout())).toMatchObject({
+      findings: [
+        {
+          code: "operator-finding",
+          cause: "inspect runner",
+          resolution: ["Correct the cause above, then retry the same Yrd command."],
+        },
+      ],
+    })
+    const auditHuman = outputIO()
+    expect(await runYrd(app, yrd("queue", "audit"), auditHuman.io, services)).toBe(1)
+    expect(auditHuman.stdout()).toContain("err=operator-finding")
+    expect(auditHuman.stdout()).toContain("cause: inspect runner")
+    expect(auditHuman.stdout()).toContain("resolve:")
 
     const controller = new AbortController()
     const sleeps: number[] = []
@@ -8209,7 +8228,12 @@ describe("typed issue landing bridge", () => {
     expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
     expect(exhausted.stdout()).toBe("")
     expect(exhausted.stderr()).toBe(
-      "yrd: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'\n",
+      [
+        "yrd: err=request-refused",
+        "cause: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
+        "resolve: yrd pr runs PR1 --json",
+        "",
+      ].join("\n"),
     )
   })
 })

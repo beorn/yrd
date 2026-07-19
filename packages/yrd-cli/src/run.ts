@@ -22,12 +22,13 @@ import {
   type PRRegressionSeverity,
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
-import { raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
+import { createFailure, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
 import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { loadYrdConfig } from "./config.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
+import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import {
   canonicalizeYrdCommandAliases,
   classifyFailure,
@@ -586,12 +587,16 @@ async function runJobs(app: YrdCliApp, ids: readonly string[], io: YrdCliIO): Pr
 function assertJobsPassed(runs: readonly Job[], action: string): void {
   const unresolved = runs.find((run) => run.status !== "passed")
   if (unresolved === undefined) return
-  const detail =
-    (unresolved.status === "failed" ? unresolved.error.message : undefined) ??
-    (unresolved.status === "lost" ? unresolved.lostReason : undefined) ??
-    ("detail" in unresolved ? unresolved.detail : undefined) ??
-    unresolved.status
-  refusal(`${action} ${unresolved.status}: ${detail}`)
+  const failure =
+    unresolved.status === "failed"
+      ? unresolved.error
+      : unresolved.status === "lost"
+        ? { code: "job-lost", message: unresolved.lostReason }
+        : {
+            code: `job-${unresolved.status}`,
+            message: ("detail" in unresolved ? unresolved.detail : undefined) ?? unresolved.status,
+          }
+  raiseFailure("refusal", failure.code, `${action} ${unresolved.status}: ${failure.message}`)
 }
 
 function within(parent: string, child: string): boolean {
@@ -1961,18 +1966,21 @@ async function migrateTerminalAssociations(
     plan = app.queue.terminalAssociationPlan()
   }
   const mode = options.apply === true ? "apply" : "dry-run"
+  const rows = plan.rows.map((row) =>
+    row.status === "ready" ? row : { ...row, refusal: { ...row.refusal, ...actionableFailure(row.refusal) } },
+  )
   const human =
-    plan.rows.length === 0
+    rows.length === 0
       ? `No unprojectable legacy PR terminals; ${mode} appended ${plan.summary.appended}.`
       : [
-          ...plan.rows.map((row) =>
+          ...rows.map((row) =>
             row.status === "ready"
               ? `READY ${row.terminal.pr} revision ${row.terminal.revision}@${row.terminal.headSha} -> ${row.association.run} (${row.terminal.event})`
-              : `REFUSED ${row.terminal.pr} revision ${row.terminal.revision}: ${row.refusal.code} — ${row.refusal.message}`,
+              : `REFUSED ${row.terminal.pr} revision ${row.terminal.revision}\n${formatActionableFailure(row.refusal)}`,
           ),
           `${mode}: ${plan.summary.ready} ready, ${plan.summary.refused} refused, ${plan.summary.appended} appended`,
         ].join("\n")
-  await printResult(io, jsonEnabled(options), { command: "migrate.terminal-associations", mode, ...plan }, human)
+  await printResult(io, jsonEnabled(options), { command: "migrate.terminal-associations", mode, ...plan, rows }, human)
   return plan.summary.refused === 0 ? 0 : 1
 }
 
@@ -2491,7 +2499,9 @@ export async function requireFreshInstalledBaseline(services: YrdCliServices): P
   const result = await administration.auditEnvironment()
   const drift = result.findings.filter((finding) => finding.code === "config-drift" || finding.code === "runtime-drift")
   if (drift.length === 0) return
-  refusal(drift.map((finding) => finding.message).join("\n"))
+  const first = drift[0]
+  if (first === undefined) return
+  raiseFailure("refusal", first.code, drift.map((finding) => finding.message).join("\n"))
 }
 
 async function queueAudit(
@@ -2502,14 +2512,19 @@ async function queueAudit(
 ): Promise<YrdCliExitCode> {
   const core = app.queue.audit()
   const environment = await services.queue?.auditEnvironment?.()
-  const result = { findings: [...core.findings, ...(environment?.findings ?? [])] }
+  const result = {
+    findings: [...core.findings, ...(environment?.findings ?? [])].map((finding) => ({
+      ...finding,
+      ...actionableFailure(finding),
+    })),
+  }
   await printResult(
     io,
     jsonEnabled(options),
     { command: "queue.audit", ...result },
     result.findings.length === 0
       ? "queue audit clean"
-      : result.findings.map((finding) => `${finding.code}: ${finding.message}`).join("\n"),
+      : result.findings.map((finding) => formatActionableFailure(finding)).join("\n\n"),
   )
   return result.findings.length === 0 ? 0 : 1
 }
@@ -3131,19 +3146,16 @@ function maxExit(left: YrdCliExitCode, right: YrdCliExitCode): YrdCliExitCode {
   return Math.max(left, right) as YrdCliExitCode
 }
 
-function configureOutput(command: CliCommand, io: YrdCliIO, output: { wroteError: boolean }): void {
+function configureOutput(command: CliCommand, io: YrdCliIO): void {
   command.configureOutput({
     writeOut: (text) => io.stdout(text),
-    writeErr: (text) => {
-      output.wroteError = true
-      io.stderr(text)
-    },
+    writeErr: (text) => io.stderr(text),
     getOutHasColors: () => io.color === true,
     getErrHasColors: () => io.color === true,
     getOutHelpWidth: () => io.columns ?? 80,
     getErrHelpWidth: () => io.columns ?? 80,
   })
-  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io, output)
+  for (const child of command.commands) configureOutput(child as unknown as CliCommand, io)
 }
 
 function addExamples(program: CliCommand, name: string, projection: "root" | "bay"): void {
@@ -3183,7 +3195,7 @@ function addAuthoredCarrierWorkflow<
   command.addHelpSection("Authored root carrier:", [
     [`$ ${name} pr submit <branch> --draft`, "record the immutable authored carrier as a draft PR"],
     [
-      `$ ${name} pr recut <PR> --queue`,
+      `$ ${name} pr recut <PR> --queue --force`,
       "recut and queue a new revision on that same PR; no composition manifest or manual recut",
     ],
   ])
@@ -3196,7 +3208,6 @@ function buildProgram(
   projection: "root" | "bay",
   io: YrdCliIO,
   setExit: (code: YrdCliExitCode) => void,
-  commanderOutput: { wroteError: boolean },
   bootstrap?: RuntimeBootstrap,
 ): CliCommand {
   let runtimeApp = app
@@ -3312,7 +3323,7 @@ function buildProgram(
 
   if (projection === "bay") {
     addExamples(program, name, projection)
-    configureOutput(program, io, commanderOutput)
+    configureOutput(program, io)
     return program
   }
 
@@ -3697,7 +3708,7 @@ function buildProgram(
   const orderedCommands = program.commands as unknown as CliCommand[]
   orderedCommands.sort((left, right) => (order.get(left.name()) ?? 99) - (order.get(right.name()) ?? 99))
   addExamples(program, name, projection)
-  configureOutput(program, io, commanderOutput)
+  configureOutput(program, io)
   return program
 }
 
@@ -3720,17 +3731,7 @@ async function executeYrd(
     exit = maxExit(exit, code)
   }
   const runtimeIO: YrdCliIO = { ...io }
-  const commanderOutput = { wroteError: false }
-  const program = buildProgram(
-    app,
-    services,
-    invocation.name,
-    invocation.projection,
-    runtimeIO,
-    setExit,
-    commanderOutput,
-    bootstrap,
-  )
+  const program = buildProgram(app, services, invocation.name, invocation.projection, runtimeIO, setExit, bootstrap)
   const canonicalArgs = canonicalizeYrdCommandAliases(invocation.args, invocation.projection)
   const args =
     invocation.projection === "root" && canonicalArgs.length === 1 && canonicalArgs[0] === "pr"
@@ -3742,7 +3743,11 @@ async function executeYrd(
   } catch (error) {
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
-      if (!commanderOutput.wroteError) await diagnostic(runtimeIO, invocation.name, error)
+      await diagnostic(
+        runtimeIO,
+        invocation.name,
+        createFailure({ kind: "usage", code: "invalid-arguments", message: error.message }, error),
+      )
       return 2
     }
     const { exitCode } = classifyFailure(error)
