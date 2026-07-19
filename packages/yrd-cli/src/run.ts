@@ -2823,7 +2823,53 @@ async function finishQueue(
   )
 }
 
-type ResidentCycleRecovery = Readonly<{ message: string; props: Record<string, unknown> }>
+type ResidentCycleRecovery = Readonly<{
+  message: string
+  props: Record<string, unknown>
+  busy?: Readonly<{ base: string; run: string }>
+}>
+
+type ResidentBusyWindow = Readonly<{ base: string; run: string; suppressed: number }>
+
+/**
+ * Keep one loud warning for a busy queue, then count exact repeats until the
+ * queue frees (or the resident exits). Other recoveries stay one-for-one and
+ * flush any pending busy summary before their own warning.
+ */
+function createResidentRecoveryReporter(log: YrdCliApp["log"]): Readonly<{
+  report(recovery: ResidentCycleRecovery): void
+  flush(): void
+}> {
+  let busy: ResidentBusyWindow | null = null
+  const flush = (): void => {
+    if (busy !== null && busy.suppressed > 0) {
+      log.warn?.("resident runner suppressed repeated busy-queue refusals", {
+        action: "resident-busy-summary",
+        base: busy.base,
+        run: busy.run,
+        suppressed: busy.suppressed,
+      })
+    }
+    busy = null
+  }
+  return Object.freeze({
+    report(recovery) {
+      if (recovery.busy === undefined) {
+        flush()
+        log.warn?.(recovery.message, recovery.props)
+        return
+      }
+      if (busy?.base === recovery.busy.base && busy.run === recovery.busy.run) {
+        busy = { ...busy, suppressed: busy.suppressed + 1 }
+        return
+      }
+      flush()
+      busy = { ...recovery.busy, suppressed: 0 }
+      log.warn?.(recovery.message, recovery.props)
+    },
+    flush,
+  })
+}
 
 /**
  * Classify a mid-compose error as a losable resident-runner race worth skipping
@@ -2845,6 +2891,7 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
     return {
       message: "resident runner deferred a cycle — the queue is already running",
       props: { action: "resident-busy-defer", base: error.base, run: error.runId, reason: error.message },
+      busy: { base: error.base, run: error.runId },
     }
   }
   if (isConcurrentCheckabilityConflict(error)) {
@@ -2882,6 +2929,7 @@ export async function followQueueRuns(
   const drainSignal = io.drainSignal
   const drainRequested = () => drainSignal?.aborted === true
   const resident = io.runner?.startsWith("yrd-cli:") === true
+  const recoveryReporter = createResidentRecoveryReporter(app.log)
   // Reclaim a prior resident's leases BEFORE the heartbeat overwrites status.json —
   // once it writes, the departed pid is lost. The exclusive resident lock guarantees
   // that prior resident is not concurrently running as a resident.
@@ -2917,7 +2965,7 @@ export async function followQueueRuns(
         // has no next interval to skip to.
         const recovery = selectors.length === 0 ? residentCycleRecovery(error) : undefined
         if (recovery === undefined) throw error
-        app.log.warn?.(recovery.message, recovery.props)
+        recoveryReporter.report(recovery)
         heartbeat?.check()
         if (drainRequested()) {
           await scope.sleep(interval)
@@ -2929,6 +2977,7 @@ export async function followQueueRuns(
         if (scope.signal.aborted) return 0
         continue
       }
+      recoveryReporter.flush()
       heartbeat?.check()
       // The runner is a service; its stdout is a log stream. Human output is
       // loggily-only (--json still streams the structured record). The
@@ -2952,6 +3001,7 @@ export async function followQueueRuns(
       if (scope.signal.aborted) return exit
     }
   } finally {
+    recoveryReporter.flush()
     await heartbeat?.close()
   }
 }

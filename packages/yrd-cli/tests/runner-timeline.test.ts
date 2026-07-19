@@ -117,6 +117,15 @@ describe("resident runner step-row grammar", () => {
     expect(colored).toContain("\x1b[31mfailed") // red verb
   })
 
+  it("uses the shared short slug vocabulary in resident log rows", () => {
+    const recutFailure = log("yrd:jobs:merge", "error", "merge failed", {
+      ...stepFailed.props,
+      error: { code: "recut-certificate-missing", message: "certificate absent" },
+    } as Record<string, unknown>)
+
+    expect(grammar(formatResidentLogLine(recutFailure, { color: false }))).toContain("err=recut-cert-missing")
+  })
+
   it("marks a retry attempt (>1) in the step token as index:step#attempt", () => {
     const retry = log("yrd:jobs:merge", "error", "merge failed", {
       ...stepFailed.props,
