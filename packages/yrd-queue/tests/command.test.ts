@@ -2682,10 +2682,12 @@ describe("Queue command adapters", () => {
     await using process = createProcess()
     let recoveryAttempts = 0
     let recovered = false
+    const refreshArgv: string[][] = []
     const flakyProcess: Pick<Process, "run"> = {
       run(request) {
         const refresh = request.argv[0] === "git" && request.argv.includes("fetch")
         if (refresh && !recovered) {
+          refreshArgv.push([...request.argv])
           recoveryAttempts += 1
           if (recoveryAttempts < 3) {
             return Promise.resolve({
@@ -2708,6 +2710,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(recoveryAttempts).toBe(3)
+    expect(refreshArgv.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
     expect(run).toMatchObject({ status: "passed", prs: [{ id: "PR1", revision: 1, headSha: featureSha }] })
     expect(app.state().bays.prs.PR1).toMatchObject({ revision: 1, headSha: featureSha, status: "integrated" })
   })

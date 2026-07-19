@@ -1956,7 +1956,7 @@ async function prepareSource(
   }
   const fetched = await git.run(
     sourceRepo,
-    ["-c", "protocol.file.allow=always", "fetch", "--quiet", "origin", source.branch],
+    ["-c", "protocol.file.allow=always", "fetch", "--no-recurse-submodules", "--quiet", "origin", source.branch],
     true,
   )
   if (fetched.code !== 0) {
@@ -3437,7 +3437,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           "check-failed",
           detail,
           await failureEvidence({
-            command: ["git", "-C", repo, "fetch", "--quiet", "origin"],
+            command: ["git", "-C", repo, "fetch", "--no-recurse-submodules", "--quiet", "origin"],
             detail,
             classification: "base",
             artifactRoot: options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts"),
@@ -3597,7 +3597,11 @@ async function sourceCandidateRefError(
 ): Promise<string | undefined> {
   for (const source of sources) {
     const sourceRepo = join(repo, source.repo)
-    const fetched = await git.run(sourceRepo, ["fetch", "--quiet", "origin", source.candidateRef], true)
+    const fetched = await git.run(
+      sourceRepo,
+      ["fetch", "--no-recurse-submodules", "--quiet", "origin", source.candidateRef],
+      true,
+    )
     if (fetched.code !== 0 || (await git.optionalCommit(sourceRepo, "FETCH_HEAD")) !== source.newTipSha) {
       return `source '${source.repo}' candidate ref no longer resolves to '${source.newTipSha}'`
     }
@@ -3611,7 +3615,11 @@ async function authoritativeQueueBase(git: Git, repo: string, branch: string): P
   const source = `refs/heads/${branch}`
   const target = `refs/remotes/origin/${branch}`
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const fetched = await git.run(repo, ["fetch", "--quiet", "origin", `+${source}:${target}`], true)
+    const fetched = await git.run(
+      repo,
+      ["fetch", "--no-recurse-submodules", "--quiet", "origin", `+${source}:${target}`],
+      true,
+    )
     if (fetched.code === 0) return inspectQueueBase(git, repo, branch)
     if (attempt === 3) {
       const detail = fetched.stderr || fetched.stdout || `could not refresh origin/${branch}`
