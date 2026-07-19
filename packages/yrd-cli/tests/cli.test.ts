@@ -3987,7 +3987,10 @@ describe("runYrd", () => {
         projection: { ...constrainedProjection, display: { limit: 20, shown: projection.rows.length, hidden: 0 } },
         columns: 200,
       }),
-      { width: 200, height: 32, plain: true },
+      // Round 5 groups three TIME distributions under explicit headings. Give
+      // the complete static surface enough rows; production printHuman uses a
+      // 10,000-row render target and is never terminal-height clipped.
+      { width: 200, height: 44, plain: true },
     )
     expect(rendered).toContain("TIME")
     expect(rendered).toContain("STATUS")
@@ -4138,26 +4141,33 @@ describe("runYrd", () => {
     expect(mounted?.type).toBe(QueueWatchPane)
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)
-    const frame = stripOsc8Targets(
-      await renderString(createElement(QueueWatchFrame, { snapshot: props.initial }), {
-        width: 200,
-        height: 50,
-        plain: true,
-      }),
-    )
-    expect(frame).toContain("PR1.1")
-    expect(frame).toContain("QUEUE main")
-    expect(frame).toContain("pending")
-    expect(frame).not.toContain("position 1")
-    expect(frame).toContain("AGE")
-    expect(frame).toContain("WAIT")
-    expect(frame).toContain("NO RUNNER - no drained run in window")
-    // The bottom keybindings footer row was removed entirely (item h).
-    expect(frame).not.toContain("q quit")
-    expect(frame).not.toContain("LIVE")
-    expect(frame).not.toContain("p pause")
-    expect(frame).not.toContain("PATH")
-    expect(frame).not.toContain("file:///repo/.bays/B1")
+    // Exercise the live runtime so useWindowSize sees the mounted 200×50
+    // viewport; renderString's first synchronous frame intentionally reports
+    // the fallback 80×24 hook size and cannot certify responsive watch IA.
+    const frameHandle = await run(createElement(QueueWatchFrame, { snapshot: props.initial }), {
+      writable: { write: () => {} },
+      cols: 200,
+      rows: 50,
+    })
+    try {
+      await frameHandle.waitForLayoutStable()
+      const frame = stripOsc8Targets(frameHandle.text)
+      expect(frame).toContain("PR1.1")
+      expect(frame).toContain("QUEUE main")
+      expect(frame).toContain("pending")
+      expect(frame).not.toContain("position 1")
+      expect(frame).toContain("AGE")
+      expect(frame).toContain("WAIT")
+      expect(frame).toContain("NO RUNNER - no drained run in window")
+      // The bottom keybindings footer row was removed entirely (item h).
+      expect(frame).not.toContain("q quit")
+      expect(frame).not.toContain("LIVE")
+      expect(frame).not.toContain("p pause")
+      expect(frame).not.toContain("PATH")
+      expect(frame).not.toContain("file:///repo/.bays/B1")
+    } finally {
+      frameHandle.unmount()
+    }
     expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(before)
   })
 

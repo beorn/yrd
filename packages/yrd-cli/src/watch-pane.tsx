@@ -42,9 +42,9 @@ import { reduceRunCancelKey } from "./watch-cancel.ts"
 
 const LIST_NATURAL_WIDTH = 80
 const DETAIL_NATURAL_WIDTH = 72
-// Queue chrome is 13 fixed rows at the production cap (tabs, clocks, filter,
-// header, FLOW/TIME, spacer). Reserve enough primary height to keep useful rows
-// visible before selecting the persistent-below tier.
+// This compact primary height reserves the queue title, runner, filter, table
+// header, and useful data rows. The taller grouped FLOW/TIME summary has its
+// own responsive height gate and is omitted when a split only fits this floor.
 const LIST_NATURAL_HEIGHT = 19
 const DETAIL_NATURAL_HEIGHT = 12
 const DIVIDER_SIZE = 1
@@ -87,6 +87,17 @@ export function queueTimelineColumns(
     minSecondarySize: DETAIL_NATURAL_WIDTH,
   })
   return Math.round(visibleRatio * Math.max(0, columns - DIVIDER_SIZE))
+}
+
+function queueTimelineHeight(rows: number, tier: QueueDetailTier, detailOpen: boolean, splitRatio: number): number {
+  if (tier !== "below" || !detailOpen) return rows
+  const visibleRatio = clampSplitPaneRatio(splitRatio, {
+    containerSize: rows,
+    dividerSize: DIVIDER_SIZE,
+    minPrimarySize: LIST_NATURAL_HEIGHT,
+    minSecondarySize: DETAIL_NATURAL_HEIGHT,
+  })
+  return Math.round(visibleRatio * Math.max(0, rows - DIVIDER_SIZE))
 }
 
 export type QueueWatchSnapshot = Readonly<{
@@ -341,9 +352,10 @@ export function QueueWorkflowStepTabs({
   const selectedPr = prs.find((pr) => pr.id === row?.pr) ?? prs[0]
   const submitted = row?.timestamp === null ? undefined : row?.timestamp
 
-  // Each step tab is a three-row card from the recovered mock: numbered step,
-  // state, then a right-aligned clock. Every label has the same measured width;
-  // the surrounding flex boxes divide the whole row equally.
+  // Each step tab is a three-row segment from the recovered mock: numbered
+  // step, state, then a right-aligned clock. Every label has the same measured
+  // width; the surrounding flex boxes divide the whole row equally. Round 4
+  // makes selection a solid surface instead of surrounding every tab in chrome.
   const stepTabWidth =
     data === undefined
       ? 0
@@ -360,7 +372,7 @@ export function QueueWorkflowStepTabs({
             )
           }),
         )
-  const stepTabLabel = (name: string) => {
+  const stepTabLabel = (name: string, selected: boolean) => {
     if (data === undefined) return name
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
@@ -369,15 +381,15 @@ export function QueueWorkflowStepTabs({
     const number = names.indexOf(name) + 1
     const glyph = timelineStatusGlyph(rep.status)
     return (
-      <>
+      <Text color={selected ? "$fg-on-selected" : undefined}>
         {`${number}: ${name}`.padEnd(stepTabWidth)}
         {"\n"}
-        <Text color={taskStatusColor(rep.taskStatus)} bold={rep.taskStatus === "wip"}>
+        <Text color={selected ? "$fg-on-selected" : taskStatusColor(rep.taskStatus)} bold={rep.taskStatus === "wip"}>
           {`${glyph} ${rep.status}`.padEnd(stepTabWidth)}
         </Text>
         {"\n"}
         {(duration === "" ? " " : duration).padStart(stepTabWidth)}
-      </>
+      </Text>
     )
   }
   return (
@@ -416,8 +428,15 @@ export function QueueWorkflowStepTabs({
           <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
             <TabList>
               {names.map((name) => (
-                <Box key={name} borderStyle="round" paddingLeft={1} flexGrow={1} flexBasis={0} minWidth={0}>
-                  <Tab value={name}>{stepTabLabel(name)}</Tab>
+                <Box
+                  key={name}
+                  backgroundColor={activeStep === name ? "$bg-selected" : undefined}
+                  paddingLeft={1}
+                  flexGrow={1}
+                  flexBasis={0}
+                  minWidth={0}
+                >
+                  <Tab value={name}>{stepTabLabel(name, activeStep === name)}</Tab>
                 </Box>
               ))}
             </TabList>
@@ -434,9 +453,9 @@ export function QueueWorkflowStepTabs({
                   {/* Only the step-level facts here (item H); the run-level facts
                   render once above the tabs. */}
                   {command === undefined ? null : (
-                    <Box borderStyle="round" paddingX={1} marginTop={1} flexShrink={0} minWidth={0}>
+                    <Box backgroundColor="$bg-surface-subtle" paddingX={1} marginTop={1} flexShrink={0} minWidth={0}>
                       <Text bold color="$fg" wrap="truncate">
-                        [ $ {command} ]
+                        <Text color="$fg-muted">COMMAND </Text>$ {command}
                       </Text>
                     </Box>
                   )}
@@ -690,6 +709,7 @@ export function QueueWatchFrame({
   // status-parameterized template need the full projected row at this index.
   const selectedProjectedRow = projectedRows?.[cursor]
   const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
+  const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - 1), tier, detailOpen, splitRatio)
   const timeline =
     snapshot.projection === undefined ? (
       <QueueTimelineView
@@ -711,6 +731,7 @@ export function QueueWatchFrame({
         onSelect={activateRow}
         paneChrome
         fillHeight
+        availableRows={timelineRows}
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
         onToggleBucket={toggleBucket}

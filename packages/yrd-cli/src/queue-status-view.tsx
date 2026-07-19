@@ -28,6 +28,7 @@ import {
   TogglePillGroup,
   type TableColumn,
   type TextProps,
+  useWindowSize,
 } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
 import { formatLocalClock, TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
@@ -51,7 +52,7 @@ import {
   type TaskStatus,
   type TaskStatusFields,
 } from "./task-status.ts"
-import { TimeStatsBox } from "./time-stats-box.tsx"
+import { TimeStatsBox, TIME_STATS_TWO_ACROSS_MIN_WIDTH } from "./time-stats-box.tsx"
 
 const sourceRowKey = ["li", "ne"].join("") as `${"li"}${"ne"}`
 
@@ -3761,6 +3762,13 @@ function QueueUpdatedClock({ now }: { now: string }) {
   )
 }
 
+// The grouped round-5 TIME IA occupies 17 rows beside FLOW or 27 when the
+// boxes stack. Preserve fixed queue chrome plus at least two data rows; below
+// that pane height, omit the complete secondary metrics pair instead of
+// collapsing ListView to a zero-height viewport.
+const QUEUE_METRICS_ROW_MIN_PANE_ROWS = 28
+const QUEUE_METRICS_STACK_MIN_PANE_ROWS = 38
+
 function ProjectedQueueTimeline({
   projection,
   nav,
@@ -3770,6 +3778,7 @@ function ProjectedQueueTimeline({
   columns,
   paneChrome = false,
   fillHeight = false,
+  availableRows,
   visibleBuckets,
   expandedStorms,
   onToggleBucket,
@@ -3784,6 +3793,8 @@ function ProjectedQueueTimeline({
   columns: number
   paneChrome?: boolean
   fillHeight?: boolean
+  /** Actual queue-pane height when hosted in a split; viewport height otherwise. */
+  availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
@@ -3808,6 +3819,9 @@ function ProjectedQueueTimeline({
     !fillHeight &&
     rows.some((row) => row.timestamp !== null && row.timestamp.slice(0, 10) !== projection.now.slice(0, 10))
   const layout = timelineCellLayout(rows, includeDate, columns)
+  const { rows: viewportRows } = useWindowSize()
+  const metricsMinPaneRows =
+    columns >= TIME_STATS_TWO_ACROSS_MIN_WIDTH ? QUEUE_METRICS_ROW_MIN_PANE_ROWS : QUEUE_METRICS_STACK_MIN_PANE_ROWS
   return (
     <Box width="100%" minWidth={0} minHeight={0} flexGrow={fillHeight ? 1 : undefined}>
       <Box flexGrow={1} flexBasis={0} maxWidth={TIMELINE_CONTENT_CAP} flexDirection="column" minWidth={0} minHeight={0}>
@@ -3920,12 +3934,16 @@ function ProjectedQueueTimeline({
           </Box>
           <TimelineFilterLine projection={projection} buckets={buckets} onToggleBucket={onToggleBucket} />
         </Box>
-        <TimeStatsBox
-          facts={projection.timeStatsFacts}
-          now={projection.now}
-          earliestEventMs={projection.earliestEventMs}
-          width={columns}
-        />
+        {!fillHeight ||
+        (availableRows ?? viewportRows) === 0 ||
+        (availableRows ?? viewportRows) >= metricsMinPaneRows ? (
+          <TimeStatsBox
+            facts={projection.timeStatsFacts}
+            now={projection.now}
+            earliestEventMs={projection.earliestEventMs}
+            width={columns}
+          />
+        ) : null}
       </Box>
     </Box>
   )
@@ -3944,6 +3962,7 @@ export function QueueTimelineView({
   columns = 120,
   paneChrome = false,
   fillHeight = false,
+  availableRows,
   visibleBuckets,
   expandedStorms,
   onToggleBucket,
@@ -3962,6 +3981,7 @@ export function QueueTimelineView({
   columns?: number
   paneChrome?: boolean
   fillHeight?: boolean
+  availableRows?: number
   visibleBuckets?: ReadonlySet<QueueTimelineStatusBucket>
   expandedStorms?: ReadonlySet<string>
   onToggleBucket?: (bucket: QueueTimelineStatusBucket) => void
@@ -3982,6 +4002,7 @@ export function QueueTimelineView({
         columns={surfaceWidth}
         paneChrome={paneChrome}
         fillHeight={fillHeight}
+        availableRows={availableRows}
         visibleBuckets={visibleBuckets}
         expandedStorms={expandedStorms}
         onToggleBucket={onToggleBucket}

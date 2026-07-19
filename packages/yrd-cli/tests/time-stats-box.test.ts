@@ -129,11 +129,9 @@ describe("TimeStatsBox", () => {
       const sectionY = timeRows.findIndex((row) => row.includes(section))
       expect(sectionY, `${section} heading exists`).toBeGreaterThanOrEqual(0)
       expect(timeRows[sectionY]).not.toMatch(/\b(?:avg|p50|p90)\b/u)
-      expect(timeRows.slice(sectionY + 1, sectionY + 4).map((row) => row.trimStart().split(/\s+/u)[0])).toEqual([
-        "avg",
-        "p50",
-        "p90",
-      ])
+      expect(
+        timeRows.slice(sectionY + 1, sectionY + 4).map((row) => row.replace(/^│\s*/u, "").split(/\s+/u)[0]),
+      ).toEqual(["avg", "p50", "p90"])
     }
     expect(timeText).not.toMatch(/(?:INTEGRATED|FAILED|WAIT) (?:avg|p50|p90)/u)
   })

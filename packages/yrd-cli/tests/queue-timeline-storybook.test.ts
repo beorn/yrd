@@ -88,10 +88,9 @@ describe("queue timeline storybook", () => {
         /(?:✓|●|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
       )
 
-      const commandRowIndex = lines.findIndex((line) => line.includes("[ $ "))
+      const commandRowIndex = lines.findIndex((line) => line.includes("COMMAND $ "))
       expect(commandRowIndex).toBeGreaterThan(0)
-      expect(lines[commandRowIndex - 1]).toContain("╭")
-      expect(lines[commandRowIndex + 1]).toContain("╰")
+      expect(lines[commandRowIndex]).not.toContain("[ $")
     } finally {
       handle.unmount()
     }
@@ -173,10 +172,16 @@ describe("queue timeline storybook", () => {
     })
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
-      expect(term.screen.getText()).toContain("PR42.1")
-      expect(term.screen.getText()).toContain("PR43.1")
+      const queue = term.screen.getText()
+      expect(queue).toContain("PR42.1")
+      expect(queue).toContain("PR43.1")
+      // The grouped round-5 metrics are secondary to the queue itself. At the
+      // 24-row compact tier, omit the whole pair instead of collapsing the
+      // ListView to zero rows or clipping a partially truthful metric group.
+      expect(queue).not.toContain("╭─ FLOW ")
+      expect(queue).not.toContain("╭─ TIME ")
       // The bottom keybindings footer was removed entirely (item h).
-      expect(term.screen.getText()).not.toContain("q quit")
+      expect(queue).not.toContain("q quit")
 
       await act(async () => {
         await handle.press("Enter")
@@ -329,7 +334,10 @@ describe("queue timeline storybook", () => {
       for (const width of story.widths) {
         const rendered = await renderString(createElement(QueueTimelineView, { projection, columns: width }), {
           width,
-          height: 24,
+          // Static queue output is unbounded in production. Round 5's grouped
+          // TIME box needs the taller fixture canvas so this cross-width
+          // contract tests content and wrapping rather than crop behavior.
+          height: 48,
           plain: true,
         })
         expect(rendered, name).toContain(`QUEUE ${projection.base}`)
