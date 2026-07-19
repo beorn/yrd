@@ -1085,6 +1085,40 @@ describe("runYrd", () => {
     expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR6", position: 6 })
   })
 
+  it("windows only the unfiltered human PR list and never wraps revision counts", async () => {
+    const app = await createApp()
+    for (const index of Array.from({ length: 520 }, (_, offset) => offset + 1)) {
+      await app.bays.submit({
+        branch: `topic/list-${index}`,
+        headSha: index.toString(16).padStart(40, "0"),
+        base: "main",
+      })
+    }
+
+    const expected = Array.from({ length: 20 }, (_, offset) => `PR${offset + 501}`)
+    for (const columns of [80, 120]) {
+      const human = outputIO({ columns })
+      expect(await runYrd(app, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
+      const physical = stripAnsi(human.stdout())
+        .split("\n")
+        .filter((row) => row !== "")
+      expect(physical).toHaveLength(expected.length + 1)
+      expect(physical.slice(1).map((row) => row.match(/pr#(\d+)\.1/u)?.[1])).toEqual(expected.map((id) => id.slice(2)))
+      expect(physical).not.toContainEqual(expect.stringMatching(/^\s*\d+\s*$/u))
+    }
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    const jsonIds = (JSON.parse(json.stdout()) as { prs: readonly PR[] }).prs.map(({ id }) => id)
+    expect(jsonIds).toHaveLength(520)
+    expect(jsonIds.at(0)).toBe("PR1")
+    expect(jsonIds.at(-1)).toBe("PR520")
+
+    const filtered = outputIO({ columns: 120 })
+    expect(await runYrd(app, yrd("pr", "list", "--base", "main"), filtered.io), filtered.stderr()).toBe(0)
+    expect(stripAnsi(filtered.stdout()).split("\n").filter(Boolean)).toHaveLength(521)
+  })
+
   it("executes bare projections with their canonical JSON discriminators", async () => {
     const app = await createApp()
     const surfaces = [
