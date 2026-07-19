@@ -111,6 +111,28 @@ describe("TimeStatsBox", () => {
     expect(monCount).toBe(2)
   })
 
+  it("groups TIME metrics under one heading per state instead of repeating state prefixes", () => {
+    const render = createRenderer({ cols: 126, rows: 40 })
+    const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
+    const rows = app.text.split("\n")
+    const timeX = rowContaining(app, "╭─ TIME ").indexOf("╭─ TIME ")
+    const timeRows = rows.map((row) => row.slice(timeX))
+    const timeText = timeRows.join("\n")
+
+    for (const section of ["INTEGRATED", "FAILED", "WAIT"]) {
+      expect(timeText.match(new RegExp(section, "gu")), `${section} is named once in TIME`).toHaveLength(1)
+      const sectionY = timeRows.findIndex((row) => row.includes(section))
+      expect(sectionY, `${section} heading exists`).toBeGreaterThanOrEqual(0)
+      expect(timeRows[sectionY]).not.toMatch(/\b(?:avg|p50|p90)\b/u)
+      expect(timeRows.slice(sectionY + 1, sectionY + 4).map((row) => row.trimStart().split(/\s+/u)[0])).toEqual([
+        "avg",
+        "p50",
+        "p90",
+      ])
+    }
+    expect(timeText).not.toMatch(/(?:INTEGRATED|FAILED|WAIT) (?:avg|p50|p90)/u)
+  })
+
   it("shows covered counts, the fail share, and integrated durations", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
@@ -130,6 +152,7 @@ describe("TimeStatsBox", () => {
     expect(app.text).not.toContain("33%")
     expect(rowContaining(app, "RUNS")).not.toMatch(/RUNS\s+3\b/u)
     expect(app.text).toContain("-")
+    expect(app.text).toContain("- no full window")
   })
 
   it("places clean FLOW and TIME frames side by side at the live pane width", () => {
