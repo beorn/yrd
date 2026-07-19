@@ -50,10 +50,12 @@ import {
   needsReview,
   prForBay,
   PrCheckabilityConflict,
+  projectBranchLifecycles,
   reviewState,
   resolveBay,
   resolvePR,
   type Bay,
+  type BranchLifecycle,
   type BaysState,
   type CompositionV1,
   type Correlation,
@@ -90,6 +92,15 @@ export type OpenBayArgs = z.infer<typeof OpenBayArgsSchema>
 
 const RefreshBayArgsSchema = z.object({ bay: TextSchema }).strict()
 export type RefreshBayArgs = z.infer<typeof RefreshBayArgsSchema>
+
+const CertifyHandoffArgsSchema = z
+  .object({ bay: TextSchema, branch: GitRefSchema, headSha: GitShaSchema, evidence: TextSchema })
+  .strict()
+export type CertifyHandoffArgs = z.infer<typeof CertifyHandoffArgsSchema>
+
+const BayHandoffCertifiedSchema = z
+  .object({ bay: BayIdSchema, branch: GitRefSchema, headSha: GitShaSchema, evidence: TextSchema })
+  .strict()
 
 const IntakePRArgsSchema = z
   .object({
@@ -438,6 +449,7 @@ export type BayCommands = Readonly<{
   bay: Readonly<{
     open: CommandHandler<OpenBayArgs, BayState>
     refresh: CommandHandler<RefreshBayArgs, BayState>
+    certifyHandoff: CommandHandler<CertifyHandoffArgs, BayState>
     intake: CommandHandler<IntakePRArgs, BayState>
     submit: CommandHandler<SubmitArgs, BayState>
     close: CommandHandler<CloseBayArgs, BayState>
@@ -459,6 +471,7 @@ export type Bays = Readonly<{
   state: ReadSignal<DeepReadonly<BaysState>>
   get(selector: string): DeepReadonly<Bay> | undefined
   list(): readonly DeepReadonly<Bay>[]
+  branchLifecycles(): readonly DeepReadonly<BranchLifecycle>[]
   pr(selector: string): DeepReadonly<PR> | undefined
   prs(): readonly DeepReadonly<PR>[]
   reviewState(selector: string): DeepReadonly<PRReviewState>
@@ -466,6 +479,7 @@ export type Bays = Readonly<{
   checksRequested(selector: string): boolean
   open(args: OpenBayArgs): Promise<CommandResult>
   refresh(args: RefreshBayArgs): Promise<CommandResult>
+  certifyHandoff(args: CertifyHandoffArgs): Promise<CommandResult>
   intake(args: IntakePRArgs): Promise<CommandResult>
   submit(args: SubmitArgs): Promise<CommandResult>
   submitSelection(selector: string, options: SubmitSelectionOptions): Promise<DeepReadonly<PR>>
@@ -487,6 +501,7 @@ type BayActions = Pick<
   Bays,
   | "open"
   | "refresh"
+  | "certifyHandoff"
   | "intake"
   | "submit"
   | "close"
@@ -831,6 +846,7 @@ export function createBays(
     state,
     get: (selector) => resolveBay(state(), selector),
     list: () => Object.freeze(Object.values(state().byId)),
+    branchLifecycles: () => Object.freeze(projectBranchLifecycles(state())),
     pr: (selector) => resolvePR(state(), selector),
     prs: () => Object.freeze(Object.values(state().prs)),
     reviewState: (selector) => reviewState(required(resolvePR(state(), selector), "PR", selector)),
@@ -839,6 +855,7 @@ export function createBays(
     submitSelection,
     open,
     refresh: actions.refresh,
+    certifyHandoff: actions.certifyHandoff,
     intake,
     submit,
     close: actions.close,
@@ -875,6 +892,7 @@ export function withBays(options: WithBaysOptions) {
       events: {
         "bay/opened": BayOpenedSchema,
         "bay/closing": BayClosingSchema,
+        "bay/handoff-certified": BayHandoffCertifiedSchema,
         "pr/pushed": PRPushedSchema,
         "pr/recut": PRRecutFactSchema,
         "pr/submitted": PRRevisionSchema,
@@ -899,7 +917,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v2",
+      projectionVersion: "bays-v3",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -911,6 +929,7 @@ export function withBays(options: WithBaysOptions) {
             {
               open: (args) => yrd.dispatch(commands.bay.open, args),
               refresh: (args) => yrd.dispatch(commands.bay.refresh, args),
+              certifyHandoff: (args) => yrd.dispatch(commands.bay.certifyHandoff, args),
               intake: (args) => yrd.dispatch(commands.bay.intake, args),
               submit: (args) => yrd.dispatch(commands.bay.submit, args),
               close: (args) => yrd.dispatch(commands.bay.close, args),
@@ -962,6 +981,12 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultActor: 
         visibility: "public",
         params: RefreshBayArgsSchema,
         apply: (state: BayState, args: RefreshBayArgs) => refreshBay(state, args, jobs["bay.refresh"]),
+      }),
+      certifyHandoff: command({
+        title: "Certify a materialized Bay handoff",
+        visibility: "public",
+        params: CertifyHandoffArgsSchema,
+        apply: (state: BayState, args: CertifyHandoffArgs) => certifyBayHandoff(state, args),
       }),
       intake: command({
         title: "Record pushed revision",
@@ -1089,6 +1114,33 @@ function refreshBay(state: DeepReadonly<BayState>, args: RefreshBayArgs, refresh
         ...(bay.path === undefined ? {} : { path: bay.path }),
         branch: bay.branch,
         base: bay.base,
+      }),
+    ],
+  }
+}
+
+function certifyBayHandoff(state: DeepReadonly<BayState>, args: CertifyHandoffArgs) {
+  const bay = required(resolveBay(state.bays, args.bay), "bay", args.bay)
+  if (bay.status !== "active") throw new Error(`yrd: bay '${bay.id}' is ${bay.status}, not active`)
+  if (bay.branch !== args.branch) {
+    throw new Error(`yrd: handoff branch '${args.branch}' does not match current branch '${bay.branch}'`)
+  }
+  if (bay.headSha !== args.headSha) {
+    throw new Error(
+      `yrd: handoff head '${args.headSha}' does not match current head '${bay.headSha ?? "unknown"}' for bay '${bay.id}'`,
+    )
+  }
+  if (bay.handoff?.evidence === args.evidence) {
+    if (bay.handoff.headSha === args.headSha) return { events: [] }
+    throw new Error(`yrd: handoff evidence '${args.evidence}' already certifies a different Bay head`)
+  }
+  return {
+    events: [
+      event("bay/handoff-certified", {
+        bay: bay.id,
+        branch: bay.branch,
+        headSha: args.headSha,
+        evidence: args.evidence,
       }),
     ],
   }
@@ -1722,6 +1774,22 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
       const bay = current.byId[data.bay as string]
       return bay === undefined ? state : patchBay(bay, { status: "closing", failure: undefined })
     }
+    case "bay/handoff-certified": {
+      const certified = BayHandoffCertifiedSchema.parse(data)
+      const bay = current.byId[certified.bay]
+      if (bay === undefined) return state
+      if (bay.branch !== certified.branch || bay.headSha !== certified.headSha) {
+        throw new Error(`yrd: handoff certification does not match Bay '${certified.bay}' current branch and head`)
+      }
+      return patchBay(bay, {
+        handoff: {
+          headSha: certified.headSha,
+          evidence: certified.evidence,
+          certifiedAt: applied.ts,
+          eventId: applied.id,
+        },
+      })
+    }
     case "pr/pushed": {
       const parsed = PRPushedSchema.safeParse(data)
       const pushed = parsed.success ? parsed.data : LegacyPRPushedSchema.parse(data)
@@ -2157,9 +2225,20 @@ function projectBayJob(state: DeepReadonly<BayState>, applied: Event, change: Jo
       jobDef: undefined,
     })
   }
-  DeprovisionedBaySchema.parse(change.result.output)
+  const output = DeprovisionedBaySchema.parse(change.result.output)
   return save({
     status: "closed",
+    ...(output.headSha === undefined ? {} : { headSha: output.headSha }),
+    ...(output.headSha === undefined || output.preservedRef === undefined
+      ? {}
+      : {
+          archive: {
+            headSha: output.headSha,
+            preservedRef: output.preservedRef,
+            archivedAt: applied.ts,
+            eventId: applied.id,
+          },
+        }),
     closedAt: applied.ts,
     failure: undefined,
     jobId: undefined,

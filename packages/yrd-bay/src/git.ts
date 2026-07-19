@@ -266,13 +266,15 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
     },
 
     async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
-      if (input.path === undefined) return { status: "passed", output: {} }
       try {
-        if (!existsSync(input.path)) {
+        if (input.path === undefined || !existsSync(input.path)) {
           if (input.headSha === undefined) throw new Error("workspace is absent and the Bay has no recorded head")
           return {
             status: "passed",
-            output: { preservedRef: await requirePreservedBay(git, repo, input.bay, input.headSha) },
+            output: {
+              headSha: input.headSha,
+              preservedRef: await requirePreservedBay(git, repo, input.bay, input.headSha),
+            },
           }
         }
         const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
@@ -288,7 +290,7 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
         const headSha = await git.commit(input.path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
         await git.run(repo, ["worktree", "remove", "--force", input.path])
-        return { status: "passed", output: { preservedRef } }
+        return { status: "passed", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)
       }

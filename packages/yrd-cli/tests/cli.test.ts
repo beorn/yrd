@@ -2290,6 +2290,85 @@ describe("runYrd", () => {
     expect(app.state().bays.byId.B1?.status).toBe("closed")
   })
 
+  it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {
+    const app = await createApp()
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "handoff-cli", "--json"), open.io), open.stderr()).toBe(0)
+
+    const before = outputIO()
+    expect(await runYrd(app, yrd("bay", "--json"), before.io), before.stderr()).toBe(0)
+    expect(JSON.parse(before.stdout())).toMatchObject({
+      command: "bay.list",
+      lifecycles: [
+        { bay: "B1", branch: "issue/handoff-cli", headSha: HEAD_SHA, status: "open" },
+      ],
+    })
+
+    const handoff = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "B1",
+          "--branch",
+          "issue/handoff-cli",
+          "--head",
+          HEAD_SHA,
+          "--evidence",
+          "@km/handoff/handoff-cli.md",
+          "--json",
+        ),
+        handoff.io,
+      ),
+      handoff.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(handoff.stdout())).toMatchObject({
+      command: "bay.handoff",
+      lifecycle: {
+        bay: "B1",
+        branch: "issue/handoff-cli",
+        headSha: HEAD_SHA,
+        status: "handoff-ready",
+        ready: { evidence: "@km/handoff/handoff-cli.md" },
+      },
+    })
+  })
+
+  it("refreshes the Bay before certifying a newly committed handoff head", async () => {
+    const app = await createApp({ refreshedHead: MERGED_SHA })
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "fresh-handoff", "--json"), open.io), open.stderr()).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ headSha: HEAD_SHA })
+
+    const handoff = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "B1",
+          "--branch",
+          "issue/fresh-handoff",
+          "--head",
+          MERGED_SHA,
+          "--evidence",
+          "@km/handoff/fresh-handoff.md",
+          "--json",
+        ),
+        handoff.io,
+      ),
+      handoff.stderr(),
+    ).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ headSha: MERGED_SHA })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "handoff-ready", headSha: MERGED_SHA })
+    expect(Object.values(app.state().jobs.byId)).toContainEqual(
+      expect.objectContaining({ definition: "bay.refresh", status: "passed" }),
+    )
+  })
+
   it("records tracker-neutral issue and actor links when opening a bay", async () => {
     const app = await createApp()
     const output = outputIO({ color: true, columns: 96 })

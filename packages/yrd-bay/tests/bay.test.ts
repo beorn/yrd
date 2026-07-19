@@ -71,7 +71,7 @@ function createWorkspaceHarness() {
       workspace.calls.push(`deprovision:${input.bay}`)
       return workspace.dirty
         ? { status: "failed", error: { code: "dirty-worktree", message: "workspace has uncommitted work" } }
-        : { status: "passed", output: { preservedRef: `refs/yrd/closed/${input.bay}` } }
+        : { status: "passed", output: { headSha: HEAD_1, preservedRef: `refs/yrd/closed/${input.bay}` } }
     },
   }
   return { adapter, workspace }
@@ -741,6 +741,160 @@ describe("withBays", () => {
     expect(app.bays.state().byId.B1?.status).toBe("closed")
     expect(workspace.calls).toEqual([`provision:B1:${BASE}`, "refresh:B1", "deprovision:B1", "deprovision:B1"])
     await app.close()
+  })
+
+  it("certifies handoff readiness for the exact current Bay branch and head", async () => {
+    await using app = (await createHarness()).app
+    const opened = await app.bays.open({ name: "handoff-ready" })
+    await finishJob(app, opened)
+
+    expect(app.bays.branchLifecycles()).toEqual([
+      expect.objectContaining({
+        bay: "B1",
+        branch: "issue/handoff-ready",
+        headSha: HEAD_1,
+        status: "open",
+      }),
+    ])
+    await expect(
+      app.bays.certifyHandoff({
+        bay: "B1",
+        branch: "issue/handoff-ready",
+        headSha: HEAD_2,
+        evidence: "@km/handoff/handoff-ready.md",
+      }),
+    ).rejects.toThrow("does not match current head")
+
+    const certified = await app.bays.certifyHandoff({
+      bay: "B1",
+      branch: "issue/handoff-ready",
+      headSha: HEAD_1,
+      evidence: "@km/handoff/handoff-ready.md",
+    })
+    expect(certified.events.map(({ name, data }) => ({ name, data }))).toEqual([
+      {
+        name: "bay/handoff-certified",
+        data: {
+          bay: "B1",
+          branch: "issue/handoff-ready",
+          headSha: HEAD_1,
+          evidence: "@km/handoff/handoff-ready.md",
+        },
+      },
+    ])
+    expect(
+      (
+        await app.bays.certifyHandoff({
+          bay: "B1",
+          branch: "issue/handoff-ready",
+          headSha: HEAD_1,
+          evidence: "@km/handoff/handoff-ready.md",
+        })
+      ).events,
+    ).toEqual([])
+    expect(app.bays.branchLifecycles()).toEqual([
+      expect.objectContaining({
+        bay: "B1",
+        branch: "issue/handoff-ready",
+        headSha: HEAD_1,
+        status: "handoff-ready",
+        ready: {
+          at: "2026-01-01T00:00:00.000Z",
+          eventId: certified.events[0]?.id,
+          evidence: "@km/handoff/handoff-ready.md",
+        },
+      }),
+    ])
+
+    await app.bays.intake({ bay: "B1", headSha: HEAD_2 })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      bay: "B1",
+      branch: "issue/handoff-ready",
+      status: "open",
+    })
+  })
+
+  it("projects pushed, submitted, and proof-bearing archived branch states", async () => {
+    await using app = (await createHarness()).app
+    const opened = await app.bays.open({ name: "branch-lifecycle" })
+    await finishJob(app, opened)
+    await app.bays.certifyHandoff({
+      bay: "B1",
+      branch: "issue/branch-lifecycle",
+      headSha: HEAD_1,
+      evidence: "@km/handoff/branch-lifecycle.md",
+    })
+
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "handoff-ready" })
+
+    await app.bays.submit({ pr: "PR1" })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      bay: "B1",
+      branch: "issue/branch-lifecycle",
+      headSha: HEAD_1,
+      status: "submitted",
+      submitted: { pr: "PR1", revision: 1, at: "2026-01-01T00:00:00.000Z" },
+    })
+
+    const closing = await app.bays.close({ bay: "B1", withdraw: true })
+    await finishJob(app, closing)
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      bay: "B1",
+      branch: "issue/branch-lifecycle",
+      headSha: HEAD_1,
+      status: "archived",
+      archived: {
+        at: "2026-01-01T00:00:00.000Z",
+        eventId: expect.any(String),
+        preservedRef: "refs/yrd/closed/B1",
+      },
+    })
+  })
+
+  it("projects an exact integrated revision as landed even after its Bay closes", async () => {
+    const integrate = command({
+      title: "Integrate the lifecycle fixture",
+      apply: () => ({
+        events: [
+          event("pr/integrated", {
+            pr: "PR1",
+            revision: 1,
+            headSha: HEAD_1,
+            run: "R1",
+            commit: BASE,
+            landingSha: BASE,
+            baseSha: BASE,
+          }),
+        ],
+      }),
+    })
+    const jobs = createBayJobDefs(createWorkspaceHarness().adapter)
+    const definition = pipe(
+      createYrdDef(),
+      withJobs({ definitions: jobs }),
+      withBays({ jobs, defaultBase: "main" }),
+    ).extend({ commands: { fixture: { integrate } } })
+    await using app = await createYrd(definition, {
+      inject: { journal: createMemoryJournal(), clock: () => "2026-01-01T00:00:00.000Z", id: ids() },
+    })
+    const opened = await app.bays.open({ name: "landed-lifecycle" })
+    await finishJob(app, opened)
+    await app.bays.intake({ bay: "B1", headSha: HEAD_1 })
+    await app.bays.submit({ pr: "PR1" })
+
+    await app.dispatch(app.commands.fixture.integrate, undefined)
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({
+      bay: "B1",
+      branch: "issue/landed-lifecycle",
+      headSha: HEAD_1,
+      status: "landed",
+      landed: { pr: "PR1", revision: 1, at: "2026-01-01T00:00:00.000Z", commit: BASE },
+    })
+
+    const closing = await app.bays.close({ bay: "B1" })
+    await finishJob(app, closing)
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "landed" })
   })
 
   it("submits prepared branches with monotonic PR ids and selected bases", async () => {

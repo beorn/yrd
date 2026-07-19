@@ -153,6 +153,20 @@ export type BayFailure = Readonly<{
 
 export type BayStatus = "opening" | "active" | "closing" | "closed" | "failed"
 
+export type BayHandoff = Readonly<{
+  headSha: string
+  evidence: string
+  certifiedAt: string
+  eventId: string
+}>
+
+export type BayArchive = Readonly<{
+  headSha: string
+  preservedRef: string
+  archivedAt: string
+  eventId: string
+}>
+
 export type Bay = Readonly<{
   id: BayId
   name: string
@@ -172,7 +186,49 @@ export type Bay = Readonly<{
   jobDef?: string
   closedAt?: string
   failure?: BayFailure
+  handoff?: BayHandoff
+  archive?: BayArchive
 }>
+
+type BranchLifecycleBase = Readonly<{
+  bay: BayId
+  name: string
+  issue?: string
+  actor?: string
+  branch: string
+  openedAt: string
+}>
+
+export type BranchLifecycle =
+  | Readonly<BranchLifecycleBase & { status: "open"; headSha?: string }>
+  | Readonly<
+      BranchLifecycleBase & {
+        status: "handoff-ready"
+        headSha: string
+        ready: Readonly<{ at: string; eventId: string; evidence: string }>
+      }
+    >
+  | Readonly<
+      BranchLifecycleBase & {
+        status: "submitted"
+        headSha: string
+        submitted: Readonly<{ pr: PRId; revision: number; at: string }>
+      }
+    >
+  | Readonly<
+      BranchLifecycleBase & {
+        status: "landed"
+        headSha: string
+        landed: Readonly<{ pr: PRId; revision: number; at: string; commit: string }>
+      }
+    >
+  | Readonly<
+      BranchLifecycleBase & {
+        status: "archived"
+        headSha: string
+        archived: Readonly<{ at: string; eventId: string; preservedRef: string }>
+      }
+    >
 
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
@@ -495,7 +551,11 @@ export const DeprovisionBayInputSchema = z
   .strict()
 export type DeprovisionBayInput = z.infer<typeof DeprovisionBayInputSchema>
 
-export const DeprovisionedBaySchema = z.object({ preservedRef: GitRefSchema.optional() }).strict()
+/** `headSha` is optional only for replay compatibility with pre-lifecycle job
+ * results. New workspace adapters return the exact preserved head. */
+export const DeprovisionedBaySchema = z
+  .object({ headSha: GitShaSchema.optional(), preservedRef: GitRefSchema.optional() })
+  .strict()
 export type DeprovisionedBay = z.infer<typeof DeprovisionedBaySchema>
 
 export function defaultBayBranch(name: string): string {
@@ -504,6 +564,92 @@ export function defaultBayBranch(name: string): string {
 
 export function emptyBaysState(): BaysState {
   return { byId: {}, prs: {}, receipts: {} }
+}
+
+/** Projects the current lifecycle of every Bay-registered task branch from the
+ * same journal-backed aggregate used by the Bay and PR APIs. */
+export function projectBranchLifecycles(state: BaysState): readonly BranchLifecycle[] {
+  return Object.values(state.byId)
+    .map((bay): BranchLifecycle => {
+      const base = {
+        bay: bay.id,
+        name: bay.name,
+        ...(bay.issue === undefined ? {} : { issue: bay.issue }),
+        ...(bay.actor === undefined ? {} : { actor: bay.actor }),
+        branch: bay.branch,
+        openedAt: bay.openedAt,
+      }
+      const pr = prForBay(state, bay.id)
+      if (
+        bay.headSha !== undefined &&
+        pr?.headSha === bay.headSha &&
+        pr.status === "integrated" &&
+        pr.integratedAt !== undefined &&
+        pr.integration !== undefined
+      ) {
+        return {
+          ...base,
+          status: "landed",
+          headSha: bay.headSha,
+          landed: {
+            pr: pr.id,
+            revision: pr.revision,
+            at: pr.integratedAt,
+            commit: pr.integration.commit,
+          },
+        }
+      }
+      if (bay.archive !== undefined) {
+        return {
+          ...base,
+          status: "archived",
+          headSha: bay.archive.headSha,
+          archived: {
+            at: bay.archive.archivedAt,
+            eventId: bay.archive.eventId,
+            preservedRef: bay.archive.preservedRef,
+          },
+        }
+      }
+      const revision =
+        bay.headSha === undefined || pr?.headSha !== bay.headSha
+          ? undefined
+          : pr.revisions.find(
+              (candidate) => candidate.revision === pr.revision && candidate.headSha === bay.headSha,
+            )
+      if (
+        bay.headSha !== undefined &&
+        pr !== undefined &&
+        revision?.submittedAt !== undefined &&
+        pr.status !== "withdrawn" &&
+        pr.status !== "canceled"
+      ) {
+        return {
+          ...base,
+          status: "submitted",
+          headSha: bay.headSha,
+          submitted: { pr: pr.id, revision: pr.revision, at: revision.submittedAt },
+        }
+      }
+      if (
+        bay.headSha !== undefined &&
+        bay.handoff?.headSha === bay.headSha &&
+        (pr === undefined || (pr.headSha === bay.headSha && pr.status === "pushed"))
+      ) {
+        return {
+          ...base,
+          status: "handoff-ready",
+          headSha: bay.headSha,
+          ready: {
+            at: bay.handoff.certifiedAt,
+            eventId: bay.handoff.eventId,
+            evidence: bay.handoff.evidence,
+          },
+        }
+      }
+      return { ...base, status: "open", ...(bay.headSha === undefined ? {} : { headSha: bay.headSha }) }
+    })
+    .toSorted((left, right) => left.openedAt.localeCompare(right.openedAt) || left.bay.localeCompare(right.bay))
 }
 
 export function isLivePR(status: PRStatus): boolean {

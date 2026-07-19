@@ -803,6 +803,38 @@ async function refreshBay(app: YrdCliApp, bay: Bay, io: YrdCliIO): Promise<Bay> 
   return refreshed
 }
 
+async function certifyBayHandoff(
+  app: YrdCliApp,
+  selector: string,
+  options: Readonly<{ branch: string; head: string; evidence: string; json?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  let bay = app.bays.get(selector)
+  if (bay === undefined) throw new Error(`yrd: no bay '${selector}'`)
+  // The Bay projection records the last observed workspace head, while the
+  // packet is cut after the agent's final commit. Refresh only when needed so
+  // retries stay fact-idempotent but a newly committed exact head can certify.
+  if (bay.headSha !== options.head) bay = await refreshBay(app, bay, io)
+  await app.bays.certifyHandoff({
+    bay: bay.id,
+    branch: options.branch,
+    headSha: options.head,
+    evidence: options.evidence,
+  })
+  const certified = app.bays.get(bay.id)
+  if (certified === undefined) throw new Error(`yrd: bay '${bay.id}' disappeared after handoff certification`)
+  const lifecycle = app.bays.branchLifecycles().find((candidate) => candidate.bay === certified.id)
+  if (lifecycle?.status !== "handoff-ready") {
+    throw new Error(`yrd: bay '${bay.id}' did not become handoff-ready`)
+  }
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.handoff", lifecycle },
+    createElement(BayStatusView, { bays: [certified] }),
+  )
+}
+
 async function closeBays(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -1403,7 +1435,12 @@ function sameIssueIntegratedCompositions(app: YrdCliApp, pr: PR): readonly Compo
 
 async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
   const bays = app.bays.list()
-  await printResult(io, jsonEnabled(options), { command: "bay.list", bays }, createElement(BayStatusView, { bays }))
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.list", bays, lifecycles: app.bays.branchLifecycles() },
+    createElement(BayStatusView, { bays }),
+  )
 }
 
 async function listPrs(
@@ -3301,6 +3338,21 @@ function buildProgram(
     .description("refresh work bays")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => refreshBays(installed(), selectors, options, io))
+  bay
+    .command("handoff <selector>")
+    .description("certify a materialized exact-head handoff")
+    .requiredOption("--branch <branch>", "exact branch recorded in the handoff packet")
+    .requiredOption("--head <sha>", "exact head recorded in the handoff packet")
+    .requiredOption("--evidence <ref>", "opaque materialized handoff reference")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) =>
+      certifyBayHandoff(
+        installed(),
+        selector,
+        options as Readonly<{ branch: string; head: string; evidence: string; json?: boolean }>,
+        io,
+      ),
+    )
   bay
     .command("submit [selector...]")
     .description("submit bays or branches")
