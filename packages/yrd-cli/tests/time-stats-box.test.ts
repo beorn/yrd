@@ -58,7 +58,7 @@ function rowContaining(app: { text: string }, needle: string): string {
  * `╰──…──╯`. This catches a row drawn over a box border (the reported glitch),
  * since a content glyph landing where a border cell belongs fails the check.
  */
-function assertBoxClean(text: string, title: string): void {
+function assertBoxClean(text: string, title: string): number {
   const rows = text.split("\n")
   const topIndex = rows.findIndex((row) => row.includes(`╭─ ${title} `))
   expect(topIndex, `top border for ${title}`).toBeGreaterThanOrEqual(0)
@@ -81,6 +81,7 @@ function assertBoxClean(text: string, title: string): void {
   const bottom = rows[bottomIndex]!
   expect(bottom[right], `${title} bottom-right corner`).toBe("╯")
   expect(/^[─]+$/u.test(bottom.slice(left + 1, right)), `${title} bottom edge unbroken`).toBe(true)
+  return bottomIndex
 }
 
 describe("TimeStatsBox", () => {
@@ -118,6 +119,10 @@ describe("TimeStatsBox", () => {
     const timeX = rowContaining(app, "╭─ TIME ").indexOf("╭─ TIME ")
     const timeRows = rows.map((row) => row.slice(timeX))
     const timeText = timeRows.join("\n")
+    expect(
+      timeRows.find((row) => row.includes("HR")),
+      "TIME names the metric column before its windows",
+    ).toMatch(/METRIC\s+HR/u)
 
     for (const section of ["INTEGRATED", "FAILED", "WAIT"]) {
       expect(timeText.match(new RegExp(section, "gu")), `${section} is named once in TIME`).toHaveLength(1)
@@ -159,8 +164,9 @@ describe("TimeStatsBox", () => {
     const render = createRenderer({ cols: 126, rows: 40 })
     const app = render(boxesElement({ facts: FACTS, now: NOW, earliestEventMs: HORIZON, width: 126 }))
     expect(rowContaining(app, "╭─ FLOW ")).toContain("╭─ TIME ")
-    assertBoxClean(app.text, "FLOW")
-    assertBoxClean(app.text, "TIME")
+    const flowBottom = assertBoxClean(app.text, "FLOW")
+    const timeBottom = assertBoxClean(app.text, "TIME")
+    expect(flowBottom, "side-by-side boxes share one bottom edge").toBe(timeBottom)
   })
 
   it("stacks the independently framed FLOW and TIME boxes on a narrow pane", () => {
