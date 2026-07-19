@@ -386,6 +386,59 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
+  it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
+    const { repo, featureSha } = await repository()
+    await git(repo, "switch", "-qc", "issue/second")
+    await writeFile(join(repo, "second.txt"), "second\n")
+    await git(repo, "add", "second.txt")
+    await git(repo, "commit", "-qm", "second feature")
+    const secondSha = await git(repo, "rev-parse", "HEAD")
+    await git(repo, "switch", "-q", "main")
+
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "issue/feature", "issue/second")
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 2,
+      steps: ["check"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const commands: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const tracedProcess = {
+      run: async (request: Parameters<typeof runtimeProcess.run>[0]) => {
+        commands.push([...request.argv])
+        return runtimeProcess.run(request)
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: tracedProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+    commands.length = 0
+
+    const runs = await app.queue.run({ prs: ["PR1", "PR2"] }, { runner: "test", leaseMs: 60_000 })
+
+    const rootFetches = commands.filter(
+      (argv) => argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && argv[3] === "fetch",
+    )
+    expect(runs).toMatchObject([{ status: "passed", prs: [{ id: "PR1" }, { id: "PR2" }] }])
+    // Every same-base PR shares the cycle's one authoritative root refresh.
+    expect(rootFetches).toHaveLength(1)
+    expect(rootFetches.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
+  })
+
   it("refreshes a shared journal before the host selects queued PRs", async () => {
     const { repo, featureSha } = await repository()
     const config: ResolvedYrdProjectConfig = {
