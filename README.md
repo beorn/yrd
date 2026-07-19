@@ -259,6 +259,23 @@ callers use the PR-native check-admission surface below.
 | `submit`  | Bays, PRs, or source branches; optional `--draft`     | Creates or advances PRs to `submitted`, or only `pushed` with `--draft`; never executes Queue work |
 | `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR                        |
 
+Submodule repositories are ready when `bay open` returns. Yrd recursively
+materializes the recorded gitlinks while keeping each Bay's refs, config, and
+working tree isolated. For every initial clone whose exact commit already
+exists in the source repository, Git borrows that matching local object store
+with `--reference`; only a genuinely new pin falls back to the configured
+remote. Yrd records that fallback boundary in repository-local Git config as
+`submodule.alternateLocation=superproject` and
+`submodule.alternateErrorStrategy=info`. There is no Yrd-specific cache knob.
+
+The Queue uses the same materializer for warm candidates and landing scratch
+worktrees. This makes Bay startup and repeated checks faster, avoids redundant
+network transfer and private pack copies, and still checks out the exact
+candidate gitlinks. Fresh standalone clones without a local source store fall
+back normally. Exact-SHA reachability proofs intentionally remain backed by
+fresh remote stores, so local borrowing cannot turn an unpushed pin into a
+passing delivery proof.
+
 `--head` is an alias for `--from`. `--queue` is an alias for `--base`. The
 canonical words are source branch (`--from`) and base branch (`--base`).
 

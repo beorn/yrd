@@ -4,7 +4,7 @@
  * @consumer @yrd/bay Git workspace adapter
  */
 import { existsSync } from "node:fs"
-import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises"
+import { chmod, mkdtemp, readFile, readdir, realpath, rm, unlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
@@ -142,13 +142,42 @@ describe("createGitWorkspace", () => {
   it("closes a clean worktree whose repository contains submodules", async () => {
     const { root, repo } = await repository()
     await addSubmodule(root, repo)
+    const unreachable = "never://network.example/dependency.git"
+    await git(repo, ["config", "-f", ".gitmodules", "submodule.vendor/dependency.url", unreachable])
+    await git(repo, ["config", "submodule.vendor/dependency.url", unreachable])
+    await git(repo, ["commit", "-qam", "make dependency remote unreachable"])
+    const unexpectedHookSync = join(root, "unexpected-post-checkout-submodule-sync")
+    const postCheckout = join(repo, ".git", "hooks", "post-checkout")
+    await writeFile(
+      postCheckout,
+      `#!/bin/sh\n[ "\${KM_NO_AUTO_SUBMODULE_UPDATE:-}" = "1" ] || : > "${unexpectedHookSync}"\n`,
+    )
+    await chmod(postCheckout, 0o755)
     await using process = createProcess()
     await using app = await createApp(await workspace(process, { repo, baysRoot: join(root, "bays") }))
 
     await runRequested(app, await app.bays.open({ name: "submodule-close" }))
     const bay = app.bays.get("B1")
     if (bay?.path === undefined) throw new Error("expected active Bay path")
-    await git(bay.path, ["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"])
+    expect(await git(bay.path, ["config", "--local", "--get", "submodule.alternateLocation"])).toMatchObject({
+      stdout: "superproject",
+    })
+    expect(await git(bay.path, ["config", "--local", "--get", "submodule.alternateErrorStrategy"])).toMatchObject({
+      stdout: "info",
+    })
+    expect(existsSync(join(bay.path, "vendor", "dependency", "dependency.txt"))).toBe(true)
+    const dependencyGitDir = (await git(join(bay.path, "vendor", "dependency"), ["rev-parse", "--absolute-git-dir"]))
+      .stdout
+    expect((await readFile(join(dependencyGitDir, "objects", "info", "alternates"), "utf8")).trim()).toBe(
+      join(await realpath(repo), ".git", "modules", "vendor", "dependency", "objects"),
+    )
+    expect((await git(join(bay.path, "vendor", "dependency"), ["remote", "get-url", "origin"])).stdout).toBe(
+      unreachable,
+    )
+    const objects = join(dependencyGitDir, "objects")
+    expect((await readdir(objects)).filter((name) => name !== "info" && name !== "pack")).toEqual([])
+    expect(existsSync(join(objects, "pack")) ? await readdir(join(objects, "pack")) : []).toEqual([])
+    expect(existsSync(unexpectedHookSync)).toBe(false)
 
     await runRequested(app, await app.bays.close({ bay: bay.id }))
 

@@ -4,6 +4,7 @@ import type { JsonValue } from "@yrd/core"
 import type { JobResult } from "@yrd/job"
 import type { Process } from "@yrd/process"
 import type { ConditionalLogger } from "loggily"
+import { materializeSubmodules } from "@yrd/bay"
 
 /**
  * Bounded warm candidate-worktree pool (merge-queue R40).
@@ -80,6 +81,7 @@ export function createCandidatePoolGit(
   const env = Object.fromEntries(
     Object.entries(environment).filter(([key, value]) => value !== undefined && !key.startsWith("GIT_")),
   ) as Record<string, string>
+  env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   return Object.freeze({
     async run(repo, args, allowFailure = false): Promise<CandidatePoolGitResult> {
       const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
@@ -186,16 +188,14 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     }
   }
 
-  async function hasSubmodules(worktree: string, ref: string): Promise<boolean> {
-    const probe = await git.run(worktree, ["cat-file", "-e", `${ref}:.gitmodules`], true)
-    return probe.code === 0
-  }
-
   async function materialize(worktree: string, ref: string): Promise<void> {
-    if (!(await hasSubmodules(worktree, ref))) return
     using _span = log?.span?.("materialize", { repo, ref })
-    const allow = ["-c", "protocol.file.allow=always"]
-    const updated = await git.run(worktree, [...allow, "submodule", "update", "--init", "--recursive", "--force"], true)
+    const updated = await materializeSubmodules(git, {
+      worktree,
+      referenceWorktree: repo,
+      force: true,
+      log: (message) => log?.debug?.(message),
+    })
     if (updated.code !== 0) {
       throw new Error(updated.stderr || updated.stdout || `could not materialize submodules for '${ref}'`)
     }
@@ -227,7 +227,10 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     using span = log?.span?.("reset", { repo, ref })
     const record = (clean: boolean, reason?: string): boolean => {
       if (span !== undefined) {
-        Object.assign(span.spanData, { outcome: clean ? "clean" : "unclean", ...(reason === undefined ? {} : { reason }) })
+        Object.assign(span.spanData, {
+          outcome: clean ? "clean" : "unclean",
+          ...(reason === undefined ? {} : { reason }),
+        })
       }
       return clean
     }
@@ -268,9 +271,8 @@ export function createCandidatePool(options: CandidatePoolOptions): CandidatePoo
     const normalized = local.split(sep).join("/")
     const ignored = await git.run(repo, ["check-ignore", "--quiet", "--no-index", "--", normalized], true)
     if (ignored.code !== 0) {
-      const exclude = (
-        await git.run(repo, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"])
-      ).stdout
+      const exclude = (await git.run(repo, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]))
+        .stdout
       if (exclude === "") throw new Error("yrd: candidate pool could not resolve the repository exclude path")
       const escaped = normalized.replace(/([\\[\]*?!#])/gu, "\\$1")
       await appendFile(exclude, `\n/${escaped}/\n`, { encoding: "utf8", mode: 0o600 })
