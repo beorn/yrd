@@ -75,7 +75,7 @@ describe("queue timeline storybook", () => {
       expect(frame).not.toContain("RUN LOGS")
       expect(frame).not.toContain("OUTPUT check#")
       expect(frame).not.toContain("DETAILS")
-      expect(frame).toContain("- @hab/super/21135-herdr-keybindings")
+      expect(frame).toContain("pr#42.1 @hab/super/21135-herdr-keybindings")
       expect(frame).toContain("0: submit")
       expect(frame).toContain("pr#42.1")
       expect(frame).toContain("Diff +324 / -323 lines")
@@ -460,7 +460,7 @@ describe("queue timeline storybook", () => {
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
           expect(term.screen.getText(), name).toContain("RUN main#4")
           expect(term.screen.getText(), name).toContain("passed, integrated")
-          expect(term.screen.getText(), name).toContain(`Committed as ${"b".repeat(40)} on main`)
+          expect(term.screen.getText(), name).toContain(`COMMIT ${"b".repeat(40)}`)
           expect(term.screen.getText(), name).not.toContain("QUEUE main")
         }
       } finally {
@@ -591,7 +591,7 @@ describe("queue timeline storybook", () => {
     }
   })
 
-  it("scrolls detail output independently and resumes tail-follow only at the end", async () => {
+  it("scrolls complete detail output and follows appended output only from the shared tail", async () => {
     const mixed = queueTimelineStories["mixed-completed"].snapshot
     const outputTemplate = queueTimelineStories["live-output-growth"].snapshot.outputs?.[0]
     if (outputTemplate === undefined) throw new Error("live-output-growth is missing its output fixture")
@@ -616,9 +616,10 @@ describe("queue timeline storybook", () => {
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("RUN main#3")
       expect(handle.text).toContain("detail-row-080")
+      expect(handle.text).not.toContain("detail-row-001")
 
-      // This long fixture makes the lossless follow contract observable: wheel
-      // input targets the detail pane, never the selected master-list row.
+      // Wheel input targets the one shared detail-tab scroller, never the
+      // selected master-list row or a nested output-only viewport.
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, -3)
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-001")
@@ -683,7 +684,7 @@ describe("queue timeline storybook", () => {
       await handle.press("l")
       await handle.press("l")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("Committed as")
+      expect(handle.text).toContain("COMMIT ")
 
       // Esc hides the detail pane; the list keeps running.
       await handle.press("Escape")
@@ -704,7 +705,8 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toMatch(/- \d{2}:\d{2} submitted by @cto/u)
       expect(handle.text).toContain("○ pending")
       expect(handle.text).toContain("Prepare release notes")
-      expect(handle.text).toContain("topic/pr1 - @yrd/core/21120-pr-state-notifications")
+      expect(handle.text).toContain("pr#1.1 @yrd/core/21120-pr-state-notifications")
+      expect(handle.text).toContain("topic/pr1")
       expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
       expect(handle.text).not.toContain("PR PR1 STATUS")
       expect(handle.text).not.toContain("SOURCE ")

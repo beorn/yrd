@@ -126,6 +126,14 @@ describe("queue watch user round 6", () => {
       description: "First description line\nSecond description line may wrap",
       correlation: { namespace: "tribe", id: "21514-round6-agent1" },
       requestedReviewers: ["@chief"],
+      checkRequests: [
+        {
+          revision: 4,
+          headSha: leadHead,
+          baseSha,
+          at: "2026-07-13T10:35:00.000Z",
+        },
+      ],
     }
     const partner = fixturePr("PR61", "integrated", "2026-07-13T10:31:00.000Z", "Partner subject", {
       actor: "@ci",
@@ -224,23 +232,29 @@ describe("queue watch user round 6", () => {
       expect(app.text).toContain("pr#60.4")
       expect(app.text).toContain("pr#61.1")
       expect(app.text).not.toContain("PR60.4")
-      expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr60 - @yrd/core/21514-detail-pane`)
+      expect(app.text).toContain("pr#60.4 @yrd/core/21514-detail-pane")
+      expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr60`)
+      expect(app.text).not.toContain(`${BRANCH_GLYPH} topic/pr60 - @yrd/core/21514-detail-pane`)
       expect(app.text).toContain("- Lead title may wrap across the detail pane")
       expect(app.text).toContain("  First description line")
       expect(app.text).toContain("  Second description line may wrap")
       expect(app.text).toContain("- note: visual confirmation required")
       expect(app.text).toContain("- correlation: tribe:21514-round6-agent1")
       expect(app.text).toContain("- requested reviewers: @chief")
+      expect(app.text).toMatch(/- \d{2}:\d{2} check requested/u)
+      expect(app.text).not.toMatch(/- check requested: \d{2}:\d{2}/u)
       expect(app.text).toMatch(/- \d{2}:\d{2} r4 integrated \(age 11:00\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r3 rejected \(visual-rejected: round-3 density was rejected\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r2 rejected \(visual-rejected: round-2 hierarchy was rejected\)/u)
-      expect(app.text).toMatch(/- \d{2}:\d{2} r1 rejected \(mock-mismatch: round-1 detail layout was rejected\)/u)
+      expect(app.text).toMatch(/- \d{2}:\d{2} r3 rejected \(err=visual-rejected — round-3 density was rejected\)/u)
+      expect(app.text).toMatch(/- \d{2}:\d{2} r2 rejected \(err=visual-rejected — round-2 hierarchy was rejected\)/u)
+      expect(app.text).toMatch(/- \d{2}:\d{2} r1 rejected \(err=mock-mismatch — round-1 detail layout was rejected\)/u)
       expect(app.text).toMatch(/- \d{2}:\d{2} submitted by @ci/u)
-      expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr61 - @yrd/core/21525-queue-watch`)
+      expect(app.text).toContain("pr#61.1 @yrd/core/21525-queue-watch")
+      expect(app.text).toContain(`${BRANCH_GLYPH} topic/pr61`)
       expect(app.text).toContain("- Partner subject")
       expect(app.text).toContain("Diff +324 / -323 lines")
       expect(app.text).toContain("diff unavailable (refs pruned)")
       expect(app.text).not.toContain("src/detail-pane.tsx")
+      expect(app.text).not.toContain("click to expand")
 
       const branchY = rows.findIndex((row) => row.slice(detailX).includes(`${BRANCH_GLYPH} topic/pr60`))
       const branchX = branchGlyphColumn(app, branchY)
@@ -264,13 +278,20 @@ describe("queue watch user round 6", () => {
       expect(app.cell(bodyX, bodyY).bold).not.toBe(true)
 
       const diff = pointOf(app.text, "Diff +324 / -323 lines")
+      const collapsedRows = app.text.split("\n")
+      expect(collapsedRows[diff[1] - 1]?.slice(detailX).trim(), "blank row above the diff summary").toBe("")
+      expect(collapsedRows[diff[1] + 1]?.slice(detailX).trim(), "blank row below the diff summary").toBe("")
+      expect(
+        collapsedRows.slice(diff[1] + 1, diff[1] + 4).some((line) => line.slice(detailX).includes("─")),
+        "a horizontal divider terminates the PR diff section",
+      ).toBe(true)
       await app.click(diff[0], diff[1])
       await app.waitForLayoutStable()
       expect(app.text).toContain("src/detail-pane.tsx")
       expect(app.text).toContain("+new detail")
 
-      const expandedDiff = pointOf(app.text, "Diff +324 / -323 lines")
-      await app.click(expandedDiff[0], expandedDiff[1])
+      const expandedPatch = pointOf(app.text, "+new detail")
+      await app.click(expandedPatch[0], expandedPatch[1])
       await app.waitForLayoutStable()
       expect(app.text).not.toContain("src/detail-pane.tsx")
       await app.press("Tab")
@@ -281,7 +302,7 @@ describe("queue watch user round 6", () => {
       const mergeTab = pointOf(app.text, "1: merge")
       await app.click(mergeTab[0], mergeTab[1])
       await app.waitForLayoutStable()
-      expect(app.text).toContain(`Committed as ${commit} on main`)
+      expect(app.text).toContain(`COMMIT ${commit}`)
       const divider = app.text.split("\n")[0]?.indexOf("│") ?? -1
       expect(
         app.text
@@ -393,6 +414,12 @@ describe("queue watch user round 6", () => {
       expect(app.cell(prepareX, tabsY + 2).bg, "one blank row below content inherits the tab fill").toEqual(
         app.cell(prepareX, tabsY).bg,
       )
+      expect(rows[tabsY - 2]?.slice(submitX - 2).trim(), "one unfilled blank row sits above the padded tab row").toBe(
+        "",
+      )
+      expect(rows[tabsY + 3]?.slice(submitX - 2).trim(), "one unfilled blank row sits below the padded tab row").toBe(
+        "",
+      )
       expect(rows[tabsY + 2]).not.toMatch(/◷\s+\d/u)
 
       const duration = /\d+(?:m(?:\d+s)?|s)/u.exec(statusRow)
@@ -408,17 +435,22 @@ describe("queue watch user round 6", () => {
     const app = createRenderer({ cols: 200, rows: 50 })(h(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      const checkTab = pointOf(app.text, "2: check")
+      const checkTab = pointOf(app.text, ": check")
       await app.click(checkTab[0], checkTab[1])
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
-      const jobY = rows.findIndex((row) => row.includes("JOB") && row.includes("yrd#J42-check"))
+      const jobY = rows.findIndex(
+        (row) =>
+          row.includes("JOB") && row.includes("yrd#J42-check") && row.includes("@hab/super/21135-herdr-keybindings"),
+      )
       const commandY = rows.findIndex((row) => row.includes("$ bun vitest run"))
       const outputY = rows.findIndex((row) => row.includes("125 tests collected"))
 
       expect(jobY).toBeGreaterThanOrEqual(0)
       expect(commandY).toBeGreaterThan(jobY)
       expect(outputY).toBeGreaterThan(commandY)
+      const divider = rows[0]?.indexOf("│") ?? -1
+      expect(rows[commandY - 1]?.slice(divider + 1).trim(), "one blank row separates metadata from execution").toBe("")
       expect(app.text).not.toContain("runner-herdr-07")
       expect(app.text).not.toContain("DETAILS")
       expect(app.text).not.toContain("COMMAND $ ")
@@ -429,11 +461,140 @@ describe("queue watch user round 6", () => {
       const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
       const outputX = rows[outputY]?.indexOf("125 tests collected") ?? -1
       const jobIdX = rows[jobY]?.indexOf("J42-check") ?? -1
+      const jobLabelX = rows[jobY]?.indexOf("JOB") ?? -1
+      const issueX = rows[jobY]?.indexOf("@hab/super/21135-herdr-keybindings") ?? -1
+      expect(app.cell(jobLabelX, jobY).bold).toBe(true)
       expect(app.cell(jobIdX, jobY).bold).toBe(true)
+      expect(app.cell(issueX, jobY).bold).toBe(true)
       expect(app.cell(commandX, commandY).bold).toBe(true)
       expect(app.cell(outputX, outputY).fg, "inline output is greyed against the command").not.toEqual(
         app.cell(commandX, commandY).fg,
       )
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("renders every recorded command with its own output block in attempt order", async () => {
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const result = snapshot.results[0]
+    const run = result?.running.find((candidate) => candidate.id === "R42")
+    if (result === undefined || run === undefined) throw new Error("production fixture is missing R42")
+    const data = queueShowData(run)
+    const check = data.steps.find((row) => row.step === "check")
+    if (check === undefined) throw new Error("production fixture is missing the check step")
+    const repeated = {
+      ...data,
+      steps: [
+        ...data.steps.filter((row) => row.step !== "check"),
+        { ...check, uuid: "J42-check-1", attempt: "1", command: "bun vitest run first.spec.ts" },
+        { ...check, uuid: "J42-check-2", attempt: "2", command: "bun vitest run second.spec.ts" },
+      ],
+    }
+    const app = createRenderer({ cols: 120, rows: 36 })(
+      h(QueueWorkflowStepTabs, {
+        data: repeated,
+        row: snapshot.projection.rows.find((candidate) => candidate.pr === "PR42"),
+        outputs: [
+          { run: "R42", step: "check", attempt: 1, path: "attempt-1.log", text: "first attempt output" },
+          { run: "R42", step: "check", attempt: 2, path: "attempt-2.log", text: "second attempt output" },
+        ],
+        compact: true,
+        active: false,
+        highlightPr: "PR42",
+        prs: result.prs,
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const checkTab = pointOf(app.text, ": check")
+      await app.click(checkTab[0], checkTab[1])
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const firstCommand = rows.findIndex((row) => row.includes("$ bun vitest run first.spec.ts"))
+      const firstOutput = rows.findIndex((row) => row.includes("first attempt output"))
+      const secondCommand = rows.findIndex((row) => row.includes("$ bun vitest run second.spec.ts"))
+      const secondOutput = rows.findIndex((row) => row.includes("second attempt output"))
+
+      expect(firstCommand).toBeGreaterThanOrEqual(0)
+      expect(firstOutput).toBeGreaterThan(firstCommand)
+      expect(secondCommand).toBeGreaterThan(firstOutput)
+      expect(secondOutput).toBeGreaterThan(secondCommand)
+      expect(rows[firstCommand - 1]?.trim()).toBe("")
+      expect(rows[secondCommand - 1]?.trim()).toBe("")
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("preserves recorded merge attempts instead of collapsing them into one synthetic command", async () => {
+    const snapshot = queueTimelineStories["production-overview"].snapshot
+    const result = snapshot.results[0]
+    const run = result?.running.find((candidate) => candidate.id === "R42")
+    if (result === undefined || run === undefined) throw new Error("production fixture is missing R42")
+    const data = queueShowData(run)
+    const merge = data.steps.find((row) => row.step === "merge")
+    if (merge === undefined) throw new Error("production fixture is missing the merge step")
+    const repeated = {
+      ...data,
+      steps: [
+        ...data.steps.filter((row) => row.step !== "merge"),
+        { ...merge, attempt: "1", command: "git merge first-head" },
+        { ...merge, attempt: "2", command: "git merge second-head" },
+      ],
+    }
+    const app = createRenderer({ cols: 120, rows: 36 })(
+      h(QueueWorkflowStepTabs, {
+        data: repeated,
+        row: snapshot.projection.rows.find((candidate) => candidate.pr === "PR42"),
+        outputs: [
+          { run: "R42", step: "merge", attempt: 1, path: "attempt-1.log", text: "first merge failed" },
+          { run: "R42", step: "merge", attempt: 2, path: "attempt-2.log", text: "second merge passed" },
+        ],
+        compact: true,
+        active: false,
+        highlightPr: "PR42",
+        prs: result.prs,
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const mergeTab = pointOf(app.text, ": merge")
+      await app.click(mergeTab[0], mergeTab[1])
+      await app.waitForLayoutStable()
+      expect(app.text).toMatch(
+        /\$ git merge first-head[\s\S]*first merge failed[\s\S]*\$ git merge second-head[\s\S]*second merge passed/u,
+      )
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("keeps the tail of a long expanded diff reachable inside the shared submit tab scroll", async () => {
+    const story = queueTimelineStories["production-overview"]
+    const firstDiff = story.snapshot.diffs?.[0]
+    if (firstDiff === undefined || "unavailable" in firstDiff)
+      throw new Error("production fixture has no available diff")
+    const tail = "round-8-long-diff-tail"
+    const snapshot = {
+      ...story.snapshot,
+      diffs: [
+        {
+          ...firstDiff,
+          patch: `${Array.from({ length: 90 }, (_, index) => `+long diff row ${index + 1}`).join("\n")}\n+${tail}`,
+        },
+      ],
+    }
+    const app = createRenderer({ cols: 200, rows: 34 })(h(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      const summary = pointOf(app.text, "Diff +")
+      await app.click(summary[0], summary[1])
+      await app.waitForLayoutStable()
+      expect(app.text).not.toContain(tail)
+      for (let index = 0; index < 40; index += 1) await app.wheel(150, 25, 3)
+      await app.waitForLayoutStable()
+      expect(app.text).toContain(tail)
     } finally {
       app.unmount()
     }
@@ -471,9 +632,14 @@ describe("queue watch user round 6", () => {
       steps: [merge],
       results: { merge: { commit: "b".repeat(40), baseSha: "a".repeat(40) } },
     })
-    const data = queueShowData(run)
-    const runHeadSha = data.prs[0]?.headSha
+    const projected = queueShowData(run)
+    const runHeadSha = projected.prs[0]?.headSha
     if (runHeadSha === undefined) throw new Error("round-6 merge fixture has no head SHA")
+    const nativeCommand = `git merge --no-ff --no-edit ${runHeadSha}`
+    const data = {
+      ...projected,
+      steps: projected.steps.map((row) => (row.step === "merge" ? { ...row, command: nativeCommand } : row)),
+    }
     const app = createRenderer({ cols: 100, rows: 30 })(
       h(QueueWorkflowStepTabs, {
         data,
@@ -489,8 +655,8 @@ describe("queue watch user round 6", () => {
       const mergeTab = pointOf(app.text, "1: merge")
       await app.click(mergeTab[0], mergeTab[1])
       await app.waitForLayoutStable()
-      expect(app.text).toContain(`Committed as ${data.integration?.commit} on main`)
-      expect(app.text).toContain(`$ git merge --no-ff --no-edit ${runHeadSha}`)
+      expect(app.text).toContain(`COMMIT ${data.integration?.commit}`)
+      expect(app.text).toContain(`$ ${nativeCommand}`)
       expect(app.text).toContain(`PARENTS ${data.integration?.baseSha} ${runHeadSha}`)
       expect(app.text).not.toContain(`MERGE ${data.integration?.commit}`)
       expect(app.text).not.toMatch(/Waiting for (?:first )?(?:input|output)/u)

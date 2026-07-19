@@ -587,7 +587,7 @@ describe("recut fast-forward gitlink resolution", () => {
     expect(await isAncestor(join(repo, "dep"), moduleC, moduleB)).toBe(false)
 
     const headSha = await carrier(repo, sourceBase, moduleB)
-    await advanceBase(repo, moduleC)
+    const targetSha = await advanceBase(repo, moduleC)
 
     const dirtyBefore = await git(repo, ["status", "--porcelain"])
     await using process = createProcess()
@@ -604,7 +604,14 @@ describe("recut fast-forward gitlink resolution", () => {
       failure: {
         kind: "refusal",
         code: "recut-gitlink-conflict",
-        message: expect.stringContaining("neither is an ancestor of the other"),
+        message: expect.stringMatching(
+          new RegExp(
+            `target root '${targetSha}' pins submodule 'dep' to '${moduleC}'.*` +
+              `replayed authored root '${headSha}' pins it to '${moduleB}'.*` +
+              "ancestry walk failed because neither submodule commit is an ancestor of the other",
+            "u",
+          ),
+        ),
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)

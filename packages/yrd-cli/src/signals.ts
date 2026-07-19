@@ -7,6 +7,7 @@ import { createExclusive } from "@yrd/persistence"
 import type { Process } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
+import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
 import type { SignalRouteTarget, SignalRoutes } from "./config.ts"
 
 const TextSchema = z.string().trim().min(1)
@@ -569,14 +570,18 @@ function forgetOpened(state: CursorState, requestId: string, recipient: string):
 function deliveryText(delivery: SignalDelivery): string {
   const { event } = delivery
   if (event.kind === "pr/rejected") {
+    const failure = actionableFailure({
+      code: "pr-rejected",
+      message: event.detail ?? `PR ${event.pr} revision ${event.revision} was rejected at step ${event.step}`,
+    })
     return [
       `Yrd rejected ${event.pr} revision ${event.revision} at step ${event.step}.`,
       `run=${event.run}`,
       `head=${event.headSha}`,
       ...(event.evidence === undefined ? [] : [`evidence=${event.evidence}`]),
-      ...(event.detail === undefined ? [] : [`detail=${event.detail}`]),
+      formatActionableFailure(failure),
       `event=${event.id}`,
-    ].join(" ")
+    ].join("\n")
   }
   if (event.kind === "pr/needs-review") {
     return `Yrd needs review for ${event.pr} revision ${event.revision}. head=${event.headSha} event=${event.id}`
@@ -585,7 +590,11 @@ function deliveryText(delivery: SignalDelivery): string {
     return `Yrd integrated ${event.prs.map(({ pr }) => pr).join(", ")} at ${event.landingSha}. run=${event.run} event=${event.id}`
   }
   if (event.kind === "run/failed") {
-    return `Yrd failed ${event.prs.map(({ pr }) => pr).join(", ")}. run=${event.run} ${event.error.code}: ${event.error.message} event=${event.id}`
+    return [
+      `Yrd failed ${event.prs.map(({ pr }) => pr).join(", ")}. run=${event.run}`,
+      formatActionableFailure(actionableFailure(event.error)),
+      `event=${event.id}`,
+    ].join("\n")
   }
   throw new Error(`yrd: ${event.kind} is a terminal closure signal and is never delivered as a message`)
 }

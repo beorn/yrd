@@ -1077,6 +1077,40 @@ describe("runYrd", () => {
     expect(JSON.parse(refusal.stderr())).toMatchObject({ command: "pr.merge", pr: "PR6", position: 6 })
   })
 
+  it("windows only the unfiltered human PR list and never wraps revision counts", async () => {
+    const app = await createApp()
+    for (const index of Array.from({ length: 520 }, (_, offset) => offset + 1)) {
+      await app.bays.submit({
+        branch: `topic/list-${index}`,
+        headSha: index.toString(16).padStart(40, "0"),
+        base: "main",
+      })
+    }
+
+    const expected = Array.from({ length: 20 }, (_, offset) => `PR${offset + 501}`)
+    for (const columns of [80, 120]) {
+      const human = outputIO({ columns })
+      expect(await runYrd(app, yrd("pr", "list"), human.io), human.stderr()).toBe(0)
+      const physical = stripAnsi(human.stdout())
+        .split("\n")
+        .filter((row) => row !== "")
+      expect(physical).toHaveLength(expected.length + 1)
+      expect(physical.slice(1).map((row) => row.match(/pr#(\d+)\.1/u)?.[1])).toEqual(expected.map((id) => id.slice(2)))
+      expect(physical).not.toContainEqual(expect.stringMatching(/^\s*\d+\s*$/u))
+    }
+
+    const json = outputIO()
+    expect(await runYrd(app, yrd("pr", "list", "--json"), json.io), json.stderr()).toBe(0)
+    const jsonIds = (JSON.parse(json.stdout()) as { prs: readonly PR[] }).prs.map(({ id }) => id)
+    expect(jsonIds).toHaveLength(520)
+    expect(jsonIds.at(0)).toBe("PR1")
+    expect(jsonIds.at(-1)).toBe("PR520")
+
+    const filtered = outputIO({ columns: 120 })
+    expect(await runYrd(app, yrd("pr", "list", "--base", "main"), filtered.io), filtered.stderr()).toBe(0)
+    expect(stripAnsi(filtered.stdout()).split("\n").filter(Boolean)).toHaveLength(521)
+  })
+
   it("executes bare projections with their canonical JSON discriminators", async () => {
     const app = await createApp()
     const surfaces = [
@@ -1125,7 +1159,7 @@ describe("runYrd", () => {
     expect(submitHelp.stdout()).toContain("Authored root carrier")
     expect(submitHelp.stdout()).toContain("$ yrd pr submit <branch> --draft")
     expect(submitHelp.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(submitHelp.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
+    expect(submitHelp.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
 
     expect(await runYrd(app, yrd("pr", "recut", "--help"), help.io), help.stderr()).toBe(0)
     expect(help.stdout()).toContain("Usage: yrd pr recut [options] <selector>")
@@ -1135,7 +1169,7 @@ describe("runYrd", () => {
     expect(help.stdout()).toContain("Authored root carrier")
     expect(help.stdout()).toContain("$ yrd pr submit <branch> --draft")
     expect(help.stdout()).toContain("$ yrd pr recut <PR> --queue")
-    expect(help.stdout()).toMatch(/no composition\s+manifest or manual recut/u)
+    expect(help.stdout()).toMatch(/no\s+composition\s+manifest or manual recut/u)
   })
 
   it("draft-registers an authored carrier and queues a recut revision on the same PR", async () => {
@@ -2280,6 +2314,115 @@ describe("runYrd", () => {
     expect(close.stdout()).toContain("B1")
     expect(close.stdout()).toContain("closed")
     expect(app.state().bays.byId.B1?.status).toBe("closed")
+  })
+
+  it("certifies exact-head handoff readiness and exposes the shared lifecycle projection", async () => {
+    const app = await createApp()
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "handoff-cli", "--json"), open.io), open.stderr()).toBe(0)
+
+    const before = outputIO()
+    expect(await runYrd(app, yrd("bay", "--json"), before.io), before.stderr()).toBe(0)
+    expect(JSON.parse(before.stdout())).toMatchObject({
+      command: "bay.list",
+      lifecycles: [{ bay: "B1", branch: "issue/handoff-cli", headSha: HEAD_SHA, status: "open" }],
+    })
+
+    const handoff = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "B1",
+          "--branch",
+          "issue/handoff-cli",
+          "--head",
+          HEAD_SHA,
+          "--evidence",
+          "@km/handoff/handoff-cli.md",
+          "--json",
+        ),
+        handoff.io,
+      ),
+      handoff.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(handoff.stdout())).toMatchObject({
+      command: "bay.handoff",
+      certification: { headSha: HEAD_SHA, evidence: "@km/handoff/handoff-cli.md" },
+      lifecycle: {
+        bay: "B1",
+        branch: "issue/handoff-cli",
+        headSha: HEAD_SHA,
+        status: "handoff-ready",
+        ready: { evidence: "@km/handoff/handoff-cli.md" },
+      },
+    })
+  })
+
+  it("returns the durable certification when an exact handoff retry is already submitted", async () => {
+    const app = await createApp()
+    const evidence = "@km/handoff/submitted-retry.md"
+    const args = yrd(
+      "bay",
+      "handoff",
+      "B1",
+      "--branch",
+      "issue/submitted-retry",
+      "--head",
+      HEAD_SHA,
+      "--evidence",
+      evidence,
+      "--json",
+    )
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "submitted-retry", "--json"), open.io), open.stderr()).toBe(0)
+    const first = outputIO()
+    expect(await runYrd(app, args, first.io), first.stderr()).toBe(0)
+    await app.bays.intake({ bay: "B1", headSha: HEAD_SHA })
+    await app.bays.submit({ pr: "PR1" })
+
+    const retry = outputIO()
+    expect(await runYrd(app, args, retry.io), retry.stderr()).toBe(0)
+    expect(JSON.parse(retry.stdout())).toMatchObject({
+      command: "bay.handoff",
+      certification: { headSha: HEAD_SHA, evidence },
+      lifecycle: { bay: "B1", headSha: HEAD_SHA, status: "submitted" },
+    })
+  })
+
+  it("refreshes the Bay before certifying a newly committed handoff head", async () => {
+    const app = await createApp({ refreshedHead: MERGED_SHA })
+    const open = outputIO()
+    expect(await runYrd(app, yrd("bay", "open", "fresh-handoff", "--json"), open.io), open.stderr()).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ headSha: HEAD_SHA })
+
+    const handoff = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "handoff",
+          "B1",
+          "--branch",
+          "issue/fresh-handoff",
+          "--head",
+          MERGED_SHA,
+          "--evidence",
+          "@km/handoff/fresh-handoff.md",
+          "--json",
+        ),
+        handoff.io,
+      ),
+      handoff.stderr(),
+    ).toBe(0)
+    expect(app.bays.get("B1")).toMatchObject({ headSha: MERGED_SHA })
+    expect(app.bays.branchLifecycles()[0]).toMatchObject({ status: "handoff-ready", headSha: MERGED_SHA })
+    expect(Object.values(app.state().jobs.byId)).toContainEqual(
+      expect.objectContaining({ definition: "bay.refresh", status: "passed" }),
+    )
   })
 
   it("records tracker-neutral issue and actor links when opening a bay", async () => {
@@ -5020,7 +5163,7 @@ describe("runYrd", () => {
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
       expect.soft(status.stdout()).toContain("⧗")
-      expect.soft(status.stdout()).toContain("apply-conflict: PR 'PR1' could not be applied")
+      expect.soft(status.stdout()).toContain("err=apply-conflict — PR 'PR1' could not be applied")
       expect.soft(status.stdout()).toContain(`evidence: ${artifact}`)
       expect.soft(status.stdout()).not.toContain("next:")
       expect.soft(status.stdout()).not.toContain("hint:")
@@ -5047,7 +5190,7 @@ describe("runYrd", () => {
       expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
       expect.soft(frame).toContain("OPEN 1")
       expect.soft(frame).toContain("feat(cli): keep runnable work visible")
-      expect.soft(frame).toContain("apply-conflict: PR 'PR1' could not be applied")
+      expect.soft(frame).toContain("err=apply-conflict — PR 'PR1' could not be applied")
       expect.soft(frame).toContain(`evidence: ${artifact}`)
       expect.soft(frame).not.toContain("next:")
       expect.soft(frame).not.toContain("released maintenance")
@@ -6513,7 +6656,7 @@ describe("runYrd", () => {
 
     const showHuman = await renderString(createElement(QueueShowView, { data: show }), {
       width: 120,
-      height: 20,
+      height: 40,
       plain: true,
     })
     expect(showHuman).toContain("TOTAL")
@@ -7063,11 +7206,15 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("bay", "adopt", "old-branch"), usage.io)).toBe(2)
     expect(usage.stdout()).toBe("")
     expect(usage.stderr()).toContain("too many arguments")
+    expect(usage.stderr()).toContain("err=invalid-arguments")
+    expect(usage.stderr()).toContain("resolve:")
 
     const refusal = outputIO()
     expect(await runYrd(app, yrd("bay", "close", "missing"), refusal.io)).toBe(1)
     expect(refusal.stdout()).toBe("")
     expect(refusal.stderr()).toContain("no bay 'missing'")
+    expect(refusal.stderr()).toContain("err=request-refused")
+    expect(refusal.stderr()).toContain("cause:")
 
     const missingPR = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR404"), missingPR.io)).toBe(1)
@@ -7114,6 +7261,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd(), infrastructure.io)).toBe(3)
     expect(infrastructure.stdout()).toBe("")
     expect(infrastructure.stderr()).toContain("corrupt event log")
+    expect(infrastructure.stderr()).toContain("err=unexpected")
+    expect(infrastructure.stderr()).toContain("resolve:")
   })
 
   it("projects installed queue administration and cancels an idle watch deterministically", async () => {
@@ -7151,7 +7300,20 @@ describe("runYrd", () => {
 
     const audit = outputIO()
     expect(await runYrd(app, yrd("queue", "audit", "--json"), audit.io, services)).toBe(1)
-    expect(JSON.parse(audit.stdout())).toMatchObject({ findings: [{ code: "operator-finding" }] })
+    expect(JSON.parse(audit.stdout())).toMatchObject({
+      findings: [
+        {
+          code: "operator-finding",
+          cause: "inspect runner",
+          resolution: ["Correct the cause above, then retry the same Yrd command."],
+        },
+      ],
+    })
+    const auditHuman = outputIO()
+    expect(await runYrd(app, yrd("queue", "audit"), auditHuman.io, services)).toBe(1)
+    expect(auditHuman.stdout()).toContain("err=operator-finding")
+    expect(auditHuman.stdout()).toContain("cause: inspect runner")
+    expect(auditHuman.stdout()).toContain("resolve:")
 
     const controller = new AbortController()
     const sleeps: number[] = []
@@ -8204,7 +8366,12 @@ describe("typed issue landing bridge", () => {
     expect({ snapshots, advances }).toEqual({ snapshots: 6, advances: 3 })
     expect(exhausted.stdout()).toBe("")
     expect(exhausted.stderr()).toBe(
-      "yrd: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'\n",
+      [
+        "yrd: err=request-refused",
+        "cause: journal changed while reading PR 'PR1' runs; retry with 'yrd pr runs PR1 --json'",
+        "resolve: yrd pr runs PR1 --json",
+        "",
+      ].join("\n"),
     )
   })
 })

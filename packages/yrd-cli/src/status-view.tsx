@@ -2,6 +2,12 @@ import { pathToFileURL } from "node:url"
 import type { Bay, PR, PRRegression } from "@yrd/bay"
 import type { Contest, ContestEvaluationRun } from "@yrd/contest"
 import { Box, Link, Table, Text, type TableColumn } from "silvery"
+import {
+  actionableFailure,
+  actionableFailureSummary,
+  formatActionableFailure,
+  type ActionableFailure,
+} from "./actionable-error.ts"
 import { formatDuration } from "./runner-timeline.ts"
 import { projectPRTaskStatus, type StatusGlyph, type TaskStatus, type TaskStatusFields } from "./task-status.ts"
 
@@ -12,6 +18,7 @@ type EvaluationRow = Readonly<{
   generation: string
   verdict: string
   summary: string
+  failure?: ActionableFailure
   evidenceLabel: string
   evidenceHref?: string
 }>
@@ -106,10 +113,19 @@ function evaluatorVerdict(run: ContestEvaluationRun | undefined): string {
 function evaluatorSummary(run: ContestEvaluationRun | undefined): string {
   if (run?.result?.summary !== undefined) return run.result.summary
   const job = run?.job
-  if (job?.status === "failed") return job.error.message
-  if (job?.status === "lost") return job.lostReason
+  if (job?.status === "failed") return actionableFailureSummary(actionableFailure(job.error))
+  if (job?.status === "lost") {
+    return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }))
+  }
   if (job !== undefined && "detail" in job && job.detail !== undefined) return job.detail
   return "-"
+}
+
+function evaluatorFailure(run: ContestEvaluationRun | undefined): ActionableFailure | undefined {
+  const job = run?.job
+  if (job?.status === "failed") return actionableFailure(job.error)
+  if (job?.status === "lost") return actionableFailure({ code: "job-lost", message: job.lostReason })
+  return undefined
 }
 
 function primaryEvidence(run: ContestEvaluationRun | undefined):
@@ -139,6 +155,7 @@ function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
         const runs = evaluation?.runs.length ? evaluation.runs : [undefined]
         return runs.map((run) => {
           const evidence = primaryEvidence(run)
+          const failure = evaluatorFailure(run)
           return {
             attempt: id,
             state: attempt.status,
@@ -146,6 +163,7 @@ function heldOutEvaluationRows(contest: Contest): EvaluationRow[] {
             generation: run === undefined ? "-" : String(run.generation),
             verdict: evaluatorVerdict(run),
             summary: evaluatorSummary(run),
+            ...(failure === undefined ? {} : { failure }),
             evidenceLabel: evidence?.label ?? "-",
             ...(evidence === undefined ? {} : { evidenceHref: evidence.href }),
           }
@@ -412,7 +430,7 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
         />
       </Box>
       {evaluations.length > 0 && (
-        <Box marginTop={1}>
+        <Box marginTop={1} flexDirection="column">
           <Table
             data={evaluations}
             padding={1}
@@ -447,6 +465,15 @@ export function ContestStatusView({ contest }: { contest: Contest }) {
               },
             ]}
           />
+          {evaluations.flatMap((evaluation, index) =>
+            evaluation.failure === undefined
+              ? []
+              : [
+                  <Text key={`${evaluation.attempt}:${evaluation.evaluator}:${index}`} wrap="wrap">
+                    {formatActionableFailure(evaluation.failure)}
+                  </Text>,
+                ],
+          )}
         </Box>
       )}
     </Box>

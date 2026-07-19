@@ -89,6 +89,11 @@ knows the failure kind. `usage`, `configuration`, `refusal`, and
 condition and `message` remains presentation text. Untyped exceptions are not
 silently inferred from their wording by downstream callers.
 
+Human adapters project that immutable fact as `err=<code>`, a one-line cause,
+and resolution steps (plus a reference for deep cases). The projection stays
+outside `FailureFact`, so historical journal rows gain better guidance without
+a schema migration.
+
 ## Reactive State
 
 `yrd.state` is a synchronous `ReadSignal<DeepReadonly<State>>`. Domain objects

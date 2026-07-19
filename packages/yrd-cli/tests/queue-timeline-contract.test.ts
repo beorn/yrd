@@ -210,7 +210,8 @@ describe("queue timeline 21106 contract", () => {
   })
 
   it("renders the user-settled row contract at 160 columns", async () => {
-    const rows = (await renderTimeline(contractProjection(), 160)).map((row) => row.trimEnd())
+    const projection = contractProjection()
+    const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
     const pending = rows[rowIndex(rows, "pr#1.1")]
     const lead = rows[rowIndex(rows, "pr#42.1")]
     const partner = rows[rowIndex(rows, "pr#43.1")]
@@ -221,15 +222,15 @@ describe("queue timeline 21106 contract", () => {
     // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend\s+-\s+pr#1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
+    expect(pending?.trim()).toMatch(
+      /^16:40:00 ○ pend\s+-\s+pr#1\.1 for @yrd\/core\/21120-pr-state-notifications\s+@cto\s+50:00$/u,
+    )
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 pr#42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
+      /^17:10:00 ● run\s+main#42 pr#42\.1 for @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
     )
-    expect(partner?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 pr#43\.1\s+\S topic\/pr43 \(2:check\)\s+@agent\/5 34:00 20:00$/u,
-    )
+    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 for @si\/ui\/21119-split-pane\s+@agent\/5 34:00\s+-$/u)
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
+      /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
     )
     expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
 
@@ -237,6 +238,37 @@ describe("queue timeline 21106 contract", () => {
     // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
     for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
     expect(pending).not.toContain("main#")
+  })
+
+  it("keys continuation rows by base and run, and keeps the selected issue blue", async () => {
+    const source = contractProjection()
+    const lead = source.rows.find((row) => row.pr === "PR42")
+    const partner = source.rows.find((row) => row.pr === "PR43")
+    if (lead === undefined || partner === undefined)
+      throw new Error("contract fixture is missing the active batched run")
+    const projection = {
+      ...source,
+      rows: [lead, { ...partner, id: `release:${partner.id}`, base: "release" }],
+      display: { ...source.display, shown: 2, hidden: 0 },
+    }
+    const app = createRenderer({ cols: 160, rows: 30 })(
+      createElement(QueueTimelineView, { projection, columns: 160, nav: true, cursorKey: 0 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const leadY = rowIndex(rows, "@hab/super/21135-herdr-keybindings")
+      const partnerY = rowIndex(rows, "@si/ui/21119-split-pane")
+      const leadIssueX = rows[leadY]?.indexOf("@hab/super/21135-herdr-keybindings") ?? -1
+      const partnerIssueX = rows[partnerY]?.indexOf("@si/ui/21119-split-pane") ?? -1
+      const leadForX = rows[leadY]?.indexOf("for") ?? -1
+
+      expect(rows[partnerY]).toContain("release#42")
+      expect(app.cell(leadIssueX, leadY).fg).toEqual(app.cell(partnerIssueX, partnerY).fg)
+      expect(app.cell(leadIssueX, leadY).fg).not.toEqual(app.cell(leadForX, leadY).fg)
+    } finally {
+      app.unmount()
+    }
   })
 
   it("uses distinct semantic queue glyphs and removes the redundant task/ branch prefix", async () => {
@@ -262,7 +294,7 @@ describe("queue timeline 21106 contract", () => {
     const productionRows = (await renderTimeline(production, 160)).map((row) => row.trimEnd())
     const environment = productionRows[rowIndex(productionRows, "pr#6.1")]
     expect(environment).toContain("× env")
-    expect(environment).toContain("(queue-environment)")
+    expect(environment).toContain("(err=queue-environment)")
   })
 
   it("folds a consecutive same-PR outcome storm to one selectable row and expands it on select", async () => {
@@ -350,7 +382,8 @@ describe("queue timeline 21106 contract", () => {
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
     const lead = rows[rowIndex(rows, "pr#42.1")]
     expect(lead).toContain("main#42")
-    expect(lead).toContain("2:check")
+    expect(lead).toContain("for @hab/super/21135-herdr-keybindi…")
+    expect(lead).not.toContain("2:check")
     expect(lead).toContain("36:00")
     expect(lead).toContain("20:00")
     expect(lead).not.toContain("◷")
@@ -533,7 +566,7 @@ describe("queue timeline 21106 contract", () => {
     // queue-environment-refused (25 cells) shortens at its last semantic
     // boundary; nothing mid-token, no lost fixed columns.
     const environment = rows[rowIndex(rows, "pr#6.1")]
-    expect(environment).toContain("queue-environment")
+    expect(environment).toContain("err=queue-environment")
     expect(environment).not.toContain("queue-environment-")
     const canceled = rows[rowIndex(rows, "pr#7.1")]
     expect(canceled).toContain("queue-canceled")
@@ -698,15 +731,17 @@ describe("queue timeline 21106 contract", () => {
     expect(frame).toContain("╭─ RUNNER ")
     expect(frame).not.toContain("╭─ STATUS ")
 
-    for (const row of projection.rows) {
+    for (const [index, row] of projection.rows.entries()) {
       const rendered = rows[rowIndex(rows, formatQueuePrId(row.pr, row.revision))]
       if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
-      if (row.timestamp !== null) expect(rendered, row.id).toContain(wallClock(row.timestamp))
+      const continuation = index > 0 && row.run !== undefined && projection.rows[index - 1]?.run === row.run
+      if (row.timestamp !== null && !continuation) expect(rendered, row.id).toContain(wallClock(row.timestamp))
       if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
-      if (row.step !== undefined) expect(rendered, row.id).toContain(row.step)
+      if (row.issue !== undefined) expect(rendered, row.id).toContain(row.issue)
+      else if (row.step !== undefined && !continuation) expect(rendered, row.id).toContain(row.step)
       if (row.ageMs !== null) expect(rendered, row.id).toContain(duration(row.ageMs))
       // Run duration is a bare dimmed time now \u2014 no `\u25f7` glyph (item S).
-      if (row.totalMs !== null) expect(rendered, row.id).toContain(duration(row.totalMs))
+      if (row.totalMs !== null && !continuation) expect(rendered, row.id).toContain(duration(row.totalMs))
     }
   })
 
@@ -723,13 +758,13 @@ describe("queue timeline 21106 contract", () => {
       // background across the whole row; its sibling does not. Scope to actual
       // list rows (they start with a clock) so the DETAIL pane's identity title
       // — which also names the selected PR (item M) — isn't mistaken for a row.
-      const isListRow = (row: string): boolean => /^\s*\d{2}:\d{2}:\d{2}/u.test(row)
+      const isListRow = (row: string): boolean => /^\s*(?:\d{2}:\d{2}:\d{2}|-)\s/u.test(row)
       const cursorRow = frame.findIndex((row) => row.includes("pr#42.1") && isListRow(row))
       const siblingRow = frame.findIndex((row) => row.includes("pr#43.1") && isListRow(row))
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""
-      for (const anchor of ["●", "pr#42.1", "2:check"]) {
+      for (const anchor of ["●", "pr#42.1", "@hab/super/21135-herdr-keybindings"]) {
         const column = cursorText.indexOf(anchor)
         expect(column, anchor).toBeGreaterThanOrEqual(0)
         expect(handle.cell(column, cursorRow).bg, `selection bg under ${anchor}`).not.toBeNull()

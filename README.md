@@ -324,7 +324,8 @@ existing PR.
 yrd pr submit [selector...] [--draft] [--follow] [--base <branch>]
   [--issue <ref>] [--title <text>] [--description <text>]
   [--correlation <namespace:id>] [--json]
-yrd pr list [--needs-review] [--json]
+yrd pr list [--base <branch>] [--state <state>] [--issue <ref>]
+  [--needs-review [--reviewer <actor>]] [--json]
 yrd pr edit <selector> [--issue <ref>] [--note <text>]
   [--title <text>] [--description <text>] [--json]
 yrd pr recut <selector> [--revision <number>] [--queue] [--json]
@@ -335,6 +336,10 @@ yrd pr comment <selector> --note <text> [--by <actor>] [--ref <id>] [--json]
 yrd pr checks <selector...> [--follow] [--json]
 yrd pr close [selector...] [--json]
 ```
+
+An unfiltered human `pr list` shows the 20 most recent PRs in numeric id order.
+Any explicit list filter keeps the complete matching set, and JSON stays
+lossless.
 
 Plain `pr submit` appends the revision, records a check request, schedules the
 configured pre-merge Queue steps, and returns. `--draft` instead registers only
@@ -361,8 +366,12 @@ attaching a composition manifest:
 
 ```bash
 yrd pr submit <branch> --draft
-yrd pr recut <PR> --queue
+yrd pr recut <PR> --queue --force
 ```
+
+`--force` is explicit because an authored-root rejection can leave a passing
+check attached to the current revision; recut replaces that revision with the
+machine-certified successor.
 
 The Queue is the only scheduler. Its journaled passed Run is also the cache:
 integration reuses matching carrier-classified pre-merge work only when
@@ -410,6 +419,27 @@ Human-authored gitlink commits are refused by default. The normal path is the
 draft-to-recut workflow above; `YRD_ALLOW_AUTHORED_GITLINKS=1` is break-glass
 only for a legacy carrier and does not weaken Candidate pinning or exact
 landing.
+
+#### Resolving Divergent Gitlink Pins
+
+`err=recut-gitlink-conflict` names the authoritative root and pin plus the
+replayed authored root and pin. When neither submodule pin contains the other,
+publish a real composition commit in that submodule, update the carrier to pin
+it, and recut the same PR:
+
+```bash
+git -C <submodule> fetch --all --prune
+git -C <submodule> switch -c yrd/compose-<PR> <authored-pin>
+git -C <submodule> merge <authoritative-pin>
+# Resolve any content conflicts and commit before continuing.
+git -C <submodule> push -u origin HEAD
+git add <submodule> && git commit -m "fix(yrd): compose <submodule> pins"
+yrd pr submit <branch> --draft
+yrd pr recut <PR> --queue --force
+```
+
+The composition commit must be published before the root carrier is submitted;
+otherwise the Queue cannot prove the gitlink object is remotely reachable.
 
 #### Manning an Ordinary Bay
 
