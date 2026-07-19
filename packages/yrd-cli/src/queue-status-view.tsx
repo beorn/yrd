@@ -134,6 +134,8 @@ export type QueueTimelineProjectedRow = Readonly<{
   revision: number
   headSha: string
   branch: string
+  /** Canonical issue path for this PR revision; presentation may replace the branch with this stronger identity. */
+  issue?: string
   subject: string
   /** The actor who submitted this exact PR revision; absent only for journals written before submitter identity. */
   submitter?: string
@@ -1331,7 +1333,7 @@ function stepEvidence(step: QueueStep): string | Record<string, unknown> {
 
 function CellLink({ href, children }: { href: string; children: string }) {
   return (
-    <Link href={href} minWidth={0} maxWidth="100%" wrap="truncate">
+    <Link href={href} minWidth={0} maxWidth="100%" flexShrink={1} wrap="truncate">
       {children}
     </Link>
   )
@@ -1348,9 +1350,19 @@ function issueHref(issue: string): string | undefined {
 
 /** An issue reference rendered as an OSC 8 hyperlink whenever it has a
  * meaningful native or km-internal target. */
-function IssueValue({ issue }: { issue: string }) {
+function IssueValue({ issue, flex = false }: { issue: string; flex?: boolean }) {
   const href = issueHref(issue)
-  return href === undefined ? <>{issue}</> : <CellLink href={href}>{issue}</CellLink>
+  return href === undefined ? (
+    <Text color="$fg-link" minWidth={flex ? 0 : undefined} flexShrink={flex ? 1 : undefined} wrap="truncate">
+      {issue}
+    </Text>
+  ) : flex ? (
+    <Link href={href} wrap="truncate" minWidth={0} flexShrink={1}>
+      {issue}
+    </Link>
+  ) : (
+    <CellLink href={href}>{issue}</CellLink>
+  )
 }
 
 /** A PR description spanning rows; blank rows are preserved as paragraph breaks. */
@@ -1607,6 +1619,7 @@ function timelineRunMemberRows(
           ? (lineage.sourceReadyAt ?? admission.submittedAt)
           : (admission.checkRequestedAt ?? admission.pushedAt)
     const submitter = revisionSubmitter(current, member.revision, member.headSha)
+    const issue = presentFact(current.issue)
     return {
       id: `${run.base}:run:${run.id}:${member.id}:${member.revision}`,
       base: run.base,
@@ -1620,6 +1633,7 @@ function timelineRunMemberRows(
       revision: member.revision,
       headSha: member.headSha,
       branch: member.branch,
+      ...(issue === undefined ? {} : { issue }),
       subject: timelineMemberSubject(result, member, state),
       ...(submitter === undefined ? {} : { submitter }),
       ...(stepLabel === undefined ? {} : { step: stepLabel }),
@@ -1656,6 +1670,7 @@ function timelinePendingRows(
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
     const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
     const submitter = revisionSubmitter(pr)
+    const issue = presentFact(pr.issue)
     return [
       {
         id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
@@ -1669,6 +1684,7 @@ function timelinePendingRows(
         revision: pr.revision,
         headSha: pr.headSha,
         branch: pr.branch,
+        ...(issue === undefined ? {} : { issue }),
         subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
         ...(submitter === undefined ? {} : { submitter }),
         detail,
@@ -3009,7 +3025,7 @@ function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
   if (row.failure !== undefined) {
     return {
-      text: fitTimelineLabel(errorCodeLabel(row.failure.code), TIMELINE_STATE_CAP),
+      text: errorCodeLabel(fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP)),
       color:
         row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
     }
@@ -3234,18 +3250,20 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
 
 function TimelineProjectedRow({
   row,
+  continuation,
   cursor,
   hovered,
   layout,
   live,
 }: {
   row: QueueTimelineDisplayRow
+  continuation: boolean
   cursor: boolean
   hovered: boolean
   layout: TimelineCellLayout
   live: boolean
 }) {
-  const active = row.status === "running"
+  const active = !continuation && row.status === "running"
   const status = timelineStatusCell(row)
   const runCell = timelineRunCell(row, layout.compact)
   const step = timelineStepCell(row)
@@ -3264,35 +3282,41 @@ function TimelineProjectedRow({
       backgroundColor={rowBackground}
       time={
         <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
-          {timelineClockCell(row, layout)}
+          {continuation ? "-" : timelineClockCell(row, layout)}
         </Text>
       }
       status={
-        <>
-          <Box width={1} flexShrink={0}>
-            {/* A running row's glyph keeps its km warning pulse even under
+        continuation ? (
+          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
+        ) : (
+          <>
+            <Box width={1} flexShrink={0}>
+              {/* A running row's glyph keeps its km warning pulse even under
                 selection; other statuses take the selection fg. */}
-            {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
-          </Box>
-          <Box paddingLeft={1} minWidth={0} overflow="hidden">
-            {/* The running status word pulses blue in the shared phase (item 12)
+              {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
+            </Box>
+            <Box paddingLeft={1} minWidth={0} overflow="hidden">
+              {/* The running status word pulses blue in the shared phase (item 12)
                 and stays blue when the row is selected (item 13). */}
-            {active ? (
-              <ActivityPulse live={live} wrap="truncate">
-                {status.word}
-              </ActivityPulse>
-            ) : (
-              <Text color={forcedFg ?? status.color} wrap="truncate">
-                {status.word}
-              </Text>
-            )}
-          </Box>
-        </>
+              {active ? (
+                <ActivityPulse live={live} wrap="truncate">
+                  {status.word}
+                </ActivityPulse>
+              ) : (
+                <Text color={forcedFg ?? status.color} wrap="truncate">
+                  {status.word}
+                </Text>
+              )}
+            </Box>
+          </>
+        )
       }
       run={
         // Real run ids share TIME's muted treatment (user respec 2026-07-15);
         // run-less pending rows keep their info-colored `pending`.
-        row.run === undefined ? (
+        continuation ? (
+          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
+        ) : row.run === undefined ? (
           <Text color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate">
             {runCell.text}
           </Text>
@@ -3312,21 +3336,30 @@ function TimelineProjectedRow({
               {` ${timelineRepeatLabel(row.repeat)}`}
             </Text>
           ) : null}
-          <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
-            <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
-              {BRANCH_ICON}
-            </Text>
-            <Text color={forcedFg} wrap="truncate" minWidth={0}>
-              {" "}
-              {timelineBranchLabel(row.branch)}
-            </Text>
-            {step.text === "" ? null : (
-              <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
-                {" "}
-                ({step.text})
+          {row.issue === undefined ? (
+            <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+              <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
+                {BRANCH_ICON}
               </Text>
-            )}
-          </Box>
+              <Text color={forcedFg} wrap="truncate" minWidth={0}>
+                {" "}
+                {timelineBranchLabel(row.branch)}
+              </Text>
+              {continuation || step.text === "" ? null : (
+                <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
+                  {" "}
+                  ({step.text})
+                </Text>
+              )}
+            </Box>
+          ) : (
+            <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+              <Text color={forcedFg} flexShrink={0}>
+                for{" "}
+              </Text>
+              <IssueValue issue={row.issue} flex />
+            </Box>
+          )}
         </>
       }
       by={
@@ -3338,7 +3371,13 @@ function TimelineProjectedRow({
       runDuration={
         // Run duration: no clock glyph, just the dimmed time (user directive
         // 2026-07-16, supersedes the 15c `◷`-carries-onto-RUN clause).
-        runDuration === "" ? <Text> </Text> : <Text color={forcedFg ?? "$fg-muted"}>{runDuration}</Text>
+        continuation ? (
+          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
+        ) : runDuration === "" ? (
+          <Text> </Text>
+        ) : (
+          <Text color={forcedFg ?? "$fg-muted"}>{runDuration}</Text>
+        )
       }
     />
   )
@@ -3974,6 +4013,12 @@ function ProjectedQueueTimeline({
                 const entry = (
                   <TimelineProjectedRow
                     row={row}
+                    continuation={
+                      index > 0 &&
+                      row.run !== undefined &&
+                      rows[index - 1]?.base === row.base &&
+                      rows[index - 1]?.run === row.run
+                    }
                     cursor={meta.isCursor}
                     hovered={meta.isHovered}
                     layout={layout}
@@ -4846,7 +4891,6 @@ export function QueueDetailRunPrBlocks({
               : [`${queueLogClock(memberRow.timestamp, true, false)} submitted by ${memberRow.submitter ?? "-"}`]
             : prLineageLines(pr, member.revision, runDetails)
         const facts = pr === undefined ? [] : prDetailFacts(pr, member.revision)
-        const issueTarget = issue === undefined ? undefined : issueHref(issue)
         return (
           <Box
             key={`${member.id}:${member.revision}:${member.headSha}`}
@@ -4854,23 +4898,19 @@ export function QueueDetailRunPrBlocks({
             marginTop={index === 0 ? 0 : 1}
             minWidth={0}
           >
-            <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" />
+            <Box flexDirection="row" minWidth={0} overflow="hidden">
+              <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" />
+              {issue === undefined ? null : (
+                <>
+                  <Text> </Text>
+                  <IssueValue issue={issue} />
+                </>
+              )}
+            </Box>
             <Box flexDirection="row" minWidth={0}>
               <Text internal_dim>{TIMELINE_BRANCH_ICON}</Text>
               <Text wrap="wrap" minWidth={0}>
                 {` ${member.branch}`}
-                {issue === undefined ? null : (
-                  <>
-                    {" - "}
-                    {issueTarget === undefined ? (
-                      issue
-                    ) : (
-                      <Link href={issueTarget} color="inherit">
-                        {issue}
-                      </Link>
-                    )}
-                  </>
-                )}
               </Text>
             </Box>
             {subject === undefined ? null : (
@@ -4887,7 +4927,7 @@ export function QueueDetailRunPrBlocks({
                 ))}
             {facts.map((fact, factIndex) => (
               <Text key={`${fact.key}:${factIndex}`} wrap="wrap" bgConflict="ignore">
-                - {fact.key}: {fact.value}
+                {fact.key === "check requested" ? `- ${fact.value} check requested` : `- ${fact.key}: ${fact.value}`}
               </Text>
             ))}
             {lineage.map((line, lineIndex) => (
@@ -5015,12 +5055,18 @@ function queueShowNeedsNext(data: QueueShowData): boolean {
  * intentionally absent from the default body; failures still carry their
  * runner/revision evidence in the durable log projections.
  */
-function QueueStepInternals({ row }: { row: QueueShowRow }) {
+function QueueStepInternals({ row, issue }: { row: QueueShowRow; issue?: string }) {
   const job = presentFact(row.uuid)
   if (job === undefined) return null
   return (
-    <Text wrap="truncate">
+    <Text bold wrap="truncate">
       JOB <NounId noun="yrd" value={job} />
+      {issue === undefined ? null : (
+        <>
+          {" "}
+          <IssueValue issue={issue} />
+        </>
+      )}
     </Text>
   )
 }
@@ -5049,6 +5095,7 @@ function CompactQueueShowView({
   showMembers = true,
   showLogArtifacts = true,
   showIntegration = true,
+  stepIssue,
 }: {
   data: QueueShowData
   highlightPr?: string
@@ -5068,14 +5115,14 @@ function CompactQueueShowView({
   showLogArtifacts?: boolean
   /** False when a workflow tab owns landing facts (Round-6 Revision B). */
   showIntegration?: boolean
+  /** Selected PR issue shown beside the step's JOB identity. */
+  stepIssue?: string
 }) {
   const runFacts = section !== "steps"
   const stepFacts = section !== "run"
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const timing = queueRunTimingRow(data)
-  const latestStepRowIndexes = new Map<string, number>()
-  data.steps.forEach((row, index) => latestStepRowIndexes.set(row.step, index))
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
     // detail pane instead of overflowing it (canonical CSS escape hatch).
@@ -5107,8 +5154,10 @@ function CompactQueueShowView({
           )}
         </>
       ) : null}
-      {stepFacts
-        ? data.steps.map((row, rowIndex) => {
+      {stepFacts ? (
+        <>
+          {data.steps.at(-1) === undefined ? null : <QueueStepInternals row={data.steps.at(-1)!} issue={stepIssue} />}
+          {data.steps.map((row) => {
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)
             const lost = presentFact(row.lost)
@@ -5134,7 +5183,6 @@ function CompactQueueShowView({
                 minWidth={0}
                 overflow="hidden"
               >
-                {latestStepRowIndexes.get(row.step) === rowIndex ? <QueueStepInternals row={row} /> : null}
                 {row.failure !== undefined ? (
                   <ActionableFailureView failure={row.failure} />
                 ) : error === undefined ? null : (
@@ -5182,8 +5230,9 @@ function CompactQueueShowView({
                 )}
               </Box>
             )
-          })
-        : null}
+          })}
+        </>
+      ) : null}
       {runFacts && queueShowNeedsNext(data) ? <Text wrap="wrap">NEXT {queueShowNextAction(data)}</Text> : null}
     </Box>
   )
@@ -5199,6 +5248,7 @@ export function QueueShowView({
   showMembers = true,
   showLogArtifacts = true,
   showIntegration = true,
+  stepIssue,
 }: {
   data: QueueShowData
   compact?: boolean
@@ -5216,6 +5266,8 @@ export function QueueShowView({
   showLogArtifacts?: boolean
   /** Compact-only: keep landing facts out of the run header when a merge tab owns them. */
   showIntegration?: boolean
+  /** Compact-only: selected PR issue rendered with the step JOB identity. */
+  stepIssue?: string
 }) {
   if (compact) {
     return (
@@ -5227,6 +5279,7 @@ export function QueueShowView({
         showMembers={showMembers}
         showLogArtifacts={showLogArtifacts}
         showIntegration={showIntegration}
+        {...(stepIssue === undefined ? {} : { stepIssue })}
         {...(historyRevision === undefined ? {} : { historyRevision })}
       />
     )
