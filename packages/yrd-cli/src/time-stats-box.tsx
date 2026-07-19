@@ -63,7 +63,7 @@ function formatShareOfFails(covered: boolean, part: number, fails: number): stri
   return percent(part / fails)
 }
 
-/** A human duration; `-` when uncovered or when the sample set is empty. */
+/** A human duration; `-` when uncovered, `none` for a covered empty sample. */
 function formatDuration(covered: boolean, ms: number | null): string {
   if (!covered) return "-"
   return ms === null ? "none" : timelineMetric(ms)
