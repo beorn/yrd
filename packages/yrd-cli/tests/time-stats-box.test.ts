@@ -121,8 +121,9 @@ describe("TimeStatsBox", () => {
     const timeText = timeRows.join("\n")
     expect(
       timeRows.find((row) => row.includes("HR")),
-      "TIME names the metric column before its windows",
-    ).toMatch(/METRIC\s+HR/u)
+      "TIME moves its window keys onto the first INTEGRATED group row",
+    ).toMatch(/INTEGRATED\s+HR\s+DAY\s+WK\s+MON/u)
+    expect(app.text).not.toContain("METRIC")
 
     for (const section of ["INTEGRATED", "FAILED", "WAIT"]) {
       expect(timeText.match(new RegExp(section, "gu")), `${section} is named once in TIME`).toHaveLength(1)

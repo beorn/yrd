@@ -1097,7 +1097,14 @@ async function runReceiverHook(mode: "pre-receive" | "post-receive", env: NodeJS
  * SGR mouse reports, which the ListView scrolls the viewport with while
  * leaving the cursor put. Regression: @km/code/trackpad-wheel-not-scrolling.
  */
-export const WATCH_LIVE_RENDER_OPTIONS = { mode: "fullscreen", mouse: true } as const
+export const WATCH_LIVE_RENDER_OPTIONS = {
+  mode: "fullscreen",
+  mouse: true,
+  // Mouse tracking intercepts terminal-native drag selection. Keep Silvery's
+  // selection feature explicit and copy completed drags through OSC52.
+  selection: true,
+  copyOnSelect: true,
+} as const
 
 function defaultIO(): YrdCliIO {
   const color = process.env.NO_COLOR === undefined && (process.stdout.isTTY || process.env.FORCE_COLOR !== undefined)

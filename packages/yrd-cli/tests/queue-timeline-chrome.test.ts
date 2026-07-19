@@ -116,15 +116,17 @@ describe("queue timeline chrome 21106", () => {
       const headerY = rowIndexOf(text, "STATUS")
       const timeHeaderX = rowAt(text, headerY).indexOf("TIME")
       expect(app.cell(timeHeaderX, headerY).bold, "header TIME is bold").toBe(true)
-      const mutedRowY = rowIndexOf(text, "PR4.1")
+      const mutedRowY = rowIndexOf(text, "pr#4.1")
       const mutedTimeX = rowAt(text, mutedRowY).search(/\d{2}:\d{2}:\d{2}/u)
       expect(app.cell(timeHeaderX, headerY).fg, "header fg is brighter than the muted row TIME").not.toEqual(
         app.cell(mutedTimeX, mutedRowY).fg,
       )
-      // F: an integrated (non-running) PR id is still bold.
+      // Round 6: only the value segment is bold; noun and revision stay plain.
       const doneRow = rowAt(text, mutedRowY)
-      const prX = doneRow.indexOf("PR4.1")
-      expect(app.cell(prX, mutedRowY).bold, "integrated PR id is bold").toBe(true)
+      const prX = doneRow.indexOf("pr#4.1")
+      expect(app.cell(prX, mutedRowY).bold, "integrated PR noun is plain").not.toBe(true)
+      expect(app.cell(prX + 3, mutedRowY).bold, "integrated PR value is bold").toBe(true)
+      expect(app.cell(prX + 4, mutedRowY).bold, "integrated PR revision is plain").not.toBe(true)
       // Item 5: the table header sits flush — the row directly above the TIME
       // header is not a blank spacer (it is the QUEUE metadata row).
       expect(rowAt(text, headerY - 1).trim(), "no blank row above the header").not.toBe("")
@@ -140,7 +142,7 @@ describe("queue timeline chrome 21106", () => {
     try {
       await app.waitForLayoutStable()
       const text = app.text
-      const runRowY = rowIndexOf(text, "PR4.1")
+      const runRowY = rowIndexOf(text, "pr#4.1")
       expect(runRowY).toBeGreaterThan(0)
       const runRow = rowAt(text, runRowY)
       const runX = runRow.indexOf("main#4 ") >= 0 ? runRow.indexOf("main#4 ") : runRow.indexOf("main#4")
@@ -185,10 +187,10 @@ describe("queue timeline chrome 21106", () => {
     const app = render(createElement(QueueTimelineView, { projection, nav: false, columns: 160 }))
     try {
       await app.waitForLayoutStable()
-      const integratedRow = rowAt(app.text, rowIndexOf(app.text, "PR4.1"))
+      const integratedRow = rowAt(app.text, rowIndexOf(app.text, "pr#4.1"))
       expect(integratedRow).toContain(" done ")
       expect(integratedRow).not.toContain(" ok ")
-      const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "PR5.1"))
+      const rejectedRow = rowAt(app.text, rowIndexOf(app.text, "pr#5.1"))
       expect(rejectedRow).toContain(" fail ")
       expect(rejectedRow).not.toContain(" rej ")
     } finally {
@@ -247,7 +249,7 @@ describe("queue timeline chrome 21106", () => {
       for (let offset = 0; offset < message.length; offset += 4) {
         expect(app.cell(startX + offset, messageY).fg, `fg at offset ${offset}`).toEqual(messageFg)
       }
-      const rejectedY = rowIndexOf(app.text, "PR5.1")
+      const rejectedY = rowIndexOf(app.text, "pr#5.1")
       const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)
@@ -409,10 +411,10 @@ describe("queue timeline chrome 21106", () => {
       await app.waitForLayoutStable()
       await waitFor(() => app.text.includes("╭─ FLOW "))
       const text = app.text
-      // QUEUE is a tab-headed pane; DETAIL is headed by the selected row's
-      // identity title (`main#42 PR42.1`), not the word "DETAIL" — neither is boxed.
+      // QUEUE is a tab-headed pane; DETAIL is headed by the selected run's
+      // identity title (`RUN main#42`), not the word "DETAIL" — neither is boxed.
       expect(rowIndexOf(text, "QUEUE main"), "QUEUE pane tab").toBeGreaterThanOrEqual(0)
-      expect(text, "DETAIL pane shows the run identity title, not a DETAIL box").toContain("main#42 PR42.1")
+      expect(text, "DETAIL pane shows the run identity title, not a DETAIL box").toContain("RUN main#42")
       expect(text).not.toContain("╭─ DETAIL")
       expect(text).not.toContain("╭─ QUEUE")
       // Padded content: the TIME header sits inside the pane's horizontal padding.

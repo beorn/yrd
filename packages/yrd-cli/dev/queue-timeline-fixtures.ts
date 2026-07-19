@@ -530,7 +530,7 @@ const batchSteps = [
     }),
     { classification: "carrier" },
   ),
-  fixtureStep("integrate", fixtureJob("J42-integrate", "requested", { requestedAt: "2026-07-13T11:43:00.000Z" }), {
+  fixtureStep("merge", fixtureJob("J42-merge", "requested", { requestedAt: "2026-07-13T11:43:00.000Z" }), {
     integrates: true,
     needsIntegration: true,
   }),
@@ -550,8 +550,8 @@ const integratedSteps = [
     { classification: "carrier" },
   ),
   fixtureStep(
-    "integrate",
-    fixtureJob("J4-integrate", "passed", {
+    "merge",
+    fixtureJob("J4-merge", "passed", {
       requestedAt: "2026-07-13T10:47:00.000Z",
       startedAt: "2026-07-13T10:48:00.000Z",
       changedAt: "2026-07-13T10:55:00.000Z",
@@ -668,7 +668,7 @@ const integratedRun = fixtureRun("R4", [integratedPr], "passed", "2026-07-13T10:
   cursor: integratedSteps.length,
   results: {
     check: { tests: 125, failures: 0, artifacts: [checkReport] },
-    integrate: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
+    merge: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
   },
 })
 const rejectedRun = fixtureRun("R5", [rejectedPr], "failed", "2026-07-13T11:00:00.000Z", {
@@ -927,10 +927,30 @@ const integratedSnapshot = fixtureSnapshot(fixtureResult([integratedPr], [integr
 
 export const queueTimelineStories: Readonly<Record<QueueTimelineStoryName, QueueTimelineStory>> = {
   "production-overview": {
-    snapshot: fixtureSnapshot(productionOverviewResult, { statuses: ["running", "rejected", "integrated", "other"] }, [
-      batchStdout,
-      batchStderr,
-    ]),
+    snapshot: {
+      ...fixtureSnapshot(productionOverviewResult, { statuses: ["running", "rejected", "integrated", "other"] }, [
+        batchStdout,
+        batchStderr,
+      ]),
+      diffs: [
+        {
+          pr: "PR42",
+          revision: 1,
+          additions: 324,
+          deletions: 323,
+          files: ["packages/yrd-cli/src/watch-pane.tsx", "packages/yrd-cli/tests/queue-watch-round6.test.ts"],
+          patch: [
+            "diff --git a/packages/yrd-cli/src/watch-pane.tsx b/packages/yrd-cli/src/watch-pane.tsx",
+            "--- a/packages/yrd-cli/src/watch-pane.tsx",
+            "+++ b/packages/yrd-cli/src/watch-pane.tsx",
+            "@@ -1 +1 @@",
+            "-legacy detail layout",
+            "+synthetic submit step",
+          ].join("\n"),
+        },
+        { pr: "PR43", revision: 1, unavailable: "refs-pruned" },
+      ],
+    },
     widths: [80, 140],
     selectedStatus: "running",
     viewport: { columns: 200, rows: 50 },

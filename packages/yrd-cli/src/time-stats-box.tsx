@@ -3,10 +3,11 @@
  * Both share the same four rolling-window columns (HR / DAY / WK / MON). The
  * frames arrange side by side on a wide pane and stack as the pane narrows.
  *
- * Both sections share one compact row model. Their first row names the metric
- * column plus the window keys; TIME then groups avg/p50/p90 beneath one heading
- * for each sample (INTEGRATED / FAILED / WAIT). Blank cells render a space so
- * every column keeps one cell per row and the grid stays aligned.
+ * Both sections share one compact row model. FLOW keeps an unlabeled window-key
+ * row above its metrics; TIME puts those same keys directly on the first
+ * INTEGRATED group heading so there is no redundant METRIC title. Blank cells
+ * render a space so every column keeps one cell per row and the grid stays
+ * aligned.
  *
  * Extraction note: TimeStatsBox lives in yrd-cli today because it is the only
  * consumer. If a second surface needs a windowed-metric box, promote it into
@@ -77,7 +78,7 @@ function failsOf(stats: QueueTimeWindowStats): number {
 
 function flowRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
   return [
-    { label: "METRIC", keys: true, heading: true, cells: windowKeys },
+    { label: "", keys: true, heading: true, cells: windowKeys },
     { label: "RUNS", cells: stats.map((s) => formatCount(s.covered, s.metrics.terminalAttempts)) },
     { label: "INTEGRATED", cells: stats.map((s) => formatCount(s.covered, s.metrics.outcomes.integrated)) },
     { label: "FAILS", cells: stats.map((s) => formatShareOfRuns(s.covered, failsOf(s), s.metrics.terminalAttempts)) },
@@ -103,9 +104,10 @@ function timeMetricRows(
   label: string,
   stats: readonly QueueTimeWindowStats[],
   pick: (metrics: QueueTimeWindowStats["metrics"]) => WindowDistribution,
+  windowKeys?: readonly string[],
 ): readonly BoxRow[] {
   return [
-    { label, heading: true, cells: [] },
+    { label, heading: true, ...(windowKeys === undefined ? {} : { keys: true }), cells: windowKeys ?? [] },
     { label: "avg", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).avgMs)) },
     { label: "p50", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p50Ms)) },
     { label: "p90", indent: true, cells: stats.map((s) => formatDuration(s.covered, pick(s.metrics).p90Ms)) },
@@ -114,8 +116,7 @@ function timeMetricRows(
 
 function timeRows(stats: readonly QueueTimeWindowStats[], windowKeys: readonly string[]): readonly BoxRow[] {
   return [
-    { label: "METRIC", keys: true, heading: true, cells: windowKeys },
-    ...timeMetricRows("INTEGRATED", stats, (m) => m.activeRun.integratedOnly),
+    ...timeMetricRows("INTEGRATED", stats, (m) => m.activeRun.integratedOnly, windowKeys),
     ...timeMetricRows("FAILED", stats, (m) => m.activeRun.failedOnly),
     ...timeMetricRows("WAIT", stats, (m) => m.queueWait),
     ...(stats.some((entry) => !entry.covered)

@@ -53,18 +53,19 @@ describe("QueueWatchFrame fill-timeline cursor", () => {
 
       // Fill renders every row — the two pending rows AND the running row the
       // pre-slice would have hidden. No `... N more` residue in fill mode.
-      expect(app.text, "first pending row renders").toContain("PRA.1")
-      expect(app.text, "second pending row renders").toContain("PRB.1")
-      expect(app.text, "the running row the cap hid now renders").toContain("PRR.1")
+      expect(app.text, "first pending row renders").toContain("pr#A.1")
+      expect(app.text, "second pending row renders").toContain("pr#B.1")
+      expect(app.text, "the running row the cap hid now renders").toContain("pr#R.1")
       expect(app.text, "fill suppresses the pre-slice residue").not.toContain("... 1 more")
 
-      // The mandated default cursor is the first RUNNING row. Now that it
-      // renders, detail resolves that running run (its RUN LOGS section and
-      // `PRs      PRR` header) — the cursor names a rendered row. The detail rework
-      // (W3) prints the run status inline rather than an "OUTCOME" label, so
-      // anchor on the RUN LOGS accordion the detail body renders.
-      expect(app.text, "detail resolves the running run's log section").toContain("RUN LOGS")
-      expect(app.text, "detail resolves the running run's PR").toContain("PRs      PRR")
+      // The mandated default cursor is the first RUNNING row. The detail title
+      // and JOB body resolve that same run without PR-list or log-accordion chrome.
+      expect(app.text.split("\n")[0], "detail resolves the running run").toContain("RUN main#RR")
+      await app.press("l")
+      await app.waitForLayoutStable()
+      expect(app.text, "detail resolves the running run's job").toContain("JOB yrd#JRR-check")
+      expect(app.text).not.toContain("RUN LOGS")
+      expect(app.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
     } finally {
       app.unmount()
     }

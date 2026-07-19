@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Box,
   ListView,
@@ -10,20 +10,21 @@ import {
   Text,
   clampSplitPaneRatio,
   resolveSplitPaneLayout,
+  useFocusManager,
   useInput,
   useScopeEffect,
   useWindowSize,
-  type BoxProps,
   type ListViewHandle,
 } from "silvery"
 import type { PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
-  QueueDetailPrFacts,
-  QueueDetailSinglePrHeader,
+  QueueDetailRunPrBlocks,
   QueueDetailTitle,
+  QueueIntegrationFacts,
   QueueShowView,
   QueueTimelineView,
+  queueShowData,
   queueTimelineDisplayRows,
   queueTimelineFilterBuckets,
   queueTimelineRows,
@@ -36,7 +37,6 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
-import { taskFoldGlyph } from "./task-status.ts"
 import { timelineStatusGlyph } from "./runner-timeline.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
 
@@ -60,6 +60,21 @@ export type QueueArtifactOutput = Readonly<{
   text: string
   truncatedBytes?: number
 }>
+
+export type QueuePrDiff =
+  | Readonly<{
+      pr: string
+      revision: number
+      additions: number
+      deletions: number
+      files: readonly string[]
+      patch: string
+    }>
+  | Readonly<{
+      pr: string
+      revision: number
+      unavailable: "refs-pruned" | "git-error"
+    }>
 
 export function queueDetailTier(columns: number, rows: number): QueueDetailTier {
   const layout = resolveSplitPaneLayout({
@@ -105,6 +120,8 @@ export type QueueWatchSnapshot = Readonly<{
   now: number
   projection?: QueueTimelineProjection
   outputs?: readonly QueueArtifactOutput[]
+  /** Revision-bound source deltas for the synthetic submit step. */
+  diffs?: readonly QueuePrDiff[]
   /** Resolved project commands for the live step headers. */
   commands?: Readonly<Record<string, string>>
 }>
@@ -123,7 +140,7 @@ type QueueArtifactOutputLine = Readonly<{
   kind: "heading" | "muted" | "body"
 }>
 
-export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueArtifactOutput[]; inline: boolean }) {
   const listRef = useRef<ListViewHandle | null>(null)
   const [atEnd, setAtEnd] = useState(true)
   const [unseenLines, setUnseenLines] = useState(0)
@@ -134,7 +151,15 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
         const textLines = output.text.split("\n")
         if (textLines.at(-1) === "") textLines.pop()
         return [
-          { key: `${outputKey}:heading`, text: `OUTPUT ${output.step}#${output.attempt}`, kind: "heading" },
+          ...(inline
+            ? []
+            : [
+                {
+                  key: `${outputKey}:heading`,
+                  text: `OUTPUT ${output.step}#${output.attempt}`,
+                  kind: "heading" as const,
+                },
+              ]),
           ...(output.truncatedBytes === undefined
             ? []
             : [
@@ -145,7 +170,13 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
                 },
               ]),
           ...(textLines.length === 0
-            ? [{ key: `${outputKey}:waiting`, text: "Waiting for output...", kind: "body" as const }]
+            ? [
+                {
+                  key: `${outputKey}:waiting`,
+                  text: inline ? "No output recorded." : "Waiting for output...",
+                  kind: "body" as const,
+                },
+              ]
             : textLines.map((text, index) => ({
                 key: `${outputKey}:line:${index}`,
                 text,
@@ -153,7 +184,7 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
               }))),
         ] satisfies readonly QueueArtifactOutputLine[]
       }),
-    [outputs],
+    [inline, outputs],
   )
   const previousLineCount = useRef(lines.length)
 
@@ -185,10 +216,12 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
         unseenLines === 0 ? "" : ` | ${unseenLines} new ${unseenLines === 1 ? "line" : "lines"}`
       } | End resumes`
   return (
-    <Box flexDirection="column" flexGrow={1} minHeight={0} marginTop={1}>
-      <Text color="$fg-muted" bold={!atEnd}>
-        {followStatus}
-      </Text>
+    <Box flexDirection="column" flexGrow={1} minHeight={0} marginTop={inline ? 0 : 1}>
+      {inline ? null : (
+        <Text color="$fg-muted" bold={!atEnd}>
+          {followStatus}
+        </Text>
+      )}
       <ListView
         ref={listRef}
         items={lines}
@@ -199,45 +232,45 @@ export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueAr
           if (nextAtEnd) setUnseenLines(0)
         }}
         scrollbarVisibility="always"
-        renderItem={(row) =>
-          row.kind === "heading" ? (
-            <Text bold wrap="truncate">
-              {row.text}
-            </Text>
-          ) : row.kind === "muted" ? (
-            <Text color="$fg-muted">{row.text}</Text>
-          ) : (
-            // Body rows mirror a step's raw `output.log` tail — foreign terminal
-            // output whose embedded ANSI (colors AND backgrounds, e.g. vitest's
-            // cyan ` RUN ` banner) is intentional. `bgConflict="ignore"` keeps
-            // those colors and stops silvery's background-conflict guard (default
-            // `throw`) from killing the watch loop, while the global throw stays a
-            // safety net for silvery's own pipeline bugs everywhere else.
-            <Text bgConflict="ignore">{row.text}</Text>
-          )
-        }
+        renderItem={(row) => (
+          // ListView suppresses selection on its navigation wrapper. Restore a
+          // text-selectable island for every output row so drag-select reaches
+          // Silvery's OSC52 copy path while mouse tracking remains enabled.
+          <Box userSelect="text" flexDirection="column" width="100%" minWidth={0} overflow="hidden">
+            {row.kind === "heading" ? (
+              <Text bold wrap="truncate">
+                {row.text}
+              </Text>
+            ) : row.kind === "muted" ? (
+              <Text color="$fg-muted">{row.text}</Text>
+            ) : inline ? (
+              <Text color="$fg-muted" bgConflict="ignore" wrap="wrap">
+                {row.text}
+              </Text>
+            ) : (
+              // Body rows mirror a step's raw `output.log` tail — foreign terminal
+              // output whose embedded ANSI (colors AND backgrounds, e.g. vitest's
+              // cyan ` RUN ` banner) is intentional. `bgConflict="ignore"` keeps
+              // those colors and stops silvery's background-conflict guard (default
+              // `throw`) from killing the watch loop, while the global throw stays a
+              // safety net for silvery's own pipeline bugs everywhere else.
+              <Text bgConflict="ignore" wrap="wrap">
+                {row.text}
+              </Text>
+            )}
+          </Box>
+        )}
       />
     </Box>
   )
 }
 
-function isSuccessfulStepStatus(status: string): boolean {
-  return status === "passed" || status === "skipped"
+export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  return <QueueArtifactOutputList outputs={outputs} inline={false} />
 }
 
 function queueStepNames(data: QueueShowData): readonly string[] {
   return [...new Set(data.steps.map((row) => row.step))]
-}
-
-function defaultQueueStep(data: QueueShowData, names: readonly string[]): string | undefined {
-  const needsAttention = names.find((name) =>
-    data.steps.some((row) => row.step === name && !isSuccessfulStepStatus(row.status)),
-  )
-  return needsAttention ?? names.at(-1)
-}
-
-function stepLogStartsExpanded(data: QueueShowData, step: string): boolean {
-  return data.steps.some((row) => row.step === step && !isSuccessfulStepStatus(row.status))
 }
 
 // Effective selection derives from the live step unless the operator explicitly
@@ -251,33 +284,172 @@ export function resolveStepTabSelection(
   return userSelectedStep !== null && names.includes(userSelectedStep) ? userSelectedStep : liveStep
 }
 
-// Effective fold derives from live status (running/attention open, completed
-// folded) unless the operator explicitly toggled this step's log.
-export function resolveStepLogExpanded(autoExpanded: boolean, userToggled: boolean | undefined): boolean {
-  return userToggled ?? autoExpanded
+/** Step output is inline, muted, permanently expanded, and still scrollable. */
+function QueueInlineArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
+  return <QueueArtifactOutputList outputs={outputs} inline />
 }
 
-/** Queue-specific fold chrome using the same width-one markers as km trees. */
-function QueueDisclosure({
-  title,
+function usableStepOutput(output: string | undefined): string | undefined {
+  const trimmed = output?.trim()
+  if (trimmed === undefined || trimmed === "" || trimmed === "-" || /^waiting\b/iu.test(trimmed)) return undefined
+  return trimmed
+}
+
+function nativeMergeCommand(data: QueueShowData, step: string): string | undefined {
+  // Composition members are materialized through composePR rather than this
+  // git command. In that case the honest UI is the MERGE/PARENTS summary below,
+  // never a plausible-looking command the runner did not execute.
+  if (step !== "merge" || data.prs.length === 0 || data.prs.some((pr) => pr.composition !== undefined)) {
+    return undefined
+  }
+  return data.prs.map((pr) => `git merge --no-ff --no-edit ${pr.headSha}`).join(" && ")
+}
+
+function stepSummaryOutput(data: QueueShowData, step: string, output: string | undefined): readonly string[] {
+  if (step === "merge" && data.integration !== undefined) {
+    const parents = [data.integration.baseSha, ...data.prs.map((pr) => pr.headSha)]
+    return [`PARENTS ${parents.join(" ")}`]
+  }
+  const recorded = usableStepOutput(output)
+  if (recorded !== undefined) return recorded.split("\n")
+  return ["No output recorded."]
+}
+
+/** Synthetic inline summaries only need a stable positive artifact key. */
+function syntheticArtifactAttempt(attempt: string | undefined): number {
+  const parsed = attempt === undefined ? Number.NaN : Number(attempt)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1
+}
+
+function submitClock(data: QueueShowData, prs: readonly PR[]): string {
+  const submitted = data.prs.flatMap((member) => {
+    const pr = prs.find((candidate) => candidate.id === member.id)
+    const revision = pr?.revisions.find(
+      (candidate) => candidate.revision === member.revision && candidate.headSha === member.headSha,
+    )
+    const at = revision?.submittedAt ?? revision?.pushedAt
+    return at === undefined ? [] : [at]
+  })
+  const latest = submitted.toSorted().at(-1)
+  if (latest === undefined) return "time unavailable"
+  const date = new Date(latest)
+  if (Number.isNaN(date.getTime())) return "time unavailable"
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date)
+}
+
+function QueueSubmitDiff({
+  data,
+  diff,
   expanded,
   onToggle,
-  children,
-  ...rest
-}: Readonly<{
-  title: ReactNode
+}: {
+  data: QueueShowData
+  diff: QueuePrDiff | undefined
   expanded: boolean
-  onToggle: (expanded: boolean) => void
-  children: ReactNode
-}> &
-  Omit<BoxProps, "children">) {
+  onToggle(): void
+}) {
+  const focusId = `queue-submit-diff-${data.run}-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
+  const { activeId } = useFocusManager()
+  const focused = activeId === focusId
+  useInput(
+    (input, key) => {
+      if (key.return || (input === " " && !key.ctrl && !key.meta && !key.shift)) onToggle()
+    },
+    { isActive: focused && diff !== undefined && !("unavailable" in diff) },
+  )
+  if (diff === undefined || "unavailable" in diff) {
+    return (
+      <Text color="$fg-muted">
+        {diff === undefined || diff.unavailable === "refs-pruned"
+          ? "diff unavailable (refs pruned)"
+          : "diff unavailable (git error)"}
+      </Text>
+    )
+  }
+  const summary = `Diff +${diff.additions} / -${diff.deletions} lines`
   return (
-    <Box flexDirection="column" {...rest}>
-      <Box flexDirection="row" gap={1} mouseCursor="pointer" onMouseDown={() => onToggle(!expanded)}>
-        <Text>{taskFoldGlyph(expanded)}</Text>
-        <Text>{title}</Text>
+    <Box flexDirection="column" minWidth={0}>
+      <Box
+        testID={focusId}
+        focusable
+        mouseCursor="pointer"
+        onClick={onToggle}
+        userSelect="text"
+        minWidth={0}
+        backgroundColor={focused ? "$bg-selected" : undefined}
+      >
+        <Text wrap="truncate" color={focused ? "$fg-on-selected" : undefined}>
+          {summary} — click to {expanded ? "collapse" : "expand"}
+        </Text>
       </Box>
-      {expanded ? <Box flexDirection="column">{children}</Box> : null}
+      {expanded ? (
+        <>
+          <Text color="$fg-muted">Files ({diff.files.length})</Text>
+          {diff.files.map((file) => (
+            <Text key={file} color="$fg-muted" wrap="wrap">
+              - {file}
+            </Text>
+          ))}
+          <QueueInlineArtifactOutputView
+            outputs={[
+              {
+                run: data.run,
+                step: "submit",
+                attempt: 1,
+                path: "",
+                text: diff.patch,
+              },
+            ]}
+          />
+        </>
+      ) : null}
+    </Box>
+  )
+}
+
+function QueueSubmitPanel({
+  data,
+  row,
+  rows,
+  prs,
+  runDetails,
+  diffs,
+}: {
+  data: QueueShowData
+  row?: QueueTimelineProjectedRow
+  rows: readonly QueueTimelineProjectedRow[]
+  prs: readonly PR[]
+  runDetails: readonly QueueShowData[]
+  diffs: readonly QueuePrDiff[]
+}) {
+  const [expandedPr, setExpandedPr] = useState<string | null>(null)
+  return (
+    <Box flexDirection="column" minWidth={0} flexGrow={1}>
+      {data.prs.map((member) => {
+        const key = `${member.id}:${member.revision}`
+        const diff = diffs.find((candidate) => candidate.pr === member.id && candidate.revision === member.revision)
+        return (
+          <Box key={key} flexDirection="column" minWidth={0}>
+            <QueueDetailRunPrBlocks
+              data={{ ...data, prs: [member] }}
+              row={row}
+              rows={rows}
+              prs={prs}
+              runDetails={runDetails}
+            />
+            <QueueSubmitDiff
+              data={data}
+              diff={diff}
+              expanded={expandedPr === key}
+              onToggle={() => setExpandedPr((current) => (current === key ? null : key))}
+            />
+          </Box>
+        )
+      })}
     </Box>
   )
 }
@@ -291,6 +463,9 @@ export function QueueWorkflowStepTabs({
   active,
   highlightPr,
   prs,
+  runRows = [],
+  runDetails = [],
+  diffs = [],
 }: {
   data?: QueueShowData
   row?: QueueTimelineProjectedRow
@@ -300,95 +475,77 @@ export function QueueWorkflowStepTabs({
   active: boolean
   highlightPr?: string
   prs: readonly PR[]
+  runRows?: readonly QueueTimelineProjectedRow[]
+  runDetails?: readonly QueueShowData[]
+  diffs?: readonly QueuePrDiff[]
 }) {
   const names = useMemo(() => (data === undefined ? [] : queueStepNames(data)), [data])
-  // The live current step re-derives from the freshest props on every render,
-  // so a same-run status advance (a running step passes, the next starts) moves
-  // it. Operator intent is tracked SEPARATELY and only overrides the live view
-  // when the operator actually acted: `userSelectedStep === null` and an absent
-  // `userToggledLogs` key both mean "follow the live derivation". The parent
-  // remounts this component when the run changes (`key={detailData.run}`), which
-  // resets these overrides to their empty defaults for the next run.
-  const liveStep = data === undefined ? undefined : defaultQueueStep(data, names)
+  const tabNames = useMemo(() => (data === undefined ? [] : ["submit", ...names]), [data, names])
+  // Revision B makes submission the stable entry point. Runtime step progress
+  // still colors the real tabs; operator selection overrides the initial tab.
+  // The parent remounts on run change, resetting that override.
+  const liveStep = data === undefined ? undefined : "submit"
   const [userSelectedStep, setUserSelectedStep] = useState<string | null>(null)
-  const [userToggledLogs, setUserToggledLogs] = useState<Readonly<Record<string, boolean>>>({})
-  const [prsExpanded, setPrsExpanded] = useState(false)
-  const activeStep = resolveStepTabSelection(names, liveStep, userSelectedStep)
-
-  // The selected PR always surfaces its subject + linked ISSUE directly under
-  // the identity row. In a batch, the selected member still owns this context;
-  // the PRs disclosure carries the rest of the members and their activity.
-  const headerPr = prs.find((pr) => pr.id === highlightPr) ?? (prs.length === 1 ? prs[0] : undefined)
-  const selectedPrHeader = headerPr === undefined ? null : <QueueDetailSinglePrHeader pr={headerPr} />
-
-  // The batched members' review/comment/check-request/revision history (item J)
-  // is a collapsed disclosure so it never pushes the step body past a short
-  // viewport; its subject/activity live behind the "PRS" header.
-  const prSummary = (
-    <>
-      {"PRs".padEnd(9, " ")}
-      {prs.map((pr, index) => (
-        <Text key={pr.id} bold={pr.id === highlightPr}>
-          {index === 0 ? "" : ","}
-          {pr.id}@r{pr.revision}:{pr.headSha.slice(0, 12)}
-        </Text>
-      ))}
-    </>
-  )
-  const prFacts =
-    prs.length === 0 ? null : (
-      <QueueDisclosure
-        title={prSummary}
-        expanded={prsExpanded}
-        onToggle={setPrsExpanded}
-        marginTop={1}
-        flexShrink={0}
-        minWidth={0}
-      >
-        <QueueDetailPrFacts prs={prs} />
-      </QueueDisclosure>
-    )
+  const activeStep = resolveStepTabSelection(tabNames, liveStep, userSelectedStep)
 
   const selectedPr = prs.find((pr) => pr.id === row?.pr) ?? prs[0]
   const submitted = row?.timestamp === null ? undefined : row?.timestamp
+  const submitStatus =
+    data === undefined ? "" : `✓ ${submitClock(data, prs)} ${data.prs.length} PR${data.prs.length === 1 ? "" : "s"}`
 
-  // Each step tab is a three-row segment from the recovered mock: numbered
-  // step, state, then a right-aligned clock. Every label has the same measured
-  // width; the surrounding flex boxes divide the whole row equally. Round 4
-  // makes selection a solid surface instead of surrounding every tab in chrome.
+  // Round 6 tabs are two-row, equally measured segments. Both active and
+  // inactive states are filled, and no flex growth may stretch them past the
+  // widest title/status+duration content.
   const stepTabWidth =
     data === undefined
       ? 0
       : Math.max(
-          compact ? 18 : 28,
-          ...names.map((name) => {
+          1,
+          ...tabNames.map((name) => {
+            if (name === "submit") return Math.max("0: submit".length, submitStatus.length)
             const rep = data.steps.filter((row) => row.step === name).at(-1)
             const duration = rep?.duration === undefined || rep.duration === "-" ? "" : rep.duration
             const glyph = rep === undefined ? "" : timelineStatusGlyph(rep.status)
             return Math.max(
               `${names.indexOf(name) + 1}: ${name}`.length,
-              `${glyph} ${rep?.status ?? ""}`.length,
-              duration.length + 2,
+              `${glyph} ${rep?.status ?? ""}${duration === "" ? "" : ` ${duration}`}`.length,
             )
           }),
         )
   const stepTabLabel = (name: string, selected: boolean) => {
     if (data === undefined) return name
+    if (name === "submit") {
+      return (
+        <Text color={selected ? "$fg-on-selected" : undefined}>
+          {"0: submit".padEnd(stepTabWidth)}
+          {"\n"}
+          <Text color={selected ? "$fg-on-selected" : "$fg-success"}>{submitStatus}</Text>
+          {" ".repeat(Math.max(0, stepTabWidth - submitStatus.length))}
+        </Text>
+      )
+    }
     const stepRows = data.steps.filter((row) => row.step === name)
     const rep = stepRows.at(-1)
     if (rep === undefined) return name
-    const duration = rep.duration === "-" ? "" : `◷ ${rep.duration}`
+    const duration = rep.duration === "-" ? "" : rep.duration
     const number = names.indexOf(name) + 1
     const glyph = timelineStatusGlyph(rep.status)
+    const status = `${glyph} ${rep.status}`
+    const remainder = Math.max(0, stepTabWidth - status.length - (duration === "" ? 0 : duration.length + 1))
     return (
       <Text color={selected ? "$fg-on-selected" : undefined}>
         {`${number}: ${name}`.padEnd(stepTabWidth)}
         {"\n"}
         <Text color={selected ? "$fg-on-selected" : taskStatusColor(rep.taskStatus)} bold={rep.taskStatus === "wip"}>
-          {`${glyph} ${rep.status}`.padEnd(stepTabWidth)}
+          {status}
         </Text>
-        {"\n"}
-        {(duration === "" ? " " : duration).padStart(stepTabWidth)}
+        {duration === "" ? "" : " "}
+        {duration === "" ? null : (
+          <Text color={selected ? "$fg-on-selected" : undefined} bold={false} internal_dim>
+            {duration}
+          </Text>
+        )}
+        {" ".repeat(remainder)}
       </Text>
     )
   }
@@ -398,10 +555,9 @@ export function QueueWorkflowStepTabs({
     // visual title of the step section, so step title + step contents read as
     // one grouped unit.
     <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
-      {selectedPrHeader}
-      {prFacts}
       {data === undefined ? (
         <>
+          <QueueDetailRunPrBlocks row={row} rows={runRows} prs={prs} runDetails={runDetails} />
           {row?.position === undefined ? null : <Text>{`${"POSITION".padEnd(9, " ")}${row.position}`}</Text>}
           {submitted === undefined ? null : (
             <Text>{`${"TIMELINE".padEnd(9, " ")}${submitted.slice(11, 19)} → pending`}</Text>
@@ -412,8 +568,16 @@ export function QueueWorkflowStepTabs({
         </>
       ) : activeStep === undefined ? (
         <>
-          <QueueShowView data={data} compact={compact} highlightPr={highlightPr} titleAbove showMembers={false} />
-          <QueueArtifactOutputView outputs={outputs} />
+          <QueueShowView
+            data={data}
+            compact={compact}
+            highlightPr={highlightPr}
+            section="run"
+            titleAbove
+            showMembers={false}
+            showIntegration={false}
+          />
+          <QueueSubmitPanel data={data} row={row} rows={runRows} prs={prs} runDetails={runDetails} diffs={diffs} />
         </>
       ) : (
         <>
@@ -424,41 +588,63 @@ export function QueueWorkflowStepTabs({
             section="run"
             titleAbove
             showMembers={false}
+            showIntegration={false}
           />
           <Tabs value={activeStep} onChange={setUserSelectedStep} isActive={active}>
             <TabList>
-              {names.map((name) => (
+              {tabNames.map((name) => (
                 <Box
                   key={name}
-                  backgroundColor={activeStep === name ? "$bg-selected" : undefined}
-                  paddingLeft={1}
-                  flexGrow={1}
-                  flexBasis={0}
-                  minWidth={0}
+                  backgroundColor={activeStep === name ? "$bg-selected" : "$bg-surface-subtle"}
+                  paddingLeft={2}
+                  paddingY={1}
+                  width={stepTabWidth + 4}
+                  flexShrink={0}
                 >
                   <Tab value={name}>{stepTabLabel(name, activeStep === name)}</Tab>
                 </Box>
               ))}
             </TabList>
-            {names.map((name) => {
+            {tabNames.map((name) => {
+              if (name === "submit") {
+                return (
+                  <TabPanel key={name} value={name}>
+                    <QueueSubmitPanel
+                      data={data}
+                      row={row}
+                      rows={runRows}
+                      prs={prs}
+                      runDetails={runDetails}
+                      diffs={diffs}
+                    />
+                  </TabPanel>
+                )
+              }
               const stepRows = data.steps.filter((row) => row.step === name)
               const stepOutputs = outputs.filter((output) => output.step === name)
               const stepData: QueueShowData = { ...data, steps: stepRows }
               // The job input is durable proof of what this run actually executed;
               // current config is only a preview for a step that has no job yet.
-              const command = stepRows.at(-1)?.command ?? commands?.[name]
-              const logExpanded = resolveStepLogExpanded(stepLogStartsExpanded(data, name), userToggledLogs[name])
+              const latestStep = stepRows.at(-1)
+              const command = nativeMergeCommand(data, name) ?? latestStep?.command ?? commands?.[name]
+              const fallbackOutput = stepSummaryOutput(data, name, latestStep?.output)
+              const inlineOutputs =
+                stepOutputs.length > 0
+                  ? stepOutputs
+                  : [
+                      {
+                        run: data.run,
+                        step: name,
+                        attempt: syntheticArtifactAttempt(latestStep?.attempt),
+                        path: "",
+                        text: fallbackOutput.join("\n"),
+                      },
+                    ]
               return (
                 <TabPanel key={name} value={name}>
+                  {name === "merge" ? <QueueIntegrationFacts data={data} /> : null}
                   {/* Only the step-level facts here (item H); the run-level facts
                   render once above the tabs. */}
-                  {command === undefined ? null : (
-                    <Box backgroundColor="$bg-surface-subtle" paddingX={1} marginTop={1} flexShrink={0} minWidth={0}>
-                      <Text bold color="$fg" wrap="truncate">
-                        <Text color="$fg-muted">COMMAND </Text>$ {command}
-                      </Text>
-                    </Box>
-                  )}
                   <QueueShowView
                     data={stepData}
                     compact={compact}
@@ -466,22 +652,14 @@ export function QueueWorkflowStepTabs({
                     section="steps"
                     showLogArtifacts={false}
                   />
-                  <QueueDisclosure
-                    title="RUN LOGS"
-                    expanded={logExpanded}
-                    onToggle={(expanded) => setUserToggledLogs((current) => ({ ...current, [name]: expanded }))}
-                    marginTop={1}
-                    flexGrow={1}
-                    minHeight={0}
-                  >
-                    {stepOutputs.length === 0 ? (
-                      <Text color="$fg-muted">Waiting for first output…</Text>
-                    ) : (
-                      <Box minHeight={8} flexGrow={1}>
-                        <QueueArtifactOutputView outputs={stepOutputs} />
-                      </Box>
-                    )}
-                  </QueueDisclosure>
+                  {command === undefined ? null : (
+                    <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
+                      <Text bold color="$fg" wrap="truncate">
+                        $ {command}
+                      </Text>
+                    </Box>
+                  )}
+                  <QueueInlineArtifactOutputView outputs={inlineOutputs} />
                 </TabPanel>
               )
             })}
@@ -697,17 +875,26 @@ export function QueueWatchFrame({
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
-  // The batched members' full PRs (reviews/comments/check-requests/revision
-  // history) are not on the run's `PRSnapshot` — resolve them from the status
-  // results by id so the detail's PR facts (item J) can render.
+  // Revision A makes DETAIL run-scoped: resolve every immutable run member for
+  // the PR blocks, while pending rows retain the same one-template shape.
   const allFullPrs = snapshot.results.flatMap((result) => result.prs)
-  const detailFullPrs =
-    detailData === undefined
-      ? allFullPrs.filter((candidate) => candidate.id === detailPr)
-      : allFullPrs.filter((candidate) => detailData.prs.some((member) => member.id === candidate.id))
   // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity and the
   // status-parameterized template need the full projected row at this index.
   const selectedProjectedRow = projectedRows?.[cursor]
+  const detailRunRows =
+    selectedRow?.run === undefined
+      ? selectedProjectedRow === undefined
+        ? []
+        : [selectedProjectedRow]
+      : (snapshot.projection?.rows.filter((candidate) => candidate.run === selectedRow.run) ?? [])
+  const detailRunDetails = snapshot.results.flatMap((result) => {
+    const runs = [...result.running, ...result.waiting, ...result.finished]
+    return runs.map((run) => queueShowData(run, runs))
+  })
+  const detailMemberIds = new Set(
+    detailData?.prs.map((member) => member.id) ?? (detailPr === undefined ? [] : [detailPr]),
+  )
+  const detailFullPrs = allFullPrs.filter((candidate) => detailMemberIds.has(candidate.id))
   const timelineColumns = queueTimelineColumns(columns, tier, detailOpen, splitRatio)
   const timelineRows = queueTimelineHeight(Math.max(0, viewportRows - 1), tier, detailOpen, splitRatio)
   const timeline =
@@ -754,6 +941,9 @@ export function QueueWatchFrame({
           outputs={detailOutputs}
           {...(snapshot.commands === undefined ? {} : { commands: snapshot.commands })}
           prs={detailFullPrs}
+          runRows={detailRunRows}
+          runDetails={detailRunDetails}
+          diffs={snapshot.diffs ?? []}
           compact
           active={detailOpen}
           highlightPr={selectedRow?.pr}
@@ -774,9 +964,9 @@ export function QueueWatchFrame({
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by an emphasized identity title row (run + PR.rev + dimmed branch
-  // glyph) with STATUS/OUTCOME right-aligned and total time directly beneath
-  // it, then the body. One cell of horizontal padding keeps content off the
+  // is headed by an emphasized run identity with STATUS/OUTCOME right-aligned,
+  // then exactly one blank row and the run-scoped body.
+  // One cell of horizontal padding keeps content off the
   // pane edge; the title sits flush at the top.
   const framedTimeline = (
     // The QUEUE pane is its own selection scope (item 4a): a drag started here
@@ -797,13 +987,14 @@ export function QueueWatchFrame({
         {...(selectedProjectedRow === undefined ? {} : { row: selectedProjectedRow })}
         {...(detailData === undefined ? {} : { data: detailData })}
       />
+      <Box height={1} flexShrink={0} />
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {detail}
       </Box>
     </Box>
   )
   return (
-    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} userSelect="none">
+    <Box flexDirection="column" width="100%" height="100%" minWidth={0} minHeight={0} userSelect="text">
       <Box flexGrow={1} minWidth={0} minHeight={0}>
         {tier === "full" ? (
           <Box flexGrow={1} minWidth={0} minHeight={0}>

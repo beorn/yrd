@@ -63,7 +63,7 @@ describe("queue timeline FILTER pills row (items 2/3/5)", () => {
     try {
       await app.waitForLayoutStable()
       const headerY = rowIndex(app.text, /\bTIME\b/u)
-      const firstRowY = rowIndex(app.text, /PR0\.\d/u)
+      const firstRowY = rowIndex(app.text, /pr#0\.\d/u)
       const pillsY = rowIndex(app.text, /pending.*running.*failed.*done/u)
       const flowY = rowIndex(app.text, /╭─ FLOW /u)
 

@@ -95,7 +95,7 @@ import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
 // load. Types are erased, so they stay as a static type-only import.
-import type { QueueArtifactOutput, QueueWatchSnapshot } from "./watch-pane.tsx"
+import type { QueueArtifactOutput, QueuePrDiff, QueueWatchSnapshot } from "./watch-pane.tsx"
 
 function gitSync(cwd: string, args: readonly string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
@@ -2098,12 +2098,65 @@ export async function queueArtifactOutputs(
   return outputs
 }
 
+function queuePrDiffSource(pr: PR, revision: number): Readonly<{ base: string; headSha: string }> | undefined {
+  const revisionRecord = pr.revisions.find((candidate) => candidate.revision === revision)
+  const isCurrent = revision === pr.revision
+  const headSha = isCurrent ? pr.headSha : revisionRecord?.headSha
+  if (headSha === undefined) return undefined
+  const base = isCurrent
+    ? (pr.baseSha ?? revisionRecord?.baseSha ?? pr.base)
+    : (revisionRecord?.baseSha ?? revisionRecord?.base)
+  return base === undefined ? undefined : { base, headSha }
+}
+
+/** Resolve a revision-bound PR delta for the synthetic `0: submit` step. */
+export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueuePrDiff {
+  const source = queuePrDiffSource(pr, revision)
+  if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  // Missing objects are the one recoverable absence state. Validate the
+  // repository outside this catch so environment/corruption failures never
+  // masquerade as ordinary ref pruning.
+  gitSync(cwd, ["rev-parse", "--git-dir"])
+  try {
+    gitSync(cwd, ["cat-file", "-e", `${source.base}^{commit}`])
+    gitSync(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
+  } catch {
+    return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  }
+  const range = `${source.base}...${source.headSha}`
+  const numstat = gitSync(cwd, ["diff", "--numstat", "--no-renames", "-z", range, "--"])
+  const rows = numstat.split("\0").filter((row) => row !== "")
+  let additions = 0
+  let deletions = 0
+  const files: string[] = []
+  for (const row of rows) {
+    const [added = "-", deleted = "-", ...pathParts] = row.split("\t")
+    const addedCount = Number(added)
+    const deletedCount = Number(deleted)
+    if (Number.isFinite(addedCount)) additions += addedCount
+    if (Number.isFinite(deletedCount)) deletions += deletedCount
+    const path = pathParts.join("\t")
+    if (path !== "") files.push(path)
+  }
+  const patch = gitSync(cwd, [
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--ignore-submodules=none",
+    "--no-renames",
+    range,
+    "--",
+  ])
+  return { pr: pr.id, revision, additions, deletions, files, patch }
+}
+
 export async function queueListSnapshot(
   app: YrdCliApp,
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
   includeOutputs = false,
+  diffCache?: Map<string, QueuePrDiff>,
 ): Promise<QueueListSnapshot> {
   // The watch loop reuses one app across ticks, and app.state() is the mount-time
   // journal projection — it never tails cross-process runner appends on its own.
@@ -2133,6 +2186,33 @@ export async function queueListSnapshot(
   })
   const outputs =
     includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(results, io.artifactRoot) : []
+  const diffs = includeOutputs
+    ? (() => {
+        const prsById = new Map(results.flatMap((result) => result.prs).map((pr) => [pr.id, pr] as const))
+        const visibleRevisions = new Map(
+          projection.rows.flatMap((row) => {
+            const pr = prsById.get(row.pr)
+            return pr === undefined ? [] : [[`${row.pr}:${row.revision}`, { pr, revision: row.revision }] as const]
+          }),
+        )
+        return [...visibleRevisions.values()].map(({ pr, revision }) => {
+          const source = queuePrDiffSource(pr, revision)
+          const cacheKey = source === undefined ? undefined : `${pr.id}:${revision}:${source.base}:${source.headSha}`
+          const cached = cacheKey === undefined ? undefined : diffCache?.get(cacheKey)
+          if (cached !== undefined) return cached
+          let diff: QueuePrDiff
+          try {
+            diff = queuePrDiff(io.cwd ?? process.cwd(), pr, revision)
+          } catch {
+            diff = { pr: pr.id, revision, unavailable: "git-error" }
+          }
+          // A missing ref can appear after the next fetch; cache only stable,
+          // source-backed diffs for the lifetime of this watch process.
+          if (cacheKey !== undefined && !("unavailable" in diff)) diffCache?.set(cacheKey, diff)
+          return diff
+        })
+      })()
+    : []
   const commands = includeOutputs
     ? Object.fromEntries(
         Object.entries(
@@ -2150,6 +2230,7 @@ export async function queueListSnapshot(
     now,
     projection,
     ...(outputs.length === 0 ? {} : { outputs }),
+    ...(diffs.length === 0 ? {} : { diffs }),
     ...(commands === undefined || Object.keys(commands).length === 0 ? {} : { commands }),
   }
 }
@@ -2737,8 +2818,9 @@ async function watchQueue(
 ): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
+  const diffCache = new Map<string, QueuePrDiff>()
   const load = async (): Promise<QueueListSnapshot> =>
-    queueListSnapshot(app, filters, options, io, !jsonEnabled(options))
+    queueListSnapshot(app, filters, options, io, !jsonEnabled(options), diffCache)
 
   if (!jsonEnabled(options)) {
     io.stderr(`yrd watch runtime: ${formatYrdRuntimeVersion()}\n`)

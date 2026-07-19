@@ -50,7 +50,7 @@ describe("queue liveness status render (item 4)", () => {
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
       expect(app.text).toContain("[84042]")
-      const statusAt = discPointOnRow(app.text, "PRR.1")
+      const statusAt = discPointOnRow(app.text, "pr#R.1")
       expect(app.cell(statusAt[0], statusAt[1]).fg).not.toBeNull()
     } finally {
       app.unmount()

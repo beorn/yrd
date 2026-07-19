@@ -56,13 +56,14 @@ function integratedRunData(): QueueShowData {
 }
 
 describe("watch detail completeness — run-level integration proof detail (item J)", () => {
-  it("appends REWRITES to the LANDING row, no raw ISO", () => {
+  it("keeps the landing sentence exact and carries REWRITES as a separate fact", () => {
     const app = createRenderer({ cols: 120, rows: 30 })(
       createElement(QueueShowView, { data: integratedRunData(), compact: true, section: "run" }),
     )
     try {
-      expect(app.text).toContain("RUN R4 STATUS passed OUTCOME integrated")
-      expect(app.text).toContain("LANDING  bbbbbbbbbbbb@aaaaaaaaaaaa REWRITES 1")
+      expect(app.text).toContain("RUN main#4 STATUS passed OUTCOME integrated")
+      expect(app.text).toContain(`Committed as ${"b".repeat(40)} on main`)
+      expect(app.text).toContain("- integration proof: REWRITES 1")
       expect(app.text).not.toMatch(NO_RAW_ISO)
     } finally {
       app.unmount()
@@ -71,12 +72,12 @@ describe("watch detail completeness — run-level integration proof detail (item
 })
 
 describe("watch detail completeness — step artifacts + checkpoint (item J)", () => {
-  it("renders artifacts and checkpoint on a proof row distinct from RUN LOGS", () => {
+  it("renders artifacts and checkpoint on a proof row distinct from inline output", () => {
     const data = integratedRunData()
     const [row] = data.steps
     if (row === undefined) throw new Error("fixture run produced no step rows")
     // Isolate the artifacts/checkpoint cells: no ART links or EVIDENCE JSON, so
-    // the single truncate RUN LOGS row has room to show both fields.
+    // the single truncate PROOF row has room to show both fields.
     const stepData: QueueShowData = {
       ...data,
       steps: [{ ...row, artifacts: "vitest-report", checkpoint: "tests=125 failures=0", evidence: "-", locations: [] }],
@@ -86,7 +87,7 @@ describe("watch detail completeness — step artifacts + checkpoint (item J)", (
     )
     try {
       // The step tab is the step summary now (item d), so the duplicate STEP
-      // header row is gone; durable proof remains distinct from the one RUN LOGS disclosure.
+      // header row is gone; durable proof remains distinct from inline output.
       expect(app.text).not.toContain("STEP check#1")
       expect(app.text).toContain("PROOF")
       expect(app.text).toContain("ARTIFACTS vitest-report")
@@ -96,7 +97,7 @@ describe("watch detail completeness — step artifacts + checkpoint (item J)", (
     }
   })
 
-  it("lets RUN LOGS own raw locations and artifact names without hiding non-log proof", () => {
+  it("lets inline output own raw locations and artifact names without hiding non-log proof", () => {
     const data = integratedRunData()
     const [row] = data.steps
     if (row === undefined) throw new Error("fixture run produced no step rows")
@@ -168,7 +169,7 @@ describe("watch detail completeness — PR-level facts (item J)", () => {
     })
     const app = createRenderer({ cols: 140, rows: 30 })(createElement(QueueDetailPrFacts, { prs: [pr] }))
     try {
-      expect(app.text).toContain("PR PR9@r1 Wire the queue detail surface")
+      expect(app.text).toContain("pr#9.1 Wire the queue detail surface")
       expect(app.text).toContain("ISSUE @yrd/core/21106-queue-timeline")
       expect(app.text).toContain("NOTE Keep the selected detail visible during review.")
       expect(app.text).toContain("REVIEW approve reviewer@example.test")

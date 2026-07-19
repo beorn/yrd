@@ -1,11 +1,10 @@
 /**
  * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
  *
- * Pins the reshaped detail surface: the emphasized identity title row with a
- * dimmed branch glyph and right-aligned colorized STATUS/OUTCOME plus total
- * time beneath it; the unlabelled bold PR title and linked ISSUE; the exact
- * ISSUE/PRs/TIMELINE/LANDING key/value facts; the dropped duplicate RUN/BASE
- * facts; inline non-duplicated DETAILS; and the failure-only NEXT cue.
+ * Pins the reshaped detail surface: the run-scoped identity title with
+ * right-aligned colorized STATUS/OUTCOME; the linked ISSUE primitive; the
+ * natural clock sentence plus COMMIT; separate JOB/RUNNER facts; and the
+ * failure-only NEXT cue.
  */
 
 import { createElement } from "react"
@@ -76,8 +75,8 @@ function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: nu
   return -1
 }
 
-describe("detail title row — identity emphasis + right-aligned outcome + dim glyph (items a/i)", () => {
-  it("emphasizes the identity, right-aligns STATUS/OUTCOME, and puts total time directly beneath it", () => {
+describe("detail title row — run identity emphasis + right-aligned outcome", () => {
+  it("emphasizes the identity, right-aligns STATUS/OUTCOME, and omits corner time", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:55:00.000Z",
@@ -91,25 +90,23 @@ describe("detail title row — identity emphasis + right-aligned outcome + dim g
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
     )
     try {
-      // Identity reads like the row, not the word DETAIL, and carries the run's
-      // outcome on the same row (deduped `passed, integrated`).
-      expect(app.text).toContain("main#42 PR42.1")
-      expect(app.text).toContain("topic/pr42")
+      // Revision A makes the title run-scoped; PR and branch move into member
+      // blocks while the deduped run outcome stays on this line.
+      expect(app.text).toContain("RUN main#42")
+      expect(app.text).not.toContain("PR42.1")
+      expect(app.text).not.toContain("topic/pr42")
       expect(app.text).toContain(`${data.glyph} passed, integrated`)
 
       const titleRow = app.text.split("\n").findIndex((text) => text.includes("main#42"))
       expect(titleRow).toBeGreaterThanOrEqual(0)
 
       // Identity is emphasized like the QUEUE tab: warning-colored + bold.
-      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("PR42.1") ?? -1
+      const identityColumn = app.text.split("\n")[titleRow]?.indexOf("RUN main#42") ?? -1
       const identityCell = app.cell(identityColumn, titleRow)
       expect(identityCell.bold).toBe(true)
       expect(identityCell.fg).not.toBeNull()
 
-      // The branch glyph is dimmed apart from the identity (item i).
-      const glyph = glyphColumn(app, titleRow)
-      expect(glyph).toBeGreaterThan(0)
-      expect(app.cell(glyph, titleRow).fg).not.toEqual(identityCell.fg)
+      expect(glyphColumn(app, titleRow), "branch marker belongs in the member block, not the run title").toBe(-1)
 
       // STATUS/OUTCOME is colorized, distinct from the identity emphasis.
       const outcomeColumn = app.text.split("\n")[titleRow]?.indexOf("integrated") ?? -1
@@ -117,17 +114,13 @@ describe("detail title row — identity emphasis + right-aligned outcome + dim g
       expect(outcomeCell.fg).not.toBeNull()
       expect(outcomeCell.fg).not.toEqual(identityCell.fg)
 
-      // The total occupies the otherwise blank line between the identity and
-      // the PR title, with the same right edge as the status block above.
-      const durationRow = app.text.split("\n")[titleRow + 1] ?? ""
-      expect(durationRow).toContain("15m00s")
-      expect(durationRow.trimEnd().length).toBe((app.text.split("\n")[titleRow] ?? "").trimEnd().length)
+      expect(app.text).not.toContain("15m00s")
     } finally {
       app.unmount()
     }
   })
 
-  it("uses the live row elapsed time while a run has no terminal total yet", () => {
+  it("does not put live elapsed time in the title corner", () => {
     const pr = fixturePr("PR43", "submitted", "2026-07-13T11:30:00.000Z", "Still running")
     const run = fixtureRun("R43", [pr], "running", "2026-07-13T11:40:00.000Z", {
       steps: [fixtureStep("check", fixtureJob("J43-check", "running"))],
@@ -143,7 +136,7 @@ describe("detail title row — identity emphasis + right-aligned outcome + dim g
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
     )
     try {
-      expect(app.text).toContain("20m00s")
+      expect(app.text).not.toContain("20m00s")
     } finally {
       app.unmount()
     }
@@ -159,7 +152,7 @@ describe("detail title row — identity emphasis + right-aligned outcome + dim g
   })
 })
 
-describe("detail run facts — exact PRs/TIMELINE/LANDING rows, no RUN/BASE duplication", () => {
+describe("detail run facts — natural timing sentence + landing, no RUN/BASE duplication", () => {
   it("drops the RUN header and BASE rows when the title renders them above", () => {
     const app = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: integratedRun(), compact: true, section: "run", titleAbove: true }),
@@ -169,34 +162,34 @@ describe("detail run facts — exact PRs/TIMELINE/LANDING rows, no RUN/BASE dupl
       expect(app.text).not.toContain("OUTCOME")
       expect(app.text).not.toContain("BASE ")
       expect(app.text).not.toContain("TITLE ")
-      // The settled key/value label set is exact.
-      expect(app.text).toContain("PRs      PR42@r1")
-      expect(app.text).toContain("TIMELINE ")
-      expect(app.text).toContain("LANDING  bbbbbbbbbbbb")
+      // Direct QueueShowView retains its member fact; the watch passes
+      // showMembers=false because run member blocks own it there.
+      expect(app.text).toContain("PRs      pr#42.1")
+      expect(app.text).toContain("Started 03:40:00, ended 03:55:00 (total 15:00, wait 0)")
+      expect(app.text).not.toContain("TIMELINE")
+      expect(app.text).toContain(`Committed as ${"b".repeat(40)} on main`)
+      expect(app.text).not.toContain("LANDING")
 
-      const factRows = app.text.split("\n").filter((row) => /^(?:PRs|TIMELINE|LANDING)/u.test(row))
-      expect(factRows.map((row) => row.slice(9).search(/\S/u) + 9)).toEqual([9, 9, 9])
+      expect(app.text.split("\n").findIndex((row) => row.startsWith("Started "))).toBeLessThan(
+        app.text.split("\n").findIndex((row) => row.startsWith("Committed as ")),
+      )
     } finally {
       app.unmount()
     }
   })
 
-  it("collapses START/END + TOTAL/ACTIVE/WAIT into one labeled timeline while keeping LANDING separate", () => {
+  it("collapses START/END + TOTAL/ACTIVE/WAIT into one sentence while keeping the landing separate", () => {
     const app = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: integratedRun(), compact: true, section: "run", titleAbove: true }),
     )
     try {
-      // One TIMELINE row carries clocks/duration; LANDING owns the proof SHA.
-      expect(app.text).toContain("TIMELINE ")
-      expect(app.text).toContain(" → ")
-      expect(app.text).toMatch(/\d{2}:\d{2}:\d{2} → /u)
-      expect(app.text).toContain("· 15m00s")
-      const timelineRow = app.text.split("\n").find((row) => row.includes("TIMELINE")) ?? ""
-      expect(timelineRow).not.toContain("bbbbbbbbbbbb")
-      expect(app.text).toContain("LANDING  bbbbbbbbbbbb")
-      // The whole run ran active, so the wait segment is omitted (rule: >0 only).
-      expect(app.text).not.toContain("(wait")
+      // One natural sentence carries clocks/duration; the landing sentence owns the proof SHA.
+      expect(app.text).toContain("Started 03:40:00, ended 03:55:00 (total 15:00, wait 0)")
+      const timingRow = app.text.split("\n").find((row) => row.includes("Started ")) ?? ""
+      expect(timingRow).not.toContain("bbbbbbbbbbbb")
+      expect(app.text).toContain(`Committed as ${"b".repeat(40)} on main`)
       // The retired label rows are gone.
+      expect(app.text).not.toContain("TIMELINE")
       expect(app.text).not.toContain("START ")
       expect(app.text).not.toContain("TOTAL ")
       expect(app.text).not.toContain("ACTIVE ")
@@ -229,7 +222,7 @@ describe("detail run facts — exact PRs/TIMELINE/LANDING rows, no RUN/BASE dupl
       }),
     )
     try {
-      expect(app.text).toContain("(wait 5m00s)")
+      expect(app.text).toContain("(total 15:00, wait 5:00)")
     } finally {
       app.unmount()
     }
@@ -277,7 +270,7 @@ describe("detail run facts — RETRY only above one, NEXT only on failure (items
   })
 })
 
-describe("detail step facts — aligned inline DETAILS without duplication", () => {
+describe("detail step facts — final JOB yrd# grammar without duplication", () => {
   it("uses the durable command evidence and hides the shell transport wrapper", () => {
     const pr = fixturePr("PR10", "integrated", "2026-07-13T10:30:00.000Z", "Command evidence")
     const run = fixtureRun("R10", [pr], "passed", "2026-07-13T10:40:00.000Z", {
@@ -294,17 +287,15 @@ describe("detail step facts — aligned inline DETAILS without duplication", () 
     expect(queueShowData(run).steps[0]?.command).toBe("bun check")
   })
 
-  it("renders JOB/RUNNER/REV once in a single DETAILS key/value row", () => {
+  it("renders one JOB yrd# row and omits runner/revision from the default body", () => {
     const app = createRenderer({ cols: 120, rows: 20 })(
       createElement(QueueShowView, { data: integratedRun(), compact: true, section: "steps" }),
     )
     try {
-      expect(app.text).toContain("DETAILS")
-      expect(app.text).toContain("J42-check")
-      expect(app.text).toContain("runner-herdr-03")
-      expect(app.text).toContain("step-v2")
-      expect(app.text.match(/DETAILS/gu)).toHaveLength(1)
-      expect(app.text).not.toMatch(/[>v] DETAILS/u)
+      expect(app.text).toContain("JOB yrd#J42-check")
+      expect(app.text).not.toContain("runner-herdr-03")
+      expect(app.text).not.toContain("DETAILS")
+      expect(app.text).not.toContain("REV")
       expect(app.text.match(/J42-check/gu)).toHaveLength(1)
     } finally {
       app.unmount()
@@ -330,10 +321,11 @@ describe("detail step facts — aligned inline DETAILS without duplication", () 
     try {
       await app.waitForLayoutStable()
       await app.press("Enter")
+      await app.press("l")
       await app.waitForLayoutStable()
       expect(app.text).toContain("MESSAGE")
       expect(app.text).not.toMatch(/^DETAIL\s/mu)
-      expect(app.text.match(/DETAILS/gu)).toHaveLength(1)
+      expect(app.text).not.toContain("DETAILS")
       const messageLine = app.text.split("\n").find((line) => line.includes("MESSAGE"))
       expect(messageLine, "the MESSAGE row is visible at the narrow full-detail tier").toBeDefined()
       expect(messageLine?.trimEnd(), "MESSAGE ends with an ellipsis instead of clipping mid-word").toMatch(/…$/u)

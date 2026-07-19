@@ -76,8 +76,8 @@ describe("synchronized activity pulse (items 12-13)", () => {
       await app.waitForLayoutStable()
       expect(app.text).toContain("╭─ RUNNER ")
       expect(app.text).not.toContain("╭─ STATUS ")
-      const glyph = cellOf(app, "●", "PRR.1")
-      const word = cellOf(app, "run", "PRR.1")
+      const glyph = cellOf(app, "●", "pr#R.1")
+      const word = cellOf(app, "run", "pr#R.1")
       expect(word.fg, "running marker and word share the activity phase").toEqual(glyph.fg)
     } finally {
       app.unmount()

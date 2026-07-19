@@ -4,10 +4,11 @@
 
 import { createElement as h, useEffect, useState } from "react"
 import { renderString } from "silvery"
+import { createRenderer } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { fixtureJob, fixturePr, fixtureRun, fixtureStep } from "../dev/queue-timeline-fixtures.ts"
 import { queueShowData, type QueueShowData } from "../src/queue-status-view.tsx"
-import { QueueWorkflowStepTabs, resolveStepLogExpanded, resolveStepTabSelection } from "../src/watch-pane.tsx"
+import { QueueWorkflowStepTabs, resolveStepTabSelection } from "../src/watch-pane.tsx"
 import type { QueueArtifactOutput } from "../src/watch-pane.tsx"
 
 // One PR / one run; the reconciliation contract (21106) is entirely about the
@@ -38,9 +39,8 @@ function stepTabsData(steps: readonly StepState[]): QueueShowData {
   return queueShowData(run)
 }
 
-// Each step streams a distinctly-named output so the active step is readable
-// from the rendered RUN LOGS heading (the STEP <name>#<attempt> facts row was
-// dropped — the tab is the step summary now, item d of the 2026-07-16 redesign).
+// Each step streams distinctly-named inline output so the active step remains
+// readable without the removed RUN LOGS / OUTPUT accordion chrome.
 function stepOutputs(steps: readonly StepState[]): readonly QueueArtifactOutput[] {
   return steps.map((step) => ({
     run: "R100",
@@ -65,7 +65,7 @@ function SameRunAdvance({ first, second }: { first: readonly StepState[]; second
     outputs: stepOutputs(steps),
     compact: true,
     active: false,
-    prs: [],
+    prs: [STEP_PR],
   })
 }
 
@@ -80,44 +80,57 @@ async function renderOnce(steps: readonly StepState[]): Promise<string> {
       outputs: stepOutputs(steps),
       compact: true,
       active: false,
-      prs: [],
+      prs: [STEP_PR],
     }),
     { width: 100, height: 40, plain: true },
   )
 }
 
-// The active step is the only rendered TabPanel; its expanded RUN LOGS streams
-// that step's output under an `OUTPUT <name>#<attempt>` heading, so the active
-// running step names itself. A completed active step folds its log (no heading)
-// — which is exactly the frozen-selection bug this contract catches, so a
-// missing heading is a legitimate failure, not a detection gap.
-function activeStepName(frame: string): string {
-  const match = /\bOUTPUT (\S+?)#/u.exec(frame)
-  if (match === null) throw new Error(`no OUTPUT <name>#<attempt> heading in frame:\n${frame}`)
-  return match[1] as string
+async function renderSelected(steps: readonly StepState[], name: string): Promise<string> {
+  const app = createRenderer({ cols: 100, rows: 40 })(
+    h(QueueWorkflowStepTabs, {
+      data: stepTabsData(steps),
+      outputs: stepOutputs(steps),
+      compact: true,
+      active: true,
+      prs: [STEP_PR],
+    }),
+  )
+  try {
+    await app.waitForLayoutStable()
+    const rows = app.text.split("\n")
+    const y = rows.findIndex((row) => row.includes(name))
+    const x = rows[y]?.indexOf(name) ?? -1
+    if (x < 0 || y < 0) throw new Error(`missing tab '${name}' in frame:\n${app.text}`)
+    await app.click(x, y)
+    await app.waitForLayoutStable()
+    return app.text
+  } finally {
+    app.unmount()
+  }
 }
 
 describe("queue step tabs same-run reconciliation (21106)", () => {
-  it("right-aligns durations within wide equal-width tabs", async () => {
+  it("keeps status and duration on compact equal-width two-row tabs", async () => {
     const startedAt = "2026-07-13T11:30:00.000Z"
     const frame = await renderOnce([
       { name: "prepare", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:27.000Z" },
       { name: "check", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:42.000Z" },
       { name: "integrate", status: "passed", startedAt, finishedAt: "2026-07-13T11:30:15.000Z" },
     ])
-    const lines = frame.split("\n")
-    const tabRowIndex = lines.findIndex((row) => row.includes("1: prepare") && row.includes("3: integrate"))
-    const tabRow = lines[tabRowIndex] ?? ""
+    const rows = frame.split("\n")
+    const tabRowIndex = rows.findIndex((row) => row.includes("1: prepare") && row.includes("3: integrate"))
+    const tabRow = rows[tabRowIndex] ?? ""
     const prepareX = tabRow.indexOf("1: prepare")
     const checkX = tabRow.indexOf("2: check", prepareX)
     const integrateX = tabRow.indexOf("3: integrate", checkX)
     const firstStride = checkX - prepareX
     const secondStride = integrateX - checkX
-    expect(firstStride).toBeGreaterThanOrEqual(20)
+    expect(firstStride).toBeLessThan(20)
     expect(Math.abs(firstStride - secondStride)).toBeLessThanOrEqual(2)
 
-    const durationRow = lines[tabRowIndex + 2] ?? ""
-    const segment = durationRow.slice(prepareX)
+    const statusRow = rows[tabRowIndex + 1] ?? ""
+    const segment = statusRow.slice(prepareX)
     const durations = [...segment.matchAll(/\b(?:27s|42s|15s)\b/gu)]
     expect(durations.map((match) => match[0])).toEqual(["27s", "42s", "15s"])
     const ends = durations.map((match) => (match.index ?? -1) + match[0].length)
@@ -126,37 +139,47 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
   })
 
   it("keeps detailed failure text in the active pane content, never in the tab label", async () => {
-    const frame = await renderOnce([
-      {
-        name: "check",
-        status: "failed",
-        error: { code: "check-failed", message: "typecheck found three unsafe assignments" },
-      },
-      { name: "integrate", status: "requested" },
-    ])
+    const frame = await renderSelected(
+      [
+        {
+          name: "check",
+          status: "failed",
+          error: { code: "check-failed", message: "typecheck found three unsafe assignments" },
+        },
+        { name: "integrate", status: "requested" },
+      ],
+      "1: check",
+    )
     const tabRow = frame.split("\n").find((row) => row.includes("check") && row.includes("integrate")) ?? ""
     expect(tabRow).not.toContain("typecheck found three unsafe assignments")
     expect(frame).toContain("typecheck found three unsafe assignments")
   })
 
   it("shows the run's recorded command instead of a newer config value", async () => {
-    const frame = await renderString(
+    const data = stepTabsData([{ name: "check", status: "running" }])
+    const app = createRenderer({ cols: 100, rows: 30 })(
       h(QueueWorkflowStepTabs, {
-        data: stepTabsData([{ name: "check", status: "running" }]),
+        data,
         outputs: [],
         commands: { check: "bun test:stale-config" },
         compact: true,
-        active: false,
-        prs: [],
+        active: true,
+        prs: [STEP_PR],
       }),
-      { width: 100, height: 30, plain: true },
     )
-    expect(frame).toContain("COMMAND $ bun vitest run")
+    await app.waitForLayoutStable()
+    const [tabRow = ""] = app.text.split("\n").filter((row) => row.includes("1: check"))
+    await app.click(tabRow.indexOf("1: check"), app.text.split("\n").indexOf(tabRow))
+    await app.waitForLayoutStable()
+    const frame = app.text
+    app.unmount()
+    expect(frame).toContain("$ bun vitest run")
+    expect(frame).not.toContain("COMMAND $ ")
     expect(frame).not.toContain("[ $")
     expect(frame).not.toContain("stale-config")
   })
 
-  it("follows the newly-active step when a running step passes underneath the pane", async () => {
+  it("keeps submit selected when the live runtime step advances underneath the pane", async () => {
     // First: check is running (auto-selected), integrate is still queued.
     const first: readonly StepState[] = [
       { name: "check", status: "running" },
@@ -168,48 +191,38 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
       { name: "integrate", status: "running" },
     ]
 
-    // Sanity: on first mount the live step is `check`.
-    expect(activeStepName(await renderOnce(first))).toBe("check")
-
-    // Contract: the selected tab must follow the live step to `integrate`.
+    expect(await renderOnce(first)).not.toContain("live check output")
     const advanced = await renderAdvance(first, second)
-    expect(activeStepName(advanced)).toBe("integrate")
-
-    // Expansion follows the live step too: the freshly-active step's RUN LOGS
-    // is open, so its streamed output is visible.
-    expect(advanced).toContain("live integrate output")
+    expect(advanced).toContain("0: submit")
+    expect(advanced).not.toContain("live integrate output")
   })
 
-  it("folds a step's log once that step completes in the same run", async () => {
-    // A single step: running (log auto-open) then passed (log must auto-fold).
+  it("keeps a step's output expanded once that step completes in the same run", async () => {
+    // A single step: running then passed; round 6 removes log folding entirely.
     const first: readonly StepState[] = [{ name: "check", status: "running" }]
     const second: readonly StepState[] = [{ name: "check", status: "passed" }]
 
-    // While running, the log is open — the streamed output renders.
-    expect(await renderOnce(first)).toContain("live check output")
+    // While running, the streamed output renders.
+    expect(await renderSelected(first, "1: check")).toContain("live check output")
 
-    // Once the step passes in the same run, a completed step folds: the output
-    // disappears behind the collapsed accordion (no OUTPUT heading remains).
-    const advanced = await renderAdvance(first, second)
-    expect(advanced).not.toContain("live check output")
+    // Once the step passes in the same run, the evidence remains visible.
+    const advanced = await renderSelected(second, "1: check")
+    expect(advanced).toContain("live check output")
   })
 
-  it("selects the live step on a fresh mount, mirroring a new-run remount", async () => {
-    // A new run remounts the component (`key={detailData.run}`), which drops
-    // every override — so a first paint always lands on the live step.
+  it("selects submit on a fresh mount, mirroring a new-run remount", async () => {
     const started: readonly StepState[] = [
       { name: "check", status: "passed" },
       { name: "integrate", status: "running" },
     ]
-    expect(activeStepName(await renderOnce(started))).toBe("integrate")
+    const frame = await renderOnce(started)
+    expect(frame).toContain("0: submit")
+    expect(frame).not.toContain("live integrate output")
   })
 })
 
-// The selection/fold resolvers are the seam where operator intent meets the
-// live derivation. Testing them directly pins the preservation half of the
-// 21106 contract (an explicit pick/toggle survives status advances) without an
-// input harness: the component wires each resolver to a `useState` that only a
-// user tab pick / log toggle writes.
+// The selection resolver is the seam where operator intent meets live
+// derivation. Output is no longer foldable in round 6.
 describe("queue step tabs override resolution (21106 preservation)", () => {
   const names = ["prepare", "check", "integrate"] as const
 
@@ -227,18 +240,5 @@ describe("queue step tabs override resolution (21106 preservation)", () => {
 
   it("falls back to the live step when a pinned step no longer exists", () => {
     expect(resolveStepTabSelection(names, "integrate", "gone")).toBe("integrate")
-  })
-
-  it("follows live fold state until the operator toggles a log", () => {
-    // No toggle: running/attention steps open, completed steps fold.
-    expect(resolveStepLogExpanded(true, undefined)).toBe(true)
-    expect(resolveStepLogExpanded(false, undefined)).toBe(false)
-  })
-
-  it("preserves an explicit log toggle across status changes", () => {
-    // Operator expanded a completed step's log (auto would fold it) — it stays.
-    expect(resolveStepLogExpanded(false, true)).toBe(true)
-    // Operator collapsed a running step's log (auto would open it) — it stays.
-    expect(resolveStepLogExpanded(true, false)).toBe(false)
   })
 })

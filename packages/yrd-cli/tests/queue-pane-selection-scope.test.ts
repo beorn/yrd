@@ -91,6 +91,8 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot: twoPaneSnapshot() }))
     try {
       await app.waitForLayoutStable()
+      await app.press("l")
+      await app.waitForLayoutStable()
       const text = app.text
       // Columns 0..103 are the QUEUE pane, 104+ the DETAIL pane (0.52 split of 200).
       const LEFT_MAX = 103
@@ -98,9 +100,9 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
 
       // Three consecutive rows in the QUEUE list — all selectable, all resolving
       // to ONE shared scope: an in-pane drag between them selects and stays put.
-      const rowA = pointOf(text, "PRA.1", 0, LEFT_MAX)
-      const rowB = pointOf(text, "PRB.1", 0, LEFT_MAX)
-      const rowC = pointOf(text, "PRC.1", 0, LEFT_MAX)
+      const rowA = pointOf(text, "pr#A.1", 0, LEFT_MAX)
+      const rowB = pointOf(text, "pr#B.1", 0, LEFT_MAX)
+      const rowC = pointOf(text, "pr#C.1", 0, LEFT_MAX)
       for (const point of [rowA, rowB, rowC]) {
         expect(resolveUserSelect(nodeAt(app, point)), "queue row stays selectable").not.toBe("none")
       }
@@ -110,15 +112,15 @@ describe("queue watch per-pane selection scopes (item 4a)", () => {
 
       // A DETAIL-pane node resolves to a DISJOINT scope: a drag anchored in the
       // QUEUE pane cannot reach it (its contain boundary ends before DETAIL begins).
-      // The detail rework (W3) prints the run status/outcome inline rather than an
-      // "OUTCOME" label, so anchor on the RUN LOGS accordion — a detail-body node.
-      const detailPoint = pointOf(text, "RUN LOGS", RIGHT_MIN)
+      // Anchor on the selected step's JOB row — a stable detail-body node after
+      // round 6 removed the RUN LOGS accordion.
+      const detailPoint = pointOf(text, "JOB", RIGHT_MIN)
       expect(resolveUserSelect(nodeAt(app, detailPoint)), "detail stays selectable").not.toBe("none")
       const detailScope = scopeAt(app, detailPoint)
       expect(sameScope(detailScope, queueScope), "QUEUE and DETAIL are different scopes").toBe(false)
       expect(queueScope.right, "QUEUE scope ends before DETAIL scope begins").toBeLessThan(detailScope.left)
 
-      // The reported regression starts in EMPTY space under RUN LOGS, not on
+      // The reported regression starts in EMPTY space under the step output, not on
       // a glyph. The DETAIL surface must therefore fill the pane all the way
       // down: hit-testing a blank cell near its bottom still resolves to the
       // same contain boundary as its visible body. If the detail only hugs its

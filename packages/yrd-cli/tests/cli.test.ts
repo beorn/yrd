@@ -49,7 +49,7 @@ import {
 } from "@yrd/queue"
 import { withIssues } from "@yrd/issue"
 import { createElement, type ReactElement } from "react"
-import { renderString } from "silvery"
+import { renderString, stripAnsi } from "silvery"
 import { createRenderer } from "silvery/test"
 import { run } from "silvery/runtime"
 import {
@@ -1069,7 +1069,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "status"), humanStatus.io), humanStatus.stderr()).toBe(0)
     expect(humanStatus.stdout()).toContain("STATUS submitted")
     expect(humanStatus.stdout()).toContain("POSITION 6")
-    expect(humanStatus.stdout()).toContain("PR6")
+    expect(humanStatus.stdout()).toContain("pr#6.1")
     expect(humanStatus.stdout()).toContain("▢")
 
     const status = outputIO({ currentBranch: () => "topic/6" })
@@ -2239,7 +2239,7 @@ describe("runYrd", () => {
 
     const prs = outputIO()
     expect(await runYrd(app, yrd("pr", "list"), prs.io), prs.stderr()).toBe(0)
-    expect(prs.stdout()).toContain("PR1")
+    expect(prs.stdout()).toContain("pr#1.1")
 
     const queues = outputIO()
     expect(await runYrd(app, yrd("queue"), queues.io), queues.stderr()).toBe(0)
@@ -3324,7 +3324,7 @@ describe("runYrd", () => {
       resolveRevision: async () => MERGED_SHA,
     })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), human.io)).toBe(0)
-    expect(human.stdout()).toContain("PR1")
+    expect(stripAnsi(human.stdout())).toContain("pr#1.1")
     expect(human.stdout()).toContain("STATUS")
     expect(human.stdout()).toContain("integrated")
     expect(human.stdout()).toContain("one")
@@ -3604,7 +3604,7 @@ describe("runYrd", () => {
     })
     // The cumulative source-ready age (2h, not the 5m of the current
     // revision) is the visible AGE; lineage stays in the row detail/JSON.
-    expect(rendered).toContain("PR1.2")
+    expect(rendered).toContain("pr#1.2")
     expect(rendered).toContain("2:00:00")
 
     const running = fakeRun({
@@ -3727,8 +3727,8 @@ describe("runYrd", () => {
     for (const removed of ["STEP", "SUBJECT", "DETAIL", "ACTIVE", "WAIT", "TOTAL"]) {
       expect(header).not.toContain(removed)
     }
-    const first = rows.find((row) => row.includes("PR1.1"))
-    const second = rows.find((row) => row.includes("PR2.1"))
+    const first = rows.find((row) => row.includes("pr#1.1"))
+    const second = rows.find((row) => row.includes("pr#2.1"))
     expect(first).toContain("main#1")
     expect(first).toContain("@cto")
     expect(second).toContain("main#1")
@@ -4025,7 +4025,7 @@ describe("runYrd", () => {
     expect(rendered).toContain("STATUS")
     expect(rendered).toContain("AGE")
     expect(rendered).toContain("main#4")
-    expect(rendered).toContain("PR5.1")
+    expect(rendered).toContain("pr#5.1")
     expect(rendered).toContain("typecheck-failed")
     expect(rendered).not.toContain("R4·PR5")
     expect(rendered).not.toContain("SUBJECT")
@@ -4073,7 +4073,7 @@ describe("runYrd", () => {
       // The BY submitter column drops first on the narrow tier.
       if (width === 80) expect(header).not.toContain("BY")
       else expect(header).toContain("BY")
-      const integratedLine = rows.find((row) => row.includes("PR1.1"))
+      const integratedLine = rows.find((row) => row.includes("pr#1.1"))
       expect(integratedLine).toBeDefined()
       // Local wall clock (suite pins Asia/Kolkata): 10:10Z renders 15:40:00,
       // date-qualified but never truncated below seconds.
@@ -4095,11 +4095,11 @@ describe("runYrd", () => {
       // Markers are semantic-foreground only — the canonical km/ag glyphs,
       // never a colored STATUS background band.
       for (const [glyph, anchor] of [
-        ["○", "PR6.1"],
-        ["●", "PR5.1"],
-        ["−", "PR7.1"],
-        ["×", "PR3.1"],
-        ["✓", "PR2.1"],
+        ["○", "pr#6.1"],
+        ["●", "pr#5.1"],
+        ["−", "pr#7.1"],
+        ["×", "pr#3.1"],
+        ["✓", "pr#2.1"],
       ] as const) {
         const row = styled.lines.findIndex((row) => row.includes(anchor))
         expect(row, anchor).toBeGreaterThan(0)
@@ -4181,7 +4181,7 @@ describe("runYrd", () => {
     try {
       await frameHandle.waitForLayoutStable()
       const frame = stripOsc8Targets(frameHandle.text)
-      expect(frame).toContain("PR1.1")
+      expect(frame).toContain("pr#1.1")
       expect(frame).toContain("QUEUE main")
       expect(frame).toContain("pending")
       expect(frame).not.toContain("position 1")
@@ -4240,19 +4240,20 @@ describe("runYrd", () => {
     )
 
     try {
-      expect(handle.text).toContain("> 2m submitted PR1")
-      expect(handle.text).toContain("PRs      PR1@r1:")
+      expect(handle.text).toContain("> 2m submitted pr#1.1")
+      expect(handle.text).toContain(`HEAD     ${HEAD_SHA}`)
+      expect(handle.text).not.toMatch(/\bPRS\b/giu)
 
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("> 1m submitted PR2")
-      expect(handle.text).toContain("PRs      PR2@r1:")
-      expect(handle.text).not.toContain("PRs      PR1@r1:")
+      expect(handle.text).toContain("> 1m submitted pr#2.1")
+      expect(handle.text).toContain(`HEAD     ${"2".repeat(40)}`)
+      expect(handle.text).not.toContain(`HEAD     ${HEAD_SHA}`)
 
       await handle.press("Enter")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs      PR2@r1:")
-      expect(handle.text).not.toContain("PRs      PR1@r1:")
+      expect(handle.text).toContain(`HEAD     ${"2".repeat(40)}`)
+      expect(handle.text).not.toContain(`HEAD     ${HEAD_SHA}`)
     } finally {
       handle.unmount()
     }
@@ -4303,30 +4304,30 @@ describe("runYrd", () => {
       expect(wide.text).toContain("│")
       // Right-docked: the DETAIL pane's identity title (item M — the selected
       // `PR.rev`) shares the top row with the QUEUE tab.
-      expect(wide.text.split("\n")[0]).toMatch(/PR\d+\.\d+/u)
-      expect(wide.text).toContain("PRs      PR1@r1:")
+      expect(wide.text.split("\n")[0]).toMatch(/pr#\d+\.\d+/u)
+      expect(wide.text).toContain(`HEAD     ${HEAD_SHA}`)
       await wide.press("Escape")
       await wide.waitForLayoutStable()
-      expect(wide.text).not.toContain("PRs      PR1@r1:")
+      expect(wide.text).not.toContain(`HEAD     ${HEAD_SHA}`)
       await wide.press("Enter")
       await wide.waitForLayoutStable()
-      expect(wide.text).toContain("PRs      PR1@r1:")
+      expect(wide.text).toContain(`HEAD     ${HEAD_SHA}`)
 
       expect(below.text).toContain("─")
       // Below-docked: the detail identity title is not on the top row.
       expect(below.text.split("\n")[0]).not.toMatch(/PR\d+\.\d+/u)
-      expect(below.text).toContain("PRs      PR1@r1:")
+      expect(below.text).toContain(`HEAD     ${HEAD_SHA}`)
 
       expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain("PRs      PR1@r1:")
+      expect(compact.text).not.toContain(`HEAD     ${HEAD_SHA}`)
       await compact.press("Enter")
       await compact.waitForLayoutStable()
-      expect(compact.text).toContain("PRs      PR1@r1:")
+      expect(compact.text).toContain(`HEAD     ${HEAD_SHA}`)
       expect(compact.text).not.toContain("QUEUE main")
       await compact.press("Escape")
       await compact.waitForLayoutStable()
       expect(compact.text).toContain("QUEUE main")
-      expect(compact.text).not.toContain("PRs      PR1@r1:")
+      expect(compact.text).not.toContain(`HEAD     ${HEAD_SHA}`)
     } finally {
       wide.unmount()
       below.unmount()
@@ -4385,7 +4386,7 @@ describe("runYrd", () => {
       resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), status.io), status.stderr()).toBe(0)
-    expect(status.stdout()).toContain("PR1.1")
+    expect(status.stdout()).toContain("pr#1.1")
     expect(status.stdout()).toContain("pending")
   })
 
@@ -4406,11 +4407,11 @@ describe("runYrd", () => {
     })
     expect(await runYrd(app, yrd("queue", "ls", "--latest"), latest.io), latest.stderr()).toBe(0)
 
-    expect(plain.stdout()).toContain("PR1.1")
-    expect(plain.stdout()).toContain("PR2.1")
+    expect(plain.stdout()).toContain("pr#1.1")
+    expect(plain.stdout()).toContain("pr#2.1")
     expect(plain.stdout()).toContain("pending")
-    expect(latest.stdout()).toContain("PR1.1")
-    expect(latest.stdout()).toContain("PR2.1")
+    expect(latest.stdout()).toContain("pr#1.1")
+    expect(latest.stdout()).toContain("pr#2.1")
     // Non-default-only FILTER row (user respec 2026-07-15): `latest` renders
     // only when the collapse is on — no `latest=no` placeholder.
     expect(plain.stdout()).not.toContain("latest")
@@ -4546,8 +4547,8 @@ describe("runYrd", () => {
       height: 24,
       plain: true,
     })
-    expect(frame).toContain("PR1")
-    expect(frame).not.toContain("PR2")
+    expect(frame).toContain("pr#1.1")
+    expect(frame).not.toContain("pr#2.1")
   })
 
   it("renders pause and drain health in watch output", async () => {
@@ -5457,7 +5458,7 @@ describe("runYrd", () => {
         resolveQueueTarget: async () => ({ base: "main", sha: BASE_SHA }),
       })
       expect(await runYrd(app, yrd(), status.io), status.stderr()).toBe(0)
-      expect(status.stdout()).toContain("ACTIVE R1 PR1 fix(cli): show the active queue check")
+      expect(status.stdout()).toContain("ACTIVE RUN main#1 pr#1.1 fix(cli): show the active queue check")
       expect(
         Math.max(
           ...status
@@ -5614,8 +5615,8 @@ describe("runYrd", () => {
 
     const dashboard = outputIO({ now, resolveQueueTarget })
     expect(await runYrd(app, yrd(), dashboard.io), dashboard.stderr()).toBe(0)
-    expect.soft(dashboard.stdout()).toContain("1. ▢ PR1")
-    expect.soft(dashboard.stdout()).toContain("2. ▢ PR2")
+    expect.soft(dashboard.stdout()).toContain("1. ▢ pr#1.1")
+    expect.soft(dashboard.stdout()).toContain("2. ▢ pr#2.1")
 
     const status = outputIO({ now, resolveQueueTarget, currentBranch: () => "issue/two" })
     expect(await runYrd(app, yrd("pr", "status"), status.io), status.stderr()).toBe(0)
@@ -5699,13 +5700,14 @@ describe("runYrd", () => {
     })
     const detailHuman = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr", "view", "PR1"), detailHuman.io)).toBe(0)
-    expect(detailHuman.stdout()).toContain("RUN R1")
+    expect(detailHuman.stdout()).toContain("RUN main#1")
     expect(detailHuman.stdout()).not.toContain("RELATED RUNS")
-    // JOB uuid / RUNNER / candidate REV share the one dim inline DETAILS row
-    // (item f, 2026-07-16); the step body stays signal-only.
-    expect(detailHuman.stdout()).toContain("DETAILS")
-    // This run records no artifacts or evidence: the RUN LOGS proof row is
-    // omitted entirely under the present-facts rule (item e).
+    // Round 6 exposes only the stable job noun and drops runner internals.
+    expect(detailHuman.stdout()).toContain("JOB yrd#")
+    expect(detailHuman.stdout()).not.toContain("RUNNER")
+    expect(detailHuman.stdout()).not.toContain("DETAILS")
+    // This run records no artifacts or evidence: no legacy log chrome is
+    // emitted under the present-facts rule (item e).
     expect(detailHuman.stdout()).not.toContain("RUN LOGS")
     // NEXT is a failure-only cue now (item g): an integrated run never shows it.
     expect(detailHuman.stdout()).not.toContain("NEXT")
@@ -5734,8 +5736,8 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("log", "--base", "main"), human.io)).toBe(0)
     expect(human.stdout()).not.toMatch(/^\s*(?:TIME|RUN|OUTCOME)\b/mu)
     expect(human.stdout()).not.toContain("✓")
-    expect(human.stdout()).toContain("(rev1, run1)")
-    expect(human.stdout()).toContain("PR1")
+    expect(human.stdout()).toContain("main#1")
+    expect(stripAnsi(human.stdout())).toContain("pr#1.1")
     expect(human.stdout()).toContain("integrated")
   })
 
@@ -5800,9 +5802,9 @@ describe("runYrd", () => {
 
     const human = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain(`REVISION CLOCK PR1 rev1 HEAD ${HEAD_SHA}`)
-    expect(human.stdout()).toContain(`REVISION CLOCK PR1 rev2 HEAD ${nextHead}`)
-    expect(human.stdout()).toContain(`REVISION CLOCK PR1 rev3 HEAD ${pushedOnlyHead}`)
+    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.1 HEAD ${HEAD_SHA}`)
+    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.2 HEAD ${nextHead}`)
+    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.3 HEAD ${pushedOnlyHead}`)
     expect(human.stdout()).toContain("PUSHED 2026-07-09T12:00:00.000Z")
     expect(human.stdout()).toContain("SUBMITTED 2026-07-09T12:00:00.000Z")
     expect(human.stdout()).toContain("TERMINAL rejected AT 2026-07-09T12:00:00.000Z")
@@ -5866,12 +5868,12 @@ describe("runYrd", () => {
 
     const human = outputIO({ columns: 80 })
     expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io), human.stderr()).toBe(0)
-    expect(human.stdout()).toContain(`REVISION CLOCK PR1 rev1 HEAD ${HEAD_SHA}`)
+    expect(human.stdout()).toContain(`REVISION CLOCK pr#1.1 HEAD ${HEAD_SHA}`)
     expect(human.stdout()).toContain("SUBMITTED -")
     expect(human.stdout()).toContain("CHECK REQUESTED 2026-07-09T12:01:00.000Z, 2026-07-09T12:10:00.000Z")
-    expect(human.stdout()).toContain("RUN R1 ADMITTED check-request AT 2026-07-09T12:01:00.000Z")
-    expect(human.stdout()).toContain("RUN R2 ADMITTED check-request AT 2026-07-09T12:10:00.000Z")
-    expect(human.stdout()).toContain("R1")
+    expect(human.stdout()).toContain("RUN main#1 ADMITTED check-request AT 2026-07-09T12:01:00.000Z")
+    expect(human.stdout()).toContain("RUN main#2 ADMITTED check-request AT 2026-07-09T12:10:00.000Z")
+    expect(human.stdout()).toContain("main#1")
 
     const json = outputIO()
     expect(await runYrd(app, yrd("pr", "runs", "PR1", "--json"), json.io), json.stderr()).toBe(0)
@@ -5911,8 +5913,8 @@ describe("runYrd", () => {
 
     const laterHuman = outputIO({ columns: 120 })
     expect(await runYrd(app, yrd("log", "--pr", "PR1"), laterHuman.io), laterHuman.stderr()).toBe(0)
-    expect(laterHuman.stdout()).toContain("run1")
-    expect(laterHuman.stdout()).toContain("run2")
+    expect(laterHuman.stdout()).toContain("main#1")
+    expect(laterHuman.stdout()).toContain("main#2")
 
     const laterJson = outputIO()
     expect(await runYrd(app, yrd("log", "--pr", "PR1", "--json"), laterJson.io), laterJson.stderr()).toBe(0)
@@ -6167,7 +6169,7 @@ describe("runYrd", () => {
     })
     expect(renderedLogWithCoverage).not.toContain("Legacy queue coverage")
     expect(renderedLogWithCoverage).not.toContain("185")
-    expect(renderedLogWithCoverage).toContain("R10")
+    expect(renderedLogWithCoverage).toContain("main#10")
     expect(renderedLogWithCoverage).not.toContain("c".repeat(40))
 
     const renderedLogNoCoverage = await renderString(createElement(QueueLogView, { rows }), {
@@ -6600,14 +6602,14 @@ describe("runYrd", () => {
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((row) => row.includes("R4"))
+      const physicalRows = human.split("\n").filter((row) => row.includes("main#4"))
       expect(human).not.toMatch(/^\s*(?:TIME|LEVEL|BASE|PR|REV·RUN|OUTCOME|SUBJECT|AGE|TOTAL|ACTIVE|WAIT)\b/mu)
       expect(human).not.toContain("GLYPH")
       expect(human).not.toContain("✓")
       expect(physicalRows).toHaveLength(1)
       expect(physicalRows[0]?.length).toBeLessThanOrEqual(width)
-      expect(physicalRows[0]).toContain("PR23")
-      expect(physicalRows[0]).toContain(width === 80 ? "r4/R4" : "(rev4, run4)")
+      expect(physicalRows[0]).toContain("pr#23.4")
+      expect(physicalRows[0]).toContain("main#4")
       expect(physicalRows[0]).toContain("integrated")
       expect(physicalRows[0]).toContain("age=1h")
       expect(physicalRows[0]).toContain("total=48:07")
@@ -6651,7 +6653,7 @@ describe("runYrd", () => {
         height: 8,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((row) => /\bPR2[23]\b/u.test(row))
+      const physicalRows = human.split("\n").filter((row) => /pr#2[23]\.[0-9]+/u.test(row))
       expect(physicalRows).toHaveLength(2)
       // Rendered in Asia/Kolkata (+5:30): 11:01:16Z → 16:31:16, 23:59:58Z → next local day 05:29:58.
       expect(physicalRows[0]).toContain("2026-07-12T16:31:16")
@@ -6899,15 +6901,15 @@ describe("runYrd", () => {
         height: 24,
         plain: true,
       })
-      const physicalRows = human.split("\n").filter((row) => /\bPR1\b/u.test(row))
+      const physicalRows = human.split("\n").filter((row) => /pr#1\.1/u.test(row))
       expect(physicalRows).toHaveLength(20)
-      expect(physicalRows[0]).toContain(width === 80 ? "r1/R22" : "(rev1, run22)")
-      expect(physicalRows.at(-1)).toContain(width === 80 ? "r1/R3" : "(rev1, run3)")
+      expect(physicalRows[0]).toContain("main#22")
+      expect(physicalRows.at(-1)).toContain("main#3")
       expect(physicalRows[0]).not.toContain("⧗")
       expect(physicalRows[0]).toContain("fix(")
       expect(Math.max(...human.split("\n").map((row) => row.length))).toBeLessThanOrEqual(width)
-      expect(human).not.toMatch(width === 80 ? /r1\/R2\s/u : /\(rev1, run2\)\s/u)
-      expect(human).not.toMatch(width === 80 ? /r1\/R1\s/u : /\(rev1, run1\)\s/u)
+      expect(human).not.toMatch(/main#2\s/u)
+      expect(human).not.toMatch(/main#1\s/u)
       expect(human).toContain("... 2 more")
     }
   })

@@ -22,6 +22,10 @@ function rowIndexOf(text: string, needle: string): number {
   return text.split("\n").findIndex((row) => row.includes(needle))
 }
 
+function detailTitleRow(text: string): string {
+  return text.split("\n")[0] ?? ""
+}
+
 function findGlyphColumn(term: ReturnType<typeof createTermless>, glyph: string, row: number): number {
   const columns = term.cols
   if (columns === undefined) throw new Error("Termless terminal is missing its column count")
@@ -70,15 +74,15 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("PRs      PR42@r1"))
+      await waitFor(() => detailTitleRow(app.text).includes("RUN main#42"))
 
-      const rowY = rowIndexOf(app.text, "PR4.1")
-      const rowX = app.text.split("\n")[rowY]?.indexOf("PR4.1") ?? -1
+      const rowY = rowIndexOf(app.text, "pr#4.1")
+      const rowX = app.text.split("\n")[rowY]?.indexOf("pr#4.1") ?? -1
       expect(rowY).toBeGreaterThan(0)
       expect(rowX).toBeGreaterThan(0)
       await app.click(rowX, rowY)
-      await waitFor(() => app.text.includes("PRs      PR4@r1"))
-      expect(app.text).not.toContain("PRs      PR42@r1")
+      await waitFor(() => detailTitleRow(app.text).includes("RUN main#4 "))
+      expect(detailTitleRow(app.text)).not.toContain("RUN main#42")
     } finally {
       app.unmount()
     }
@@ -90,24 +94,26 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const handle = await run(createElement(QueueWatchFrame, { snapshot }), term, { mouse: true, selection: false })
     try {
       // Default cursor is the first running row (PR42), so the detail opens on it.
-      await waitFor(() => term.screen.getText().includes("PRs      PR42@r1"))
+      await waitFor(() => detailTitleRow(term.screen.getText()).includes("RUN main#42"))
       const text = term.screen.getText()
-      const row4Y = rowIndexOf(text, "PR4.1")
-      const row4X = text.split("\n")[row4Y]?.indexOf("PR4.1") ?? -1
+      const row4Y = rowIndexOf(text, "pr#4.1")
+      const row4X = text.split("\n")[row4Y]?.indexOf("pr#4.1") ?? -1
       expect(row4Y).toBeGreaterThan(0)
       expect(row4X).toBeGreaterThan(0)
 
-      // Hover over PR4.1's row — the detail must STAY on PR42, not follow the pointer.
+      // Hover over pr#4.1's row — the detail must STAY on PR42, not follow the pointer.
       await term.mouse.move(row4X, row4Y)
       await handle.waitForLayoutStable()
-      expect(term.screen.getText(), "hover must not switch the detail selection").toContain("PRs      PR42@r1")
-      expect(term.screen.getText()).not.toContain("PRs      PR4@r1")
+      expect(detailTitleRow(term.screen.getText()), "hover must not switch the detail selection").toContain(
+        "RUN main#42",
+      )
+      expect(detailTitleRow(term.screen.getText())).not.toContain("RUN main#4 ")
 
-      // Click PR4.1's row — NOW the detail follows the click to PR4.
+      // Click pr#4.1's row — NOW the detail follows the click to PR4.
       await term.mouse.down(row4X, row4Y)
       await term.mouse.up(row4X, row4Y)
-      await waitFor(() => term.screen.getText().includes("PRs      PR4@r1"))
-      expect(term.screen.getText()).not.toContain("PRs      PR42@r1")
+      await waitFor(() => detailTitleRow(term.screen.getText()).includes("RUN main#4 "))
+      expect(detailTitleRow(term.screen.getText())).not.toContain("RUN main#42")
     } finally {
       handle.unmount()
     }
@@ -120,16 +126,16 @@ describe("QueueWatchFrame 21106 interaction", () => {
     try {
       await app.waitForLayoutStable()
       // Default cursor is the first running row (PR42); its detail is open.
-      await waitFor(() => app.text.includes("PRs      PR42@r1"))
+      await waitFor(() => detailTitleRow(app.text).includes("RUN main#42"))
       const rows = app.text.split("\n")
 
       // A non-cursor QUEUE list row (clock-prefixed, so we never match the
       // identity-title row of the DETAIL pane).
       const isListRow = (needle: string) => (row: string) => row.includes(needle) && /^\s*\d{2}:\d{2}:\d{2}/u.test(row)
-      const hoverY = rows.findIndex(isListRow("PR4.1"))
-      const hoverX = rows[hoverY]?.indexOf("PR4.1") ?? -1
-      const cursorY = rows.findIndex(isListRow("PR42.1"))
-      const cursorX = rows[cursorY]?.indexOf("PR42.1") ?? -1
+      const hoverY = rows.findIndex(isListRow("pr#4.1"))
+      const hoverX = rows[hoverY]?.indexOf("pr#4.1") ?? -1
+      const cursorY = rows.findIndex(isListRow("pr#42.1"))
+      const cursorX = rows[cursorY]?.indexOf("pr#42.1") ?? -1
       expect(hoverY).toBeGreaterThan(0)
       expect(hoverX).toBeGreaterThan(0)
       expect(cursorY).toBeGreaterThan(0)
@@ -147,8 +153,8 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // ...it is the hover tint, NOT the selection background...
       expect(hoverBg, "hover affordance is distinct from selection").not.toEqual(selectionBg)
       // ...and hover never moves the cursor/detail (hover paints, click selects).
-      expect(app.text, "hover must not switch the detail selection").toContain("PRs      PR42@r1")
-      expect(app.text).not.toContain("PRs      PR4@r1")
+      expect(detailTitleRow(app.text), "hover must not switch the detail selection").toContain("RUN main#42")
+      expect(detailTitleRow(app.text)).not.toContain("RUN main#4 ")
       expect(app.cell(cursorX, cursorY).bg, "cursor selection is unchanged by hover").toEqual(selectionBg)
 
       // Moving the pointer onto the cursor row clears the prior affordance
@@ -172,19 +178,21 @@ describe("QueueWatchFrame 21106 interaction", () => {
     try {
       await app.waitForLayoutStable()
       // Default cursor: the first pending row; the detail pane follows it.
-      await waitFor(() => app.text.includes("PRs      PR1@r1"))
-      expect(app.text).toContain("PR1.1")
-      expect(app.text).not.toContain("PR24.1")
+      await waitFor(() => detailTitleRow(app.text).includes("pr#1.1"))
+      expect(app.text).toContain("pr#1.1")
+      expect(app.text).not.toContain("pr#24.1")
 
       // Scope to the QUEUE list row (starts with a clock) — the DETAIL pane's
-      // identity title also names PR1.1 (item M) and must not be wheeled.
-      const listY = app.text.split("\n").findIndex((row) => row.includes("PR1.1") && /^\s*\d{2}:\d{2}:\d{2}/u.test(row))
-      const listX = (app.text.split("\n")[listY]?.indexOf("PR1.1") ?? 0) + 2
+      // identity title also names pr#1.1 (item M) and must not be wheeled.
+      const listY = app.text
+        .split("\n")
+        .findIndex((row) => row.includes("pr#1.1") && /^\s*\d{2}:\d{2}:\d{2}/u.test(row))
+      const listX = (app.text.split("\n")[listY]?.indexOf("pr#1.1") ?? 0) + 2
       for (let index = 0; index < 12; index += 1) await app.wheel(listX, listY, 3)
-      await waitFor(() => app.text.includes("PR24.1"))
+      await waitFor(() => app.text.includes("pr#24.1"))
       // Contract literal: scrolling never activates a different run — the
       // detail pane still shows the selected pending PR1.
-      expect(app.text).toContain("PRs      PR1@r1")
+      expect(detailTitleRow(app.text)).toContain("pr#1.1")
     } finally {
       app.unmount()
     }
@@ -196,13 +204,13 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      await waitFor(() => app.text.includes("PRs      PR42@r1"))
+      await waitFor(() => detailTitleRow(app.text).includes("RUN main#42"))
       // The detail pane docks right; wheel well inside it.
       const detailX = 170
       const detailY = 20
       for (let index = 0; index < 8; index += 1) await app.wheel(detailX, detailY, 3)
       await app.waitForLayoutStable()
-      expect(app.text).toContain("PRs      PR42@r1")
+      expect(detailTitleRow(app.text)).toContain("RUN main#42")
     } finally {
       app.unmount()
     }
@@ -216,7 +224,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       selection: false,
     })
     try {
-      await waitFor(() => term.screen.getText().includes("PRs      PR3@r1"))
+      await waitFor(() => detailTitleRow(term.screen.getText()).includes("RUN main#3"))
       const initialDivider = findGlyphColumn(term, "│", 0)
       expect(initialDivider).toBeGreaterThan(0)
 
@@ -240,20 +248,20 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("PR5.1")
+      expect(app.text).toContain("pr#5.1")
       // The status buckets are TogglePills now (label constant, state by colour),
       // so the toggle is verified by the rows appearing/disappearing, not by an
       // ✓/○ lifecycle glyph. Item 3: pills are plain words, no [f] brackets.
       expect(app.text, "the failed pill renders").toContain("failed")
 
       await app.press("f")
-      await waitFor(() => !app.text.includes("PR5.1"))
+      await waitFor(() => !app.text.includes("pr#5.1"))
 
       await app.press("f")
-      await waitFor(() => app.text.includes("PR5.1"))
+      await waitFor(() => app.text.includes("pr#5.1"))
 
       await app.press("d")
-      await waitFor(() => !app.text.includes("PR4.1"))
+      await waitFor(() => !app.text.includes("pr#4.1"))
 
       // `p` toggles the pending bucket — it never pauses.
       await app.press("p")
@@ -261,7 +269,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       expect(app.text).not.toContain("PAUSED")
       await app.press("p")
       await app.press("d")
-      await waitFor(() => app.text.includes("PR4.1"))
+      await waitFor(() => app.text.includes("pr#4.1"))
     } finally {
       app.unmount()
     }
@@ -273,7 +281,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text).toContain("PR42.1")
+      expect(app.text).toContain("pr#42.1")
       // The pills row (the one carrying all four plain-word pills) sits below
       // the list; find `running` there, not in a running PR row above it.
       const filterY = app.text.split("\n").findIndex((row) => /pending.*running.*failed.*done/u.test(row))
@@ -283,7 +291,7 @@ describe("QueueWatchFrame 21106 interaction", () => {
       // Clicking the running pill toggles the running bucket off — the running
       // rows drop out (state is colour, so the filtering behaviour is the proof).
       await app.click(filterX + 1, filterY)
-      await waitFor(() => !app.text.includes("PR42.1"))
+      await waitFor(() => !app.text.includes("pr#42.1"))
     } finally {
       app.unmount()
     }
@@ -295,17 +303,16 @@ describe("QueueWatchFrame 21106 interaction", () => {
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
       await app.waitForLayoutStable()
-      // The detail pane is identity-headed now (item a/M), so its presence is
-      // marked by the run detail body (the `PRs` members row), not "DETAIL".
-      await waitFor(() => app.text.includes("PRs      PR42@r1"))
+      // The detail pane is identity-headed; its selected PR title proves presence.
+      await waitFor(() => detailTitleRow(app.text).includes("RUN main#42"))
 
       await app.press("Escape")
-      await waitFor(() => !app.text.includes("PRs      PR42@r1"))
+      await waitFor(() => !detailTitleRow(app.text).includes("RUN main#42"))
       // Esc at top never quits; the list is still live.
       expect(app.text).toContain("QUEUE main")
 
       await app.press("Enter")
-      await waitFor(() => app.text.includes("PRs      PR42@r1"))
+      await waitFor(() => detailTitleRow(app.text).includes("RUN main#42"))
     } finally {
       app.unmount()
     }

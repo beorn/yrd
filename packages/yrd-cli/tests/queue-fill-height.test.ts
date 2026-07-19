@@ -28,7 +28,7 @@ function manyPendingSnapshot() {
 }
 
 function pendingRowCount(text: string): number {
-  return new Set(text.match(/PR\d\d\.\d/gu) ?? []).size
+  return new Set(text.match(/pr#\d\d\.\d/gu) ?? []).size
 }
 
 describe("queue timeline fill height (item 5)", () => {
@@ -51,7 +51,7 @@ describe("queue timeline fill height (item 5)", () => {
       // claims the slack, so the box sits after the last PR row.
       const rows = app.text.split("\n")
       const flowY = rows.findIndex((row) => row.includes("╭─ FLOW "))
-      const lastRowY = rows.reduce((last, row, index) => (/PR\d\d\.\d/u.test(row) ? index : last), -1)
+      const lastRowY = rows.reduce((last, row, index) => (/pr#\d\d\.\d/u.test(row) ? index : last), -1)
       expect(flowY, "FLOW box renders").toBeGreaterThan(0)
       expect(flowY, "FLOW box sits below the filled rows").toBeGreaterThan(lastRowY)
     } finally {

@@ -71,14 +71,14 @@ describe("queue timeline fill-mode dates (item 1)", () => {
       await app.waitForLayoutStable()
       // TIME cell is time-of-day only — no full ISO datetime anywhere in the pane.
       expect(app.text, "fill TIME cell drops the inline date").not.toMatch(ISO_DATETIME)
-      const firstRow = app.text.split("\n").find((row) => row.includes("PR1")) ?? ""
-      expect(firstRow, "the PR1 row shows HH:MM:SS").toContain("23:50:00")
+      const firstRow = app.text.split("\n").find((row) => row.includes("pr#1.1")) ?? ""
+      expect(firstRow, "the pr#1.1 row shows HH:MM:SS").toContain("23:50:00")
 
       // The day is carried by header rows: a LEADING header for the first day
       // AND a boundary header at the local midnight crossing.
       expect(headerRows(app.text), "leading + boundary day headers render in fill mode").toEqual([
-        "2026-07-13",
         "2026-07-14",
+        "2026-07-13",
       ])
     } finally {
       app.unmount()
@@ -92,7 +92,7 @@ describe("queue timeline fill-mode dates (item 1)", () => {
     try {
       await app.waitForLayoutStable()
       expect(app.text, "print keeps its inline-date TIME cell").toMatch(ISO_DATETIME)
-      expect(headerRows(app.text), "print keeps the boundary header, no leading header").toEqual(["2026-07-14"])
+      expect(headerRows(app.text), "print keeps the boundary header, no leading header").toEqual(["2026-07-13"])
     } finally {
       app.unmount()
     }

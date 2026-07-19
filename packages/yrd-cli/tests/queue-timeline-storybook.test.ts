@@ -67,20 +67,30 @@ describe("queue timeline storybook", () => {
     )
     try {
       await waitFor(() => term.screen.getText().includes("QUEUE main"))
-      const frame = term.screen.getText()
-      const lines = frame.split("\n")
+      let frame = term.screen.getText()
 
       expect(frame).not.toMatch(/\[(?: |\/|!|x|-)\]/u)
       expect(frame).not.toMatch(/(?:^|\s)[>v]\s+(?:PRS|RUN LOGS)/mu)
-      expect(frame).toMatch(/[▸•] PRs/u)
-      expect(frame).toMatch(/[▸•] RUN LOGS/u)
-      expect(frame.match(/\bPRS\b/giu), "the PRs group renders once, never as a fact plus disclosure").toHaveLength(1)
-      expect(frame.match(/RUN LOGS/gu), "run logs render once, never as a fact plus disclosure").toHaveLength(1)
-      expect(frame).toContain("ISSUE    @hab/super/21135-herdr-keybindings")
+      expect(frame).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
+      expect(frame).not.toContain("RUN LOGS")
+      expect(frame).not.toContain("OUTPUT check#")
+      expect(frame).not.toContain("DETAILS")
+      expect(frame).toContain("- @hab/super/21135-herdr-keybindings")
+      expect(frame).toContain("0: submit")
+      expect(frame).toContain("pr#42.1")
+      expect(frame).toContain("Diff +324 / -323 lines")
+      expect(frame).toContain("diff unavailable (refs pruned)")
       expect(frame).toContain("╭─ RUNNER ")
       expect(frame).toContain("╭─ FLOW ")
       expect(frame).toContain("╭─ TIME ")
 
+      await act(async () => {
+        await handle.press("l")
+        await handle.press("l")
+        await handle.waitForLayoutStable()
+      })
+      frame = term.screen.getText()
+      const lines = frame.split("\n")
       const prepareRowIndex = lines.findIndex((line) => line.includes("1: prepare"))
       expect(prepareRowIndex).toBeGreaterThan(0)
       expect(lines[prepareRowIndex]).not.toMatch(/(?:^|\s)(?:passed|running|pending|failed)(?:\s|$)/u)
@@ -88,9 +98,11 @@ describe("queue timeline storybook", () => {
         /(?:✓|●|○|×|−)\s+(?:passed|running|pending|failed|skipped)/u,
       )
 
-      const commandRowIndex = lines.findIndex((line) => line.includes("COMMAND $ "))
+      const commandRowIndex = lines.findIndex((row) => row.includes(" $ bun vitest run"))
       expect(commandRowIndex).toBeGreaterThan(0)
       expect(lines[commandRowIndex]).not.toContain("[ $")
+      expect(lines[commandRowIndex]).not.toContain("COMMAND")
+      expect(frame).toContain("125 tests collected")
     } finally {
       handle.unmount()
     }
@@ -104,15 +116,24 @@ describe("queue timeline storybook", () => {
     })
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
-      const frame = term.screen.getText()
+      let frame = term.screen.getText()
       expect(frame).toContain("QUEUE main")
       expect(frame).toContain("running")
-      expect(frame).toContain("PRs      PR42@r1:cccccccccccc,PR43@r1:dddddddddddd")
-      // Run identity + STATUS/OUTCOME live in the title row now (item a); the
-      // active check step is the tab, its output streams under RUN LOGS (items d/e).
-      expect(frame).toContain("main#42 PR42.1")
-      expect(frame).toContain("RUN LOGS")
-      expect(frame).toContain("OUTPUT check#2")
+      expect(frame).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
+      expect(frame).toContain("0: submit")
+      expect(frame).toContain("pr#42.1")
+      await act(async () => {
+        await handle.press("l")
+        await handle.press("l")
+        await handle.waitForLayoutStable()
+      })
+      frame = term.screen.getText()
+      // Run identity + STATUS/OUTCOME live in the title row; the active check
+      // step streams inline with no repeated PR or output header.
+      expect(frame).toContain("RUN main#42")
+      expect(frame).toContain("125 tests collected")
+      expect(frame).not.toContain("RUN LOGS")
+      expect(frame).not.toContain("OUTPUT check#2")
       // The bottom keybindings footer was removed entirely (item h).
       expect(frame).not.toContain("q quit")
       expect(frame).not.toContain("No matching queue rows.")
@@ -121,14 +142,19 @@ describe("queue timeline storybook", () => {
     }
   })
 
-  it("renders one PRs group and one RUN LOGS surface in rejected detail", async () => {
+  it("renders rejected detail without repeated PR, accordion, or DETAILS chrome", async () => {
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot: queueTimelineStories["selected-rejected"].snapshot }))
     try {
       await app.waitForLayoutStable()
-      expect(app.text.match(/\bPRS\b/giu)).toHaveLength(1)
-      expect(app.text.match(/RUN LOGS/gu)).toHaveLength(1)
-      expect(app.text.match(/DETAILS/gu)).toHaveLength(1)
+      expect(app.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
+      expect(app.text).not.toContain("RUN LOGS")
+      expect(app.text).not.toContain("DETAILS")
+      expect(app.text).toContain("0: submit")
+      await app.press("l")
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("JOB")
+      expect(app.text).toContain("RUNNER")
     } finally {
       app.unmount()
     }
@@ -173,8 +199,8 @@ describe("queue timeline storybook", () => {
     try {
       await waitFor(() => term.screen.getText().includes("production-overview"))
       const queue = term.screen.getText()
-      expect(queue).toContain("PR42.1")
-      expect(queue).toContain("PR43.1")
+      expect(queue).toContain("pr#42.1")
+      expect(queue).toContain("pr#43.1")
       // The grouped round-5 metrics are secondary to the queue itself. At the
       // 24-row compact tier, omit the whole pair instead of collapsing the
       // ListView to zero rows or clipping a partially truthful metric group.
@@ -188,10 +214,12 @@ describe("queue timeline storybook", () => {
         await handle.waitForLayoutStable()
       })
       const detail = term.screen.getText()
-      // Run identity + STATUS/OUTCOME live in the title row (item a); the step
-      // internals (JOB/RUNNER/REV) share the inline DETAILS key/value row.
-      expect(detail).toContain("main#42 PR42.1")
-      expect(detail).toContain("DETAILS")
+      // Run identity + STATUS/OUTCOME live in the title row. The 24-row full
+      // tier shows the complete PR facts first; step internals remain below
+      // the viewport and are covered by the wide Round-6 acceptance story.
+      expect(detail).toContain("RUN main#42")
+      expect(detail).not.toContain("runner-herdr-07")
+      expect(detail).not.toContain("DETAILS")
       expect(detail).not.toContain("QUEUE main")
     } finally {
       handle.unmount()
@@ -218,7 +246,7 @@ describe("queue timeline storybook", () => {
 
       // The next snapshot must update the existing frame. Remounting loses the
       // anchor/follow state and makes this named visual story falsely show no new rows.
-      expect(term.screen.getText()).toContain("1 new")
+      expect(term.screen.getText()).toContain("↓ 1 new run — G jumps")
     } finally {
       handle.unmount()
     }
@@ -374,9 +402,9 @@ describe("queue timeline storybook", () => {
       plain: true,
     })
     expect(header(wide), "wide header").toContain("BY")
-    const batchRow = wide.split("\n").find((row) => row.includes("PR42.1"))
+    const batchRow = wide.split("\n").find((row) => row.includes("pr#42.1"))
     expect(batchRow, "batch revision row").toContain("@agent/3")
-    const environmentRow = wide.split("\n").find((row) => row.includes("PR6.1"))
+    const environmentRow = wide.split("\n").find((row) => row.includes("pr#6.1"))
     // PR6's revision has no recorded submitter, so its BY cell falls back to "-" (no handle).
     expect(environmentRow, "environment run row").not.toContain("@")
 
@@ -405,32 +433,34 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          // Right-docked: the DETAIL pane's identity title (item M — the
-          // selected `PR.rev`) shares the top row with the QUEUE tab, and the
+          // Right-docked: the DETAIL pane's run identity title shares the top
+          // row with the QUEUE tab, and the
           // split divider is the lone vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
           const topRow = term.screen.getText().split("\n")[0] ?? ""
-          expect(topRow, name).toMatch(/PR\d+\.\d+/u)
+          expect(topRow, name).toContain("RUN main#4")
           expect(topRow, "detail identity is a flush-top title, not a DETAIL tab").not.toContain("DETAIL")
           expect(findGlyphColumn(term, "│", 0), name).toBeGreaterThan(0)
-          expect(term.screen.getText(), name).toContain("PRs      PR4")
+          expect(term.screen.getText(), name).toContain("RUN main#4")
         } else if (divider === "horizontal") {
           // Below-docked: the detail renders under the list, so the identity
           // title is not on the top row (which holds only the QUEUE tab).
-          await waitFor(() => term.screen.getText().includes("PRs      PR4"))
+          await waitFor(() => term.screen.getText().includes("RUN main#4"))
           const topRow = term.screen.getText().split("\n")[0] ?? ""
-          expect(topRow, name).not.toMatch(/PR\d+\.\d+/u)
-          expect(term.screen.getText(), name).toContain("PRs      PR4")
+          expect(topRow, name).not.toContain("RUN main#4")
+          expect(term.screen.getText(), name).toContain("RUN main#4")
         } else {
-          expect(term.screen.getText(), name).not.toContain("PRs      PR4")
+          expect(term.screen.getText(), name).not.toContain("RUN main#4")
           await act(async () => {
             await handle.press("Enter")
+            await handle.press("l")
+            await handle.press("l")
             await handle.waitForLayoutStable()
           })
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
-          expect(term.screen.getText(), name).toContain("main#4 PR4.1")
+          expect(term.screen.getText(), name).toContain("RUN main#4")
           expect(term.screen.getText(), name).toContain("passed, integrated")
-          expect(term.screen.getText(), name).toContain("LANDING  bbbbbbbbbbbb@aaaaaaaaaaaa")
+          expect(term.screen.getText(), name).toContain(`Committed as ${"b".repeat(40)} on main`)
           expect(term.screen.getText(), name).not.toContain("QUEUE main")
         }
       } finally {
@@ -447,7 +477,7 @@ describe("queue timeline storybook", () => {
       selection: false,
     })
     try {
-      await waitFor(() => term.screen.getText().includes("PRs      PR3@r1"))
+      await waitFor(() => term.screen.getText().includes("RUN main#3"))
       // Row 0 carries the two pane titles; the only vertical glyph there is
       // the SplitPane divider (pane side walls start below the title rows).
       const initialDivider = findGlyphColumn(term, "│", 0)
@@ -460,7 +490,7 @@ describe("queue timeline storybook", () => {
       await term.mouse.up(draggedDivider, 1)
 
       await handle.press("j")
-      await waitFor(() => term.screen.getText().includes("PRs      PR7@r1"))
+      await waitFor(() => term.screen.getText().includes("RUN main#7"))
       expect(findGlyphColumn(term, "│", 0)).toBe(draggedDivider)
     } finally {
       handle.unmount()
@@ -501,10 +531,10 @@ describe("queue timeline storybook", () => {
       rows: 33,
     })
     try {
-      expect(fullAtNaturalBoundary.text).not.toContain("PRs      PR4")
-      expect(fullAtNaturalBoundary.text).toContain("PR4.1")
-      expect(belowAfterNaturalBoundary.text).toContain("PRs      PR4")
-      expect(belowAfterNaturalBoundary.text).toContain("PR4.1")
+      expect(fullAtNaturalBoundary.text).not.toContain("Land the durable patch")
+      expect(fullAtNaturalBoundary.text).toContain("pr#4.1")
+      expect(belowAfterNaturalBoundary.text).toContain("Land the durable patch")
+      expect(belowAfterNaturalBoundary.text).toContain("pr#4.1")
     } finally {
       fullAtNaturalBoundary.unmount()
       belowAfterNaturalBoundary.unmount()
@@ -520,7 +550,7 @@ describe("queue timeline storybook", () => {
       const header = right.text.split("\n").find((row) => row.includes("TIME") && row.includes("PR"))
       expect(header).toContain("STATUS")
       expect(header).not.toContain("BY")
-      expect(right.text).toContain("PR42.1")
+      expect(right.text).toContain("pr#42.1")
       expect(right.text).toContain("20:00")
     } finally {
       right.unmount()
@@ -533,6 +563,8 @@ describe("queue timeline storybook", () => {
     const renderLive = createRenderer({ cols: 200, rows: 50 })
     const outputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.snapshot }))
     try {
+      await outputFrame.waitForLayoutStable()
+      await outputFrame.press("l")
       await outputFrame.waitForLayoutStable()
       expect(outputFrame.text).toContain("checking one")
       const nextOutputFrame = renderLive(createElement(QueueWatchFrame, { snapshot: live.nextSnapshot }))
@@ -580,7 +612,9 @@ describe("queue timeline storybook", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(80) }))
     try {
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs      PR3")
+      await handle.press("l")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("RUN main#3")
       expect(handle.text).toContain("detail-row-080")
 
       // This long fixture makes the lossless follow contract observable: wheel
@@ -588,23 +622,23 @@ describe("queue timeline storybook", () => {
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, -3)
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-001")
-      expect(handle.text).toContain("PRs      PR3")
+      expect(handle.text).toContain("RUN main#3")
 
       handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(81) }))
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-001")
       expect(handle.text).not.toContain("detail-row-081")
-      expect(handle.text).toContain("PRs      PR3")
+      expect(handle.text).toContain("RUN main#3")
 
       for (let index = 0; index < 40; index += 1) await handle.wheel(150, 30, 3)
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-081")
-      expect(handle.text).toContain("PRs      PR3")
+      expect(handle.text).toContain("RUN main#3")
 
       handle.rerender(createElement(QueueWatchFrame, { snapshot: snapshotWithLines(82) }))
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("detail-row-082")
-      expect(handle.text).toContain("PRs      PR3")
+      expect(handle.text).toContain("RUN main#3")
     } finally {
       handle.unmount()
     }
@@ -620,7 +654,7 @@ describe("queue timeline storybook", () => {
       rows: viewport.rows,
     })
     try {
-      expect(handle.text).toContain("PRs      PR4")
+      expect(handle.text).toContain("RUN main#4")
       // The FILTER row's TogglePills are the toggles (the footer hint row was
       // removed, item h); the `[f]ailed` pill drives the assertions below.
 
@@ -630,7 +664,7 @@ describe("queue timeline storybook", () => {
       expect(handle.text).toContain("failed")
       await handle.press("f")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR4.1")
+      expect(handle.text).toContain("pr#4.1")
       await handle.press("f")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("failed")
@@ -639,19 +673,22 @@ describe("queue timeline storybook", () => {
       await handle.press("d")
       await handle.waitForLayoutStable()
       expect(handle.text).toContain("done")
-      expect(handle.text).not.toContain("PR4.1")
+      expect(handle.text).not.toContain("pr#4.1")
       await handle.press("d")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR4.1")
+      expect(handle.text).toContain("pr#4.1")
 
-      // The integration proof (LANDING) is a plain always-visible detail fact
-      // now (item e) — the separate EVIDENCE disclosure and its `o` jump are gone.
-      expect(handle.text).toContain("LANDING")
+      // Revision B keeps the integration proof in the merge-step body rather
+      // than repeating it above the synthetic submit tab.
+      await handle.press("l")
+      await handle.press("l")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("Committed as")
 
       // Esc hides the detail pane; the list keeps running.
       await handle.press("Escape")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PR4.1")
+      expect(handle.text).toContain("pr#4.1")
     } finally {
       handle.unmount()
     }
@@ -663,27 +700,29 @@ describe("queue timeline storybook", () => {
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
     try {
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("- PR1.1")
+      expect(handle.text).toContain("pr#1.1")
+      expect(handle.text).toMatch(/- \d{2}:\d{2} submitted by @cto/u)
       expect(handle.text).toContain("○ pending")
       expect(handle.text).toContain("Prepare release notes")
-      expect(handle.text).toContain("ISSUE    @yrd/core/21120-pr-state-notifications")
-      expect(handle.text).toContain("PRs      PR1@r1")
+      expect(handle.text).toContain("topic/pr1 - @yrd/core/21120-pr-state-notifications")
+      expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
       expect(handle.text).not.toContain("PR PR1 STATUS")
       expect(handle.text).not.toContain("SOURCE ")
       expect(handle.text).not.toContain("BASE ")
 
       const rows = handle.text.split("\n")
-      const pr2Y = rows.findIndex((row) => row.includes("PR2.1"))
+      const pr2Y = rows.findIndex((row) => row.includes("pr#2.1"))
       expect(pr2Y, "PR2 screen row").toBeGreaterThanOrEqual(0)
       const pr2Row = rows[pr2Y]
       if (pr2Row === undefined) throw new Error("pending-only story did not render the PR2 revision row")
-      const pr2X = pr2Row.indexOf("PR2.1")
+      const pr2X = pr2Row.indexOf("pr#2.1")
       expect(pr2X, "PR2 screen column").toBeGreaterThanOrEqual(0)
       await handle.click(pr2X, pr2Y)
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("- PR2.1")
+      expect(handle.text).toContain("pr#2.1")
+      expect(handle.text).toMatch(/- \d{2}:\d{2} submitted by -/u)
       expect(handle.text).toContain("○ pending")
-      expect(handle.text).not.toContain("- PR1.1")
+      expect(handle.text).not.toContain("submitted by @cto")
     } finally {
       handle.unmount()
     }

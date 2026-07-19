@@ -38,7 +38,14 @@ describe("queue freshness cue is a click-to-jump affordance (item 4-new)", () =>
     const projection = pendingSnapshot([["PRA", "2026-07-13T11:10:00.000Z"]]).projection
     const render = createRenderer({ cols: 160, rows: 40 })
     const app = render(
-      createElement(QueueTimelineView, { projection, nav: true, columns: 160, paneChrome: true, freshRows: 3, onJumpToNewest }),
+      createElement(QueueTimelineView, {
+        projection,
+        nav: true,
+        columns: 160,
+        paneChrome: true,
+        freshRows: 3,
+        onJumpToNewest,
+      }),
     )
     try {
       await app.waitForLayoutStable()
@@ -63,7 +70,7 @@ describe("queue freshness cue is a click-to-jump affordance (item 4-new)", () =>
     const app = render(createElement(QueueWatchFrame, { snapshot: before }))
     try {
       await app.waitForLayoutStable()
-      const pin = pointOf(app.text, /PRC/u)
+      const pin = pointOf(app.text, /pr#C\.1/u)
       app.click(pin[0], pin[1])
       await app.waitForLayoutStable()
 

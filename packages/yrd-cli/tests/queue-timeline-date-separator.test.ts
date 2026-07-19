@@ -58,17 +58,17 @@ describe("K date-header sub-item — queue timeline date-header separator", () =
   it("queueTimelineDateSeparatorLabel fires only across a local calendar-day change", () => {
     const projection = twoDayProjection()
     const rows = queueTimelineVisibleRows(projection)
-    expect(rows.map((row) => row.pr)).toEqual(["PR1", "PR2", "PR3"])
+    expect(rows.map((row) => row.pr)).toEqual(["PR2", "PR3", "PR1"])
 
     // No separator above the very first row (design call: BETWEEN entries
     // only, never a leading header).
     expect(queueTimelineDateSeparatorLabel(undefined, rows[0]!)).toBeNull()
     // A row compared with itself shares a calendar day.
     expect(queueTimelineDateSeparatorLabel(rows[0]!, rows[0]!)).toBeNull()
-    // The local-midnight crossing yields the next day's label.
-    expect(queueTimelineDateSeparatorLabel(rows[0]!, rows[1]!)).toBe("2026-07-14")
-    // PR2 and PR3 share the later local day: no separator between them.
-    expect(queueTimelineDateSeparatorLabel(rows[1]!, rows[2]!)).toBeNull()
+    // PR2 and PR3 share the newer local day: no separator between them.
+    expect(queueTimelineDateSeparatorLabel(rows[0]!, rows[1]!)).toBeNull()
+    // The descending local-midnight crossing yields the older day's label.
+    expect(queueTimelineDateSeparatorLabel(rows[1]!, rows[2]!)).toBe("2026-07-13")
 
     // An untimed entry on either side suppresses the separator — there is no
     // day to anchor a boundary to.
@@ -86,18 +86,18 @@ describe("K date-header sub-item — queue timeline date-header separator", () =
       await app.waitForLayoutStable()
       const rendered = app.text.split("\n")
       const separators = rendered.filter((entry) => /^\d{4}-\d{2}-\d{2}$/u.test(entry.trim()))
-      expect(separators).toEqual(["2026-07-14"])
-      // No leading separator above the first day's entries.
-      expect(rendered.some((entry) => entry.trim() === "2026-07-13")).toBe(false)
+      expect(separators).toEqual(["2026-07-13"])
+      // No leading separator above the newest day's entries.
+      expect(rendered.some((entry) => entry.trim() === "2026-07-14")).toBe(false)
 
-      const separatorAt = rendered.findIndex((entry) => entry.trim() === "2026-07-14")
+      const separatorAt = rendered.findIndex((entry) => entry.trim() === "2026-07-13")
       expect(separatorAt).toBeGreaterThan(0)
-      const separatorColumn = rendered[separatorAt]!.indexOf("2026-07-14")
+      const separatorColumn = rendered[separatorAt]!.indexOf("2026-07-13")
       const separatorCell = app.cell(separatorColumn, separatorAt)
       // H1 typography preset: bold, and a fg distinct from a plain body cell.
       expect(separatorCell.bold, "date separator uses the H1 preset (bold)").toBe(true)
-      const bodyAt = rendered.findIndex((entry) => entry.includes("PR1"))
-      const bodyColumn = rendered[bodyAt]!.indexOf("PR1")
+      const bodyAt = rendered.findIndex((entry) => entry.includes("pr#1.1"))
+      const bodyColumn = rendered[bodyAt]!.indexOf("pr#1.1")
       const bodyCell = app.cell(bodyColumn, bodyAt)
       expect(separatorCell.fg, "H1 fg differs from a plain PR-id cell").not.toEqual(bodyCell.fg)
     } finally {

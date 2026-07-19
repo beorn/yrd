@@ -81,7 +81,7 @@ describe("watch detail — pending row whose latest run ran a superseded revisio
     try {
       // (a) The run block is labeled as history: the run header carries the
       //     revision it ran + "superseded".
-      expect(app.text).toContain("R520")
+      expect(app.text).toContain("main#520")
       expect(app.text).toContain("(rev 1 · superseded)")
       // (b) The current revision's real state is stated plainly above the run.
       expect(app.text).toContain("CURRENT rev 2")
@@ -122,7 +122,7 @@ describe("watch detail — current-revision run keeps today's rendering", () => 
       createElement(QueueWatchView, { results: [result], now: NOW, pr: "PR380" }),
     )
     try {
-      expect(app.text).toContain("R521")
+      expect(app.text).toContain("main#521")
       expect(app.text).not.toContain("superseded")
       expect(app.text).not.toContain("no run yet")
       // The current-revision blocker keeps its plain (unscoped) presentation.

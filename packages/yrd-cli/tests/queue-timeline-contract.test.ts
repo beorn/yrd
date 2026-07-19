@@ -8,6 +8,7 @@ import { renderString } from "silvery"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
+  formatQueuePrId,
   QueueTimelineView,
   PRDetailView,
   queueTimelineAdmissionTimes,
@@ -38,6 +39,10 @@ function rowIndex(rows: readonly string[], needle: string): number {
   const index = rows.findIndex((row) => row.includes(needle))
   if (index < 0) throw new Error(`expected a rendered row containing '${needle}'`)
   return index
+}
+
+function detailTitleRow(text: string): string {
+  return text.split("\n")[0] ?? ""
 }
 
 describe("queue timeline 21106 contract", () => {
@@ -163,7 +168,7 @@ describe("queue timeline 21106 contract", () => {
     const queueLine = rowIndex(rows, "QUEUE")
     const updatedLine = rowIndex(rows, "updated 17:30:00")
     const headerLine = rowIndex(rows, "TIME")
-    const lastRowLine = rowIndex(rows, "PR4.1")
+    const lastRowLine = rowIndex(rows, "pr#4.1")
     // Item 2 (deliberate contract change): the pills row moved from ABOVE the
     // header to BELOW the list — new order updated → header → rows → pills →
     // the FLOW/TIME boxes.
@@ -206,32 +211,32 @@ describe("queue timeline 21106 contract", () => {
 
   it("renders the user-settled row contract at 160 columns", async () => {
     const rows = (await renderTimeline(contractProjection(), 160)).map((row) => row.trimEnd())
-    const pending = rows[rowIndex(rows, "PR1.1")]
-    const lead = rows[rowIndex(rows, "PR42.1")]
-    const partner = rows[rowIndex(rows, "PR43.1")]
-    const rejected = rows[rowIndex(rows, "PR5.1")]
-    const integrated = rows[rowIndex(rows, "PR4.1")]
+    const pending = rows[rowIndex(rows, "pr#1.1")]
+    const lead = rows[rowIndex(rows, "pr#42.1")]
+    const partner = rows[rowIndex(rows, "pr#43.1")]
+    const rejected = rows[rowIndex(rows, "pr#5.1")]
+    const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     // Row contract (user directive 2026-07-16): STEP folded into the flexible
     // cell as `<branch-glyph> <branch> (<status>)` (item Q); BY left-aligned
     // (item R); run duration is a bare dimmed time — no `◷` glyph (item S). The
     // branch glyph (U+E0A0) is matched as one non-space char.
-    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend\s+-\s+PR1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
+    expect(pending?.trim()).toMatch(/^16:40:00 ○ pend\s+-\s+pr#1\.1\s+\S topic\/pr1\s+@cto\s+50:00$/u)
     expect(lead?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 PR42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
+      /^17:10:00 ● run\s+main#42 pr#42\.1\s+\S topic\/pr42 \(2:check\)\s+@agent\/3 36:00 20:00$/u,
     )
     expect(partner?.trim()).toMatch(
-      /^17:10:00 ● run\s+main#42 PR43\.1\s+\S topic\/pr43 \(2:check\)\s+@agent\/5 34:00 20:00$/u,
+      /^17:10:00 ● run\s+main#42 pr#43\.1\s+\S topic\/pr43 \(2:check\)\s+@agent\/5 34:00 20:00$/u,
     )
     expect(rejected?.trim()).toMatch(
-      /^16:42:00 × fail\s+main#5\s+PR5\.1\s+\S topic\/pr5 \(typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
+      /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
     )
-    expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+PR4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
+    expect(integrated?.trim()).toMatch(/^16:25:00 ✓ done\s+main#4\s+pr#4\.1\s+\S topic\/pr4\s+@agent\/7 25:00 15:00$/u)
 
     // No row carries the removed clock glyph, and a not-yet-started run shows a
     // muted "-" in the RUN cell (item 9) instead of a run id, no run duration.
     for (const row of [pending, lead, partner, rejected, integrated]) expect(row).not.toContain("◷")
-    expect(pending).not.toContain("#")
+    expect(pending).not.toContain("main#")
   })
 
   it("uses distinct semantic queue glyphs and removes the redundant task/ branch prefix", async () => {
@@ -241,10 +246,10 @@ describe("queue timeline 21106 contract", () => {
       rows: source.rows.map((row) => ({ ...row, branch: `task/${row.branch}` })),
     }
     const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
-    const pending = rows[rowIndex(rows, "PR1.1")]
-    const running = rows[rowIndex(rows, "PR42.1")]
-    const rejected = rows[rowIndex(rows, "PR5.1")]
-    const integrated = rows[rowIndex(rows, "PR4.1")]
+    const pending = rows[rowIndex(rows, "pr#1.1")]
+    const running = rows[rowIndex(rows, "pr#42.1")]
+    const rejected = rows[rowIndex(rows, "pr#5.1")]
+    const integrated = rows[rowIndex(rows, "pr#4.1")]
 
     expect(pending).toContain("○ pend")
     expect(running).toContain("● run")
@@ -255,7 +260,7 @@ describe("queue timeline 21106 contract", () => {
     const production = queueTimelineStories["production-overview"].snapshot.projection
     if (production === undefined) throw new Error("production-overview is missing its projection")
     const productionRows = (await renderTimeline(production, 160)).map((row) => row.trimEnd())
-    const environment = productionRows[rowIndex(productionRows, "PR6.1")]
+    const environment = productionRows[rowIndex(productionRows, "pr#6.1")]
     expect(environment).toContain("× env")
     expect(environment).toContain("(queue-environment)")
   })
@@ -265,7 +270,7 @@ describe("queue timeline 21106 contract", () => {
     const projection = story.snapshot.projection
     if (projection === undefined) throw new Error("production-overview is missing its projection")
     const environment = projection.rows.find((row) => row.pr === "PR6")
-    if (environment === undefined || environment.timestampMs === null) {
+    if (environment?.timestampMs === undefined || environment.timestampMs === null) {
       throw new Error("production-overview is missing its environment-refused row")
     }
     const environmentTimestampMs = environment.timestampMs
@@ -286,7 +291,7 @@ describe("queue timeline 21106 contract", () => {
       details: [],
     }
     const oneShot = (await renderTimeline(stormProjection, 200)).join("\n")
-    expect(oneShot.match(/PR6\.1/gu)).toHaveLength(1)
+    expect(oneShot.match(/pr#6\.1/gu)).toHaveLength(1)
     expect(oneShot).toMatch(/×21 · \d{2}:\d{2}–\d{2}:\d{2}/u)
     expect(oneShot).not.toContain("... 16 more")
 
@@ -301,7 +306,7 @@ describe("queue timeline 21106 contract", () => {
       await app.press("Escape")
       await app.waitForLayoutStable()
       const stormVisibleRows = () =>
-        app.text.split("\n").filter((row) => /^\s*\d{2}:\d{2}:\d{2} × env\b/u.test(row) && row.includes("PR6.1"))
+        app.text.split("\n").filter((row) => /^\s*\d{2}:\d{2}:\d{2} × env\b/u.test(row) && row.includes("pr#6.1"))
       expect(stormVisibleRows()).toHaveLength(1)
       expect(app.text).toMatch(/×21 · \d{2}:\d{2}–\d{2}:\d{2}/u)
 
@@ -340,12 +345,11 @@ describe("queue timeline 21106 contract", () => {
     expect(expanded[3]?.repeat?.collapsed).toBe(true)
   })
 
-  it("falls back to the compact #run form and keeps fixed fields intact at 80 columns", async () => {
+  it("keeps the full run noun and fixed fields intact at 80 columns", async () => {
     const rows = (await renderTimeline(contractProjection(), 80)).map((row) => row.trimEnd())
     for (const row of rows) expect(Array.from(row).length).toBeLessThanOrEqual(80)
-    const lead = rows[rowIndex(rows, "PR42.1")]
-    expect(lead).toContain("#42")
-    expect(lead).not.toContain("main#42")
+    const lead = rows[rowIndex(rows, "pr#42.1")]
+    expect(lead).toContain("main#42")
     expect(lead).toContain("2:check")
     expect(lead).toContain("36:00")
     expect(lead).toContain("20:00")
@@ -355,7 +359,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead?.trimStart().startsWith("17:10:00 ● run")).toBe(true)
     expect(lead).not.toContain("@agent/3")
     expect(rows.some((row) => row.includes("BY"))).toBe(false)
-    const rejected = rows[rowIndex(rows, "PR5.1")]
+    const rejected = rows[rowIndex(rows, "pr#5.1")]
     expect(rejected).toContain("typecheck-failed")
     expect(rejected).toContain("12:00")
     expect(rejected).not.toContain("◷")
@@ -376,12 +380,12 @@ describe("queue timeline 21106 contract", () => {
       }
       // Item 9: a not-yet-started run shows a muted "-", not a blue "pending"
       // run id — the blue (info) reference is now the running km task glyph.
-      const runningMarker = cell("●", "PR42.1").fg
-      const successMarker = cell("✓", "PR4.1").fg
-      const successText = cell("done", "PR4.1").fg
-      const failureText = cell("typecheck-failed", "PR5.1").fg
-      const mutedTime = cell("16:40:00", "PR1.1").fg
-      const mutedAge = cell("50:00", "PR1.1").fg
+      const runningMarker = cell("●", "pr#42.1").fg
+      const successMarker = cell("✓", "pr#4.1").fg
+      const successText = cell("done", "pr#4.1").fg
+      const failureText = cell("typecheck-failed", "pr#5.1").fg
+      const mutedTime = cell("16:40:00", "pr#1.1").fg
+      const mutedAge = cell("50:00", "pr#1.1").fg
 
       for (const pinned of [runningMarker, successMarker, successText, failureText, mutedTime, mutedAge]) {
         expect(pinned).not.toBeNull()
@@ -443,6 +447,9 @@ describe("queue timeline 21106 contract", () => {
     const render = createRenderer({ cols: 200, rows: 50 })
     const app = render(createElement(QueueWatchFrame, { snapshot }))
     try {
+      await app.waitForLayoutStable()
+      await app.press("l")
+      await app.press("l")
       await app.waitForLayoutStable()
       const rows = app.text.split("\n")
       const divider = rows[0]?.indexOf("│") ?? -1
@@ -525,12 +532,12 @@ describe("queue timeline 21106 contract", () => {
     const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
     // queue-environment-refused (25 cells) shortens at its last semantic
     // boundary; nothing mid-token, no lost fixed columns.
-    const environment = rows[rowIndex(rows, "PR6.1")]
+    const environment = rows[rowIndex(rows, "pr#6.1")]
     expect(environment).toContain("queue-environment")
     expect(environment).not.toContain("queue-environment-")
-    const canceled = rows[rowIndex(rows, "PR7.1")]
+    const canceled = rows[rowIndex(rows, "pr#7.1")]
     expect(canceled).toContain("queue-canceled")
-    const integrated = rows[rowIndex(rows, "PR4.1")]
+    const integrated = rows[rowIndex(rows, "pr#4.1")]
     expect(integrated).toContain("✓ done")
   })
 
@@ -556,17 +563,17 @@ describe("queue timeline 21106 contract", () => {
     try {
       await handle.waitForLayoutStable()
       // No running rows: the newest finished run R12 is the default.
-      expect(handle.text).toContain("PRs      PR12")
+      expect(detailTitleRow(handle.text)).toContain("RUN main#12")
 
       // A manual move is sticky: the arriving newer run R13 must not steal
       // the cursor.
       await handle.press("j")
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs      PR11")
+      expect(detailTitleRow(handle.text)).toContain("RUN main#11")
       handle.rerender(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
       await handle.waitForLayoutStable()
-      expect(handle.text).toContain("PRs      PR11")
-      expect(handle.text).not.toContain("PRs      PR13")
+      expect(detailTitleRow(handle.text)).toContain("RUN main#11")
+      expect(detailTitleRow(handle.text)).not.toContain("RUN main#13")
     } finally {
       handle.unmount()
     }
@@ -576,13 +583,13 @@ describe("queue timeline 21106 contract", () => {
     const reopened = fresh(createElement(QueueWatchFrame, { snapshot: story.nextSnapshot }))
     try {
       await reopened.waitForLayoutStable()
-      expect(reopened.text).toContain("PRs      PR13")
+      expect(detailTitleRow(reopened.text)).toContain("RUN main#13")
     } finally {
       reopened.unmount()
     }
   })
 
-  it("drops the bottom keybindings footer and highlights the selected batched member", async () => {
+  it("drops the footer and scopes batched-run detail to every immutable run member", async () => {
     const story = queueTimelineStories["contract-overview"]
     const render = createRenderer({ cols: 200, rows: 50 })
     const handle = render(createElement(QueueWatchFrame, { snapshot: story.snapshot }))
@@ -597,15 +604,14 @@ describe("queue timeline 21106 contract", () => {
       const statistics = rows.findIndex((row) => row.includes("╭─ FLOW "))
       expect(statistics).toBeGreaterThan(0)
 
-      // Default cursor is the batch lead; the shared Run detail (agent8's
-      // step-tabs composition) names every member of the batch.
-      expect(handle.text).toContain("PRs      PR42@r1")
-      expect(handle.text).toContain("PR43@r1")
-      const members = rows.findIndex((row) => row.includes("PRs      PR42@r1"))
-      const lead = rows[members]?.indexOf("PR42") ?? -1
-      const sibling = rows[members]?.indexOf("PR43") ?? -1
-      expect(handle.cell(lead, members).bold).toBe(true)
-      expect(handle.cell(sibling, members).bold).toBe(false)
+      // Default cursor is the batch lead, while Revision A makes the detail
+      // run-scoped and gives each immutable member its own block.
+      expect(detailTitleRow(handle.text)).toContain("RUN main#42")
+      expect(handle.text).toContain("pr#42.1")
+      expect(handle.text).toContain("16:54 submitted by @agent/3")
+      expect(handle.text).toContain("pr#43.1")
+      expect(handle.text).toContain("16:56 submitted by @agent/5")
+      expect(handle.text).not.toMatch(/(?:^|\s)(?:▸|•)\s+PRS\b/gmu)
     } finally {
       handle.unmount()
     }
@@ -693,7 +699,7 @@ describe("queue timeline 21106 contract", () => {
     expect(frame).not.toContain("╭─ STATUS ")
 
     for (const row of projection.rows) {
-      const rendered = rows[rowIndex(rows, `${row.pr}.${row.revision}`)]
+      const rendered = rows[rowIndex(rows, formatQueuePrId(row.pr, row.revision))]
       if (rendered === undefined) throw new Error(`missing rendered row for ${row.id}`)
       if (row.timestamp !== null) expect(rendered, row.id).toContain(wallClock(row.timestamp))
       if (row.submitter !== undefined) expect(rendered, row.id).toContain(row.submitter)
@@ -718,17 +724,17 @@ describe("queue timeline 21106 contract", () => {
       // list rows (they start with a clock) so the DETAIL pane's identity title
       // — which also names the selected PR (item M) — isn't mistaken for a row.
       const isListRow = (row: string): boolean => /^\s*\d{2}:\d{2}:\d{2}/u.test(row)
-      const cursorRow = frame.findIndex((row) => row.includes("PR42.1") && isListRow(row))
-      const siblingRow = frame.findIndex((row) => row.includes("PR43.1") && isListRow(row))
+      const cursorRow = frame.findIndex((row) => row.includes("pr#42.1") && isListRow(row))
+      const siblingRow = frame.findIndex((row) => row.includes("pr#43.1") && isListRow(row))
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""
-      for (const anchor of ["●", "PR42.1", "2:check"]) {
+      for (const anchor of ["●", "pr#42.1", "2:check"]) {
         const column = cursorText.indexOf(anchor)
         expect(column, anchor).toBeGreaterThanOrEqual(0)
         expect(handle.cell(column, cursorRow).bg, `selection bg under ${anchor}`).not.toBeNull()
       }
-      const siblingColumn = (frame[siblingRow] ?? "").indexOf("PR43.1")
+      const siblingColumn = (frame[siblingRow] ?? "").indexOf("pr#43.1")
       expect(handle.cell(siblingColumn, siblingRow).bg).toBeNull()
     } finally {
       handle.unmount()
