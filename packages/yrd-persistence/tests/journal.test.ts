@@ -23,6 +23,7 @@ import {
   createJournal,
   createReadOnlyJournal,
   readArchivedOrphans,
+  resolveCustomSqliteLibrary,
   type Exclusive,
   type ExclusiveOptions,
 } from "@yrd/persistence"
@@ -431,6 +432,14 @@ describe("SQLite Journal", () => {
     const unsafe = testJournal(dir, { sqliteVersion: "3.51.0" })
     await expect(unsafe.append(frame("unsafe"), 0)).rejects.toThrow("SQLite 3.51.0 is unsafe for WAL")
     expect(await missing(join(dir, SQLITE))).toBe(true)
+  })
+
+  it("resolves a custom SQLite library for unsafe bundled runtimes", () => {
+    expect(resolveCustomSqliteLibrary("/lib/custom.dylib", "darwin", () => true)).toBe("/lib/custom.dylib")
+    expect(resolveCustomSqliteLibrary("  ", "darwin", () => true)).toBe("/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib")
+    expect(resolveCustomSqliteLibrary(undefined, "darwin", () => false)).toBeUndefined()
+    expect(resolveCustomSqliteLibrary(undefined, "linux", () => true)).toBeUndefined()
+    expect(resolveCustomSqliteLibrary("/lib/custom.dylib", "linux", () => false)).toBe("/lib/custom.dylib")
   })
 
   it("fails loud on checksum drift instead of replaying unverified SQL", async () => {

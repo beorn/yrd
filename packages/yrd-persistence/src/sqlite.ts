@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
+import { existsSync } from "node:fs"
 import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
 import { basename, join } from "node:path"
 import { gunzipSync } from "node:zlib"
@@ -7,6 +8,45 @@ import { observeYrdLifecycle, parseJournalFrame, type Journal, type JournalCheck
 import canonicalize from "canonicalize"
 import { createLogger, type ConditionalLogger } from "loggily"
 import { createExclusive, type Exclusive, type ExclusiveOptions } from "./lock.ts"
+
+const DARWIN_HOMEBREW_SQLITE = "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib"
+
+export function resolveCustomSqliteLibrary(
+  env: string | undefined,
+  platform: string,
+  fileExists: (path: string) => boolean,
+): string | undefined {
+  const explicit = env?.trim()
+  if (explicit) return explicit
+  if (platform === "darwin" && fileExists(DARWIN_HOMEBREW_SQLITE)) return DARWIN_HOMEBREW_SQLITE
+  return undefined
+}
+
+// Bun bundles its own SQLite, and affected builds (< 3.51.3 without a fixed
+// backport) fail assertSafeWalVersion. Bun can substitute an external library,
+// but only before the process opens its first connection — hence module load.
+// YRD_SQLITE_LIB is the explicit override (fails loud when unloadable); on
+// darwin the Homebrew keg is probed as a fallback, and assertSafeWalVersion
+// still gates whichever library actually loads.
+{
+  const candidate = resolveCustomSqliteLibrary(process.env.YRD_SQLITE_LIB, process.platform, existsSync)
+  if (candidate) {
+    try {
+      Database.setCustomSQLite(candidate)
+    } catch (error) {
+      if (process.env.YRD_SQLITE_LIB?.trim()) {
+        throw new Error(
+          `yrd: YRD_SQLITE_LIB could not be loaded (${candidate}): ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        )
+      }
+      // silent-fallback-allow: darwin auto-probe only — another library may
+      // already be active in this process (a host app that opened SQLite
+      // first); the bundled build then still faces assertSafeWalVersion,
+      // which fails loud when it is unsafe.
+    }
+  }
+}
 
 const DATABASE_FILE = "journal.sqlite"
 const LEGACY_MANIFEST_FILE = "events-v4.manifest.json"
