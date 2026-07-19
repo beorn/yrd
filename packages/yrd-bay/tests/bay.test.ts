@@ -18,6 +18,7 @@ import { withJobs, type JobResult } from "@yrd/job"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
   GitShaSchema,
+  isManagedBranchOverdue,
   resolveBase,
   type DeprovisionedBay,
   type ProvisionedBay,
@@ -101,6 +102,113 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("tracks managed delivery branches without provisioning a second workspace", async () => {
+    const { app, workspace } = await createHarness()
+    const branch = "task/@tent/tooling/21563-bay-branch-lifecycle"
+    const issue = "@tent/tooling/21563-bay-branch-lifecycle"
+
+    const registered = await app.bays.registerBranch({
+      branch,
+      issue,
+      actor: "@agent/5",
+      base: "main",
+      baseSha: BASE,
+      headSha: HEAD_1,
+    })
+
+    expect(registered.events.map(({ name }) => name)).toEqual(["branch/registered"])
+    expect(app.bays.branch(branch)).toMatchObject({
+      branch,
+      issue,
+      actor: "@agent/5",
+      base: "main",
+      baseSha: BASE,
+      registeredHeadSha: HEAD_1,
+      headSha: HEAD_1,
+      status: "open",
+      registeredAt: "2026-01-01T00:00:00.000Z",
+    })
+    expect(workspace.calls).toEqual([])
+
+    const replay = await app.bays.registerBranch({
+      branch,
+      issue,
+      actor: "@agent/5",
+      base: "origin/main",
+      // origin/main may advance between branch creation and handoff. The
+      // registration's original base proof remains immutable; retrying the
+      // same logical branch/base identity must not orphan the handoff.
+      baseSha: "9".repeat(40),
+      headSha: HEAD_2,
+    })
+    expect(replay.events).toEqual([])
+    expect(app.bays.branch(branch)?.registeredHeadSha).toBe(HEAD_1)
+    expect(app.bays.branch(branch)?.baseSha).toBe(BASE)
+
+    await app.bays.readyBranch({ branch, headSha: HEAD_2, handoff: "@km/handoff/21563" })
+    expect(app.bays.branch(branch)).toMatchObject({
+      status: "handoff-ready",
+      headSha: HEAD_2,
+      handoff: "@km/handoff/21563",
+      readyAt: "2026-01-01T00:00:00.000Z",
+    })
+
+    await app.bays.submit({ branch, headSha: HEAD_2 })
+    expect(app.bays.branch(branch)).toMatchObject({
+      status: "submitted",
+      pr: "PR1",
+      submittedAt: "2026-01-01T00:00:00.000Z",
+    })
+
+    // A fresh pushed revision is source-ready again, but the branch lifecycle
+    // is monotonic: it must not erase proof that this delivery was submitted.
+    await app.bays.intake({ branch, headSha: "3".repeat(40), baseSha: BASE })
+    expect(app.bays.branch(branch)).toMatchObject({ status: "submitted", pr: "PR1" })
+
+    await app.bays.closePr({ pr: "PR1", reason: "superseded" })
+    expect(app.bays.branch(branch)).toMatchObject({
+      status: "archived",
+      pr: "PR1",
+      archiveReason: "superseded",
+      archivedAt: "2026-01-01T00:00:00.000Z",
+    })
+    await app.close()
+  })
+
+  it("uses pushed PR facts as handoff-ready proof and applies the SLA strictly after 30 minutes", async () => {
+    await using app = (await createHarness()).app
+    const branch = "task/managed-draft"
+    await app.bays.registerBranch({ branch, base: "main", headSha: HEAD_1 })
+    await app.bays.submit({ branch, headSha: HEAD_2, draft: true })
+
+    const managed = app.bays.branch(branch)
+    expect(managed).toMatchObject({ status: "handoff-ready", pr: "PR1", headSha: HEAD_2 })
+    expect(isManagedBranchOverdue(managed!, Date.parse("2026-01-01T00:30:00.000Z"))).toBe(false)
+    expect(isManagedBranchOverdue(managed!, Date.parse("2026-01-01T00:30:00.001Z"))).toBe(true)
+
+    await app.bays.ready({ pr: "PR1" })
+    expect(app.bays.branch(branch)).toMatchObject({ status: "submitted" })
+    expect(isManagedBranchOverdue(app.bays.branch(branch)!, Date.parse("2026-01-02T00:00:00.000Z"))).toBe(false)
+  })
+
+  it("archives abandoned managed branches explicitly and refuses identity drift", async () => {
+    await using app = (await createHarness()).app
+    const branch = "task/abandoned"
+    await app.bays.registerBranch({ branch, issue: "@km/work/a", base: "main", headSha: HEAD_1 })
+
+    await expect(
+      app.bays.registerBranch({ branch, issue: "@km/work/b", base: "main", headSha: HEAD_1 }),
+    ).rejects.toThrow(/already registered.*@km\/work\/a/iu)
+
+    await app.bays.archiveBranch({ branch, reason: "work preserved elsewhere" })
+    expect(app.bays.branch(branch)).toMatchObject({
+      status: "archived",
+      archiveReason: "work preserved elsewhere",
+    })
+    expect((await app.bays.archiveBranch({ branch, reason: "work preserved elsewhere" })).events).toEqual([])
+    await expect(app.bays.readyBranch({ branch, headSha: HEAD_2 })).rejects.toThrow(/archived/iu)
+  })
+
   it("records the submitting actor on strict current revision facts", async () => {
     await using app = await createApp(createWorkspaceHarness().adapter, undefined, "@agent/7")
 

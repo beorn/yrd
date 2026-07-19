@@ -1406,6 +1406,99 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   await printResult(io, jsonEnabled(options), { command: "bay.list", bays }, createElement(BayStatusView, { bays }))
 }
 
+async function requiredGitRevision(ref: string, io: YrdCliIO): Promise<string> {
+  const revision = await optionalRevision(ref, io)
+  if (revision === undefined) refusal(`no Git commit '${ref}'`)
+  return revision
+}
+
+async function registerManagedBranch(
+  app: YrdCliApp,
+  branch: string,
+  options: Readonly<{
+    issue?: string
+    actor?: string
+    base?: string
+    queue?: string
+    head?: string
+    json?: boolean
+  }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const baseRef = oneOfAliases(options.base, options.queue, "base", "queue") ?? "origin/main"
+  const base = await resolvedQueueTarget(baseRef, io)
+  const headSha = await requiredGitRevision(options.head ?? branch, io)
+  await app.bays.registerBranch({
+    branch,
+    ...(options.issue === undefined ? {} : { issue: options.issue }),
+    ...(options.actor === undefined ? {} : { actor: options.actor }),
+    base: base.base,
+    ...(base.sha === undefined ? {} : { baseSha: base.sha }),
+    headSha,
+  })
+  const managed = app.bays.branch(branch)
+  if (managed === undefined) throw new Error(`yrd: managed branch '${branch}' disappeared after register`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.branch.register", branch: managed },
+    `${managed.branch} registered (${managed.status})`,
+  )
+}
+
+async function readyManagedBranch(
+  app: YrdCliApp,
+  selector: string,
+  options: Readonly<{ head?: string; handoff?: string; json?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  const selected = app.bays.branch(selector)
+  if (selected === undefined) refusal(`no managed branch '${selector}'`)
+  const headSha = await requiredGitRevision(options.head ?? selected.branch, io)
+  await app.bays.readyBranch({
+    branch: selected.branch,
+    headSha,
+    ...(options.handoff === undefined ? {} : { handoff: options.handoff }),
+  })
+  const managed = app.bays.branch(selected.branch)
+  if (managed === undefined) throw new Error(`yrd: managed branch '${selected.branch}' disappeared after ready`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.branch.ready", branch: managed },
+    `${managed.branch} handoff-ready`,
+  )
+}
+
+async function archiveManagedBranch(
+  app: YrdCliApp,
+  selector: string,
+  options: Readonly<{ reason?: string; json?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  await app.bays.archiveBranch({
+    branch: selector,
+    ...(options.reason === undefined ? {} : { reason: options.reason }),
+  })
+  const managed = app.bays.branch(selector)
+  if (managed === undefined) throw new Error(`yrd: managed branch '${selector}' disappeared after archive`)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "bay.branch.archive", branch: managed },
+    `${managed.branch} archived`,
+  )
+}
+
+async function listManagedBranches(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const branches = [...app.bays.branches()].toSorted((left, right) => left.branch.localeCompare(right.branch))
+  const human =
+    branches.length === 0
+      ? "No managed branches."
+      : branches.map((branch) => `${branch.status.padEnd(13)} ${branch.branch}`).join("\n")
+  await printResult(io, jsonEnabled(options), { command: "bay.branch.list", branches }, human)
+}
+
 const PR_LIST_DEFAULT_WINDOW_SIZE = 20
 
 async function listPrs(
@@ -3332,6 +3425,41 @@ function buildProgram(
     .option("--withdraw", "withdraw a live PR before closing")
     .option("--json", "emit stable JSON")
     .action(async (selectors, options) => closeBays(installed(), selectors, options, io))
+
+  const managedBranch = bay.command("branch").description("manage registered delivery branches")
+  managedBranch.helpCommand(false)
+  managedBranch
+    .command("_list", { isDefault: true, hidden: true })
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listManagedBranches(installed(), options, io))
+  managedBranch
+    .command("list")
+    .description("list registered delivery branches")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => listManagedBranches(installed(), options, io))
+  managedBranch
+    .command("register <branch>")
+    .description("register a delivery branch without provisioning a workspace")
+    .option("--issue <ref>", "link a tracker-neutral issue reference")
+    .option("--actor <id>", "record the worker or implementation identity")
+    .option("--base <branch>", "select the base branch (default: origin/main)")
+    .option("--queue <branch>", "alias for --base")
+    .option("--head <commit>", "record this head commit (default: the branch tip)")
+    .option("--json", "emit stable JSON")
+    .action(async (branch, options) => registerManagedBranch(installed(), branch, options, io))
+  managedBranch
+    .command("ready <selector>")
+    .description("mark a pushed delivery branch handoff-ready")
+    .option("--head <commit>", "record this head commit (default: the branch tip)")
+    .option("--handoff <ref>", "link an opaque handoff or delivery record")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => readyManagedBranch(installed(), selector, options, io))
+  managedBranch
+    .command("archive <selector>")
+    .description("archive an abandoned or withdrawn delivery branch")
+    .option("--reason <text>", "record why the branch was archived")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => archiveManagedBranch(installed(), selector, options, io))
 
   if (projection === "bay") {
     addExamples(program, name, projection)

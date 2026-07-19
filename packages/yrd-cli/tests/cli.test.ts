@@ -668,6 +668,98 @@ describe("runYrd", () => {
     expect(Object.keys(app.state().queues.records)).toEqual([])
   })
 
+  it("manages delivery branches independently from physical Bay workspaces", async () => {
+    const app = await createApp()
+    const branch = "task/@tent/tooling/21563-bay-branch-lifecycle"
+    const issue = "@tent/tooling/21563-bay-branch-lifecycle"
+    const resolveRevision = async (ref: string) =>
+      ref === branch || ref === HEAD_SHA ? HEAD_SHA : ref === "origin/main" || ref === "main" ? BASE_SHA : undefined
+
+    const register = outputIO({ resolveRevision })
+    expect(
+      await runYrd(
+        app,
+        yrd(
+          "bay",
+          "branch",
+          "register",
+          branch,
+          "--issue",
+          issue,
+          "--actor",
+          "@agent/5",
+          "--base",
+          "origin/main",
+          "--json",
+        ),
+        register.io,
+      ),
+      register.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(register.stdout())).toMatchObject({
+      command: "bay.branch.register",
+      branch: { branch, issue, actor: "@agent/5", status: "open", base: "main", baseSha: BASE_SHA },
+    })
+
+    const ready = outputIO({ resolveRevision })
+    expect(
+      await runYrd(
+        app,
+        yrd("bay", "branch", "ready", branch, "--head", HEAD_SHA, "--handoff", "@km/handoff/21563", "--json"),
+        ready.io,
+      ),
+      ready.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(ready.stdout())).toMatchObject({
+      command: "bay.branch.ready",
+      branch: { branch, status: "handoff-ready", handoff: "@km/handoff/21563" },
+    })
+
+    const list = outputIO()
+    expect(await runYrd(app, yrd("bay", "branch", "list", "--json"), list.io), list.stderr()).toBe(0)
+    expect(JSON.parse(list.stdout())).toMatchObject({
+      command: "bay.branch.list",
+      branches: [{ branch, status: "handoff-ready" }],
+    })
+
+    const submit = outputIO({ resolveRevision })
+    expect(await runYrd(app, yrd("pr", "submit", branch, "--issue", issue, "--json"), submit.io), submit.stderr()).toBe(
+      0,
+    )
+    expect(app.bays.branch(branch)).toMatchObject({ status: "submitted", pr: "PR1" })
+
+    const land = outputIO()
+    expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), land.io), land.stderr()).toBe(0)
+    expect(app.bays.branch(branch)).toMatchObject({ status: "landed", pr: "PR1", landedAt: expect.any(String) })
+    expect(app.bays.list()).toEqual([])
+  })
+
+  it("archives an abandoned managed branch through the public CLI", async () => {
+    const app = await createApp()
+    const branch = "task/abandoned"
+    const resolveRevision = async (ref: string) =>
+      ref === branch ? HEAD_SHA : ref === "origin/main" ? BASE_SHA : undefined
+    const register = outputIO({ resolveRevision })
+    expect(
+      await runYrd(app, yrd("bay", "branch", "register", branch, "--base", "origin/main", "--json"), register.io),
+      register.stderr(),
+    ).toBe(0)
+
+    const archived = outputIO()
+    expect(
+      await runYrd(
+        app,
+        yrd("bay", "branch", "archive", branch, "--reason", "preserved elsewhere", "--json"),
+        archived.io,
+      ),
+      archived.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(archived.stdout())).toMatchObject({
+      command: "bay.branch.archive",
+      branch: { branch, status: "archived", archiveReason: "preserved elsewhere" },
+    })
+  })
+
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
     const app = await createApp()
     const root = outputIO({ columns: 100 })
@@ -6113,7 +6205,7 @@ describe("runYrd", () => {
       submittedAt: "2026-07-10T10:59:00.000Z",
     }
     const statusRows = queueStatusRows(
-      { byId: {}, prs: { PR1: statusPr }, receipts: {} },
+      { byId: {}, branches: {}, prs: { PR1: statusPr }, receipts: {} },
       { ...fakeSummary([runMissingLocation]), prs: [statusPr] },
       new Set(),
       Date.parse("2026-07-10T12:01:00.000Z"),

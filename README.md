@@ -170,6 +170,7 @@ Installed binaries are `yrd`, `git-yrd`, and `git-bay`. Git resolves
 | ------------------ | ------------------------------------------------------------------- |
 | **Issue**          | Unit of intent from km, GitHub, another tracker, or a direct caller |
 | **Work Bay**       | Named isolated Git worktree for one implementation attempt          |
+| **Managed branch** | Delivery branch tracked without provisioning another worktree       |
 | **PR**             | Local pull request containing one immutable submitted revision      |
 | **Queue**          | Ordered integration process attached to a base branch               |
 | **Step**           | Typed queue transition such as check, review, merge, or deploy      |
@@ -226,7 +227,7 @@ The top-level surface is deliberately small:
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd pr                      list PRs; submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
-yrd bay                     list bays; open, refresh, submit, and close
+yrd bay                     list bays; open, refresh, submit, close, and track delivery branches
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   show the queue timeline by default; list/ls is canonical;
@@ -245,6 +246,11 @@ yrd bay refresh [selector...] [--json]
 yrd bay submit [selector...] [--draft] [--base <branch>]
   [--correlation <namespace:id>] [--composition <path>] [--json]
 yrd bay close [selector...] [--withdraw] [--json]
+yrd bay branch list [--json]
+yrd bay branch register <branch> [--issue <ref>] [--actor <id>]
+  [--base <branch>] [--head <commit>] [--json]
+yrd bay branch ready <selector> [--head <commit>] [--handoff <ref>] [--json]
+yrd bay branch archive <selector> [--reason <text>] [--json]
 ```
 
 The same commands are available through the standalone `git bay` projection.
@@ -258,6 +264,28 @@ callers use the PR-native check-admission surface below.
 | `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                                        |
 | `submit`  | Bays, PRs, or source branches; optional `--draft`     | Creates or advances PRs to `submitted`, or only `pushed` with `--draft`; never executes Queue work |
 | `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR                        |
+
+Managed branches are the delivery-lifecycle projection for callers that
+already own a checkout. `branch register` records the exact logical base and
+initial head without calling the Bay workspace adapter; retrying the same
+branch/issue/actor/base identity is idempotent even when the base ref or branch
+tip has since advanced. `branch ready` records the exact handoff-ready head and
+an optional opaque handoff reference. `branch archive` retires abandoned work
+but refuses a landed branch or a live PR.
+
+The lifecycle is monotonic:
+
+```text
+open → handoff-ready → submitted → landed
+  └───────────────→ archived
+```
+
+`pr/pushed` is also handoff-ready proof; `pr/submitted` and `pr/integrated`
+advance the same record, while withdrawn or canceled PRs archive it. Recut and
+intake facts never regress `submitted` to `handoff-ready`. The stable
+`bay.branch.list` JSON projection is the authority for host-side delivery
+audits and SLA policy. Yrd records facts only: fleet paging, queue ownership,
+and close policy remain in the calling coordination layer.
 
 Submodule repositories are ready when `bay open` returns. Yrd recursively
 materializes the recorded gitlinks while keeping each Bay's refs, config, and

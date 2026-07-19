@@ -174,13 +174,45 @@ export type Bay = Readonly<{
   failure?: BayFailure
 }>
 
+/** Monotonic delivery lifecycle for an explicitly registered Git branch.
+ * This is deliberately distinct from `BayStatus`: a Bay is a physical
+ * workspace, while a managed branch can outlive (or never have) a workspace. */
+export type ManagedBranchStatus = "open" | "handoff-ready" | "submitted" | "landed" | "archived"
+
+export type ManagedBranch = Readonly<{
+  branch: string
+  issue?: string
+  actor?: string
+  base: string
+  baseSha?: string
+  registeredHeadSha: string
+  headSha: string
+  status: ManagedBranchStatus
+  registeredAt: string
+  readyAt?: string
+  handoff?: string
+  pr?: PRId
+  submittedAt?: string
+  landedAt?: string
+  archivedAt?: string
+  archiveReason?: string
+}>
+
+export const MANAGED_BRANCH_SLA_MS = 30 * 60 * 1_000
+
+/** The SLA is strict: exactly 30 minutes is still within the window. */
+export function isManagedBranchOverdue(
+  branch: ManagedBranch,
+  nowMs: number,
+  thresholdMs = MANAGED_BRANCH_SLA_MS,
+): boolean {
+  if (branch.status !== "handoff-ready" || branch.readyAt === undefined) return false
+  return nowMs - Date.parse(branch.readyAt) > thresholdMs
+}
+
 export type PRStatus = "pushed" | "submitted" | "rejected" | "integrated" | "withdrawn" | "canceled"
 
-const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>([
-  "integrated",
-  "withdrawn",
-  "canceled",
-])
+const NON_CHECKABLE_PR_STATUSES: ReadonlySet<PRStatus> = new Set<PRStatus>(["integrated", "withdrawn", "canceled"])
 
 /** A PR can only accept new check requests while pushed/submitted/rejected; once
  * it reaches a terminal status (integrated/withdrawn/canceled) it is no longer
@@ -428,6 +460,7 @@ export function checkRequest(pr: PR): PRCheckRequest | undefined {
 
 export type BaysState = Readonly<{
   byId: Readonly<Record<BayId, Bay>>
+  branches: Readonly<Record<string, ManagedBranch>>
   prs: Readonly<Record<PRId, PR>>
   receipts: Readonly<
     Record<
@@ -503,7 +536,7 @@ export function defaultBayBranch(name: string): string {
 }
 
 export function emptyBaysState(): BaysState {
-  return { byId: {}, prs: {}, receipts: {} }
+  return { byId: {}, branches: {}, prs: {}, receipts: {} }
 }
 
 export function isLivePR(status: PRStatus): boolean {
@@ -523,6 +556,18 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
       value: bay,
     })),
     { kind: "Bay" },
+  )
+}
+
+export function resolveManagedBranch(state: BaysState, selector: string): ManagedBranch | undefined {
+  return resolveSelector(
+    selector,
+    Object.values(state.branches).map((branch) => ({
+      canonical: branch.branch,
+      aliases: [],
+      value: branch,
+    })),
+    { kind: "managed branch" },
   )
 }
 
