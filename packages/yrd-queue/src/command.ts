@@ -1258,7 +1258,11 @@ async function recutDirectPR(
           }
           continue
         }
-        const resolution = await resolveGitlinkFastForward(git, repo, path, conflict)
+        let resolution = await resolveGitlinkFastForward(git, repo, path, conflict)
+        if (resolution.kind === "refuse") {
+          resolution =
+            (await resolveGitlinkByFinalPin(git, repo, path, conflict, target.sha, input.headSha)) ?? resolution
+        }
         if (resolution.kind === "unresolved") break
         if (resolution.kind === "refuse") {
           await git.run(path, ["rebase", "--abort"], true)
@@ -1428,17 +1432,8 @@ async function recutDirectPR(
         input.headSha,
         absorbedGitlinks,
         ffGitlinks,
-        "source",
       )
-      const recutSequence = await certifiedPatchSequence(
-        git,
-        path,
-        target.sha,
-        headSha,
-        absorbedGitlinks,
-        ffGitlinks,
-        "recut",
-      )
+      const recutSequence = await certifiedPatchSequence(git, path, target.sha, headSha, absorbedGitlinks, ffGitlinks)
       if (sourceSequence === undefined || recutSequence === undefined) {
         throw createFailure({
           kind: "refusal",
@@ -2230,6 +2225,42 @@ async function resolveGitlinkFastForward(
 }
 
 /**
+ * Resolve a transient gitlink conflict from the authored range by proving the
+ * transition that actually lands: the authoritative target pin must be an
+ * ancestor of the authored root's final pin. This is the merge-aware sibling
+ * of the ordinary pairwise resolver. It deliberately ignores the conflicting
+ * intermediate pin only after the local submodule store proves the final pin
+ * contains the scratch side; missing objects, non-gitlinks, reverse moves, and
+ * true final divergence remain owned by the original loud refusal.
+ */
+async function resolveGitlinkByFinalPin(
+  git: Git,
+  repo: string,
+  worktree: string,
+  path: string,
+  targetSha: string,
+  authoredHead: string,
+): Promise<GitlinkFastForward | undefined> {
+  const stages = await readGitlinkConflictStages(git, worktree, path)
+  if (stages === undefined) return undefined
+  const authoritativePin = await readGitlink(git, repo, targetSha, path)
+  const finalPin = await readGitlink(git, repo, authoredHead, path)
+  if (authoritativePin === undefined || finalPin === undefined || finalPin === authoritativePin) return undefined
+  const submodule = join(repo, path)
+  try {
+    await realpath(submodule)
+  } catch {
+    return undefined
+  }
+  for (const oid of [authoritativePin, finalPin]) {
+    if ((await git.run(submodule, ["cat-file", "-e", `${oid}^{commit}`], true)).code !== 0) return undefined
+  }
+  return (await isAncestor(git, submodule, authoritativePin, finalPin))
+    ? { kind: "resolved", side: "carrier", sha: finalPin }
+    : undefined
+}
+
+/**
  * Post-rebase classification of carrier gitlinks that git fast-forwarded
  * WITHOUT a conflict (21461) — the silent sibling of resolveGitlinkFastForward's
  * "carrier" verdict, proved with the same primitive (ancestry in the
@@ -2349,13 +2380,13 @@ async function changedPayloadIdentity(
 }
 
 /**
- * Certify every ordered authored slot after removing absorbed gitlink paths.
- * An absorbed-only slot may disappear during rebase. A forward-resolved
- * gitlink slot may not: it carries the exact authored post-commit pin alongside
- * the stable patch ID of its remaining paths, preserving commit boundaries and
- * order even though the gitlink's from-pin changed with the authoritative base.
- * Merge commits stay fail-closed because the direct recutter does not preserve
- * merge shape.
+ * Certify every ordered non-gitlink patch after removing paths whose final pin
+ * was independently ancestry-certified. Intermediate gitlink slots are not a
+ * delivery fact: a branch may merge two sibling submodule lines and land their
+ * common descendant, as PR928 did. The caller has already proved exact final
+ * pins plus aggregate payload identity, so this sequence owns only the ordered
+ * ordinary patches. Merge wrapper commits are skipped; any tree effect unique
+ * to a merge remains covered by the aggregate certificate above.
  */
 async function certifiedPatchSequence(
   git: Git,
@@ -2364,27 +2395,20 @@ async function certifiedPatchSequence(
   to: string,
   absorbedPaths: readonly string[],
   ffGitlinks: readonly string[],
-  side: "source" | "recut",
 ): Promise<readonly string[] | undefined> {
   const commitsResult = await git.run(repo, ["rev-list", "--reverse", "--topo-order", `${from}..${to}`], true)
   if (commitsResult.code !== 0) return undefined
-  const merges = await git.run(repo, ["rev-list", "--merges", `${from}..${to}`], true)
-  if (merges.code !== 0 || merges.stdout !== "") return undefined
 
   const excludedPaths = [...new Set([...absorbedPaths, ...ffGitlinks])].toSorted()
   const pathspec = [".", ...excludedPaths.map((path) => `:(top,literal,exclude)${path}`)]
   const slots: string[] = []
   for (const commit of commitsResult.stdout.split(/\r?\n/u).filter((candidate) => candidate !== "")) {
-    const parent = `${commit}^`
-    const commitPaths = new Set(await changedPaths(git, repo, parent, commit))
-    if (side === "recut" && absorbedPaths.some((path) => commitPaths.has(path))) return undefined
-    const pins: [path: string, sha: string][] = []
-    for (const path of ffGitlinks) {
-      if (!commitPaths.has(path)) continue
-      const pin = await readGitlink(git, repo, commit, path)
-      if (pin === undefined) return undefined
-      pins.push([path, pin])
-    }
+    const lineage = await git.run(repo, ["rev-list", "--parents", "-n", "1", commit], true)
+    if (lineage.code !== 0) return undefined
+    const [, ...parents] = lineage.stdout.split(" ")
+    if (parents.length !== 1) continue
+    const parent = parents[0]
+    if (parent === undefined) return undefined
     const changed = await git.run(
       repo,
       ["diff", ...CERTIFICATE_DIFF_OPTIONS, "--quiet", parent, commit, "--", ...pathspec],
@@ -2393,8 +2417,7 @@ async function certifiedPatchSequence(
     if (changed.code !== 0 && changed.code !== 1) return undefined
     const patchId = changed.code === 0 ? undefined : await git.stablePatchId(repo, parent, commit, pathspec)
     if (changed.code === 1 && patchId === undefined) return undefined
-    if (patchId === undefined && pins.length === 0) continue
-    slots.push(JSON.stringify([patchId ?? null, pins]))
+    if (patchId !== undefined) slots.push(patchId)
   }
   return slots
 }

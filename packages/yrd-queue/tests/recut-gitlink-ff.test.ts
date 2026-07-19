@@ -79,6 +79,21 @@ async function moduleCommit(module: string, branch: string, from: string, value:
   return git(module, ["rev-parse", "HEAD"])
 }
 
+/** Commit one disjoint module file so two sibling pins can merge cleanly. */
+async function moduleFileCommit(
+  module: string,
+  branch: string,
+  from: string,
+  file: string,
+  value: string,
+): Promise<string> {
+  await git(module, ["checkout", "-q", "-B", branch, from])
+  await writeFile(join(module, file), `${value}\n`)
+  await git(module, ["add", file])
+  await git(module, ["commit", "-qm", `module ${value}`])
+  return git(module, ["rev-parse", "HEAD"])
+}
+
 /** Author a carrier commit that pins `dep` to `carrierPin` plus an unrelated file. */
 async function carrier(repo: string, sourceBase: string, carrierPin: string): Promise<string> {
   await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
@@ -156,6 +171,45 @@ async function advanceBase(repo: string, basePin: string): Promise<string> {
   return git(repo, ["rev-parse", "HEAD"])
 }
 
+/**
+ * Reproduce PR928's root/submodule topology: the feature lineage temporarily
+ * carries one submodule side, current main carries its sibling, and the final
+ * feature pin is a merge descendant of both. The root branch then merges
+ * current main before the authoritative root advances once more.
+ */
+async function currentMainMergeCarrier(
+  repo: string,
+  sourceBase: string,
+  transientPin: string,
+  authoritativePin: string,
+  finalPin: string,
+): Promise<{ headSha: string; recordedBase: string; target: string }> {
+  await git(repo, ["switch", "-qc", "issue/feature", sourceBase])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${transientPin},dep`])
+  await writeFile(join(repo, "feature.txt"), "feature\n")
+  await git(repo, ["add", "feature.txt"])
+  await git(repo, ["commit", "-qm", "carrier: transient pin + feature"])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${finalPin},dep`])
+  await git(repo, ["commit", "-qm", "carrier: final composed pin"])
+
+  await git(repo, ["switch", "-q", "main"])
+  await git(repo, ["update-index", "--cacheinfo", `160000,${authoritativePin},dep`])
+  await writeFile(join(repo, "upstream.txt"), "upstream\n")
+  await git(repo, ["add", "upstream.txt"])
+  await git(repo, ["commit", "-qm", "base: authoritative sibling pin"])
+  const recordedBase = await git(repo, ["rev-parse", "HEAD"])
+
+  await git(repo, ["switch", "-q", "issue/feature"])
+  await git(repo, ["merge", "-q", "--no-ff", "main", "-m", "carrier: merge current main"])
+  const headSha = await git(repo, ["rev-parse", "HEAD"])
+
+  await git(repo, ["switch", "-q", "main"])
+  await writeFile(join(repo, "later.txt"), "later\n")
+  await git(repo, ["add", "later.txt"])
+  await git(repo, ["commit", "-qm", "base: advance after submission"])
+  return { headSha, recordedBase, target: await git(repo, ["rev-parse", "HEAD"]) }
+}
+
 describe("recut fast-forward gitlink resolution", () => {
   it("resolves to the carrier pin when the base pin is its ancestor (ff-forward)", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
@@ -225,6 +279,44 @@ describe("recut fast-forward gitlink resolution", () => {
       expect(await git(repo, ["status", "--porcelain"])).toBe(dirtyBefore)
     },
   )
+
+  it("certifies the final descendant pin across a current-main merge (21556 / PR928)", async () => {
+    const { repo, module, moduleA, sourceBase } = await baseRepo()
+    const transientPin = await moduleFileCommit(module, "network", moduleA, "network.txt", "network")
+    const authoritativePin = await moduleFileCommit(module, "runtime", moduleA, "runtime.txt", "runtime")
+    await git(module, ["switch", "-qc", "composed", authoritativePin])
+    await git(module, ["merge", "-q", "--no-ff", transientPin, "-m", "module: compose network + runtime"])
+    const finalPin = await git(module, ["rev-parse", "HEAD"])
+    await git(join(repo, "dep"), ["fetch", "-q", "origin", "network", "runtime", "composed"])
+    expect(await isAncestor(join(repo, "dep"), transientPin, authoritativePin)).toBe(false)
+    expect(await isAncestor(join(repo, "dep"), authoritativePin, transientPin)).toBe(false)
+    expect(await isAncestor(join(repo, "dep"), transientPin, finalPin)).toBe(true)
+    expect(await isAncestor(join(repo, "dep"), authoritativePin, finalPin)).toBe(true)
+
+    const { headSha, recordedBase, target } = await currentMainMergeCarrier(
+      repo,
+      sourceBase,
+      transientPin,
+      authoritativePin,
+      finalPin,
+    )
+    expect(await gitlinkAt(repo, recordedBase)).toBe(authoritativePin)
+    expect(await gitlinkAt(repo, headSha)).toBe(finalPin)
+
+    await using process = createProcess()
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR928",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: recordedBase,
+    })
+
+    expect(await git(repo, ["rev-parse", `${result.headSha}~1`])).toBe(target)
+    expect(await gitlinkAt(repo, result.headSha)).toBe(finalPin)
+    expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
+  })
 
   it("retains a non-gitlink patch in the same commit as an FF-certified gitlink", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
@@ -330,7 +422,7 @@ describe("recut fast-forward gitlink resolution", () => {
     })
   })
 
-  it("refuses a same-tree recut that squashes an FF gitlink commit into its neighbor", async () => {
+  it("accepts a same-tree recut that folds an FF gitlink-only slot into its neighbor", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleC = await moduleCommit(module, "main", moduleA, "c")
     const moduleB = await moduleCommit(module, "main", moduleC, "b")
@@ -353,50 +445,41 @@ describe("recut fast-forward gitlink resolution", () => {
     await chmod(hook, 0o755)
 
     await using process = createProcess()
-    await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
-        id: "PR1",
-        branch: "issue/feature",
-        base: "main",
-        revision: 1,
-        headSha,
-        baseSha: sourceBase,
-      }),
-    ).rejects.toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "payload-certificate",
-        message: expect.stringContaining("not commit-sequence equivalent"),
-      },
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
     })
+    expect(await git(repo, ["rev-list", "--count", `${result.baseSha}..${result.headSha}`])).toBe("1")
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+    expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
   })
 
-  it("keeps mixed merge carriers fail-closed when merge shape cannot be retained", async () => {
+  it("certifies a mixed merge carrier by final pin and payload when merge shape is flattened", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleC = await moduleCommit(module, "main", moduleA, "c")
     const moduleB = await moduleCommit(module, "main", moduleC, "b")
     await git(join(repo, "dep"), ["fetch", "-q", "origin", "main"])
 
     const headSha = await mergeCarrier(repo, sourceBase, moduleB)
-    await advanceBase(repo, moduleC)
+    const target = await advanceBase(repo, moduleC)
 
     await using process = createProcess()
-    await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
-        id: "PR1",
-        branch: "issue/feature",
-        base: "main",
-        revision: 1,
-        headSha,
-        baseSha: sourceBase,
-      }),
-    ).rejects.toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "payload-certificate",
-        message: expect.stringContaining("no stable commit-sequence identity"),
-      },
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
     })
+    expect(await git(repo, ["merge-base", "--is-ancestor", target, result.headSha])).toBe("")
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleB)
+    expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
+    expect(await git(repo, ["show", `${result.headSha}:side.txt`])).toBe("side")
   })
 
   it("resolves to the base pin when the carrier pin is its ancestor (reverse ff)", async () => {
@@ -460,7 +543,7 @@ describe("recut fast-forward gitlink resolution", () => {
     },
   )
 
-  it("refuses transient absorbed-pin commits injected into the recut range", async () => {
+  it("ignores transient absorbed-pin history when the final pin is authoritative", async () => {
     const { repo, module, moduleA, sourceBase } = await baseRepo()
     const moduleB = await moduleCommit(module, "main", moduleA, "b")
     const moduleC = await moduleCommit(module, "main", moduleB, "c")
@@ -483,22 +566,16 @@ describe("recut fast-forward gitlink resolution", () => {
     await chmod(hook, 0o755)
 
     await using process = createProcess()
-    await expect(
-      createGitPRRecutter({ inject: { process }, repo }).recut({
-        id: "PR1",
-        branch: "issue/feature",
-        base: "main",
-        revision: 1,
-        headSha,
-        baseSha: sourceBase,
-      }),
-    ).rejects.toMatchObject({
-      failure: {
-        kind: "refusal",
-        code: "payload-certificate",
-        message: expect.stringContaining("no stable commit-sequence identity"),
-      },
+    const result = await createGitPRRecutter({ inject: { process }, repo }).recut({
+      id: "PR1",
+      branch: "issue/feature",
+      base: "main",
+      revision: 1,
+      headSha,
+      baseSha: sourceBase,
     })
+    expect(await gitlinkAt(repo, result.headSha)).toBe(moduleC)
+    expect(await git(repo, ["show", `${result.headSha}:feature.txt`])).toBe("feature")
   })
 
   it("refuses loudly when the carrier and base pins have truly diverged", async () => {
