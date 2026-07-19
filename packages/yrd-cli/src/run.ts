@@ -1406,6 +1406,8 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   await printResult(io, jsonEnabled(options), { command: "bay.list", bays }, createElement(BayStatusView, { bays }))
 }
 
+const PR_LIST_DEFAULT_WINDOW_SIZE = 20
+
 async function listPrs(
   app: YrdCliApp,
   options: JsonOption &
@@ -1415,11 +1417,21 @@ async function listPrs(
   if (options.reviewer !== undefined && options.needsReview !== true) usage("--reviewer requires --needs-review")
   const state = stateOf(app)
   const base = options.base === undefined ? undefined : selectedBase(state, options.base)
-  const rows = app.bays
+  const explicitlyFiltered =
+    options.base !== undefined ||
+    options.state !== undefined ||
+    options.issue !== undefined ||
+    options.needsReview === true ||
+    options.reviewer !== undefined
+  const matching = app.bays
     .prs()
     .filter((pr) => base === undefined || baseIdentity(pr.base) === base)
     .filter((pr) => options.state === undefined || pr.status === options.state)
     .filter((pr) => options.issue === undefined || pr.issue === options.issue)
+    .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
+  const json = jsonEnabled(options)
+  const listed = explicitlyFiltered || json ? matching : matching.slice(-PR_LIST_DEFAULT_WINDOW_SIZE)
+  const rows = listed
     .map((pr) => ({
       pr,
       eligibility: app.queue.eligibility(pr.id),
@@ -1439,7 +1451,7 @@ async function listPrs(
   const runs = allQueueRuns(app).filter((run) => run.prs.some((member) => selected.has(member.id)))
   await printResult(
     io,
-    jsonEnabled(options),
+    json,
     {
       command: "pr.list",
       prs: rows.map(({ pr, eligibility, needsReview }) => ({

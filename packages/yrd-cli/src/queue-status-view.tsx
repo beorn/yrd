@@ -2220,13 +2220,17 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
   const submitter: TableColumn<PRListRow> = { header: "BY", key: "submitter", minWidth: 4, maxWidth: 10 }
   const ageColumn: TableColumn<PRListRow> = { header: "AGE", key: "age", minWidth: 5, maxWidth: 7 }
   const changed: TableColumn<PRListRow> = { header: "CHANGED", key: "touched", minWidth: 9, maxWidth: 9 }
+  const prWidth = Math.min(
+    16,
+    rows.reduce((width, row) => Math.max(width, formatQueuePrId(row.pr, row.revision).length + 2), 8),
+  )
   const columns: TableColumn<PRListRow>[] = [
     {
       header: "PR",
       key: "pr",
-      minWidth: 8,
+      minWidth: prWidth,
       maxWidth: 16,
-      render: (row: PRListRow) => <QueuePrId pr={row.pr} revision={row.revision} />,
+      render: (row: PRListRow) => <QueuePrId pr={row.pr} revision={row.revision} wrap="truncate" />,
     },
     {
       header: "STATE",
