@@ -3397,7 +3397,7 @@ function QueueTabsLine({ base, showLabel = true }: { base: string; showLabel?: b
   )
 }
 
-const RUNNER_STALE_MS = 15_000
+export const RUNNER_STALE_MS = 15_000
 
 function runnerTiming(projection: QueueTimelineProjection): Readonly<{ ageMs: number; uptimeMs: number }> | null {
   const runner = projection.runner

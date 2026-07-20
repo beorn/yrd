@@ -22,10 +22,11 @@ import {
   type PRRegressionSeverity,
 } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
-import { createFailure, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
+import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
 import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
+import { createExclusive } from "@yrd/persistence"
 import { loadYrdConfig } from "./config.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
 import { actionableFailure, formatActionableFailure } from "./actionable-error.ts"
@@ -63,6 +64,7 @@ import {
   queueTimelineAdmissionTimes,
   queueTimelineProjection,
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
+  RUNNER_STALE_MS,
   runRevisionClock,
   queueShowData,
   type QueueTimelineProjection,
@@ -92,6 +94,7 @@ import {
 } from "./task-status.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
+import { readInstalledBaselines } from "./installed-baseline.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
@@ -194,6 +197,222 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
     throw cause
   }
+}
+
+type RunnerGitDistance = Readonly<{
+  base: string
+  baseSha: string
+  ahead?: number
+  behind?: number
+  unavailable?: string
+}>
+
+type RunnerGitHealth = Readonly<{
+  cwd: string
+  headSha: string
+  dirty: boolean
+  baselines: readonly RunnerGitDistance[]
+}>
+
+type RunnerHealthFacts = Readonly<{
+  lease: "held" | "free" | "unknown"
+  runnerStatus: "fresh" | "stale" | "missing"
+  runnerAgeMs?: number
+  runner?: QueueTimelineRunner
+  git: RunnerGitHealth
+}>
+
+type RunnerHealthPayload = Readonly<{
+  schema: "hab-service-health/1"
+  command: "queue.list.check"
+  service: "yrd-runner"
+  state: "healthy" | "absent" | "unhealthy"
+  running: boolean
+  error?: ReturnType<typeof actionableFailure>
+  facts: RunnerHealthFacts
+}>
+
+async function residentRunnerLeaseHeld(cwd: string): Promise<boolean> {
+  const gitDir = queueGitDir(cwd)
+  if (gitDir === undefined) {
+    raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
+  }
+  try {
+    await createExclusive(join(gitDir, "yrd", "resident-runner"), { timeoutMs: 0 }).run(async () => undefined)
+    return false
+  } catch (error) {
+    if (failureFact(error)?.code === "exclusive-busy") return true
+    throw error
+  }
+}
+
+function gitDistance(cwd: string, baseSha: string, headSha: string): Omit<RunnerGitDistance, "base" | "baseSha"> {
+  try {
+    const counts = gitSync(cwd, ["rev-list", "--left-right", "--count", `${baseSha}...${headSha}`])
+      .trim()
+      .split(/\s+/u)
+      .map(Number)
+    const behind = counts[0]
+    const ahead = counts[1]
+    if (!Number.isSafeInteger(ahead) || !Number.isSafeInteger(behind)) throw new Error("invalid rev-list counts")
+    return { ahead, behind }
+  } catch (error) {
+    return { unavailable: error instanceof Error ? error.message.split("\n", 1)[0] : String(error) }
+  }
+}
+
+async function runnerGitHealth(cwd: string): Promise<RunnerGitHealth> {
+  const gitDir = queueGitDir(cwd)
+  if (gitDir === undefined) {
+    raiseFailure("infrastructure", "runner-health-unavailable", `yrd: '${cwd}' is not a Git queue repository`)
+  }
+  const headSha = gitSync(cwd, ["rev-parse", "HEAD"]).trim().toLowerCase()
+  const dirty = gitSync(cwd, ["status", "--porcelain"]).trim() !== ""
+  const baselines = await readInstalledBaselines(join(gitDir, "yrd"))
+  return {
+    cwd,
+    headSha,
+    dirty,
+    baselines: Object.values(baselines).map((baseline) => ({
+      base: baseline.base,
+      baseSha: baseline.baseSha,
+      ...gitDistance(cwd, baseline.baseSha, headSha),
+    })),
+  }
+}
+
+function runnerHealthError(code: string, cause: string, resolution: readonly string[]) {
+  return Object.freeze({ code, cause, resolution: Object.freeze([...resolution]) })
+}
+
+async function queueRunnerHealth(
+  services: YrdCliServices,
+  io: YrdCliIO,
+): Promise<{
+  payload: RunnerHealthPayload
+  exitCode: YrdCliExitCode
+}> {
+  const cwd = io.cwd ?? process.cwd()
+  const audit = services.queue?.auditEnvironment
+  let leaseHeld: boolean | undefined
+  let git: RunnerGitHealth = { cwd, headSha: "unknown", dirty: false, baselines: [] }
+  try {
+    leaseHeld = await residentRunnerLeaseHeld(cwd)
+    if (audit === undefined) {
+      raiseFailure(
+        "configuration",
+        "queue-audit-unavailable",
+        "yrd: queue.audit capability is not installed; runner health cannot prove baseline freshness",
+      )
+    }
+    const runner = await residentRunnerStatus(cwd)
+    git = await runnerGitHealth(cwd)
+    const auditResult = await audit()
+    const now = io.now?.() ?? Date.now()
+    const runnerAgeMs = runner === null ? undefined : Math.max(0, now - Date.parse(runner.lastTickAt))
+    const runnerStatus = runnerAgeMs === undefined ? "missing" : runnerAgeMs > RUNNER_STALE_MS ? "stale" : "fresh"
+    const facts: RunnerHealthFacts = {
+      lease: leaseHeld ? "held" : "free",
+      runnerStatus,
+      ...(runnerAgeMs === undefined ? {} : { runnerAgeMs }),
+      ...(runner === null ? {} : { runner }),
+      git,
+    }
+    const drift = auditResult.findings.filter(
+      (finding) => finding.code === "config-drift" || finding.code === "runtime-drift",
+    )
+    if (drift.length > 0) {
+      const first = drift[0]
+      if (first === undefined) throw new Error("drift projection lost its first finding")
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service: "yrd-runner",
+          state: "unhealthy",
+          running: leaseHeld,
+          error: actionableFailure({ code: first.code, message: drift.map((finding) => finding.message).join("\n") }),
+          facts,
+        },
+      }
+    }
+    if (!leaseHeld) {
+      return {
+        exitCode: 1,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service: "yrd-runner",
+          state: "absent",
+          running: false,
+          facts,
+        },
+      }
+    }
+    if (runnerStatus !== "fresh") {
+      const detail = runnerStatus === "missing" ? "has no heartbeat" : `heartbeat is stale by ${runnerAgeMs ?? 0}ms`
+      return {
+        exitCode: 2,
+        payload: {
+          schema: "hab-service-health/1",
+          command: "queue.list.check",
+          service: "yrd-runner",
+          state: "unhealthy",
+          running: true,
+          error: runnerHealthError("resident-runner-unhealthy", `resident runner lease is held but ${detail}`, [
+            "Inspect the lease owner and resident log, then stop that owner before starting a replacement.",
+          ]),
+          facts,
+        },
+      }
+    }
+    return {
+      exitCode: 0,
+      payload: {
+        schema: "hab-service-health/1",
+        command: "queue.list.check",
+        service: "yrd-runner",
+        state: "healthy",
+        running: true,
+        facts,
+      },
+    }
+  } catch (error) {
+    const fact = failureFact(error) ?? {
+      code: "runner-health-failed",
+      message: error instanceof Error ? error.message : String(error),
+    }
+    const lease = leaseHeld === undefined ? "unknown" : leaseHeld ? "held" : "free"
+    return {
+      exitCode: 2,
+      payload: {
+        schema: "hab-service-health/1",
+        command: "queue.list.check",
+        service: "yrd-runner",
+        state: "unhealthy",
+        running: leaseHeld === true,
+        error: actionableFailure(fact),
+        facts: { lease, runnerStatus: "missing", git },
+      },
+    }
+  }
+}
+
+async function checkQueueRunner(services: YrdCliServices, options: JsonOption, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const result = await queueRunnerHealth(services, io)
+  const gitLines = result.payload.facts.git.baselines.map((distance) =>
+    distance.unavailable === undefined
+      ? `git ${distance.base}: ahead=${distance.ahead ?? 0} behind=${distance.behind ?? 0} baseline=${distance.baseSha.slice(0, 12)}`
+      : `git ${distance.base}: distance unavailable (${distance.unavailable})`,
+  )
+  const human = [
+    `yrd-runner ${result.payload.state} (lease=${result.payload.facts.lease}, heartbeat=${result.payload.facts.runnerStatus})`,
+    ...(result.payload.error === undefined ? [] : [formatActionableFailure(result.payload.error)]),
+    ...gitLines,
+  ].join("\n")
+  await printResult(io, jsonEnabled(options), result.payload, human)
+  return result.exitCode
 }
 
 export type ResidentRunnerReclaim = Readonly<{ reclaim: false }> | Readonly<{ reclaim: true; runner: string }>
@@ -379,6 +598,7 @@ type QueueListOptions = Readonly<{
   since?: string
   latest?: boolean
   watch?: boolean
+  check?: boolean
   json?: boolean
 }>
 
@@ -3531,6 +3751,18 @@ function buildProgram(
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
+  const listQueue = async (filters: string[], options: QueueListOptions): Promise<void> => {
+    if (options.check === true) {
+      if (options.watch === true || filters.length > 0) usage("queue list --check does not accept --watch or filters")
+      setExit(await checkQueueRunner(installedServices(), options, io))
+      return
+    }
+    if (options.watch === true) {
+      setExit(await watchQueue(installed(), filters, options, io))
+      return
+    }
+    await listQueues(installed(), filters, options, io)
+  }
   queue
     .command("_list [filter...]", { isDefault: true, hidden: true })
     .option("--base <branch>", "select one base queue")
@@ -3539,14 +3771,9 @@ function buildProgram(
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
+    .option("--check", "probe resident lease, heartbeat, baseline health, and Git distance")
     .option("--json", "emit stable JSON")
-    .action(async (filters, options) => {
-      if (options.watch === true) {
-        setExit(await watchQueue(installed(), filters, options, io))
-        return
-      }
-      await listQueues(installed(), filters, options, io)
-    })
+    .action(listQueue)
   queue
     .command("list [filter...]")
     .description("show the queue timeline")
@@ -3556,14 +3783,9 @@ function buildProgram(
     .option("--since <duration>", "timeline window (default: everything; flow metrics default 24h)")
     .option("--latest", "show only the latest Run for each PR")
     .option("--watch", "keep this projection live and interactive")
+    .option("--check", "probe resident lease, heartbeat, baseline health, and Git distance")
     .option("--json", "emit stable JSON")
-    .action(async (filters, options) => {
-      if (options.watch === true) {
-        setExit(await watchQueue(installed(), filters, options, io))
-        return
-      }
-      await listQueues(installed(), filters, options, io)
-    })
+    .action(listQueue)
   queue
     .command("audit")
     .description("check queue state")
@@ -3912,6 +4134,19 @@ async function executeYrd(
     await program.parseAsync(args, { from: "user" })
     return exit
   } catch (error) {
+    if (queueRunnerCheckRequested(args)) {
+      return checkQueueRunner(
+        {
+          queue: {
+            auditEnvironment: async () => {
+              throw error
+            },
+          },
+        },
+        { json: args.includes("--json") },
+        runtimeIO,
+      )
+    }
     if (error instanceof CommanderError) {
       if (error.exitCode === 0 || error.code === "commander.helpDisplayed") return 0
       await diagnostic(
@@ -3926,6 +4161,14 @@ async function executeYrd(
     await diagnostic(runtimeIO, invocation.name, error, { verbose: (globals.verbose ?? 0) > 0 })
     return exitCode
   }
+}
+
+function queueRunnerCheckRequested(args: readonly string[]): boolean {
+  const queueIndex = args.indexOf("queue")
+  if (queueIndex < 0) return false
+  const tail = args.slice(queueIndex + 1)
+  const options = tail[0] === "list" ? tail.slice(1) : tail
+  return options.includes("--check") && options.every((argument) => argument === "--check" || argument === "--json")
 }
 
 /** Render command metadata without creating a repository-backed runtime. */
