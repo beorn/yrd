@@ -102,6 +102,15 @@ const PinnedCandidateSchema = GitCheckEvidenceSchema.pick({
 }).strict()
 type PinnedCandidate = Readonly<z.infer<typeof PinnedCandidateSchema>>
 
+export const GitCheckExecutionRefusalEvidenceSchema = PinnedCandidateSchema.extend({
+  kind: z.literal("check-execution-refusal"),
+  phase: z.enum(["parent", "candidate"]),
+  error: JobErrorSchema,
+  candidateEvidence: CommandEvidenceSchema.optional(),
+  retryable: z.literal(true),
+}).strict()
+export type GitCheckExecutionRefusalEvidence = Readonly<z.infer<typeof GitCheckExecutionRefusalEvidenceSchema>>
+
 export const GitCheckComparisonRefusalEvidenceSchema = PinnedCandidateSchema.extend({
   kind: z.literal("check-comparison-refusal"),
   phase: z.enum(["parent", "candidate"]),
@@ -179,6 +188,7 @@ export const GitCheckResultEvidenceSchema = z.union([
   GitCheckEvidenceSchema,
   CommandEvidenceSchema,
   GitCheckFailureEvidenceSchema,
+  GitCheckExecutionRefusalEvidenceSchema,
   GitCheckComparisonRefusalEvidenceSchema,
 ])
 export type GitCheckResultEvidence = Readonly<z.infer<typeof GitCheckResultEvidenceSchema>>
@@ -3101,6 +3111,9 @@ export type GitCheckOptions = ProcessDependency &
     purpose?: string
     runner?: "local" | "waiting"
     classification?: "base" | "carrier"
+    /** Opt into parent-versus-candidate comparison for diagnostics-shaped
+     * lint/typecheck output. Ordinary commands use their exit code directly. */
+    comparison?: "diagnostics"
     environment?: string
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
@@ -3298,19 +3311,19 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           } catch (cause) {
             const error = JobErrorSchema.parse({
-              code: `${purpose}-candidate-evidence-unavailable`,
+              code: `${purpose}-candidate-execution-unavailable`,
               message: messageOf(cause),
             })
-            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+            const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
-              kind: "check-comparison-refusal",
+              kind: "check-execution-refusal",
               phase: "candidate",
               error,
               retryable: true,
             })
             return failedWithEvidence(
               "queue-environment-refused",
-              `${purpose} candidate evidence could not be evaluated: ${error.message}`,
+              `${purpose} candidate command could not run: ${error.message}`,
               refusal,
             )
           }
@@ -3337,25 +3350,20 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          const candidateEvidence = comparableCommandEvidence(outcome, purpose)
-          if (candidateEvidence === undefined) {
-            const error = comparisonOutcomeError(outcome, purpose, "candidate")
-            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
-              ...candidate,
-              kind: "check-comparison-refusal",
-              phase: "candidate",
-              error,
-              ...(outcome.status === "failed" && outcome.output !== undefined
-                ? { candidateEvidence: outcome.output }
-                : {}),
-              retryable: true,
-            })
-            return failedWithEvidence(
-              "queue-environment-refused",
-              `${purpose} candidate evidence could not be evaluated: ${error.message}`,
-              refusal,
-            )
+          const candidateFailure: JobResult<GitCheckResultEvidence> = {
+            status: "failed",
+            error: outcome.error,
+            ...(outcome.output === undefined
+              ? {}
+              : { output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }) }),
           }
+          if (options.comparison !== "diagnostics") return candidateFailure
+
+          const candidateEvidence = comparableCommandEvidence(outcome, purpose)
+          // A command that returned a nonzero exit genuinely ran. Missing or
+          // truncated diagnostics cannot turn that terminal result into an
+          // infrastructure refusal: the candidate remains red by exit code.
+          if (candidateEvidence === undefined) return candidateFailure
 
           let parentPath = ""
           let parentOutcome: JobResult<CommandEvidence>
@@ -3374,12 +3382,12 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           } catch (cause) {
             const error = JobErrorSchema.parse({
-              code: `${purpose}-parent-evidence-unavailable`,
+              code: `${purpose}-parent-execution-unavailable`,
               message: messageOf(cause),
             })
-            const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
+            const refusal = GitCheckExecutionRefusalEvidenceSchema.parse({
               ...candidate,
-              kind: "check-comparison-refusal",
+              kind: "check-execution-refusal",
               phase: "parent",
               error,
               candidateEvidence,
@@ -3387,13 +3395,19 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             })
             return failedWithEvidence(
               "queue-environment-refused",
-              `${purpose} parent evidence could not be evaluated: ${error.message}`,
+              `${purpose} parent command could not run: ${error.message}`,
               refusal,
             )
           }
 
           const parentEvidence = comparableCommandEvidence(parentOutcome, purpose)
           if (parentEvidence === undefined) {
+            // An ordinary nonzero parent exit genuinely ran and cannot become
+            // an infrastructure alias just because its diagnostics are opaque.
+            // Named incomplete outcomes (timeout/stall) remain retryable below.
+            if (parentOutcome.status === "failed" && parentOutcome.error.code === `${purpose}-failed`) {
+              return candidateFailure
+            }
             const error = comparisonOutcomeError(parentOutcome, purpose, "parent")
             const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
               ...candidate,

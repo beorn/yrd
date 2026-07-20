@@ -44,6 +44,7 @@ export function queueStepRevision(input: QueueStepRevisionInput): string {
         env: input.config.env,
         environmentPassthrough: input.config.environmentPassthrough,
         classification: input.config.classification ?? "carrier",
+        comparison: input.config.comparison,
         timeoutMs: input.timeoutMs,
         noProgressMs: input.noProgressMs,
         toolchain: input.toolchain,
