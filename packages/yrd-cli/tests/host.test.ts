@@ -305,6 +305,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
     expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
+    expect(run.steps[0]?.job).toMatchObject({ runner: "yrd-local", context: "worktree-context:1" })
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     const evaluatorRevision = app.jobs.definition("contest.evaluator.security").revision
     const queueRevision = app.jobs.definition("queue.step.security").revision
@@ -635,7 +636,7 @@ notify:
         host.app.queue
           .run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
           .then((runs) => ({ kind: "runs" as const, runs })),
-        Bun.sleep(1_000).then(() => ({ kind: "timeout" as const })),
+        Bun.sleep(5_000).then(() => ({ kind: "timeout" as const })),
       ])
 
       expect(settled).toMatchObject({
@@ -1617,7 +1618,9 @@ notify:
     }>
     expect(rejected).toMatchObject({
       command: "pr.merge",
-      status: "rejected",
+      status: "submitted",
+      outcome: "rejected",
+      run: "R1",
       next: "yrd pr runs PR1",
     })
     expect(rejected.guidance).toEqual({
@@ -2486,7 +2489,7 @@ notify:
       }),
     ).toBe(0)
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
-    expect(stdout).toMatch(/pr#1\.1\s+issue\/feature\s+environment-refused/u)
+    expect(stdout).toMatch(/pr#1\.1\s+→ CANDIDATE C1 → RUN main#1 issue\/feature\s+environment-refused/u)
     expect(stdout).toContain("OPEN 1")
     expect(stdout).toContain("REJECTED 0")
     expect(stdout).not.toContain(featureSha.slice(0, 12))
@@ -2602,7 +2605,7 @@ notify:
     expect(await journalEnvelope(repo)).toEqual(journalBefore)
   })
 
-  it("renders clickable candidate-conflict evidence written by the real Git check adapter", async () => {
+  it("renders a conflicting Candidate without admitting a Job", async () => {
     const { repo } = await repository()
     await writeFile(join(repo, "conflict.txt"), "main\n")
     await git(repo, "add", "conflict.txt")
@@ -2616,17 +2619,27 @@ notify:
     await commitYrdConfig(repo, 'steps: [check, merge]\ncheck:\n  run: "true"\n')
 
     const host = await createYrdHost({ cwd: repo })
-    let artifact: string | undefined
     try {
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
-      expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "candidate-conflict" } })
-      const failedStep = run.steps.find((step) => step.job?.status === "completed" && step.job.conclusion === "failure")
-      const artifacts = (failedStep?.job as { output?: { artifacts?: readonly { path: string }[] } } | undefined)
-        ?.output?.artifacts
-      artifact = artifacts?.[0]?.path
-      expect(artifact).toMatch(/\/\.git\/yrd\/artifacts\/R1\/0-check\/attempt-1\/(?:stdout|stderr)\.log$/u)
-      expect(artifact === undefined ? "" : await readFile(artifact, "utf8")).toContain("CONFLICT")
+      const [run] = await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      expect(run).toMatchObject({
+        id: "R1",
+        candidateId: "C1",
+        status: "completed",
+        conclusion: "failure",
+        jobs: [],
+        error: { code: "candidate-conflicting" },
+      })
+      expect(Queues.ids(host.app.state().queues)).toEqual(["R1"])
+      expect(host.app.state().queues.candidates.C1).toMatchObject({
+        id: "C1",
+        mergeability: "conflicting",
+        revs: [{ pr: "PR1", n: 1, head: featureSha }],
+      })
+      expect(host.app.queue.eligibility("PR1")).toMatchObject({
+        runnable: false,
+        reason: { code: "candidate-conflicting", message: "PR 'PR1' revision 1 conflicts in Candidate 'C1'" },
+      })
     } finally {
       await host.close()
     }
@@ -2648,9 +2661,7 @@ notify:
       stderr,
     ).toBe(0)
     expect(stdout).toContain("candidate-conflict")
-    expect(artifact === undefined ? stdout : stdout).toContain(
-      artifact === undefined ? "candidate-conflict" : pathToFileURL(artifact).href,
-    )
+    expect(stdout).toContain("C1")
   })
 
   it("reports the authoritative remote queue head when local main is stale", async () => {

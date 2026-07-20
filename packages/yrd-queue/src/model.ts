@@ -17,7 +17,7 @@ import {
   type PR,
 } from "@yrd/bay"
 import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
-import type { FlowPin } from "@yrd/config"
+import type { FlowPin, StepKind } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 import {
@@ -98,6 +98,7 @@ export type Candidate = Readonly<{
   sha?: string
   ref?: string
   sourceRewrites?: readonly SourceRewrite[]
+  submoduleResolutions?: readonly QueueSubmoduleResolutionEvidence[]
   mergeability: "unknown" | "mergeable" | "conflicting"
   createdAt: string
 }>
@@ -116,30 +117,6 @@ export const SourceRewriteSchema = z
     payload: z.array(z.string().min(1)).min(1),
   })
   .strict() as z.ZodType<SourceRewrite>
-
-export const CandidateSchema = z
-  .object({
-    id: z.string().regex(/^C\d+$/u),
-    queueId: GitRefSchema,
-    baseSha: GitShaSchema,
-    revs: z
-      .array(
-        z
-          .object({
-            pr: PRIdSchema,
-            n: z.number().int().positive(),
-            head: GitShaSchema,
-          })
-          .strict(),
-      )
-      .min(1),
-    sha: GitShaSchema.optional(),
-    ref: GitRefSchema.optional(),
-    sourceRewrites: z.array(SourceRewriteSchema).optional(),
-    mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
-    createdAt: z.iso.datetime({ offset: true }),
-  })
-  .strict()
 
 export type QueueSubmoduleResolutionEvidence =
   | Readonly<{
@@ -186,6 +163,31 @@ export const QueueSubmoduleResolutionEvidenceSchema = z.discriminatedUnion("kind
     .strict(),
 ]) as z.ZodType<QueueSubmoduleResolutionEvidence>
 
+export const CandidateSchema = z
+  .object({
+    id: z.string().regex(/^C\d+$/u),
+    queueId: GitRefSchema,
+    baseSha: GitShaSchema,
+    revs: z
+      .array(
+        z
+          .object({
+            pr: PRIdSchema,
+            n: z.number().int().positive(),
+            head: GitShaSchema,
+          })
+          .strict(),
+      )
+      .min(1),
+    sha: GitShaSchema.optional(),
+    ref: GitRefSchema.optional(),
+    sourceRewrites: z.array(SourceRewriteSchema).optional(),
+    submoduleResolutions: z.array(QueueSubmoduleResolutionEvidenceSchema).min(1).optional(),
+    mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
+    createdAt: z.iso.datetime({ offset: true }),
+  })
+  .strict()
+
 export type IntegrationProof = Readonly<{
   commit: string
   baseSha: string
@@ -220,8 +222,7 @@ export type InstalledStep = Readonly<{
   name: StepName
   title: string
   revision: string
-  integrates: boolean
-  needsIntegration: boolean
+  kind: StepKind
   classification?: "base" | "carrier"
 }>
 
@@ -244,6 +245,8 @@ export type StepSelection =
 export type QueueFailure = Readonly<{
   at: string
   error: JobError
+  /** Present when the Run failure was derived from a retryable Job attempt. */
+  job?: Readonly<{ id: string; attempt: number }>
 }>
 
 export type QueueAuthorityToken = Readonly<{
@@ -307,7 +310,10 @@ export type QueueRecord = Readonly<{
   settlement?: "explicit"
   queueId: string
   candidateId: CandidateId
+  /** Immutable execution receipt. Candidate owns the ordered revision identity;
+   * projection rejects any receipt that diverges from it. */
   prs: readonly PRSnapshot[]
+  /** Queue-target receipt; Candidate owns the exact base SHA. */
   base: string
   flow?: FlowPin
   steps: readonly InstalledStep[]
@@ -339,6 +345,8 @@ export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "s
     integration?: IntegrationProof
     status: RunStatus
     conclusion?: RunConclusion
+    /** Durable Job identities in literal Flow order. */
+    jobs: readonly string[]
     steps: readonly QueueStep[]
     shape: PRShape | IntegratedShape
     finishedAt?: string
@@ -377,6 +385,7 @@ export type PREligibilityReason = Readonly<{
     | "draft"
     | "checks-pending"
     | "checks-failed"
+    | "candidate-conflicting"
     | "review-required"
     | "review-rejected"
     | "queue-paused"
@@ -446,11 +455,29 @@ export const InstalledStepSchema = z
     name: z.string().regex(/^[a-z][a-z0-9_-]*$/iu),
     title: z.string().trim().min(1),
     revision: z.string().trim().min(1),
-    integrates: z.boolean(),
-    needsIntegration: z.boolean(),
+    kind: z.enum(["check", "action", "merge"]),
     classification: z.enum(["base", "carrier"]).optional(),
   })
   .strict()
+
+export const ReplayInstalledStepSchema = z.preprocess((value) => {
+  if (typeof value !== "object" || value === null || !("integrates" in value)) return value
+  const legacy = value as Readonly<{
+    name?: unknown
+    title?: unknown
+    revision?: unknown
+    integrates?: unknown
+    needsIntegration?: unknown
+    classification?: unknown
+  }>
+  return {
+    name: legacy.name,
+    title: legacy.title,
+    revision: legacy.revision,
+    kind: legacy.integrates === true ? "merge" : legacy.needsIntegration === true ? "action" : "check",
+    ...(legacy.classification === undefined ? {} : { classification: legacy.classification }),
+  }
+}, InstalledStepSchema)
 
 const SkippedStepSchema = InstalledStepSchema.extend({
   index: z.number().int().nonnegative(),
@@ -458,11 +485,51 @@ const SkippedStepSchema = InstalledStepSchema.extend({
   reason: z.literal("not-selected"),
 }).strict()
 
+const ReplaySkippedStepSchema = z.preprocess((value) => {
+  if (typeof value !== "object" || value === null || !("integrates" in value)) return value
+  const legacy = value as Readonly<Record<string, unknown>>
+  return {
+    name: legacy.name,
+    title: legacy.title,
+    revision: legacy.revision,
+    kind: legacy.integrates === true ? "merge" : legacy.needsIntegration === true ? "action" : "check",
+    ...(legacy.classification === undefined ? {} : { classification: legacy.classification }),
+    index: legacy.index,
+    status: legacy.status,
+    reason: legacy.reason,
+  }
+}, SkippedStepSchema)
+
 const StepSelectionSchema = z
   .object({
     authority: z.enum(["configured", "explicit", "admission"]),
     steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
     omittedSteps: z.array(SkippedStepSchema).min(1).optional(),
+  })
+  .strict()
+  .superRefine((selection, context) => {
+    const omitted = selection.omittedSteps ?? []
+    const selectedNames = new Set(selection.steps)
+    const omittedNames = new Set<string>()
+    const omittedIndexes = new Set<number>()
+    const planLength = selection.steps.length + omitted.length
+    for (const step of omitted) {
+      if (selectedNames.has(step.name) || omittedNames.has(step.name)) {
+        context.addIssue({ code: "custom", message: `duplicate step-selection evidence for '${step.name}'` })
+      }
+      if (step.index >= planLength || omittedIndexes.has(step.index)) {
+        context.addIssue({ code: "custom", message: `invalid omitted-step index ${step.index}` })
+      }
+      omittedNames.add(step.name)
+      omittedIndexes.add(step.index)
+    }
+  })
+
+const ReplayStepSelectionSchema = z
+  .object({
+    authority: z.enum(["configured", "explicit", "admission"]),
+    steps: z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/iu)).min(1),
+    omittedSteps: z.array(ReplaySkippedStepSchema).min(1).optional(),
   })
   .strict()
   .superRefine((selection, context) => {
@@ -504,11 +571,24 @@ const queueRecordShape = {
   reusedFrom: z.string().trim().min(1).optional(),
   startedAt: z.iso.datetime({ offset: true }),
   parent: z.string().trim().min(1).optional(),
-  isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
   failure: z
-    .object({ at: z.iso.datetime({ offset: true }), error: JobErrorSchema })
+    .object({
+      at: z.iso.datetime({ offset: true }),
+      error: JobErrorSchema,
+      job: z
+        .object({ id: z.string().trim().min(1), attempt: z.number().int().positive() })
+        .strict()
+        .optional(),
+    })
     .strict()
     .optional(),
+}
+
+const replayQueueRecordShape = {
+  ...queueRecordShape,
+  steps: z.array(ReplayInstalledStepSchema).min(1),
+  /** Replay-only provenance; fresh child Runs use Candidate membership + Run.parent. */
+  isolationPart: z.union([z.literal(0), z.literal(1)]).optional(),
 }
 
 export const QueueRecordSchema = z
@@ -517,14 +597,14 @@ export const QueueRecordSchema = z
 
 export const ReplayQueueRecordSchema = z
   .object({
-    ...queueRecordShape,
+    ...replayQueueRecordShape,
     queueId: GitRefSchema.optional(),
     candidateId: z
       .string()
       .regex(/^C\d+$/u)
       .optional(),
     settlement: z.literal("explicit").optional(),
-    stepSelection: z.union([StepSelectionSchema, LegacyStepSelectionSchema]).optional(),
+    stepSelection: z.union([ReplayStepSelectionSchema, LegacyStepSelectionSchema]).optional(),
   })
   .strict()
 

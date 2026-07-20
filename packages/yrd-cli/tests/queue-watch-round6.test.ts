@@ -161,7 +161,7 @@ describe("queue watch user round 6", () => {
         runner: "runner-herdr-09",
         output: { commit, baseSha },
       }),
-      { integrates: true },
+      { kind: "merge" },
     )
     const rejectedRuns = [
       fixtureRun("R57", [lead], "failed", "2026-07-12T22:14:00.000Z", {
@@ -626,7 +626,7 @@ describe("queue watch user round 6", () => {
         runner: "runner-herdr-09",
         output: { commit: "b".repeat(40), baseSha: "a".repeat(40) },
       }),
-      { integrates: true },
+      { kind: "merge" },
     )
     const run = fixtureRun("R60", [pr], "passed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:41:00.000Z",

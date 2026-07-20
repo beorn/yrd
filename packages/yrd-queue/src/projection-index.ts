@@ -24,13 +24,7 @@ export function emptyQueueProjectionIndex(): QueueProjectionIndex {
 export function queueLookupKey(snapshot: Readonly<PRSnapshot>, steps: readonly Readonly<InstalledStep>[]): string {
   return JSON.stringify([
     [snapshot.id, snapshot.revision, snapshot.headSha, snapshot.base, snapshot.baseSha ?? null],
-    steps.map((step) => [
-      step.name,
-      step.revision,
-      step.integrates,
-      step.needsIntegration,
-      step.classification ?? null,
-    ]),
+    steps.map((step) => [step.name, step.revision, step.kind, step.classification ?? null]),
   ])
 }
 
@@ -83,6 +77,21 @@ export function indexQueueStart(
     }
   }
   return { ...index, nextRunNumber, childByParentPart, rootsByMember, plans }
+}
+
+/** Index fresh bisection provenance from its dedicated event. Run.parent is
+ * the durable public relationship; this part lookup only resumes the
+ * deterministic two-child traversal. */
+export function indexQueueChild(
+  index: Readonly<QueueProjectionIndex>,
+  parent: RunId,
+  part: 0 | 1,
+  run: RunId,
+): QueueProjectionIndex {
+  const key = childKey(parent, part)
+  const current = projectionLookupGet(index.childByParentPart, key)
+  if (current !== undefined && compareRunIds(current, run) <= 0) return index
+  return { ...index, childByParentPart: projectionLookupSet(index.childByParentPart, key, run) }
 }
 
 export function recordReleasedAdmissionFailure(

@@ -26,7 +26,7 @@ import {
 } from "@yrd/contest"
 import { createYrd, createYrdDef, failureFact, pipe, raiseFailure, type Journal } from "@yrd/core"
 import { defineConfig, selectFlow } from "@yrd/config"
-import { withJobs } from "@yrd/job"
+import { localRunner, withJobs } from "@yrd/job"
 import {
   configuredCommandStep,
   configuredMergeStep,
@@ -34,10 +34,12 @@ import {
   createCandidatePool,
   createCandidatePoolGit,
   createGitPRRecutter,
+  gitCandidatePreparer,
   gitCheckStep,
   gitMergeStep,
   inspectGitQueueTarget,
   resolveGitQueueTarget,
+  worktreeContexts,
   withQueue,
   withMerge,
   withStep,
@@ -103,6 +105,8 @@ export type DefaultYrdAppOptions = Readonly<{
   log?: ConditionalLogger
   /** Opt-in warm candidate-worktree pool shared across check steps (R40). */
   candidatePool?: CandidatePool
+  /** Runtime Runner identity recorded on fresh Jobs. */
+  runnerId?: string
 }>
 
 function validateConfig(config: ResolvedYrdProjectConfig): void {
@@ -228,7 +232,7 @@ function candidateStep(
   name: string,
   config: YrdStepConfig,
   revision: string,
-  candidatePool: CandidatePool | undefined,
+  kind: "check" | "action",
 ): RuntimeStep {
   return eraseStep(
     withStep(
@@ -238,7 +242,6 @@ function candidateStep(
         repo,
         command: shellCommand(stepCommand(name, config)),
         checkoutParent,
-        ...(candidatePool === undefined ? {} : { candidatePool }),
         artifactRoot: join(stateDir, "artifacts"),
         purpose: name,
         runner: config.runner,
@@ -253,6 +256,7 @@ function candidateStep(
       }),
       {
         revision,
+        kind,
         classification: config.classification ?? "carrier",
       },
     ),
@@ -273,13 +277,14 @@ function configuredStepDescriptors(
   mergeCommand: readonly string[] | undefined,
 ): readonly InstalledStep[] {
   const toolchain = hostToolchainFingerprint()
-  let integrated = false
-  return config.steps.map((name) => {
+  const mergeIndex = config.steps.indexOf("merge")
+  return config.steps.map((name, index) => {
     const stepConfig = config.definitions[name] ?? { runner: "local" as const }
+    const kind =
+      stepConfig.kind ?? (name === "merge" ? "merge" : mergeIndex >= 0 && index > mergeIndex ? "action" : "check")
     const timeoutMs = stepTimeoutMs(stepConfig)
     const noProgressMs = stepNoProgressMs(stepConfig)
-    if (name === "merge") {
-      integrated = true
+    if (kind === "merge") {
       return {
         name,
         title: "merge",
@@ -293,11 +298,10 @@ function configuredStepDescriptors(
           toolchain,
           resolvedCommand: mergeCommand,
         }),
-        integrates: true,
-        needsIntegration: false,
+        kind,
       }
     }
-    if (!integrated) {
+    if (kind === "check") {
       return {
         name,
         title: name,
@@ -311,8 +315,7 @@ function configuredStepDescriptors(
           toolchain,
           checkoutParent: fixed.baysRoot,
         }),
-        integrates: false,
-        needsIntegration: false,
+        kind,
         classification: stepConfig.classification ?? "carrier",
       }
     }
@@ -328,8 +331,7 @@ function configuredStepDescriptors(
         noProgressMs,
         toolchain,
       }),
-      integrates: false,
-      needsIntegration: true,
+      kind,
     }
   })
 }
@@ -386,14 +388,12 @@ function configuredQueueSteps(
     options.config,
     mergeCommand,
   )
-  let integrated = false
   return options.config.steps.map((name, index) => {
     const config = options.config.definitions[name] ?? { runner: "local" as const }
     const descriptor = descriptors[index]
     if (descriptor === undefined) throw new Error(`yrd: missing derived descriptor for queue step '${name}'`)
     const revision = descriptor.revision
-    if (name === "merge") {
-      integrated = true
+    if (descriptor.kind === "merge") {
       return eraseStep(
         withMerge(
           mergeCommand === undefined
@@ -414,7 +414,7 @@ function configuredQueueSteps(
         ),
       )
     }
-    if (!integrated) {
+    if (descriptor.kind === "check") {
       return candidateStep(
         options.process,
         options.repo,
@@ -423,13 +423,13 @@ function configuredQueueSteps(
         name,
         config,
         revision,
-        options.candidatePool,
+        descriptor.kind,
       )
     }
     return eraseStep(
       withStep(name, integratedRunner(options.process, options.repo, options.stateDir, name, config), {
         revision,
-        needsIntegration: true,
+        kind: "action",
       }),
     )
   })
@@ -628,6 +628,32 @@ export async function createDefaultYrdApp(options: DefaultYrdAppOptions): Promis
           branch: baseIdentity(base),
         })
       ).sha,
+    prepareCandidate: gitCandidatePreparer({
+      inject: { process: options.process },
+      repo: options.repo,
+      checkoutParent: options.baysRoot,
+      artifactRoot: join(options.stateDir, "artifacts"),
+      ...(options.candidatePool === undefined ? {} : { candidatePool: options.candidatePool }),
+    }),
+    runner: (jobs) => {
+      const contexts = worktreeContexts({
+        repo: options.repo,
+        parent: options.baysRoot,
+        size: 2,
+        submodules: "isolated",
+        git: createCandidatePoolGit(options.process),
+        ...(options.candidatePool === undefined ? {} : { pool: options.candidatePool }),
+        ...(options.log === undefined ? {} : { log: options.log }),
+      })
+      const runner = localRunner({
+        id: options.runnerId ?? "yrd-local",
+        jobs,
+        leaseMs: 60_000,
+        maxInFlight: contexts.maxInFlight,
+        contexts,
+      })
+      return Object.freeze({ ...runner, [Symbol.asyncDispose]: () => contexts.close() })
+    },
   })
   const contestAdapters = defaultContestAdapters(options)
   const contests = withContests({
@@ -1044,6 +1070,7 @@ async function createYrdRuntimeHost(
       scope,
       log,
       candidatePool,
+      runnerId: resident?.id ?? `yrd-cli:${globalThis.process.pid}`,
     })
     signals?.start()
     const runtimeApp = app

@@ -308,8 +308,7 @@ export function fixtureStep(
   options: Readonly<{
     title?: string
     revision?: string
-    integrates?: boolean
-    needsIntegration?: boolean
+    kind?: "check" | "action" | "merge"
     classification?: "base" | "carrier"
   }> = {},
 ): Run["steps"][number] {
@@ -317,8 +316,7 @@ export function fixtureStep(
     name,
     title: options.title ?? `${name} production gate`,
     revision: options.revision ?? "step-v2",
-    integrates: options.integrates ?? false,
-    needsIntegration: options.needsIntegration ?? false,
+    kind: options.kind ?? "check",
     ...(options.classification === undefined ? {} : { classification: options.classification }),
     job,
   }
@@ -342,6 +340,7 @@ export function fixtureRun(
   const runStatus: Run["status"] = status === "running" ? "in_progress" : status === "waiting" ? "waiting" : "completed"
   const conclusion: Run["conclusion"] | undefined =
     status === "passed" ? "success" : status === "failed" ? "failure" : undefined
+  const steps = options.steps ?? []
   return {
     id,
     queueId: "main",
@@ -361,7 +360,8 @@ export function fixtureRun(
       }
     }),
     base: "main",
-    steps: options.steps ?? [],
+    jobs: steps.flatMap((step) => (step.job === undefined ? [] : [step.job.id])),
+    steps,
     startedAt,
     cursor: options.cursor ?? 0,
     ...(integration === undefined ? {} : { integration }),
@@ -619,8 +619,7 @@ const batchSteps = [
     { classification: "carrier" },
   ),
   fixtureStep("merge", fixtureJob("J42-merge", "requested", { requestedAt: "2026-07-13T11:43:00.000Z" }), {
-    integrates: true,
-    needsIntegration: true,
+    kind: "merge",
   }),
 ]
 const integratedSteps = [
@@ -647,7 +646,7 @@ const integratedSteps = [
       finishedAt: "2026-07-13T10:55:00.000Z",
       output: { commit: INTEGRATED_SHA, baseSha: BASE_SHA },
     }),
-    { integrates: true, needsIntegration: true },
+    { kind: "merge" },
   ),
 ]
 const rejectedSteps = [

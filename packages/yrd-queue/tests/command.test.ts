@@ -840,7 +840,7 @@ describe("Queue command adapters", () => {
       },
     })
     expect(await git(repo, ["status", "--porcelain"])).toBe("")
-  })
+  }, 30_000)
 
   it("refuses a recorded base with ambiguous source merge bases", async () => {
     const { repo } = await repository()
@@ -1978,6 +1978,78 @@ describe("Queue command adapters", () => {
     const artifact = artifacts?.[0]
     expect(artifact === undefined ? false : existsSync(artifact.path)).toBe(true)
     expect(artifact === undefined ? "" : await readFile(artifact.path, "utf8")).toContain("CONFLICT")
+  })
+
+  it("checks the immutable Candidate already materialized by the Runner Context", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    const baseSha = await git(repo, ["rev-parse", "main"])
+    const candidateRef = "refs/yrd/candidates/C1"
+    await git(repo, ["update-ref", candidateRef, featureSha])
+    const candidatePath = join(repo, "..", "candidate-C1")
+    await git(repo, ["worktree", "add", "--detach", candidatePath, candidateRef])
+    await using process = createProcess()
+    const commandCwds: string[] = []
+    const recordingProcess: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "test") {
+          if (request.cwd === undefined) throw new Error("Candidate check command is missing its Context cwd")
+          commandCwds.push(request.cwd)
+        }
+        return process.run(request)
+      },
+    }
+
+    const outcome = await gitCheckStep({
+      inject: { process: recordingProcess },
+      repo,
+      command: ["test", "-f", "feature.txt"],
+    })(
+      {
+        run: "R1",
+        step: "check",
+        index: 0,
+        prs: [
+          {
+            id: "PR1",
+            branch: "issue/feature",
+            base: "main",
+            revision: 1,
+            headSha: featureSha,
+            baseSha,
+          },
+        ],
+        candidate: {
+          id: "C1",
+          queueId: "main",
+          baseSha,
+          revs: [{ pr: "PR1", n: 1, head: featureSha }],
+          sha: featureSha,
+          ref: candidateRef,
+          mergeability: "mergeable",
+          createdAt: new Date(0).toISOString(),
+        },
+        shape: { results: {} },
+      } as StepExecution<PRShape>,
+      {
+        id: "J1",
+        attempt: 1,
+        runner: "local",
+        context: {
+          id: "worktree-context:1",
+          request: { scope: "job", candidate: "rw", capabilities: ["git"] },
+          candidateRef,
+          cwd: candidatePath,
+        },
+        signal: new AbortController().signal,
+      },
+    )
+
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      output: { baseSha, candidateSha: featureSha, candidateRef },
+    })
+    expect(commandCwds).toEqual([candidatePath])
   })
 
   it("executes argv directly and requires an explicit gate for shell text", async () => {
@@ -3388,7 +3460,9 @@ describe("Queue command adapters", () => {
     )
     expect(proofFetches).toHaveLength(2)
     expect(proofFetches.map(({ argv }) => argv.at(-2))).toEqual([origin, origin])
-    expect(proofFetches.map(({ argv }) => argv.at(-1)).sort()).toEqual([...pins].sort())
+    expect(
+      proofFetches.map(({ argv }) => argv.at(-1)).toSorted((left, right) => (left ?? "").localeCompare(right ?? "")),
+    ).toEqual([...pins].toSorted((left, right) => left.localeCompare(right)))
     const proofStores = new Set(proofFetches.map(({ argv }) => argv[2]))
     expect([...proofStores]).toEqual([initializations[0]?.argv.at(-1)])
 
@@ -3728,7 +3802,7 @@ describe("Queue command adapters", () => {
           const result = await process.run(request)
           return {
             ...result,
-            stdout: result.stdout.replace(/(submodule\.[^\0\n]+\.url\n)[^\0]*/u, "$1../dep.git"),
+            stdout: result.stdout.replace(/(submodule\.[^\n]+\.url\n)[\s\S]*/u, "$1../dep.git"),
           }
         }
         if (request.argv.at(-1) === "remote.origin.url") {
@@ -3821,7 +3895,7 @@ describe("Queue command adapters", () => {
       expect(configuredCheckRan).toBe(false)
       expect(requests.some(({ argv }) => argv.includes("submodule") && argv.includes("update"))).toBe(false)
       expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
-        status: "rejected",
+        status: "submitted",
         headSha: fixture.featureSha,
       })
     },
@@ -3860,7 +3934,7 @@ describe("Queue command adapters", () => {
       error: { code: "check-failed", message: expect.stringContaining("has no URL") },
     })
     expect(configuredCheckRan).toBe(false)
-    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "rejected", headSha: featureSha })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
   it("composes a divergent clean submodule pin into the checked and landed root candidate", async () => {

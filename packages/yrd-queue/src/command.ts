@@ -16,7 +16,13 @@ import type {
 } from "./model.ts"
 import { IntegrationProofSchema, QueueSubmoduleResolutionEvidenceSchema, SourceRewriteSchema } from "./model.ts"
 import type { CandidatePool } from "./candidate-pool.ts"
-import type { StepExecution, StepRunner } from "./queue.ts"
+import type {
+  CandidatePreparationInput,
+  CandidatePreparer,
+  PreparedCandidate,
+  StepExecution,
+  StepRunner,
+} from "./queue.ts"
 import { resolveRelativeSubmoduleOrigin } from "./submodule-origin.ts"
 import { executeQueueSubmoduleComposition } from "./submodule-composition-git.ts"
 import {
@@ -1698,6 +1704,143 @@ async function prepareCandidate(
   }
 }
 
+async function mergeTreeCandidate(
+  git: Git,
+  repo: string,
+  input: CandidatePreparationInput,
+): Promise<"mergeable" | "conflicting"> {
+  let current = input.baseSha
+  for (const revision of input.revs) {
+    const merged = await git.run(repo, ["merge-tree", "--write-tree", current, revision.head], true)
+    if (merged.code !== 0) return "conflicting"
+    const tree = merged.stdout.split(/\r?\n/u)[0]
+    if (tree === undefined || !/^[0-9a-f]{40,64}$/iu.test(tree)) {
+      throw new Error(`yrd: git merge-tree returned no tree for Candidate '${input.id}'`)
+    }
+    const committed = await git.run(repo, [
+      "-c",
+      "user.name=Yrd",
+      "-c",
+      "user.email=yrd@localhost",
+      "commit-tree",
+      tree,
+      "-p",
+      current,
+      "-p",
+      revision.head,
+      "-m",
+      `yrd mergeability probe ${input.id}`,
+    ])
+    current = committed.stdout
+  }
+  return "mergeable"
+}
+
+export type GitCandidatePreparerOptions = Readonly<{
+  inject: Readonly<{ process: Pick<Process, "run"> }>
+  repo: string
+  checkoutParent?: string
+  artifactRoot?: string
+  env?: NodeJS.ProcessEnv
+  candidatePool?: CandidatePool
+}>
+
+/** Construct and publish the ONE immutable Candidate before Runner admission.
+ * `git merge-tree` classifies ordinary conflicts without a checkout; the
+ * existing certificate-bearing composition path is then reused only to
+ * materialize the synthetic commit and source-rewrite evidence. */
+export function gitCandidatePreparer(options: GitCandidatePreparerOptions): CandidatePreparer {
+  const repo = resolve(options.repo)
+  const git = createGit(options.inject.process, options.env)
+  return async (input): Promise<PreparedCandidate> => {
+    const mergeability = await mergeTreeCandidate(git, repo, input)
+    const needsDomainComposition = input.prs.some((pr) => pr.composition !== undefined || pr.recut !== undefined)
+    if (mergeability === "conflicting" && !needsDomainComposition) {
+      return {
+        id: input.id,
+        queueId: input.queueId,
+        baseSha: input.baseSha,
+        revs: input.revs,
+        mergeability: "conflicting",
+      }
+    }
+    const execution: StepExecution = {
+      run: input.id,
+      step: "candidate",
+      index: 0,
+      prs: input.prs,
+      shape: { results: {} },
+    }
+    const materialize = async (path: string, scratchRoot: string): Promise<PreparedCandidate> => {
+      const candidate = await prepareCandidate(
+        git,
+        repo,
+        path,
+        execution,
+        1,
+        resolve(options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")),
+        (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
+      )
+      if (candidate.status === "failed") {
+        throw createFailure({
+          kind: "refusal",
+          code: candidate.error.code,
+          message: candidate.error.message,
+        })
+      }
+      await proveCandidateSubmoduleReachability(
+        git,
+        repo,
+        path,
+        candidate.output.sha,
+        join(scratchRoot, "submodule-proof"),
+      )
+      const ref = `refs/yrd/candidates/${input.id}`
+      const pinned = await git.run(
+        repo,
+        ["update-ref", "--create-reflog", ref, candidate.output.sha, "0".repeat(candidate.output.sha.length)],
+        true,
+      )
+      if (pinned.code !== 0 && (await git.optionalCommit(repo, ref)) !== candidate.output.sha) {
+        throw createFailure({
+          kind: "infrastructure",
+          code: "candidate-ref-refused",
+          message: `yrd: Candidate ref '${ref}' is already occupied by different evidence`,
+        })
+      }
+      return {
+        id: input.id,
+        queueId: input.queueId,
+        baseSha: input.baseSha,
+        revs: input.revs,
+        sha: candidate.output.sha,
+        ref,
+        ...(candidate.output.sourceRewrites.length === 0 ? {} : { sourceRewrites: candidate.output.sourceRewrites }),
+        ...(candidate.output.submoduleResolutions.length === 0
+          ? {}
+          : { submoduleResolutions: candidate.output.submoduleResolutions }),
+        mergeability: "mergeable",
+      }
+    }
+    if (options.candidatePool !== undefined) {
+      return options.candidatePool.withCandidate(input.baseSha, materialize)
+    }
+    const outcome = await withScratch<PreparedCandidate>(
+      git,
+      repo,
+      input.baseSha,
+      options.checkoutParent ?? tmpdir(),
+      async (path, scratchRoot) => ({
+        status: "completed",
+        conclusion: "success",
+        output: await materialize(path, scratchRoot),
+      }),
+    )
+    if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+    throw new Error("yrd: Candidate scratch construction did not complete")
+  }
+}
+
 type RecutBaseMovement = CandidateFailure | Readonly<{ status: "moved"; moved: boolean; baseSha: string; head: string }>
 
 /**
@@ -3222,13 +3365,74 @@ async function withPinnedCandidate<Output extends JsonValue>(
   })
 }
 
+async function withStepCandidate<Output extends JsonValue>(
+  git: Git,
+  repo: string,
+  input: StepExecution,
+  context: JobContext,
+  options: Readonly<{
+    checkoutParent?: string
+    artifactRoot?: string
+    allowAuthoredGitlinks?: boolean
+    candidatePool?: CandidatePool
+  }>,
+  onFailure: (failure: PreparedCandidateFailure) => JobResult<Output>,
+  use: (path: string, candidate: PinnedCandidate) => Promise<JobResult<Output>>,
+): Promise<JobResult<Output>> {
+  const runtime = context.context
+  if (runtime === undefined) {
+    // Compatibility for direct StepRunner consumers and replay-era tests. The
+    // configured Queue always supplies a Runner Context and never enters this
+    // reconstruction path.
+    return withPinnedCandidate(git, repo, input, context, options, onFailure, use)
+  }
+  if (runtime.request.candidate === "none") {
+    if (runtime.cwd === undefined && runtime.candidateRef === undefined) {
+      return withPinnedCandidate(git, repo, input, context, options, onFailure, use)
+    }
+    throw new Error(`yrd: check Job '${context.id}' requires a Candidate Context`)
+  }
+  if (runtime.cwd === undefined || runtime.candidateRef === undefined) {
+    throw new Error(`yrd: Candidate Context '${runtime.id}' is missing its materialized worktree identity`)
+  }
+  const candidate = input.candidate
+  if (candidate === undefined) {
+    throw new Error(`yrd: check Job '${context.id}' is missing immutable Candidate facts`)
+  }
+  if (candidate.mergeability !== "mergeable" || candidate.sha === undefined || candidate.ref === undefined) {
+    throw new Error(`yrd: check Job '${context.id}' requires a constructed mergeable Candidate`)
+  }
+  if (candidate.ref !== runtime.candidateRef) {
+    throw new Error(
+      `yrd: Candidate Context '${runtime.id}' materialized '${runtime.candidateRef}', expected '${candidate.ref}'`,
+    )
+  }
+  if (input.prs.some((pr) => pr.baseSha !== undefined && pr.baseSha !== candidate.baseSha)) {
+    throw new Error(`yrd: check Job '${context.id}' Candidate base does not match its PR revisions`)
+  }
+  const head = await git.commit(runtime.cwd, "HEAD")
+  if (head !== candidate.sha) {
+    throw new Error(`yrd: Candidate Context '${runtime.id}' materialized ${head}, expected ${candidate.sha}`)
+  }
+  return use(
+    runtime.cwd,
+    PinnedCandidateSchema.parse({
+      baseSha: candidate.baseSha,
+      candidateSha: candidate.sha,
+      candidateRef: candidate.ref,
+      ...(candidate.sourceRewrites === undefined ? {} : { sourceRewrites: candidate.sourceRewrites }),
+      ...(candidate.submoduleResolutions === undefined ? {} : { submoduleResolutions: candidate.submoduleResolutions }),
+    }),
+  )
+}
+
 export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitCheckResultEvidence> {
   const repo = resolve(options.repo)
   const git = createGit(options.inject.process, options.env)
   return async (input, context): Promise<JobResult<GitCheckResultEvidence>> => {
     try {
       const purpose = options.purpose ?? "check"
-      return await withPinnedCandidate(
+      return await withStepCandidate(
         git,
         repo,
         input,

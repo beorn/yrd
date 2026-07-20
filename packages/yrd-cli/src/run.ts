@@ -65,6 +65,7 @@ import {
   PRResultView,
   queueLogAttempts,
   queueLogRows,
+  latestRunForCurrentRevision,
   prListRows,
   prDetailData,
   queueRevisionKey,
@@ -610,8 +611,8 @@ function selectedBase(state: YrdCliState, selector: string): string {
   return resolveBase(knownBases(state), selector) ?? baseIdentity(selector)
 }
 
-async function runJobs(app: YrdCliApp, ids: readonly string[], io: YrdCliIO): Promise<Job[]> {
-  return [...(await app.jobs.runMany(ids, runtimeOptions(io)))]
+async function runJobs(app: YrdCliApp, ids: readonly string[], _io: YrdCliIO): Promise<Job[]> {
+  return Promise.all(ids.map((job) => app.runner.submit({ job })))
 }
 
 function assertJobsPassed(runs: readonly Job[], action: string): void {
@@ -761,6 +762,10 @@ function projectQueueStatusResultTaskStatus(result: QueueStatusResult) {
   return {
     ...projectQueueSummaryTaskStatus(result),
     prs: result.prs.map(projectPRTaskStatus),
+    ...(result.candidates === undefined ? {} : { candidates: result.candidates }),
+    ...(result.eligibilities === undefined
+      ? {}
+      : { eligibilities: result.eligibilities.map(projectEligibilityTaskStatus) }),
   }
 }
 
@@ -2129,14 +2134,20 @@ async function queueStatusSnapshots(
     const canonical = app.queue.status(group.base)
     const aliases = [...group.aliases].filter((base) => base !== group.base).map((base) => app.queue.status(base))
     const runs = mergedQueueRuns(canonical, aliases)
+    const prs = Object.values(state.bays.prs).filter(
+      (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
+    )
+    const prIds = new Set(prs.map((pr) => pr.id))
     results.push({
       base: group.base,
       ...runs,
       ...(canonical.pause === undefined ? {} : { pause: canonical.pause }),
       ...(group.headSha === undefined ? {} : { headSha: group.headSha }),
-      prs: Object.values(state.bays.prs).filter(
-        (pr) => group.aliases.has(pr.base) && (target.selected.size === 0 || target.selected.has(pr.id)),
+      prs,
+      candidates: Object.values(state.queues.candidates).filter((candidate) =>
+        candidate.revs.some((revision) => prIds.has(revision.pr)),
       ),
+      eligibilities: prs.map((pr) => app.queue.eligibility(pr.id)),
     })
   }
   return { results }
@@ -3303,12 +3314,13 @@ async function refusePrMerge(
   }
 
   const position = await queuedPrPosition(stateOf(app), pr, io)
-  const detail = prMergeRefusalDetail(pr, position)
+  const detail = prMergeRefusalDetail(pr, position, latestRunForCurrentRevision(pr, app.queue.status(pr.base)))
   const message = `the queue is the only merger; ${detail.message}`
   const guidance = {
     command: "pr.merge",
     pr: pr.id,
     status: prDeliveryState(pr),
+    ...(detail.run === undefined ? {} : { run: detail.run, outcome: detail.outcome }),
     ...(position === undefined ? {} : { position }),
     next: detail.next,
     guidance: detail.guidance,
@@ -3324,8 +3336,26 @@ async function refusePrMerge(
 function prMergeRefusalDetail(
   pr: PR,
   position: number | undefined,
-): Readonly<{ next: string; guidance: Readonly<Record<string, string>>; message: string }> {
+  latestRun: Run | undefined,
+): Readonly<{
+  next: string
+  guidance: Readonly<Record<string, string>>
+  message: string
+  run?: string
+  outcome?: "rejected"
+}> {
   const delivery = prDeliveryState(pr)
+  if (latestRun?.status === "completed" && latestRun.conclusion === "failure") {
+    const inspect = `yrd pr runs ${pr.id}`
+    const resubmit = "fix the branch and run yrd pr submit again"
+    return {
+      next: inspect,
+      guidance: { inspect, resubmit },
+      message: `PR '${pr.id}' latest Run '${latestRun.id}' was rejected; see: ${inspect}; then ${resubmit}`,
+      run: latestRun.id,
+      outcome: "rejected",
+    }
+  }
   if (delivery === "submitted") {
     const watch = `yrd watch --pr ${pr.id}`
     return {

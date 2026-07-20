@@ -553,8 +553,7 @@ function fakeStep(name: string, status: Parameters<typeof fakeJob>[0]["status"],
     name,
     title: `${name} test step`,
     revision: "step-v1",
-    integrates: false,
-    needsIntegration: false,
+    kind: name === "merge" ? ("merge" as const) : ("check" as const),
     job,
   }
 }
@@ -589,6 +588,7 @@ function fakeRun(input: {
       },
     ],
     base: input.base ?? "main",
+    jobs: input.steps.flatMap((step) => (step.job === undefined ? [] : [step.job.id])),
     steps: input.steps,
     startedAt,
     cursor: 0,
@@ -2237,7 +2237,7 @@ describe("runYrd", () => {
     })
   })
 
-  it("teaches inspect-and-resubmit when pr merge is invoked for rejected work", async () => {
+  it("teaches inspect-and-resubmit when pr merge is invoked after a failed Run", async () => {
     const app = await createApp({ failingCheck: true })
     await openAndSubmit(app)
     await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
@@ -2249,7 +2249,9 @@ describe("runYrd", () => {
     }>
     expect(refusal).toMatchObject({
       command: "pr.merge",
-      status: "rejected",
+      status: "submitted",
+      run: "R1",
+      outcome: "rejected",
       next: "yrd pr runs PR1",
     })
     expect(refusal.guidance).toEqual({
@@ -2976,9 +2978,9 @@ describe("runYrd", () => {
         },
       ],
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("rejected")
-    expect(currentPRRev(app.state().bays.prs.PR1!)).toMatchObject({ terminal: { kind: "rejected" } })
-    expect(app.state().bays.prs.PR1).toMatchObject({ detail: "check failed" })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(currentPRRev(app.state().bays.prs.PR1!).terminal).toBeUndefined()
+    expect(app.state().bays.prs.PR1).not.toHaveProperty("detail")
 
     const human = outputIO({ color: true, columns: 160 })
     expect(await runYrd(app, yrd("pr", "checks", "PR1"), human.io), human.stderr()).toBe(1)
@@ -2997,13 +2999,13 @@ describe("runYrd", () => {
     expect(plain.stdout()).not.toContain("\u001b]")
 
     behavior.failingCheck = false
-    const rejected = app.state().bays.prs.PR1
-    if (rejected === undefined) throw new Error("expected rejected PR")
+    const failedPr = app.state().bays.prs.PR1
+    if (failedPr === undefined) throw new Error("expected failed-Run PR")
     await app.bays.intake({
-      branch: rejected.branch,
+      branch: failedPr.branch,
       headSha: MERGED_SHA,
-      base: rejected.base,
-      ...(prBaseSha(rejected) === undefined ? {} : { baseSha: prBaseSha(rejected) }),
+      base: failedPr.base,
+      ...(prBaseSha(failedPr) === undefined ? {} : { baseSha: prBaseSha(failedPr) }),
     })
     await app.bays.submit({ pr: "PR1" })
     await app.bays.requestChecks({ pr: "PR1" })
@@ -3397,14 +3399,14 @@ describe("runYrd", () => {
       status: "completed",
       conclusion: "failure",
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("rejected")
-    const rejected = app.state().bays.prs.PR1
-    if (rejected === undefined) throw new Error("expected rejected PR")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    const failedPr = app.state().bays.prs.PR1
+    if (failedPr === undefined) throw new Error("expected failed-Run PR")
     await app.bays.intake({
-      branch: rejected.branch,
+      branch: failedPr.branch,
       headSha: MERGED_SHA,
-      base: rejected.base,
-      ...(prBaseSha(rejected) === undefined ? {} : { baseSha: prBaseSha(rejected) }),
+      base: failedPr.base,
+      ...(prBaseSha(failedPr) === undefined ? {} : { baseSha: prBaseSha(failedPr) }),
     })
     await app.bays.submit({ pr: "PR1" })
     await app.dispatch(app.commands.queue.advance, { run: "R1" })
@@ -3501,8 +3503,8 @@ describe("runYrd", () => {
     expect(JSON.parse(finish.stdout())).toMatchObject({
       run: { id: "R1", status: "completed", conclusion: "failure" },
     })
-    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("rejected")
-    expect(app.state().bays.prs.PR1).toMatchObject({ detail: "private tests failed" })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(app.state().bays.prs.PR1).not.toHaveProperty("detail")
     const status = outputIO({ color: true })
     expect(await runYrd(app, yrd(), status.io)).toBe(0)
     expect(status.stdout()).toContain(pathToFileURL(artifact).href)
@@ -5045,8 +5047,7 @@ describe("runYrd", () => {
             name: "check",
             title: "check test step",
             revision: "step-v1",
-            integrates: false,
-            needsIntegration: false,
+            kind: "check",
             index: 0,
             status: "skipped",
             reason: "not-selected",
@@ -5349,7 +5350,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("projects runnable work and bounded rejection evidence without stale holds or unsafe retry teaching", async () => {
+  it("projects open work and bounded failed-Run evidence without stale holds or unsafe retry teaching", async () => {
     const temp = mkdtempSync("/tmp/yrd-output-polish-")
     const artifact = join(temp, "failure.log")
     const failure = [
@@ -5375,9 +5376,9 @@ describe("runYrd", () => {
     })
     const resolveQueueTarget = async () => ({ base: "main", sha: BASE_SHA })
     const now = () => Date.parse("2026-07-09T12:01:00.000Z")
-    const rejectedOnly = outputIO({ columns: 120, now, resolveQueueTarget })
-    expect(await runYrd(app, yrd(), rejectedOnly.io), rejectedOnly.stderr()).toBe(0)
-    expect.soft(rejectedOnly.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 0 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
+    const failedOnly = outputIO({ columns: 120, now, resolveQueueTarget })
+    expect(await runYrd(app, yrd(), failedOnly.io), failedOnly.stderr()).toBe(0)
+    expect.soft(failedOnly.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 1 ACTIVE 0 INTEGRATED 0 REJECTED 0/u)
 
     await app.bays.submit({
       branch: "issue/runnable",
@@ -5397,7 +5398,7 @@ describe("runYrd", () => {
       const rows = status.stdout().trimEnd().split("\n")
       expect.soft(rows.length).toBeLessThanOrEqual(14)
       expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(columns)
-      expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 1 ACTIVE 0 INTEGRATED 0 REJECTED 1/u)
+      expect.soft(status.stdout()).toMatch(/main@[a-f0-9]{12} OPEN 2 ACTIVE 0 INTEGRATED 0 REJECTED 0/u)
       expect.soft(status.stdout()).toContain("feat(cli): keep runnable work visible")
       expect.soft(status.stdout()).toContain("fix(cli): bound operator failures")
       expect.soft(status.stdout()).toContain("⧗")
@@ -5420,13 +5421,13 @@ describe("runYrd", () => {
     if (mounted === undefined) throw new Error("expected watch pane to mount")
     const snapshot = (mounted.props as QueueWatchPaneProps).initial
     expect.soft(snapshot.results[0]?.pause).toBeUndefined()
-    expect.soft(watchQueueRows(snapshot.results[0]!, now()).map((row) => row.pr)).toEqual(["PR2"])
+    expect.soft(watchQueueRows(snapshot.results[0]!, now()).map((row) => row.pr)).toEqual(["PR1", "PR2"])
     for (const width of [80, 120]) {
       const frame = await renderString(createElement(QueueWatchView, snapshot), { width, height: 24, plain: true })
       const rows = frame.trimEnd().split("\n")
       expect.soft(rows.length).toBeLessThanOrEqual(16)
       expect.soft(Math.max(...rows.map((row) => row.length))).toBeLessThanOrEqual(width)
-      expect.soft(frame).toContain("OPEN 1")
+      expect.soft(frame).toContain("OPEN 2")
       expect.soft(frame).toContain("feat(cli): keep runnable work visible")
       expect.soft(frame).toContain("err=apply-conflict — PR 'PR1' could not be applied")
       expect.soft(frame).toContain(`evidence: ${artifact}`)
@@ -6107,10 +6108,9 @@ describe("runYrd", () => {
     expect(human.stdout()).toContain(`REVISION CLOCK pr#1.3 HEAD ${pushedOnlyHead}`)
     expect(human.stdout()).toContain("PUSHED 2026-07-09T12:00:00.000Z")
     expect(human.stdout()).toContain("SUBMITTED 2026-07-09T12:00:00.000Z")
-    expect(human.stdout()).toContain("TERMINAL rejected AT 2026-07-09T12:00:00.000Z")
+    expect(human.stdout()).not.toContain("TERMINAL rejected")
     expect(human.stdout()).toContain("PUSHED 2026-07-09T12:10:00.000Z")
     expect(human.stdout()).toContain("SUBMITTED 2026-07-09T12:10:00.000Z")
-    expect(human.stdout()).toContain("TERMINAL rejected AT 2026-07-09T12:10:00.000Z")
     expect(human.stdout()).toContain("PUSHED 2026-07-09T12:20:00.000Z")
     expect(human.stdout()).toContain("No runs recorded for this revision.")
 
@@ -6133,16 +6133,15 @@ describe("runYrd", () => {
         n: 1,
         head: HEAD_SHA,
         submittedAt: "2026-07-09T12:00:00.000Z",
-        terminal: { kind: "rejected", at: "2026-07-09T12:00:00.000Z" },
       },
       {
         n: 2,
         head: nextHead,
         submittedAt: "2026-07-09T12:10:00.000Z",
-        terminal: { kind: "rejected", at: "2026-07-09T12:10:00.000Z" },
       },
       { n: 3, head: pushedOnlyHead, pushedAt: "2026-07-09T12:20:00.000Z" },
     ])
+    expect(parsed.pr.revs.every((revision) => revision.terminal === undefined)).toBe(true)
     expect(parsed.runs.map((run) => run.revisionClock)).toMatchObject([
       { pr: "PR1", revision: 1, headSha: HEAD_SHA, submittedAt: "2026-07-09T12:00:00.000Z" },
       { pr: "PR1", revision: 2, headSha: nextHead, submittedAt: "2026-07-09T12:10:00.000Z" },
@@ -6379,7 +6378,6 @@ describe("runYrd", () => {
 
     const failureShow = queueShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
     expect(failureShow).toMatchObject({
-      candidateId: "C:R10",
       durationMs: 2_000,
       prs: [{ id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA }],
     })
@@ -6513,7 +6511,6 @@ describe("runYrd", () => {
     expect(ttyShow).toContain("\u001b]8;;")
     expect(ttyShow).toContain(pathToFileURL(attemptTwo).href)
     expect(ttyShow).toContain("https://ci.invalid/check")
-    expect(plainShow).toContain("pr#1.2 → C:R2 → main#2")
     expect(plainShow).not.toContain("\u001b]8;;")
     const compactShow = await renderString(createElement(QueueShowView, { data: show, compact: true }), {
       width: 80,
@@ -7784,7 +7781,7 @@ describe("correlation projections", () => {
         prs: readonly Readonly<Record<string, unknown>>[]
       }>
 
-      expect.soft(prDeliveryState(pr)).toBe(terminal)
+      expect.soft(prDeliveryState(pr)).toBe(terminal === "rejected" ? "submitted" : terminal)
       expect.soft(persisted.prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect.soft(queueShowData(run).prs).toEqual([expect.objectContaining({ correlation: PROJECTION_CORRELATION })])
       expect
@@ -7963,8 +7960,7 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
                 name: "check",
                 title: "check",
                 revision: "check-v1",
-                integrates: false,
-                needsIntegration: false,
+                kind: "check",
                 classification: "carrier",
               },
             ],
@@ -8047,7 +8043,7 @@ function legacyRejectedJournal(runIds: readonly string[] = ["R1"], terminalAt = 
 }
 
 describe("typed issue landing bridge", () => {
-  it("projects every native PR state in JSON and human views from one exact journal cursor", async () => {
+  it("projects native PR states and fresh failed Runs from one exact journal cursor", async () => {
     for (const status of ["pushed", "submitted", "rejected", "integrated", "withdrawn", "canceled"] as const) {
       const issueRef = `@km/all/21091-${status}`
       const app = await createApp({ failingCheck: status === "rejected" })
@@ -8082,6 +8078,7 @@ describe("typed issue landing bridge", () => {
         const output = outputIO()
         expect(await runYrd(app, yrd("issue", "view", issueRef, "--json"), output.io), output.stderr()).toBe(0)
         const bridge = trackerBridge(output.stdout())
+        const projectedStatus = status === "rejected" ? "submitted" : status
         expect(bridge).toMatchObject({
           version: 1,
           asOf: { cursor: expect.any(Number), at: "2026-07-09T12:00:00.000Z" },
@@ -8091,7 +8088,7 @@ describe("typed issue landing bridge", () => {
               pr: "PR1",
               revision: 1,
               headSha: HEAD_SHA,
-              status,
+              status: projectedStatus,
               at: "2026-07-09T12:00:00.000Z",
               runs: status === "rejected" || status === "integrated" || status === "canceled" ? ["R1"] : [],
             },
@@ -8100,18 +8097,16 @@ describe("typed issue landing bridge", () => {
         const delivery = bridge.deliveries[0]
         if (status === "integrated") expect(delivery).toMatchObject({ landingSha: MERGED_SHA })
         else expect(delivery).not.toHaveProperty("landingSha")
-        if (status === "rejected") {
-          expect(delivery).toMatchObject({ bounce: { run: "R1", detail: "check failed" } })
-        }
+        if (status === "rejected") expect(delivery).not.toHaveProperty("bounce")
 
         const human = outputIO()
         expect(await runYrd(app, yrd("issue", "view", issueRef), human.io), human.stderr()).toBe(0)
         expect(human.stdout()).toContain(issueRef)
         expect(human.stdout()).toContain("DELIVERIES")
-        expect(human.stdout()).toContain(`PR1 rev1 ${status}`)
+        expect(human.stdout()).toContain(`PR1 rev1 ${projectedStatus}`)
         expect(human.stdout()).toContain(`HEAD ${HEAD_SHA}`)
         if (status === "integrated") expect(human.stdout()).toContain(MERGED_SHA)
-        if (status === "rejected") expect(human.stdout()).toContain("BOUNCE R1 check failed")
+        if (status === "rejected") expect(human.stdout()).not.toContain("BOUNCE")
       } finally {
         await app.close()
       }
@@ -8133,7 +8128,10 @@ describe("typed issue landing bridge", () => {
       ),
       submit.stderr(),
     ).toBe(1)
-    expect(JSON.parse(submit.stdout())).toMatchObject({
+    const submitted = JSON.parse(submit.stdout()) as Readonly<{
+      prs: readonly Readonly<{ revs: readonly Readonly<Record<string, unknown>>[] }>[]
+    }>
+    expect(submitted).toMatchObject({
       command: "pr.submit",
       prs: [
         {
@@ -8141,12 +8139,13 @@ describe("typed issue landing bridge", () => {
           issue: issueRef,
           state: "open",
           merged: false,
-          revs: [{ terminal: { kind: "rejected" } }],
-          taskStatus: "blocked",
+          revs: [{ n: 1 }],
+          taskStatus: "wip",
         },
       ],
       checks: [{ error: { code: "shipping-config-invalid", message: "shipping config rejects candidate" } }],
     })
+    expect(submitted.prs[0]?.revs[0]).not.toHaveProperty("terminal")
 
     const checks = outputIO()
     expect(await runYrd(app, yrd("pr", "checks", "PR1", "--json"), checks.io), checks.stderr()).toBe(1)
@@ -8160,10 +8159,11 @@ describe("typed issue landing bridge", () => {
         pr: "PR1",
         revision: 1,
         headSha: HEAD_SHA,
-        status: "rejected",
-        bounce: { run: "R1", detail: "shipping config rejects candidate" },
+        status: "submitted",
+        runs: ["R1"],
       }),
     ])
+    expect(trackerBridge(issue.stdout()).deliveries[0]).not.toHaveProperty("bounce")
   })
 
   it("refuses to label a historical rejection without a typed Queue bounce as trackerBridge v1", async () => {

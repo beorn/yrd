@@ -53,6 +53,7 @@ const EnvironmentNameSchema = TextSchema.regex(/^[A-Za-z_][A-Za-z0-9_]*$/u).refi
 )
 const StepObjectSchema = z
   .object({
+    kind: z.enum(["check", "action", "merge"]).optional(),
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
     classification: z.enum(["base", "carrier"]).optional(),
@@ -245,6 +246,13 @@ export async function loadYrdConfig(options: {
   ]
   const steps = parsed.steps ?? defaultSteps
   const flows = defineConfig(legacyFlow(steps, definitions))
+  const kinds = new Map(flows.flows[0]?.steps.map((step) => [step.name, step.kind] as const) ?? [])
+  const resolvedDefinitions = Object.fromEntries(
+    Object.entries(definitions).map(([name, definition]) => [
+      name,
+      { ...definition, ...(kinds.get(name) === undefined ? {} : { kind: kinds.get(name) }) },
+    ]),
+  )
   return {
     ...(source === undefined ? {} : { path }),
     config: {
@@ -252,7 +260,7 @@ export async function loadYrdConfig(options: {
       batch: parsed.batch ?? 1,
       steps,
       requires: parsed.requires ?? [],
-      definitions,
+      definitions: resolvedDefinitions,
       contest: {
         concurrency: parsed.contest.concurrency ?? 2,
         timeoutMs: parsed.contest.timeoutMs ?? 30 * 60_000,
@@ -304,14 +312,17 @@ function legacyFlow(steps: readonly string[], definitions: Readonly<Record<strin
         ...(definition.env === undefined ? {} : { env: definition.env }),
         ...(definition.classification === undefined ? {} : { classification: definition.classification }),
       }
-      if (name === "merge") return withMergeStep(options)
-      return mergeIndex >= 0 && index > mergeIndex ? withActionStep(name, options) : withCheckStep(name, options)
+      const kind =
+        definition.kind ?? (name === "merge" ? "merge" : mergeIndex >= 0 && index > mergeIndex ? "action" : "check")
+      if (kind === "merge") return withMergeStep(options)
+      return kind === "action" ? withActionStep(name, options) : withCheckStep(name, options)
     }),
   })
 }
 
 function resolvedStep(step: StepDef): YrdStepConfig {
   return {
+    kind: step.kind,
     ...(step.run === undefined ? {} : { run: step.run }),
     runner: step.runner,
     ...(step.classification === undefined ? {} : { classification: step.classification }),

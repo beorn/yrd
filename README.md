@@ -660,7 +660,7 @@ const review = withStep("coderabbit", reviewRunner, {
 const merge = withMerge(gitMergeRunner, { revision: "git-merge-v1" })
 const deploy = withStep("deploy", deployRunner, {
   revision: "deploy-v1",
-  needsIntegration: true,
+  kind: "action",
 })
 const queue = withQueue({ steps: [check, review, merge, deploy] as const })
 const contests = withContests({ runners, evaluators, git })

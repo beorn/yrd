@@ -19,7 +19,15 @@ import {
 } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import type { IntegrationProof, PRCheckRecord, PREligibility, Run, QueueStep, QueueSummary } from "@yrd/queue"
+import type {
+  Candidate,
+  IntegrationProof,
+  PRCheckRecord,
+  PREligibility,
+  Run,
+  QueueStep,
+  QueueSummary,
+} from "@yrd/queue"
 import {
   Box,
   formatNounId,
@@ -93,12 +101,19 @@ function RunId({ base, run, ...props }: { base: string; run: string } & QueueNou
   return <NounId noun={base} value={runIdValue(run)} {...props} />
 }
 
-export type QueueStatusResult = QueueSummary & { headSha?: string; prs: PR[] }
+export type QueueStatusResult = QueueSummary &
+  Readonly<{
+    headSha?: string
+    prs: PR[]
+    candidates?: readonly Candidate[]
+    eligibilities?: readonly PREligibility[]
+  }>
 
 export type QueueTimelineRow = Readonly<{
   key: string
   pr: string
   revision: number
+  candidateId?: string
   run?: string
   position?: number
   base: string
@@ -135,6 +150,8 @@ export type QueueTimelineProjectedRow = Readonly<{
   glyph: string
   timestamp: string | null
   timestampMs: number | null
+  /** Immutable attempted integration. Present on every Run row, absent only for a pending PR revision. */
+  candidateId?: string
   run?: string
   pr: string
   revision: number
@@ -484,6 +501,7 @@ export type HumanPRProjection = Row &
     nativeStatus: PRDeliveryState
     taskStatus: TaskStatus
     glyph: StatusGlyph
+    candidateId?: string
     runId?: string
     submittedAt?: string
     sourceReadyAt?: string
@@ -619,7 +637,7 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
     .at(-1)
 }
 
-function latestRun(pr: PR, summary: QueueSummary): Run | undefined {
+export function latestRunForCurrentRevision(pr: PR, summary: QueueSummary): Run | undefined {
   const revision = currentPRRev(pr)
   const current = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
   const currentSubmission = prDeliveryState(pr) === "submitted" ? (revision.submittedAt ?? pr.submittedAt) : undefined
@@ -633,6 +651,21 @@ function latestRun(pr: PR, summary: QueueSummary): Run | undefined {
     )
     .toSorted((left, right) => left.startedAt.localeCompare(right.startedAt))
     .at(-1)
+}
+
+function latestCandidateForCurrentRevision(result: QueueStatusResult, pr: PR): Candidate | undefined {
+  const revision = currentPRRev(pr)
+  return result.candidates
+    ?.filter((candidate) =>
+      candidate.revs.some((member) => member.pr === pr.id && member.n === revision.n && member.head === revision.head),
+    )
+    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .at(-1)
+}
+
+function eligibilityForCurrentRevision(result: QueueStatusResult, pr: PR): PREligibility | undefined {
+  const revision = prRevisionNumber(pr)
+  return result.eligibilities?.find((eligibility) => eligibility.pr === pr.id && eligibility.revision === revision)
 }
 
 /** The submitter handle recorded on one exact immutable PR revision, or
@@ -791,6 +824,7 @@ export function queueTimelineRows(
       key: row.id,
       pr: row.pr,
       revision: row.revision,
+      ...(row.candidateId === undefined ? {} : { candidateId: row.candidateId }),
       ...(row.run === undefined ? {} : { run: row.run }),
       ...(row.position === undefined ? {} : { position: row.position }),
       base: row.base,
@@ -1695,6 +1729,7 @@ function timelineRunMemberRows(
       glyph: statusGlyph(status),
       timestamp,
       timestampMs,
+      candidateId: run.candidateId,
       run: run.id,
       pr: member.id,
       revision: member.revision,
@@ -1737,7 +1772,13 @@ function timelinePendingRows(
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
     const revisionLineage = [timelineRevisionLineage(pr)]
     const sourceReadyAt = revisionLineage[0]?.sourceReadyAt ?? timestamp ?? undefined
-    const detail = withTimelineLineage(position === undefined ? "queued" : `position ${position}`, revisionLineage)
+    const candidate = latestCandidateForCurrentRevision(result, pr)
+    const eligibility = eligibilityForCurrentRevision(result, pr)
+    const blockingReason = eligibility?.runnable === false ? eligibility.reason : undefined
+    const detail = withTimelineLineage(
+      blockingReason?.message ?? (position === undefined ? "queued" : `position ${position}`),
+      revisionLineage,
+    )
     const submitter = revisionSubmitter(pr)
     const issue = presentFact(pr.issue)
     return [
@@ -1749,6 +1790,7 @@ function timelinePendingRows(
         glyph: statusGlyph("pending"),
         timestamp,
         timestampMs,
+        ...(candidate === undefined ? {} : { candidateId: candidate.id }),
         pr: pr.id,
         revision: revision.n,
         headSha: revision.head,
@@ -1760,6 +1802,9 @@ function timelinePendingRows(
         ...(position === undefined ? {} : { position }),
         ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
         revisionLineage,
+        ...(blockingReason === undefined
+          ? {}
+          : { failure: { code: blockingReason.code, message: blockingReason.message } }),
         ageMs: timelineAge(sourceReadyAt, nowIso, `PR '${pr.id}' source-ready age`),
         totalMs: null,
         activeMs: null,
@@ -1795,7 +1840,7 @@ function timelineSort(left: QueueTimelineProjectedRow, right: QueueTimelineProje
 
 function timelineMatches(row: QueueTimelineProjectedRow, terms: readonly string[]): boolean {
   if (terms.length === 0) return true
-  const searchable = [row.run ?? "", row.pr, row.branch, row.subject, row.failure?.code ?? ""]
+  const searchable = [row.candidateId ?? "", row.run ?? "", row.pr, row.branch, row.subject, row.failure?.code ?? ""]
     .join("\n")
     .toLocaleLowerCase()
   return terms.some((term) => searchable.includes(term))
@@ -2013,8 +2058,11 @@ function projectPR(
   pr: PR,
   now: number,
   runOverride?: Run,
+  candidateOverride?: Candidate,
+  eligibility?: PREligibility,
 ): HumanPRProjection {
-  const run = runOverride ?? latestRun(pr, result)
+  const run = runOverride ?? latestRunForCurrentRevision(pr, result)
+  const candidate = candidateOverride
   const step = relevantStep(run)
   const job = step?.job
   const path = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
@@ -2038,6 +2086,7 @@ function projectPR(
       : []),
     run?.startedAt,
     run?.finishedAt,
+    candidate?.createdAt,
     ...(run?.steps ?? []).flatMap((item) => {
       const itemJob = item.job
       return itemJob === undefined
@@ -2057,8 +2106,14 @@ function projectPR(
   const runDuration = runDurationMs === undefined ? "-" : formatDuration(runDurationMs)
   const artifacts = stepArtifacts(step)
   const artifact = artifactHref(artifacts[0])
-  const stateLabel = queueState(pr, run)
-  const taskStatus = runOverride === undefined || run === undefined ? prTaskStatusOf(pr) : runTaskStatusOf(run)
+  const candidateConflict =
+    run === undefined && eligibility?.runnable === false && eligibility.reason?.code === "candidate-conflicting"
+  const stateLabel = candidateConflict ? eligibility.reason.code : queueState(pr, run)
+  const taskStatus = candidateConflict
+    ? "blocked"
+    : runOverride === undefined || run === undefined
+      ? prTaskStatusOf(pr)
+      : runTaskStatusOf(run)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
   const terminalAt =
@@ -2076,6 +2131,7 @@ function projectPR(
   const parsedTerminalAt = terminalAt === undefined ? Number.NaN : Date.parse(terminalAt)
   const ageAt = Number.isFinite(parsedTerminalAt) ? parsedTerminalAt : now
   const failure = fact === undefined || run === undefined ? undefined : projectFailure(fact, evidence)
+  const candidateId = run?.candidateId ?? candidate?.id
   return {
     pr: pr.id,
     revision: projectedRevision,
@@ -2085,6 +2141,7 @@ function projectPR(
     nativeStatus: prDeliveryState(pr),
     state: stateLabel,
     ...taskStatusFields(taskStatus),
+    ...(candidateId === undefined ? {} : { candidateId }),
     ...(run === undefined ? {} : { runId: run.id }),
     ...(submittedAt === undefined ? {} : { submittedAt }),
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
@@ -2096,6 +2153,7 @@ function projectPR(
     run: runDuration,
     step: step?.name ?? "-",
     result:
+      (candidateConflict ? eligibility.reason.message : undefined) ??
       failure?.summary ??
       (job !== undefined && "detail" in job && typeof job.detail === "string" ? boundedQueue(job.detail) : undefined) ??
       (step === undefined ? "-" : jobStatus(step)),
@@ -2107,7 +2165,17 @@ function projectPR(
 }
 
 function projectedPRRows(state: BaysState | undefined, result: QueueStatusResult, now: number): HumanPRProjection[] {
-  return result.prs.map((pr) => projectPR(state, result, pr, now))
+  return result.prs.map((pr) =>
+    projectPR(
+      state,
+      result,
+      pr,
+      now,
+      undefined,
+      latestCandidateForCurrentRevision(result, pr),
+      eligibilityForCurrentRevision(result, pr),
+    ),
+  )
 }
 
 function byTouchedNewest(left: HumanPRProjection, right: HumanPRProjection): number {
@@ -2656,6 +2724,18 @@ function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?
             <QueuePrId pr={row.pr} revision={row.revision} />
           </Link>
         )}{" "}
+        {row.candidateId === undefined ? null : (
+          <>
+            {"→ "}
+            <Text bold>{`CANDIDATE ${row.candidateId}`}</Text>{" "}
+          </>
+        )}
+        {row.runId === undefined ? null : (
+          <>
+            {"→ RUN "}
+            <RunId base={row.target} run={row.runId} />{" "}
+          </>
+        )}
         {row.subject} <StatusValue value={row.state} href={row.log} /> age={row.age}
       </Text>
     </Box>
@@ -2991,8 +3071,8 @@ function timelineBranchLabel(branch: string): string {
 }
 
 /**
- * The DETAIL pane's flush-top run identity. Round-6 Revision A makes a run the
- * unit of detail: the left side is `CANDIDATE C# RUN main#N`, while immutable
+ * The DETAIL pane's flush-top target identity. Round-6 Revision A makes a run
+ * the unit of detail: the left side is `CANDIDATE C# RUN main#N`, while immutable
  * member PRs and their branches live in body blocks below. Pending rows use
  * their PR revision as the same template's no-run identity. STATUS + OUTCOME
  * stays right-aligned; timing belongs exclusively in the body.
@@ -3005,15 +3085,26 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
       </Text>
     )
   }
+  if (row.run !== undefined && row.candidateId === undefined) {
+    throw new Error(`yrd: queue timeline Run '${row.run}' is missing its Candidate identity`)
+  }
+  if (row.run !== undefined && data !== undefined && data.candidateId !== row.candidateId) {
+    throw new Error(
+      `yrd: queue timeline Run '${row.run}' Candidate '${row.candidateId}' disagrees with detail Candidate '${data.candidateId}'`,
+    )
+  }
   const outcome = detailStatusOutcome(row, data)
   return (
     <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0} flexShrink={0}>
       <Text color="$fg-warning" wrap="truncate" minWidth={0}>
         {row.run === undefined ? (
-          <QueuePrId pr={row.pr} revision={row.revision} />
+          <>
+            <QueuePrId pr={row.pr} revision={row.revision} />
+            {row.candidateId === undefined ? null : <Text bold>{` → CANDIDATE ${row.candidateId}`}</Text>}
+          </>
         ) : (
           <>
-            <Text bold>{data === undefined ? "RUN " : `CANDIDATE ${data.candidateId} RUN `}</Text>
+            <Text bold>{`CANDIDATE ${row.candidateId} RUN `}</Text>
             <RunId base={row.base} run={row.run} />
           </>
         )}
@@ -4709,9 +4800,10 @@ function QueueShowMembersValue({ data, highlightPr }: { data: QueueShowData; hig
   )
 }
 
-function QueueShowIdentityChainValue({ data }: { data: QueueShowData }) {
+function QueueShowIdentityChain({ data }: { data: QueueShowData }) {
   return (
-    <>
+    <Text color="$fg-muted" wrap="truncate">
+      CHAIN{" "}
       {data.prs.map((pr, index) => (
         <Text key={pr.id} color="inherit">
           {index === 0 ? "" : ","}
@@ -4722,14 +4814,6 @@ function QueueShowIdentityChainValue({ data }: { data: QueueShowData }) {
       {data.candidateId}
       {" → "}
       <RunId base={data.base} run={data.run} color="inherit" />
-    </>
-  )
-}
-
-function QueueShowIdentityChain({ data }: { data: QueueShowData }) {
-  return (
-    <Text color="$fg-muted" wrap="truncate">
-      CHAIN <QueueShowIdentityChainValue data={data} />
     </Text>
   )
 }

@@ -75,7 +75,7 @@ function glyphColumn(app: ReturnType<ReturnType<typeof createRenderer>>, row: nu
   return -1
 }
 
-describe("detail title row — run identity emphasis + right-aligned outcome", () => {
+describe("detail title row — target identity emphasis + right-aligned outcome", () => {
   it("emphasizes the identity, right-aligns STATUS/OUTCOME, and omits corner time", () => {
     const pr = fixturePr("PR42", "submitted", "2026-07-13T10:30:00.000Z", "Land it")
     const run = fixtureRun("R42", [pr], "passed", "2026-07-13T10:40:00.000Z", {
@@ -88,6 +88,9 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
 
     const app = createRenderer({ cols: 120, rows: 6 })(
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
+    )
+    const projectedOnly = createRenderer({ cols: 120, rows: 6 })(
+      createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row })),
     )
     try {
       // Candidate + Run form the execution identity; PR and branch move into
@@ -115,8 +118,11 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
       expect(outcomeCell.fg).not.toEqual(identityCell.fg)
 
       expect(app.text).not.toContain("15m00s")
+      expect(projectedOnly.text).toContain(`CANDIDATE ${data.candidateId} RUN main#42`)
+      expect(projectedOnly.text).not.toContain("CANDIDATE undefined")
     } finally {
       app.unmount()
+      projectedOnly.unmount()
     }
   })
 

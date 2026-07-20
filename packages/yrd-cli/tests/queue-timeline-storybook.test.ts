@@ -435,8 +435,8 @@ describe("queue timeline storybook", () => {
         expect(term.screen.getText(), name).toContain("QUEUE main")
 
         if (divider === "vertical") {
-          // Right-docked: the DETAIL pane's run identity title shares the top
-          // row with the QUEUE tab, and the
+          // Right-docked: the DETAIL pane's target identity title shares the
+          // top row with the QUEUE tab, and the
           // split divider is the lone vertical glyph on that row.
           await waitFor(() => findGlyphColumn(term, "│", 0) >= 0)
           const topRow = term.screen.getText().split("\n")[0] ?? ""

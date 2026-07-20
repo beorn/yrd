@@ -485,7 +485,7 @@ function QueueSubmitDiff({
   data: QueueShowData
   diff: QueuePrDiff | undefined
   expanded: boolean
-  onToggle(): void
+  onToggle: () => void
 }) {
   const focusId = `queue-submit-diff-${data.run}-${diff?.pr ?? "missing"}-${diff?.revision ?? "missing"}`
   const { activeId } = useFocusManager()
@@ -1108,8 +1108,8 @@ export function QueueWatchFrame({
   // QUEUE and DETAIL are PANES, not boxes (user directive 2026-07-16, items
   // L/M) — no surrounding rounded border; the SplitPane divider separates them.
   // QUEUE is headed by its tab-style label (rendered inside `timeline`); DETAIL
-  // is headed by an emphasized run identity with STATUS/OUTCOME right-aligned,
-  // then exactly one blank row and the run-scoped body.
+  // is headed by an emphasized Candidate + Run identity with STATUS/OUTCOME
+  // right-aligned, then exactly one blank row and the run-scoped body.
   // One cell of horizontal padding keeps content off the
   // pane edge; the title sits flush at the top.
   const framedTimeline = (

@@ -432,6 +432,8 @@ export type WorktreeContextsOptions = Omit<CandidatePoolOptions, "capacity"> &
   Readonly<{
     size: number
     submodules: "isolated"
+    /** Reuse the host's Candidate pool when one already owns the worktrees. */
+    pool?: CandidatePool
   }>
 
 export type WorktreeContexts = RunnerContexts &
@@ -449,14 +451,23 @@ export function worktreeContexts(options: WorktreeContextsOptions): WorktreeCont
   if (!Number.isInteger(options.size) || options.size < 1) {
     throw new RangeError("yrd: worktree context size must be a positive integer")
   }
-  const pool = createCandidatePool({
-    repo: options.repo,
-    parent: options.parent,
-    capacity: options.size,
-    git: options.git,
-    ...(options.log === undefined ? {} : { log: options.log }),
-  })
+  const ownsPool = options.pool === undefined
+  const pool =
+    options.pool ??
+    createCandidatePool({
+      repo: options.repo,
+      parent: options.parent,
+      capacity: options.size,
+      git: options.git,
+      ...(options.log === undefined ? {} : { log: options.log }),
+    })
   let sequence = 0
+  let closed = false
+  const close = async (): Promise<void> => {
+    if (closed) return
+    closed = true
+    if (ownsPool) await pool.close()
+  }
 
   const withContext = async <Output>(
     request: RunnerContextRequest,
@@ -482,7 +493,7 @@ export function worktreeContexts(options: WorktreeContextsOptions): WorktreeCont
     maxInFlight: options.size,
     withContext,
     stats: pool.stats,
-    close: pool.close,
-    [Symbol.asyncDispose]: pool[Symbol.asyncDispose],
+    close,
+    [Symbol.asyncDispose]: close,
   })
 }

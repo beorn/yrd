@@ -38,6 +38,8 @@ export type Runner = Readonly<{
   recover(options: Readonly<{ now: string; reason?: string; runner?: string }>): Promise<readonly string[]>
 }>
 
+export type HasRunner = Readonly<{ runner: Runner }>
+
 export type LocalRunnerOptions = Readonly<{
   id?: string
   jobs: Jobs

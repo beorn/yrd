@@ -73,7 +73,7 @@ const check = withStep("check", checkRunner, { revision: "check-v1" })
 const merge = withMerge(mergeRunner, { revision: "merge-v1" })
 const deploy = withStep("deploy", deployRunner, {
   revision: "deploy-v1",
-  needsIntegration: true,
+  kind: "action",
 })
 const queue = withQueue({ steps: [check, merge, deploy] as const })
 const contests = withContests({ runners, evaluators, git })

@@ -2,7 +2,7 @@
 // @level l1
 // @consumer @yrd/cli
 
-import { currentPRRev, prBaseSha, prHead, prRevisionNumber, type PR } from "@yrd/bay"
+import { prBaseSha, prHead, prRevisionNumber, type PR } from "@yrd/bay"
 import type { Run } from "@yrd/queue"
 import { describe, expect, test } from "vitest"
 import { prDetailData } from "../src/queue-status-view.tsx"
@@ -48,6 +48,7 @@ function fixtureRun(
       baseSha: prBaseSha(pr),
     })),
     base: "main",
+    jobs: [],
     steps: [],
     startedAt,
     cursor: 0,

@@ -3,7 +3,7 @@ import { join } from "node:path"
 import * as z from "zod"
 import { raiseFailure } from "@yrd/core"
 import { createExclusive } from "@yrd/persistence"
-import { InstalledStepSchema, type InstalledStep, type QueueAuditFinding } from "@yrd/queue"
+import { ReplayInstalledStepSchema, type InstalledStep, type QueueAuditFinding } from "@yrd/queue"
 
 /** The installed baseline: the queue installation baseline written by `yrd queue
  * init` (provision). It pins the check-definition revisions the operator
@@ -14,7 +14,7 @@ const InstalledBaselineSchema = z
     base: z.string().trim().min(1),
     baseSha: z.string().regex(/^[0-9a-f]{40}$/u),
     installedAt: z.iso.datetime({ offset: true }),
-    steps: z.array(InstalledStepSchema).min(1),
+    steps: z.array(ReplayInstalledStepSchema).min(1),
   })
   .strict()
 
@@ -148,7 +148,10 @@ const shortRevision = (revision: string): string =>
  * operator can tell WHICH leg diverged (merge-queue R41b). */
 type StepPlanVocabulary = Readonly<{ live: string; missingLive: string }>
 const CONFIG_VOCABULARY: StepPlanVocabulary = { live: "current", missingLive: "is no longer configured" }
-const RUNTIME_VOCABULARY: StepPlanVocabulary = { live: "runtime", missingLive: "is not installed in this running process" }
+const RUNTIME_VOCABULARY: StepPlanVocabulary = {
+  live: "runtime",
+  missingLive: "is not installed in this running process",
+}
 
 function stepPlanDeltas(
   baseline: InstalledBaseline,
@@ -169,11 +172,7 @@ function stepPlanDeltas(
       deltas.push(
         `step '${installed.name}' revision '${shortRevision(installed.revision)}' installed, ${vocabulary.live} '${shortRevision(liveStep.revision)}'`,
       )
-    } else if (
-      liveStep.integrates !== installed.integrates ||
-      liveStep.needsIntegration !== installed.needsIntegration ||
-      liveStep.classification !== installed.classification
-    ) {
+    } else if (liveStep.kind !== installed.kind || liveStep.classification !== installed.classification) {
       deltas.push(`step '${installed.name}' integration contract changed`)
     }
   }

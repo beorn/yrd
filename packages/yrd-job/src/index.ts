@@ -45,4 +45,11 @@ export type {
   RunJobOptions,
 } from "./jobs.ts"
 export { localRunner } from "./runner.ts"
-export type { LocalRunnerOptions, Runner, RunnerContexts, RunnerContextRequest, RunnerSubmission } from "./runner.ts"
+export type {
+  HasRunner,
+  LocalRunnerOptions,
+  Runner,
+  RunnerContexts,
+  RunnerContextRequest,
+  RunnerSubmission,
+} from "./runner.ts"
