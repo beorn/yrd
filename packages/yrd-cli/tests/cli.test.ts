@@ -6378,6 +6378,7 @@ describe("runYrd", () => {
 
     const failureShow = queueShowData(runChronologyFailure, [runChronologyFailure, runRetryAttemptTwo])
     expect(failureShow).toMatchObject({
+      candidateId: "C:R10",
       durationMs: 2_000,
       prs: [{ id: "PR1", revision: 2, headSha: "c".repeat(40), baseSha: BASE_SHA }],
     })
@@ -6511,7 +6512,14 @@ describe("runYrd", () => {
     expect(ttyShow).toContain("\u001b]8;;")
     expect(ttyShow).toContain(pathToFileURL(attemptTwo).href)
     expect(ttyShow).toContain("https://ci.invalid/check")
+    expect(plainShow).toContain("pr#1.2 → C:R2 → main#2")
     expect(plainShow).not.toContain("\u001b]8;;")
+    const compactShow = await renderString(createElement(QueueShowView, { data: show, compact: true }), {
+      width: 80,
+      height: 40,
+      plain: true,
+    })
+    expect(compactShow).toContain("CANDIDATE C:R2 RUN main#2")
     const queueShowJson = JSON.parse(JSON.stringify(show)) as typeof show
     expect(queueShowJson.steps[0]).toMatchObject({
       uuid: JOB_CHECK_PASS_ID,

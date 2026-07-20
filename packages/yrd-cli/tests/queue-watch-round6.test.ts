@@ -211,8 +211,8 @@ describe("queue watch user round 6", () => {
       await app.waitForLayoutStable()
 
       const rows = app.text.split("\n")
-      const titleY = rows.findIndex((row) => row.includes("RUN main#60"))
-      const detailX = rows[titleY]?.indexOf("RUN main#60") ?? -1
+      const titleY = rows.findIndex((row) => row.includes("CANDIDATE C60 RUN main#60"))
+      const detailX = rows[titleY]?.indexOf("CANDIDATE C60 RUN main#60") ?? -1
       expect(titleY).toBeGreaterThanOrEqual(0)
       expect(rows[titleY + 1]?.slice(detailX).trim(), "exactly one blank row follows the identity title").toBe("")
       expect(rows[titleY + 1]?.slice(detailX)).not.toMatch(/\d+(?:h|m|s)/u)

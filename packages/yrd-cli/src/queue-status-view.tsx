@@ -539,6 +539,7 @@ type QueueShowRow = Readonly<{
 
 export type QueueShowData = Readonly<{
   run: string
+  candidateId: string
   base: string
   status: Run["status"]
   conclusion?: Run["conclusion"]
@@ -2991,10 +2992,10 @@ function timelineBranchLabel(branch: string): string {
 
 /**
  * The DETAIL pane's flush-top run identity. Round-6 Revision A makes a run the
- * unit of detail: the left side is `RUN main#N`, while immutable member PRs and
- * their branches live in body blocks below. Pending rows use their PR revision
- * as the same template's no-run identity. STATUS + OUTCOME stays right-aligned;
- * timing belongs exclusively in the body.
+ * unit of detail: the left side is `CANDIDATE C# RUN main#N`, while immutable
+ * member PRs and their branches live in body blocks below. Pending rows use
+ * their PR revision as the same template's no-run identity. STATUS + OUTCOME
+ * stays right-aligned; timing belongs exclusively in the body.
  */
 export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRow; data?: QueueShowData }) {
   if (row === undefined) {
@@ -3012,7 +3013,7 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
           <QueuePrId pr={row.pr} revision={row.revision} />
         ) : (
           <>
-            <Text bold>RUN </Text>
+            <Text bold>{data === undefined ? "RUN " : `CANDIDATE ${data.candidateId} RUN `}</Text>
             <RunId base={row.base} run={row.run} />
           </>
         )}
@@ -4569,6 +4570,7 @@ export function queueShowData(
   const runFailure = failureFact(run, relevantStep(run))
   return {
     run: run.id,
+    candidateId: run.candidateId,
     base: run.base,
     status: run.status,
     ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
@@ -4704,6 +4706,31 @@ function QueueShowMembersValue({ data, highlightPr }: { data: QueueShowData; hig
         </Text>
       ))}
     </>
+  )
+}
+
+function QueueShowIdentityChainValue({ data }: { data: QueueShowData }) {
+  return (
+    <>
+      {data.prs.map((pr, index) => (
+        <Text key={pr.id} color="inherit">
+          {index === 0 ? "" : ","}
+          <QueuePrId pr={pr.id} revision={pr.revision} color="inherit" />
+        </Text>
+      ))}
+      {" → "}
+      {data.candidateId}
+      {" → "}
+      <RunId base={data.base} run={data.run} color="inherit" />
+    </>
+  )
+}
+
+function QueueShowIdentityChain({ data }: { data: QueueShowData }) {
+  return (
+    <Text color="$fg-muted" wrap="truncate">
+      CHAIN <QueueShowIdentityChainValue data={data} />
+    </Text>
   )
 }
 
@@ -5173,11 +5200,11 @@ function QueueStepInternals({ row, issue }: { row: QueueShowRow; issue?: string 
  * (user directive 2026-07-16, item H): `"run"` renders the run-level facts (+
  * COMMIT/timing/NEXT) once above the tabs, `"steps"` renders per-step facts under the
  * selected tab, `"all"` (default) renders everything in order for non-tab
- * contexts. When `titleAbove` is set the caller renders the run identity +
- * STATUS/OUTCOME in a title row above, so the RUN header row is dropped here
- * (items a/c, 2026-07-16). Subprocess-derived strings (ERROR, MESSAGE, LOST,
- * EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data keeps its
- * colors without crashing the event loop.
+ * contexts. When `titleAbove` is set the caller renders the Candidate + Run
+ * identity and STATUS/OUTCOME in a title row above, so the RUN header row is
+ * dropped here (items a/c, 2026-07-16). Subprocess-derived strings (ERROR,
+ * MESSAGE, LOST, EVIDENCE) carry `bgConflict="ignore"` so raw ANSI in the data
+ * keeps its colors without crashing the event loop.
  */
 function CompactQueueShowView({
   data,
@@ -5199,8 +5226,8 @@ function CompactQueueShowView({
    * is never read as the PR's current state (user-reported 2026-07-16).
    */
   historyRevision?: number
-  /** When true, the run identity + STATUS/OUTCOME live in a title row above,
-   *  so the RUN header row is omitted here (framedDetail title, item a). */
+  /** When true, the Candidate + Run identity and STATUS/OUTCOME live in a title
+   *  row above, so the RUN header row is omitted here (framedDetail title). */
   titleAbove?: boolean
   /** False when the watch's run-scoped PR blocks already own this fact. */
   showMembers?: boolean
@@ -5225,7 +5252,7 @@ function CompactQueueShowView({
         <>
           {titleAbove ? null : (
             <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
-              RUN <RunId base={data.base} run={data.run} />
+              CANDIDATE {data.candidateId} RUN <RunId base={data.base} run={data.run} />
               {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status}{" "}
               OUTCOME {data.outcome}
             </Text>
@@ -5351,8 +5378,8 @@ export function QueueShowView({
   section?: "run" | "steps" | "all"
   /** Compact-only: mark this run as history for a now-superseded revision. */
   historyRevision?: number
-  /** Compact-only: the run identity + STATUS/OUTCOME live in a title row above,
-   *  so drop the RUN header row here (framedDetail title, item a). */
+  /** Compact-only: the Candidate + Run identity and STATUS/OUTCOME live in a
+   *  title row above, so drop the RUN header row here (framedDetail title). */
   titleAbove?: boolean
   /** Compact-only: hide the PRs row when surrounding run-scoped PR blocks own it. */
   showMembers?: boolean
@@ -5380,6 +5407,7 @@ export function QueueShowView({
   }
   return (
     <Box flexDirection="column">
+      <QueueShowIdentityChain data={data} />
       <QueueShowMembersLine data={data} {...(highlightPr === undefined ? {} : { highlightPr })} />
       <Table
         data={[data]}

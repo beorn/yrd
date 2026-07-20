@@ -1,7 +1,7 @@
 /**
  * 21106 W3 — DETAIL pane rework (user screenshot review, 2026-07-16).
  *
- * Pins the reshaped detail surface: the run-scoped identity title with
+ * Pins the reshaped detail surface: the Candidate + Run identity title with
  * right-aligned colorized STATUS/OUTCOME; the linked ISSUE primitive; the
  * natural clock sentence plus COMMIT; separate JOB/RUNNER facts; and the
  * failure-only NEXT cue.
@@ -90,9 +90,9 @@ describe("detail title row — run identity emphasis + right-aligned outcome", (
       createElement(Box, { width: 120 }, createElement(QueueDetailTitle, { row, data })),
     )
     try {
-      // Revision A makes the title run-scoped; PR and branch move into member
-      // blocks while the deduped run outcome stays on this line.
-      expect(app.text).toContain("RUN main#42")
+      // Candidate + Run form the execution identity; PR and branch move into
+      // member blocks while the deduped run outcome stays on this line.
+      expect(app.text).toContain(`CANDIDATE ${data.candidateId} RUN main#42`)
       expect(app.text).not.toContain("PR42.1")
       expect(app.text).not.toContain("topic/pr42")
       expect(app.text).toContain(`${data.glyph} completed, integrated`)
