@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Box,
   Divider,
@@ -128,9 +128,40 @@ export type QueueWatchSnapshot = Readonly<{
   commands?: Readonly<Record<string, string>>
 }>
 
+/** The one immutable row identity whose expensive detail data watch may load. */
+export type QueueWatchFocus = Readonly<{
+  pr: string
+  revision: number
+  run?: string
+}>
+
+function sameQueueWatchFocus(left: QueueWatchFocus | undefined, right: QueueWatchFocus | undefined): boolean {
+  return left?.pr === right?.pr && left?.revision === right?.revision && left?.run === right?.run
+}
+
+function selectedQueueWatchFocus(
+  row: Readonly<{ pr: string; run?: string }> | undefined,
+  projectedRow: QueueTimelineProjectedRow | undefined,
+  prs: readonly PR[],
+): QueueWatchFocus | undefined {
+  if (row === undefined) return undefined
+  const revision = projectedRow?.revision ?? prs.find((candidate) => candidate.id === row.pr)?.revision
+  if (revision === undefined) return undefined
+  return { pr: row.pr, revision, ...(row.run === undefined ? {} : { run: row.run }) }
+}
+
+function useReportQueueWatchFocus(
+  focus: QueueWatchFocus | undefined,
+  onFocusChange: ((focus: QueueWatchFocus) => void) | undefined,
+): void {
+  useEffect(() => {
+    if (focus !== undefined) onFocusChange?.(focus)
+  }, [focus, onFocusChange])
+}
+
 export type QueueWatchPaneProps = Readonly<{
   initial: QueueWatchSnapshot
-  load(): Promise<QueueWatchSnapshot>
+  load(focus?: QueueWatchFocus): Promise<QueueWatchSnapshot>
   intervalMs: number
   pr?: string
   onCancelRun?: (run: string) => void | Promise<void>
@@ -785,10 +816,12 @@ export function QueueWatchFrame({
   snapshot,
   pr,
   onCancelRun,
+  onFocusChange,
 }: {
   snapshot: QueueWatchSnapshot
   pr?: string
   onCancelRun?: (run: string) => void | Promise<void>
+  onFocusChange?: (focus: QueueWatchFocus) => void
 }) {
   const { columns, rows: viewportRows } = useWindowSize()
   const tier = queueDetailTier(columns, Math.max(0, viewportRows - 1))
@@ -992,6 +1025,7 @@ export function QueueWatchFrame({
   // `rows` is a trimmed {key,pr,run} projection; the DETAIL identity and the
   // status-parameterized template need the full projected row at this index.
   const selectedProjectedRow = projectedRows?.[cursor]
+  useReportQueueWatchFocus(selectedQueueWatchFocus(selectedRow, selectedProjectedRow, allFullPrs), onFocusChange)
   const detailRunRows =
     selectedRow?.run === undefined
       ? selectedProjectedRow === undefined
@@ -1143,27 +1177,66 @@ export function QueueWatchFrame({
 export function QueueWatchPane({ initial, load, intervalMs, pr, onCancelRun }: QueueWatchPaneProps) {
   const [snapshot, setSnapshot] = useState(initial)
   const [failure, setFailure] = useState<Error | undefined>()
+  const mounted = useRef(true)
+  const focus = useRef<QueueWatchFocus | undefined>(undefined)
+  const refreshRequested = useRef(false)
+  const refreshInFlight = useRef<Promise<void> | undefined>(undefined)
+  const refresh = useCallback((): Promise<void> => {
+    refreshRequested.current = true
+    const active = refreshInFlight.current
+    if (active !== undefined) return active
+    const pending = (async () => {
+      while (refreshRequested.current) {
+        refreshRequested.current = false
+        const requestedFocus = focus.current
+        const next = await load(requestedFocus)
+        // Input wins: never commit details for a row the cursor left while its
+        // async Git/artifact work was still in flight. The pending flag causes
+        // one coalesced refresh for the newest focus instead of overlapping.
+        if (mounted.current && sameQueueWatchFocus(requestedFocus, focus.current)) setSnapshot(next)
+      }
+    })().finally(() => {
+      refreshInFlight.current = undefined
+    })
+    refreshInFlight.current = pending
+    return pending
+  }, [load])
+  const onFocusChange = useCallback(
+    (next: QueueWatchFocus): void => {
+      if (sameQueueWatchFocus(focus.current, next)) return
+      focus.current = next
+      void refresh().catch((error: unknown) => {
+        if (mounted.current) setFailure(error instanceof Error ? error : new Error(String(error)))
+      })
+    },
+    [refresh],
+  )
 
   useInput((input) => {
     if (input === "q") return "exit"
   })
 
+  useEffect(
+    () => () => {
+      mounted.current = false
+    },
+    [],
+  )
+
   useScopeEffect(
     (scope) => {
       void (async () => {
         while (!scope.signal.aborted) {
+          await refresh()
+          if (scope.signal.aborted) return
           await scope.sleep(intervalMs)
-          if (scope.signal.aborted) return
-          const next = await load()
-          if (scope.signal.aborted) return
-          setSnapshot(next)
         }
       })().catch((error: unknown) => {
         if (scope.signal.aborted) return
         setFailure(error instanceof Error ? error : new Error(String(error)))
       })
     },
-    [intervalMs, load],
+    [intervalMs, refresh],
   )
 
   if (failure !== undefined) throw failure
@@ -1172,6 +1245,7 @@ export function QueueWatchPane({ initial, load, intervalMs, pr, onCancelRun }: Q
       snapshot={snapshot}
       {...(pr === undefined ? {} : { pr })}
       {...(onCancelRun === undefined ? {} : { onCancelRun })}
+      onFocusChange={onFocusChange}
     />
   )
 }

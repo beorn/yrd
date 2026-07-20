@@ -4308,6 +4308,10 @@ describe("runYrd", () => {
     expect(mounted?.type).toBe(QueueWatchPane)
     const props = mounted?.props as QueueWatchPaneProps
     expect(props.intervalMs).toBe(1_000)
+    expect(props.initial.diffs, "initial paint must not synchronously probe every visible PR").toBeUndefined()
+    await expect(props.load({ pr: "PR1", revision: 1 })).resolves.toMatchObject({
+      diffs: [{ pr: "PR1", revision: 1, unavailable: "git-error" }],
+    })
     // Exercise the live runtime so useWindowSize sees the mounted 200×50
     // viewport; renderString's first synchronous frame intentionally reports
     // the fallback 80×24 hook size and cannot certify responsive watch IA.
@@ -4393,6 +4397,90 @@ describe("runYrd", () => {
       expect(handle.text).toContain(`HEAD     ${"2".repeat(40)}`)
       expect(handle.text).not.toContain(`HEAD     ${HEAD_SHA}`)
     } finally {
+      handle.unmount()
+    }
+  })
+
+  it("loads watch details only for the row that currently owns the cursor", async () => {
+    const result = {
+      base: "main",
+      headSha: BASE_SHA,
+      prs: [
+        {
+          id: "PR1",
+          name: "First",
+          branch: "topic/one",
+          base: "main",
+          status: "submitted",
+          revision: 1,
+          headSha: HEAD_SHA,
+          revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+          submittedAt: "2026-07-09T12:00:00.000Z",
+        },
+        {
+          id: "PR2",
+          name: "Second",
+          branch: "topic/two",
+          base: "main",
+          status: "submitted",
+          revision: 2,
+          headSha: "2".repeat(40),
+          revisions: [submittedRevision(2, "2".repeat(40), "2026-07-09T12:01:00.000Z")],
+          submittedAt: "2026-07-09T12:01:00.000Z",
+        },
+      ],
+      running: [],
+      waiting: [],
+      finished: [],
+    } as unknown as QueueStatusResult
+    const initial = { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") }
+    const requested: Array<{ pr: string; revision: number; run?: string } | undefined> = []
+    let activeLoads = 0
+    let maxActiveLoads = 0
+    let releaseFirstFocus = (): void => undefined
+    const firstFocusBlocked = new Promise<void>((resolve) => {
+      releaseFirstFocus = resolve
+    })
+    let announceFirstFocus = (): void => undefined
+    const firstFocusStarted = new Promise<void>((resolve) => {
+      announceFirstFocus = resolve
+    })
+    const handle = await run(
+      createElement(QueueWatchPane, {
+        initial,
+        load: async (focus?: { pr: string; revision: number; run?: string }) => {
+          activeLoads++
+          maxActiveLoads = Math.max(maxActiveLoads, activeLoads)
+          requested.push(focus)
+          try {
+            if (focus?.pr === "PR1") {
+              announceFirstFocus()
+              await firstFocusBlocked
+            }
+            return initial
+          } finally {
+            activeLoads--
+          }
+        },
+        intervalMs: 5,
+      }),
+      { writable: { write: () => {} }, cols: 120, rows: 30 },
+    )
+
+    try {
+      await firstFocusStarted
+      await handle.press("j")
+      await handle.waitForLayoutStable()
+      expect(handle.text).toContain("> 1m submitted pr#2.2")
+      // The focused PR1 load is still pending, but keyboard input has already
+      // moved the cursor. Releasing it must coalesce one PR2 refresh rather than
+      // overlap or commit stale PR1 detail.
+      releaseFirstFocus()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(requested).toContainEqual({ pr: "PR2", revision: 2 })
+      expect(maxActiveLoads).toBe(1)
+    } finally {
+      releaseFirstFocus()
       handle.unmount()
     }
   })
@@ -8765,12 +8853,94 @@ describe("PR metadata — title, description, and issue link", () => {
 })
 
 describe("watch viewer — frozen projection under a live clock (task #64)", () => {
+  it("does not read run artifacts for a focused PR row without a run", async () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-focused-output-"))
+    const app = await createApp()
+    try {
+      await openAndSubmit(app)
+      await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })
+      const outputPath = join(artifactRoot, "R1", "0-check", "attempt-1", "output.log")
+      mkdirSync(join(outputPath, ".."), { recursive: true })
+      writeFileSync(outputPath, "must stay unread for a PR-only row\n")
+
+      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ artifactRoot }).io, {
+        includeOutputs: true,
+        focus: { pr: "PR1", revision: 1 },
+      })
+      expect(snapshot.outputs).toBeUndefined()
+    } finally {
+      await app.close()
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("resolves and permanently caches one async diff for an immutable focused revision", async () => {
+    const calls: string[][] = []
+    const resolver = runInternals.createQueuePrDiffResolver({
+      runGit: async (_cwd, args) => {
+        calls.push([...args])
+        if (args.includes("--numstat")) return "3\t2\tsrc/watch.ts\0-\t-\tfixture.bin\0"
+        if (args[0] === "diff") return "focused patch\n"
+        return ""
+      },
+    })
+    const pr = {
+      id: "PR1",
+      revision: 1,
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+    } as unknown as PR
+
+    await expect(resolver.resolve("/repo", pr, 1, 1_000)).resolves.toEqual({
+      pr: "PR1",
+      revision: 1,
+      additions: 3,
+      deletions: 2,
+      files: ["src/watch.ts", "fixture.bin"],
+      patch: "focused patch\n",
+    })
+    expect(calls).toHaveLength(5)
+    await resolver.resolve("/repo", pr, 1, 60_000)
+    expect(calls).toHaveLength(5)
+  })
+
+  it("negative-caches a missing focused diff until its retry window expires", async () => {
+    const calls: string[][] = []
+    const resolver = runInternals.createQueuePrDiffResolver({
+      negativeTtlMs: 30_000,
+      runGit: async (_cwd, args) => {
+        calls.push([...args])
+        if (args[0] === "rev-parse") return ".git\n"
+        throw new Error("missing object")
+      },
+    })
+    const pr = {
+      id: "PR1",
+      revision: 1,
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+    } as unknown as PR
+
+    await expect(resolver.resolve("/repo", pr, 1, 1_000)).resolves.toMatchObject({ unavailable: "refs-pruned" })
+    await expect(resolver.resolve("/repo", pr, 1, 30_999)).resolves.toMatchObject({ unavailable: "refs-pruned" })
+    expect(calls).toHaveLength(2)
+
+    await expect(resolver.resolve("/repo", pr, 1, 31_000)).resolves.toMatchObject({ unavailable: "refs-pruned" })
+    expect(calls).toHaveLength(4)
+  })
+
   it("projects configured step commands into human watch snapshots", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-watch-commands-"))
     writeFileSync(join(repo, ".yrd.yml"), 'steps: [check, merge]\ncheck: "bun vitest run"\nmerge: {}\n')
     const app = await createApp()
     try {
-      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ cwd: repo }).io, true)
+      const snapshot = await runInternals.queueListSnapshot(app, [], {}, outputIO({ cwd: repo }).io, {
+        includeOutputs: true,
+      })
       expect(snapshot.commands).toEqual({ check: "bun vitest run" })
     } finally {
       await app.close()

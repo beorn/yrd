@@ -96,7 +96,7 @@ import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
 // load. Types are erased, so they stay as a static type-only import.
-import type { QueueArtifactOutput, QueuePrDiff, QueueWatchSnapshot } from "./watch-pane.tsx"
+import type { QueueArtifactOutput, QueuePrDiff, QueueWatchFocus, QueueWatchSnapshot } from "./watch-pane.tsx"
 
 function gitSync(cwd: string, args: readonly string[]): string {
   return execFileSync("git", ["-C", cwd, ...args], {
@@ -104,6 +104,26 @@ function gitSync(cwd: string, args: readonly string[]): string {
     env: cleanGitEnvironment(process.env),
     stdio: ["ignore", "pipe", "pipe"],
   })
+}
+
+type QueueGitRunner = (cwd: string, args: readonly string[]) => Promise<string>
+
+async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
+  const child = Bun.spawn(["git", "-C", cwd, ...args], {
+    env: cleanGitEnvironment(process.env),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  if (exitCode !== 0) {
+    throw new Error(`git ${args.join(" ")} exited ${String(exitCode)}: ${stderr.trim()}`)
+  }
+  return stdout
 }
 
 function queueGitDir(cwd: string): string | undefined {
@@ -2170,6 +2190,23 @@ function queuePrDiffSource(pr: PR, revision: number): Readonly<{ base: string; h
   return base === undefined ? undefined : { base, headSha }
 }
 
+function queuePrDiffResult(pr: PR, revision: number, numstat: string, patch: string): QueuePrDiff {
+  const rows = numstat.split("\0").filter((row) => row !== "")
+  let additions = 0
+  let deletions = 0
+  const files: string[] = []
+  for (const row of rows) {
+    const [added = "-", deleted = "-", ...pathParts] = row.split("\t")
+    const addedCount = Number(added)
+    const deletedCount = Number(deleted)
+    if (Number.isFinite(addedCount)) additions += addedCount
+    if (Number.isFinite(deletedCount)) deletions += deletedCount
+    const path = pathParts.join("\t")
+    if (path !== "") files.push(path)
+  }
+  return { pr: pr.id, revision, additions, deletions, files, patch }
+}
+
 /** Resolve a revision-bound PR delta for the synthetic `0: submit` step. */
 export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueuePrDiff {
   const source = queuePrDiffSource(pr, revision)
@@ -2186,19 +2223,6 @@ export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueueP
   }
   const range = `${source.base}...${source.headSha}`
   const numstat = gitSync(cwd, ["diff", "--numstat", "--no-renames", "-z", range, "--"])
-  const rows = numstat.split("\0").filter((row) => row !== "")
-  let additions = 0
-  let deletions = 0
-  const files: string[] = []
-  for (const row of rows) {
-    const [added = "-", deleted = "-", ...pathParts] = row.split("\t")
-    const addedCount = Number(added)
-    const deletedCount = Number(deleted)
-    if (Number.isFinite(addedCount)) additions += addedCount
-    if (Number.isFinite(deletedCount)) deletions += deletedCount
-    const path = pathParts.join("\t")
-    if (path !== "") files.push(path)
-  }
   const patch = gitSync(cwd, [
     "diff",
     "--no-ext-diff",
@@ -2208,7 +2232,68 @@ export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueueP
     range,
     "--",
   ])
-  return { pr: pr.id, revision, additions, deletions, files, patch }
+  return queuePrDiffResult(pr, revision, numstat, patch)
+}
+
+async function queuePrDiffAsync(cwd: string, pr: PR, revision: number, runGit: QueueGitRunner): Promise<QueuePrDiff> {
+  const source = queuePrDiffSource(pr, revision)
+  if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  await runGit(cwd, ["rev-parse", "--git-dir"])
+  try {
+    await runGit(cwd, ["cat-file", "-e", `${source.base}^{commit}`])
+    await runGit(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
+  } catch {
+    return { pr: pr.id, revision, unavailable: "refs-pruned" }
+  }
+  const range = `${source.base}...${source.headSha}`
+  const [numstat, patch] = await Promise.all([
+    runGit(cwd, ["diff", "--numstat", "--no-renames", "-z", range, "--"]),
+    runGit(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames", range, "--"]),
+  ])
+  return queuePrDiffResult(pr, revision, numstat, patch)
+}
+
+type QueuePrDiffResolver = Readonly<{
+  resolve(cwd: string, pr: PR, revision: number, now?: number): Promise<QueuePrDiff>
+}>
+
+/** Async, focus-scoped diff resolver. Missing immutable objects are retried only
+ * after a bounded window, while successful revision deltas remain stable. */
+export function createQueuePrDiffResolver(
+  options: Readonly<{ runGit?: QueueGitRunner; negativeTtlMs?: number }> = {},
+): QueuePrDiffResolver {
+  const runGit = options.runGit ?? gitAsync
+  const negativeTtlMs = options.negativeTtlMs ?? 30_000
+  const resolved = new Map<string, QueuePrDiff>()
+  const retryAt = new Map<string, number>()
+  const inFlight = new Map<string, Promise<QueuePrDiff>>()
+
+  return {
+    async resolve(cwd, pr, revision, now = Date.now()) {
+      const source = queuePrDiffSource(pr, revision)
+      if (source === undefined) return { pr: pr.id, revision, unavailable: "refs-pruned" }
+      const key = `${cwd}\0${pr.id}\0${String(revision)}\0${source.base}\0${source.headSha}`
+      const cached = resolved.get(key)
+      const retry = retryAt.get(key)
+      if (cached !== undefined && (retry === undefined || now < retry)) return cached
+      const running = inFlight.get(key)
+      if (running !== undefined) return running
+
+      const pending = queuePrDiffAsync(cwd, pr, revision, runGit)
+        .catch((): QueuePrDiff => ({ pr: pr.id, revision, unavailable: "git-error" }))
+        .then((diff) => {
+          if (!("unavailable" in diff) || diff.unavailable === "refs-pruned") {
+            resolved.set(key, diff)
+            if ("unavailable" in diff) retryAt.set(key, now + negativeTtlMs)
+            else retryAt.delete(key)
+          }
+          return diff
+        })
+        .finally(() => inFlight.delete(key))
+      inFlight.set(key, pending)
+      return pending
+    },
+  }
 }
 
 export async function queueListSnapshot(
@@ -2216,9 +2301,13 @@ export async function queueListSnapshot(
   filters: readonly string[],
   options: QueueListOptions,
   io: YrdCliIO,
-  includeOutputs = false,
-  diffCache?: Map<string, QueuePrDiff>,
+  details: Readonly<{
+    includeOutputs?: boolean
+    focus?: QueueWatchFocus
+    diffResolver?: QueuePrDiffResolver
+  }> = {},
 ): Promise<QueueListSnapshot> {
+  const { includeOutputs = false, focus, diffResolver } = details
   // The watch loop reuses one app across ticks, and app.state() is the mount-time
   // journal projection — it never tails cross-process runner appends on its own.
   // Fold new frames first so each snapshot's rows are as fresh as its clock;
@@ -2245,11 +2334,28 @@ export async function queueListSnapshot(
     state: state.bays,
     runner,
   })
+  const outputResults =
+    focus === undefined
+      ? results
+      : focus.run === undefined
+        ? []
+        : results.map((result) => ({
+            ...result,
+            running: result.running.filter((run) => run.id === focus.run),
+            waiting: result.waiting.filter((run) => run.id === focus.run),
+            finished: result.finished.filter((run) => run.id === focus.run),
+          }))
   const outputs =
-    includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(results, io.artifactRoot) : []
+    includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(outputResults, io.artifactRoot) : []
   const diffs = includeOutputs
-    ? (() => {
+    ? await (async () => {
         const prsById = new Map(results.flatMap((result) => result.prs).map((pr) => [pr.id, pr] as const))
+        if (focus !== undefined) {
+          const focusedPr = prsById.get(focus.pr)
+          if (focusedPr === undefined) return []
+          const resolver = diffResolver ?? createQueuePrDiffResolver()
+          return [await resolver.resolve(io.cwd ?? process.cwd(), focusedPr, focus.revision, now)]
+        }
         const visibleRevisions = new Map(
           projection.rows.flatMap((row) => {
             const pr = prsById.get(row.pr)
@@ -2257,19 +2363,12 @@ export async function queueListSnapshot(
           }),
         )
         return [...visibleRevisions.values()].map(({ pr, revision }) => {
-          const source = queuePrDiffSource(pr, revision)
-          const cacheKey = source === undefined ? undefined : `${pr.id}:${revision}:${source.base}:${source.headSha}`
-          const cached = cacheKey === undefined ? undefined : diffCache?.get(cacheKey)
-          if (cached !== undefined) return cached
           let diff: QueuePrDiff
           try {
             diff = queuePrDiff(io.cwd ?? process.cwd(), pr, revision)
           } catch {
             diff = { pr: pr.id, revision, unavailable: "git-error" }
           }
-          // A missing ref can appear after the next fetch; cache only stable,
-          // source-backed diffs for the lifetime of this watch process.
-          if (cacheKey !== undefined && !("unavailable" in diff)) diffCache?.set(cacheKey, diff)
           return diff
         })
       })()
@@ -2886,9 +2985,13 @@ async function watchQueue(
 ): Promise<YrdCliExitCode> {
   const interval = 1_000
   const scope = io.scope ?? app.scope
-  const diffCache = new Map<string, QueuePrDiff>()
-  const load = async (): Promise<QueueListSnapshot> =>
-    queueListSnapshot(app, filters, options, io, !jsonEnabled(options), diffCache)
+  const diffResolver = createQueuePrDiffResolver()
+  const load = async (focus?: QueueWatchFocus): Promise<QueueListSnapshot> =>
+    queueListSnapshot(app, filters, options, io, {
+      includeOutputs: !jsonEnabled(options) && focus !== undefined,
+      focus,
+      diffResolver,
+    })
 
   if (!jsonEnabled(options)) {
     io.stderr(`yrd watch runtime: ${formatYrdRuntimeVersion()}\n`)
