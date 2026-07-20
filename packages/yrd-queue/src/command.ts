@@ -3402,16 +3402,21 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
 
           const parentEvidence = comparableCommandEvidence(parentOutcome, purpose)
           if (parentEvidence === undefined) {
-            // The parent command also genuinely ran. If its output cannot
-            // support diagnostics comparison, retain the candidate's terminal
-            // failure instead of releasing authority for an identical retry.
-            if (parentOutcome.status === "failed") return candidateFailure
+            // An ordinary nonzero parent exit genuinely ran and cannot become
+            // an infrastructure alias just because its diagnostics are opaque.
+            // Named incomplete outcomes (timeout/stall) remain retryable below.
+            if (parentOutcome.status === "failed" && parentOutcome.error.code === `${purpose}-failed`) {
+              return candidateFailure
+            }
             const error = comparisonOutcomeError(parentOutcome, purpose, "parent")
             const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
               ...candidate,
               kind: "check-comparison-refusal",
               phase: "parent",
               error,
+              ...(parentOutcome.status === "failed" && parentOutcome.output !== undefined
+                ? { parent: parentOutcome.output }
+                : {}),
               candidateEvidence,
               retryable: true,
             })

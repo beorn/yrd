@@ -2446,6 +2446,52 @@ describe("Queue command adapters", () => {
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
   })
 
+  it("keeps an incomplete parent diagnostics run retryable as infrastructure refusal", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const parentTimeout: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] !== "sh") return process.run(request)
+        configuredRuns += 1
+        if (configuredRuns === 1) return process.run(request)
+        return Promise.resolve({
+          exitCode: 124,
+          signal: "SIGKILL",
+          stdout: "",
+          stderr: "parent bootstrap timed out",
+          durationMs: 1_000,
+          timedOut: true,
+        })
+      },
+    }
+    await using app = await checkedQueue(
+      parentTimeout,
+      repo,
+      shellCommand("printf 'src/feature.ts:2:1 - net-new\\n'; exit 17"),
+      { comparison: "diagnostics" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "check-comparison-refusal",
+          phase: "parent",
+          error: { code: "check-timeout" },
+          parent: { exitCode: 124, timedOut: true },
+          candidateEvidence: { exitCode: 17 },
+          retryable: true,
+        },
+      },
+    })
+    expect(configuredRuns).toBe(2)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
+  })
+
   it("treats Vitest-shaped nonzero output as a terminal failure under the plain exit-code contract", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
