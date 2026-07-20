@@ -242,6 +242,7 @@ function candidateStep(
         purpose: name,
         runner: config.runner,
         classification: config.classification ?? "carrier",
+        ...(config.comparison === undefined ? {} : { comparison: config.comparison }),
         timeoutMs: stepTimeoutMs(config),
         noProgressTimeoutMs: stepNoProgressMs(config),
         ...(config.environment === undefined ? {} : { environment: config.environment }),
