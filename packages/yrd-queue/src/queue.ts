@@ -991,9 +991,15 @@ function createQueue<Shape extends PRShape>(
 
   const refreshCheckIdentities = async (prs: readonly DeepReadonly<PR>[]): Promise<void> => {
     if (resolveBaseSha === undefined) return
+    const resolvedBaseShas = new Map<string, string>()
     for (const pr of prs) {
       if (!checksRequested(pr)) continue
-      const baseSha = await resolveBaseSha(pr.base)
+      const base = baseIdentity(pr.base)
+      let baseSha = resolvedBaseShas.get(base)
+      if (baseSha === undefined) {
+        baseSha = await resolveBaseSha(base)
+        resolvedBaseShas.set(base, baseSha)
+      }
       if (checkRequest(pr)?.baseSha === baseSha) continue
       await actions.requestChecks(pr.id, baseSha)
     }
