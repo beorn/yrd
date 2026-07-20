@@ -4,6 +4,7 @@
  * @consumer @yrd/cli configuration
  */
 import { describe, expect, it } from "vitest"
+import { defineConfig, yrd } from "@yrd/config"
 import { loadYrdConfig, parseYrdConfig } from "../src/config.ts"
 
 describe("Yrd config", () => {
@@ -59,7 +60,7 @@ notify:
     const loaded = await loadYrdConfig({
       repo: "/repo",
       defaultBase: "trunk",
-      read: () => Promise.resolve("batch: 3"),
+      read: (path) => Promise.resolve(path.endsWith(".yrd.yml") ? "batch: 3" : undefined),
     })
     expect(loaded).toMatchObject({
       path: "/repo/.yrd.yml",
@@ -71,8 +72,66 @@ notify:
         definitions: { check: { runner: "local" }, merge: { runner: "local" } },
         contest: { concurrency: 2, timeoutMs: 1_800_000, evaluators: ["check"] },
         notify: {},
+        flows: [expect.objectContaining({ name: "default", rev: "legacy-v1" })],
       },
     })
+  })
+
+  it("loads .yrd.ts from base-branch authority and flattens its selected step capabilities", async () => {
+    const reads: string[] = []
+    const loaded = await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      readAuthority: (base, path) => {
+        reads.push(`${base}:${path}`)
+        return Promise.resolve(path === ".yrd.ts" ? "base source" : undefined)
+      },
+      loadModule: () =>
+        Promise.resolve(
+          defineConfig(
+            yrd.flow({
+              name: "docs",
+              rev: "5",
+              on: ({ branch }) => branch.startsWith("docs/"),
+              steps: [yrd.check("check", { run: "bun test" }), yrd.action("publish"), yrd.merge()],
+            }),
+          ),
+        ),
+    })
+
+    expect(reads).toEqual(["main:.yrd.ts"])
+    expect(loaded.path).toBe("/repo/.yrd.ts")
+    expect(loaded.config).toMatchObject({
+      steps: ["check", "publish", "merge"],
+      definitions: {
+        check: { run: "bun test", runner: "local" },
+        publish: { runner: "local" },
+        merge: { runner: "local" },
+      },
+      flows: [expect.objectContaining({ name: "docs", rev: "5" })],
+    })
+  })
+
+  it("treats --config as a base-relative authority path, never a candidate filesystem escape", async () => {
+    const requested: string[] = []
+    await loadYrdConfig({
+      repo: "/repo",
+      defaultBase: "main",
+      configPath: "delivery/yard.ts",
+      readAuthority: (base, path) => {
+        requested.push(`${base}:${path}`)
+        return Promise.resolve("base source")
+      },
+      loadModule: () =>
+        Promise.resolve(
+          defineConfig(yrd.flow({ name: "main", rev: "1", on: () => true, steps: [yrd.check("check"), yrd.merge()] })),
+        ),
+    })
+    expect(requested).toEqual(["main:delivery/yard.ts"])
+
+    await expect(loadYrdConfig({ repo: "/repo", defaultBase: "main", configPath: "../candidate.ts" })).rejects.toThrow(
+      "must stay inside the repository",
+    )
   })
 
   it.each([

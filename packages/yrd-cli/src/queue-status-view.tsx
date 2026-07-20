@@ -3,17 +3,23 @@ import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type React from "react"
 import {
+  currentPRRev,
+  prDeliveryState,
+  prCorrelation,
+  prHead,
   prRevisionLineage,
+  prRevisionNumber,
   prSourceReadyAt,
   type BaysState,
   type Correlation,
   type PR,
-  type PRRevisionClock,
-  type PRRevisionTerminal,
+  type PRDeliveryState,
+  type PRRevClock,
+  type PRRevTerminal,
 } from "@yrd/bay"
 import type { Event, JsonValue } from "@yrd/core"
 import { JobRequestSchema, JobTransitionSchema, type Job, type JobError } from "@yrd/job"
-import type { IntegrationProof, PRCheckRecord, PREligibility, QueueRun, QueueStep, QueueSummary } from "@yrd/queue"
+import type { IntegrationProof, PRCheckRecord, PREligibility, Run, QueueStep, QueueSummary } from "@yrd/queue"
 import {
   Box,
   formatNounId,
@@ -83,7 +89,7 @@ function runIdValue(run: string): string {
   return run.replace(/^R(?=\d+$)/u, "")
 }
 
-function QueueRunId({ base, run, ...props }: { base: string; run: string } & QueueNounIdProps) {
+function RunId({ base, run, ...props }: { base: string; run: string } & QueueNounIdProps) {
   return <NounId noun={base} value={runIdValue(run)} {...props} />
 }
 
@@ -357,11 +363,11 @@ export function queueRevisionKey(revision: PinnedPRRevision): string {
   return JSON.stringify([revision.id, revision.revision, revision.headSha])
 }
 
-export function queueRunRevisionKey(run: Pick<QueueRun, "id">, revision: PinnedPRRevision): string {
+export function queueRunRevisionKey(run: Pick<Run, "id">, revision: PinnedPRRevision): string {
   return JSON.stringify([run.id, revision.id, revision.revision, revision.headSha])
 }
 
-export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<QueueRun>): Map<string, PRRunRevisionClock> {
+export function queueRunRevisionClocks(prs: Iterable<PR>, runs: Iterable<Run>): Map<string, PRRunRevisionClock> {
   const byId = new Map([...prs].map((pr) => [pr.id, pr]))
   const clocks = new Map<string, PRRunRevisionClock>()
   for (const run of runs) {
@@ -428,11 +434,20 @@ export async function queueLogAttempts(events: AsyncIterable<Event> | Iterable<E
       ...request,
       attempt: transition.attempt,
       runner: start.runner,
-      outcome: transition.type === "lose" ? "lost" : transition.result.status === "passed" ? "passed" : "failed",
+      outcome: transition.type === "lose" ? "lost" : transition.result.conclusion === "success" ? "passed" : "failed",
       startedAt: start.startedAt,
       finishedAt: event.ts,
       durationMs,
-      result: transition.type === "lose" ? { status: "lost", reason: transition.reason } : transition.result,
+      result:
+        transition.type === "lose"
+          ? { status: "lost", reason: transition.reason }
+          : transition.result.conclusion === "success"
+            ? { status: "passed", output: transition.result.output }
+            : {
+                status: "failed",
+                error: transition.result.error,
+                ...(transition.result.output === undefined ? {} : { output: transition.result.output }),
+              },
     })
   }
 
@@ -466,7 +481,7 @@ export type HumanPRProjection = Row &
     revision: number
     branch: string
     subject: string
-    nativeStatus: PR["status"]
+    nativeStatus: PRDeliveryState
     taskStatus: TaskStatus
     glyph: StatusGlyph
     runId?: string
@@ -525,7 +540,8 @@ type QueueShowRow = Readonly<{
 export type QueueShowData = Readonly<{
   run: string
   base: string
-  status: string
+  status: Run["status"]
+  conclusion?: Run["conclusion"]
   taskStatus: TaskStatus
   glyph: StatusGlyph
   outcome: string
@@ -545,7 +561,7 @@ export type QueueShowData = Readonly<{
   parent: string
   isolationPart: "0" | "1" | "-"
   failure?: HumanFailureProjection
-  prs: QueueRun["prs"]
+  prs: Run["prs"]
   revisionClock?: PRRunRevisionClock
   attempts: readonly (QueueAttempt & TaskStatusFields)[]
   steps: readonly QueueShowRow[]
@@ -556,7 +572,7 @@ export type PRRevisionHistoryClock = Readonly<{
   revision: number
   headSha: string
 }> &
-  PRRevisionClock
+  PRRevClock
 
 export type PRRunRevisionClock =
   | (PRRevisionHistoryClock & Readonly<{ admittedBy: "submission"; submittedAt: string }>)
@@ -602,13 +618,10 @@ function latest(...timestamps: (string | undefined)[]): string | undefined {
     .at(-1)
 }
 
-function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
-  const current = queueRevisionKey({ id: pr.id, revision: pr.revision, headSha: pr.headSha })
-  const currentSubmission =
-    pr.status === "submitted"
-      ? (pr.revisions.find((revision) => revision.revision === pr.revision && revision.headSha === pr.headSha)
-          ?.submittedAt ?? pr.submittedAt)
-      : undefined
+function latestRun(pr: PR, summary: QueueSummary): Run | undefined {
+  const revision = currentPRRev(pr)
+  const current = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
+  const currentSubmission = prDeliveryState(pr) === "submitted" ? (revision.submittedAt ?? pr.submittedAt) : undefined
   return [...summary.running, ...summary.waiting, ...summary.finished]
     .filter((run) => run.prs.some((member) => queueRevisionKey(member) === current))
     .filter(
@@ -623,13 +636,14 @@ function latestRun(pr: PR, summary: QueueSummary): QueueRun | undefined {
 
 /** The submitter handle recorded on one exact immutable PR revision, or
  * undefined for revisions journaled before submitter identity was recorded. */
-function revisionSubmitter(pr: PR, revision = pr.revision, headSha = pr.headSha): string | undefined {
-  return pr.revisions?.find((candidate) => candidate.revision === revision && candidate.headSha === headSha)?.actor
+function revisionSubmitter(pr: PR, revision = prRevisionNumber(pr), headSha = prHead(pr)): string | undefined {
+  return pr.revs.find((candidate) => candidate.n === revision && candidate.head === headSha)?.actor
 }
 
-function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
+function currentTerminalFact(pr: PR): PRRevTerminal | undefined {
+  const delivery = prDeliveryState(pr)
   let at: string | undefined
-  switch (pr.status) {
+  switch (delivery) {
     case "rejected":
       at = pr.rejectedAt
       break
@@ -646,9 +660,11 @@ function currentTerminalFact(pr: PR): PRRevisionTerminal | undefined {
       return undefined
   }
   if (at === undefined) {
-    throw new Error(`yrd: PR '${pr.id}' current revision ${pr.revision}@${pr.headSha} has no ${pr.status} timestamp`)
+    throw new Error(
+      `yrd: PR '${pr.id}' current revision ${prRevisionNumber(pr)}@${prHead(pr)} has no ${delivery} timestamp`,
+    )
   }
-  return { status: pr.status, at }
+  return { kind: delivery, at }
 }
 
 function finiteNonnegative(value: number, subject: string): number {
@@ -818,34 +834,34 @@ function validateRevisionClock(pr: PR, clock: PRRevisionHistoryClock): PRRevisio
     }
   }
 
-  if (clock.revision !== pr.revision || clock.headSha !== pr.headSha) return clock
+  if (clock.revision !== prRevisionNumber(pr) || clock.headSha !== prHead(pr)) return clock
   const expected = currentTerminalFact(pr)
   if (expected === undefined) {
     if (clock.terminal !== undefined) {
       throw new Error(
-        `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.status} terminal clock`,
+        `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} retains stale ${clock.terminal.kind} terminal clock`,
       )
     }
     return clock
   }
   if (clock.terminal === undefined) {
     throw new Error(
-      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.status} terminal clock`,
+      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} has no ${expected.kind} terminal clock`,
     )
   }
-  if (clock.terminal.status !== expected.status || clock.terminal.at !== expected.at) {
+  if (clock.terminal.kind !== expected.kind || clock.terminal.at !== expected.at) {
     throw new Error(
-      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.status} terminal clock contradicts current PR state`,
+      `yrd: PR '${pr.id}' current revision ${clock.revision}@${clock.headSha} ${expected.kind} terminal clock contradicts current PR state`,
     )
   }
   return clock
 }
 
-function revisionHistoryClock(pr: PR, revision: PR["revisions"][number]): PRRevisionHistoryClock {
+function revisionHistoryClock(pr: PR, revision: PR["revs"][number]): PRRevisionHistoryClock {
   return {
     pr: pr.id,
-    revision: revision.revision,
-    headSha: revision.headSha,
+    revision: revision.n,
+    headSha: revision.head,
     pushedAt: revision.pushedAt,
     ...(revision.submittedAt === undefined ? {} : { submittedAt: revision.submittedAt }),
     ...(revision.terminal === undefined ? {} : { terminal: revision.terminal }),
@@ -853,9 +869,9 @@ function revisionHistoryClock(pr: PR, revision: PR["revisions"][number]): PRRevi
 }
 
 export function prRevisionClocks(pr: PR): readonly PRRevisionHistoryClock[] {
-  const clocks = pr.revisions.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
-  if (!clocks.some((clock) => clock.revision === pr.revision && clock.headSha === pr.headSha)) {
-    throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${pr.revision}@${pr.headSha}`)
+  const clocks = pr.revs.map((revision) => validateRevisionClock(pr, revisionHistoryClock(pr, revision)))
+  if (!clocks.some((clock) => clock.revision === prRevisionNumber(pr) && clock.headSha === prHead(pr))) {
+    throw new Error(`yrd: PR '${pr.id}' has no clock for current revision ${prRevisionNumber(pr)}@${prHead(pr)}`)
   }
   return clocks
 }
@@ -884,12 +900,10 @@ function timestamp(value: string, subject: string): number {
   return parsed
 }
 
-export function runRevisionClock(pr: PR, run: QueueRun): PRRunRevisionClock {
+export function runRevisionClock(pr: PR, run: Run): PRRunRevisionClock {
   const pinned = run.prs.find((member) => member.id === pr.id)
   if (pinned === undefined) throw new Error(`yrd: run '${run.id}' does not contain PR '${pr.id}'`)
-  const revision = pr.revisions.find(
-    (revision) => revision.revision === pinned.revision && revision.headSha === pinned.headSha,
-  )
+  const revision = pr.revs.find((revision) => revision.n === pinned.revision && revision.head === pinned.headSha)
   if (revision === undefined) {
     throw new Error(
       `yrd: run '${run.id}' has no retained revision clock for PR '${pr.id}' revision ${pinned.revision}@${pinned.headSha}`,
@@ -918,10 +932,31 @@ export function runRevisionClock(pr: PR, run: QueueRun): PRRunRevisionClock {
   return { ...clock, admittedBy: "check-request", checkRequestedAt: checkRequest.at }
 }
 
-type JobByStatus<Status extends Job["status"]> = Extract<Job, { status: Status }>
+type JobDisplayStatus =
+  | "queued"
+  | "requested"
+  | "running"
+  | "waiting"
+  | "passed"
+  | "failed"
+  | "lost"
+  | "canceled"
+  | "skipped"
 
-function jobStatus(step: QueueStep): Job["status"] | "queued" {
-  return step.job?.status ?? "queued"
+function jobDisplayStatus(job: Job | undefined): JobDisplayStatus {
+  if (job === undefined) return "queued"
+  if (job.status === "queued") return "requested"
+  if (job.status === "in_progress") return "running"
+  if (job.status === "waiting") return "waiting"
+  if (job.conclusion === "success") return "passed"
+  if (job.conclusion === "failure") return "failed"
+  if (job.conclusion === "timed_out") return "lost"
+  if (job.conclusion === "cancelled") return "canceled"
+  return "skipped"
+}
+
+function jobStatus(step: QueueStep): JobDisplayStatus {
+  return jobDisplayStatus(step.job)
 }
 
 function isObjectValue(value: unknown): value is Record<string, unknown> {
@@ -1016,7 +1051,7 @@ function queueLogLevel(outcome: string): "DEBUG" | "ERROR" | "INFO" | "WARN" {
 }
 
 function runDurations(
-  run: QueueRun,
+  run: Run,
   attempts: readonly QueueLogAttempt[],
 ): {
   totalDurationMs?: number
@@ -1053,7 +1088,7 @@ function parseRunIdSuffix(run: string): number {
   return suffix === undefined ? Number.MAX_SAFE_INTEGER : Number.parseInt(suffix, 10)
 }
 
-function byRunStarted(left: QueueRun, right: QueueRun): number {
+function byRunStarted(left: Run, right: Run): number {
   const leftAt = Date.parse(left.startedAt)
   const rightAt = Date.parse(right.startedAt)
   if (leftAt !== rightAt) return leftAt - rightAt
@@ -1130,22 +1165,27 @@ function attemptLocations(attempt: QueueAttempt): QueueLogLocationEntry[] {
   })
 }
 
-function runLocations(run: QueueRun): QueueLogLocationEntry[] {
+function runLocations(run: Run): QueueLogLocationEntry[] {
   const locations = run.steps.flatMap((step) => stepLocations(step))
   return [...new Map(locations.map((entry) => [JSON.stringify(entry.location), entry])).values()]
 }
 
-function runLocation(run: QueueRun): QueueLogLocation | undefined {
+function runLocation(run: Run): QueueLogLocation | undefined {
   return run.steps.toReversed().flatMap(stepLocations).at(0)?.location
 }
 
 function jobCheckpoint(job: Job | undefined): unknown {
   if (job === undefined) return undefined
-  if (job.status === "waiting" || job.status === "passed" || job.status === "failed") return job.checkpoint
+  if (
+    job.status === "waiting" ||
+    (job.status === "completed" && (job.conclusion === "success" || job.conclusion === "failure"))
+  ) {
+    return job.checkpoint
+  }
   return undefined
 }
 
-function relevantStep(run: QueueRun | undefined): QueueStep | undefined {
+function relevantStep(run: Run | undefined): QueueStep | undefined {
   if (run === undefined) return undefined
   const latestFirst = run.steps.toReversed()
   return (
@@ -1155,7 +1195,7 @@ function relevantStep(run: QueueRun | undefined): QueueStep | undefined {
   )
 }
 
-function runOutputQueueageIndex(finished: readonly QueueRun[], run: QueueRun, revision: number, prId: string): number {
+function runOutputQueueageIndex(finished: readonly Run[], run: Run, revision: number, prId: string): number {
   const related = finished
     .filter((candidate) => candidate.prs.some((pr) => pr.id === prId && pr.revision === revision))
     .toSorted(byRunStarted)
@@ -1165,13 +1205,29 @@ function runOutputQueueageIndex(finished: readonly QueueRun[], run: QueueRun, re
 function stepArtifacts(step: QueueStep | undefined): readonly unknown[] {
   if (step?.job === undefined) return []
   const artifacts: unknown[] = []
+  const append = (value: unknown): void => {
+    if (isObjectValue(value) && Array.isArray(value.artifacts)) {
+      artifacts.push(...(value.artifacts as readonly unknown[]))
+    }
+  }
   if ("artifacts" in step.job && Array.isArray(step.job.artifacts)) {
     artifacts.push(...(step.job.artifacts as readonly unknown[]))
   }
-  if ((step.job.status === "passed" || step.job.status === "failed") && isObjectValue(step.job.output)) {
+  if (
+    step.job.status === "completed" &&
+    (step.job.conclusion === "success" || step.job.conclusion === "failure") &&
+    isObjectValue(step.job.output)
+  ) {
     if (Array.isArray(step.job.output.artifacts)) {
       artifacts.push(...(step.job.output.artifacts as readonly unknown[]))
     }
+  }
+  if (step.job.status === "completed" && step.job.conclusion === "failure") {
+    const refusal = isObjectValue(step.job.error.evidence) ? step.job.error.evidence : undefined
+    const candidate = isObjectValue(refusal?.candidateEvidence) ? refusal.candidateEvidence : undefined
+    const parent = isObjectValue(refusal?.parent) ? refusal.parent : undefined
+    const selected = refusal?.phase === "parent" ? (parent ?? candidate ?? refusal) : (candidate ?? parent ?? refusal)
+    for (const evidence of [selected, candidate, parent, refusal]) append(evidence)
   }
   const checkpoint = jobCheckpoint(step.job)
   if (isObjectValue(checkpoint) && Array.isArray(checkpoint.artifacts)) {
@@ -1189,71 +1245,75 @@ function artifactHref(artifact: unknown): string | undefined {
 function stepOutput(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
-  if (job.status === "failed") return safeText((job as JobByStatus<"failed">).output ?? job.error)
-  if (job.status === "passed") return safeText((job as JobByStatus<"passed">).output)
-  if (job.status === "waiting" || job.status === "running") {
+  if (job.status === "completed" && job.conclusion === "failure") return safeText(job.output ?? job.error)
+  if (job.status === "completed" && job.conclusion === "success") return safeText(job.output)
+  if (job.status === "waiting" || job.status === "in_progress") {
     const detail = job.status === "waiting" && typeof job.detail === "string" ? job.detail : undefined
     return detail === undefined ? "waiting" : detail
   }
   return "-"
 }
 
-function queueOutcome(run: QueueRun): "passed" | "integrated" | "rejected" | "canceled" | "running" | "waiting" {
-  if (run.status === "passed") return queueIntegration(run) === undefined ? "passed" : "integrated"
-  if (run.status === "failed") return "rejected"
+function queueOutcome(run: Run): "passed" | "integrated" | "rejected" | "canceled" | "running" | "waiting" {
+  if (run.status === "completed" && run.conclusion === "success") {
+    return queueIntegration(run) === undefined ? "passed" : "integrated"
+  }
+  if (run.status === "completed" && run.conclusion === "cancelled") return "canceled"
+  if (run.status === "completed") return "rejected"
   // "canceled" is a distinct terminal outcome — a canceled run is NOT rejected;
   // its PRs re-queue. "running"/"waiting" fall through unchanged.
-  return run.status
+  return run.status === "waiting" ? "waiting" : "running"
 }
 
-function queueIntegration(run: QueueRun): IntegrationProof | undefined {
+function queueIntegration(run: Run): IntegrationProof | undefined {
   return run.integration ?? ("integration" in run.shape ? run.shape.integration : undefined)
 }
 
-function queueLanding(run: QueueRun): string {
+function queueLanding(run: Run): string {
   const proof = queueIntegration(run)
   if (proof === undefined) return "-"
   return `${proof.commit.slice(0, 12)}@${proof.baseSha.slice(0, 12)}`
 }
 
-function queueOutcomeIntegration(run: QueueRun): IntegrationProof {
+function queueOutcomeIntegration(run: Run): IntegrationProof {
   const proof = queueIntegration(run)
   if (proof === undefined) throw new Error(`yrd: passed run '${run.id}' is missing integration proof`)
   return proof
 }
 
-function isolationPartLabel(run: QueueRun): "0" | "1" | "-" {
+function isolationPartLabel(run: Run): "0" | "1" | "-" {
   return run.isolationPart === undefined ? "-" : run.isolationPart === 0 ? "0" : "1"
 }
 
-function queueShowRetries(finished: readonly QueueRun[], run: QueueRun): number {
+function queueShowRetries(finished: readonly Run[], run: Run): number {
   if (run.prs.length === 0) return 0
   const first = run.prs[0]
   if (first === undefined) return 0
   return runOutputQueueageIndex(finished, run, first.revision, first.id)
 }
 
-function queueState(pr: PR, run: QueueRun | undefined): string {
-  if (run?.status === "running") return "checking"
+function queueState(pr: PR, run: Run | undefined): string {
+  if (run?.status === "queued" || run?.status === "in_progress") return "checking"
   if (run?.status === "waiting") return "waiting"
-  return pr.status
+  if (run?.status === "completed") return terminalOutcome(run)
+  return prDeliveryState(pr)
 }
 
 function stepError(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
-  if (job.status === "failed") return (job as JobByStatus<"failed">).error.message
+  if (job.status === "completed" && job.conclusion === "failure") return job.error.message
   return "-"
 }
 
 function stepErrorCode(step: QueueStep): string {
   const job = step.job
-  return job?.status === "failed" ? (job as JobByStatus<"failed">).error.code : "-"
+  return job?.status === "completed" && job.conclusion === "failure" ? job.error.code : "-"
 }
 
 function stepLost(step: QueueStep): string {
   const job = step.job
-  if (job?.status !== "lost") return "-"
+  if (job?.status !== "completed" || job.conclusion !== "timed_out") return "-"
   return job.lostReason
 }
 
@@ -1261,16 +1321,21 @@ function stepDetail(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
   const outputDetail =
-    (job.status === "passed" || job.status === "failed") && isObjectValue(job.output) ? job.output.detail : undefined
+    job.status === "completed" &&
+    (job.conclusion === "success" || job.conclusion === "failure") &&
+    isObjectValue(job.output)
+      ? job.output.detail
+      : undefined
   if (typeof outputDetail === "string" && outputDetail !== "") return outputDetail
   const detail =
-    job.status === "waiting" || job.status === "passed" || job.status === "failed"
+    job.status === "waiting" ||
+    (job.status === "completed" && (job.conclusion === "success" || job.conclusion === "failure"))
       ? "detail" in job
         ? job.detail
         : undefined
       : undefined
   if (typeof detail === "string" && detail !== "") return detail
-  if (job.status === "failed") return (job as JobByStatus<"failed">).error.message
+  if (job.status === "completed" && job.conclusion === "failure") return job.error.message
   return "-"
 }
 
@@ -1294,9 +1359,9 @@ function stepCommand(step: QueueStep): string | undefined {
 function stepDuration(step: QueueStep): string {
   const job = step.job
   if (job === undefined) return "-"
-  if (job.status === "requested" || job.status === "running" || job.status === "waiting") return "-"
-  if (job.status === "passed" || job.status === "failed" || job.status === "lost") {
-    return duration(job.startedAt, (job as { finishedAt?: string }).finishedAt)
+  if (job.status === "queued" || job.status === "in_progress" || job.status === "waiting") return "-"
+  if (job.status === "completed" && "startedAt" in job) {
+    return duration(job.startedAt, job.finishedAt)
   }
   return "-"
 }
@@ -1423,13 +1488,14 @@ const RECENT_ROW_LIMIT = 3
 // headless resident runner shares this exact vocabulary.
 const statusGlyph = timelineStatusGlyph
 
-function failureFact(
-  run: QueueRun | undefined,
-  step: QueueStep | undefined,
-): { code: string; message: string } | undefined {
+function failureFact(run: Run | undefined, step: QueueStep | undefined): { code: string; message: string } | undefined {
   const job = step?.job
-  if (job?.status === "failed") return { code: job.error.code, message: job.error.message }
-  if (job?.status === "lost") return { code: "job-lost", message: job.lostReason }
+  if (job?.status === "completed" && job.conclusion === "failure") {
+    return { code: job.error.code, message: job.error.message }
+  }
+  if (job?.status === "completed" && job.conclusion === "timed_out") {
+    return { code: "job-lost", message: job.lostReason }
+  }
   return run?.error
 }
 
@@ -1468,10 +1534,9 @@ const TIMELINE_STATUS_ORDER: readonly QueueTimelineStatusFilter[] = [
  */
 export const QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS = 100 * 365 * 24 * 60 * 60 * 1_000
 
-function terminalOutcome(run: QueueRun): QueueTerminalOutcome {
-  if (run.status === "passed") return "integrated"
-  const status = run.status as string
-  if (status === "canceled" || status === "cancelled") return "canceled"
+function terminalOutcome(run: Run): QueueTerminalOutcome {
+  if (run.status === "completed" && run.conclusion === "success") return "integrated"
+  if (run.status === "completed" && run.conclusion === "cancelled") return "canceled"
   const failure = failureFact(run, relevantStep(run))
   if (failure !== undefined && CANCELED_CODES.has(failure.code)) return "canceled"
   if (failure !== undefined && ENVIRONMENT_REFUSAL_CODES.has(failure.code)) return "environment-refused"
@@ -1498,11 +1563,12 @@ function timelineAge(timestamp: string | undefined, nowIso: string, subject: str
 
 function timelineMemberSubject(
   result: QueueStatusResult,
-  member: QueueRun["prs"][number],
+  member: Run["prs"][number],
   state: BaysState | undefined,
 ): string {
   const current = result.prs.find((candidate) => candidate.id === member.id)
-  const isCurrent = current?.revision === member.revision && current.headSha === member.headSha
+  const isCurrent =
+    current !== undefined && prRevisionNumber(current) === member.revision && prHead(current) === member.headSha
   const bayPath = isCurrent && current?.bay !== undefined ? state?.byId[current.bay]?.path : undefined
   return boundedQueue(
     bayPath ??
@@ -1515,20 +1581,20 @@ function timelineMemberSubject(
   )
 }
 
-function timelineRevisionLineage(pr: PR, revision = pr.revision): QueueTimelineRevisionLineage {
-  const retained = pr.revisions?.some((candidate) => candidate.revision === revision)
+function timelineRevisionLineage(pr: PR, revision = prRevisionNumber(pr)): QueueTimelineRevisionLineage {
+  const retained = pr.revs.some((candidate) => candidate.n === revision)
   if (retained !== true) {
     return {
       pr: pr.id,
       revisions: [revision],
-      ...(revision === pr.revision && pr.submittedAt !== undefined ? { sourceReadyAt: pr.submittedAt } : {}),
+      ...(revision === prRevisionNumber(pr) && pr.submittedAt !== undefined ? { sourceReadyAt: pr.submittedAt } : {}),
     }
   }
   const revisions = prRevisionLineage(pr, revision)
   const sourceReadyAt = prSourceReadyAt(pr, revision)
   return {
     pr: pr.id,
-    revisions: revisions.map((candidate) => candidate.revision),
+    revisions: revisions.map((candidate) => candidate.n),
     ...(sourceReadyAt === undefined ? {} : { sourceReadyAt }),
   }
 }
@@ -1550,7 +1616,7 @@ function withTimelineLineage(detail: string, lineages: readonly QueueTimelineRev
   return lineage === undefined ? detail : `${detail} · ${lineage}`
 }
 
-function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
+function timelineQueueWaits(run: Run, submissionTimes: ReadonlyMap<string, string | null>): (number | null)[] {
   return run.prs.map((member) => {
     const runKey = queueRunRevisionKey(run, member)
     const submittedAt = submissionTimes.has(runKey)
@@ -1562,13 +1628,13 @@ function timelineQueueWaits(run: QueueRun, submissionTimes: ReadonlyMap<string, 
 
 function timelineRunMemberRows(
   result: QueueStatusResult,
-  run: QueueRun,
+  run: Run,
   nowIso: string,
   submissionTimes: ReadonlyMap<string, string | null>,
   state: BaysState | undefined,
   attempts: readonly QueueAttempt[],
 ): QueueTimelineProjectedRow[] {
-  const running = run.status === "running" || run.status === "waiting"
+  const running = run.status === "queued" || run.status === "in_progress" || run.status === "waiting"
   const status: QueueTimelineStatus = running ? "running" : terminalOutcome(run)
   const timestamp = running ? toIso(run.startedAt) : run.finishedAt === undefined ? null : toIso(run.finishedAt)
   const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `Run '${run.id}' timeline`)
@@ -1611,7 +1677,7 @@ function timelineRunMemberRows(
     // Member AGE anchors on the causal admission clock of THIS run, so a
     // later resubmission of the same revision can never postdate an earlier
     // run's finish (the 21106 timestamp-crash class).
-    const admission = (current.revisions?.length ?? 0) > 0 ? runRevisionClock(current, run) : undefined
+    const admission = current.revs.length > 0 ? runRevisionClock(current, run) : undefined
     const sourceReadyAt =
       admission === undefined
         ? (lineage.sourceReadyAt ?? submittedAt)
@@ -1661,8 +1727,10 @@ function timelinePendingRows(
   )
   const positions = submittedPrPositions(result.prs)
   return result.prs.flatMap((pr) => {
-    if (pr.status !== "submitted" || activeRevisions.has(queueRevisionKey(pr))) return []
-    const timestamp = submissionTimes.get(queueRevisionKey(pr)) ?? pr.submittedAt ?? null
+    const revision = currentPRRev(pr)
+    const revisionKey = queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head })
+    if (prDeliveryState(pr) !== "submitted" || activeRevisions.has(revisionKey)) return []
+    const timestamp = submissionTimes.get(revisionKey) ?? revision.submittedAt ?? pr.submittedAt ?? null
     const timestampMs = parsedTimelineTimestamp(timestamp ?? undefined, `PR '${pr.id}' submission`)
     const position = positions.get(pr.id)
     const bayPath = pr.bay === undefined ? undefined : state?.byId[pr.bay]?.path
@@ -1673,7 +1741,7 @@ function timelinePendingRows(
     const issue = presentFact(pr.issue)
     return [
       {
-        id: `${pr.base}:pr:${pr.id}:${pr.revision}:${pr.headSha}`,
+        id: `${pr.base}:pr:${pr.id}:${revision.n}:${revision.head}`,
         base: pr.base,
         group: "pending" as const,
         status: "pending" as const,
@@ -1681,8 +1749,8 @@ function timelinePendingRows(
         timestamp,
         timestampMs,
         pr: pr.id,
-        revision: pr.revision,
-        headSha: pr.headSha,
+        revision: revision.n,
+        headSha: revision.head,
         branch: pr.branch,
         ...(issue === undefined ? {} : { issue }),
         subject: boundedQueue(bayPath ?? pr.title ?? pr.name ?? pr.branch, 80),
@@ -1750,23 +1818,26 @@ export function queueTimelineAdmissionTimes(results: readonly QueueStatusResult[
   for (const result of results) {
     const byId = new Map(result.prs.map((pr) => [pr.id, pr]))
     for (const pr of result.prs) {
-      for (const revision of pr.revisions ?? []) {
+      for (const revision of pr.revs) {
         if (revision.submittedAt !== undefined) {
-          submissionTimes.set(queueRevisionKey({ ...revision, id: pr.id }), revision.submittedAt)
+          submissionTimes.set(
+            queueRevisionKey({ id: pr.id, revision: revision.n, headSha: revision.head }),
+            revision.submittedAt,
+          )
         }
       }
-      const current = pr.revisions?.find(
-        (revision) => revision.revision === pr.revision && revision.headSha === pr.headSha,
-      )
+      const current = currentPRRev(pr)
       const submittedAt = current?.submittedAt ?? pr.submittedAt
-      if (submittedAt !== undefined) submissionTimes.set(queueRevisionKey(pr), submittedAt)
+      if (submittedAt !== undefined) {
+        submissionTimes.set(queueRevisionKey({ id: pr.id, revision: current.n, headSha: current.head }), submittedAt)
+      }
     }
     for (const run of [...result.running, ...result.waiting, ...result.finished]) {
       for (const member of run.prs) {
         const pr = byId.get(member.id)
         if (pr === undefined) throw new Error(`yrd: run '${run.id}' has no retained PR '${member.id}'`)
         const runKey = queueRunRevisionKey(run, member)
-        if ((pr.revisions?.length ?? 0) > 0) {
+        if (pr.revs.length > 0) {
           const clock = runRevisionClock(pr, run)
           submissionTimes.set(runKey, clock.admittedBy === "submission" ? clock.submittedAt : null)
           continue
@@ -1940,7 +2011,7 @@ function projectPR(
   result: QueueSummary,
   pr: PR,
   now: number,
-  runOverride?: QueueRun,
+  runOverride?: Run,
 ): HumanPRProjection {
   const run = runOverride ?? latestRun(pr, result)
   const step = relevantStep(run)
@@ -1949,12 +2020,14 @@ function projectPR(
   const revisionClocks = prRevisionClocks(pr)
   const revision =
     run === undefined
-      ? revisionClocks.find((candidate) => candidate.revision === pr.revision && candidate.headSha === pr.headSha)
+      ? revisionClocks.find(
+          (candidate) => candidate.revision === prRevisionNumber(pr) && candidate.headSha === prHead(pr),
+        )
       : runRevisionClock(pr, run)
   const isCurrentRevision =
-    revision === undefined || (revision.revision === pr.revision && revision.headSha === pr.headSha)
+    revision === undefined || (revision.revision === prRevisionNumber(pr) && revision.headSha === prHead(pr))
   const submittedAt = revision?.submittedAt ?? (run === undefined && isCurrentRevision ? pr.submittedAt : undefined)
-  const projectedRevision = revision?.revision ?? pr.revision
+  const projectedRevision = revision?.revision ?? prRevisionNumber(pr)
   const lineage = timelineRevisionLineage(pr, projectedRevision)
   const sourceReadyAt = lineage.sourceReadyAt
   const revisionLineage = lineage.revisions
@@ -1984,18 +2057,18 @@ function projectPR(
   const artifacts = stepArtifacts(step)
   const artifact = artifactHref(artifacts[0])
   const stateLabel = queueState(pr, run)
-  const taskStatus = prTaskStatusOf(pr)
+  const taskStatus = runOverride === undefined || run === undefined ? prTaskStatusOf(pr) : runTaskStatusOf(run)
   const fact = failureFact(run, step)
   const evidence = failureEvidence(step)
   const terminalAt =
     revision?.terminal?.at ??
     runOverride?.finishedAt ??
     (isCurrentRevision
-      ? pr.status === "rejected"
+      ? prDeliveryState(pr) === "rejected"
         ? pr.rejectedAt
-        : pr.status === "integrated"
+        : prDeliveryState(pr) === "integrated"
           ? pr.integratedAt
-          : pr.status === "withdrawn"
+          : prDeliveryState(pr) === "withdrawn"
             ? pr.withdrawnAt
             : undefined
       : undefined)
@@ -2008,7 +2081,7 @@ function projectPR(
     ...(path === undefined ? {} : { prHref: pathToFileURL(path).href, path }),
     branch: pr.branch,
     subject: boundedQueue(pr.title ?? pr.name ?? pr.branch, 80),
-    nativeStatus: pr.status,
+    nativeStatus: prDeliveryState(pr),
     state: stateLabel,
     ...taskStatusFields(taskStatus),
     ...(run === undefined ? {} : { runId: run.id }),
@@ -2066,8 +2139,8 @@ export function humanQueueProjection(
     run.prs.flatMap((member) => {
       const pr = result.prs.find((candidate) => candidate.id === member.id)
       if (pr === undefined) return []
-      if (selected.size === 0 && (pr.status !== "rejected" || run.status !== "failed")) return []
-      if (selected.size > 0 && (!selected.has(pr.id) || pr.status === "submitted")) return []
+      if (selected.size === 0 && (run.status !== "completed" || run.conclusion !== "failure")) return []
+      if (selected.size > 0 && (!selected.has(pr.id) || prDeliveryState(pr) === "submitted")) return []
       return [projectPR(options.state, result, pr, now, run)]
     }),
   )
@@ -2100,7 +2173,7 @@ export function humanQueueProjection(
   }
 }
 
-export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
+export function QueueRunsView({ runs }: { runs: readonly Run[] }) {
   if (runs.length === 0) return <Text color="$fg-muted">Queue idle.</Text>
   const data = runs.map((run) => {
     const taskStatus = runTaskStatusOf(run)
@@ -2130,7 +2203,7 @@ export function QueueRunsView({ runs }: { runs: readonly QueueRun[] }) {
   )
 }
 
-function queueRunSteps(run: QueueRun): string {
+function queueRunSteps(run: Run): string {
   const selection = run.stepSelection
   const omitted = selection !== undefined && "omittedSteps" in selection ? selection.omittedSteps : undefined
   if (omitted === undefined) {
@@ -2184,23 +2257,24 @@ function reviewLabel(eligibility: PREligibility): PRListRow["review"] {
 
 export function prListRows(
   entries: readonly Readonly<{ pr: PR; eligibility: PREligibility }>[],
-  runs: readonly QueueRun[],
+  runs: readonly Run[],
   now: number,
 ): PRListRow[] {
   const summary: QueueSummary = {
     base: "*",
-    running: runs.filter((run) => run.status === "running"),
+    running: runs.filter((run) => run.status === "queued" || run.status === "in_progress"),
     waiting: runs.filter((run) => run.status === "waiting"),
-    finished: runs.filter((run) => run.status === "passed" || run.status === "failed"),
+    finished: runs.filter((run) => run.status === "completed"),
   }
   return entries.map(({ pr, eligibility }) => {
-    if (eligibility.pr !== pr.id || eligibility.revision !== pr.revision) {
+    const revision = prRevisionNumber(pr)
+    if (eligibility.pr !== pr.id || eligibility.revision !== revision) {
       throw new Error(
-        `yrd: PR '${pr.id}' revision ${pr.revision} has mismatched eligibility for '${eligibility.pr}' revision ${eligibility.revision}`,
+        `yrd: PR '${pr.id}' revision ${revision} has mismatched eligibility for '${eligibility.pr}' revision ${eligibility.revision}`,
       )
     }
     if (!eligibility.runnable && eligibility.reason === undefined) {
-      throw new Error(`yrd: PR '${pr.id}' revision ${pr.revision} is ineligible without a typed blocking reason`)
+      throw new Error(`yrd: PR '${pr.id}' revision ${revision} is ineligible without a typed blocking reason`)
     }
     const projected = projectPR(undefined, summary, pr, now)
     return {
@@ -2208,7 +2282,7 @@ export function prListRows(
       state: projected.state,
       stateLabel: `${projected.glyph} ${projected.state}`,
       glyph: projected.glyph,
-      revision: pr.revision,
+      revision,
       lineage: projected.revisionLineage.join("→"),
       subject: projected.subject,
       submitter: revisionSubmitter(pr) ?? "-",
@@ -2353,7 +2427,7 @@ export function PRResultView({
   now,
 }: {
   prs: readonly PR[]
-  runs: readonly QueueRun[]
+  runs: readonly Run[]
   checks?: readonly PRCheckViewRecord[]
   now?: number
 }) {
@@ -2374,7 +2448,7 @@ export function PRResultView({
   )
 }
 
-function latestPRRun(pr: PR, runs: readonly QueueRun[]): QueueRun | undefined {
+function latestPRRun(pr: PR, runs: readonly Run[]): Run | undefined {
   return runs
     .filter((run) => run.prs.some((member) => member.id === pr.id))
     .toSorted(byRunStarted)
@@ -2387,7 +2461,7 @@ export type PRDetailData = Readonly<{
   run?: QueueShowData
 }>
 
-export function prDetailData(pr: PR, runs: readonly QueueRun[], attempts: readonly QueueAttempt[] = []): PRDetailData {
+export function prDetailData(pr: PR, runs: readonly Run[], attempts: readonly QueueAttempt[] = []): PRDetailData {
   const matchingRuns = runs.filter((run) => run.prs.some((member) => member.id === pr.id))
   const details = matchingRuns.map((run) => queueShowData(run, matchingRuns, attempts))
   const latest = latestPRRun(pr, matchingRuns)
@@ -2395,21 +2469,18 @@ export function prDetailData(pr: PR, runs: readonly QueueRun[], attempts: readon
   return { pr, runs: details, ...(run === undefined ? {} : { run }) }
 }
 
-function diagnosticBlocker(
-  pr: PR,
-  run: QueueRun | undefined,
-  step: QueueStep | undefined,
-  now: number,
-): string | undefined {
+function diagnosticBlocker(pr: PR, run: Run | undefined, step: QueueStep | undefined, now: number): string | undefined {
   const job = step?.job
-  if (job?.status === "failed") return actionableFailureSummary(actionableFailure(job.error))
-  if (job?.status === "lost") {
+  if (job?.status === "completed" && job.conclusion === "failure") {
+    return actionableFailureSummary(actionableFailure(job.error))
+  }
+  if (job?.status === "completed" && job.conclusion === "timed_out") {
     return actionableFailureSummary(actionableFailure({ code: "job-lost", message: job.lostReason }))
   }
-  if (job?.status === "canceled") {
+  if (job?.status === "completed" && job.conclusion === "cancelled") {
     return actionableFailureSummary(actionableFailure({ code: "job-canceled", message: job.cancelReason }))
   }
-  if (job?.status === "running") {
+  if (job?.status === "in_progress") {
     const leaseExpiresAt = Date.parse(job.leaseExpiresAt)
     if (Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now) {
       return actionableFailureSummary(
@@ -2434,7 +2505,7 @@ export function PRDetailView({
   position,
 }: {
   pr: PR
-  runs: readonly QueueRun[]
+  runs: readonly Run[]
   attempts?: readonly QueueAttempt[]
   now: number
   position?: number
@@ -2448,9 +2519,11 @@ export function PRDetailView({
   // the current revision's real state is stated above it (user-reported
   // 2026-07-16). A superseded run implies the current revision has no run yet:
   // any run against it would sort newer and be selected here instead.
+  const revision = currentPRRev(pr)
+  const delivery = prDeliveryState(pr)
   const supersededRunRevision =
-    run !== undefined && runMember !== undefined && runMember.revision !== pr.revision ? runMember.revision : undefined
-  const currentStateWord = pr.status === "submitted" ? "pending" : pr.status
+    run !== undefined && runMember !== undefined && runMember.revision !== revision.n ? runMember.revision : undefined
+  const currentStateWord = delivery === "submitted" ? "pending" : delivery
   const activeStep = relevantStep(run)
   const blocker = diagnosticBlocker(pr, run, activeStep, now)
   const landing = pr.integration ?? (run === undefined ? undefined : queueIntegration(run))
@@ -2463,7 +2536,7 @@ export function PRDetailView({
   return (
     <Box flexDirection="column">
       <Text>
-        <QueuePrId pr={pr.id} revision={pr.revision} /> <Text bold>STATUS</Text> <StatusValue value={pr.status} />{" "}
+        <QueuePrId pr={pr.id} revision={revision.n} /> <Text bold>STATUS</Text> <StatusValue value={delivery} />{" "}
         <TaskStatusGlyph taskStatus={projectionFields.taskStatus} glyph={projectionFields.glyph} />
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
@@ -2474,11 +2547,11 @@ export function PRDetailView({
       )}
       <Text>
         <Text bold>SOURCE</Text> <Text color={BRANCH_ICON_COLOR}>{BRANCH_ICON}</Text> {pr.branch} <Text bold>HEAD</Text>{" "}
-        {pr.headSha}
+        {revision.head}
       </Text>
       <Text>
         <Text bold>BASE</Text> {pr.base}
-        {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
+        {revision.baseSha === undefined ? null : `@${revision.baseSha}`}
       </Text>
       {pr.issue === undefined ? null : (
         <Text wrap="truncate">
@@ -2496,7 +2569,7 @@ export function PRDetailView({
       )}
       {supersededRunRevision === undefined ? null : (
         <Text>
-          <Text bold>CURRENT rev {pr.revision}</Text> — {currentStateWord}, no run yet
+          <Text bold>CURRENT rev {revision.n}</Text> — {currentStateWord}, no run yet
         </Text>
       )}
       {detail.run === undefined ? null : (
@@ -2561,7 +2634,7 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
     <Box height={1}>
       <Text wrap="truncate">
         <Text bold>ACTIVE RUN </Text>
-        <QueueRunId base={active.base} run={active.run} /> <QueuePrId pr={active.pr} revision={active.revision} />{" "}
+        <RunId base={active.base} run={active.run} /> <QueuePrId pr={active.pr} revision={active.revision} />{" "}
         {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps}{" "}
         {active.elapsed}
       </Text>
@@ -2655,7 +2728,7 @@ function ProjectionRows({
         <>
           <Box height={1}>
             <Text bold>
-              {projection.recent.some((row) => row.nativeStatus === "rejected") ? "Recent failures" : "Recent results"}
+              {projection.recent.some((row) => row.failure !== undefined) ? "Recent failures" : "Recent results"}
             </Text>
           </Box>
           {projection.recent.map((row, index) => (
@@ -2753,7 +2826,7 @@ export type WatchActiveRow = Readonly<{
   subject: string
   step: string
   steps: string
-  status: QueueRun["status"]
+  status: Run["status"]
   taskStatus: TaskStatus
   glyph: StatusGlyph
   elapsed: string
@@ -2834,7 +2907,7 @@ export function QueueWatchView({
 
 function queueLogSubmissionTime(
   revisionClocks: ReadonlyMap<string, PRRunRevisionClock> | undefined,
-  run: QueueRun,
+  run: Run,
   pr: PinnedPRRevision,
 ): string | undefined {
   if (revisionClocks === undefined) return undefined
@@ -2940,7 +3013,7 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
         ) : (
           <>
             <Text bold>RUN </Text>
-            <QueueRunId base={row.base} run={row.run} />
+            <RunId base={row.base} run={row.run} />
           </>
         )}
       </Text>
@@ -3321,7 +3394,7 @@ function TimelineProjectedRow({
             {runCell.text}
           </Text>
         ) : (
-          <QueueRunId base={row.base} run={row.run} color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate" />
+          <RunId base={row.base} run={row.run} color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate" />
         )
       }
       pr={
@@ -4167,7 +4240,7 @@ export function QueueTimelineView({
                 {meta.isCursor ? "> " : "  "}
                 <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text>{" "}
                 <QueuePrId pr={row.pr} revision={row.revision} />{" "}
-                {row.run === undefined ? "-" : <QueueRunId base={row.base} run={row.run} />} {row.subject}{" "}
+                {row.run === undefined ? "-" : <RunId base={row.base} run={row.run} />} {row.subject}{" "}
                 <Text color="$fg-muted">{row.detail}</Text>
               </Text>
             </Box>
@@ -4182,7 +4255,7 @@ export function queueLogRows(
   results: readonly QueueLogResult[],
   selectedPrs: ReadonlySet<string>,
   prFilter: string | undefined,
-  prStatus?: ReadonlyMap<string, PR["status"]>,
+  prStatus?: ReadonlyMap<string, PRDeliveryState>,
   attempts: readonly QueueLogAttempt[] = [],
   revisionSubjects: ReadonlyMap<string, string> = new Map(),
   revisionClocks?: ReadonlyMap<string, PRRunRevisionClock>,
@@ -4203,7 +4276,7 @@ export function queueLogRows(
           run.steps
             .toReversed()
             .map((step) => step.job)
-            .find((job) => job?.status === "failed")?.error?.message ??
+            .find((job) => job?.status === "completed" && job.conclusion === "failure")?.error?.message ??
           "-"
         const location = runLocation(run)
         const locations = runLocations(run)
@@ -4240,7 +4313,10 @@ export function queueLogRows(
         const submittedAt = queueLogSubmissionTime(revisionClocks, run, pr)
         const ageMs = elapsedMs(submittedAt, finishedAt, `PR '${pr.id}' submitted-to-terminal age`)
         const showLocation = prStatus?.get(pr.id) === "withdrawn" ? undefined : location
-        const taskStatus = runTaskStatusOf({ status: outcome })
+        const taskStatus =
+          outcome === "passed"
+            ? runTaskStatusOf({ status: "completed", conclusion: "success" })
+            : runTaskStatusOf({ status: outcome })
         rows.push({
           run: run.id,
           base: run.base,
@@ -4271,7 +4347,10 @@ export function queueLogRows(
           activeSteps: durations.activeSteps,
           retries: String(Math.max(0, runOutputQueueageIndex(finished, run, pr.revision, pr.id))),
           landing: queueLanding(run),
-          integration: outcome === "integrated" && run.status === "passed" ? queueOutcomeIntegration(run) : undefined,
+          integration:
+            outcome === "integrated" && run.status === "completed" && run.conclusion === "success"
+              ? queueOutcomeIntegration(run)
+              : undefined,
           parent: run.parent ?? "-",
           isolationPart: isolationPartLabel(run),
           result: safeText(run.prs.length > 0 ? run.prs : ["-"]),
@@ -4300,8 +4379,18 @@ export function queueLogRows(
           .flatMap((result) => result.finished)
           .flatMap((run) => run.prs)
           .find((candidate) => candidate.id === prFilter)
-      const headSha = (exampleResult?.headSha ?? "-").slice(0, 40)
-      const baseSha = (exampleResult?.baseSha ?? "-").slice(0, 40)
+      const exampleRevision =
+        exampleResult === undefined
+          ? undefined
+          : "revs" in exampleResult
+            ? currentPRRev(exampleResult)
+            : { n: exampleResult.revision, head: exampleResult.headSha, baseSha: exampleResult.baseSha }
+      const headSha = (exampleRevision?.head ?? "-").slice(0, 40)
+      const baseSha = (exampleRevision?.baseSha ?? "-").slice(0, 40)
+      const exampleKey =
+        exampleResult === undefined || exampleRevision === undefined
+          ? undefined
+          : queueRevisionKey({ id: exampleResult.id, revision: exampleRevision.n, headSha: exampleRevision.head })
       const taskStatus = runTaskStatusOf({ status: "retired" })
       rows.push({
         run: "-",
@@ -4309,11 +4398,11 @@ export function queueLogRows(
         pr: prFilter,
         branch: exampleResult?.branch ?? "-",
         subject:
-          (exampleResult === undefined ? undefined : revisionSubjects.get(queueRevisionKey(exampleResult))) ??
+          (exampleKey === undefined ? undefined : revisionSubjects.get(exampleKey)) ??
           exampleResult?.branch ??
           prFilter,
         ...taskStatusFields(taskStatus),
-        revision: String(exampleResult?.revision ?? 0),
+        revision: String(exampleRevision?.n ?? 0),
         headSha,
         baseSha,
         outcome: "retired",
@@ -4344,8 +4433,8 @@ export function queueLogRows(
     const rightAt = Date.parse(right.started)
     if (Number.isNaN(leftAt) && Number.isNaN(rightAt)) {
       return byRunStarted(
-        { id: left.run, startedAt: left.started, base: left.base } as QueueRun,
-        { id: right.run, startedAt: right.started, base: right.base } as QueueRun,
+        { id: left.run, startedAt: left.started, base: left.base } as Run,
+        { id: right.run, startedAt: right.started, base: right.base } as Run,
       )
     }
     if (Number.isNaN(leftAt)) return 1
@@ -4355,13 +4444,13 @@ export function queueLogRows(
   })
 }
 
-function correlationField(pr: QueueRun["prs"][number] | PR | undefined): Readonly<{ correlation?: Correlation }> {
-  const correlation = pr?.correlation
+function correlationField(pr: Run["prs"][number] | PR | undefined): Readonly<{ correlation?: Correlation }> {
+  const correlation = pr === undefined ? undefined : "revs" in pr ? prCorrelation(pr) : pr.correlation
   if (correlation === undefined) return {}
   return { correlation }
 }
 
-function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
+function queueShowStepRow(run: Run, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const command = stepCommand(step)
@@ -4379,12 +4468,12 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
     attempt: step.job === undefined ? "-" : String(step.job.attempt),
     uuid: step.job?.id ?? "-",
     runner: step.job !== undefined && "runner" in step.job ? step.job.runner : "-",
-    lease: step.job?.status === "running" ? toIso(step.job.leaseExpiresAt) : "-",
+    lease: step.job?.status === "in_progress" ? toIso(step.job.leaseExpiresAt) : "-",
     requested: step.job === undefined ? "-" : toIso(step.job.requestedAt),
     started: step.job === undefined || !("startedAt" in step.job) ? "-" : toIso(step.job.startedAt),
     changed: step.job === undefined ? "-" : toIso(step.job.changedAt),
     finished:
-      step.job === undefined || step.job.status === "running" || step.job.status === "requested"
+      step.job === undefined || step.job.status === "in_progress" || step.job.status === "queued"
         ? "-"
         : toIso((step.job as { finishedAt?: string } | undefined)?.finishedAt),
     duration: step.job === undefined ? "-" : stepDuration(step),
@@ -4405,7 +4494,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   }
 }
 
-function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow {
+function queueShowAttemptRow(run: Run, attempt: QueueAttempt): QueueShowRow {
   const step = run.steps[attempt.index] ?? run.steps.find((candidate) => candidate.name === attempt.step)
   if (step?.job?.id === attempt.job && step.job.attempt === attempt.attempt) {
     return {
@@ -4464,12 +4553,12 @@ function queueShowAttemptRow(run: QueueRun, attempt: QueueAttempt): QueueShowRow
 }
 
 export function queueShowData(
-  run: QueueRun,
-  allRuns: readonly QueueRun[] = [],
+  run: Run,
+  allRuns: readonly Run[] = [],
   attempts: readonly QueueAttempt[] = [],
   revisionClock?: PRRunRevisionClock,
 ): QueueShowData {
-  const finished = allRuns.filter((candidate) => candidate.status === "passed" || candidate.status === "failed")
+  const finished = allRuns.filter((candidate) => candidate.status === "completed")
   const runAttempts = attempts
     .filter((attempt) => attempt.run === run.id)
     .toSorted((left, right) => left.index - right.index || left.attempt - right.attempt)
@@ -4482,6 +4571,7 @@ export function queueShowData(
     run: run.id,
     base: run.base,
     status: run.status,
+    ...(run.conclusion === undefined ? {} : { conclusion: run.conclusion }),
     ...taskStatusFields(taskStatus),
     outcome: queueOutcome(run),
     started: toIso(run.startedAt),
@@ -4496,7 +4586,7 @@ export function queueShowData(
     ...(durations.waitDurationMs === undefined ? {} : { waitDurationMs: durations.waitDurationMs }),
     retries: queueShowRetries(finished, run),
     landing: queueLanding(run),
-    integration: run.status === "passed" ? queueIntegration(run) : undefined,
+    integration: run.status === "completed" && run.conclusion === "success" ? queueIntegration(run) : undefined,
     parent: run.parent ?? "-",
     isolationPart: isolationPartLabel(run),
     ...(runFailure === undefined ? {} : { failure: projectFailure(runFailure) }),
@@ -4589,7 +4679,9 @@ export function QueueLogView({
 
 function queueShowNextAction(data: QueueShowData): string {
   if (data.outcome === "integrated") return "none — landing proof is recorded"
-  if (data.status === "running" || data.status === "waiting") return "follow live output or wait for the current step"
+  if (["queued", "in_progress", "waiting"].includes(data.status)) {
+    return "follow live output or wait for the current step"
+  }
   const actionable = data.failure ?? data.steps.findLast((step) => step.failure !== undefined)?.failure
   if (actionable !== undefined) return actionable.resolution.join("; then ")
   const errorCode = data.steps.find((step) => step.errorCode !== "-")?.errorCode
@@ -4801,13 +4893,13 @@ function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly Que
     const submittedAt = clock.submittedAt ?? clock.pushedAt
     const ageMs = elapsedMs(submittedAt, clock.terminal.at, `PR '${pr.id}' revision ${clock.revision} terminal age`)
     const reason =
-      clock.terminal.status === "rejected"
+      clock.terminal.kind === "rejected"
         ? (runFailureReason(runDetails.find((detail) => detail.run === clock.terminal?.run)) ?? "reason not recorded")
         : undefined
     const suffix = reason !== undefined ? ` (${reason})` : ageMs === undefined ? "" : ` (age ${mediaDuration(ageMs)})`
-    return [`${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.status}${suffix}`]
+    return [`${queueLogClock(clock.terminal.at, true, false)} r${clock.revision} ${clock.terminal.kind}${suffix}`]
   })
-  const submitted = pr.revisions.find((candidate) => candidate.revision === memberRevision)
+  const submitted = pr.revs.find((candidate) => candidate.n === memberRevision)
   if (submitted === undefined) return terminal
   return [
     ...terminal,
@@ -4816,13 +4908,16 @@ function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly Que
 }
 
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
-  const retained = pr.revisions.find((candidate) => candidate.revision === revision)
-  const correlation = retained?.correlation ?? pr.correlation
+  const retained = pr.revs.find((candidate) => candidate.n === revision)
+  const correlation = retained?.correlation
+  const note = presentFact(pr.note)
+  const detail = presentFact(pr.detail)
+  const requestedReviewers = pr.requestedReviewers ?? []
   const facts: Readonly<{ key: string; value: string }>[] = [
-    ...(presentFact(pr.note) === undefined ? [] : [{ key: "note", value: presentFact(pr.note)! }]),
-    ...(presentFact(pr.detail) === undefined ? [] : [{ key: "detail", value: presentFact(pr.detail)! }]),
+    ...(note === undefined ? [] : [{ key: "note", value: note }]),
+    ...(detail === undefined ? [] : [{ key: "detail", value: detail }]),
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
-    { key: "head", value: retained?.headSha ?? pr.headSha },
+    { key: "head", value: retained?.head ?? prHead(pr) },
     { key: "base", value: retained?.base ?? pr.base },
     ...(retained?.recut === undefined ? [] : [{ key: "recut", value: boundedQueue(safeText(retained.recut), 160) }]),
     ...(retained?.composition === undefined
@@ -4840,9 +4935,7 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
       key: "check requested",
       value: queueLogClock(request.at, true, false),
     })),
-    ...((pr.requestedReviewers?.length ?? 0) === 0
-      ? []
-      : [{ key: "requested reviewers", value: pr.requestedReviewers!.join(", ") }]),
+    ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
     ...((pr.regressions?.length ?? 0) === 0
       ? []
       : [{ key: "regressions", value: boundedQueue(safeText(pr.regressions), 160) }]),
@@ -4961,7 +5054,7 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
         return (
           <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
             <Text wrap="truncate" bgConflict="ignore">
-              <QueuePrId pr={pr.id} revision={pr.revision} />
+              <QueuePrId pr={pr.id} revision={prRevisionNumber(pr)} />
               {name === undefined ? "" : ` ${name}`}
             </Text>
             {title === undefined ? null : (
@@ -5002,7 +5095,7 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
             ))}
             {clocks.map((clock, clockIndex) => (
               <Text key={`rev:${clockIndex}`} wrap="truncate">
-                REV {clock.revision} {clock.terminal?.status ?? "open"}{" "}
+                REV {clock.revision} {clock.terminal?.kind ?? "open"}{" "}
                 {detailClock(clock.terminal?.at ?? clock.submittedAt ?? clock.pushedAt)}
               </Text>
             ))}
@@ -5047,7 +5140,7 @@ function queueRunTimingRow(data: QueueShowData): string | undefined {
  * empty `NEXT none`.
  */
 function queueShowNeedsNext(data: QueueShowData): boolean {
-  return data.status === "failed" || data.outcome === "rejected"
+  return data.outcome === "rejected"
 }
 
 /**
@@ -5123,6 +5216,7 @@ function CompactQueueShowView({
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const timing = queueRunTimingRow(data)
+  const selectedStep = data.steps.at(-1)
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
     // detail pane instead of overflowing it (canonical CSS escape hatch).
@@ -5131,7 +5225,7 @@ function CompactQueueShowView({
         <>
           {titleAbove ? null : (
             <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
-              RUN <QueueRunId base={data.base} run={data.run} />
+              RUN <RunId base={data.base} run={data.run} />
               {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status}{" "}
               OUTCOME {data.outcome}
             </Text>
@@ -5156,7 +5250,7 @@ function CompactQueueShowView({
       ) : null}
       {stepFacts ? (
         <>
-          {data.steps.at(-1) === undefined ? null : <QueueStepInternals row={data.steps.at(-1)!} issue={stepIssue} />}
+          {selectedStep === undefined ? null : <QueueStepInternals row={selectedStep} issue={stepIssue} />}
           {data.steps.map((row) => {
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)
@@ -5294,7 +5388,7 @@ export function QueueShowView({
             header: "RUN",
             key: "run",
             minWidth: 8,
-            render: (row) => <QueueRunId base={row.base} run={row.run} />,
+            render: (row) => <RunId base={row.base} run={row.run} />,
           },
           { header: "BASE", key: "base", minWidth: 5 },
           {
@@ -5440,7 +5534,7 @@ function RevisionClockView({
       <Text wrap="wrap">SUBMITTED {clock.submittedAt ?? "-"}</Text>
       <Text wrap="wrap">CHECK REQUESTED {checkRequests.length === 0 ? "-" : checkRequests.join(", ")}</Text>
       <Text wrap="wrap">
-        TERMINAL {clock.terminal?.status ?? "-"} AT {clock.terminal?.at ?? "-"}
+        TERMINAL {clock.terminal?.kind ?? "-"} AT {clock.terminal?.at ?? "-"}
       </Text>
     </Box>
   )
@@ -5452,7 +5546,7 @@ function RunAdmissionClockView({ run }: { run: QueueShowData }) {
   const at = clock.admittedBy === "submission" ? clock.submittedAt : clock.checkRequestedAt
   return (
     <Text wrap="wrap">
-      RUN <QueueRunId base={run.base} run={run.run} /> ADMITTED {clock.admittedBy} AT {at}
+      RUN <RunId base={run.base} run={run.run} /> ADMITTED {clock.admittedBy} AT {at}
     </Text>
   )
 }

@@ -25,7 +25,9 @@ const job = (id = "E1", attempt = 1) => ({ id, attempt, runner: "test", signal: 
 const argv = (value: string) => value.split(" ")
 
 function passed(run: Awaited<ReturnType<ContestRunnerDef["run"]>>) {
-  if (run.status !== "passed") throw new Error(`expected passed result, got ${run.status}`)
+  if (run.status !== "completed" || run.conclusion !== "success") {
+    throw new Error(`expected passed result, got ${run.status}`)
+  }
   return run.output
 }
 
@@ -273,8 +275,8 @@ describe("createAgContestRunner", () => {
     })
 
     const failed = await failedRunner.run(contestInput(bay, { provider: "codex" }), job())
-    expect(failed).toMatchObject({ status: "failed", error: { code: "ag-process-failed" } })
-    if (failed.status === "failed") {
+    expect(failed).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "ag-process-failed" } })
+    if (failed.status === "completed" && failed.conclusion === "failure") {
       const manifestUri = failed.error.message.match(/file:\/\/\S+\/manifest\.json/u)?.[0]
       expect(manifestUri).toBeDefined()
       expect(await Bun.file(artifactPath(manifestUri!)).exists()).toBe(true)
@@ -294,7 +296,7 @@ describe("createAgContestRunner", () => {
       ),
     })
     const noCommit = await noCommitRunner.run(contestInput(bay, { provider: "codex" }), job("E2", 2))
-    expect(noCommit).toMatchObject({ status: "failed", error: { code: "no-commit" } })
+    expect(noCommit).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "no-commit" } })
   })
 
   it("keeps a pre-existing attempt ref immutable", async () => {
@@ -318,7 +320,11 @@ describe("createAgContestRunner", () => {
 
     const outcome = await runner.run(contestInput(bay, { provider: "codex" }), job())
 
-    expect(outcome).toMatchObject({ status: "failed", error: { code: "attempt-ref-conflict" } })
+    expect(outcome).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "attempt-ref-conflict" },
+    })
     expect(await git(repo, "rev-parse", "refs/yrd/attempts/C1/A1")).toBe(baseSha)
   })
 
@@ -336,10 +342,14 @@ describe("createAgContestRunner", () => {
     })
 
     const missingBase = await runner.run(contestInput({ ...bay, baseSha: undefined }, { provider: "codex" }), job())
-    expect(missingBase).toMatchObject({ status: "failed", error: { code: "bay-base-missing" } })
+    expect(missingBase).toMatchObject({
+      status: "completed",
+      conclusion: "failure",
+      error: { code: "bay-base-missing" },
+    })
 
     const dirty = await runner.run(contestInput({ ...bay, dirty: true }, { provider: "codex" }), job("E2"))
-    expect(dirty).toMatchObject({ status: "failed", error: { code: "bay-dirty" } })
+    expect(dirty).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "bay-dirty" } })
     expect(launches).toBe(0)
   })
 
@@ -358,7 +368,7 @@ describe("createAgContestRunner", () => {
 
     const outcome = await runner.run(contestInput(bay, { provider: "codex" }), job("E-timeout"))
 
-    expect(outcome).toMatchObject({ status: "failed", error: { code: "ag-timeout" } })
+    expect(outcome).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "ag-timeout" } })
     const ref = await systemProcess.run({
       argv: ["git", "show-ref", "--verify", "--quiet", "refs/yrd/attempts/C1/A1"],
       cwd: repo,

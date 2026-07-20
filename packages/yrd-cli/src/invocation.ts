@@ -15,6 +15,8 @@ export type FailureVerdict = Readonly<{ exitCode: YrdCliExitCode; failure: Failu
 export type YrdContext = Readonly<{
   /** Git path used to discover the repository and its operation root. */
   repo: string
+  /** Base-relative programmatic config selected by --config. */
+  configPath?: string
   /** One host-owned logging policy shared by every command service. */
   observability: YrdObservability
 }>
@@ -25,6 +27,7 @@ const increaseDiagnostics = (_value: string, previous: number): number => previo
 export function configureYrdGlobalOptions(program: CliCommand): CliCommand {
   return program
     .option("--repo <path>", "repository authority and operation root (env: YRD_REPO)")
+    .option("--config <path>", "base-relative .yrd.ts/.yml config authority")
     .option("-v, --verbose", "increase diagnostics (-vv enables spans, -vvv traces)", increaseDiagnostics, 0)
     .option("-q, --quiet", "reduce diagnostics (-q errors only, -qq silent)", increaseDiagnostics, 0)
     .option("--log-level <level>", "set trace|debug|info|warn|error|silent (env: LOG_LEVEL)")
@@ -54,7 +57,7 @@ const QUEUE_SUBCOMMANDS = new Set([
 function rootCommandIndex(args: readonly string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]
-    if (arg === "--repo" || arg === "--log-level") {
+    if (arg === "--repo" || arg === "--config" || arg === "--log-level") {
       index += 1
       continue
     }
@@ -113,13 +116,14 @@ export function yrdCommandOperand(args: readonly string[]): string | undefined {
 /** Resolve the one repository selector against the captured invocation
  * directory. CLI overrides environment; ambient discovery is the fallback. */
 export function resolveYrdContext(
-  options: Readonly<{ repo?: string }> & YrdObservabilityFlags,
+  options: Readonly<{ repo?: string; config?: string }> & YrdObservabilityFlags,
   env: Readonly<Record<string, string | undefined>>,
   ambientCwd: string,
 ): YrdContext {
   const ambient = resolve(ambientCwd)
   return Object.freeze({
     repo: resolve(ambient, options.repo ?? env.YRD_REPO ?? "."),
+    ...(options.config === undefined ? {} : { configPath: options.config }),
     observability: resolveYrdObservability(options, env),
   })
 }

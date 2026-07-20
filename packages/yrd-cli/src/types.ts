@@ -6,6 +6,7 @@ import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesSt
 import type { HasIssues } from "@yrd/issue"
 import type { OrphanJournalImportResult } from "@yrd/persistence"
 import type { Scope } from "@silvery/scope"
+import type { YrdConfig } from "@yrd/config"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
@@ -38,6 +39,8 @@ export type YrdCliServices = Readonly<{
   queue?: YrdCliQueueAdministration
   recut?: GitPRRecutter
   journal?: YrdCliJournalAdministration
+  /** Live base-authority flow config for deterministic doctor diagnostics. */
+  config?: YrdConfig
 }>
 
 /** Read-only Git facts `pr prune` proves its superseded verdicts with. The

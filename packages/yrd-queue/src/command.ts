@@ -362,7 +362,7 @@ function configuredCommand<Shape extends PRShape>(
         evidence,
       )
     }
-    if (!waiting) return { status: "passed", output: evidence }
+    if (!waiting) return { status: "completed", conclusion: "success", output: evidence }
     try {
       const launch = parseJobLaunch(result.stdout)
       return {
@@ -507,9 +507,10 @@ function compareCommandEvidence(
 }
 
 function comparableCommandEvidence(outcome: JobResult<CommandEvidence>, purpose: string): CommandEvidence | undefined {
-  if (outcome.status === "passed") return outcome.output
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
   if (
-    outcome.status === "failed" &&
+    outcome.status === "completed" &&
+    outcome.conclusion === "failure" &&
     outcome.error.code === `${purpose}-failed` &&
     outcome.output?.diagnostics !== undefined &&
     outcome.output.diagnostics.length > 0 &&
@@ -525,7 +526,7 @@ function comparisonOutcomeError(
   purpose: string,
   phase: "parent" | "candidate",
 ): JobError {
-  if (outcome.status === "failed") return outcome.error
+  if (outcome.status === "completed" && outcome.conclusion === "failure") return outcome.error
   return {
     code: `${purpose}-${phase}-evidence-unavailable`,
     message: `${purpose} ${phase} command returned ${outcome.status} instead of comparable evidence`,
@@ -992,7 +993,8 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
     }
     const patchId = compositionPatchId(rewrites)
     return {
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: {
         headSha: target.sha,
         baseSha: target.sha,
@@ -1004,8 +1006,11 @@ async function recutPR(git: Git, repo: string, input: PRRecutInput): Promise<PRR
       },
     }
   })
-  if (outcome.status === "passed") return outcome.output
-  const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+  const message =
+    outcome.status === "completed" && outcome.conclusion === "failure"
+      ? outcome.error.message
+      : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
 }
 
@@ -1107,7 +1112,8 @@ async function assertCurrentRecutCertificate(
         throw currentCompositionFailure("wrapper paths do not match the current composition")
       }
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           treeSha: tree.stdout,
           patchId: compositionPatchId(receipts),
@@ -1115,8 +1121,11 @@ async function assertCurrentRecutCertificate(
       }
     },
   )
-  if (outcome.status !== "passed") {
-    const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  if (outcome.status !== "completed" || outcome.conclusion !== "success") {
+    const message =
+      outcome.status === "completed" && outcome.conclusion === "failure"
+        ? outcome.error.message
+        : (outcome.detail ?? outcome.token)
     throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
   }
   if (outcome.output.treeSha !== certifiedTreeSha || outcome.output.patchId !== certifiedPatchId) {
@@ -1481,7 +1490,8 @@ async function recutDirectPR(
       }
     }
     return {
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: {
         headSha,
         baseSha: target.sha,
@@ -1491,8 +1501,11 @@ async function recutDirectPR(
       },
     }
   })
-  if (outcome.status === "passed") return outcome.output
-  const message = outcome.status === "failed" ? outcome.error.message : (outcome.detail ?? outcome.token)
+  if (outcome.status === "completed" && outcome.conclusion === "success") return outcome.output
+  const message =
+    outcome.status === "completed" && outcome.conclusion === "failure"
+      ? outcome.error.message
+      : (outcome.detail ?? outcome.token)
   throw createFailure({ kind: "infrastructure", code: "recut-scratch-failed", message: `yrd: ${message}` })
 }
 
@@ -1592,7 +1605,9 @@ async function withScratch<Output extends JsonValue>(
 
   if (operationFailure !== undefined) throw operationFailure
   if (outcome === undefined) throw new Error("scratch worktree produced no result")
-  if (outcome.status === "failed" || cleanupFailure === undefined) return outcome
+  if ((outcome.status === "completed" && outcome.conclusion === "failure") || cleanupFailure === undefined) {
+    return outcome
+  }
   return failed("scratch-cleanup-failed", cleanupFailure)
 }
 
@@ -3224,7 +3239,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
           artifactRoot: options.artifactRoot,
           allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
         },
-        (failure) => failure,
+        (failure) => failed(failure.error.code, failure.error.message, failure.output),
         async (path, candidate): Promise<JobResult<GitCheckResultEvidence>> => {
           const artifactRoot = options.artifactRoot ?? join(repo, ".git", "yrd", "artifacts")
           const configured = (
@@ -3266,9 +3281,10 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               { ...input, targetSha: candidate.candidateSha },
               context,
             )
-            if (outcome.status === "passed") {
+            if (outcome.status === "completed" && outcome.conclusion === "success") {
               return {
-                status: "passed",
+                status: "completed",
+                conclusion: "success",
                 output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
               }
             }
@@ -3282,7 +3298,8 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               }
             }
             return {
-              status: "failed",
+              status: "completed",
+              conclusion: "failure",
               error: outcome.error,
               ...(outcome.output === undefined
                 ? {}
@@ -3315,13 +3332,14 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             )
           }
 
-          if (outcome.status === "passed") {
+          if (outcome.status === "completed" && outcome.conclusion === "success") {
             return {
-              status: "passed",
+              status: "completed",
+              conclusion: "success",
               output: GitCheckEvidenceSchema.parse({ ...outcome.output, ...candidateMetadata }),
             }
           }
-          if (outcome.status !== "failed") {
+          if (outcome.status !== "completed" || outcome.conclusion !== "failure") {
             const error = comparisonOutcomeError(outcome, purpose, "candidate")
             const refusal = GitCheckComparisonRefusalEvidenceSchema.parse({
               ...candidate,
@@ -3345,7 +3363,7 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               kind: "check-comparison-refusal",
               phase: "candidate",
               error,
-              ...(outcome.status === "failed" && outcome.output !== undefined
+              ...(outcome.status === "completed" && outcome.conclusion === "failure" && outcome.output !== undefined
                 ? { candidateEvidence: outcome.output }
                 : {}),
               retryable: true,
@@ -3400,7 +3418,9 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
               kind: "check-comparison-refusal",
               phase: "parent",
               error,
-              ...(parentOutcome.status === "failed" && parentOutcome.output !== undefined
+              ...(parentOutcome.status === "completed" &&
+              parentOutcome.conclusion === "failure" &&
+              parentOutcome.output !== undefined
                 ? { parent: parentOutcome.output }
                 : {}),
               candidateEvidence,
@@ -3420,9 +3440,9 @@ export function gitCheckStep(options: GitCheckOptions): StepRunner<PRShape, GitC
             comparison,
           })
           if (comparison.netNewDiagnostics.length === 0) {
-            return { status: "passed", output: evidence }
+            return { status: "completed", conclusion: "success", output: evidence }
           }
-          return { status: "failed", error: outcome.error, output: evidence }
+          return { status: "completed", conclusion: "failure", error: outcome.error, output: evidence }
         },
       )
     } catch (cause) {
@@ -3542,10 +3562,19 @@ async function validatePinnedCandidate(
 }
 
 type MergeCandidateResult =
-  | Readonly<{ status: "passed"; base: GitQueueTarget; checked: PinnedCandidate }>
-  | Readonly<{ status: "failed"; error: Readonly<{ code: string; message: string }> }>
+  | Readonly<{
+      status: "completed"
+      conclusion: "success"
+      base: GitQueueTarget
+      checked: PinnedCandidate
+    }>
+  | Readonly<{
+      status: "completed"
+      conclusion: "failure"
+      error: Readonly<{ code: string; message: string }>
+    }>
   | Readonly<{ status: "waiting"; token: string; detail?: string }>
-type FailedJobResult = Extract<JobResult<never>, { status: "failed" }>
+type FailedJobResult = Extract<JobResult<never>, { status: "completed"; conclusion: "failure" }>
 
 async function mergeCandidate(
   git: Git,
@@ -3567,22 +3596,27 @@ async function mergeCandidate(
             allowAuthoredGitlinks: options.allowAuthoredGitlinks,
           },
           (failure) => failedWithEvidence(failure.error.code, failure.error.message, failure.output),
-          (_path, candidate) => Promise.resolve({ status: "passed" as const, output: candidate }),
+          (_path, candidate) =>
+            Promise.resolve({ status: "completed" as const, conclusion: "success" as const, output: candidate }),
         )
       : undefined
-  if (prepared?.status === "failed") return prepared
+  if (prepared?.status === "completed" && prepared.conclusion === "failure") return prepared
   if (prepared?.status === "waiting") return prepared
-  const checked = prior ?? prepared?.output
+  const checked =
+    prior ?? (prepared?.status === "completed" && prepared.conclusion === "success" ? prepared.output : undefined)
   if (checked === undefined) throw new Error("yrd: merge candidate preparation produced no candidate")
   const base = await authoritativeQueueBase(git, repo, primaryPR(input).base)
   const validated = await validatePinnedCandidate(git, repo, input, base.sha, checked)
-  return "error" in validated ? { status: "failed", error: validated.error } : { status: "passed", base, checked }
+  return "error" in validated
+    ? { status: "completed", conclusion: "failure", error: validated.error }
+    : { status: "completed", conclusion: "success", base, checked }
 }
 
 function mergeAuthorityCancellation(context: Pick<JobContext, "signal">): FailedJobResult | undefined {
   if (!context.signal.aborted) return undefined
   return {
-    status: "failed",
+    status: "completed",
+    conclusion: "failure",
     error: {
       code: "merge-canceled",
       message: "merge execution authority was canceled or superseded before landing",
@@ -3814,7 +3848,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
       const candidate = await mergeCandidate(git, repo, input, context, {
         allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
       })
-      if (candidate.status !== "passed") return candidate
+      if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const { base, checked } = candidate
       const baseSha = base.sha
       const remote = base.remote
@@ -3849,7 +3883,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
               return failed("merge-push-failed", pushed.stderr || pushed.stdout || `could not update '${branch}'`)
             }
             return {
-              status: "passed",
+              status: "completed",
+              conclusion: "success",
               output: integrationProof(checked.candidateSha, checked),
             }
           },
@@ -3864,7 +3899,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             return failed("invalid-candidate", sourceRefError)
           }
           return {
-            status: "passed",
+            status: "completed",
+            conclusion: "success",
             output: integrationProof(landing.sha, checked),
           }
         }
@@ -3874,7 +3910,7 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
             `queue '${branch}' moved from '${baseSha}' to '${landing.sha}' before the candidate could land`,
           )
         }
-        if (attempted.status === "failed") return attempted
+        if (attempted.status === "completed" && attempted.conclusion === "failure") return attempted
         if (attempted.status === "waiting") throw new Error("native merge cannot wait")
         return failed("merge-verification-failed", `landed '${branch}' does not contain '${missing}'`)
       }
@@ -3922,7 +3958,8 @@ export function gitMergeStep<Shape extends PRShape>(options: GitMergeOptions): S
         if (moved.code !== 0) return failed("stale-base", moved.stderr || "base branch moved")
       }
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: integrationProof(checked.candidateSha, checked),
       }
     } catch (cause) {
@@ -3948,7 +3985,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         artifactRoot: options.artifactRoot,
         allowAuthoredGitlinks: (options.env ?? globalThis.process.env).YRD_ALLOW_AUTHORED_GITLINKS === "1",
       })
-      if (candidate.status !== "passed") return candidate
+      if (candidate.status !== "completed" || candidate.conclusion !== "success") return candidate
       const command = configuredCommandStep<Shape>({
         inject: options.inject,
         command: options.command,
@@ -3979,7 +4016,7 @@ export function configuredMergeStep<Shape extends PRShape>(
         if (refusal !== undefined) {
           return failedWithEvidence(failureFact(cause)?.code ?? "queue-environment-refused", messageOf(cause), refusal)
         }
-        return outcome.status === "failed"
+        return outcome.status === "completed" && outcome.conclusion === "failure"
           ? failed(outcome.error.code, outcome.error.message)
           : failed("merge-verification-failed", messageOf(cause))
       }
@@ -3992,11 +4029,14 @@ export function configuredMergeStep<Shape extends PRShape>(
           return failed("invalid-candidate", sourceRefError)
         }
         return {
-          status: "passed",
+          status: "completed",
+          conclusion: "success",
           output: integrationProof(landing.sha, candidate.checked),
         }
       }
-      if (outcome.status === "failed") return failed(outcome.error.code, outcome.error.message)
+      if (outcome.status === "completed" && outcome.conclusion === "failure") {
+        return failed(outcome.error.code, outcome.error.message)
+      }
       if (outcome.status === "waiting") {
         return failed("merge-command-waited", "merge commands cannot leave a waiting external effect")
       }
@@ -4050,11 +4090,16 @@ function failed<Output extends JsonValue = JsonValue>(
   message: string,
   output?: Output,
 ): JobResult<Output> {
-  return { status: "failed", error: { code, message }, ...(output === undefined ? {} : { output }) }
+  return {
+    status: "completed",
+    conclusion: "failure",
+    error: { code, message },
+    ...(output === undefined ? {} : { output }),
+  }
 }
 
 function failedWithEvidence(code: string, message: string, evidence: JsonValue): JobResult<never> {
-  return { status: "failed", error: { code, message, evidence } }
+  return { status: "completed", conclusion: "failure", error: { code, message, evidence } }
 }
 
 function messageOf(cause: unknown): string {

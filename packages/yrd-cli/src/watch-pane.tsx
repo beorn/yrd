@@ -19,7 +19,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import type { PR } from "@yrd/bay"
+import { prHead, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailRunPrBlocks,
@@ -460,9 +460,7 @@ function syntheticArtifactAttempt(attempt: string | undefined): number {
 function submitClock(data: QueueShowData, prs: readonly PR[]): string {
   const submitted = data.prs.flatMap((member) => {
     const pr = prs.find((candidate) => candidate.id === member.id)
-    const revision = pr?.revisions.find(
-      (candidate) => candidate.revision === member.revision && candidate.headSha === member.headSha,
-    )
+    const revision = pr?.revs.find((candidate) => candidate.n === member.revision && candidate.head === member.headSha)
     const at = revision?.submittedAt ?? revision?.pushedAt
     return at === undefined ? [] : [at]
   })
@@ -700,7 +698,7 @@ export function QueueWorkflowStepTabs({
             <Text>{`${"TIMELINE".padEnd(9, " ")}${submitted.slice(11, 19)} → pending`}</Text>
           )}
           {selectedPr === undefined ? null : (
-            <Text wrap="truncate" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${selectedPr.headSha}`}</Text>
+            <Text wrap="truncate" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${prHead(selectedPr)}`}</Text>
           )}
         </>
       ) : activeStep === undefined ? (
@@ -793,7 +791,7 @@ export function QueueWorkflowStepTabs({
                         <Box height={1} flexShrink={0} />
                         {execution.command === undefined ? null : (
                           <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
-                            <Text bold wrap="truncate">
+                            <Text bold color="$fg" wrap="truncate">
                               $ {execution.command}
                             </Text>
                           </Box>

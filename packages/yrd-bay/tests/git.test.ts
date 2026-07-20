@@ -299,8 +299,12 @@ describe("createGitWorkspace", () => {
       },
     )
 
-    if (provisioned.status === "failed") throw new Error(provisioned.error.message)
-    if (provisioned.status !== "passed") throw new Error("Bay provisioning unexpectedly waited")
+    if (provisioned.status === "completed" && provisioned.conclusion === "failure") {
+      throw new Error(provisioned.error.message)
+    }
+    if (provisioned.status !== "completed" || provisioned.conclusion !== "success") {
+      throw new Error("Bay provisioning unexpectedly waited")
+    }
     expect(await git(provisioned.output.path, ["config", "--worktree", "--get", "remote.pushDefault"])).toMatchObject({
       stdout: "bay",
     })
@@ -342,7 +346,8 @@ describe("createGitWorkspace", () => {
         { id: "provision-B1", attempt: 1, runner: "test", signal: new AbortController().signal },
       ),
     ).resolves.toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "provision-failed", message: expect.stringContaining("could not read worktree config") },
     })
   })

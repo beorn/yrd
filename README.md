@@ -78,20 +78,22 @@ The CLI initializes `.git/yrd/` on the first repository-backed command. Help is
 repository-independent and never creates Yrd state.
 
 Every command accepts one global repository selector. `--repo <path>` (or
-`YRD_REPO`) selects the Git repository, its `.yrd.yml`, durable Yrd state, and
-operation root. Selecting a linked worktree preserves its current-bay and
-current-branch behavior while config and state still resolve through the shared
-repository authority. The CLI value overrides the environment value, which
-overrides discovery from the caller's directory. Relative values resolve
-against that one original caller directory.
+`YRD_REPO`) selects the Git repository, durable Yrd state, and operation root.
+Selecting a linked worktree preserves its current-bay and current-branch
+behavior while config and state still resolve through the shared repository
+authority. The CLI value overrides the environment value, which overrides
+discovery from the caller's directory. Relative values resolve against that one
+original caller directory.
 
 ```console
 $ yrd --repo /work/my-repository/.bays/B1 pr status --json
 ```
 
-The selector is global and may also follow a subcommand. `.yrd.yml` remains the
-only configuration path; there is no separate `--cwd`, `--config`, or `--root`
-surface.
+The selector is global and may also follow a subcommand. Config defaults to the
+base branch's `.yrd.ts`, with `.yrd.yml` as the legacy fallback.
+`--config <path>` selects another base-relative `.ts`, `.yml`, or `.yaml`
+authority; candidate content can never override it. There is no separate
+`--cwd` or `--root` surface.
 
 ```console
 $ cd my-repository
@@ -485,17 +487,17 @@ yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command             | Input                                             | Output and state                                                                        |
-| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
-| `run`               | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
-| `resume`            | Optional base                                     | Removes the queue pause                                                                 |
-| `recover`           | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`            | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`             | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`              | Optional base                                     | Resolves and validates queue environment resources                                      |
-| `deinit`            | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
+| Command              | Input                                             | Output and state                                                                                                      |
+| -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
+| `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
+| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles                                 |
+| `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
+| `recover`            | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                                              |
+| `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
+| `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
+| `init`               | Optional base                                     | Resolves and validates queue environment resources                                                                    |
+| `deinit`             | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command
@@ -728,12 +730,12 @@ the current revision must approve. Comments never gate, and omitting
 `notify` routes an enumerated journal transition without turning delivery into
 a Queue step. Its Tribe intake policy is explicit:
 
-| Signal            | Message type | Delivery | Pending ball        | Deadline   |
-| ----------------- | ------------ | -------- | ------------------- | ---------- |
-| `pr/rejected`     | notify       | pull     | none                | —          |
-| `pr/needs-review` | request      | push     | exact recipient/id  | 10 minutes |
-| `pr/integrated`   | notify       | pull     | none                | —          |
-| `run/failed`      | notify       | pull     | none                | —          |
+| Signal            | Message type | Delivery | Pending ball       | Deadline   |
+| ----------------- | ------------ | -------- | ------------------ | ---------- |
+| `pr/rejected`     | notify       | pull     | none               | —          |
+| `pr/needs-review` | request      | push     | exact recipient/id | 10 minutes |
+| `pr/integrated`   | notify       | pull     | none               | —          |
+| `run/failed`      | notify       | pull     | none               | —          |
 
 `pr/needs-review` is projected from a committed submission only when
 `requires: [review]`. Rejection and Run failure are outcome evidence, so even a

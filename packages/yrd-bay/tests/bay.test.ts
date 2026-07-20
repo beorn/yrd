@@ -15,11 +15,15 @@ import {
   type CommandResult,
 } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
+import { defineConfig, selectFlow, yrd, type FlowPin, type Submission } from "@yrd/config"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
 import {
   GitShaSchema,
+  currentPRRev,
+  prDeliveryState,
   resolveBase,
   type DeprovisionedBay,
+  type PR,
   type ProvisionedBay,
   type RefreshedBay,
 } from "../src/model.ts"
@@ -35,12 +39,22 @@ function ids(): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
-async function createApp(workspace: BayWorkspace, log?: ConditionalLogger, defaultActor?: string) {
+async function createApp(
+  workspace: BayWorkspace,
+  log?: ConditionalLogger,
+  defaultActor?: string,
+  selectSubmissionFlow?: (submission: Submission) => FlowPin,
+) {
   const jobs = createBayJobDefs(workspace)
   const definition = pipe(
     createYrdDef(),
     withJobs({ definitions: jobs }),
-    withBays({ jobs, defaultBase: "main", ...(defaultActor === undefined ? {} : { defaultActor }) }),
+    withBays({
+      jobs,
+      defaultBase: "main",
+      ...(defaultActor === undefined ? {} : { defaultActor }),
+      ...(selectSubmissionFlow === undefined ? {} : { selectFlow: selectSubmissionFlow }),
+    }),
   )
   return createYrd(definition, {
     inject: {
@@ -58,20 +72,33 @@ function createWorkspaceHarness() {
     revision: "test-workspace-v1",
     provision(input): JobResult<ProvisionedBay> {
       workspace.calls.push(`provision:${input.bay}:${input.baseSha ?? "current"}`)
-      return { status: "passed", output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE } }
+      return {
+        status: "completed",
+        conclusion: "success",
+        output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_1, baseSha: BASE },
+      }
     },
     refresh(input): JobResult<RefreshedBay> {
       workspace.calls.push(`refresh:${input.bay}`)
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_2, baseSha: BASE, dirty: workspace.dirty },
       }
     },
     deprovision(input): JobResult<DeprovisionedBay> {
       workspace.calls.push(`deprovision:${input.bay}`)
       return workspace.dirty
-        ? { status: "failed", error: { code: "dirty-worktree", message: "workspace has uncommitted work" } }
-        : { status: "passed", output: { headSha: HEAD_1, preservedRef: `refs/yrd/closed/${input.bay}` } }
+        ? {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "dirty-worktree", message: "workspace has uncommitted work" },
+          }
+        : {
+            status: "completed",
+            conclusion: "success",
+            output: { headSha: HEAD_1, preservedRef: `refs/yrd/closed/${input.bay}` },
+          }
     },
   }
   return { adapter, workspace }
@@ -83,6 +110,11 @@ async function createHarness(log?: ConditionalLogger) {
 }
 
 type TestApp = Awaited<ReturnType<typeof createApp>>
+
+function prFacts(pr: PR | undefined) {
+  if (pr === undefined) throw new Error("expected PR")
+  return { ...pr, delivery: prDeliveryState(pr), current: currentPRRev(pr) }
+}
 
 describe("GitShaSchema", () => {
   it("accepts only native SHA-1 and SHA-256 object widths", () => {
@@ -101,6 +133,70 @@ async function finishJob(app: TestApp, result: CommandResult): Promise<void> {
 }
 
 describe("withBays", () => {
+  it("pins the exactly-one Flow revision and structural fingerprint at PR enrollment", async () => {
+    const config = defineConfig(
+      yrd.flow({
+        name: "docs",
+        rev: "5",
+        on: ({ branch }) => branch.startsWith("docs/"),
+        steps: [yrd.check("check"), yrd.merge()],
+      }),
+      yrd.flow({
+        name: "product",
+        rev: "8",
+        on: ({ branch }) => !branch.startsWith("docs/"),
+        steps: [yrd.check("check"), yrd.merge()],
+      }),
+    )
+    await using app = await createApp(
+      createWorkspaceHarness().adapter,
+      undefined,
+      undefined,
+      (submission) => selectFlow(config, submission).pin,
+    )
+
+    const submitted = await app.bays.submit({ branch: "docs/target-model", headSha: HEAD_1, baseSha: BASE })
+
+    expect(submitted.events).toContainEqual(
+      expect.objectContaining({
+        name: "pr/submitted",
+        data: expect.objectContaining({
+          flow: { name: "docs", rev: "5", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+        }),
+      }),
+    )
+    expect(app.bays.pr("PR1")?.flow).toEqual({
+      name: "docs",
+      rev: "5",
+      fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    })
+  })
+
+  it("projects GitHub-shaped PR state with immutable submitted revisions", async () => {
+    await using app = (await createHarness()).app
+
+    await app.bays.submit({ branch: "topic/target-model", headSha: HEAD_1, base: "main", baseSha: BASE })
+
+    const pr = app.bays.pr("PR1")
+    expect(pr).toMatchObject({
+      id: "PR1",
+      state: "open",
+      merged: false,
+      revs: [{ n: 1, head: HEAD_1, submittedAt: "2026-01-01T00:00:00.000Z" }],
+    })
+    expect(pr).not.toHaveProperty("status")
+    expect(pr).not.toHaveProperty("revision")
+    expect(pr).not.toHaveProperty("headSha")
+    expect(pr).not.toHaveProperty("revisions")
+
+    await app.bays.closePr({ pr: "PR1" })
+    expect(app.bays.pr("PR1")).toMatchObject({
+      state: "closed",
+      merged: false,
+      revs: [{ n: 1, head: HEAD_1 }],
+    })
+  })
+
   it("records the submitting actor on strict current revision facts", async () => {
     await using app = await createApp(createWorkspaceHarness().adapter, undefined, "@agent/7")
 
@@ -110,9 +206,7 @@ describe("withBays", () => {
       expect.objectContaining({ name: "pr/pushed", data: expect.objectContaining({ actor: "@agent/7" }) }),
       expect.objectContaining({ name: "pr/submitted", data: expect.objectContaining({ actor: "@agent/7" }) }),
     ])
-    expect(app.bays.pr("PR1")?.revisions).toEqual([
-      expect.objectContaining({ revision: 1, headSha: HEAD_1, actor: "@agent/7" }),
-    ])
+    expect(app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ n: 1, head: HEAD_1, actor: "@agent/7" })])
   })
 
   it("resolves Bay, PR, and base selectors without changing canonical identity", async () => {
@@ -159,7 +253,12 @@ describe("withBays", () => {
     await app.bays.submit({ branch: "topic/attach-once", headSha: HEAD_1 })
 
     await app.bays.editPr({ pr: "PR1", issue: "@km/all/21091-original" })
-    expect(app.bays.pr("PR1")).toMatchObject({ issue: "@km/all/21091-original", status: "submitted" })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      issue: "@km/all/21091-original",
+      state: "open",
+      merged: false,
+      delivery: "submitted",
+    })
 
     await expect(app.bays.editPr({ pr: "PR1", issue: "@km/all/21091-rehome" })).rejects.toThrow(
       /already linked|withdraw/i,
@@ -171,11 +270,10 @@ describe("withBays", () => {
         issue: "@km/all/21091-rehome",
       }),
     ).rejects.toThrow(/already linked|withdraw/i)
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       issue: "@km/all/21091-original",
-      revision: 1,
-      headSha: HEAD_1,
-      status: "submitted",
+      delivery: "submitted",
+      current: { n: 1, head: HEAD_1 },
     })
   })
 
@@ -192,12 +290,11 @@ describe("withBays", () => {
       run: runtime,
     })
 
-    expect(revised).toMatchObject({
+    expect(prFacts(revised)).toMatchObject({
       id: "PR1",
       issue: explicitIssue,
-      revision: 2,
-      headSha: HEAD_2,
-      status: "submitted",
+      delivery: "submitted",
+      current: { n: 2, head: HEAD_2 },
     })
     await app.close()
   })
@@ -208,21 +305,21 @@ describe("withBays", () => {
     const submitOptions = () => ({ resolveRevision: async () => tip, run: runtime, base: "main" })
 
     const drafted = await app.bays.submitSelection("topic/moving-draft", { ...submitOptions(), draft: true })
-    expect(drafted).toMatchObject({ status: "pushed", revision: 1, headSha: HEAD_1 })
+    expect(prFacts(drafted)).toMatchObject({ delivery: "pushed", current: { n: 1, head: HEAD_1 } })
 
     // The branch advances to a new commit after the draft was pushed. A non-draft
     // re-submit must register the moved head, not reuse the stored revision-1 head.
     tip = HEAD_2
     const resubmitted = await app.bays.submitSelection("topic/moving-draft", submitOptions())
-    expect(resubmitted).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
-    expect(resubmitted.revisions).toMatchObject([
-      { revision: 1, headSha: HEAD_1 },
-      { revision: 2, headSha: HEAD_2 },
+    expect(prFacts(resubmitted)).toMatchObject({ delivery: "submitted", current: { n: 2, head: HEAD_2 } })
+    expect(resubmitted.revs).toMatchObject([
+      { n: 1, head: HEAD_1 },
+      { n: 2, head: HEAD_2 },
     ])
 
     // A further re-submit with the branch unmoved must not manufacture a spurious revision.
     const stable = await app.bays.submitSelection("topic/moving-draft", submitOptions())
-    expect(stable).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
+    expect(prFacts(stable)).toMatchObject({ delivery: "submitted", current: { n: 2, head: HEAD_2 } })
   })
 
   it("rejects a landed branch identity and accepts a fresh delivery-nonce branch", async () => {
@@ -297,11 +394,11 @@ describe("withBays", () => {
     expect(await Array.fromAsync(app.events())).toEqual(before)
 
     const delivered = await app.bays.submitSelection("topic/landed-delivery-r2", submitOptions)
-    expect(delivered).toMatchObject({
+    expect(prFacts(delivered)).toMatchObject({
       id: "PR2",
       branch: "topic/landed-delivery-r2",
-      headSha: HEAD_2,
-      status: "submitted",
+      delivery: "submitted",
+      current: { head: HEAD_2 },
     })
   })
 
@@ -330,7 +427,10 @@ describe("withBays", () => {
     await expect(app.dispatch(app.commands.fixture.staleWithdraw, undefined)).rejects.toThrow(/stale terminal.*PR1/iu)
 
     expect(await Array.fromAsync(app.events())).toEqual(before)
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 2, headSha: HEAD_2 })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "submitted",
+      current: { n: 2, head: HEAD_2 },
+    })
   })
 
   it("replays historical current and legacy terminal payloads without accepting legacy appends", async () => {
@@ -505,22 +605,24 @@ describe("withBays", () => {
       inject: { journal, clock: () => at, id: nextId },
     })
 
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "rejected", issue: issueRef })
-    expect(app.bays.pr("PR1")?.revisions).toEqual([expect.not.objectContaining({ actor: expect.anything() })])
-    expect(app.bays.pr("PR2")).toMatchObject({
-      status: "integrated",
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "rejected", issue: issueRef })
+    expect(app.bays.pr("PR1")?.revs).toEqual([expect.not.objectContaining({ actor: expect.anything() })])
+    expect(prFacts(app.bays.pr("PR2"))).toMatchObject({
+      state: "closed",
+      merged: true,
+      delivery: "integrated",
       issue: issueRef,
       integration: { commit: BASE, baseSha: BASE },
     })
-    expect(app.bays.pr("PR3")).toMatchObject({ status: "withdrawn", issue: issueRef })
-    expect(app.bays.pr("PR4")).toMatchObject({ status: "integrated", terminalRun: "R91" })
-    expect(app.bays.pr("PR5")).toMatchObject({
-      status: "rejected",
+    expect(prFacts(app.bays.pr("PR3"))).toMatchObject({ delivery: "withdrawn", issue: issueRef })
+    expect(prFacts(app.bays.pr("PR4"))).toMatchObject({ delivery: "integrated", terminalRun: "R91" })
+    expect(prFacts(app.bays.pr("PR5"))).toMatchObject({
+      delivery: "rejected",
       terminalRun: "R92",
       detail: "current check failure",
     })
-    expect(app.bays.pr("PR6")).toMatchObject({
-      status: "canceled",
+    expect(prFacts(app.bays.pr("PR6"))).toMatchObject({
+      delivery: "canceled",
       terminalRun: "R93",
       canceledBy: "@ci",
       cancelReason: "superseded",
@@ -631,11 +733,10 @@ describe("withBays", () => {
         data: expect.objectContaining({ correlation }),
       }),
     )
-    expect(app.bays.pr("PR1")).toMatchObject({
-      status: "pushed",
-      revision: 1,
-      correlation,
-      revisions: [{ revision: 1, correlation }],
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "pushed",
+      current: { n: 1, correlation },
+      revs: [{ n: 1, correlation }],
     })
 
     expect((await app.bays.submit({ pr: "PR1", correlation })).events).toEqual([])
@@ -648,11 +749,10 @@ describe("withBays", () => {
 
     const ready = await app.bays.ready({ pr: "PR1" })
     expect(ready.events).toHaveLength(1)
-    expect(app.bays.pr("PR1")).toMatchObject({
-      status: "submitted",
-      revision: 1,
-      correlation,
-      revisions: [{ revision: 1, correlation }],
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "submitted",
+      current: { n: 1, correlation },
+      revs: [{ n: 1, correlation }],
     })
   })
 
@@ -686,26 +786,25 @@ describe("withBays", () => {
     await finishJob(app, refreshed)
     expect(app.bays.get("B1")).toMatchObject({ status: "active", headSha: HEAD_2, baseSha: BASE, dirty: false })
     await app.bays.intake({ bay: "B1", headSha: HEAD_2, baseSha: BASE })
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       id: "PR1",
       bay: "B1",
       branch: "issue/fix-release",
       base: "main",
-      status: "pushed",
-      revision: 2,
-      headSha: HEAD_2,
-      revisions: [
+      delivery: "pushed",
+      current: { n: 2, head: HEAD_2 },
+      revs: [
         {
-          revision: 1,
-          headSha: HEAD_1,
+          n: 1,
+          head: HEAD_1,
           base: "main",
           baseSha: BASE,
           pushedAt: "2026-01-01T00:00:00.000Z",
           submittedAt: "2026-01-01T00:00:00.000Z",
         },
         {
-          revision: 2,
-          headSha: HEAD_2,
+          n: 2,
+          head: HEAD_2,
           base: "main",
           baseSha: BASE,
           pushedAt: "2026-01-01T00:00:00.000Z",
@@ -719,19 +818,19 @@ describe("withBays", () => {
     workspace.dirty = true
     const refused = await app.bays.close({ bay: "B1", withdraw: true })
     await finishJob(app, refused)
-    expect(app.bays.state()).toMatchObject({
-      prs: {
-        PR1: {
-          status: "withdrawn",
-          revisions: [
-            { revision: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
-            {
-              revision: 2,
-              terminal: { status: "withdrawn", at: "2026-01-01T00:00:00.000Z" },
-            },
-          ],
+    expect(prFacts(app.bays.state().prs.PR1)).toMatchObject({
+      state: "closed",
+      merged: false,
+      delivery: "withdrawn",
+      revs: [
+        { n: 1, submittedAt: "2026-01-01T00:00:00.000Z" },
+        {
+          n: 2,
+          terminal: { kind: "withdrawn", at: "2026-01-01T00:00:00.000Z" },
         },
-      },
+      ],
+    })
+    expect(app.bays.state()).toMatchObject({
       byId: { B1: { status: "active", failure: { code: "dirty-worktree" } } },
     })
 
@@ -858,7 +957,11 @@ describe("withBays", () => {
       ...harness.adapter,
       revision: "legacy-workspace-v1",
       deprovision(input): JobResult<DeprovisionedBay> {
-        return { status: "passed", output: { preservedRef: `refs/yrd/closed/${input.bay}` } }
+        return {
+          status: "completed",
+          conclusion: "success",
+          output: { preservedRef: `refs/yrd/closed/${input.bay}` },
+        }
       },
     }
     await using app = await createApp(adapter)
@@ -926,12 +1029,18 @@ describe("withBays", () => {
     await app.bays.submit({ branch: "release/fix", headSha: HEAD_1, base: "release/2.0", name: "release-fix" })
     await app.bays.submit({ branch: "hotfix/next", headSha: HEAD_2 })
 
-    expect(app.bays.state()).toMatchObject({
-      byId: {},
-      prs: {
-        PR1: { branch: "release/fix", base: "release/2.0", status: "submitted", headSha: HEAD_1 },
-        PR2: { branch: "hotfix/next", base: "main", status: "submitted", headSha: HEAD_2 },
-      },
+    expect(app.bays.state().byId).toEqual({})
+    expect(prFacts(app.bays.state().prs.PR1)).toMatchObject({
+      branch: "release/fix",
+      base: "release/2.0",
+      delivery: "submitted",
+      current: { head: HEAD_1 },
+    })
+    expect(prFacts(app.bays.state().prs.PR2)).toMatchObject({
+      branch: "hotfix/next",
+      base: "main",
+      delivery: "submitted",
+      current: { head: HEAD_2 },
     })
     await expect(app.bays.submit({ branch: "release/fix", headSha: HEAD_2 })).rejects.toThrow(
       "branch 'release/fix' already has live PR 'PR1'",
@@ -944,7 +1053,10 @@ describe("withBays", () => {
     await using app = (await createHarness()).app
 
     await app.bays.submit({ branch: "issue/review-me", headSha: HEAD_1, draft: true })
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 1, headSha: HEAD_1 })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "pushed",
+      current: { n: 1, head: HEAD_1 },
+    })
     const requestChecks = async (baseSha: string) =>
       (await app.bays.requestChecks({ pr: "PR1", baseSha })).events.map(({ name, data }) => ({ name, data }))
     const fact = (baseSha: string) => [
@@ -990,18 +1102,21 @@ describe("withBays", () => {
       current: { revision: 1, headSha: HEAD_1, actor: "@cto", decision: "approve", ref: "verdict-1" },
       stale: [],
     })
-    expect(app.bays.pr("PR1")).toMatchObject({
-      status: "pushed",
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "pushed",
       reviews: [{ revision: 1, headSha: HEAD_1, decision: "approve", actor: "@cto", ref: "verdict-1" }],
       comments: [{ revision: 1, headSha: HEAD_1, actor: "@cto", ref: "dialog-1" }],
     })
 
     expect((await app.bays.ready({ pr: "PR1" })).events).toHaveLength(1)
     expect((await app.bays.ready({ pr: "PR1" })).events).toHaveLength(0)
-    expect(app.bays.pr("PR1")?.status).toBe("submitted")
+    expect(prFacts(app.bays.pr("PR1")).delivery).toBe("submitted")
 
     await app.bays.intake({ branch: "issue/review-me", headSha: HEAD_2, base: "main" })
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 2, headSha: HEAD_2 })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "pushed",
+      current: { n: 2, head: HEAD_2 },
+    })
     expect(app.bays.reviewState("PR1")).toMatchObject({
       approved: false,
       stale: [{ revision: 1, headSha: HEAD_1, decision: "approve", ref: "verdict-1" }],
@@ -1014,7 +1129,11 @@ describe("withBays", () => {
     await using app = (await createHarness()).app
 
     await app.bays.submit({ branch: "issue/request-review", headSha: HEAD_1 })
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 1, requestedReviewers: [] })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "submitted",
+      current: { n: 1 },
+      requestedReviewers: [],
+    })
     expect(app.bays.needsReview("PR1")).toBe(false)
 
     const arbitraryActor = "reviewer id/with spaces:7"
@@ -1064,7 +1183,7 @@ describe("withBays", () => {
     expect(app.bays.needsReview("PR1", "@agent/5")).toBe(true)
 
     await app.bays.intake({ branch: "issue/needs-review", headSha: HEAD_2, base: "main" })
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 2 })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "pushed", current: { n: 2 } })
     expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto", "@agent/5"])
     expect(app.bays.needsReview("PR1")).toBe(false)
 
@@ -1092,7 +1211,7 @@ describe("withBays", () => {
       patchId: "d".repeat(40),
       reviewCarried: false,
     })
-    expect(app.bays.pr("PR1")).toMatchObject({ status: "pushed", revision: 2 })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ delivery: "pushed", current: { n: 2 } })
     expect(app.bays.pr("PR1")?.requestedReviewers).toEqual(["@cto"])
 
     await app.bays.ready({ pr: "PR1" })
@@ -1169,8 +1288,8 @@ describe("withBays", () => {
       inject: { journal, clock: () => at, id: nextId },
     })
 
-    expect(app.bays.pr("PR1")).toMatchObject({
-      status: "submitted",
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      delivery: "submitted",
       requestedReviewers: ["@agent/5", "@cto"],
     })
     expect(app.bays.needsReview("PR1")).toBe(true)
@@ -1226,20 +1345,22 @@ describe("withBays", () => {
         },
       }),
     )
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       id: "PR1",
       branch: "issue/recut",
-      status: "pushed",
-      revision: 2,
-      headSha: HEAD_2,
-      baseSha: nextBase,
-      correlation,
-      recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
-      revisions: [
-        { revision: 1, headSha: HEAD_1, correlation },
+      delivery: "pushed",
+      current: {
+        n: 2,
+        head: HEAD_2,
+        baseSha: nextBase,
+        correlation,
+        recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
+      },
+      revs: [
+        { n: 1, head: HEAD_1, correlation },
         {
-          revision: 2,
-          headSha: HEAD_2,
+          n: 2,
+          head: HEAD_2,
           baseSha: nextBase,
           correlation,
           recut: { fromRevision: 1, patchId, treeSha, reviewCarried: true },
@@ -1290,17 +1411,16 @@ describe("withBays", () => {
     })
 
     const pr = app.bays.pr("PR1")
-    expect(pr).toMatchObject({
-      revision: 3,
-      headSha: "3".repeat(40),
-      revisions: [
-        { revision: 1, headSha: HEAD_1 },
-        { revision: 2, headSha: HEAD_2, recut: { fromRevision: 1, treeSha, patchId } },
-        { revision: 3, headSha: "3".repeat(40) },
+    expect(prFacts(pr)).toMatchObject({
+      current: { n: 3, head: "3".repeat(40) },
+      revs: [
+        { n: 1, head: HEAD_1 },
+        { n: 2, head: HEAD_2, recut: { fromRevision: 1, treeSha, patchId } },
+        { n: 3, head: "3".repeat(40) },
       ],
     })
-    expect(pr?.recut).toBeUndefined()
-    expect(pr?.revisions[2]?.recut).toBeUndefined()
+    expect(pr === undefined ? undefined : currentPRRev(pr).recut).toBeUndefined()
+    expect(pr?.revs[2]?.recut).toBeUndefined()
   })
 
   it("keeps the selected immutable revision correlation when recutting an older payload", async () => {
@@ -1326,13 +1446,12 @@ describe("withBays", () => {
       reviewCarried: false,
     })
 
-    expect(app.bays.pr("PR1")).toMatchObject({
-      revision: 3,
-      correlation: sourceCorrelation,
-      revisions: [
-        { revision: 1, correlation: sourceCorrelation },
-        { revision: 2, correlation: currentCorrelation },
-        { revision: 3, correlation: sourceCorrelation, recut: { fromRevision: 1 } },
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      current: { n: 3, correlation: sourceCorrelation },
+      revs: [
+        { n: 1, correlation: sourceCorrelation },
+        { n: 2, correlation: currentCorrelation },
+        { n: 3, correlation: sourceCorrelation, recut: { fromRevision: 1 } },
       ],
     })
 
@@ -1348,8 +1467,8 @@ describe("withBays", () => {
       patchId: "d".repeat(40),
       reviewCarried: false,
     })
-    expect(app.bays.pr("PR2")?.correlation).toBeUndefined()
-    expect(app.bays.pr("PR2")?.revisions[2]?.correlation).toBeUndefined()
+    expect(prFacts(app.bays.pr("PR2")).current.correlation).toBeUndefined()
+    expect(app.bays.pr("PR2")?.revs[2]?.correlation).toBeUndefined()
   })
 
   it("refuses to append check requests to terminal PR history", async () => {
@@ -1381,12 +1500,14 @@ describe("withBays", () => {
       },
     })
 
-    expect(app.bays.pr("PR1")).toMatchObject({
-      composition: {
-        version: 1,
-        sources: [{ repo: "vendor/example", payload: ["src/a.ts", "src/z.ts"] }],
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      current: {
+        composition: {
+          version: 1,
+          sources: [{ repo: "vendor/example", payload: ["src/a.ts", "src/z.ts"] }],
+        },
       },
-      revisions: [
+      revs: [
         {
           composition: {
             version: 1,
@@ -1435,6 +1556,7 @@ describe("withBays", () => {
       },
     })
     const original = app.bays.pr("PR1")
+    const originalComposition = original === undefined ? undefined : currentPRRev(original).composition
 
     const canonicalRepeat = await app.bays.submitSelection("issue/composed", {
       composition: {
@@ -1457,9 +1579,9 @@ describe("withBays", () => {
       run: runtime,
     })
 
-    expect(canonicalRepeat).toMatchObject({ revision: 1, composition: original?.composition })
-    expect(omittedRepeat).toMatchObject({ revision: 1, composition: original?.composition })
-    expect(app.bays.pr("PR1")?.revisions).toHaveLength(1)
+    expect(prFacts(canonicalRepeat)).toMatchObject({ current: { n: 1, composition: originalComposition } })
+    expect(prFacts(omittedRepeat)).toMatchObject({ current: { n: 1, composition: originalComposition } })
+    expect(app.bays.pr("PR1")?.revs).toHaveLength(1)
     await app.close()
   })
 
@@ -1469,17 +1591,17 @@ describe("withBays", () => {
     // Direct (bayless) submission — the superseded-PR shape with no Bay to close.
     await app.bays.submit({ branch: "issue/chief-state-20979-r1", headSha: HEAD_1 })
     const live = app.bays.pr("PR1")
-    expect(live).toMatchObject({ id: "PR1", status: "submitted" })
+    expect(prFacts(live)).toMatchObject({ id: "PR1", state: "open", merged: false, delivery: "submitted" })
     expect(live?.bay).toBeUndefined()
 
     // PR-native close requires no Bay.
     await app.bays.closePr({ pr: "PR1" })
     const closed = app.bays.pr("PR1")
-    // "withdrawn" is exactly the status the Queue and status view exclude from OPEN selection.
-    expect(closed).toMatchObject({ id: "PR1", status: "withdrawn" })
+    // Closed and unmerged is exactly the GitHub shape Queue selection excludes.
+    expect(prFacts(closed)).toMatchObject({ id: "PR1", state: "closed", merged: false, delivery: "withdrawn" })
     expect(closed?.withdrawnAt).toBe("2026-01-01T00:00:00.000Z")
     // History remains: the PR still resolves and keeps its revision trail.
-    expect(closed?.revisions).toHaveLength(1)
+    expect(closed?.revs).toHaveLength(1)
     // A pure state transition — no bay/workspace job runs.
     expect(workspace.calls).toEqual([])
 
@@ -1500,7 +1622,7 @@ describe("withBays", () => {
     // The same verb resolves a bay-backed PR by its branch spelling.
     await app.bays.submit({ branch: "issue/other", headSha: HEAD_2 })
     await app.bays.closePr({ pr: "issue/other" })
-    expect(app.bays.pr("PR2")).toMatchObject({ status: "withdrawn" })
+    expect(prFacts(app.bays.pr("PR2"))).toMatchObject({ state: "closed", merged: false, delivery: "withdrawn" })
 
     await app.close()
   })
@@ -1515,7 +1637,12 @@ describe("withBays", () => {
     }
 
     const bayPR = await app.bays.submitSelection("B1", { resolveRevision, run: runtime })
-    expect(bayPR).toMatchObject({ bay: "B1", status: "submitted", headSha: HEAD_2, base: "main" })
+    expect(prFacts(bayPR)).toMatchObject({
+      bay: "B1",
+      delivery: "submitted",
+      current: { head: HEAD_2 },
+      base: "main",
+    })
     expect(workspace.calls).toEqual([`provision:B1:current`, "refresh:B1"])
 
     const branchPR = await app.bays.submitSelection("release/fix", {
@@ -1523,7 +1650,12 @@ describe("withBays", () => {
       resolveRevision,
       run: runtime,
     })
-    expect(branchPR).toMatchObject({ branch: "release/fix", status: "submitted", headSha: HEAD_1, base: "release/2.0" })
+    expect(prFacts(branchPR)).toMatchObject({
+      branch: "release/fix",
+      delivery: "submitted",
+      current: { head: HEAD_1 },
+      base: "release/2.0",
+    })
     expect(resolved).toEqual(["release/fix"])
 
     workspace.dirty = true
@@ -1537,7 +1669,7 @@ describe("withBays", () => {
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     const { app } = await createHarness(log)
     await app.bays.intake({ branch: "issue/feature", base: "main", headSha: HEAD_1, baseSha: BASE })
-    expect(app.bays.pr("PR1")).toMatchObject({ branch: "issue/feature", status: "pushed" })
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({ branch: "issue/feature", delivery: "pushed" })
 
     const options = {
       base: "main",
@@ -1547,8 +1679,8 @@ describe("withBays", () => {
     const submitted = await app.bays.submitSelection("PR1", options)
     const repeated = await app.bays.submitSelection("origin/issue/feature", options)
 
-    expect(submitted).toMatchObject({ id: "PR1", branch: "issue/feature", status: "submitted" })
-    expect(repeated).toMatchObject({ id: "PR1", status: "submitted" })
+    expect(prFacts(submitted)).toMatchObject({ id: "PR1", branch: "issue/feature", delivery: "submitted" })
+    expect(prFacts(repeated)).toMatchObject({ id: "PR1", delivery: "submitted" })
     expect(Object.keys(app.bays.state().prs)).toEqual(["PR1"])
     expect(
       events.filter(
@@ -1578,10 +1710,10 @@ describe("withBays", () => {
       title: "feat(bay): add pr metadata",
       description: "Adds a durable title and description to the PR record.",
     })
-    expect(app.bays.pr("PR1")).toMatchObject({
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
       title: "feat(bay): add pr metadata",
       description: "Adds a durable title and description to the PR record.",
-      status: "submitted",
+      delivery: "submitted",
     })
 
     // Unlike the immutable issue join, title and description are editable metadata.
@@ -1604,8 +1736,8 @@ describe("withBays", () => {
       title: "fix(queue): scope superseded runs",
       description: "Scopes superseded-revision runs in the watch detail pane.",
     })
-    expect(submitted).toMatchObject({
-      status: "submitted",
+    expect(prFacts(submitted)).toMatchObject({
+      delivery: "submitted",
       title: "fix(queue): scope superseded runs",
       description: "Scopes superseded-revision runs in the watch detail pane.",
     })
@@ -1625,9 +1757,8 @@ describe("withBays", () => {
     await submit({ title: "feat: carried title", description: "Carried description body." })
     tip = HEAD_2
     const resubmitted = await submit()
-    expect(resubmitted).toMatchObject({
-      revision: 2,
-      headSha: HEAD_2,
+    expect(prFacts(resubmitted)).toMatchObject({
+      current: { n: 2, head: HEAD_2 },
       title: "feat: carried title",
       description: "Carried description body.",
     })
@@ -1653,9 +1784,8 @@ describe("withBays", () => {
       patchId: "d".repeat(40),
       reviewCarried: false,
     })
-    expect(app.bays.pr("PR1")).toMatchObject({
-      revision: 2,
-      headSha: HEAD_2,
+    expect(prFacts(app.bays.pr("PR1"))).toMatchObject({
+      current: { n: 2, head: HEAD_2 },
       issue: "@km/all/21091-issue",
       title: "feat: recut carries metadata",
       description: "Recut must not drop the authored title or description.",

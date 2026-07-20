@@ -11,8 +11,9 @@ import { join, relative } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { currentPRRev, prBaseSha, prDeliveryState } from "@yrd/bay"
 import { createFailure, createMemoryJournal } from "@yrd/core"
-import { GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
+import { CommandEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal } from "@yrd/persistence"
 import { createProcess } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
@@ -98,6 +99,14 @@ async function repository(): Promise<{ repo: string; featureSha: string }> {
   const featureSha = await git(repo, "rev-parse", "HEAD")
   await git(repo, "switch", "-q", "main")
   return { repo, featureSha }
+}
+
+/** Install legacy spelling on the base branch: config authority is the base,
+ * never the operator worktree's uncommitted bytes (design C5). */
+async function commitYrdConfig(repo: string, source: string): Promise<void> {
+  await writeFile(join(repo, ".yrd.yml"), source)
+  await git(repo, "add", ".yrd.yml")
+  await git(repo, "commit", "-qm", "test Yrd config")
 }
 
 async function compositionRepository(): Promise<{
@@ -223,7 +232,9 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       events.length = 0
       const restored = await createApp()
       try {
-        expect(restored.state().bays.prs.PR1).toMatchObject({ branch: "issue/feature", headSha: featureSha })
+        const restoredPR = restored.state().bays.prs.PR1!
+        expect(restoredPR).toMatchObject({ branch: "issue/feature" })
+        expect(currentPRRev(restoredPR)).toMatchObject({ head: featureSha })
         expect(events).toContainEqual(
           expect.objectContaining({
             kind: "span",
@@ -271,7 +282,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       batchSize: 1,
       defaultSteps: ["security", "merge", "publish"],
     })
-    expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "intake", "submit", "close"])
+    expect(Object.keys(app.commands.bay)).toEqual(["open", "refresh", "certifyHandoff", "intake", "submit", "close"])
     expect(Object.keys(app.commands.pr)).toEqual([
       "close",
       "edit",
@@ -292,7 +303,7 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     const run = (await app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
-    expect(run.status).toBe("passed")
+    expect(run).toMatchObject({ status: "completed", conclusion: "success" })
     expect(run.steps.map((step) => step.name)).toEqual(["security", "merge", "publish"])
     expect(await git(repo, "merge-base", "--is-ancestor", featureSha, "main")).toBe("")
     const evaluatorRevision = app.jobs.definition("contest.evaluator.security").revision
@@ -352,11 +363,84 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "origin/main" })
 
-    expect(app.state().bays.prs.PR1).toMatchObject({ base: "main", baseSha })
+    const submittedPR = app.state().bays.prs.PR1!
+    expect(submittedPR).toMatchObject({ base: "main" })
+    expect(prBaseSha(submittedPR)).toBe(baseSha)
     await expect(
       app.bays.submit({ branch: "origin/issue/feature", headSha: featureSha, base: "main" }),
     ).rejects.toThrow("payload already recorded as PR 'PR1'")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
+  })
+
+  it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
+    const { repo, featureSha } = await repository()
+    const addFeature = async (branch: string, file: string): Promise<string> => {
+      await git(repo, "switch", "-qc", branch)
+      await writeFile(join(repo, file), `${branch}\n`)
+      await git(repo, "add", file)
+      await git(repo, "commit", "-qm", `${branch} feature`)
+      const sha = await git(repo, "rev-parse", "HEAD")
+      await git(repo, "switch", "-q", "main")
+      return sha
+    }
+    const secondSha = await addFeature("issue/second", "second.txt")
+    const thirdSha = await addFeature("issue/third", "third.txt")
+    const fourthSha = await addFeature("issue/fourth", "fourth.txt")
+
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "issue/feature", "issue/second", "issue/third", "issue/fourth")
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 2,
+      steps: ["check"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const commands: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const tracedProcess = {
+      run: async (request: Parameters<typeof runtimeProcess.run>[0]) => {
+        commands.push([...request.argv])
+        return runtimeProcess.run(request)
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: tracedProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+    await app.bays.submit({ branch: "issue/third", headSha: thirdSha, base: "main" })
+    await app.bays.submit({ branch: "issue/fourth", headSha: fourthSha, base: "main" })
+    commands.length = 0
+
+    const runCycle = async (prs: readonly [string, string]): Promise<void> => {
+      for (const pr of prs) await app.bays.requestChecks({ pr })
+      commands.length = 0
+      const runs = await app.queue.run(
+        { prs: [...prs] },
+        { runner: "test", leaseMs: 60_000, continueAdmissions: () => false },
+      )
+      const rootFetches = commands.filter(
+        (argv) => argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && argv[3] === "fetch",
+      )
+      expect(runs).toEqual([])
+      // Every same-base PR shares this cycle's one authoritative root refresh.
+      expect(rootFetches).toHaveLength(1)
+      expect(rootFetches.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
+      commands.length = 0
+    }
+
+    await runCycle(["PR1", "PR2"])
+    await runCycle(["PR3", "PR4"])
   })
 
   it("refreshes queue authority without touching dirty behind operator main", async () => {
@@ -398,7 +482,8 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
       run: { runner: "test", leaseMs: 60_000 },
     })
 
-    expect(submitted).toMatchObject({ revision: 1, headSha: featureSha, baseSha: remoteBaseSha, status: "submitted" })
+    expect(currentPRRev(submitted)).toMatchObject({ n: 1, head: featureSha, baseSha: remoteBaseSha })
+    expect(prDeliveryState(submitted)).toBe("submitted")
     expect(await git(repo, "rev-parse", "main")).toBe(localBaseSha)
     expect(await readFile(join(repo, "operator-wip.txt"), "utf8")).toBe("preserve these bytes\n")
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
@@ -434,8 +519,14 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 
     const runs = await queueHost.queue.run({}, { runner: "test", leaseMs: 60_000 })
 
-    expect(runs).toEqual([expect.objectContaining({ status: "passed", prs: [expect.objectContaining({ id: "PR1" })] })])
-    expect(queueHost.state().bays.prs.PR1).toMatchObject({ status: "integrated" })
+    expect(runs).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        conclusion: "success",
+        prs: [expect.objectContaining({ id: "PR1" })],
+      }),
+    ])
+    expect(prDeliveryState(queueHost.state().bays.prs.PR1!)).toBe("integrated")
   })
 
   it("uses steps.merge.run as the configured merge step", async () => {
@@ -468,7 +559,11 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     const run = (await app.queue.run({}, { runner: "test", leaseMs: 60_000 }))[0]!
     const landing = await git(repo, "rev-parse", "main")
 
-    expect(run).toMatchObject({ status: "passed", integration: { commit: landing, baseSha: landing } })
+    expect(run).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      integration: { commit: landing, baseSha: landing },
+    })
     expect(await Bun.file(join(repo, "delegated-merge.marker")).exists()).toBe(true)
   })
 
@@ -504,16 +599,16 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
-  it("routes a rejected Run to its revision submitter without awaiting delivery", async () => {
+  it("routes a failed Run to its revision submitter without awaiting delivery", async () => {
     const { repo, featureSha } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main
 steps: [check, merge]
 check: { run: "printf 'focused failure\\n' >&2; exit 1" }
 merge: {}
 notify:
-  pr/rejected: [submitter]
+  run/failed: [submitter]
 `,
     )
     const entered = Promise.withResolvers<void>()
@@ -534,7 +629,7 @@ notify:
     })
     try {
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
-      expect(host.app.bays.pr("PR1")?.revisions).toEqual([expect.objectContaining({ actor: "@agent/7" })])
+      expect(host.app.bays.pr("PR1")?.revs).toEqual([expect.objectContaining({ actor: "@agent/7" })])
 
       const settled = await Promise.race([
         host.app.queue
@@ -543,16 +638,20 @@ notify:
         Bun.sleep(1_000).then(() => ({ kind: "timeout" as const })),
       ])
 
-      expect(settled).toMatchObject({ kind: "runs", runs: [expect.objectContaining({ status: "failed" })] })
-      await entered.promise
+      expect(settled).toMatchObject({
+        kind: "runs",
+        runs: [expect.objectContaining({ status: "completed", conclusion: "failure" })],
+      })
+      expect(prDeliveryState(host.app.bays.pr("PR1")!)).toBe("submitted")
+      await expect(
+        Promise.race([entered.promise.then(() => "delivered"), Bun.sleep(1_000).then(() => "timed-out")]),
+      ).resolves.toBe("delivered")
       expect(delivery).toEqual({
         recipient: "@agent/7",
         event: expect.objectContaining({
-          kind: "pr/rejected",
-          pr: "PR1",
-          revision: 1,
-          step: "check",
-          evidence: expect.stringContaining("stderr"),
+          kind: "run/failed",
+          run: "R1",
+          prs: [expect.objectContaining({ pr: "PR1", revision: 1 })],
         }),
       })
     } finally {
@@ -563,8 +662,8 @@ notify:
 
   it("refuses a submitter route at startup when no Tribe identity can resolve it", async () => {
     const { repo } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main
 steps: [check, merge]
 check: { run: "true" }
@@ -593,8 +692,8 @@ notify:
 
   it("runs the literal queue watch viewer without Tribe identity or notification settlement", async () => {
     const { repo } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main
 steps: [check, merge]
 check: { run: "true" }
@@ -636,8 +735,8 @@ notify:
 
   it("runs the literal PR-list viewer without Tribe identity or notification settlement", async () => {
     const { repo } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main
 steps: [check, merge]
 check: { run: "true" }
@@ -684,8 +783,8 @@ notify:
 
   it("preserves every Yrd state byte while listing a populated PR journal", async () => {
     const { repo, featureSha } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main
 steps: [check, merge]
 check: { run: "true" }
@@ -717,7 +816,12 @@ merge: {}
 
     expect(JSON.parse(stdout)).toMatchObject({
       command: "pr.list",
-      prs: [expect.objectContaining({ branch: "issue/feature", headSha: featureSha })],
+      prs: [
+        expect.objectContaining({
+          branch: "issue/feature",
+          revs: [expect.objectContaining({ head: featureSha })],
+        }),
+      ],
     })
     expect(await byteManifest(stateDir)).toEqual(stateBefore)
     expect(await git(repo, "config", "--local", "--list")).toBe(configBefore)
@@ -726,8 +830,8 @@ merge: {}
 
   it("refuses a needs-review route when review is not an eligibility requirement", async () => {
     const { repo } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main
 steps: [check, merge]
 check: { run: "true" }
@@ -811,17 +915,30 @@ notify:
     expect(stdout).toContain("Objects:")
     expect(stdout).toContain("Boundaries:")
     expect(stdout).toContain("--repo <path>")
+    expect(stdout).toContain("--config <path>")
     expect(stdout).toContain("YRD_REPO")
     expect(stdout).not.toContain("--cwd")
     expect(stdout).not.toContain("YRD_CWD")
-    expect(stdout).not.toContain("--config")
     expect(stdout).not.toContain("--root")
     const commandBlock = stdout.match(/Commands:\n(?<commands>[\s\S]*?)\n\nModel:/u)?.groups?.commands ?? ""
     expect(
       commandBlock
         .split("\n")
         .flatMap((text) => text.match(/^\s{2}(?<command>[a-z]+)(?:\s+\[[^\]]+\])*\s{2,}/u)?.groups?.command ?? []),
-    ).toEqual(["pr", "bay", "issue", "contest", "queue", "journal", "migrate", "log", "watch", "prime", "run"])
+    ).toEqual([
+      "pr",
+      "bay",
+      "issue",
+      "contest",
+      "queue",
+      "doctor",
+      "journal",
+      "migrate",
+      "log",
+      "watch",
+      "prime",
+      "run",
+    ])
     expect(stdout).not.toMatch(/\b(?:pr\|prs|bay\|bays|issue\|issues|contest\|contests|queue\|queues)\b/u)
     expect(stderr).toBe("")
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
@@ -892,8 +1009,8 @@ notify:
 
   it("runs bare root as plain help while preserving the JSON dashboard", async () => {
     const { repo } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       ["base: main", "batch: 1", "steps: [check, merge]", "check: 'true'", "merge: {}", ""].join("\n"),
     )
 
@@ -989,7 +1106,8 @@ notify:
       command: "queue.run",
       results: [
         {
-          status: "passed",
+          status: "completed",
+          conclusion: "success",
           stepSelection: {
             authority: "explicit",
             steps: ["merge"],
@@ -1074,7 +1192,8 @@ notify:
       command: "queue.run",
       results: [
         {
-          status: "passed",
+          status: "completed",
+          conclusion: "success",
           stepSelection: {
             authority: "explicit",
             steps: ["merge"],
@@ -1145,7 +1264,8 @@ notify:
     expect(result).toMatchObject({
       results: [
         {
-          status: "passed",
+          status: "completed",
+          conclusion: "success",
           stepSelection: {
             authority: "explicit",
             steps: ["merge"],
@@ -1224,11 +1344,11 @@ notify:
       ),
       submitStderr,
     ).toBe(1)
-    // One failure, one ERROR: the failing base-health Job owns it. The enclosing
-    // run and admit settle at INFO (filtered here at the WARN default), so the
-    // former triple-report (jobs:main-health + queue:run + queue:admit all ERROR)
-    // collapses to the single deepest line.
+    // The bounded environment-refusal policy makes two attempts before parking
+    // unchanged check authority. Each failing Job owns exactly one ERROR; the
+    // enclosing run and admit settle at INFO rather than duplicating either.
     expect(submitStderr.trim().split("\n")).toEqual([
+      expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
       expect.stringMatching(/\bERROR yrd:jobs:main-health main-health failed\b/u),
     ])
     const submitted = JSON.parse(submitStdout) as { checks: Record<string, unknown>[] }
@@ -1238,7 +1358,7 @@ notify:
         {
           pr: "PR1",
           revision: 1,
-          run: "R1",
+          run: "R2",
           step: "main-health",
           status: "failed",
           classification: "base",
@@ -1297,7 +1417,7 @@ notify:
   it("refuses the retired config wrapper before plain or JSON startup mutates state", async () => {
     const { repo } = await repository()
     const retiredWrapper = ["li", "ne"].join("")
-    await writeFile(join(repo, ".yrd.yml"), `${retiredWrapper}:\n  base: main\n  steps: [check, merge]\n`)
+    await commitYrdConfig(repo, `${retiredWrapper}:\n  base: main\n  steps: [check, merge]\n`)
 
     for (const args of [["--json"]]) {
       let stdout = ""
@@ -1332,11 +1452,10 @@ notify:
     await first.close()
 
     const reopened = await createYrdHost({ cwd: repo })
-    expect(reopened.app.state().bays.prs.PR1).toMatchObject({
-      branch: "issue/feature",
-      headSha,
-      status: "submitted",
-    })
+    const reopenedPR = reopened.app.state().bays.prs.PR1!
+    expect(reopenedPR).toMatchObject({ branch: "issue/feature", state: "open", merged: false })
+    expect(currentPRRev(reopenedPR)).toMatchObject({ head: headSha })
+    expect(prDeliveryState(reopenedPR)).toBe("submitted")
     await reopened.close()
   })
 
@@ -1454,14 +1573,32 @@ notify:
 
   it("teaches exact inspect-and-resubmit guidance for a rejected direct-branch PR without appending", async () => {
     const { repo } = await repository()
-    await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await commitYrdConfig(
+      repo,
+      [
+        "base: main",
+        "batch: 1",
+        "steps: [check, merge]",
+        "check: |",
+        "  if test -f feature.txt; then printf 'feature.txt:1: target regression\\n'; exit 1; fi",
+        "merge: {}",
+        "",
+      ].join("\n"),
+    )
     await git(repo, "switch", "-q", "issue/feature")
+    let submitOutput = ""
+    let submitError = ""
     expect(
       await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "pr", "submit", "--base", "main", "--json"], {
         cwd: repo,
-        stdout: () => undefined,
-        stderr: () => undefined,
+        stdout: (text) => {
+          submitOutput += text
+        },
+        stderr: (text) => {
+          submitError += text
+        },
       }),
+      `${submitOutput}\n${submitError}`,
     ).toBe(1)
 
     const before = await journalEnvelope(repo)
@@ -1535,8 +1672,8 @@ notify:
     const command = [`touch ${JSON.stringify(startedPath)}`, "sleep 0.2", `touch ${JSON.stringify(finishedPath)}`].join(
       "; ",
     )
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main\nbatch: 1\nsteps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
     )
     await git(repo, "switch", "-qc", "issue/second", "main")
@@ -1565,7 +1702,7 @@ notify:
 
       await using settled = await createYrdHost({ cwd: repo })
       expect(Queues.ids(settled.app.state().queues)).toEqual(["R1"])
-      expect(settled.app.queue.get("R1")?.status).toBe("passed")
+      expect(settled.app.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
     } finally {
       cli.kill("SIGKILL")
       await cli.exited
@@ -1585,10 +1722,7 @@ notify:
       `sh -c 'trap "" TERM; while :; do sleep 1; done' & printf '%s\\n' "$!" > ${JSON.stringify(grandchildPidPath)}`,
       "while :; do sleep 1; done",
     ].join("; ")
-    await writeFile(
-      join(repo, ".yrd.yml"),
-      `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
-    )
+    await commitYrdConfig(repo, `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`)
 
     await using submitter = await createYrdHost({ cwd: repo })
     await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -1652,10 +1786,7 @@ notify:
       `touch ${JSON.stringify(startedPath)}`,
       "sleep 2",
     ].join("; ")
-    await writeFile(
-      join(repo, ".yrd.yml"),
-      `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
-    )
+    await commitYrdConfig(repo, `steps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`)
     await git(repo, "switch", "-qc", "issue/second", "main")
     await writeFile(join(repo, "second.txt"), "second\n")
     await git(repo, "add", "second.txt")
@@ -1727,17 +1858,23 @@ notify:
         await submitter.close()
       }
       replacement = spawnFollow("w1:p3")
-      await vi.waitFor(
-        async () => expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run", "run"]),
-        { timeout: 8_000 },
-      )
+      try {
+        await vi.waitFor(
+          async () => expect((await readFile(executionsPath, "utf8")).trim().split("\n")).toEqual(["run", "run"]),
+          { timeout: 8_000 },
+        )
+      } catch (cause) {
+        const replacementLog = await readFile(replacement.logPath, "utf8").catch(() => "<missing replacement log>")
+        throw new Error(`replacement resident did not execute PR2\n${replacementLog}`, { cause })
+      }
       replacement.child.kill("SIGTERM")
       await expect(replacement.child.exited).resolves.toBe(0)
 
       await using settled = await createYrdHost({ cwd: repo })
       const runIds = Queues.ids(settled.app.state().queues)
       expect(runIds).toEqual(["R1", "R2"])
-      expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["passed", "passed"])
+      expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["completed", "completed"])
+      expect(runIds.map((id) => settled.app.queue.get(id)?.conclusion)).toEqual(["success", "success"])
       expect(
         runIds.map((id) => {
           const job = settled.app.queue.get(id)?.steps[0]?.job
@@ -1769,7 +1906,7 @@ notify:
 
   it("replaces a dead resident owner after the OS releases its lease", async () => {
     const { repo } = await repository()
-    await writeFile(join(repo, ".yrd.yml"), 'steps: [check]\ncheck:\n  run: "true"\n')
+    await commitYrdConfig(repo, 'steps: [check]\ncheck:\n  run: "true"\n')
     const argv = [
       process.execPath,
       join(import.meta.dirname, "../../../bin/yrd.ts"),
@@ -1825,8 +1962,8 @@ notify:
       "sleep 0.2",
       `touch ${JSON.stringify(finishedPath)}`,
     ].join("; ")
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main\nbatch: 1\nsteps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
     )
     await git(repo, "switch", "-qc", "issue/second", "main")
@@ -1856,7 +1993,8 @@ notify:
       await using settled = await createYrdHost({ cwd: repo })
       const runIds = Queues.ids(settled.app.state().queues)
       expect(runIds).toEqual(["R1", "R2"])
-      expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["failed", "passed"])
+      expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["completed", "completed"])
+      expect(runIds.map((id) => settled.app.queue.get(id)?.conclusion)).toEqual(["failure", "success"])
     } finally {
       cli.kill("SIGKILL")
       await cli.exited
@@ -1867,7 +2005,6 @@ notify:
 
   it("reaps an active configured child before SIGINT releases its runner lease", async () => {
     const { repo, featureSha } = await repository()
-    const baseSha = await git(repo, "rev-parse", "main")
     const childPidPath = join(repo, "active-check.pid")
     const grandchildPidPath = join(repo, "active-check-grandchild.pid")
     const progressPath = join(repo, "active-check.progress")
@@ -1881,10 +2018,11 @@ notify:
       `while [ "$i" -lt 200 ]; do printf '%s\\n' "$i" >> ${JSON.stringify(progressPath)}; i=$((i + 1)); sleep 0.05; done`,
       `touch ${JSON.stringify(finishedPath)}`,
     ].join("; ")
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `steps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 30000\n`,
     )
+    const baseSha = await git(repo, "rev-parse", "main")
 
     await using submitter = await createYrdHost({ cwd: repo })
     await submitter.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
@@ -1921,7 +2059,8 @@ notify:
       })
       expect(recovered).toEqual([
         expect.objectContaining({
-          status: "failed",
+          status: "completed",
+          conclusion: "failure",
           error: expect.objectContaining({ code: "job-lost" }),
           steps: expect.arrayContaining([expect.objectContaining({ job: expect.objectContaining({ attempt: 1 }) })]),
         }),
@@ -2005,10 +2144,11 @@ notify:
       prs: [
         {
           branch: "issue/feature",
-          headSha: featureSha,
           base: "main",
           issue: "github:beorn/yrd#42",
-          status: "submitted",
+          state: "open",
+          merged: false,
+          revs: [expect.objectContaining({ n: 1, head: featureSha })],
         },
       ],
     })
@@ -2042,8 +2182,8 @@ notify:
     const featureSha = await git(linked, "rev-parse", "HEAD")
     await mkdir(ambient)
     const checkCwd = join(repo, "check-cwd.txt")
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main\nsteps: [check]\ncheck: ${JSON.stringify(`pwd > ${JSON.stringify(checkCwd)}`)}\n`,
     )
 
@@ -2082,7 +2222,13 @@ notify:
     expect(selected.exitCode, selected.stderr).toBe(0)
     expect(JSON.parse(selected.stdout)).toMatchObject({
       command: "bay.submit",
-      prs: [{ id: "PR1", branch: "issue/feature", headSha: featureSha }],
+      prs: [
+        {
+          id: "PR1",
+          branch: "issue/feature",
+          revs: [expect.objectContaining({ head: featureSha })],
+        },
+      ],
     })
     expect(selected.stderr).toBe("")
 
@@ -2099,7 +2245,13 @@ notify:
     expect(submitted.exitCode, submitted.stderr).toBe(0)
     expect(JSON.parse(submitted.stdout)).toMatchObject({
       command: "pr.submit",
-      prs: [{ id: "PR1", branch: "issue/feature", headSha: featureSha }],
+      prs: [
+        {
+          id: "PR1",
+          branch: "issue/feature",
+          revs: [expect.objectContaining({ head: featureSha })],
+        },
+      ],
     })
     expect(submitted.stderr).toBe("")
 
@@ -2164,7 +2316,18 @@ notify:
       submitStderr,
     ).toBe(0)
     expect(JSON.parse(submitStdout)).toMatchObject({
-      prs: [{ id: "PR1", composition: { sources: [{ repo: "dep", tipSha: sourceTipSha }] } }],
+      prs: [
+        {
+          id: "PR1",
+          revs: [
+            expect.objectContaining({
+              composition: expect.objectContaining({
+                sources: [expect.objectContaining({ repo: "dep", tipSha: sourceTipSha })],
+              }),
+            }),
+          ],
+        },
+      ],
     })
     await rm(manifest)
 
@@ -2205,7 +2368,8 @@ notify:
       .parse(JSON.parse(runStdout)).results[0]
     if (result === undefined) throw new Error("expected one composed Queue result")
     expect(result).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       integration: {
         commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
         sourceRewrites: [
@@ -2238,8 +2402,8 @@ notify:
     // wall-clock bound: the wedge signature from the 2026-07-16 R423 incident,
     // where the candidate vitest printed its RUN header then produced nothing.
     const command = "printf 'RUN v1\\n'; sleep 30"
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       `base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  noProgressMs: 400\n  timeoutMs: 30000\n`,
     )
 
@@ -2247,11 +2411,19 @@ notify:
     await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
 
-    expect(run.status).toBe("failed")
-    const failedJob = run.steps.find((step) => step.job?.status === "failed")?.job
-    if (failedJob?.status !== "failed") throw new Error("expected a stalled check job")
-    expect(failedJob.error).toMatchObject({ code: "check-stalled" })
-    const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
+    const failedJob = run.steps.find(
+      (step) => step.job?.status === "completed" && step.job.conclusion === "failure",
+    )?.job
+    if (failedJob?.status !== "completed" || failedJob.conclusion !== "failure") {
+      throw new Error("expected a stalled check job")
+    }
+    expect(failedJob.error).toMatchObject({
+      code: "queue-environment-refused",
+      evidence: expect.objectContaining({ error: expect.objectContaining({ code: "check-stalled" }) }),
+    })
+    const refusalEvidence = failedJob.error.evidence as Readonly<{ candidateEvidence?: unknown }>
+    const evidence = CommandEvidenceSchema.parse(refusalEvidence.candidateEvidence)
     expect(evidence).toMatchObject({ stageVerdict: "STALLED" })
     // A stall must not merge: the wedged candidate never reached the queue tip.
     expect(await git(repo, "rev-parse", "main")).not.toBe(featureSha)
@@ -2259,21 +2431,26 @@ notify:
 
   it("reports a failed queue against origin when the operator HEAD is detached", async () => {
     const { repo, featureSha } = await repository()
-    await writeFile(
-      join(repo, ".yrd.yml"),
+    await commitYrdConfig(
+      repo,
       "steps: [check, merge]\ncheck: printf 'real stdout\\n'; printf 'real stderr\\n' >&2; exit 7\n",
     )
     const baseSha = await git(repo, "rev-parse", "main")
     const first = await createYrdHost({ cwd: repo })
     await first.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
     const run = (await first.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
-    expect(run.status).toBe("failed")
-    const failedJob = run.steps.find((step) => step.job?.status === "failed")?.job
-    if (failedJob?.status !== "failed") throw new Error("missing failed configured check")
-    const evidence = GitCheckEvidenceSchema.parse(failedJob.output)
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure" })
+    const failedJob = run.steps.find(
+      (step) => step.job?.status === "completed" && step.job.conclusion === "failure",
+    )?.job
+    if (failedJob?.status !== "completed" || failedJob.conclusion !== "failure") {
+      throw new Error("missing failed configured check")
+    }
+    const refusalEvidence = failedJob.error.evidence as Readonly<{ baseSha?: unknown; candidateEvidence?: unknown }>
+    const evidence = CommandEvidenceSchema.parse(refusalEvidence.candidateEvidence)
+    expect(refusalEvidence.baseSha).toBe(baseSha)
     expect(evidence).toMatchObject({
       exitCode: 7,
-      baseSha,
       artifacts: [{ name: "stdout" }, { name: "stderr" }],
     })
     const artifacts = new Map(evidence.artifacts.map((artifact) => [artifact.name, artifact.path]))
@@ -2309,7 +2486,9 @@ notify:
       }),
     ).toBe(0)
     expect(stdout).toContain(`main@${baseSha.slice(0, 12)}`)
-    expect(stdout).toMatch(/PR1\s+issue\/feature\s+rejected/u)
+    expect(stdout).toMatch(/pr#1\.1\s+issue\/feature\s+environment-refused/u)
+    expect(stdout).toContain("OPEN 1")
+    expect(stdout).toContain("REJECTED 0")
     expect(stdout).not.toContain(featureSha.slice(0, 12))
     expect(stderr).toBe("")
 
@@ -2374,13 +2553,13 @@ notify:
 
   it("replays the live PR25 finish-before-later-submit journal shape through bare yrd", async () => {
     const { repo, featureSha } = await repository()
-    await writeFile(join(repo, ".yrd.yml"), "steps: [check]\ncheck: exit 7\n")
+    await commitYrdConfig(repo, "steps: [check]\ncheck: exit 7\n")
 
     const host = await createYrdHost({ cwd: repo })
     try {
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
       const prior = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
-      expect(prior.status).toBe("failed")
+      expect(prior).toMatchObject({ status: "completed", conclusion: "failure" })
       if (prior.finishedAt === undefined) throw new Error("missing prior revision finish time")
 
       await git(repo, "switch", "-q", "issue/feature")
@@ -2397,7 +2576,7 @@ notify:
       expect(Date.parse(prior.finishedAt)).toBeLessThan(Date.parse(currentSubmittedAt))
 
       const current = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
-      expect(current.status).toBe("failed")
+      expect(current).toMatchObject({ status: "completed", conclusion: "failure" })
     } finally {
       await host.close()
     }
@@ -2418,7 +2597,7 @@ notify:
     expect(exitCode, stderr).toBe(0)
     expect(stderr).toBe("")
     expect(stdout).toContain("Recent failures")
-    expect(stdout.match(/PR1/gu)).toHaveLength(2)
+    expect(stdout.match(/pr#1/giu)).toHaveLength(3)
     expect(`${stdout}\n${stderr}`).not.toMatch(/precedes/u)
     expect(await journalEnvelope(repo)).toEqual(journalBefore)
   })
@@ -2434,15 +2613,15 @@ notify:
     await git(repo, "commit", "-qm", "feature conflict")
     const featureSha = await git(repo, "rev-parse", "HEAD")
     await git(repo, "switch", "-q", "main")
-    await writeFile(join(repo, ".yrd.yml"), 'steps: [check, merge]\ncheck:\n  run: "true"\n')
+    await commitYrdConfig(repo, 'steps: [check, merge]\ncheck:\n  run: "true"\n')
 
     const host = await createYrdHost({ cwd: repo })
     let artifact: string | undefined
     try {
       await host.app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
       const run = (await host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 }))[0]!
-      expect(run).toMatchObject({ status: "failed", error: { code: "candidate-conflict" } })
-      const failedStep = run.steps.find((step) => step.job?.status === "failed")
+      expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "candidate-conflict" } })
+      const failedStep = run.steps.find((step) => step.job?.status === "completed" && step.job.conclusion === "failure")
       const artifacts = (failedStep?.job as { output?: { artifacts?: readonly { path: string }[] } } | undefined)
         ?.output?.artifacts
       artifact = artifacts?.[0]?.path

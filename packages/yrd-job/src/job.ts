@@ -40,14 +40,34 @@ export function parseJobLaunch(stdout: string): JobLaunch {
 }
 
 export type JobResult<Output extends JsonValue = JsonValue> =
-  | Readonly<{ status: "passed"; output: Output }>
-  | Readonly<{ status: "failed"; error: JobError; output?: Output }>
+  | Readonly<{ status: "completed"; conclusion: "success"; output: Output }>
+  | Readonly<{ status: "completed"; conclusion: "failure"; error: JobError; output?: Output }>
   | JobWaiting
+
+export type JobConclusion = "success" | "failure" | "cancelled" | "skipped" | "timed_out"
+export type JobStatus = "queued" | "in_progress" | "waiting" | "completed"
+
+export type ContextReq = Readonly<{
+  scope: "job" | "run" | "session" | "shared"
+  candidate: "none" | "ro" | "rw"
+  capabilities?: readonly string[]
+}>
+
+/** Ephemeral runtime materialization. Only its identity is persisted on the
+ * Job; paths and capabilities belong to the live Runner process. */
+export type RuntimeContext = Readonly<{
+  id: string
+  request: ContextReq
+  candidateRef?: string
+  cwd?: string
+  env?: NodeJS.ProcessEnv
+}>
 
 export type JobContext = Readonly<{
   id: string
   attempt: number
   runner: string
+  context?: RuntimeContext
   /** Aborts when this execution loses ownership or its runtime closes. */
   signal: AbortSignal
   /** Select progress-gated lease renewal for an execution with observable work. */
@@ -158,12 +178,19 @@ export function createJobDef<Input extends JsonValue, Output extends JsonValue>(
 }
 
 export function jobResultSchema<Output extends JsonValue>(output: z.ZodType<Output>) {
-  return z.discriminatedUnion("status", [...jobTerminalResultSchema(output).options, JobWaitingSchema])
+  return z.union([jobTerminalResultSchema(output), JobWaitingSchema])
 }
 
 export function jobTerminalResultSchema<Output extends JsonValue>(output: z.ZodType<Output>) {
-  return z.discriminatedUnion("status", [
-    z.object({ status: z.literal("passed"), output }).strict(),
-    z.object({ status: z.literal("failed"), error: JobErrorSchema, output: output.optional() }).strict(),
+  return z.discriminatedUnion("conclusion", [
+    z.object({ status: z.literal("completed"), conclusion: z.literal("success"), output }).strict(),
+    z
+      .object({
+        status: z.literal("completed"),
+        conclusion: z.literal("failure"),
+        error: JobErrorSchema,
+        output: output.optional(),
+      })
+      .strict(),
   ])
 }
