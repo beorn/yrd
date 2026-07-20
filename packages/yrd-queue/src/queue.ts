@@ -41,6 +41,7 @@ import {
   type JobObservation,
   type JobCompletion,
   type JobHandler,
+  type JobResult,
   type JobsState,
   type RunJobOptions,
 } from "@yrd/job"
@@ -294,6 +295,7 @@ export function withStep<const Name extends string, Shape extends PRShape, Outpu
     input: StepExecutionSchema,
     output,
     observe: stepObservation,
+    observeResult: stepResultObservation,
     execute: (input, context) => runner(input as StepExecution<Shape>, context),
   }) as JobDef<StepExecution, JsonValue>
   return Object.freeze({
@@ -318,6 +320,7 @@ export function withMerge<Shape extends PRShape>(
     input: StepExecutionSchema,
     output: IntegrationProofSchema,
     observe: stepObservation,
+    observeResult: stepResultObservation,
     execute: (input, context) => runner(input as StepExecution<Shape>, context),
   }) as JobDef<StepExecution, JsonValue>
   return Object.freeze({
@@ -1328,6 +1331,62 @@ function stepObservation(input: StepExecution): JobObservation {
       prs: input.prs.map(deliveryIdentity),
       ...(input.targetSha === undefined ? {} : { targetSha: input.targetSha }),
     },
+  }
+}
+
+type StepArtifactReference = Readonly<{
+  name?: string
+  path?: string
+  kind?: string
+  uri?: string
+}>
+
+function stepArtifactReference(value: unknown): StepArtifactReference | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined
+  const record = value as Readonly<Record<string, unknown>>
+  const path = typeof record.path === "string" && record.path !== "" ? record.path : undefined
+  const uri = typeof record.uri === "string" && record.uri !== "" ? record.uri : undefined
+  if (path === undefined && uri === undefined) return undefined
+  return {
+    ...(typeof record.name === "string" && record.name !== "" ? { name: record.name } : {}),
+    ...(path === undefined ? {} : { path }),
+    ...(typeof record.kind === "string" && record.kind !== "" ? { kind: record.kind } : {}),
+    ...(uri === undefined ? {} : { uri }),
+  }
+}
+
+function directStepArtifacts(value: unknown): readonly StepArtifactReference[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return []
+  const artifacts = (value as Readonly<Record<string, unknown>>).artifacts
+  if (!Array.isArray(artifacts)) return []
+  return artifacts.flatMap((artifact) => {
+    const reference = stepArtifactReference(artifact)
+    return reference === undefined ? [] : [reference]
+  })
+}
+
+function nestedStepArtifacts(value: unknown): readonly StepArtifactReference[] {
+  if (value === null || typeof value !== "object") return []
+  if (Array.isArray(value)) return value.flatMap(nestedStepArtifacts)
+  const record = value as Readonly<Record<string, unknown>>
+  return [
+    ...directStepArtifacts(record),
+    ...Object.entries(record).flatMap(([key, nested]) => (key === "artifacts" ? [] : nestedStepArtifacts(nested))),
+  ]
+}
+
+/** Queue owns the standardized artifact convention for its step definitions.
+ * Generic Jobs keeps result/evidence payloads opaque and invokes only this
+ * definition-owned typed projection. Output and waiting artifacts are direct;
+ * typed refusal evidence may nest the command evidence that owns its files. */
+function stepResultObservation(result: JobResult): Readonly<Record<string, unknown>> {
+  const artifacts = [
+    ...(result.status === "waiting" ? directStepArtifacts(result) : directStepArtifacts(result.output)),
+    ...(result.status === "failed" ? nestedStepArtifacts(result.error.evidence) : []),
+  ]
+  if (artifacts.length === 0) return {}
+  return {
+    artifacts: [...new Map(artifacts.map((artifact) => [JSON.stringify(artifact), artifact])).values()],
   }
 }
 

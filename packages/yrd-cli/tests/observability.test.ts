@@ -74,13 +74,14 @@ describe("Yrd observability controls", () => {
 })
 
 describe("resident runner observability", () => {
-  it("raises the default warn to info so span completions (incl successes) print", () => {
-    // The long-lived follow-runner's stdout IS a log stream; at the default
-    // warn it never prints a completed step/run/compose. Bump warn → info only
-    // when the operator has NOT chosen a level, so every settlement shows.
+  it("raises the default warn to debug so lifecycle starts and completions print", () => {
+    // The long-lived follow-runner's stderr IS a log stream; at the default
+    // warn it never prints a run/step start or successful completion. Bump
+    // warn → debug only when the operator has NOT chosen a level; the human
+    // formatter keeps that richer event stream concise while JSONL stays full.
     const base = resolveYrdObservability({}, {})
     expect(base).toMatchObject({ level: "warn", explicitLevel: false })
-    expect(residentObservability(base)).toMatchObject({ level: "info", explicitLevel: false })
+    expect(residentObservability(base)).toMatchObject({ level: "debug", explicitLevel: false })
   })
 
   it("never overrides an explicit operator level (--log-level / LOG_LEVEL / -v / -q)", () => {
@@ -100,6 +101,42 @@ describe("resident runner observability", () => {
     // Defensive: only the exact default (warn + not-explicit) is bumped.
     const trace = { level: "trace", spans: true, explicitLevel: false } as const
     expect(residentObservability(trace)).toEqual(trace)
+  })
+
+  it("admits only lifecycle-start DEBUG by default while keeping all warnings loud", () => {
+    const human: string[] = []
+    const config = residentObservability(resolveYrdObservability({}, {}))
+    const log = createYrdLogger(
+      config,
+      (text) => human.push(text),
+      (event) => (event.kind === "log" ? event.message : undefined),
+    )
+    const lifecycle = log.child("jobs").child("check")
+    const process = log.child("process")
+
+    expect(lifecycle.debug).toBeTypeOf("function")
+    expect(process.debug).toBeUndefined()
+    lifecycle.debug?.("check started")
+    process.debug?.("process exited")
+    process.warn?.("process drain warning")
+    log.end()
+
+    expect(human.join("")).toContain("check started")
+    expect(human.join("")).toContain("process drain warning")
+    expect(human.join("")).not.toContain("process exited")
+  })
+
+  it("preserves explicitly requested DEBUG on the human sink", () => {
+    const human: string[] = []
+    const config = residentObservability(resolveYrdObservability({ logLevel: "debug" }, {}))
+    const log = createYrdLogger(
+      config,
+      (text) => human.push(text),
+      (event) => (event.kind === "log" ? event.message : undefined),
+    )
+    log.child("process").debug?.("process exited")
+    log.end()
+    expect(human.join("")).toContain("process exited")
   })
 })
 

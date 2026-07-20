@@ -1,11 +1,13 @@
+import { pathToFileURL } from "node:url"
 import { createElement } from "react"
-import { Box } from "silvery"
+import { Box, renderString } from "silvery"
 import { createRenderer, waitFor } from "silvery/test"
 import { describe, expect, it } from "vitest"
 import { QueueArtifactOutputView, type QueueArtifactOutput } from "../src/watch-pane.tsx"
 
-function artifactOutput(lineCount: number): QueueArtifactOutput {
+function artifactOutput(lineCount: number): Extract<QueueArtifactOutput, { source: "recorded" }> {
   return {
+    source: "recorded",
     run: "run-a15",
     step: "check",
     attempt: 1,
@@ -24,6 +26,33 @@ function outputFrame(lineCount: number) {
 }
 
 describe("QueueArtifactOutputView A15 tail following", () => {
+  it("makes the full output file an OSC8 link", async () => {
+    const output = artifactOutput(1)
+    const frame = await renderString(
+      createElement(Box, { width: 80, height: 12 }, createElement(QueueArtifactOutputView, { outputs: [output] })),
+      { width: 80, height: 12, plain: false },
+    )
+    expect(frame).toContain("open full log")
+    expect(frame).toContain(pathToFileURL(output.path).href)
+  })
+
+  it("renders a synthetic summary without inventing a full-log link", async () => {
+    const summary: QueueArtifactOutput = {
+      source: "summary",
+      run: "R1",
+      step: "merge",
+      attempt: 1,
+      text: "No output recorded.",
+    }
+    const frame = await renderString(
+      createElement(Box, { width: 80, height: 12 }, createElement(QueueArtifactOutputView, { outputs: [summary] })),
+      { width: 80, height: 12, plain: false },
+    )
+    expect(frame).toContain("No output recorded.")
+    expect(frame).not.toContain("open full log")
+    expect(frame).not.toContain("\u001b]8;;")
+  })
+
   it("announces paused unseen output and resumes following with End", async () => {
     const render = createRenderer({ cols: 80, rows: 12 })
     const app = render(outputFrame(80))

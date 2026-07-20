@@ -496,8 +496,22 @@ describe("queue watch user round 6", () => {
         data: repeated,
         row: snapshot.projection.rows.find((candidate) => candidate.pr === "PR42"),
         outputs: [
-          { run: "R42", step: "check", attempt: 1, path: "attempt-1.log", text: "first attempt output" },
-          { run: "R42", step: "check", attempt: 2, path: "attempt-2.log", text: "second attempt output" },
+          {
+            source: "recorded",
+            run: "R42",
+            step: "check",
+            attempt: 1,
+            path: "attempt-1.log",
+            text: "first attempt output",
+          },
+          {
+            source: "recorded",
+            run: "R42",
+            step: "check",
+            attempt: 2,
+            path: "attempt-2.log",
+            text: "second attempt output",
+          },
         ],
         compact: true,
         active: false,
@@ -548,8 +562,22 @@ describe("queue watch user round 6", () => {
         data: repeated,
         row: snapshot.projection.rows.find((candidate) => candidate.pr === "PR42"),
         outputs: [
-          { run: "R42", step: "merge", attempt: 1, path: "attempt-1.log", text: "first merge failed" },
-          { run: "R42", step: "merge", attempt: 2, path: "attempt-2.log", text: "second merge passed" },
+          {
+            source: "recorded",
+            run: "R42",
+            step: "merge",
+            attempt: 1,
+            path: "attempt-1.log",
+            text: "first merge failed",
+          },
+          {
+            source: "recorded",
+            run: "R42",
+            step: "merge",
+            attempt: 2,
+            path: "attempt-2.log",
+            text: "second merge passed",
+          },
         ],
         compact: true,
         active: false,
@@ -573,8 +601,9 @@ describe("queue watch user round 6", () => {
   it("keeps the tail of a long expanded diff reachable inside the shared submit tab scroll", async () => {
     const story = queueTimelineStories["production-overview"]
     const firstDiff = story.snapshot.diffs?.[0]
-    if (firstDiff === undefined || "unavailable" in firstDiff)
+    if (firstDiff === undefined || "unavailable" in firstDiff) {
       throw new Error("production fixture has no available diff")
+    }
     const tail = "round-8-long-diff-tail"
     const snapshot = {
       ...story.snapshot,

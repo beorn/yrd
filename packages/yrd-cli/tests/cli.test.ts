@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
@@ -77,6 +77,7 @@ import {
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   watchQueueRows,
   type QueueLogCoverage,
+  type QueueAttempt,
   type QueueStatusResult,
   type QueueTerminalFact,
   type QueueTimelineProjection,
@@ -447,7 +448,7 @@ function fakeJob(input: {
   url?: string
   detail?: string
   checkpoint?: unknown
-  error?: { code: string; message: string }
+  error?: { code: string; message: string; evidence?: JsonValue }
   output?: unknown
   artifacts?: readonly unknown[]
   lostReason?: string
@@ -4724,7 +4725,7 @@ describe("runYrd", () => {
   it("reads the merged step artifact into successive watch snapshots", async () => {
     const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-output-"))
     const outputPath = join(artifactRoot, "R-output", "0-check", "attempt-2", "output.log")
-    mkdirSync(join(outputPath, ".."), { recursive: true })
+    mkdirSync(dirname(outputPath), { recursive: true })
     const run = fakeRun({
       id: "R-output",
       status: "running",
@@ -4747,6 +4748,7 @@ describe("runYrd", () => {
       writeFileSync(outputPath, "checking one\n")
       expect(await runInternals.queueArtifactOutputs([result], artifactRoot)).toEqual([
         {
+          source: "recorded",
           run: "R-output",
           step: "check",
           attempt: 2,
@@ -4758,6 +4760,122 @@ describe("runYrd", () => {
       expect((await runInternals.queueArtifactOutputs([result], artifactRoot))[0]?.text).toBe(
         "checking one\nchecking two\n",
       )
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("loads stdout/stderr-only files for every recorded retry attempt", async () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-retry-output-"))
+    const firstPath = join(artifactRoot, "R-history", "0-check", "attempt-1", "stderr.log")
+    const secondPath = join(artifactRoot, "R-history", "0-check", "attempt-2", "stdout.log")
+    mkdirSync(dirname(firstPath), { recursive: true })
+    mkdirSync(dirname(secondPath), { recursive: true })
+    writeFileSync(firstPath, "first attempt failed\n")
+    writeFileSync(secondPath, "second attempt passed\n")
+    const run = fakeRun({
+      id: "R-history",
+      status: "passed",
+      startedAt: "2026-07-13T11:59:00.000Z",
+      steps: [
+        fakeStep(
+          "check",
+          "passed",
+          fakeJob({
+            id: JOB_CHECK_PASS_ID,
+            status: "passed",
+            attempt: 2,
+            startedAt: "2026-07-13T12:00:00.000Z",
+          }),
+        ),
+      ],
+    })
+    const result = { ...fakeSummary([run]), prs: [] } as QueueStatusResult
+    const attempts: readonly QueueAttempt[] = [
+      {
+        job: JOB_CHECK_FAILED_ID,
+        run: "R-history",
+        step: "check",
+        index: 0,
+        attempt: 1,
+        runner: "runner-1",
+        outcome: "failed",
+        requestedAt: "2026-07-13T11:59:00.000Z",
+        startedAt: "2026-07-13T11:59:01.000Z",
+        finishedAt: "2026-07-13T11:59:02.000Z",
+        durationMs: 1_000,
+        revision: "check-v1",
+        result: {
+          status: "failed",
+          error: { code: "check-failed", message: "first attempt failed" },
+          output: { artifacts: [{ name: "stderr", path: firstPath }] },
+        },
+      },
+      {
+        job: JOB_CHECK_PASS_ID,
+        run: "R-history",
+        step: "check",
+        index: 0,
+        attempt: 2,
+        runner: "runner-2",
+        outcome: "passed",
+        requestedAt: "2026-07-13T12:00:00.000Z",
+        startedAt: "2026-07-13T12:00:01.000Z",
+        finishedAt: "2026-07-13T12:00:02.000Z",
+        durationMs: 1_000,
+        revision: "check-v1",
+        result: { status: "passed", output: { artifacts: [{ name: "stdout", path: secondPath }] } },
+      },
+    ]
+    try {
+      expect(await runInternals.queueArtifactOutputs([result], artifactRoot, attempts)).toEqual([
+        {
+          source: "recorded",
+          run: "R-history",
+          step: "check",
+          attempt: 1,
+          path: firstPath,
+          text: "first attempt failed\n",
+        },
+        {
+          source: "recorded",
+          run: "R-history",
+          step: "check",
+          attempt: 2,
+          path: secondPath,
+          text: "second attempt passed\n",
+        },
+      ])
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("bounds each inline watch artifact tail at 64 KiB and reports omitted bytes", async () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-bounded-output-"))
+    const outputPath = join(artifactRoot, "R-bounded", "0-check", "attempt-1", "output.log")
+    mkdirSync(dirname(outputPath), { recursive: true })
+    const omitted = "x".repeat(4 * 1_024)
+    const retained = "y".repeat(64 * 1_024)
+    writeFileSync(outputPath, `${omitted}${retained}`)
+    const run = fakeRun({
+      id: "R-bounded",
+      status: "running",
+      startedAt: "2026-07-13T12:00:00.000Z",
+      steps: [fakeStep("check", "running", fakeJob({ id: JOB_CHECK_PASS_ID, status: "running" }))],
+    })
+    try {
+      expect(await runInternals.queueArtifactOutputs([{ ...fakeSummary([run]), prs: [] }], artifactRoot)).toEqual([
+        {
+          source: "recorded",
+          run: "R-bounded",
+          step: "check",
+          attempt: 1,
+          path: outputPath,
+          text: retained,
+          truncatedBytes: 4 * 1_024,
+        },
+      ])
     } finally {
       rmSync(artifactRoot, { recursive: true, force: true })
     }
@@ -6317,13 +6435,16 @@ describe("runYrd", () => {
     const artifacts = join(temp, "artifacts")
     const attemptOne = join(artifacts, "attempt-1", "output.log")
     const attemptTwo = join(artifacts, "attempt-2", "output.log")
+    const comparisonStderr = join(artifacts, "attempt-comparison", "stderr.log")
     const missingArtifact = join(artifacts, "attempt-missing", "output.log")
     mkdirSync(artifacts, { recursive: true })
     mkdirSync(join(artifacts, "attempt-1"), { recursive: true })
     mkdirSync(join(artifacts, "attempt-2"), { recursive: true })
+    mkdirSync(join(artifacts, "attempt-comparison"), { recursive: true })
     mkdirSync(join(artifacts, "attempt-missing"), { recursive: true })
     writeFileSync(attemptOne, "attempt one\n")
     writeFileSync(attemptTwo, "attempt two\n")
+    writeFileSync(comparisonStderr, "comparison refusal\n")
 
     const runChronologyFailure = fakeRun({
       id: "R10",
@@ -6340,7 +6461,15 @@ describe("runYrd", () => {
             id: JOB_CHECK_FAILED_ID,
             status: "failed",
             attempt: 1,
-            error: { code: "check-failed", message: "policy mismatch" },
+            error: {
+              code: "check-failed",
+              message: "policy mismatch",
+              evidence: {
+                candidateEvidence: {
+                  artifacts: [{ name: "comparison-stderr", path: comparisonStderr }],
+                },
+              },
+            },
             output: {
               exitCode: 1,
               durationMs: 2_500,
@@ -6428,6 +6557,7 @@ describe("runYrd", () => {
       locations: [
         { label: "stdout", location: { path: attemptOne } },
         { label: "stderr", location: { path: attemptTwo } },
+        { label: "comparison-stderr", location: { path: comparisonStderr } },
       ],
     })
     expect(revision2Rows[0]?.location).toMatchObject({ path: attemptOne })
@@ -6489,12 +6619,22 @@ describe("runYrd", () => {
       locations: [
         { label: "stdout", location: { path: attemptOne } },
         { label: "stderr", location: { path: attemptTwo } },
+        { label: "comparison-stderr", location: { path: comparisonStderr } },
       ],
     })
     expect(failureShow.steps[2]).toMatchObject({ status: "lost", lost: "worker died" })
 
     const missingShow = queueShowData(runMissingLocation, [runMissingLocation])
     expect(missingShow.steps[0]).not.toHaveProperty("location")
+
+    const failureTty = await renderString(createElement(QueueShowView, { data: failureShow }), {
+      width: 140,
+      height: 40,
+      plain: false,
+    })
+    expect(failureTty).toContain(pathToFileURL(attemptOne).href)
+    expect(failureTty).toContain(pathToFileURL(attemptTwo).href)
+    expect(failureTty).toContain(pathToFileURL(comparisonStderr).href)
 
     const retiredRows = queueLogRows([summary], new Set(["PR-retired"]), "PR-retired", statusByPr)
     expect(retiredRows).toHaveLength(1)

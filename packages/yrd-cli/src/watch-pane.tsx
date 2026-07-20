@@ -1,7 +1,9 @@
+import { pathToFileURL } from "node:url"
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   Box,
   Divider,
+  Link,
   ListView,
   ScrollArea,
   SplitPane,
@@ -54,14 +56,20 @@ const DEFAULT_SPLIT_RATIO = 0.52
 
 export type QueueDetailTier = "right" | "below" | "full"
 
-export type QueueArtifactOutput = Readonly<{
+type QueueArtifactOutputCommon = Readonly<{
   run: string
   step: string
   attempt: number
-  path: string
   text: string
   truncatedBytes?: number
 }>
+
+/** A recorded tail owns a real local target. Synthetic step summaries are
+ * deliberately pathless, so rendering cannot turn an empty/undefined path
+ * into a plausible but false OSC8 link. */
+export type QueueArtifactOutput =
+  | (QueueArtifactOutputCommon & Readonly<{ source: "recorded"; path: string }>)
+  | (QueueArtifactOutputCommon & Readonly<{ source: "summary" }>)
 
 export type QueuePrDiff =
   | Readonly<{
@@ -167,18 +175,18 @@ export type QueueWatchPaneProps = Readonly<{
   onCancelRun?: (run: string) => void | Promise<void>
 }>
 
-type QueueArtifactOutputLine = Readonly<{
-  key: string
-  text: string
-  kind: "heading" | "muted" | "body"
-}>
+type QueueArtifactOutputLine =
+  | Readonly<{ key: string; text: string; kind: "link"; href: string }>
+  | Readonly<{ key: string; text: string; kind: "heading" | "muted" | "body" }>
 
 function queueArtifactOutputLines(
   outputs: readonly QueueArtifactOutput[],
   inline: boolean,
 ): readonly QueueArtifactOutputLine[] {
   return outputs.flatMap((output) => {
-    const outputKey = `${output.run}:${output.step}:${output.attempt}:${output.path}`
+    const outputKey = `${output.run}:${output.step}:${output.attempt}:${
+      output.source === "recorded" ? output.path : "summary"
+    }`
     const textLines = output.text.split("\n")
     if (textLines.at(-1) === "") textLines.pop()
     return [
@@ -191,6 +199,16 @@ function queueArtifactOutputLines(
               kind: "heading" as const,
             },
           ]),
+      ...(output.source === "recorded"
+        ? [
+            {
+              key: `${outputKey}:full-log`,
+              text: "open full log",
+              kind: "link" as const,
+              href: pathToFileURL(output.path).href,
+            },
+          ]
+        : []),
       ...(output.truncatedBytes === undefined
         ? []
         : [
@@ -277,10 +295,12 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
               <Text bold wrap="truncate">
                 {row.text}
               </Text>
+            ) : row.kind === "link" ? (
+              <Link href={row.href}>{row.text}</Link>
             ) : row.kind === "muted" ? (
               <Text color="$fg-muted">{row.text}</Text>
             ) : inline ? (
-              <Text color="$fg-muted" bgConflict="ignore" wrap="wrap">
+              <Text color="$fg-muted" bgConflict="ignore" wrap="wrap" minWidth={0}>
                 {row.text}
               </Text>
             ) : (
@@ -290,7 +310,7 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
               // those colors and stops silvery's background-conflict guard (default
               // `throw`) from killing the watch loop, while the global throw stays a
               // safety net for silvery's own pipeline bugs everywhere else.
-              <Text bgConflict="ignore" wrap="wrap">
+              <Text bgConflict="ignore" wrap="wrap" minWidth={0}>
                 {row.text}
               </Text>
             )}
@@ -327,9 +347,15 @@ function QueueInlineArtifactOutputRows({ outputs }: { outputs: readonly QueueArt
   return (
     <Box flexDirection="column" minWidth={0}>
       {lines.map((row) => (
-        <Text key={row.key} color="$fg-muted" bgConflict="ignore" wrap="wrap">
-          {row.text === "" ? " " : row.text}
-        </Text>
+        <Box key={row.key} minWidth={0}>
+          {row.kind === "link" ? (
+            <Link href={row.href}>{row.text}</Link>
+          ) : (
+            <Text color="$fg-muted" bgConflict="ignore" wrap="wrap" minWidth={0}>
+              {row.text === "" ? " " : row.text}
+            </Text>
+          )}
+        </Box>
       ))}
     </Box>
   )
@@ -411,10 +437,10 @@ function queueStepExecutions({
             ? recorded
             : [
                 {
+                  source: "summary",
                   run: data.run,
                   step: name,
                   attempt,
-                  path: "",
                   text: stepSummaryOutput(data, name, stepRow.output).join("\n"),
                 },
               ],
@@ -440,10 +466,10 @@ function queueStepExecutions({
       ...(fallbackCommand === undefined ? {} : { command: fallbackCommand }),
       outputs: [
         {
+          source: "summary",
           run: data.run,
           step: name,
           attempt: syntheticArtifactAttempt(undefined),
-          path: "",
           text: stepSummaryOutput(data, name, undefined).join("\n"),
         },
       ],
@@ -777,7 +803,7 @@ export function QueueWorkflowStepTabs({
                       compact={compact}
                       highlightPr={highlightPr}
                       section="steps"
-                      showLogArtifacts={false}
+                      showLogArtifacts
                       {...(selectedPr?.issue === undefined ? {} : { stepIssue: selectedPr.issue })}
                     />
                     {name === "merge" && data.integration !== undefined ? (

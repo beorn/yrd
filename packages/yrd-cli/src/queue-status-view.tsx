@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import type React from "react"
@@ -33,6 +32,13 @@ import {
   useWindowSize,
 } from "silvery"
 import { submittedPrPositions } from "./queue-position.ts"
+import {
+  artifactHref as locationHref,
+  artifactLabel,
+  artifactLocation as artifactPath,
+  directArtifacts,
+  nestedArtifacts,
+} from "./artifact-reference.ts"
 import { formatLocalClock, TIMELINE_BRANCH_ICON, timelineStatusGlyph } from "./runner-timeline.ts"
 import {
   formatDuration,
@@ -1060,39 +1066,8 @@ function byRunStarted(left: QueueRun, right: QueueRun): number {
   return parseRunIdSuffix(left.id) - parseRunIdSuffix(right.id)
 }
 
-function isLocalArtifact(value: unknown): value is string {
-  if (typeof value !== "string" || value === "") return false
-  return !/^[a-z][a-z0-9+.-]*:/iu.test(value)
-}
-
-function artifactPath(artifact: unknown): QueueLogLocation | undefined {
-  if (!isObjectValue(artifact)) return undefined
-  const candidate =
-    typeof artifact.uri === "string" && artifact.uri !== ""
-      ? artifact.uri
-      : typeof artifact.path === "string" && artifact.path !== ""
-        ? artifact.path
-        : undefined
-  if (candidate === undefined) return undefined
-
-  if (!isLocalArtifact(candidate)) return { url: candidate }
-
-  const path = resolve(candidate)
-  if (!existsSync(path)) return undefined
-  return { path }
-}
-
 function artifactLocation(step: QueueStep | undefined): QueueLogLocation | undefined {
   return stepLocations(step)[0]?.location
-}
-
-function artifactLabel(artifact: unknown): string {
-  if (!isObjectValue(artifact)) return "artifact"
-  for (const key of ["name", "kind", "file"] as const) {
-    const value = artifact[key]
-    if (typeof value === "string" && value !== "") return value
-  }
-  return "artifact"
 }
 
 function stepLocations(step: QueueStep | undefined): QueueLogLocationEntry[] {
@@ -1169,21 +1144,20 @@ function stepArtifacts(step: QueueStep | undefined): readonly unknown[] {
     artifacts.push(...(step.job.artifacts as readonly unknown[]))
   }
   if ((step.job.status === "passed" || step.job.status === "failed") && isObjectValue(step.job.output)) {
-    if (Array.isArray(step.job.output.artifacts)) {
-      artifacts.push(...(step.job.output.artifacts as readonly unknown[]))
-    }
+    artifacts.push(...directArtifacts(step.job.output))
+  }
+  if (step.job.status === "failed") {
+    artifacts.push(...nestedArtifacts(step.job.error.evidence))
   }
   const checkpoint = jobCheckpoint(step.job)
-  if (isObjectValue(checkpoint) && Array.isArray(checkpoint.artifacts)) {
-    artifacts.push(...(checkpoint.artifacts as readonly unknown[]))
-  }
+  artifacts.push(...directArtifacts(checkpoint))
   return [...new Map(artifacts.map((artifact) => [JSON.stringify(artifact), artifact])).values()]
 }
 
 function artifactHref(artifact: unknown): string | undefined {
   const location = artifactPath(artifact)
   if (location === undefined) return undefined
-  return "path" in location ? pathToFileURL(location.path).href : location.url
+  return locationHref(location)
 }
 
 function stepOutput(step: QueueStep): string {
@@ -4818,9 +4792,12 @@ function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly Que
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
   const retained = pr.revisions.find((candidate) => candidate.revision === revision)
   const correlation = retained?.correlation ?? pr.correlation
+  const note = presentFact(pr.note)
+  const detail = presentFact(pr.detail)
+  const requestedReviewers = pr.requestedReviewers ?? []
   const facts: Readonly<{ key: string; value: string }>[] = [
-    ...(presentFact(pr.note) === undefined ? [] : [{ key: "note", value: presentFact(pr.note)! }]),
-    ...(presentFact(pr.detail) === undefined ? [] : [{ key: "detail", value: presentFact(pr.detail)! }]),
+    ...(note === undefined ? [] : [{ key: "note", value: note }]),
+    ...(detail === undefined ? [] : [{ key: "detail", value: detail }]),
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
     { key: "head", value: retained?.headSha ?? pr.headSha },
     { key: "base", value: retained?.base ?? pr.base },
@@ -4840,9 +4817,7 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
       key: "check requested",
       value: queueLogClock(request.at, true, false),
     })),
-    ...((pr.requestedReviewers?.length ?? 0) === 0
-      ? []
-      : [{ key: "requested reviewers", value: pr.requestedReviewers!.join(", ") }]),
+    ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
     ...((pr.regressions?.length ?? 0) === 0
       ? []
       : [{ key: "regressions", value: boundedQueue(safeText(pr.regressions), 160) }]),
@@ -5123,6 +5098,7 @@ function CompactQueueShowView({
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const timing = queueRunTimingRow(data)
+  const latestStep = data.steps.at(-1)
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
     // detail pane instead of overflowing it (canonical CSS escape hatch).
@@ -5156,7 +5132,7 @@ function CompactQueueShowView({
       ) : null}
       {stepFacts ? (
         <>
-          {data.steps.at(-1) === undefined ? null : <QueueStepInternals row={data.steps.at(-1)!} issue={stepIssue} />}
+          {latestStep === undefined ? null : <QueueStepInternals row={latestStep} issue={stepIssue} />}
           {data.steps.map((row) => {
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)

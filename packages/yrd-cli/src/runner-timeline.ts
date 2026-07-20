@@ -1,12 +1,16 @@
+import { existsSync } from "node:fs"
+import { basename, join } from "node:path"
+import { hyperlink } from "@silvery/ansi"
 import type { Event } from "loggily"
+import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
 
 /**
- * Pure (no silvery/React) watch-timeline grammar shared by the interactive
- * queue view and the resident follow-runner's human log lines. The runner's
- * stdout IS a log stream, so its INFO/ERROR rows read one step per row — a
- * scannable `[<base>#<run> <index>:<step>] done|failed <duration>` prefix over
- * the full structured record. Keeping these helpers here (not in the queue view
- * .tsx) means the headless logger never imports silvery.
+ * Pure watch-timeline grammar shared by the interactive queue view and the
+ * resident follow-runner's human log lines. Its INFO/ERROR rows read one event
+ * per row — a scannable `[<base>#<run> <index>:<step>] done|failed <duration>`
+ * summary with a canonical @silvery/ansi hyperlink to the full artifact.
+ * Keeping these helpers here (not in the queue view .tsx) means the headless
+ * logger never imports React or the Silvery reconciler.
  *
  * The resident stream reports EACH step exactly once — success at INFO, failure
  * at ERROR. The enclosing run/compose settlements are redundant roll-ups of what
@@ -72,14 +76,12 @@ const ANSI = Object.freeze({
 })
 
 type Paint = (text: string) => string
-const identity: Paint = (text) => text
 const paint =
   (color: boolean, code: string): Paint =>
   (text) =>
     color ? `${code}${text}${ANSI.reset}` : text
 
 type PRProps = Readonly<{ pr?: string; revision?: number; branch?: string }>
-
 type OutcomeProps = Readonly<{
   run?: string
   base?: string
@@ -90,10 +92,71 @@ type OutcomeProps = Readonly<{
   outcome?: string
   durationMs?: number
   diagnostic?: string
-  error?: Readonly<{ code?: string }>
-  failure?: Readonly<{ code?: string }>
+  completion?: boolean
+  error?: Readonly<{ code?: string; message?: string }>
+  failure?: Readonly<{ code?: string; message?: string }>
+  artifacts?: readonly unknown[]
   prs?: readonly PRProps[]
 }>
+
+type ResidentLogFormatOptions = Readonly<{
+  color: boolean
+  artifactRoot?: string
+  includeDebug?: boolean
+}>
+
+function artifactLink(location: Readonly<{ path: string } | { url: string }>, label: string): string {
+  return hyperlink(label, artifactHref(location))
+}
+
+function recordedArtifact(
+  artifacts: readonly unknown[] | undefined,
+  event: "done" | "failed",
+): Readonly<{ location: Readonly<{ path: string } | { url: string }>; label: string }> | undefined {
+  const recorded = (artifacts ?? []).flatMap((artifact) => {
+    const location = artifactLocation(artifact)
+    if (location === undefined) return []
+    const name = artifactLabel(artifact, location)
+    const label = "path" in location ? basename(location.path) || name : name
+    return [{ location, label, name }]
+  })
+  if (recorded.length === 0) return undefined
+  const preferredNames = event === "failed" ? ["stderr", "output", "stdout"] : ["output", "stdout", "stderr"]
+  const artifact =
+    preferredNames.flatMap((name) => recorded.filter((candidate) => candidate.name === name))[0] ?? recorded[0]
+  return artifact
+}
+
+function artifactHome(props: OutcomeProps, artifactRoot: string): string | undefined {
+  if (props.run === undefined) return undefined
+  if (props.step === undefined || props.index === undefined || props.attempt === undefined) {
+    return join(artifactRoot, props.run)
+  }
+  return join(artifactRoot, props.run, `${props.index}-${props.step}`, `attempt-${props.attempt}`)
+}
+
+/** Resolve the artifact home a resident event owns. The host creates this
+ * before formatting the start row so a printed OSC8 target already exists. */
+export function residentArtifactHome(event: Event, artifactRoot: string): string | undefined {
+  if (event.kind !== "log") return undefined
+  return artifactHome((event.props ?? {}) as OutcomeProps, artifactRoot)
+}
+
+function artifactPointer(
+  props: OutcomeProps,
+  artifactRoot: string | undefined,
+  event: "admitted" | "started" | "done" | "failed",
+): string {
+  if (event === "done" || event === "failed") {
+    const artifact = recordedArtifact(props.artifacts, event)
+    if (artifact !== undefined) return ` log=${artifactLink(artifact.location, artifact.label)}`
+  }
+  if (artifactRoot === undefined) return ""
+  const home = artifactHome(props, artifactRoot)
+  if (home === undefined || !existsSync(home)) return ""
+  const label = props.step === undefined ? "artifacts" : "logs"
+  return ` log=${artifactLink({ path: home }, label)}`
+}
 
 /** The system-local wall-clock cell shared by queue watch and runner logs. */
 export function formatLocalClock(when: Date, includeDate = false): string {
@@ -162,6 +225,14 @@ function errSlug(props: OutcomeProps): string | undefined {
   return props.error?.code ?? props.failure?.code
 }
 
+function failureCause(props: OutcomeProps): string | undefined {
+  const message = props.error?.message ?? props.failure?.message
+  const oneLine = message?.replace(/\s+/gu, " ").trim()
+  if (oneLine === undefined || oneLine === "") return undefined
+  const limit = 240
+  return oneLine.length <= limit ? oneLine : `${oneLine.slice(0, limit - 1)}…`
+}
+
 /** `done` (INFO/success) or `failed` (ERROR/failure), or `undefined` when the
  * event is not a terminal step/run OUTCOME (e.g. a duration-invalid diagnostic,
  * which carries its own `diagnostic` field and must NOT masquerade as a row). */
@@ -184,7 +255,12 @@ function outcomeVerb(props: OutcomeProps, level: string): "done" | "failed" | un
  * the run ref, greens `done` / reds `failed`, dims the duration; appends
  * `err=<slug>` on a failure and the dimmed PR tail. `undefined` when the event
  * is not a terminal outcome (the caller then renders a plain notice). */
-function renderOutcomeRow(props: OutcomeProps, level: string, color: boolean): string | undefined {
+function renderOutcomeRow(
+  props: OutcomeProps,
+  level: string,
+  color: boolean,
+  artifactRoot?: string,
+): string | undefined {
   const verb = outcomeVerb(props, level)
   if (verb === undefined) return undefined
   const ref = paint(color, ANSI.bold)(runRef(props))
@@ -193,20 +269,35 @@ function renderOutcomeRow(props: OutcomeProps, level: string, color: boolean): s
   const durationCell =
     props.durationMs === undefined ? "" : ` ${paint(color, ANSI.dim)(formatDuration(props.durationMs))}`
   const errCell = verb === "failed" && errSlug(props) !== undefined ? ` err=${errSlug(props)}` : ""
+  const cause = verb === "failed" ? failureCause(props) : undefined
+  const causeCell = cause === undefined ? "" : ` cause=${JSON.stringify(cause)}`
   const head =
     STEP_LAYOUT === "bracket" && token !== undefined
       ? `[${ref} ${token}] ${verbCell}`
       : STEP_LAYOUT === "trailing" && token !== undefined
         ? `[${ref}] ${verbCell} step=${token}`
         : `[${ref}] ${verbCell}`
-  return `${head}${durationCell}${errCell}${prTail(props, color)}`
+  return `${head}${durationCell}${errCell}${causeCell}${artifactPointer(props, artifactRoot, verb)}${prTail(props, color)}`
 }
 
-/** The full structured record as a dimmed JSON tail, minus the session-constant
- * scope identity — loggily's own "message then {fields}" shape, so the friendly
- * grammar is a readable prefix to the record, never a replacement for it. */
+function renderStartedRow(props: OutcomeProps, color: boolean, artifactRoot?: string): string | undefined {
+  if (props.outcome !== "started" || props.run === undefined || props.completion === true) return undefined
+  const ref = paint(color, ANSI.bold)(runRef(props))
+  const token = stepToken(props)
+  const event = token === undefined ? "admitted" : "started"
+  const verb = paint(color, ANSI.blue)(event)
+  const head = token === undefined ? `[${ref}] ${verb}` : `[${ref} ${token}] ${verb}`
+  return `${head}${artifactPointer(props, artifactRoot, event)}${prTail(props, color)}`
+}
+
+/** Generic INFO/WARN/ERROR notice fields as a dimmed JSON tail, minus the
+ * session-constant scope identity. Lifecycle narration rows deliberately do
+ * not call this: their full structured records live only in JSONL. */
 function jsonTail(props: Record<string, unknown>, color: boolean): string {
-  const entries = Object.entries(props).filter(([key, value]) => !SESSION_SCOPE_FIELDS.has(key) && value !== undefined)
+  const omitted = new Set(["artifacts", "checkpoint", "evidence", "output", "stderr", "stdout"])
+  const entries = Object.entries(props).filter(
+    ([key, value]) => !SESSION_SCOPE_FIELDS.has(key) && !omitted.has(key) && value !== undefined,
+  )
   if (entries.length === 0) return ""
   return ` ${paint(color, ANSI.dim)(JSON.stringify(Object.fromEntries(entries)))}`
 }
@@ -219,10 +310,11 @@ function jsonTail(props: Record<string, unknown>, color: boolean): string {
  * - `yrd:queue:run` / `yrd:queue:compose` INFO/DEBUG settlements → suppressed
  *   (redundant roll-ups of step rows), a run-owned ERROR/WARN still surfaces.
  * - `yrd:journal:*` INFO/DEBUG chatter → suppressed.
- * - every other event → a loggily-style notice (prefix + message + JSON tail),
- *   so runner start, drain, refusals, recovery, and diagnostics never go silent.
+ * - unrelated DEBUG/TRACE bookkeeping → JSONL only; it never floods narration.
+ * - every other INFO/WARN/ERROR event → a loggily-style notice (prefix +
+ *   message + JSON tail), so drain, refusals, recovery, and diagnostics stay loud.
  */
-export function formatResidentLogLine(event: Event, options: Readonly<{ color: boolean }>): string | undefined {
+export function formatResidentLogLine(event: Event, options: ResidentLogFormatOptions): string | undefined {
   if (event.kind !== "log") return undefined
   const { color } = options
   const namespace = event.namespace
@@ -233,18 +325,28 @@ export function formatResidentLogLine(event: Event, options: Readonly<{ color: b
   // Its warn/error escalations still surface below as notices.
   if (namespace.startsWith("yrd:journal:") && (level === "info" || level === "debug")) return undefined
 
+  if (namespace.startsWith("yrd:jobs:") || namespace === RUN_SCOPE) {
+    const started = renderStartedRow(props, color, options.artifactRoot)
+    if (started !== undefined) return `${prefix(event.time, level, RUN_SCOPE, color)} ${started}`
+  }
+
+  // DEBUG is enabled so lifecycle starts exist, not to dump every Git/process/
+  // projection bookkeeping event into the skippable human lane. Full fidelity
+  // remains in JSONL. TRACE is likewise never human narration.
+  if ((level === "debug" || level === "trace") && options.includeDebug !== true) return undefined
+
   // The per-run / per-cycle roll-ups a step row already reported. A genuine
   // non-step failure escalates to ERROR (queueRunOutcome) or WARN (a refusal)
   // and falls through to a row/notice below — it is never suppressed here.
-  if ((namespace === RUN_SCOPE || namespace === "yrd:queue:compose") && (level === "info" || level === "debug")) {
+  if ((namespace === RUN_SCOPE || namespace === "yrd:queue:compose") && level === "info") {
     return undefined
   }
 
   // Step completions and run-owned failures render as the one-row-per-step
   // grammar, presented under the single run scope.
   if (namespace.startsWith("yrd:jobs:") || namespace === RUN_SCOPE) {
-    const row = renderOutcomeRow(props, level, color)
-    if (row !== undefined) return `${prefix(event.time, level, RUN_SCOPE, color)} ${row}${jsonTail(props, color)}`
+    const row = renderOutcomeRow(props, level, color, options.artifactRoot)
+    if (row !== undefined) return `${prefix(event.time, level, RUN_SCOPE, color)} ${row}`
   }
 
   // Everything else: runner start/lease, graceful drain, compose refusals,

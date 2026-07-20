@@ -18,6 +18,7 @@ const VITEST_BANNER =
 
 function bannerOutput(text: string): QueueArtifactOutput {
   return {
+    source: "recorded",
     run: "R1",
     step: "check",
     attempt: 1,

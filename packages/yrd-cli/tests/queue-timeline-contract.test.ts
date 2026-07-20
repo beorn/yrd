@@ -244,8 +244,9 @@ describe("queue timeline 21106 contract", () => {
     const source = contractProjection()
     const lead = source.rows.find((row) => row.pr === "PR42")
     const partner = source.rows.find((row) => row.pr === "PR43")
-    if (lead === undefined || partner === undefined)
+    if (lead === undefined || partner === undefined) {
       throw new Error("contract fixture is missing the active batched run")
+    }
     const projection = {
       ...source,
       rows: [lead, { ...partner, id: `release:${partner.id}`, base: "release" }],
@@ -469,6 +470,7 @@ describe("queue timeline 21106 contract", () => {
       ...story.snapshot,
       outputs: [
         {
+          source: "recorded" as const,
           run: "R42",
           step: "check",
           attempt: 2,
@@ -495,7 +497,7 @@ describe("queue timeline 21106 contract", () => {
         expect(Array.from(row).length).toBeLessThanOrEqual(200)
       }
       const payloadRows = rows.filter((row) => row.includes("¤"))
-      expect(payloadRows.length).toBeGreaterThan(1)
+      expect(payloadRows.length, app.text).toBeGreaterThan(1)
       for (const row of rows) expect(row.slice(0, divider)).not.toContain("¤")
     } finally {
       app.unmount()

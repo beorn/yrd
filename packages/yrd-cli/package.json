@@ -7,6 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@silvery/ansi": "^0.21.0",
     "@silvery/commander": "^0.21.0",
     "@silvery/scope": "^0.21.0",
     "@yrd/bay": "workspace:*",
