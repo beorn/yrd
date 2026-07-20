@@ -30,13 +30,13 @@ A Git superproject is built on plain Git submodules — which in theory lets you
 - **Super PRs** group one feature's branches across repos.
 - **Super worktrees** check out the whole product, every submodule at its exact commit.
 - **Super CI** tests the exact commit that would ship.
-- **Super merges** land children in order, the superproject pointer last. It never points at half a feature.
+- **Super merges** run children first, the superproject pointer last. It never points at half a feature.
 
-A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstream branch advances, Yrd refreshes the tracked super PR with the new pin — proposing, never landing. Landing only happens through the queue.
+A submodule with `branch = <name>` in `.gitmodules` is **tracked**: as the upstream branch advances, Yrd refreshes the tracked super PR with the new pin — proposing, never merging. Merges only happen through the queue.
 
 `git super` is the standalone face of the same core — plumbing without the resident queue; the guarantees come from the yard.
 
-**Assemble → test → land → roll** — everything lands through the queue.
+**Assemble → test → merge → roll** — the queue is the only merger.
 
 ## The model — five objects, one pipeline
 

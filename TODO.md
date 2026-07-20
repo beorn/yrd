@@ -73,6 +73,8 @@ shipped surface:
       judge — extends the open Contest boxes above.
 - [ ] Witness sweep: each README capability claim has one command that
       demonstrates it.
+- [ ] One outcome word: consolidate landed/integrated into merged across CLI
+      output and JSON (`landingSha` -> `mergeSha`; PR terminal status rename).
 
 After these boxes are complete, this file should contain only observed bugs,
 small usability adjustments, and release chores - no deferred second design.
