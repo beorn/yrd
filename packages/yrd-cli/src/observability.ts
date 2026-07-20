@@ -86,24 +86,58 @@ export function resolveYrdObservability(
   })
 }
 
-/** The resident follow-runner's stdout IS a log stream, so at the default `warn`
- * it would never print a completed step/run/compose — the success case simply
- * vanishes. Bump the resolved policy to `info` at the resident entry, but ONLY
- * when the operator left the level at its default (never overriding an explicit
- * `--log-level`/`LOG_LEVEL`/`-v`/`-q`). Scoping the bump to the resident process
- * keeps one-shot commands at `warn`, so they never gain `yrd:journal:lock`
- * INFO spam. */
+/** The resident follow-runner's stderr IS a narration stream, so at the default
+ * `warn` it would lose run/step starts and successful completions. Bump the
+ * resolved policy to `debug` at the resident entry, but ONLY when the operator
+ * left the level at its default (never overriding an explicit
+ * `--log-level`/`LOG_LEVEL`/`-v`/`-q`). The resident human formatter admits only
+ * concise lifecycle highlights; JSONL retains the full structured stream. */
 export function residentObservability(config: YrdObservability): YrdObservability {
   if (config.explicitLevel || config.level !== "warn") return config
-  return Object.freeze({ ...config, level: "info" })
+  return Object.freeze({ ...config, level: "debug" })
 }
 
-/** Create the one host-owned logger fan-out. Both sinks share the exact same
- * level and DEBUG namespace policy; the file sink is structured JSONL. When a
- * `human` formatter is supplied (the resident follow-runner), the stderr sink
- * renders each Event through it — a scannable timeline row, or `undefined` to
- * suppress that line from the human stream — while the JSONL file sink keeps the
- * full structured record. Without it, the default console format is used. */
+const RESIDENT_LIFECYCLE_NAMESPACES = ["yrd:jobs", "yrd:queue:run", "yrd:runner"] as const
+
+function residentLifecycleNamespace(namespace: string): boolean {
+  return RESIDENT_LIFECYCLE_NAMESPACES.some(
+    (candidate) => namespace === candidate || namespace.startsWith(`${candidate}:`),
+  )
+}
+
+/** Preserve loggily's zero-cost conditional calls for the implicit resident
+ * policy. Its pipeline needs DEBUG/INFO only for lifecycle narration, so an
+ * unrelated child must still expose neither method — otherwise every process,
+ * Git, and projection debug payload is eagerly built and discarded downstream. */
+function gateImplicitResidentLogger(logger: ConditionalLogger): ConditionalLogger {
+  return new Proxy(logger, {
+    get(target, property, receiver): unknown {
+      if (
+        (property === "debug" || property === "info" || property === "trace") &&
+        !residentLifecycleNamespace(target.name)
+      ) {
+        return undefined
+      }
+      if (property === "child" || property === "logger") {
+        const createChild = Reflect.get(target, property, target) as (...args: unknown[]) => ConditionalLogger
+        return (...args: unknown[]) => gateImplicitResidentLogger(createChild.apply(target, args))
+      }
+      return Reflect.get(target, property, receiver) as unknown
+    },
+  })
+}
+
+/** Create the one host-owned logger fan-out. The file sink is structured JSONL.
+ * When a `human` formatter is supplied (the resident follow-runner), the stderr
+ * sink renders each Event through it — a scannable timeline row, or `undefined`
+ * to suppress that line from the human stream. Without it, the default console
+ * format is used.
+ *
+ * The implicit resident default is deliberately a branched policy: every
+ * WARN/ERROR reaches the human sink, while DEBUG/INFO is admitted only from the
+ * three lifecycle namespaces that form the narration. An explicitly selected
+ * level/DEBUG filter keeps the ordinary single policy. A configured JSONL file
+ * is an explicit request for the full structured DEBUG stream. */
 export function createYrdLogger(
   config: YrdObservability,
   stderr: (text: string) => unknown,
@@ -125,9 +159,29 @@ export function createYrdLogger(
           },
           objectMode: true,
         }
-  const pipeline: ConfigElement[] = [scope, stderrSink]
-  if (config.file !== undefined) pipeline.push({ file: config.file, format: "json" })
-  const logger = createLogger("yrd", pipeline)
+  const implicitResident =
+    human !== undefined && config.level === "debug" && !config.explicitLevel && config.debug === undefined
+  const lifecycleLevel = (event: Event): Event | null =>
+    event.kind === "log" && (event.level === "debug" || event.level === "info") ? event : null
+  const pipeline: ConfigElement[] = implicitResident
+    ? [
+        { level: "debug", spans: false },
+        [{ level: "warn", spans: false }, stderrSink],
+        [{ level: "debug", ns: [...RESIDENT_LIFECYCLE_NAMESPACES], spans: false }, lifecycleLevel, stderrSink],
+      ]
+    : [scope, stderrSink]
+  if (config.file !== undefined) {
+    pipeline.push(
+      implicitResident
+        ? [
+            { level: "debug", spans: config.spans },
+            { file: config.file, format: "json" },
+          ]
+        : { file: config.file, format: "json" },
+    )
+  }
+  const created = createLogger("yrd", pipeline)
+  const logger = implicitResident && config.file === undefined ? gateImplicitResidentLogger(created) : created
   let disposed = false
   const dispose = (): void => {
     if (disposed) return

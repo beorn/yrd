@@ -710,6 +710,58 @@ describe("Queue", () => {
     log.end()
   })
 
+  it("owns the step artifact projection across output, waiting, and nested failure evidence", () => {
+    const ArtifactSchema = z
+      .object({
+        name: z.string().optional(),
+        path: z.string().optional(),
+        kind: z.string().optional(),
+        uri: z.string().optional(),
+      })
+      .strict()
+    const ArtifactResultSchema = z
+      .object({
+        checked: z.boolean(),
+        artifacts: z.array(ArtifactSchema).optional(),
+        nested: z
+          .object({ artifacts: z.array(ArtifactSchema) })
+          .strict()
+          .optional(),
+      })
+      .strict()
+    const step = withStep(
+      "check",
+      async (): Promise<JobResult<z.infer<typeof ArtifactResultSchema>>> => ({
+        status: "passed",
+        output: { checked: true },
+      }),
+      { revision: "check-v1", output: ArtifactResultSchema },
+    )
+    const local = { name: "stderr", path: "/artifacts/R1/check/stderr.log" }
+    const remote = { kind: "report", uri: "artifact://R1/check/report.json" }
+    const unrelated = { name: "nested-output", path: "/not/a/step-artifact.log" }
+
+    expect(
+      step.job.observeResult?.({
+        status: "failed",
+        error: {
+          code: "check-failed",
+          message: "candidate failed",
+          evidence: { comparison: { error: { evidence: { artifacts: [remote] } } } },
+        },
+        output: { checked: false, artifacts: [local], nested: { artifacts: [unrelated] } },
+      }),
+    ).toEqual({ artifacts: [local, remote] })
+
+    expect(
+      step.job.observeResult?.({
+        status: "waiting",
+        token: "remote-1",
+        artifacts: [remote],
+      }),
+    ).toEqual({ artifacts: [remote] })
+  })
+
   it("reports ONE failure ERROR at the deepest job — the enclosing run and compose settle at INFO", async () => {
     // A single failure must not fire ERROR three times (jobs:check + queue:run +
     // queue:compose). The failing Job owns the one ERROR; the run and compose

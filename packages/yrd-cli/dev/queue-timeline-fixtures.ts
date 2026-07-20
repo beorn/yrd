@@ -833,6 +833,7 @@ const longSubjectRun = fixtureRun("R20", [longSubjectPr], "passed", "2026-07-13T
 })
 
 const batchStdout: QueueArtifactOutput = {
+  source: "recorded",
   run: "R42",
   step: "check",
   attempt: 2,
@@ -840,6 +841,7 @@ const batchStdout: QueueArtifactOutput = {
   text: "$ bun vitest run packages/yrd-cli/tests/queue-timeline-storybook.test.ts\n125 tests collected\n",
 }
 const batchStderr: QueueArtifactOutput = {
+  source: "recorded",
   run: "R42",
   step: "check",
   attempt: 2,
@@ -847,6 +849,7 @@ const batchStderr: QueueArtifactOutput = {
   text: "stderr: waiting for the final focused assertion\n",
 }
 const initialOutput: QueueArtifactOutput = {
+  source: "recorded",
   run: "R3",
   step: "check",
   attempt: 1,
@@ -854,6 +857,7 @@ const initialOutput: QueueArtifactOutput = {
   text: "checking one\n",
 }
 const initialStderr: QueueArtifactOutput = {
+  source: "recorded",
   run: "R3",
   step: "check",
   attempt: 1,

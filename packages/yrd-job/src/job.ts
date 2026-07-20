@@ -92,6 +92,7 @@ export type JobDef<Input extends JsonValue = JsonValue, Output extends JsonValue
   input: z.ZodType<Input>
   output: z.ZodType<Output>
   observe?(input: Input): JobObservation
+  observeResult?(result: JobResult<Output>): Readonly<Record<string, unknown>>
   execute(input: Input, context: JobContext): Promise<JobResult<Output>>
   request(input: Input, options?: Readonly<{ key?: string }>): EventDraft<"job/requested", JobRequest<Input>>
 }>
@@ -103,6 +104,7 @@ export type CreateJobDefOptions<Input extends JsonValue, Output extends JsonValu
   input: z.ZodType<Input>
   output: z.ZodType<Output>
   observe?(input: Input): JobObservation
+  observeResult?(result: JobResult<Output>): Readonly<Record<string, unknown>>
   execute: JobHandler<Input, Output>
 }>
 
@@ -125,6 +127,7 @@ export function createJobDef<Input extends JsonValue, Output extends JsonValue>(
     revision: options.revision,
   })
   const result = jobResultSchema(options.output)
+  const observeResult = options.observeResult
 
   return Object.freeze({
     ...metadata,
@@ -136,6 +139,15 @@ export function createJobDef<Input extends JsonValue, Output extends JsonValue>(
       const parsedInput = options.input.parse(input)
       return Object.freeze(options.observe?.(parsedInput) ?? {})
     },
+
+    ...(observeResult === undefined
+      ? {}
+      : {
+          observeResult(value: JobResult<Output>) {
+            const parsedResult = result.parse(value) as JobResult<Output>
+            return Object.freeze(observeResult(parsedResult))
+          },
+        }),
 
     async execute(input, context) {
       const parsedInput = options.input.parse(input)

@@ -19,6 +19,7 @@ type StepState = Readonly<{
   name: string
   status: "requested" | "running" | "passed" | "failed"
   error?: Readonly<{ code: string; message: string }>
+  artifacts?: readonly Readonly<{ kind: string; uri: string }>[]
   startedAt?: string
   finishedAt?: string
 }>
@@ -30,6 +31,7 @@ function stepTabsData(steps: readonly StepState[]): QueueShowData {
         step.name,
         fixtureJob(`J100-${step.name}`, step.status, {
           ...(step.error === undefined ? {} : { error: step.error }),
+          ...(step.artifacts === undefined ? {} : { artifacts: step.artifacts }),
           ...(step.startedAt === undefined ? {} : { startedAt: step.startedAt }),
           ...(step.finishedAt === undefined ? {} : { finishedAt: step.finishedAt }),
         }),
@@ -43,10 +45,11 @@ function stepTabsData(steps: readonly StepState[]): QueueShowData {
 // readable without the removed RUN LOGS / OUTPUT accordion chrome.
 function stepOutputs(steps: readonly StepState[]): readonly QueueArtifactOutput[] {
   return steps.map((step) => ({
+    source: "recorded",
     run: "R100",
     step: step.name,
     attempt: 1,
-    path: `/repo/.git/yrd/artifacts/R100/${step.name}/attempt-1/stdout.log`,
+    path: `/repo/.git/yrd/artifacts/R100/${step.name}/attempt-1/output.log`,
     text: `live ${step.name} output\n`,
   }))
 }
@@ -153,6 +156,42 @@ describe("queue step tabs same-run reconciliation (21106)", () => {
     const tabRow = frame.split("\n").find((row) => row.includes("check") && row.includes("integrate")) ?? ""
     expect(tabRow).not.toContain("typecheck found three unsafe assignments")
     expect(frame).toContain("typecheck found three unsafe assignments")
+  })
+
+  it("renders proof-file and full-output links beside the selected step's inline tail", async () => {
+    const stdoutUri = "artifact://R100/check/attempt-1/stdout.log"
+    const steps: readonly StepState[] = [
+      {
+        name: "check",
+        status: "failed",
+        error: { code: "check-failed", message: "vitest failed" },
+        artifacts: [{ kind: "stdout", uri: stdoutUri }],
+      },
+    ]
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      h(QueueWorkflowStepTabs, {
+        data: stepTabsData(steps),
+        outputs: stepOutputs(steps),
+        compact: true,
+        active: true,
+        prs: [STEP_PR],
+      }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const rows = app.text.split("\n")
+      const y = rows.findIndex((row) => row.includes("1: check"))
+      const x = rows[y]?.indexOf("1: check") ?? -1
+      if (x < 0 || y < 0) throw new Error(`missing check tab in frame:\n${app.text}`)
+      await app.click(x, y)
+      await app.waitForLayoutStable()
+
+      expect(app.text).toContain("art:stdout")
+      expect(app.text).toContain("open full log")
+      expect(app.text).toContain("live check output")
+    } finally {
+      app.unmount()
+    }
   })
 
   it("shows the run's recorded command instead of a newer config value", async () => {

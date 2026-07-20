@@ -70,6 +70,18 @@ export type Job =
   | (JobBase & JobCancellation)
   | (JobBase & JobExecution & JobEvidence & JobCancellation)
 
+function jobResultAttributes(definition: JobDef, result: Job, observed?: JobResult): Readonly<Record<string, unknown>> {
+  const projected = observed === undefined ? undefined : definition.observeResult?.(observed)
+  return {
+    ...projected,
+    status: result.status,
+    // Surface the failed Job's canonical error code so a human row can render
+    // `err=<slug>` — the failing step owns the single ERROR line. Definition
+    // projections cannot replace this durable status/error truth.
+    ...(result.status === "failed" ? { error: result.error } : {}),
+  }
+}
+
 export type JobsState = Readonly<{
   byId: Readonly<Record<string, Job>>
   byKey: Readonly<Record<string, string>>
@@ -417,6 +429,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
     const attempt = requested.attempt + 1
     const now = runOptions.now ?? Date.now
     const observation = installed.observe?.(requested.input) ?? {}
+    let observedResult: JobResult | undefined
     return observeYrdLifecycle(
       options.log,
       {
@@ -434,12 +447,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
             : result.status === "running" || result.status === "waiting"
               ? "progress"
               : "failed",
-        resultAttributes: (result) => ({
-          status: result.status,
-          // Surface the failed Job's canonical error code so a human row can
-          // render `err=<slug>` — the failing step OWNS the single ERROR line.
-          ...(result.status === "failed" ? { error: result.error } : {}),
-        }),
+        resultAttributes: (result) => jobResultAttributes(installed, result, observedResult),
       },
       async () => {
         await commit({
@@ -503,6 +511,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
                 outcome.heartbeatError,
               )
         await commit(settlement(id, attempt, parsed.runner, result))
+        observedResult = result
         return current(id)
       },
     )
@@ -567,8 +576,29 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         ...(completion.token === undefined ? {} : { token: completion.token }),
       })
       const result = jobTerminalResultSchema(installedDef.output).parse(completion.result)
-      await commit({ type: "finish", id, ...metadata, result })
-      return current(id)
+      // The installed definition's output contract remains compatible across
+      // revisions, but its input projection may not. A pinned waiting job must
+      // not be stranded because a newer revision reinterprets old input.
+      const observation = installedDef.revision === job.revision ? (installedDef.observe?.(job.input) ?? {}) : {}
+      return observeYrdLifecycle(
+        options.log,
+        {
+          lifecycle: observation.lifecycle ?? "run",
+          identity: { ...observation.identity, job: id, attempt: metadata.attempt, runner: metadata.runner },
+          attributes: {
+            ...observation.attributes,
+            definition: job.definition,
+            revision: job.revision,
+            completion: true,
+          },
+          outcome: (finished) => (finished.status === "passed" ? "succeeded" : "failed"),
+          resultAttributes: (finished) => jobResultAttributes(installedDef, finished, result),
+        },
+        async () => {
+          await commit({ type: "finish", id, ...metadata, result })
+          return current(id)
+        },
+      )
     },
 
     async cancel(input) {

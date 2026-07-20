@@ -26,6 +26,7 @@ import {
   type JobContext,
   type JobDef,
   type JobHandler,
+  type JobResult,
   type JobTransition,
 } from "@yrd/job"
 
@@ -35,7 +36,8 @@ type Delivery = {
   step?: string
   prs?: { id: string; revision: number; headSha: string }[]
 }
-type Receipt = { receipt: string }
+type ReceiptArtifact = { name?: string; path?: string; kind?: string; uri?: string }
+type Receipt = { receipt: string; artifacts?: ReceiptArtifact[] }
 type SendArgs = Delivery & { key?: string }
 
 const SendArgsSchema = z.object({
@@ -67,13 +69,27 @@ function delivery(
     output: { receipt: `ok:${message}` },
   }),
   revision = "transport-v1",
+  observeResult?: (result: JobResult<Receipt>) => Readonly<Record<string, unknown>>,
 ) {
   return createJobDef({
     name: "message.deliver",
     title: "Deliver message",
     revision,
     input: SendArgsSchema.omit({ key: true }),
-    output: z.object({ receipt: z.string().min(1) }),
+    output: z.object({
+      receipt: z.string().min(1),
+      artifacts: z
+        .array(
+          z.object({
+            name: z.string().min(1).optional(),
+            path: z.string().min(1).optional(),
+            kind: z.string().min(1).optional(),
+            uri: z.string().min(1).optional(),
+          }),
+        )
+        .optional(),
+    }),
+    ...(observeResult === undefined ? {} : { observeResult }),
     execute,
   })
 }
@@ -178,6 +194,146 @@ describe("Jobs", () => {
     expect(terminal?.props).not.toHaveProperty("prs")
     await app.close()
     log.end()
+  })
+
+  it("uses the definition-owned terminal projection instead of crawling opaque payloads", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const outputArtifact = { kind: "report", uri: "artifact://R1/check/report.json" }
+    const unrelatedArtifact = { name: "not-definition-owned", path: "/tmp/unrelated.log" }
+    const app = await jobsApp(
+      delivery(
+        async () => ({
+          status: "failed",
+          error: {
+            code: "check-failed",
+            message: "check command exited 1",
+            evidence: { unrelated: { artifacts: [unrelatedArtifact] } },
+          },
+          output: { receipt: "failed", artifacts: [outputArtifact] },
+        }),
+        "transport-v1",
+        (result) => ({
+          artifacts:
+            "output" in result && result.output !== undefined && "artifacts" in result.output
+              ? result.output.artifacts
+              : [],
+        }),
+      ),
+      { id: ids("send", "C-send", JOB_ID), log },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "artifact" })
+
+      await app.jobs.run(app.jobs.requested(requested)[0]!, { runner: "worker", leaseMs: 60_000 })
+
+      const terminal = events.find(
+        (event) => event.kind === "log" && event.props?.outcome === "failed" && event.namespace.startsWith("yrd:jobs:"),
+      )
+      expect(terminal?.props).toMatchObject({ artifacts: [outputArtifact] })
+      expect(terminal?.props).not.toMatchObject({ artifacts: expect.arrayContaining([unrelatedArtifact]) })
+      expect(terminal?.props).not.toHaveProperty("output")
+      expect(terminal?.props).not.toHaveProperty("evidence")
+    } finally {
+      await app.close()
+      log.end()
+    }
+  })
+
+  it("emits the definition-owned terminal projection when external work finishes", async () => {
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const artifact = { kind: "report", uri: "https://runner.invalid/jobs/1/report.json" }
+    const app = await jobsApp(
+      delivery(
+        async () => ({ status: "waiting", token: "remote-1" }),
+        "transport-v1",
+        (result) => ({
+          artifacts:
+            "output" in result && result.output !== undefined && "artifacts" in result.output
+              ? result.output.artifacts
+              : [],
+        }),
+      ),
+      { id: ids("send", "C-send", JOB_ID), log },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "external" })
+      const id = app.jobs.requested(requested)[0]!
+      const waiting = await app.jobs.run(id, { runner: "worker", leaseMs: 60_000 })
+      expect(waiting).toMatchObject({ status: "waiting", token: "remote-1" })
+
+      await app.jobs.finish(id, {
+        attempt: 1,
+        runner: "worker",
+        token: "remote-1",
+        result: { status: "passed", output: { receipt: "remote-ok", artifacts: [artifact] } },
+      })
+
+      const terminal = events.findLast(
+        (event) =>
+          event.kind === "log" && event.props?.outcome === "succeeded" && event.namespace.startsWith("yrd:jobs:"),
+      )
+      expect(terminal?.props).toMatchObject({ completion: true, artifacts: [artifact] })
+    } finally {
+      await app.close()
+      log.end()
+    }
+  })
+
+  it("surfaces a definition-owned terminal projection failure instead of falling back silently", async () => {
+    const app = await jobsApp(
+      delivery(
+        async () => ({ status: "passed", output: { receipt: "ok" } }),
+        "transport-v1",
+        () => {
+          throw new Error("terminal projection failed")
+        },
+      ),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "projection" })
+      const id = app.jobs.requested(requested)[0]!
+
+      await expect(app.jobs.run(id, { runner: "worker", leaseMs: 60_000 })).rejects.toThrow(
+        "terminal projection failed",
+      )
+      expect(app.jobs.get(id)).toMatchObject({ status: "passed", output: { receipt: "ok" } })
+    } finally {
+      await app.close()
+    }
+  })
+
+  it("surfaces a projection failure from external finish after preserving durable settlement", async () => {
+    const app = await jobsApp(
+      delivery(
+        async () => ({ status: "waiting", token: "remote-1" }),
+        "transport-v1",
+        (result) => {
+          if (result.status === "passed") throw new Error("external terminal projection failed")
+          return {}
+        },
+      ),
+      { id: ids("send", "C-send", JOB_ID) },
+    )
+    try {
+      const requested = await app.dispatch(app.commands.sender.send, { message: "external projection" })
+      const id = app.jobs.requested(requested)[0]!
+      await app.jobs.run(id, { runner: "worker", leaseMs: 60_000 })
+
+      await expect(
+        app.jobs.finish(id, {
+          attempt: 1,
+          runner: "worker",
+          token: "remote-1",
+          result: { status: "passed", output: { receipt: "remote-ok" } },
+        }),
+      ).rejects.toThrow("external terminal projection failed")
+      expect(app.jobs.get(id)).toMatchObject({ status: "passed", output: { receipt: "remote-ok" } })
+    } finally {
+      await app.close()
+    }
   })
 
   it("freezes definitions at composition and rejects duplicate paths", async () => {
@@ -452,7 +608,17 @@ describe("Jobs", () => {
     await original.jobs.run(JOB_ID, { runner: "launcher", leaseMs: 60_000 })
     await original.close()
 
-    const resumed = await jobsApp(delivery(undefined, "transport-v2"), { journal })
+    const observeResult = vi.fn(() => ({ artifacts: [{ uri: "artifact://remote-ok" }] }))
+    const installed = delivery(undefined, "transport-v2", observeResult)
+    const resumed = await jobsApp(
+      Object.freeze({
+        ...installed,
+        observe() {
+          throw new Error("the installed revision must not reinterpret pinned input")
+        },
+      }),
+      { journal },
+    )
     await expect(
       resumed.jobs.finish(JOB_ID, {
         attempt: 1,
@@ -461,6 +627,7 @@ describe("Jobs", () => {
         result: { status: "passed", output: { receipt: "remote-ok" } },
       }),
     ).resolves.toMatchObject({ status: "passed", revision: "transport-v1", output: { receipt: "remote-ok" } })
+    expect(observeResult).toHaveBeenCalledWith({ status: "passed", output: { receipt: "remote-ok" } })
     await resumed.close()
   })
 

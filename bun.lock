@@ -37,6 +37,7 @@
       "name": "@yrd/cli",
       "version": "0.0.1",
       "dependencies": {
+        "@silvery/ansi": "^0.21.0",
         "@silvery/commander": "^0.21.0",
         "@silvery/scope": "^0.21.0",
         "@yrd/bay": "workspace:*",
