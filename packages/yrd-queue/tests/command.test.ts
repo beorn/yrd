@@ -2341,6 +2341,32 @@ describe("Queue command adapters", () => {
     expect(await readFile(stderrArtifact, "utf8")).toBe("check stderr\n")
   })
 
+  it("does not run parent diagnostics comparison unless the step declares it", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand("printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 17"),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("plain exit-code step did not fail")
+    expect(GitCheckEvidenceSchema.parse(job.output).comparison).toBeUndefined()
+    expect(configuredRuns).toBe(1)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+  })
+
   it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
