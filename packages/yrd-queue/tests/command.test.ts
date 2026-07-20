@@ -14,6 +14,7 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createProcess, shellCommand, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { createLogger } from "loggily"
 import * as z from "zod"
 import {
   CommandEvidenceSchema,
@@ -371,7 +372,9 @@ async function checkedQueue(
   )
   const queue = withQueue({ steps: [check, merge] as const, batch: options.batch ?? 1 })
   const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
-  return createYrd(queue(base), { inject: { journal: createMemoryJournal() } })
+  return createYrd(queue(base), {
+    inject: { journal: createMemoryJournal(), log: createLogger("test", [{ level: "silent" }]) },
+  })
 }
 
 async function expectLanded(repo: string, evidence: GitCheckEvidence): Promise<void> {
@@ -3272,6 +3275,7 @@ describe("Queue command adapters", () => {
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]!
 
     expect(run.status).toBe("passed")
+    expect(requests.filter(({ argv }) => argv[0] === "git").every(({ timeoutMs }) => timeoutMs === 30_000)).toBe(true)
     const initializations = requests.filter(
       ({ argv }) => argv[0] === "git" && argv.includes("init") && argv.includes("--bare"),
     )

@@ -9,7 +9,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { createProcess, type Process } from "@yrd/process"
+import { createProcess, type Process, type ProcessRequest } from "@yrd/process"
 import {
   createGitPushReceiver,
   loadGitPushReceiver,
@@ -28,6 +28,7 @@ type Fixture = {
   baseSha: string
   receiver: GitPushReceiver
   process: Process
+  requests: ProcessRequest[]
   hookEntry: string
 }
 
@@ -79,11 +80,18 @@ async function fixture(label: string): Promise<Fixture> {
   const stateDir = join(root, "state with 'quotes $()")
   const process = createProcess()
   processes.push(process)
+  const requests: ProcessRequest[] = []
+  const recordingProcess = {
+    run(request: ProcessRequest) {
+      requests.push(request)
+      return process.run(request)
+    },
+  }
   // Anchor the managed hook at the yrd `installHookHost` will publish, so pushes
   // exercise a real (lightweight) receiver process instead of the full CLI entry.
   const hookEntry = join(root, "bin", "yrd")
-  const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process, hookEntry })
-  return { root, mainRepo: main.path, stateDir, baseSha: main.head, receiver, process, hookEntry }
+  const receiver = await createGitPushReceiver({ mainRepo: main.path, stateDir, process: recordingProcess, hookEntry })
+  return { root, mainRepo: main.path, stateDir, baseSha: main.head, receiver, process, requests, hookEntry }
 }
 
 function target(baseSha: string, overrides: Partial<ReceiverTarget> = {}): ReceiverTarget {
@@ -130,6 +138,8 @@ async function inboxFiles(receiver: GitPushReceiver): Promise<string[]> {
 describe("Git push receiver", { timeout: 20_000 }, () => {
   it("sets up prs.git idempotently without replacing refs, objects, or managed hooks", async () => {
     const f = await fixture("setup")
+    expect(f.requests.length).toBeGreaterThan(0)
+    expect(f.requests.every((request) => request.timeoutMs === 30_000)).toBe(true)
     expect(f.receiver.receiverPath).toBe(join(await realpath(f.stateDir), "prs.git"))
     expect(await git(f.receiver.receiverPath, "rev-parse", "--is-bare-repository")).toBe("true")
     expect(await git(f.receiver.receiverPath, "rev-parse", "refs/yrd/bases/main")).toBe(f.baseSha)

@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createFailure, createMemoryJournal } from "@yrd/core"
 import { GitCheckEvidenceSchema, IntegrationProofSchema, Queues } from "@yrd/queue"
 import { createExclusive, createJournal } from "@yrd/persistence"
-import { createProcess } from "@yrd/process"
+import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type ConditionalLogger } from "loggily"
 import * as z from "zod"
 import { createDefaultYrdApp, createYrdHost, runYrdProcess } from "../src/host.ts"
@@ -2515,6 +2515,29 @@ function processExists(pid: number): boolean {
 }
 
 describe("discoverYrdRepository", { timeout: 20_000 }, () => {
+  it("propagates a hard timeout and loud diagnosis for a blackholed Git process", async () => {
+    const run = vi.fn(async (request: ProcessRequest): Promise<ProcessResult> => {
+      return {
+        exitCode: 124,
+        signal: "SIGTERM",
+        stdout: "",
+        stderr: "",
+        durationMs: request.timeoutMs ?? 0,
+        timedOut: true,
+        verdict: "TIMED_OUT",
+      }
+    })
+
+    await expect(
+      discoverYrdRepository({ cwd: "/blackholed-repository", process: { run } as Pick<Process, "run"> }),
+    ).rejects.toThrow("timed out after 30000ms")
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(run.mock.calls[0]?.[0]).toMatchObject({
+      argv: ["git", "-C", "/blackholed-repository", "rev-parse", "--path-format=absolute", "--show-toplevel"],
+      timeoutMs: 30_000,
+    })
+  })
+
   it("resolves a relative core.worktree from a separate Git directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "yrd-separated-git-"))
     roots.push(root)

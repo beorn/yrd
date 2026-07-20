@@ -58,7 +58,7 @@ import {
   writeInstalledBaseline,
 } from "./installed-baseline.ts"
 import { createExclusive, createJournal, createReadOnlyJournal, importOrphanJournal } from "@yrd/persistence"
-import { createProcess, shellCommand, type Process } from "@yrd/process"
+import { createProcess, shellCommand, type Process, type ProcessResult } from "@yrd/process"
 import { createKmIssueSource, withIssues, type IssueSource } from "@yrd/issue"
 import type { ConditionalLogger } from "loggily"
 import { run } from "silvery/runtime"
@@ -188,6 +188,11 @@ function eraseStep<Input extends PRShape, Output extends PRShape>(step: StepDef<
  * HERE (host), mechanism lives in @yrd/process — never bound inside the lib.
  */
 export const DEFAULT_STEP_TIMEOUT_MS = 15 * 60_000
+const GIT_TIMEOUT_MS = 30_000
+
+function assertGitDidNotTimeOut(result: Pick<ProcessResult, "timedOut">, args: readonly string[]): void {
+  if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+}
 
 /** Effective wall-clock bound for a step: declared, else the host default. */
 export function stepTimeoutMs(config: YrdStepConfig): number {
@@ -433,11 +438,14 @@ function configuredQueueSteps(
 async function resolveCommit(process: Pick<Process, "run">, repo: string, ref: string): Promise<string | undefined> {
   const candidates = ref.startsWith("refs/") ? [ref] : [ref, `refs/remotes/origin/${ref}`]
   for (const candidate of candidates) {
+    const args = ["rev-parse", "--verify", "--end-of-options", `${candidate}^{commit}`]
     const result = await process.run({
-      argv: ["git", "-C", repo, "rev-parse", "--verify", "--end-of-options", `${candidate}^{commit}`],
+      argv: ["git", "-C", repo, ...args],
       cwd: repo,
       env: cleanGitEnvironment(globalThis.process.env),
+      timeoutMs: GIT_TIMEOUT_MS,
     })
+    assertGitDidNotTimeOut(result, args)
     if (result.exitCode === 0) return result.stdout.trim().toLowerCase()
   }
   return undefined
@@ -450,11 +458,14 @@ async function resolveCommitMeta(
 ): Promise<Readonly<{ subject: string; body?: string }> | undefined> {
   const sha = await resolveCommit(process, repo, ref)
   if (sha === undefined) return undefined
+  const args = ["show", "--no-patch", "--format=%s%x00%b", sha]
   const result = await process.run({
-    argv: ["git", "-C", repo, "show", "--no-patch", "--format=%s%x00%b", sha],
+    argv: ["git", "-C", repo, ...args],
     cwd: repo,
     env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
   })
+  assertGitDidNotTimeOut(result, args)
   if (result.exitCode !== 0) return undefined
   const separator = result.stdout.indexOf("\0")
   const subject = (separator === -1 ? result.stdout : result.stdout.slice(0, separator)).trim()
@@ -876,10 +887,13 @@ function createViewerWorkspace(): BayWorkspace {
 }
 
 async function createViewerReceiver(repository: YrdRepository, process: Process): Promise<GitPushReceiver> {
+  const args = ["rev-parse", "--show-object-format"]
   const result = await process.run({
-    argv: ["git", "-C", repository.repo, "rev-parse", "--show-object-format"],
+    argv: ["git", "-C", repository.repo, ...args],
     cwd: repository.repo,
+    timeoutMs: GIT_TIMEOUT_MS,
   })
+  assertGitDidNotTimeOut(result, args)
   const objectFormat = result.stdout.trim()
   if (result.exitCode !== 0 || (objectFormat !== "sha1" && objectFormat !== "sha256")) {
     throw new Error(result.stderr.trim() || `yrd: unsupported Git object format '${objectFormat}'`)

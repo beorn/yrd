@@ -10,6 +10,7 @@ import { createCommandIssueSource, createKmIssueSource, createIssues, withIssues
 it("resolves source-owned ids and composes without mutating its host", async () => {
   let argv: readonly string[] = []
   let environment: NodeJS.ProcessEnv | undefined
+  let timeoutMs: number | undefined
   const source = createCommandIssueSource({
     id: "issues",
     command: ["issue", "show", "--json"],
@@ -18,6 +19,7 @@ it("resolves source-owned ids and composes without mutating its host", async () 
       async run(request) {
         argv = request.argv
         environment = request.env
+        timeoutMs = request.timeoutMs
         return {
           exitCode: 0,
           signal: null,
@@ -48,6 +50,7 @@ it("resolves source-owned ids and composes without mutating its host", async () 
   })
   expect(environment).not.toHaveProperty("GIT_DIR")
   expect(environment).not.toHaveProperty("YRD_JOB")
+  expect(timeoutMs).toBe(30_000)
   expect(() => createIssues({ sources: [source, source] })).toThrow("duplicate issue source 'issues'")
   await expect(issues.resolve({ source: "missing", id: "1" })).rejects.toThrow("no issue source")
   await app.close()

@@ -25,11 +25,13 @@ export type GitWorkspaceOptions = Readonly<{
 
 type GitResult = Readonly<{ code: number; stdout: string; stderr: string }>
 type Git = ReturnType<typeof createGit>
+const GIT_TIMEOUT_MS = 30_000
 
 function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv) {
   const env = cleanGitEnvironment(environment)
   const run = async (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> => {
-    const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
+    const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env, timeoutMs: GIT_TIMEOUT_MS })
+    if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
     if (!allowFailure && result.exitCode !== 0) {
       throw new Error(result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} exited ${result.exitCode}`)
     }

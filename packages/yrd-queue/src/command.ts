@@ -766,6 +766,7 @@ type GitResult = Readonly<{
 }>
 type Git = ReturnType<typeof createGit>
 const CERTIFICATE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--no-renames"] as const
+const GIT_TIMEOUT_MS = 30_000
 
 function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
   const output = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0))
@@ -789,11 +790,13 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     allowFailure: boolean,
     trim: boolean,
     stdoutChunks?: Uint8Array[],
+    preserveProcessFailure = false,
   ): Promise<GitResult> => {
     const result = await process.run({
       argv: ["git", "-C", repo, ...args],
       cwd: repo,
       env,
+      timeoutMs: GIT_TIMEOUT_MS,
       ...(stdoutChunks === undefined
         ? {}
         : {
@@ -814,6 +817,9 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ...(progress.verdict === undefined ? {} : { verdict: progress.verdict }),
       ...(result.sweepFailure === undefined ? {} : { sweepFailure: result.sweepFailure }),
     }
+    if (completed.timedOut && !preserveProcessFailure) {
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+    }
     if (!allowFailure && completed.code !== 0) {
       throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)
     }
@@ -823,6 +829,10 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
     execute(repo, args, allowFailure, true)
   const raw = (repo: string, args: readonly string[], allowFailure = false): Promise<GitResult> =>
     execute(repo, args, allowFailure, false)
+  const probe = (repo: string, args: readonly string[]): Promise<GitResult> =>
+    execute(repo, args, true, true, undefined, true)
+  const rawProbe = (repo: string, args: readonly string[]): Promise<GitResult> =>
+    execute(repo, args, true, false, undefined, true)
   const commit = async (repo: string, ref: string): Promise<string> =>
     (await run(repo, ["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`])).stdout
   const optionalCommit = async (repo: string, ref: string): Promise<string | undefined> => {
@@ -849,7 +859,9 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       cwd: repo,
       env,
       stdin: concatenateBytes(diffChunks),
+      timeoutMs: GIT_TIMEOUT_MS,
     })
+    if (result.timedOut) throw new Error(`yrd: git patch-id --stable timed out after ${GIT_TIMEOUT_MS}ms`)
     if (result.exitCode !== 0) return undefined
     return /^([0-9a-f]{40,64})\s+[0-9a-f]{40,64}$/iu.exec(result.stdout.trim())?.[1]
   }
@@ -867,7 +879,7 @@ function createGit(process: Pick<Process, "run">, environment: NodeJS.ProcessEnv
       ],
       true,
     )
-  return Object.freeze({ run, raw, commit, optionalCommit, stablePatchId, rangeDiff, process, env })
+  return Object.freeze({ run, raw, probe, rawProbe, commit, optionalCommit, stablePatchId, rangeDiff, process, env })
 }
 
 export type GitQueueTarget = Readonly<{
@@ -2547,7 +2559,9 @@ async function readUnionBlob(git: Git, repo: string, ref: string, path: string):
     cwd: repo,
     env: git.env,
     stdin: blob.stdout,
+    timeoutMs: GIT_TIMEOUT_MS,
   })
+  if (roundTrip.timedOut) throw new Error(`yrd: git hash-object --stdin timed out after ${GIT_TIMEOUT_MS}ms`)
   if (roundTrip.exitCode !== 0 || roundTrip.stdout.trim() !== oid) return undefined
   return { mode, content: blob.stdout }
 }
@@ -2837,7 +2851,7 @@ async function resolveCandidateSubmoduleConflict(
   )
   if (structural.status === "refused") return structural
 
-  const metadata = await git.run(path, ["diff", "--cached", "--quiet", "HEAD", "--", ".gitmodules"], true)
+  const metadata = await git.probe(path, ["diff", "--cached", "--quiet", "HEAD", "--", ".gitmodules"])
   if (!probeSettled(metadata) || (metadata.code !== 0 && metadata.code !== 1)) {
     throw createSubmoduleCompositionRefusal(
       repo,
@@ -2886,11 +2900,7 @@ async function resolveCandidateSubmoduleConflict(
   }
 
   for (const resolution of executed.resolutions) {
-    const staged = await git.run(
-      path,
-      ["update-index", "--cacheinfo", `160000,${resolution.sha},${resolution.path}`],
-      true,
-    )
+    const staged = await git.probe(path, ["update-index", "--cacheinfo", `160000,${resolution.sha},${resolution.path}`])
     if (staged.code !== 0) {
       throw createSubmoduleCompositionRefusal(
         repo,
@@ -2907,7 +2917,7 @@ async function resolveCandidateSubmoduleConflict(
       message: `candidate still has unresolved paths after submodule composition: ${unresolved.join(", ")}`,
     }
   }
-  const committed = await git.run(path, ["commit", "--no-edit"], true)
+  const committed = await git.probe(path, ["commit", "--no-edit"])
   if (committed.code !== 0) {
     throw createSubmoduleCompositionRefusal(
       repo,
@@ -2922,7 +2932,7 @@ async function resolveCandidateSubmoduleConflict(
 }
 
 async function readQueueTreeConflicts(git: Git, repo: string): Promise<QueueTreeConflict[]> {
-  const listed = await git.raw(repo, ["ls-files", "--unmerged", "-z"], true)
+  const listed = await git.rawProbe(repo, ["ls-files", "--unmerged", "-z"])
   if (!probeSettled(listed) || listed.code !== 0) {
     throw createSubmoduleCompositionRefusal(
       repo,
@@ -2987,7 +2997,7 @@ async function runSubmoduleProbe(
   raw = false,
 ): Promise<GitResult> {
   try {
-    const result = await (raw ? git.raw(repo, args, true) : git.run(repo, args, true))
+    const result = await (raw ? git.rawProbe(repo, args) : git.probe(repo, args))
     if (!probeSettled(result)) throw createSubmoduleReachabilityRefusal(context, result)
     return result
   } catch (cause) {

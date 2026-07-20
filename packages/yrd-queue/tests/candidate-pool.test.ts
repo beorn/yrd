@@ -8,7 +8,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } fro
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { createProcess } from "@yrd/process"
+import { createProcess, type ProcessRequest, type ProcessResult } from "@yrd/process"
 import { createLogger, type Event as LogEvent } from "loggily"
 import type { JobResult } from "@yrd/job"
 import {
@@ -163,6 +163,29 @@ function deferred<T = void>(): Readonly<{
 const passed: JobResult<{ ok: true }> = { status: "passed", output: { ok: true } }
 
 describe("warm candidate pool", () => {
+  it("bounds and names a blackholed Git process", async () => {
+    let request: ProcessRequest | undefined
+    const git = createCandidatePoolGit({
+      async run(input): Promise<ProcessResult> {
+        request = input
+        return {
+          exitCode: 124,
+          signal: "SIGTERM",
+          stdout: "",
+          stderr: "",
+          durationMs: input.timeoutMs ?? 0,
+          timedOut: true,
+          verdict: "TIMED_OUT",
+        }
+      },
+    })
+
+    await expect(git.run("/blackholed-repository", ["fetch", "origin"])).rejects.toThrow(
+      "git fetch origin timed out after 30000ms",
+    )
+    expect(request).toMatchObject({ timeoutMs: 30_000 })
+  })
+
   it("reuses one warm worktree across candidate cycles and resets dirt between runs", async () => {
     const { repo, baseSha, baysRoot } = await repository()
     const { log, events } = capturingLog()

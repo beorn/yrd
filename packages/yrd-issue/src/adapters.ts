@@ -11,6 +11,7 @@ type SourceOptions = Readonly<{
 }>
 
 const IssueFieldsSchema = IssueSchema.omit({ ref: true })
+const ISSUE_SOURCE_TIMEOUT_MS = 30_000
 const KmContextSchema = z.object({
   node: z.object({
     title: z.string().optional(),
@@ -73,7 +74,11 @@ function createIssueSource(
         argv: argv(ref.id),
         cwd: options.cwd,
         env: cleanEnvironment({ ...options.env, YRD_ISSUE_SOURCE: ref.source, YRD_ISSUE_ID: ref.id }),
+        timeoutMs: ISSUE_SOURCE_TIMEOUT_MS,
       })
+      if (result.timedOut) {
+        throw new Error(`yrd: issue source '${sourceId}' timed out after ${ISSUE_SOURCE_TIMEOUT_MS}ms`)
+      }
       if (result.exitCode !== 0) {
         throw new Error(
           `yrd: issue source '${sourceId}' exited ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`,

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process"
-import { mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { resolve } from "node:path"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "../src/version.ts"
 
@@ -9,7 +9,12 @@ const root = resolve(import.meta.dirname, "../../..")
 
 type GitProbe = (args: readonly string[]) => { status: number; stdout: string }
 
-async function run(executable: "yrd" | "git-yrd" | "git-bay", flag: "--version" | "-V", cwd: string) {
+async function run(
+  executable: "yrd" | "git-yrd" | "git-bay",
+  flag: "--version" | "-V",
+  cwd: string,
+  environment: NodeJS.ProcessEnv = {},
+) {
   const child = Bun.spawn([resolve(root, "bin", executable), flag], {
     cwd,
     env: {
@@ -17,6 +22,7 @@ async function run(executable: "yrd" | "git-yrd" | "git-bay", flag: "--version" 
       GIT_DIR: "/definitely/not/the/yrd/git-dir",
       GIT_PREFIX: "caller/prefix/that/must/not-leak/",
       NODE_ENV: "production",
+      ...environment,
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -53,6 +59,29 @@ describe("version CLI", () => {
       expect(formatYrdRuntimeVersion(git)).toBe(`yrd ${YRD_VERSION}+unknown`)
     },
   )
+
+  it("bounds and names a blackholed source Git process", async () => {
+    const outside = mkdtempSync(resolve(tmpdir(), "yrd-version-blackhole-"))
+    try {
+      const bin = join(outside, "bin")
+      mkdirSync(bin)
+      const git = join(bin, "git")
+      writeFileSync(git, "#!/bin/sh\nexec /bin/sleep 30\n")
+      chmodSync(git, 0o755)
+
+      const startedAt = Date.now()
+      const result = await run("yrd", "--version", outside, {
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      })
+
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toBe("")
+      expect(result.stderr).toContain("git rev-parse --short=10 --verify HEAD timed out after 5000ms")
+      expect(Date.now() - startedAt).toBeLessThan(8_000)
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  }, 10_000)
 
   it.each([
     ["yrd", "--version"],

@@ -468,6 +468,9 @@ async function pinAttempt(git: Git, cwd: string, ref: string, commit: string): P
   const create = await git.run(cwd, ["update-ref", "--create-reflog", ref, commit, "0".repeat(commit.length)])
   if (!create.ok) return create
   if (create.value.exitCode === 0) return accepted(undefined)
+  if (create.value.timedOut) {
+    return rejected("attempt-ref-write-failed", `Could not create write-once ref '${ref}': ${git.output(create.value)}`)
+  }
   const raced = await git.commit(cwd, ref, "attempt-ref-read-failed", `Could not resolve raced ref '${ref}'`)
   return raced.ok && raced.value === commit
     ? accepted(undefined)
