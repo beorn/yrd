@@ -113,8 +113,9 @@ function comparePath(left: SubmoduleEntry, right: SubmoduleEntry): number {
 }
 
 /**
- * The single advisory line for a queue list/status surface, or `undefined` when
- * every submodule tracks a branch. One line per invocation, never per row.
+ * The single advisory message for a queue list/status surface, or `undefined`
+ * when every submodule tracks a branch. One message per invocation, never per
+ * submodule row.
  */
 export function formatSubmoduleTrackingWarning(unbranched: readonly SubmoduleEntry[]): string | undefined {
   if (unbranched.length === 0) return undefined
@@ -153,9 +154,9 @@ export function readSubmoduleEntries(root: string): readonly SubmoduleEntry[] {
 }
 
 /**
- * The advisory warning lines (zero or one) for the queue list/status surfaces.
- * Empty for a non-superproject directory or when every submodule already tracks
- * a branch — those surfaces then emit no extra output at all.
+ * The advisory warning messages (zero or one) for the queue list/status
+ * surfaces. Empty for a non-superproject directory or when every submodule
+ * already tracks a branch — those surfaces then emit no extra output at all.
  */
 export function submoduleTrackingWarnings(cwd: string): readonly string[] {
   const root = superprojectRoot(cwd)

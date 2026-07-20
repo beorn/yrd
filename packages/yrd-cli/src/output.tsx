@@ -30,7 +30,7 @@ export async function printResult(io: YrdCliIO, json: boolean, value: unknown, h
 /** Like {@link printResult}, but carries advisory warnings alongside the result.
  * In JSON mode they become a `warnings` array on the value (never printed to
  * stdout, which would corrupt the JSON stream); in human mode each warning is
- * one stderr line after the rendered output. No warnings means byte-identical
+ * one stderr message after the rendered output. No warnings means byte-identical
  * output to {@link printResult}. */
 export async function printResultWithWarnings(
   io: YrdCliIO,

@@ -2264,9 +2264,9 @@ function renderInitTable(rows: readonly InitRow[]): string {
   const widths = header.map((label, column) =>
     Math.max(label.length, ...cells.map((cell) => cell[column]!.length)),
   )
-  const line = (cell: readonly string[]): string =>
+  const formatRow = (cell: readonly string[]): string =>
     cell.map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column]!))).join("  ")
-  return [line(header), ...cells.map(line)].join("\n")
+  return [formatRow(header), ...cells.map(formatRow)].join("\n")
 }
 
 /**

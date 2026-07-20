@@ -170,7 +170,7 @@ describe("unbranchedSubmodules + formatSubmoduleTrackingWarning", () => {
     expect(unbranchedSubmodules(entries).map((entry) => entry.path)).toEqual(["vendor/c", "vendor/b"])
   })
 
-  it("formats one line, plural, paths sorted, with the init hint", () => {
+  it("formats one message, plural, paths sorted, with the init hint", () => {
     expect(formatSubmoduleTrackingWarning(unbranchedSubmodules(entries))).toBe(
       "warn: 2 submodules not tracking a branch (rolls disabled): vendor/b, vendor/c — run 'yrd init' to set",
     )
@@ -278,7 +278,7 @@ describe("printResultWithWarnings", () => {
     expect(JSON.parse(out.stdout())).toEqual({ command: "queue.list", results: [] })
   })
 
-  it("writes the human output to stdout and one warning line per warning to stderr", async () => {
+  it("writes the human output to stdout and one warning message per warning to stderr", async () => {
     const out = outputIO()
     await printResultWithWarnings(out.io, false, { command: "queue.list" }, "the timeline", [warning])
     expect(out.stdout()).toContain("the timeline")
