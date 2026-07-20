@@ -1410,6 +1410,10 @@ function createQueueCommands(steps: readonly RuntimeStep[], byName: ReadonlyMap<
       if (pr.status !== "pushed" && pr.status !== "submitted") {
         raiseFailure("refusal", "pr-not-admissible", `yrd: PR '${pr.id}' is ${pr.status}, not admissible`)
       }
+      // A pause lets the currently active Job settle, but every admission
+      // retry is a fresh Queue run. Guard the command itself so a selector
+      // chosen before a concurrent pause cannot mint that retry afterward.
+      if (blockingQueuePause(state, pr) !== undefined) return { events: [] }
       const selected = admissionSteps(state.queues, steps)
       if (selected.length === 0) return { events: [] }
       const snapshot = Queues.snapshot(pr)
@@ -2891,6 +2895,7 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
   if (selected.length === 0) return []
   return Object.values(state.bays.prs)
     .filter((pr) => pr.status === "pushed" || pr.status === "submitted")
+    .filter((pr) => blockingQueuePause(state, pr) === undefined)
     .filter((pr) => checksRequested(pr))
     .filter((pr) => {
       const snapshot = Queues.snapshot(pr)
@@ -2907,6 +2912,14 @@ function admissionQueue(state: DeepReadonly<RuntimeState>, steps: readonly Runti
       const rightAt = checkQueueTime(right)
       return leftAt.localeCompare(rightAt) || left.id.localeCompare(right.id, undefined, { numeric: true })
     })
+}
+
+function blockingQueuePause(
+  state: DeepReadonly<RuntimeState>,
+  pr: DeepReadonly<PR>,
+): DeepReadonly<QueuePause> | undefined {
+  const pause = state.queues.pauses[baseIdentity(pr.base)]
+  return pause === undefined || pause.allowedPRs.includes(pr.id) ? undefined : pause
 }
 
 function checkQueueTime(pr: DeepReadonly<PR>): string {
@@ -3194,8 +3207,8 @@ function prEligibility(
     }
   }
   const base = baseIdentity(pr.base)
-  const pause = state.queues.pauses[base]
-  if (pause !== undefined && !pause.allowedPRs.includes(pr.id)) {
+  const pause = blockingQueuePause(state, pr)
+  if (pause !== undefined) {
     return result({
       code: "queue-paused",
       message: `queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,

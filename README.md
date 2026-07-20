@@ -485,17 +485,17 @@ yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command             | Input                                             | Output and state                                                                        |
-| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
-| `run`               | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
-| `resume`            | Optional base                                     | Removes the queue pause                                                                 |
-| `recover`           | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`            | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`             | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`              | Optional base                                     | Resolves and validates queue environment resources                                      |
-| `deinit`            | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
+| Command              | Input                                             | Output and state                                                                                                      |
+| -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
+| `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
+| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new runs (including retries) while active work settles               |
+| `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
+| `recover`            | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                                              |
+| `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
+| `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
+| `init`               | Optional base                                     | Resolves and validates queue environment resources                                                                    |
+| `deinit`             | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command
