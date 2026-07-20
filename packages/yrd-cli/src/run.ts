@@ -105,6 +105,17 @@ import { readInstalledBaselines } from "./installed-baseline.ts"
 import type { QueueArtifactOutput, QueuePrDiff, QueueWatchFocus, QueueWatchSnapshot } from "./watch-pane.tsx"
 
 const GIT_TIMEOUT_MS = 30_000
+const GIT_TIMEOUT_CODE = "ETIMEDOUT"
+
+function gitTimeoutError(args: readonly string[], cause?: unknown): Error & { code: typeof GIT_TIMEOUT_CODE } {
+  const message = `yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`
+  const error = cause === undefined ? new Error(message) : new Error(message, { cause })
+  return Object.assign(error, { code: GIT_TIMEOUT_CODE } as const)
+}
+
+function isGitTimeoutError(error: unknown): error is Error & { code: typeof GIT_TIMEOUT_CODE } {
+  return typeof error === "object" && error !== null && "code" in error && error.code === GIT_TIMEOUT_CODE
+}
 
 function gitSync(cwd: string, args: readonly string[]): string {
   try {
@@ -116,7 +127,7 @@ function gitSync(cwd: string, args: readonly string[]): string {
     })
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ETIMEDOUT") {
-      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: error })
+      throw gitTimeoutError(args, error)
     }
     throw error
   }
@@ -136,7 +147,7 @@ export async function runQueueGit(
     timeoutMs: GIT_TIMEOUT_MS,
   })
   if (result.timedOut) {
-    throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
+    throw gitTimeoutError(args)
   }
   if (result.exitCode !== 0) {
     throw new Error(`yrd: git ${args.join(" ")} exited ${String(result.exitCode)}: ${result.stderr.trim()}`)
@@ -156,7 +167,7 @@ function queueGitDir(cwd: string): string | undefined {
     if (gitDir === "") return undefined
     return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
   } catch (error) {
-    if (error instanceof Error && error.message.includes(`timed out after ${GIT_TIMEOUT_MS}ms`)) throw error
+    if (isGitTimeoutError(error)) throw error
     return undefined
   }
 }
@@ -573,7 +584,8 @@ function commitSubject(cwd: string, headSha: string): string | undefined {
   try {
     const subject = gitSync(cwd, ["show", "-s", "--format=%s", "--no-show-signature", headSha, "--"]).trimEnd()
     return subject === "" ? undefined : subject
-  } catch {
+  } catch (error) {
+    if (isGitTimeoutError(error)) throw error
     return undefined
   }
 }
@@ -1911,7 +1923,8 @@ function currentGitBranch(cwd: string, io: YrdCliIO): string | undefined {
   try {
     const branch = gitSync(cwd, ["branch", "--show-current"]).trim()
     return branch === "" ? undefined : branch
-  } catch {
+  } catch (error) {
+    if (isGitTimeoutError(error)) throw error
     return undefined
   }
 }
@@ -2512,7 +2525,8 @@ export function queuePrDiff(cwd: string, pr: PR, revision = pr.revision): QueueP
   try {
     gitSync(cwd, ["cat-file", "-e", `${source.base}^{commit}`])
     gitSync(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
-  } catch {
+  } catch (error) {
+    if (isGitTimeoutError(error)) throw error
     return { pr: pr.id, revision, unavailable: "refs-pruned" }
   }
   const range = `${source.base}...${source.headSha}`
@@ -2536,7 +2550,8 @@ async function queuePrDiffAsync(cwd: string, pr: PR, revision: number, runGit: Q
   try {
     await runGit(cwd, ["cat-file", "-e", `${source.base}^{commit}`])
     await runGit(cwd, ["cat-file", "-e", `${source.headSha}^{commit}`])
-  } catch {
+  } catch (error) {
+    if (isGitTimeoutError(error)) throw error
     return { pr: pr.id, revision, unavailable: "refs-pruned" }
   }
   const range = `${source.base}...${source.headSha}`
@@ -2574,7 +2589,10 @@ export function createQueuePrDiffResolver(
       if (running !== undefined) return running
 
       const pending = queuePrDiffAsync(cwd, pr, revision, runGit)
-        .catch((): QueuePrDiff => ({ pr: pr.id, revision, unavailable: "git-error" }))
+        .catch((error): QueuePrDiff => {
+          if (isGitTimeoutError(error)) throw error
+          return { pr: pr.id, revision, unavailable: "git-error" }
+        })
         .then((diff) => {
           if (!("unavailable" in diff) || diff.unavailable === "refs-pruned") {
             resolved.set(key, diff)
@@ -2668,7 +2686,8 @@ export async function queueListSnapshot(
           let diff: QueuePrDiff
           try {
             diff = queuePrDiff(io.cwd ?? process.cwd(), pr, revision)
-          } catch {
+          } catch (error) {
+            if (isGitTimeoutError(error)) throw error
             diff = { pr: pr.id, revision, unavailable: "git-error" }
           }
           return diff

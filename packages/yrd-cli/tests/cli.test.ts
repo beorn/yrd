@@ -9183,6 +9183,52 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
     ])
   })
 
+  it("never caches a timed-out focused diff as missing refs", async () => {
+    let calls = 0
+    const process = {
+      async run(): Promise<ProcessResult> {
+        calls++
+        if (calls % 2 === 1) {
+          return {
+            exitCode: 0,
+            signal: null,
+            stdout: ".git\n",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+            verdict: "EXITED",
+          }
+        }
+        return {
+          exitCode: 143,
+          signal: "SIGTERM",
+          stdout: "",
+          stderr: "",
+          durationMs: 30_000,
+          timedOut: true,
+          verdict: "TIMED_OUT",
+        }
+      },
+    }
+    const resolver = runInternals.createQueuePrDiffResolver({
+      runGit: (cwd, args) => runInternals.runQueueGit(process, cwd, args),
+    })
+    const pr = {
+      id: "PR1",
+      revision: 1,
+      base: "main",
+      baseSha: BASE_SHA,
+      headSha: HEAD_SHA,
+      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+    } as unknown as PR
+
+    await expect(resolver.resolve("/repo", pr, 1, 1_000)).rejects.toThrow(
+      "yrd: git cat-file -e aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa^{commit} timed out after 30000ms",
+    )
+    await expect(resolver.resolve("/repo", pr, 1, 2_000)).rejects.toThrow("timed out after 30000ms")
+    expect(calls).toBe(4)
+  })
+
   it("does not read run artifacts for a focused PR row without a run", async () => {
     const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-focused-output-"))
     const app = await createApp()
