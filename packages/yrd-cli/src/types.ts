@@ -6,6 +6,7 @@ import type { GitPRRecutter, HasQueue, QueueAuditResult, QueueCommands, QueuesSt
 import type { HasIssues } from "@yrd/issue"
 import type { OrphanJournalImportResult } from "@yrd/persistence"
 import type { Scope } from "@silvery/scope"
+import type { SubmoduleBranchResolver } from "./submodule-tracking.ts"
 
 export type YrdCliExitCode = 0 | 1 | 2 | 3
 
@@ -78,6 +79,9 @@ export type YrdCliIO = {
   currentBranch?(cwd: string): string | undefined
   /** Git facts for `pr prune`; defaults to real Git plumbing in `cwd`. */
   pruneGit?(cwd: string): PruneGitFacts
+  /** Resolve a submodule's upstream default branch for `yrd init`; defaults to
+   * `git ls-remote --symref`. Tests inject a resolver to avoid the network. */
+  resolveSubmoduleDefaultBranch?: SubmoduleBranchResolver
   scope?: Pick<Scope, "signal" | "sleep">
   drainSignal?: AbortSignal
 }

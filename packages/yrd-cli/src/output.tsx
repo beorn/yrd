@@ -27,6 +27,26 @@ export async function printResult(io: YrdCliIO, json: boolean, value: unknown, h
   await printHuman(io, human)
 }
 
+/** Like {@link printResult}, but carries advisory warnings alongside the result.
+ * In JSON mode they become a `warnings` array on the value (never printed to
+ * stdout, which would corrupt the JSON stream); in human mode each warning is
+ * one stderr line after the rendered output. No warnings means byte-identical
+ * output to {@link printResult}. */
+export async function printResultWithWarnings(
+  io: YrdCliIO,
+  json: boolean,
+  value: Record<string, unknown>,
+  human: HumanOutput,
+  warnings: readonly string[],
+): Promise<void> {
+  if (json) {
+    io.stdout(stableJson(warnings.length === 0 ? value : { ...value, warnings }))
+    return
+  }
+  await printHuman(io, human)
+  for (const warning of warnings) io.stderr(warning.endsWith("\n") ? warning : `${warning}\n`)
+}
+
 export type DiagnosticOptions = Readonly<{ verbose?: boolean }>
 
 export async function diagnostic(
