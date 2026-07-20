@@ -45,6 +45,9 @@ const StepObjectSchema = z
     run: TextSchema.optional(),
     runner: RunnerSchema.default("local"),
     classification: z.enum(["base", "carrier"]).optional(),
+    /** Explicit parent-versus-candidate comparison for diagnostics-shaped
+     * lint/typecheck output. Absent means the command's exit code is final. */
+    comparison: z.literal("diagnostics").optional(),
     environment: TextSchema.optional(),
     /** Declared child values applied over the deterministic base allowlist (merge-queue R42). */
     env: z.record(EnvironmentNameSchema, z.string()).optional(),
@@ -65,6 +68,23 @@ const StepObjectSchema = z
     noProgressMs: z.number().int().min(1).optional(),
   })
   .strict()
+  .superRefine((step, context) => {
+    if (step.comparison === undefined) return
+    if (step.run === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["comparison"],
+        message: "requires a local run command",
+      })
+    }
+    if (step.runner !== "local") {
+      context.addIssue({
+        code: "custom",
+        path: ["comparison"],
+        message: "is only supported by the local runner",
+      })
+    }
+  })
 const StepSchema = z.preprocess((value) => (typeof value === "string" ? { run: value } : value), StepObjectSchema)
 
 const ContestSchema = z
