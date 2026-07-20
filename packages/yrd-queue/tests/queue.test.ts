@@ -5,9 +5,10 @@
  */
 import { describe, expect, expectTypeOf, it, vi } from "vitest"
 import { createLogger, type ConditionalLogger, type Event as LogEvent } from "loggily"
-import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
+import { createBayJobDefs, currentPRRev, prDeliveryState, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { Command, createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
+import { defineConfig, selectFlow, yrd, type YrdConfig } from "@yrd/config"
 import * as z from "zod"
 import {
   withQueue,
@@ -41,6 +42,26 @@ type ReviewedShape = AddStepResult<CheckedShape, "review", ReviewResult>
 type MergedShape = ReviewedShape & IntegratedShape
 type DeployedShape = AddStepResult<MergedShape, "deploy", DeployResult>
 
+function prFacts(pr: PR | undefined) {
+  if (pr === undefined) throw new Error("expected PR")
+  const revision = currentPRRev(pr)
+  return {
+    ...pr,
+    delivery: prDeliveryState(pr),
+    current: revision,
+    revision: revision.n,
+    headSha: revision.head,
+    baseSha: revision.baseSha,
+    correlation: revision.correlation,
+    composition: revision.composition,
+    recut: revision.recut,
+  }
+}
+
+function deliveryOf(pr: PR | undefined): string | undefined {
+  return pr === undefined ? undefined : prDeliveryState(pr)
+}
+
 function ids(initial = 0): () => string {
   let value = initial
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
@@ -50,14 +71,16 @@ function workspace(): BayWorkspace {
   return {
     revision: "test-workspace-v1",
     provision: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE },
     }),
     refresh: (input) => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD, baseSha: BASE, dirty: false },
     }),
-    deprovision: () => ({ status: "passed", output: {} }),
+    deprovision: () => ({ status: "completed", conclusion: "success", output: {} }),
   }
 }
 
@@ -65,19 +88,26 @@ function queuePlugin(
   options: Readonly<{
     batch?: false | number
     check?: StepRunner<PRShape, CheckResult>
-    merge?: (input: StepExecution<ReviewedShape>) => JobResult<{ commit: string; baseSha: string }>
+    merge?: (
+      input: StepExecution<ReviewedShape>,
+    ) => JobResult<{ commit: string; baseSha: string }> | Promise<JobResult<{ commit: string; baseSha: string }>>
     deploy?: (input: StepExecution<MergedShape>) => JobResult<DeployResult>
     checkRevision?: string
     checkClassification?: "base" | "carrier"
     requires?: readonly ["review"]
     defaultSteps?: readonly ("check" | "review" | "merge" | "deploy")[]
     resolveBaseSha?: (base: string) => string | Promise<string>
+    flowConfig?: YrdConfig
   }> = {},
 ) {
   const check = withStep(
     "check",
     (input, context): JobResult<CheckResult> | Promise<JobResult<CheckResult>> =>
-      options.check?.(input, context) ?? { status: "passed", output: { checked: true } },
+      options.check?.(input, context) ?? {
+        status: "completed",
+        conclusion: "success",
+        output: { checked: true },
+      },
     {
       revision: options.checkRevision ?? "check-v1",
       output: CheckResultSchema,
@@ -87,20 +117,31 @@ function queuePlugin(
   const review = withStep(
     "review",
     (_input: StepExecution<CheckedShape>): JobResult<ReviewResult> => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { approved: true },
     }),
     { revision: "review-v1", output: ReviewResultSchema },
   )
   const merge = withMerge(
-    (input: StepExecution<ReviewedShape>): JobResult<{ commit: string; baseSha: string }> =>
-      options.merge?.(input) ?? { status: "passed", output: { commit: MERGED, baseSha: BASE } },
+    (
+      input: StepExecution<ReviewedShape>,
+    ): JobResult<{ commit: string; baseSha: string }> | Promise<JobResult<{ commit: string; baseSha: string }>> =>
+      options.merge?.(input) ?? {
+        status: "completed",
+        conclusion: "success",
+        output: { commit: MERGED, baseSha: BASE },
+      },
     { revision: "merge-v1" },
   )
   const deploy = withStep(
     "deploy",
     (input: StepExecution<MergedShape>): JobResult<DeployResult> =>
-      options.deploy?.(input) ?? { status: "passed", output: { environment: "staging" } },
+      options.deploy?.(input) ?? {
+        status: "completed",
+        conclusion: "success",
+        output: { environment: "staging" },
+      },
     { revision: "deploy-v1", needsIntegration: true, output: DeployResultSchema },
   )
   return withQueue({
@@ -108,7 +149,8 @@ function queuePlugin(
     batch: options.batch ?? false,
     defaultSteps: options.defaultSteps ?? ["check", "review", "merge", "deploy"],
     ...(options.requires === undefined ? {} : { requires: options.requires }),
-    ...(options.resolveBaseSha === undefined ? {} : { resolveBaseSha: options.resolveBaseSha }),
+    resolveBaseSha: options.resolveBaseSha ?? (() => BASE),
+    ...(options.flowConfig === undefined ? {} : { flows: options.flowConfig }),
   })
 }
 
@@ -118,10 +160,20 @@ async function createQueueApp(
   clock: () => string = () => "2026-01-01T00:00:00.000Z",
   id: () => string = ids(),
   log?: ConditionalLogger,
+  flowConfig?: YrdConfig,
 ) {
   const bayJobs = createBayJobDefs(workspace())
-  const queue = queuePlugin(options)
-  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  const queue = queuePlugin({ ...options, ...(flowConfig === undefined ? {} : { flowConfig }) })
+  const base = pipe(
+    createYrdDef(),
+    withJobs({ definitions: [bayJobs, queue.jobDefs] }),
+    withBays({
+      jobs: bayJobs,
+      ...(flowConfig === undefined
+        ? {}
+        : { selectFlow: (submission: Parameters<typeof selectFlow>[1]) => selectFlow(flowConfig, submission).pin }),
+    }),
+  )
   const definition = queue(base)
   return createYrd(definition, {
     inject: { journal, id, clock, ...(log === undefined ? {} : { log }) },
@@ -133,10 +185,155 @@ async function submitBranch(app: Awaited<ReturnType<typeof createQueueApp>>, bra
   await app.bays.submit({ branch, headSha: digit.repeat(40), base, baseSha: BASE })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
-  return pr
+  return prFacts(pr)
 }
 
 describe("Queue", () => {
+  it("runs checks across independent bases concurrently under Runner admission", async () => {
+    const entered = new Set<string>()
+    const bothEntered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    await using app = await createQueueApp({
+      check: async (input) => {
+        const base = input.prs[0]?.base
+        if (base === undefined) throw new Error("check lost its base")
+        entered.add(base)
+        if (entered.size === 2) bothEntered.resolve()
+        await release.promise
+        return { status: "completed", conclusion: "success", output: { checked: true } }
+      },
+    })
+    const main = await submitBranch(app, "topic/main-check", "main")
+    const releaseBranch = await submitBranch(app, "topic/release-check", "release")
+
+    const running = Promise.all([
+      app.queue.run({ prs: [main.id], steps: ["check"] }, runtime),
+      app.queue.run({ prs: [releaseBranch.id], steps: ["check"] }, runtime),
+    ])
+    await bothEntered.promise
+    expect([...entered].toSorted()).toEqual(["main", "release"])
+    release.resolve()
+    await expect(running).resolves.toMatchObject([
+      [{ status: "completed", conclusion: "success" }],
+      [{ status: "completed", conclusion: "success" }],
+    ])
+  })
+
+  it("serializes merge Jobs for Candidates targeting the same base", async () => {
+    let activeMerges = 0
+    let peakMerges = 0
+    await using app = await createQueueApp({
+      merge: async () => {
+        activeMerges += 1
+        peakMerges = Math.max(peakMerges, activeMerges)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        activeMerges -= 1
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
+      },
+    })
+    const first = await submitBranch(app, "topic/first-merge")
+    const second = await submitBranch(app, "topic/second-merge")
+
+    const runs = await app.queue.run({ prs: [first.id, second.id] }, runtime)
+
+    expect(runs).toHaveLength(2)
+    expect(runs.every((run) => run.status === "completed" && run.conclusion === "success")).toBe(true)
+    expect(peakMerges).toBe(1)
+  })
+
+  it("pins the enrolled Flow on the PR revision snapshot and every Run", async () => {
+    const config = defineConfig(
+      yrd.flow({
+        name: "docs",
+        rev: "5",
+        on: () => true,
+        steps: [yrd.check("check"), yrd.merge()],
+      }),
+    )
+    await using app = await createQueueApp({}, undefined, undefined, undefined, undefined, config)
+    await submitBranch(app, "docs/target-model")
+
+    const [run] = await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+
+    expect(run).toMatchObject({
+      queueId: "docs/main",
+      flow: { name: "docs", rev: "5", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+      prs: [
+        {
+          id: "PR1",
+          flow: { name: "docs", rev: "5", fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/u) },
+        },
+      ],
+    })
+    expect(app.state().queues.candidates.C1?.queueId).toBe("docs/main")
+  })
+
+  it("refuses to finish waiting work across a base-authority Flow revision change", async () => {
+    const flow = (rev: string) =>
+      defineConfig(yrd.flow({ name: "main", rev, on: () => true, steps: [yrd.check("check"), yrd.merge()] }))
+    const journal = createMemoryJournal()
+    const original = await createQueueApp(
+      { check: () => ({ status: "waiting", token: "remote-flow" }) },
+      journal,
+      undefined,
+      undefined,
+      undefined,
+      flow("1"),
+    )
+    await submitBranch(original, "topic/flow-revision")
+    const [waiting] = await original.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+    const job = waiting?.steps[0]?.job
+    if (job?.status !== "waiting") throw new Error("expected waiting Flow Job")
+    await original.close()
+
+    await using resumed = await createQueueApp(
+      { check: () => ({ status: "waiting", token: "remote-flow" }) },
+      journal,
+      undefined,
+      ids(20),
+      undefined,
+      flow("2"),
+    )
+    await expect(
+      resumed.queue.finish(
+        "R1",
+        {
+          job: job.id,
+          step: "check",
+          attempt: job.attempt,
+          runner: job.runner,
+          token: job.token,
+          result: { status: "completed", conclusion: "success", output: { checked: true } },
+        },
+        runtime,
+      ),
+    ).rejects.toThrow("revision 1 cannot resume under revision 2")
+    expect(resumed.queue.get("R1")?.steps[0]?.job?.status).toBe("waiting")
+  })
+
+  it("projects immutable Candidates separately from GitHub-shaped Runs", async () => {
+    await using app = await createQueueApp()
+    await submitBranch(app, "topic/target-model")
+
+    const [run] = await app.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
+
+    expect(app.state().queues.candidates).toMatchObject({
+      C1: {
+        id: "C1",
+        queueId: "main",
+        baseSha: BASE,
+        revs: [{ pr: "PR1", n: 1, head: HEAD }],
+        mergeability: "unknown",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    })
+    expect(run).toMatchObject({
+      id: "R1",
+      queueId: "main",
+      candidateId: "C1",
+    })
+  })
+
   it("resolves PR, Run, and base selectors while preserving canonical records", async () => {
     await using app = await createQueueApp()
     await submitBranch(app, "Topic/Selectors")
@@ -193,7 +390,7 @@ describe("Queue", () => {
     })
 
     await expect(app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime)).resolves.toMatchObject([
-      { id: "R1", status: "passed" },
+      { id: "R1", status: "completed", conclusion: "success" },
     ])
 
     expect(events).toContainEqual(
@@ -261,7 +458,13 @@ describe("Queue", () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
     await using app = await createQueueApp(
-      { check: () => ({ status: "failed", error: { code: "check-failed", message: "candidate failed" } }) },
+      {
+        check: () => ({
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "check-failed", message: "candidate failed" },
+        }),
+      },
       undefined,
       undefined,
       undefined,
@@ -299,8 +502,8 @@ describe("Queue", () => {
         batch: 1,
         check: (input) =>
           input.prs.some((pr) => pr.branch.includes("fail"))
-            ? { status: "failed", error: { code: "check-failed", message: "bad candidate" } }
-            : { status: "passed", output: { checked: true } },
+            ? { status: "completed", conclusion: "failure", error: { code: "check-failed", message: "bad candidate" } }
+            : { status: "completed", conclusion: "success", output: { checked: true } },
       },
       undefined,
       undefined,
@@ -310,7 +513,7 @@ describe("Queue", () => {
     await submitBranch(app, "issue/pass-me")
     await submitBranch(app, "issue/fail-me")
     const runs = await app.queue.run({ prs: ["PR1", "PR2"], steps: ["check"] }, runtime)
-    expect(runs.map((run) => run.status).sort()).toEqual(["failed", "passed"])
+    expect(runs.map((run) => run.conclusion).sort()).toEqual(["failure", "success"])
 
     const compose = events.find(
       (event): event is Extract<LogEvent, { kind: "log" }> =>
@@ -340,7 +543,7 @@ describe("Queue", () => {
         // terminal-failed with unsettled children across cycles.
         check: (input) =>
           input.prs.length > 1
-            ? { status: "failed", error: { code: "check-failed", message: "red batch" } }
+            ? { status: "completed", conclusion: "failure", error: { code: "check-failed", message: "red batch" } }
             : { status: "waiting", token: `remote-${input.prs[0]?.id}` },
       },
       undefined,
@@ -361,7 +564,7 @@ describe("Queue", () => {
       ).length
 
     await app.queue.run({ prs: [] }, runtime)
-    expect(app.queue.get("R1")?.status).toBe("failed")
+    expect(app.queue.get("R1")?.status).toBe("completed")
     expect(runStartedForR1()).toBe(1)
 
     // A second drain cycle re-encounters the still-unsettled bisection tree.
@@ -408,12 +611,20 @@ describe("Queue", () => {
 
     const check = withStep(
       "check",
-      (_input: StepExecution<PRShape>) => ({ status: "passed" as const, output: { checked: true } }),
+      (_input: StepExecution<PRShape>) => ({
+        status: "completed",
+        conclusion: "success" as const,
+        output: { checked: true },
+      }),
       { revision: "check-v1", output: CheckResultSchema },
     )
     const deploy = withStep(
       "deploy",
-      (_input: StepExecution<MergedShape>) => ({ status: "passed" as const, output: { environment: "test" } }),
+      (_input: StepExecution<MergedShape>) => ({
+        status: "completed",
+        conclusion: "success" as const,
+        output: { environment: "test" },
+      }),
       { revision: "deploy-v1", needsIntegration: true, output: DeployResultSchema },
     )
     const invalid = (): void => {
@@ -459,7 +670,8 @@ describe("Queue", () => {
     await using rejectedApp = await createQueueApp(
       {
         check: () => ({
-          status: "failed",
+          status: "completed",
+          conclusion: "failure",
           error: {
             code: "check-failed",
             message: "typed bounce",
@@ -521,11 +733,11 @@ describe("Queue", () => {
           attempt: job.attempt,
           runner: job.runner,
           token: job.token,
-          result: { status: "passed", output: { checked: true } },
+          result: { status: "completed", conclusion: "success", output: { checked: true } },
         },
         runtime,
       ),
-    ).toMatchObject({ status: "passed" })
+    ).toMatchObject({ status: "completed", conclusion: "success" })
     expect(await Array.fromAsync(app.events())).toContainEqual(
       expect.objectContaining({
         name: "pr/integrated",
@@ -549,7 +761,7 @@ describe("Queue", () => {
     expect(result.events).toEqual([])
     await expect(app.queue.run({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
     expect(app.state().queues.records).toEqual({})
-    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
   })
 
   it("persists configured omissions without mislabeling unconfigured steps", async () => {
@@ -588,7 +800,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       merge: () => {
         mergeCalls += 1
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const pr = await submitBranch(app, "issue/requested-merge")
@@ -598,8 +810,8 @@ describe("Queue", () => {
     await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([])
 
     expect(await Array.fromAsync(app.events())).toEqual(before)
-    expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
-    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
     expect(mergeCalls).toBe(0)
   })
 
@@ -613,11 +825,15 @@ describe("Queue", () => {
       const options = {
         check: () => {
           checkCalls += 1
-          return { status: "passed" as const, output: { checked: true } }
+          return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
         },
         merge: () => {
           mergeCalls += 1
-          return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+          return {
+            status: "completed" as const,
+            conclusion: "success" as const,
+            output: { commit: MERGED, baseSha: BASE },
+          }
         },
       }
 
@@ -632,9 +848,9 @@ describe("Queue", () => {
 
       await using replayed = await createQueueApp(options, journal, undefined, id)
       await expect(replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
-        expect.objectContaining({ id: "R1", status: "passed" }),
+        expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
       ])
-      expect(replayed.state().bays.prs.PR1?.status).toBe("integrated")
+      expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("integrated")
       expect(checkCalls).toBe(1)
       expect(mergeCalls).toBe(1)
     },
@@ -648,11 +864,15 @@ describe("Queue", () => {
     const options = {
       check: () => {
         checkCalls += 1
-        return { status: "passed" as const, output: { checked: true } }
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
       },
       merge: () => {
         mergeCalls += 1
-        return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+        return {
+          status: "completed" as const,
+          conclusion: "success" as const,
+          output: { commit: MERGED, baseSha: BASE },
+        }
       },
     }
 
@@ -660,7 +880,7 @@ describe("Queue", () => {
       await using app = await createQueueApp(options, journal, undefined, id)
       const pr = await submitBranch(app, "issue/mismatched-resume")
       await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check", "merge"] })
-      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
+      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
@@ -670,9 +890,9 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "running",
+      status: "queued",
       stepSelection: { authority: "explicit", steps: ["check", "merge"] },
-      steps: [{ name: "check", job: { status: "requested" } }, { name: "merge" }],
+      steps: [{ name: "check", job: { status: "queued" } }, { name: "merge" }],
     })
     expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
   })
@@ -686,11 +906,15 @@ describe("Queue", () => {
       batch: 2,
       check: () => {
         checkCalls += 1
-        return { status: "passed" as const, output: { checked: true } }
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
       },
       merge: () => {
         mergeCalls += 1
-        return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+        return {
+          status: "completed" as const,
+          conclusion: "success" as const,
+          output: { commit: MERGED, baseSha: BASE },
+        }
       },
     }
 
@@ -702,7 +926,7 @@ describe("Queue", () => {
         prs: [first.id, second.id],
         steps: ["check", "merge"],
       })
-      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("requested")
+      expect(app.queue.get("R1")?.steps[0]?.job?.status).toBe("queued")
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
@@ -712,9 +936,9 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "running",
+      status: "queued",
       prs: [{ id: "PR1" }, { id: "PR2" }],
-      steps: [{ name: "check", job: { status: "requested" } }, { name: "merge" }],
+      steps: [{ name: "check", job: { status: "queued" } }, { name: "merge" }],
     })
   })
 
@@ -725,7 +949,7 @@ describe("Queue", () => {
     const options = {
       check: () => {
         checkCalls += 1
-        return { status: "passed" as const, output: { checked: true } }
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
       },
     }
 
@@ -734,7 +958,7 @@ describe("Queue", () => {
       const pr = await submitBranch(app, "issue/configured-authority")
       await app.dispatch(app.commands.queue.run, { prs: [pr.id] })
       expect(app.queue.get("R1")).toMatchObject({
-        status: "running",
+        status: "queued",
         stepSelection: { authority: "configured", steps: ["check", "review", "merge", "deploy"] },
       })
     }
@@ -745,10 +969,10 @@ describe("Queue", () => {
     ).rejects.toThrow("PR 'PR1' is already in active queue run 'R1'")
     expect(checkCalls).toBe(0)
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "running",
+      status: "queued",
       stepSelection: { authority: "configured" },
     })
-    expect(replayed.queue.get("R1")?.steps[0]).toMatchObject({ name: "check", job: { status: "requested" } })
+    expect(replayed.queue.get("R1")?.steps[0]).toMatchObject({ name: "check", job: { status: "queued" } })
   })
 
   it("does not mistake a configured check-only Run for supersedable admission", async () => {
@@ -759,7 +983,7 @@ describe("Queue", () => {
       defaultSteps: ["check"] as const,
       check: () => {
         checkCalls += 1
-        return { status: "passed" as const, output: { checked: true } }
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
       },
     }
 
@@ -768,7 +992,7 @@ describe("Queue", () => {
       const pr = await submitBranch(app, "issue/configured-check-only")
       await app.dispatch(app.commands.queue.run, { prs: [pr.id] })
       expect(app.queue.get("R1")).toMatchObject({
-        status: "running",
+        status: "queued",
         stepSelection: { authority: "configured", steps: ["check"] },
       })
     }
@@ -780,7 +1004,7 @@ describe("Queue", () => {
     expect(checkCalls).toBe(0)
     expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "running",
+      status: "queued",
       stepSelection: { authority: "configured", steps: ["check"] },
     })
   })
@@ -795,18 +1019,27 @@ describe("Queue", () => {
 
     await app.bays.intake({ branch: pr.branch, headSha: UPDATED, base: "main" })
     await app.bays.submit({ pr: pr.id })
-    expect(app.state().bays.prs[pr.id]).toMatchObject({ revision: 2, status: "submitted", headSha: UPDATED })
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      revision: 2,
+      delivery: "submitted",
+      headSha: UPDATED,
+    })
 
     await expect(app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
       expect.objectContaining({
         id: "R1",
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         error: expect.objectContaining({ code: "stale-pr" }),
       }),
       expect.objectContaining({ id: "R2", status: "waiting" }),
     ])
     expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
-    expect(app.state().bays.prs[pr.id]).toMatchObject({ revision: 2, status: "submitted", headSha: UPDATED })
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      revision: 2,
+      delivery: "submitted",
+      headSha: UPDATED,
+    })
   })
 
   it.each(["merge-passed", "post-merge-requested"] as const)(
@@ -819,11 +1052,15 @@ describe("Queue", () => {
       const options = {
         merge: () => {
           mergeCalls += 1
-          return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+          return {
+            status: "completed" as const,
+            conclusion: "success" as const,
+            output: { commit: MERGED, baseSha: BASE },
+          }
         },
         deploy: () => {
           deployCalls += 1
-          return { status: "passed" as const, output: { environment: "staging" } }
+          return { status: "completed" as const, conclusion: "success" as const, output: { environment: "staging" } }
         },
       }
 
@@ -839,19 +1076,19 @@ describe("Queue", () => {
         await app.jobs.run(mergeJob.id, runtime)
         if (crashPoint === "post-merge-requested") {
           await app.dispatch(app.commands.queue.advance, { run: "R1" })
-          expect(app.state().bays.prs[pr.id]?.status).toBe("integrated")
-          expect(app.queue.get("R1")?.steps[1]?.job?.status).toBe("requested")
+          expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
+          expect(app.queue.get("R1")?.steps[1]?.job?.status).toBe("queued")
           await app.queue.pause({ base: "main", reason: "maintenance", allowedPRs: [] })
         }
       }
 
       await using replayed = await createQueueApp(options, journal, undefined, id)
       await expect(replayed.queue.run({}, runtime)).resolves.toEqual([
-        expect.objectContaining({ id: "R1", status: "passed" }),
+        expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
       ])
       await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
       expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
-      expect(replayed.state().bays.prs.PR1?.status).toBe("integrated")
+      expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("integrated")
       expect(mergeCalls).toBe(1)
       expect(deployCalls).toBe(crashPoint === "post-merge-requested" ? 1 : 0)
     },
@@ -864,7 +1101,7 @@ describe("Queue", () => {
     const options = {
       check: () => {
         checkCalls += 1
-        return { status: "passed" as const, output: { checked: true } }
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
       },
     }
 
@@ -886,10 +1123,10 @@ describe("Queue", () => {
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
     await expect(replayed.queue.run({}, runtime)).resolves.toEqual([
-      expect.objectContaining({ id: "R1", status: "running" }),
+      expect.objectContaining({ id: "R1", status: "in_progress" }),
     ])
     expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
-    expect(replayed.state().bays.prs.PR2?.status).toBe("submitted")
+    expect(deliveryOf(replayed.state().bays.prs.PR2)).toBe("submitted")
     expect(checkCalls).toBe(0)
   })
 
@@ -900,11 +1137,11 @@ describe("Queue", () => {
       batch: 2,
       check: () => {
         checkCalls += 1
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
       merge: () => {
         mergeCalls += 1
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const first = await submitBranch(app, "issue/batch-one")
@@ -925,13 +1162,17 @@ describe("Queue", () => {
     ).resolves.toEqual([
       expect.objectContaining({
         id: "R1",
-        status: "failed",
-        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.anything(),
+        ],
       }),
     ])
     expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
-    expect(app.state().bays.prs[first.id]?.status).toBe("submitted")
-    expect(app.state().bays.prs[second.id]?.status).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs[first.id])).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs[second.id])).toBe("submitted")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
 
@@ -945,7 +1186,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: () => {
         checkCalls += 1
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const pr = await submitBranch(app, "issue/dead-resident")
@@ -965,7 +1206,7 @@ describe("Queue", () => {
     await expect(
       app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z", runner: "yrd-cli:9999" }),
     ).resolves.toEqual([])
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "running", runner: "yrd-cli:4242" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "in_progress", runner: "yrd-cli:4242" })
 
     // The dead runner's reclaim releases the run and advances it to a terminal failure.
     await expect(
@@ -973,8 +1214,12 @@ describe("Queue", () => {
     ).resolves.toEqual([
       expect.objectContaining({
         id: "R1",
-        status: "failed",
-        steps: [expect.objectContaining({ job: expect.objectContaining({ status: "lost" }) }), expect.anything()],
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          expect.objectContaining({ job: expect.objectContaining({ status: "completed", conclusion: "timed_out" }) }),
+          expect.anything(),
+        ],
       }),
     ])
     expect(checkCalls).toBe(0)
@@ -988,11 +1233,15 @@ describe("Queue", () => {
     const options = {
       check: () => {
         checkCalls += 1
-        return { status: "passed" as const, output: { checked: true } }
+        return { status: "completed" as const, conclusion: "success" as const, output: { checked: true } }
       },
       merge: () => {
         mergeCalls += 1
-        return { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+        return {
+          status: "completed" as const,
+          conclusion: "success" as const,
+          output: { commit: MERGED, baseSha: BASE },
+        }
       },
     }
 
@@ -1010,15 +1259,15 @@ describe("Queue", () => {
         leaseExpiresAt: "2026-01-01T00:00:01.000Z",
       })
       await expect(app.jobs.recover({ now: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([job.id])
-      expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+      expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
     }
 
     await using replayed = await createQueueApp(options, journal, undefined, id)
     const before = await Array.fromAsync(replayed.events())
     await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:02:00.000Z" })).resolves.toEqual([
-      expect.objectContaining({ id: "R1", status: "failed" }),
+      expect.objectContaining({ id: "R1", status: "completed", conclusion: "failure" }),
     ])
-    expect(replayed.state().bays.prs.PR1?.status).toBe("submitted")
+    expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("submitted")
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
     const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
@@ -1044,9 +1293,11 @@ describe("Queue", () => {
 
     const retried = await replayed.queue.run({ prs: ["PR1"], steps: ["check", "merge"] }, runtime)
     expect(retried.map(({ id: run }) => run)).toEqual(["R2"])
-    expect(retried).toMatchObject([{ id: "R2", status: "passed", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] }])
-    expect(replayed.state().bays.prs.PR1).toMatchObject({
-      status: "integrated",
+    expect(retried).toMatchObject([
+      { id: "R2", status: "completed", conclusion: "success", prs: [{ id: "PR1", revision: 1, headSha: HEAD }] },
+    ])
+    expect(prFacts(replayed.state().bays.prs.PR1)).toMatchObject({
+      delivery: "integrated",
       revision: 1,
       headSha: HEAD,
     })
@@ -1071,7 +1322,7 @@ describe("Queue", () => {
             if (context.signal.aborted) onAbort()
             else context.signal.addEventListener("abort", onAbort, { once: true })
           })
-          return { status: "passed", output: { checked: true } }
+          return { status: "completed", conclusion: "success", output: { checked: true } }
         },
       },
       undefined,
@@ -1086,13 +1337,14 @@ describe("Queue", () => {
     await app.bays.closePr({ pr: pr.id })
     await expect(app.queue.cancel({ prs: [pr.id], by: "@chief", reason: "PR withdrawn" })).resolves.toMatchObject([
       {
-        status: "failed",
-        steps: [{ job: { status: "canceled", attempt: 1, runner: "local" } }],
+        status: "completed",
+        conclusion: "failure",
+        steps: [{ job: { status: "completed", conclusion: "cancelled", attempt: 1, runner: "local" } }],
       },
     ])
 
     await aborted.promise
-    await expect(running).resolves.toMatchObject([{ status: "failed" }])
+    await expect(running).resolves.toMatchObject([{ status: "completed", conclusion: "cancelled" }])
   })
 
   it("cancels a correlated PR when its active Queue Job is canceled", async () => {
@@ -1109,6 +1361,7 @@ describe("Queue", () => {
     })
     const pr = app.state().bays.prs.PR1
     if (pr === undefined) throw new Error("correlated PR was not recorded")
+    const revision = currentPRRev(pr)
     await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["check"] })
     const job = app.queue.get("R1")?.steps[0]?.job
     if (job === undefined) throw new Error("Queue did not request a Job")
@@ -1128,8 +1381,8 @@ describe("Queue", () => {
         name: "pr/canceled",
         data: {
           pr: pr.id,
-          revision: pr.revision,
-          headSha: pr.headSha,
+          revision: revision.n,
+          headSha: revision.head,
           run: "R1",
           correlation,
           actor: "operator",
@@ -1138,27 +1391,29 @@ describe("Queue", () => {
         },
       },
     ])
-    expect(app.state().bays.prs[pr.id]).toMatchObject({
-      status: "canceled",
-      revision: pr.revision,
-      headSha: pr.headSha,
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "canceled",
+      revision: revision.n,
+      headSha: revision.head,
       correlation,
-      revisions: [
+      revs: [
         {
-          revision: pr.revision,
-          headSha: pr.headSha,
-          terminal: { status: "canceled", at: "2026-01-01T00:00:00.000Z" },
+          n: revision.n,
+          head: revision.head,
+          terminal: { kind: "canceled", at: "2026-01-01T00:00:00.000Z" },
         },
       ],
     })
     expect(app.queue.get("R1")).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "cancelled",
       error: { code: "run-canceled" },
-      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
+      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
       steps: [
         expect.objectContaining({
           job: expect.objectContaining({
-            status: "canceled",
+            status: "completed",
+            conclusion: "cancelled",
             canceledBy: "@chief",
             cancelReason: "authorization revoked",
           }),
@@ -1171,12 +1426,13 @@ describe("Queue", () => {
 
     await using replayed = await createQueueApp({}, journal, undefined, id)
     expect(replayed.queue.get("R1")).toMatchObject({
-      status: "failed",
-      prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha, correlation }],
+      status: "completed",
+      conclusion: "cancelled",
+      prs: [{ id: pr.id, revision: revision.n, headSha: revision.head, correlation }],
     })
-    expect(replayed.state().bays.prs[pr.id]).toMatchObject({
-      status: "canceled",
-      revisions: [{ terminal: { status: "canceled", at: "2026-01-01T00:00:00.000Z" } }],
+    expect(prFacts(replayed.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "canceled",
+      revs: [{ terminal: { kind: "canceled", at: "2026-01-01T00:00:00.000Z" } }],
     })
   })
 
@@ -1187,7 +1443,8 @@ describe("Queue", () => {
     const run = (await app.queue.run({ prs: [pr.id], steps: ["merge", "deploy"] }, runtime))[0]
 
     expect(run).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       steps: [{ name: "merge" }, { name: "deploy" }],
       shape: { integration: { commit: MERGED }, results: { deploy: { environment: "staging" } } },
     })
@@ -1225,7 +1482,7 @@ describe("Queue", () => {
   it("runs checks, merge, and deploy across base queues and derives every Job field", async () => {
     await using app = await createQueueApp({
       batch: 2,
-      deploy: (input) => ({ status: "passed", output: { environment: input.prs[0]!.base } }),
+      deploy: (input) => ({ status: "completed", conclusion: "success", output: { environment: input.prs[0]!.base } }),
     })
     const first = await submitBranch(app, "issue/one")
     const second = await submitBranch(app, "issue/two")
@@ -1239,7 +1496,8 @@ describe("Queue", () => {
     ])
     for (const run of runs) {
       expect(run).toMatchObject({
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         shape: {
           results: {
             check: { checked: true },
@@ -1249,10 +1507,16 @@ describe("Queue", () => {
           integration: { commit: MERGED, baseSha: BASE },
         },
       })
-      expect(run.steps.every((step) => step.job?.status === "passed")).toBe(true)
+      expect(run.steps.every((step) => step.job?.status === "completed" && step.job.conclusion === "success")).toBe(
+        true,
+      )
       expect(
         run.steps.every(
-          (step) => step.job?.status === "passed" && step.job.startedAt !== "" && step.job.finishedAt !== "",
+          (step) =>
+            step.job?.status === "completed" &&
+            step.job.conclusion === "success" &&
+            step.job.startedAt !== "" &&
+            step.job.finishedAt !== "",
         ),
       ).toBe(true)
       const record = app.state().queues.records[run.id]
@@ -1314,12 +1578,18 @@ describe("Queue", () => {
 
     const reconciled = await app.dispatch(app.commands.queue.advance, { run: run?.id ?? "missing" })
 
-    expect(run).toMatchObject({ status: "passed", integration: { commit: MERGED } })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
     expect(reconciled.events).toEqual([
       expect.objectContaining({ name: "pr/integrated", data: expect.objectContaining({ pr: "PR2" }) }),
     ])
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", integration: run?.integration })
-    expect(app.state().bays.prs.PR2).toMatchObject({ status: "integrated", integration: run?.integration })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      delivery: "integrated",
+      integration: run?.integration,
+    })
+    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({
+      delivery: "integrated",
+      integration: run?.integration,
+    })
   })
 
   it("does not integrate canceled historical PRs that share the current payload", async () => {
@@ -1388,7 +1658,7 @@ describe("Queue", () => {
       .map((applied) => (applied.data as { pr: string }).pr)
 
     expect(integrated).toEqual([current.id])
-    expect(app.state().bays.prs.PR2).toMatchObject({ status: "canceled", canceledBy: "@chief" })
+    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "canceled", canceledBy: "@chief" })
   })
 
   it("does not reconcile a same-root PR with a different source composition", async () => {
@@ -1420,9 +1690,12 @@ describe("Queue", () => {
 
     const run = (await app.queue.run({ prs: ["PR1"], steps: ["check", "review", "merge"] }, runtime))[0]
 
-    expect(run).toMatchObject({ status: "passed", integration: { commit: MERGED } })
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "integrated", integration: run?.integration })
-    expect(app.state().bays.prs.PR2).toMatchObject({ status: "submitted" })
+    expect(run).toMatchObject({ status: "completed", conclusion: "success", integration: { commit: MERGED } })
+    expect(prFacts(app.state().bays.prs.PR1)).toMatchObject({
+      delivery: "integrated",
+      integration: run?.integration,
+    })
+    expect(prFacts(app.state().bays.prs.PR2)).toMatchObject({ delivery: "submitted" })
     expect(app.state().bays.prs.PR2?.integration).toBeUndefined()
   })
 
@@ -1529,7 +1802,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: () => {
         checks++
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const pr = await submitBranch(app, "issue/admitted")
@@ -1543,7 +1816,7 @@ describe("Queue", () => {
     const admission = (await app.queue.admit({ prs: [pr.id] }))[0]
     expect(admission).toMatchObject({
       id: "R1",
-      status: "running",
+      status: "queued",
       prs: [{ id: pr.id, headSha: pr.headSha }],
       steps: [{ name: "check" }, { name: "review" }],
     })
@@ -1554,7 +1827,9 @@ describe("Queue", () => {
       checks: { status: "checking", run: "R1" },
     })
 
-    expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([{ status: "passed" }])
+    expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([
+      { status: "completed", conclusion: "success" },
+    ])
     expect(checks).toBe(1)
     expect(app.queue.eligibility(pr.id)).toMatchObject({
       runnable: true,
@@ -1564,7 +1839,8 @@ describe("Queue", () => {
     const integrated = (await app.queue.run({ prs: [pr.id] }, runtime))[0]
     expect(integrated).toMatchObject({
       id: "R2",
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       steps: [{ name: "merge" }, { name: "deploy" }],
       shape: {
         results: { check: { checked: true }, review: { approved: true }, deploy: { environment: "staging" } },
@@ -1579,7 +1855,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: () => {
         checks++
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const pr = await submitBranch(app, "issue/queue-owned-drain")
@@ -1589,7 +1865,7 @@ describe("Queue", () => {
 
     const integrated = await app.queue.run({ prs: [pr.id] }, runtime)
 
-    expect(integrated).toMatchObject([{ id: "R2", status: "passed", reusedFrom: "R1" }])
+    expect(integrated).toMatchObject([{ id: "R2", status: "completed", conclusion: "success", reusedFrom: "R1" }])
     expect(checks).toBe(1)
   })
 
@@ -1604,13 +1880,14 @@ describe("Queue", () => {
         checks++
         return refuseEnvironment
           ? {
-              status: "failed",
+              status: "completed",
+              conclusion: "failure",
               error: {
                 code: "queue-environment-refused",
                 message: "inherited-red check environment is unavailable",
               },
             }
-          : { status: "passed", output: { checked: true } }
+          : { status: "completed", conclusion: "success", output: { checked: true } }
       },
     } satisfies Parameters<typeof queuePlugin>[0]
     {
@@ -1650,7 +1927,7 @@ describe("Queue", () => {
     refuseEnvironment = false
     await replayed.bays.requestChecks({ pr: "PR1", baseSha: BASE })
     expect(await replayed.queue.run({ prs: ["PR1"] }, runtime)).toMatchObject([
-      { id: "R4", status: "passed", reusedFrom: "R3" },
+      { id: "R4", status: "completed", conclusion: "success", reusedFrom: "R3" },
     ])
     expect(checks).toBe(3)
   })
@@ -1660,7 +1937,7 @@ describe("Queue", () => {
       check: (input) =>
         input.prs[0]?.id === "PR1"
           ? { status: "waiting", token: "remote-one" }
-          : { status: "passed", output: { checked: true } },
+          : { status: "completed", conclusion: "success", output: { checked: true } },
     })
     const waiting = await submitBranch(app, "issue/waiting-check")
     const healthy = await submitBranch(app, "issue/healthy-check")
@@ -1671,7 +1948,7 @@ describe("Queue", () => {
       { status: "waiting", prs: [{ id: waiting.id }] },
     ])
     expect(await app.queue.admit({ prs: [healthy.id] }, runtime)).toMatchObject([
-      { status: "passed", prs: [{ id: healthy.id }] },
+      { status: "completed", conclusion: "success", prs: [{ id: healthy.id }] },
     ])
     expect(app.queue.eligibility(waiting.id)).toMatchObject({ checks: { status: "checking" } })
     expect(app.queue.eligibility(healthy.id)).toMatchObject({ checks: { status: "passed" } })
@@ -1683,28 +1960,28 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: () => {
         checkCalls += 1
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
       merge: () => {
         mergeCalls += 1
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const first = await submitBranch(app, "issue/first-admission")
     const second = await submitBranch(app, "issue/second-merge")
     await app.bays.requestChecks({ pr: first.id })
     expect(await app.queue.admit({ prs: [first.id] })).toMatchObject([
-      { id: "R1", status: "running", prs: [{ id: first.id }] },
+      { id: "R1", status: "queued", prs: [{ id: first.id }] },
     ])
-    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "requested" })
+    expect(app.queue.get("R1")?.steps[0]?.job).toMatchObject({ status: "queued" })
 
     await expect(app.queue.run({ prs: [second.id], steps: ["merge"] }, runtime)).rejects.toThrow(
       "queue 'main' is running 'R1'",
     )
     expect(checkCalls).toBe(0)
     expect(mergeCalls).toBe(0)
-    expect(app.queue.get("R1")).toMatchObject({ status: "running", prs: [{ id: first.id }] })
-    expect(app.state().bays.prs[second.id]).toMatchObject({ status: "submitted" })
+    expect(app.queue.get("R1")).toMatchObject({ status: "queued", prs: [{ id: first.id }] })
+    expect(prFacts(app.state().bays.prs[second.id])).toMatchObject({ delivery: "submitted" })
   })
 
   it("keys admission reuse by the freshly resolved base SHA", async () => {
@@ -1716,18 +1993,20 @@ describe("Queue", () => {
       check: (input) => {
         checks++
         checkedBases.push(input.prs[0]?.baseSha)
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const pr = await submitBranch(app, "issue/base-keyed-cache")
     await app.bays.requestChecks({ pr: pr.id })
-    expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([{ status: "passed" }])
+    expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([
+      { status: "completed", conclusion: "success" },
+    ])
     expect(checks).toBe(1)
 
     baseSha = UPDATED
     const integrated = await app.queue.run({ prs: [pr.id] }, runtime)
 
-    expect(integrated).toMatchObject([{ status: "passed", reusedFrom: "R2" }])
+    expect(integrated).toMatchObject([{ status: "completed", conclusion: "success", reusedFrom: "R2" }])
     expect(checks).toBe(2)
     expect(checkedBases).toEqual([BASE, UPDATED])
     expect(app.queue.get("R2")?.prs).toMatchObject([{ baseSha: UPDATED }])
@@ -1742,14 +2021,18 @@ describe("Queue", () => {
       check: () => {
         checks++
         if (mainHealth === "red") {
-          return { status: "failed", error: { code: "base-red", message: "same-base main-health lock is red" } }
+          return {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "base-red", message: "same-base main-health lock is red" },
+          }
         }
         mainHealth = "green"
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
       merge: () => {
         merges++
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const pr = await submitBranch(app, "issue/main-health-turns-red")
@@ -1757,7 +2040,7 @@ describe("Queue", () => {
 
     expect(mainHealth).toBe("clear")
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([
-      { id: "R1", status: "passed", prs: [{ baseSha: BASE }] },
+      { id: "R1", status: "completed", conclusion: "success", prs: [{ baseSha: BASE }] },
     ])
     expect(mainHealth).toBe("green")
     expect(checks).toBe(1)
@@ -1768,19 +2051,20 @@ describe("Queue", () => {
     expect(refused).toMatchObject([
       {
         id: "R2",
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         prs: [{ baseSha: BASE }],
       },
     ])
     expect(refused[0]?.steps[0]).toMatchObject({
       name: "check",
       classification: "base",
-      job: { status: "failed", error: { code: "base-red" } },
+      job: { status: "completed", conclusion: "failure", error: { code: "base-red" } },
     })
     expect(refused[0]).not.toHaveProperty("reusedFrom")
     expect(checks).toBe(2)
     expect(merges).toBe(0)
-    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "rejected" })
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({ delivery: "rejected" })
     expect(app.state().bays.prs[pr.id]?.integration).toBeUndefined()
     expect(app.queue.eligibility(pr.id)).toMatchObject({ checks: { status: "failed", run: "R2" } })
     expect(app.queue.checks([pr.id])).toMatchObject([
@@ -1804,7 +2088,7 @@ describe("Queue", () => {
     await app.bays.closePr({ pr: pr.id })
 
     expect(await app.queue.admit({ prs: [pr.id] }, runtime)).toMatchObject([
-      { status: "failed", error: { code: "stale-pr" } },
+      { status: "completed", conclusion: "failure", error: { code: "stale-pr" } },
     ])
     expect(app.queue.checks([pr.id])).toMatchObject([
       { pr: pr.id, revision: 1, run: "R1", step: "check", status: "failed", error: { code: "stale-pr" } },
@@ -1816,7 +2100,7 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: (input) => {
         checked.push(input.prs[0]!.id)
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const first = await submitBranch(app, "issue/first-check")
@@ -1827,8 +2111,8 @@ describe("Queue", () => {
     expect(app.queue.eligibility(second.id)).toMatchObject({ checks: { status: "queued", position: 2 } })
     expect(await app.queue.admit({ prs: [second.id] })).toEqual([])
     expect(await app.queue.admit({}, runtime)).toMatchObject([
-      { status: "passed", prs: [{ id: first.id }] },
-      { status: "passed", prs: [{ id: second.id }] },
+      { status: "completed", conclusion: "success", prs: [{ id: first.id }] },
+      { status: "completed", conclusion: "success", prs: [{ id: second.id }] },
     ])
     expect(checked).toEqual([first.id, second.id])
   })
@@ -1870,7 +2154,7 @@ describe("Queue", () => {
         checkRevision: "check-v2",
         check: () => {
           changedChecks++
-          return { status: "passed", output: { checked: true } }
+          return { status: "completed", conclusion: "success", output: { checked: true } }
         },
       },
       journal,
@@ -1880,14 +2164,15 @@ describe("Queue", () => {
     const readmission = (await changed.queue.admit({ prs: [pr.id] }))[0]
     if (readmission === undefined) throw new Error("expected a cache-miss admission run")
     expect(readmission).toMatchObject({
-      status: "running",
+      status: "queued",
       steps: [{ name: "check", revision: "check-v2" }, { name: "review" }],
     })
     await changed.queue.admit({ prs: [pr.id] }, runtime)
 
     const integrated = (await changed.queue.run({ prs: [pr.id] }, runtime))[0]
     expect(integrated).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       reusedFrom: readmission.id,
       steps: [{ name: "merge" }, { name: "deploy" }],
     })
@@ -1903,13 +2188,14 @@ describe("Queue", () => {
         mergeCalls++
         return mergeCalls === 1
           ? {
-              status: "failed" as const,
+              status: "completed" as const,
+              conclusion: "failure" as const,
               error: {
                 code: "queue-environment-refused",
                 message: "merge environment is temporarily unavailable",
               },
             }
-          : { status: "passed" as const, output: { commit: MERGED, baseSha: BASE } }
+          : { status: "completed" as const, conclusion: "success" as const, output: { commit: MERGED, baseSha: BASE } }
       },
     }
 
@@ -1920,13 +2206,14 @@ describe("Queue", () => {
       expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
         {
           id: "R1",
-          status: "failed",
+          status: "completed",
+          conclusion: "failure",
           error: { code: "queue-environment-refused" },
           prs: [{ id: pr.id, revision: pr.revision, headSha: pr.headSha }],
         },
       ])
-      expect(app.state().bays.prs[pr.id]).toMatchObject({
-        status: "submitted",
+      expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+        delivery: "submitted",
         revision: pr.revision,
         headSha: pr.headSha,
       })
@@ -1958,12 +2245,13 @@ describe("Queue", () => {
     expect(retried).toMatchObject([
       {
         id: "R2",
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         prs: [{ id: "PR1", revision: 1, headSha: HEAD }],
       },
     ])
-    expect(replayed.state().bays.prs.PR1).toMatchObject({
-      status: "integrated",
+    expect(prFacts(replayed.state().bays.prs.PR1)).toMatchObject({
+      delivery: "integrated",
       revision: 1,
       headSha: HEAD,
     })
@@ -1977,17 +2265,21 @@ describe("Queue", () => {
       merge: () => {
         mergeCalls++
         return mergeCalls === 1
-          ? { status: "failed", error: { code: "merge-conflict", message: "payload does not merge" } }
-          : { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              error: { code: "merge-conflict", message: "payload does not merge" },
+            }
+          : { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const pr = await submitBranch(app, "issue/merit-rejection")
 
     expect(await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).toMatchObject([
-      { id: "R1", status: "failed", error: { code: "merge-conflict" } },
+      { id: "R1", status: "completed", conclusion: "failure", error: { code: "merge-conflict" } },
     ])
-    expect(app.state().bays.prs[pr.id]).toMatchObject({
-      status: "rejected",
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "rejected",
       revision: pr.revision,
       headSha: pr.headSha,
     })
@@ -2001,28 +2293,44 @@ describe("Queue", () => {
     expect(mergeCalls).toBe(1)
 
     await app.bays.submit({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
-    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "submitted", revision: 2, headSha: UPDATED })
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "submitted",
+      revision: 2,
+      headSha: UPDATED,
+    })
 
     const revised = await app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)
     const newRuns = revised.filter(({ id: run }) => run === "R2")
     expect(newRuns).toHaveLength(1)
-    expect(newRuns).toMatchObject([{ id: "R2", status: "passed", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] }])
+    expect(newRuns).toMatchObject([
+      { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] },
+    ])
     expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
-    expect(app.state().bays.prs[pr.id]).toMatchObject({ status: "integrated", revision: 2, headSha: UPDATED })
+    expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
+      delivery: "integrated",
+      revision: 2,
+      headSha: UPDATED,
+    })
     expect(mergeCalls).toBe(2)
   })
 
   it("audits a rejected revision retry without fresh submit ancestry and keeps authorized controls clean", async () => {
     const journal = createMemoryJournal<unknown>()
     const original = await createQueueApp(
-      { check: () => ({ status: "failed", error: { code: "check-failed", message: "reject R1" } }) },
+      {
+        check: () => ({
+          status: "completed",
+          conclusion: "failure",
+          error: { code: "check-failed", message: "reject R1" },
+        }),
+      },
       journal,
     )
     const retried = await submitBranch(original, "issue/retry-without-submit")
     const first = (await original.queue.run({ prs: [retried.id] }, runtime))[0]
     if (first === undefined) throw new Error("expected authorized R1")
-    expect(first).toMatchObject({ id: "R1", status: "failed" })
-    expect(original.state().bays.prs[retried.id]?.status).toBe("rejected")
+    expect(first).toMatchObject({ id: "R1", status: "completed", conclusion: "failure" })
+    expect(deliveryOf(original.state().bays.prs[retried.id])).toBe("rejected")
     const firstRecord = original.state().queues.records.R1
     if (firstRecord === undefined) throw new Error("expected persisted R1")
     const uncorrelatedSnapshot = firstRecord.prs[0]
@@ -2074,7 +2382,7 @@ describe("Queue", () => {
 
     await using app = await createQueueApp({}, journal, undefined, ids(500))
     const legacyRetry = app.queue.get("R2")
-    expect(legacyRetry).toMatchObject({ status: "failed", prs: [{ id: retried.id }] })
+    expect(legacyRetry).toMatchObject({ status: "completed", conclusion: "failure", prs: [{ id: retried.id }] })
     const legacySnapshot = legacyRetry?.prs[0]
     if (legacySnapshot === undefined) throw new Error("expected replayed legacy PR snapshot")
     expect(legacySnapshot).not.toHaveProperty("correlation")
@@ -2093,7 +2401,7 @@ describe("Queue", () => {
     await app.bays.requestChecks({ pr: "PR3" })
     const draftCheck = (await app.queue.admit({ prs: ["PR3"] }, runtime))[0]
     if (draftCheck === undefined) throw new Error("expected pushed draft-check control run")
-    expect(app.state().bays.prs.PR3?.status).toBe("pushed")
+    expect(deliveryOf(app.state().bays.prs.PR3)).toBe("pushed")
 
     expect(app.queue.audit().findings).toEqual([
       expect.objectContaining({ code: "run-without-submit-ancestry", run: "R2", pr: retried.id }),
@@ -2125,7 +2433,7 @@ describe("Queue", () => {
       })
       await original.bays.submit({ pr: stale.id })
       await original.bays.requestChecks({ pr: stale.id, baseSha: BASE })
-      expect(original.state().bays.prs[stale.id]).toMatchObject({ revision: 2, headSha: UPDATED })
+      expect(prFacts(original.state().bays.prs[stale.id])).toMatchObject({ revision: 2, headSha: UPDATED })
       await original.close()
 
       let cursor = 0
@@ -2170,15 +2478,21 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: (input) =>
         fail && input.prs[0]?.id === "PR1"
-          ? { status: "failed", error: { code: "typecheck-failed", message: "src/model.ts:12 failed" } }
-          : { status: "passed", output: { checked: true } },
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              error: { code: "typecheck-failed", message: "src/model.ts:12 failed" },
+            }
+          : { status: "completed", conclusion: "success", output: { checked: true } },
     })
     await app.bays.submit({ branch: "issue/draft-red", headSha: HEAD, base: "main", baseSha: BASE, draft: true })
     await app.bays.requestChecks({ pr: "PR1" })
     const admitted = (await app.queue.admit({ prs: ["PR1"] }))[0]
     if (admitted === undefined) throw new Error("expected an admission run")
-    expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toMatchObject([{ status: "failed" }])
-    expect(app.state().bays.prs.PR1?.status).toBe("pushed")
+    expect(await app.queue.admit({ prs: ["PR1"] }, runtime)).toMatchObject([
+      { status: "completed", conclusion: "failure" },
+    ])
+    expect(deliveryOf(app.state().bays.prs.PR1)).toBe("pushed")
 
     await app.bays.ready({ pr: "PR1" })
     expect(app.queue.eligibility("PR1")).toMatchObject({
@@ -2198,7 +2512,12 @@ describe("Queue", () => {
     ])
     const readmitted = (await app.queue.admit({ prs: ["PR1"] }, runtime))[0]
     if (readmitted === undefined) throw new Error("expected an explicitly reauthorized admission run")
-    expect(readmitted).toMatchObject({ id: "R2", status: "passed", prs: [{ id: "PR1", headSha: HEAD }] })
+    expect(readmitted).toMatchObject({
+      id: "R2",
+      status: "completed",
+      conclusion: "success",
+      prs: [{ id: "PR1", headSha: HEAD }],
+    })
     expect(app.queue.eligibility("PR1")).toMatchObject({
       runnable: true,
       checks: { status: "passed", run: "R2" },
@@ -2372,15 +2691,15 @@ describe("Queue", () => {
       },
       runtime,
     )
-    expect(app.state().bays.prs.PR11?.status).toBe("submitted")
-    expect(app.state().bays.prs.PR23?.status).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs.PR11)).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs.PR23)).toBe("submitted")
     await app.queue.pause({ base: "main", reason: "operator freeze", allowedPRs: ["PR23"] })
 
     const runs = await app.queue.run({}, runtime)
 
     expect(runs.map((run) => run.prs.map((pr) => pr.id))).toEqual([["PR23"]])
-    expect(app.state().bays.prs.PR11?.status).toBe("submitted")
-    expect(app.state().bays.prs.PR23?.status).toBe("integrated")
+    expect(deliveryOf(app.state().bays.prs.PR11)).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs.PR23)).toBe("integrated")
   })
 
   it("keeps completed history readable and refuses queued work after revision drift", async () => {
@@ -2389,7 +2708,11 @@ describe("Queue", () => {
     await first.bays.submit({ branch: "issue/completed", headSha: HEAD, base: "main" })
     const completed = await first.queue.run({ prs: ["PR1"], steps: ["check"] }, runtime)
     await first.bays.submit({ branch: "issue/queued", headSha: UPDATED, base: "main" })
-    const queued = await first.dispatch(first.commands.queue.run, { prs: ["PR2"], steps: ["check"] })
+    const queued = await first.dispatch(first.commands.queue.run, {
+      prs: ["PR2"],
+      steps: ["check"],
+      baseSha: BASE,
+    })
     const queuedJob = first.jobs.requested(queued)[0]
     if (queuedJob === undefined) throw new Error("queue did not request a Job")
     await first.close()
@@ -2400,13 +2723,14 @@ describe("Queue", () => {
         checkRevision: "check-v2",
         check: () => {
           changedExecutions++
-          return { status: "passed", output: { checked: false } }
+          return { status: "completed", conclusion: "success", output: { checked: false } }
         },
       },
       journal,
     )
     expect(changed.queue.get(completed[0]!.id)).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       shape: { results: { check: { checked: true } } },
     })
     await expect(changed.jobs.run(queuedJob, runtime)).rejects.toThrow("definition revision")
@@ -2417,48 +2741,72 @@ describe("Queue", () => {
     const withoutSteps = withQueue({ steps: [] as const })
     const historyBase = pipe(createYrdDef(), withJobs({ definitions: bayJobs }), withBays({ jobs: bayJobs }))
     await using history = await createYrd(withoutSteps(historyBase), { inject: { journal } })
-    expect(history.queue.get(completed[0]!.id)).toMatchObject({ status: "passed" })
+    expect(history.queue.get(completed[0]!.id)).toMatchObject({ status: "completed", conclusion: "success" })
   })
 
   it("rejects before merge but preserves integration when deployment fails", async () => {
     let merged = false
     await using rejectedApp = await createQueueApp({
-      check: () => ({ status: "failed", error: { code: "check-failed", message: "tests failed" } }),
+      check: () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "check-failed", message: "tests failed" },
+      }),
       merge: () => {
         merged = true
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const rejected = await submitBranch(rejectedApp, "issue/rejected")
     expect((await rejectedApp.queue.run({ prs: [rejected.id] }, runtime))[0]).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "check-failed" },
     })
     expect(merged).toBe(false)
-    expect(rejectedApp.state().bays.prs[rejected.id]).toMatchObject({ status: "rejected" })
+    expect(prFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({ delivery: "rejected" })
     await rejectedApp.bays.submit({ branch: "issue/rejected", headSha: UPDATED, base: "main" })
-    expect(rejectedApp.state().bays.prs[rejected.id]).toMatchObject({
-      status: "submitted",
+    expect(prFacts(rejectedApp.state().bays.prs[rejected.id])).toMatchObject({
+      delivery: "submitted",
       revision: 2,
       headSha: UPDATED,
-      revisions: [
-        { revision: 1, headSha: HEAD },
-        { revision: 2, headSha: UPDATED },
+      revs: [
+        { n: 1, head: HEAD },
+        { n: 2, head: UPDATED },
       ],
     })
 
+    let deployAttempts = 0
     await using deployApp = await createQueueApp({
       batch: 2,
-      deploy: () => ({ status: "failed", error: { code: "deploy-failed", message: "staging unavailable" } }),
+      deploy: () => {
+        deployAttempts += 1
+        return deployAttempts === 1
+          ? {
+              status: "completed",
+              conclusion: "failure",
+              error: { code: "deploy-failed", message: "staging unavailable" },
+            }
+          : { status: "completed", conclusion: "success", output: { environment: "staging" } }
+      },
     })
     const deployed = await submitBranch(deployApp, "issue/deploy-fails")
     const companion = await submitBranch(deployApp, "issue/deploy-companion")
     const run = (await deployApp.queue.run({ prs: [deployed.id, companion.id] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "deploy-failed" } })
-    expect(deployApp.state().bays.prs).toMatchObject({
-      [deployed.id]: { status: "integrated" },
-      [companion.id]: { status: "integrated" },
-    })
+    expect(run).toMatchObject({ status: "completed", conclusion: "failure", error: { code: "deploy-failed" } })
+    expect(deliveryOf(deployApp.state().bays.prs[deployed.id])).toBe("integrated")
+    expect(deliveryOf(deployApp.state().bays.prs[companion.id])).toBe("integrated")
+
+    const deployJob = run?.steps.find((step) => step.name === "deploy")?.job
+    if (deployJob === undefined) throw new Error("expected failed post-merge action Job")
+    expect(deployJob).toMatchObject({ status: "completed", conclusion: "failure" })
+    await deployApp.jobs.retry(deployJob.id)
+
+    const retried = (await deployApp.queue.run({ prs: [deployed.id, companion.id] }, runtime))[0]
+    expect(retried).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(deliveryOf(deployApp.state().bays.prs[deployed.id])).toBe("integrated")
+    expect(deliveryOf(deployApp.state().bays.prs[companion.id])).toBe("integrated")
+    expect(deployAttempts).toBe(2)
   })
 
   it("allows unrelated work while waiting and refuses a completed stale revision", async () => {
@@ -2466,11 +2814,11 @@ describe("Queue", () => {
     await using app = await createQueueApp({
       check: (input) =>
         input.prs[0]?.branch === "issue/next"
-          ? { status: "passed", output: { checked: true } }
+          ? { status: "completed", conclusion: "success", output: { checked: true } }
           : { status: "waiting", token: `remote-${input.prs[0]?.id}` },
       merge: () => {
         merges++
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const remote = await submitBranch(app, "issue/remote")
@@ -2483,7 +2831,10 @@ describe("Queue", () => {
     })
 
     const next = await submitBranch(app, "issue/next")
-    expect((await app.queue.run({ prs: [next.id] }, runtime))[0]).toMatchObject({ status: "passed" })
+    expect((await app.queue.run({ prs: [next.id] }, runtime))[0]).toMatchObject({
+      status: "completed",
+      conclusion: "success",
+    })
 
     await app.bays.intake({ branch: remote.branch, headSha: UPDATED, base: "main" })
     expect(
@@ -2495,12 +2846,13 @@ describe("Queue", () => {
           attempt: waitingJob.attempt,
           runner: waitingJob.runner,
           token: waitingJob.token,
-          result: { status: "passed", output: { checked: true } },
+          result: { status: "completed", conclusion: "success", output: { checked: true } },
         },
         runtime,
       ),
     ).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: { code: "stale-pr" },
     })
     await expect(
@@ -2512,13 +2864,17 @@ describe("Queue", () => {
           attempt: waitingJob.attempt,
           runner: waitingJob.runner,
           token: waitingJob.token,
-          result: { status: "passed", output: { checked: true } },
+          result: { status: "completed", conclusion: "success", output: { checked: true } },
         },
         runtime,
       ),
     ).rejects.toThrow("no waiting 'check' step")
     expect(merges).toBe(1)
-    expect(app.state().bays.prs[remote.id]).toMatchObject({ revision: 2, headSha: UPDATED, status: "pushed" })
+    expect(prFacts(app.state().bays.prs[remote.id])).toMatchObject({
+      revision: 2,
+      headSha: UPDATED,
+      delivery: "pushed",
+    })
   })
 
   it("refuses a delayed completion from an earlier attempt when a retry reuses its token", async () => {
@@ -2527,7 +2883,7 @@ describe("Queue", () => {
       check: () => ({ status: "waiting", token: "shared-token" }),
       merge: () => {
         merges += 1
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const pr = await submitBranch(app, "issue/reused-token")
@@ -2547,7 +2903,11 @@ describe("Queue", () => {
       attempt: firstJob.attempt,
       runner: firstJob.runner,
       token: firstJob.token,
-      result: { status: "failed", error: { code: "remote-failed", message: "retry requested" } },
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "remote-failed", message: "retry requested" },
+      },
     })
     await app.jobs.retry(firstJob.id)
     const retried = await app.jobs.run(firstJob.id, { runner: "runner-2", leaseMs: 60_000 })
@@ -2565,7 +2925,7 @@ describe("Queue", () => {
       attempt: firstJob.attempt,
       runner: firstJob.runner,
       token: firstJob.token,
-      result: { status: "passed" as const, output: { checked: true } },
+      result: { status: "completed" as const, conclusion: "success" as const, output: { checked: true } },
     }
     await expect(app.queue.finish(pr.id, delayedAttemptOne, runtime)).rejects.toThrow("attempt 1 is stale")
 
@@ -2574,7 +2934,7 @@ describe("Queue", () => {
       attempt: 2,
       runner: "runner-2",
     })
-    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
     expect(merges).toBe(0)
   })
 
@@ -2584,7 +2944,7 @@ describe("Queue", () => {
       check: () => ({ status: "waiting", token: "shared-token" }),
       merge: () => {
         merges += 1
-        return { status: "passed", output: { commit: MERGED, baseSha: BASE } }
+        return { status: "completed", conclusion: "success", output: { commit: MERGED, baseSha: BASE } }
       },
     })
     const pr = await submitBranch(app, "issue/reused-owner")
@@ -2596,10 +2956,14 @@ describe("Queue", () => {
       attempt: firstJob.attempt,
       runner: firstJob.runner,
       token: firstJob.token,
-      result: { status: "failed", error: { code: "remote-failed", message: "resubmit requested" } },
+      result: {
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "remote-failed", message: "resubmit requested" },
+      },
     })
     await expect(app.queue.run({ prs: [pr.id], steps: ["check", "merge"] }, runtime)).resolves.toEqual([
-      expect.objectContaining({ id: first?.id, status: "failed" }),
+      expect.objectContaining({ id: first?.id, status: "completed", conclusion: "failure" }),
     ])
 
     await app.bays.submit({ branch: pr.branch, headSha: UPDATED, base: "main" })
@@ -2624,13 +2988,13 @@ describe("Queue", () => {
           attempt: firstJob.attempt,
           runner: firstJob.runner,
           token: firstJob.token,
-          result: { status: "passed", output: { checked: true } },
+          result: { status: "completed", conclusion: "success", output: { checked: true } },
         },
         runtime,
       ),
     ).rejects.toThrow(firstJob.id)
     expect(app.queue.get(second!.id)?.steps[0]?.job).toMatchObject({ id: secondJob.id, status: "waiting" })
-    expect(app.state().bays.prs[pr.id]?.status).toBe("submitted")
+    expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
     expect(merges).toBe(0)
   })
 
@@ -2642,8 +3006,8 @@ describe("Queue", () => {
         const prs = input.prs.map((pr) => pr.id)
         checked.push(prs)
         return prs.includes("PR3")
-          ? { status: "failed", error: { code: "check-failed", message: "bad PR" } }
-          : { status: "passed", output: { checked: true } }
+          ? { status: "completed", conclusion: "failure", error: { code: "check-failed", message: "bad PR" } }
+          : { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     await submitBranch(app, "issue/one")
@@ -2654,14 +3018,33 @@ describe("Queue", () => {
     const runs = await app.queue.run({ prs: [] }, runtime)
 
     expect(checked).toEqual([["PR1", "PR2", "PR3", "PR4"], ["PR1", "PR2"], ["PR3", "PR4"], ["PR3"], ["PR4"]])
-    expect(runs.map((run) => [run.prs.map((pr) => pr.id), run.status])).toEqual([
-      [["PR1", "PR2", "PR3", "PR4"], "failed"],
-      [["PR1", "PR2"], "passed"],
-      [["PR3", "PR4"], "failed"],
-      [["PR3"], "failed"],
-      [["PR4"], "passed"],
+    expect(runs.map((run) => [run.prs.map((pr) => pr.id), run.conclusion])).toEqual([
+      [["PR1", "PR2", "PR3", "PR4"], "failure"],
+      [["PR1", "PR2"], "success"],
+      [["PR3", "PR4"], "failure"],
+      [["PR3"], "failure"],
+      [["PR4"], "success"],
     ])
-    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, pr.status]))).toEqual({
+    expect(
+      Object.values(app.state().queues.candidates).map((candidate) => ({
+        id: candidate.id,
+        revs: candidate.revs.map(({ pr }) => pr),
+      })),
+    ).toEqual([
+      { id: "C1", revs: ["PR1", "PR2", "PR3", "PR4"] },
+      { id: "C2", revs: ["PR1", "PR2"] },
+      { id: "C3", revs: ["PR3", "PR4"] },
+      { id: "C4", revs: ["PR3"] },
+      { id: "C5", revs: ["PR4"] },
+    ])
+    expect(runs.map(({ candidateId, parent }) => ({ candidateId, parent }))).toEqual([
+      { candidateId: "C1", parent: undefined },
+      { candidateId: "C2", parent: "R1" },
+      { candidateId: "C3", parent: "R1" },
+      { candidateId: "C4", parent: "R3" },
+      { candidateId: "C5", parent: "R3" },
+    ])
+    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, prDeliveryState(pr)]))).toEqual({
       PR1: "integrated",
       PR2: "integrated",
       PR3: "rejected",
@@ -2678,15 +3061,20 @@ describe("Queue", () => {
         const prs = input.prs.map((pr) => pr.id)
         checked.push(prs)
         if (prs.length === 2) {
-          return { status: "failed", error: { code: "check-failed", message: "batch is merit-red" } }
+          return {
+            status: "completed",
+            conclusion: "failure",
+            error: { code: "check-failed", message: "batch is merit-red" },
+          }
         }
         if (prs[0] === "PR1" && ++isolatedPR1Checks === 1) {
           return {
-            status: "failed",
+            status: "completed",
+            conclusion: "failure",
             error: { code: "queue-environment-refused", message: "isolated runner unavailable" },
           }
         }
-        return { status: "passed", output: { checked: true } }
+        return { status: "completed", conclusion: "success", output: { checked: true } }
       },
     })
     const first = await submitBranch(app, "issue/environment-child")
@@ -2695,13 +3083,19 @@ describe("Queue", () => {
     const runs = await app.queue.run({ prs: [first.id, second.id] }, runtime)
 
     expect(runs).toMatchObject([
-      { id: "R1", status: "failed", error: { code: "check-failed" } },
-      { id: "R2", parent: "R1", status: "failed", error: { code: "queue-environment-refused" } },
-      { id: "R3", parent: "R1", status: "passed" },
+      { id: "R1", status: "completed", conclusion: "failure", error: { code: "check-failed" } },
+      {
+        id: "R2",
+        parent: "R1",
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "queue-environment-refused" },
+      },
+      { id: "R3", parent: "R1", status: "completed", conclusion: "success" },
     ])
     expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
     expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3"])
-    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, pr.status]))).toEqual({
+    expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, prDeliveryState(pr)]))).toEqual({
       PR1: "submitted",
       PR2: "integrated",
     })
@@ -2731,13 +3125,14 @@ describe("Queue", () => {
     expect(newRuns).toMatchObject([
       {
         id: "R4",
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         prs: [{ id: first.id, revision: first.revision, headSha: first.headSha }],
       },
     ])
     expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3", "R4"])
-    expect(app.state().bays.prs[first.id]).toMatchObject({
-      status: "integrated",
+    expect(prFacts(app.state().bays.prs[first.id])).toMatchObject({
+      delivery: "integrated",
       revision: first.revision,
       headSha: first.headSha,
     })
@@ -2756,7 +3151,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
       {
         check: () => {
           checks += 1
-          if (checks > 1) return { status: "passed", output: { checked: true } }
+          if (checks > 1) return { status: "completed", conclusion: "success", output: { checked: true } }
           executing.resolve()
           return release.promise
         },
@@ -2777,10 +3172,10 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
     await using peer = await createQueueApp({}, journal, undefined, ids(1000))
     await peer.queue.cancel({ prs: [pr.id], by: "@peer", reason: "superseded" })
 
-    release.resolve({ status: "passed", output: { checked: true } })
+    release.resolve({ status: "completed", conclusion: "success", output: { checked: true } })
     const runs = await running
     expect(runs).toHaveLength(1)
-    expect(runs[0]).toMatchObject({ steps: [{ job: { status: "canceled" } }] })
+    expect(runs[0]).toMatchObject({ steps: [{ job: { status: "completed", conclusion: "cancelled" } }] })
 
     // The skip is LOUD and typed — never a silent swallow.
     expect(events).toContainEqual(
@@ -2791,7 +3186,8 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
         props: expect.objectContaining({
           action: "canceled-skip",
           run: runs[0]!.id,
-          status: "canceled",
+          status: "completed",
+          conclusion: "cancelled",
         }),
       }),
     )
@@ -2799,7 +3195,7 @@ describe("Queue — a peer-canceled Job mid-execution never kills the composing 
     // The runner keeps processing subsequent work after the raced skip.
     const next = await submitBranch(app, "issue/after-cancel")
     await expect(app.queue.run({ prs: [next.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
-      { status: "passed" },
+      { status: "completed", conclusion: "success" },
     ])
   })
 

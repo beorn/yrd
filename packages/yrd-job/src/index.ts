@@ -12,11 +12,15 @@ export type {
   JobDef,
   JobError,
   JobHandler,
+  JobConclusion,
   JobLaunch,
   JobObservation,
   JobRequest,
   JobResult,
+  JobStatus,
   JobWaiting,
+  ContextReq,
+  RuntimeContext,
 } from "./job.ts"
 export {
   createJobs,
@@ -40,3 +44,5 @@ export type {
   RunManyJobOptions,
   RunJobOptions,
 } from "./jobs.ts"
+export { localRunner } from "./runner.ts"
+export type { LocalRunnerOptions, Runner, RunnerContexts, RunnerContextRequest, RunnerSubmission } from "./runner.ts"

@@ -8,16 +8,34 @@ import {
   type PRTerminalAssociation,
   baseIdentity,
   checkRequest,
+  prBaseSha,
+  prComposition,
+  prCorrelation,
+  prHead,
+  prRecut,
+  prRevisionNumber,
   type PR,
 } from "@yrd/bay"
 import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
+import type { FlowPin } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
 
-export type QueueRunId = string
+export type CandidateId = string
+export type RunId = string
+/** @deprecated Use RunId. Retained while downstream W2 views migrate. */
+export type QueueRunId = RunId
 export type StepName = string
 export type BatchConfig = false | number
 export type QueueRequirement = "review"
+
+const FlowPinSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    rev: z.string().trim().min(1),
+    fingerprint: z.string().regex(/^[0-9a-f]{64}$/u),
+  })
+  .strict()
 
 const PRSnapshotRecutProofSchema = PRRecutProofSchema.extend({
   /** Immutable base certified by this recut revision. Optional only for replaying legacy queue records. */
@@ -37,6 +55,7 @@ export const PRSnapshotSchema = z
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
     recut: PRSnapshotRecutProofSchema.optional(),
+    flow: FlowPinSchema.optional(),
   })
   .strict()
 export type PRSnapshot = Readonly<z.infer<typeof PRSnapshotSchema>>
@@ -54,6 +73,26 @@ export type SourceRewrite = Readonly<{
   payload: readonly string[]
 }>
 
+export type CandidateRev = Readonly<{
+  pr: string
+  n: number
+  head: string
+}>
+
+/** Immutable attempted integration. Its content identity is derived from the
+ * queue/base plus ordered revision heads and their immutable compositions. */
+export type Candidate = Readonly<{
+  id: CandidateId
+  queueId: string
+  baseSha: string
+  revs: readonly CandidateRev[]
+  sha?: string
+  ref?: string
+  sourceRewrites?: readonly SourceRewrite[]
+  mergeability: "unknown" | "mergeable" | "conflicting"
+  createdAt: string
+}>
+
 export const SourceRewriteSchema = z
   .object({
     repo: z.string().min(1),
@@ -68,6 +107,30 @@ export const SourceRewriteSchema = z
     payload: z.array(z.string().min(1)).min(1),
   })
   .strict() as z.ZodType<SourceRewrite>
+
+export const CandidateSchema = z
+  .object({
+    id: z.string().regex(/^C\d+$/u),
+    queueId: GitRefSchema,
+    baseSha: GitShaSchema,
+    revs: z
+      .array(
+        z
+          .object({
+            pr: PRIdSchema,
+            n: z.number().int().positive(),
+            head: GitShaSchema,
+          })
+          .strict(),
+      )
+      .min(1),
+    sha: GitShaSchema.optional(),
+    ref: GitRefSchema.optional(),
+    sourceRewrites: z.array(SourceRewriteSchema).optional(),
+    mergeability: z.enum(["unknown", "mergeable", "conflicting"]),
+    createdAt: z.iso.datetime({ offset: true }),
+  })
+  .strict()
 
 export type QueueSubmoduleResolutionEvidence =
   | Readonly<{
@@ -178,11 +241,11 @@ export type QueueAuthorityToken = Readonly<{
   pr: string
   revision: number
   headSha: string
-  consumedBy?: QueueRunId
+  consumedBy?: RunId
 }>
 
 export type QueueRunAuthority = Readonly<{
-  inheritedFrom?: QueueRunId
+  inheritedFrom?: RunId
   missingSubmits: readonly string[]
   missingChecks: readonly string[]
   released?: Readonly<{
@@ -211,20 +274,23 @@ export type QueueAuthorityState = Readonly<{
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
-  runs: Readonly<Record<QueueRunId, QueueRunAuthority>>
+  runs: Readonly<Record<RunId, QueueRunAuthority>>
 }>
 
 export type QueueRecord = Readonly<{
-  id: QueueRunId
+  id: RunId
+  queueId: string
+  candidateId: CandidateId
   prs: readonly PRSnapshot[]
   base: string
+  flow?: FlowPin
   steps: readonly InstalledStep[]
   stepSelection?: StepSelection
   initialIntegration?: IntegrationProof
   initialResults?: Readonly<Record<string, JsonValue>>
-  reusedFrom?: QueueRunId
+  reusedFrom?: RunId
   startedAt: string
-  parent?: QueueRunId
+  parent?: RunId
   isolationPart?: 0 | 1
   failure?: QueueFailure
   // Run-level cancellation (the `run cancel` surface): a run aborted before it lands,
@@ -238,16 +304,23 @@ export type QueueRecord = Readonly<{
 
 export type QueueStep = InstalledStep & Readonly<{ job?: Job }>
 
-export type QueueRun = Omit<QueueRecord, "initialIntegration" | "initialResults" | "steps" | "failure"> &
+export type RunStatus = "queued" | "in_progress" | "waiting" | "completed"
+export type RunConclusion = "success" | "failure" | "cancelled" | "skipped" | "timed_out"
+
+export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "steps" | "failure"> &
   Readonly<{
     cursor: number
     integration?: IntegrationProof
-    status: "running" | "waiting" | "passed" | "failed" | "canceled"
+    status: RunStatus
+    conclusion?: RunConclusion
     steps: readonly QueueStep[]
     shape: PRShape | IntegratedShape
     finishedAt?: string
     error?: JobError
   }>
+
+/** @deprecated Use Run. Retained while downstream W2 views migrate. */
+export type QueueRun = Run
 
 export type QueuePause = Readonly<{
   base: string
@@ -269,7 +342,8 @@ export type QueuesState = Readonly<{
   defaultSteps?: readonly StepName[]
   requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
-  records: Readonly<Record<QueueRunId, QueueRecord>>
+  candidates: Readonly<Record<CandidateId, Candidate>>
+  records: Readonly<Record<RunId, QueueRecord>>
   authority: QueueAuthorityState
   terminalAssociations: QueueTerminalAssociations
 }>
@@ -306,7 +380,7 @@ export type PREligibility = Readonly<{
     status: "not-requested" | "queued" | "checking" | "passed" | "failed"
     queuedAt?: string
     position?: number
-    run?: QueueRunId
+    run?: RunId
   }>
 }>
 
@@ -314,7 +388,7 @@ export type PRCheckRecord = Readonly<{
   pr: string
   revision: number
   status: PREligibility["checks"]["status"]
-  run?: QueueRunId
+  run?: RunId
   step?: StepName
   classification?: "base" | "carrier"
   queuedAt?: string
@@ -327,16 +401,16 @@ export type PRCheckRecord = Readonly<{
 
 export type QueueSummary = Readonly<{
   base: string
-  running: readonly QueueRun[]
-  waiting: readonly QueueRun[]
-  finished: readonly QueueRun[]
+  running: readonly Run[]
+  waiting: readonly Run[]
+  finished: readonly Run[]
   pause?: QueuePause
 }>
 
 export type QueueAuditFinding = Readonly<{
   code: string
   message: string
-  run?: QueueRunId
+  run?: RunId
   pr?: string
   step?: StepName
 }>
@@ -395,8 +469,11 @@ const LegacyStepSelectionSchema = z
 
 const queueRecordShape = {
   id: z.string().trim().min(1),
+  queueId: GitRefSchema,
+  candidateId: z.string().regex(/^C\d+$/u),
   prs: z.array(PRSnapshotSchema).min(1),
   base: GitRefSchema,
+  flow: FlowPinSchema.optional(),
   steps: z.array(InstalledStepSchema).min(1),
   initialIntegration: IntegrationProofSchema.optional(),
   initialResults: z.record(z.string(), JsonSchema).optional(),
@@ -417,11 +494,16 @@ export const QueueRecordSchema = z
 export const ReplayQueueRecordSchema = z
   .object({
     ...queueRecordShape,
+    queueId: GitRefSchema.optional(),
+    candidateId: z
+      .string()
+      .regex(/^C\d+$/u)
+      .optional(),
     stepSelection: z.union([StepSelectionSchema, LegacyStepSelectionSchema]).optional(),
   })
   .strict()
 
-function resolveQueueRecord(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
+function resolveQueueRecord(state: QueuesState, id: RunId): QueueRecord | undefined {
   return resolveSelector(
     id,
     Object.values(state.records).map((record) => ({ canonical: record.id, value: record })),
@@ -442,17 +524,18 @@ export const Queues = Object.freeze({
       ...(options.defaultSteps === undefined ? {} : { defaultSteps: options.defaultSteps }),
       requires: options.requires ?? [],
       pauses: {},
+      candidates: {},
       records: {},
       authority: { statuses: {}, current: {}, submits: {}, checks: {}, runs: {} },
       terminalAssociations: { pending: {}, applied: {} },
     }
   },
 
-  resolve(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
+  resolve(state: QueuesState, id: RunId): QueueRecord | undefined {
     return resolveQueueRecord(state, id)
   },
 
-  record(state: QueuesState, id: QueueRunId): QueueRecord {
+  record(state: QueuesState, id: RunId): QueueRecord {
     const direct = state.records[id]
     if (direct !== undefined) return direct
     const record = resolveQueueRecord(state, id)
@@ -460,33 +543,50 @@ export const Queues = Object.freeze({
     return record
   },
 
-  nextId(state: QueuesState): QueueRunId {
+  nextId(state: QueuesState): RunId {
     const values = Object.keys(state.records)
       .filter((id) => /^R\d+$/u.test(id))
       .map((id) => Number(id.slice(1)))
     return `R${Math.max(0, ...values) + 1}`
   },
 
+  nextCandidateId(state: QueuesState): CandidateId {
+    const values = Object.keys(state.candidates)
+      .filter((id) => /^C\d+$/u.test(id))
+      .map((id) => Number(id.slice(1)))
+    return `C${Math.max(0, ...values) + 1}`
+  },
+
   snapshot(pr: PR): PRSnapshot {
-    const baseSha = checkRequest(pr)?.baseSha ?? pr.baseSha
+    const baseSha = checkRequest(pr)?.baseSha ?? prBaseSha(pr)
+    const recut = prRecut(pr)
     return PRSnapshotSchema.parse({
       id: pr.id,
       ...(pr.bay === undefined ? {} : { bay: pr.bay }),
       ...(pr.name === undefined ? {} : { name: pr.name }),
       branch: pr.branch,
       base: baseIdentity(pr.base),
-      revision: pr.revision,
-      headSha: pr.headSha,
+      revision: prRevisionNumber(pr),
+      headSha: prHead(pr),
       ...(baseSha === undefined ? {} : { baseSha }),
-      ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
-      ...(pr.composition === undefined ? {} : { composition: pr.composition }),
-      ...(pr.recut === undefined
+      ...(prCorrelation(pr) === undefined ? {} : { correlation: prCorrelation(pr) }),
+      ...(prComposition(pr) === undefined ? {} : { composition: prComposition(pr) }),
+      ...(recut === undefined
         ? {}
-        : { recut: { ...pr.recut, ...(pr.baseSha === undefined ? {} : { baseSha: pr.baseSha }) } }),
+        : { recut: { ...recut, ...(prBaseSha(pr) === undefined ? {} : { baseSha: prBaseSha(pr) }) } }),
+      ...(pr.flow === undefined ? {} : { flow: pr.flow }),
     })
   },
 
-  terminal(run: QueueRun): boolean {
-    return run.status === "passed" || run.status === "failed" || run.status === "canceled"
+  terminal(run: Run): boolean {
+    return run.status === "completed"
+  },
+
+  succeeded(run: Run): boolean {
+    return run.status === "completed" && run.conclusion === "success"
+  },
+
+  failed(run: Run): boolean {
+    return run.status === "completed" && run.conclusion === "failure"
   },
 })

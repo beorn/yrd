@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { createBayJobDefs, withBays } from "@yrd/bay"
+import { createBayJobDefs, prDeliveryState, withBays } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, JsonSchema, pipe, type Journal, type JsonValue } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
@@ -46,14 +46,16 @@ function workspace() {
   return {
     revision: "withdraw-workspace-v1",
     provision: (input: { bay: string }) => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { path: `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA },
     }),
     refresh: (input: { bay: string; path?: string }) => ({
-      status: "passed" as const,
+      status: "completed" as const,
+      conclusion: "success" as const,
       output: { path: input.path ?? `/repo/.bays/${input.bay}`, headSha: HEAD_SHA, baseSha: BASE_SHA, dirty: false },
     }),
-    deprovision: () => ({ status: "passed" as const, output: {} }),
+    deprovision: () => ({ status: "completed" as const, conclusion: "success" as const, output: {} }),
   }
 }
 
@@ -65,7 +67,8 @@ function contestAdapters() {
     revision: "ag-runner-v1",
     async run(input): Promise<JobResult<AttemptRunOutput>> {
       return {
-        status: "passed",
+        status: "completed",
+        conclusion: "success",
         output: {
           pin: {
             commit: "c".repeat(40),
@@ -87,7 +90,7 @@ function contestAdapters() {
     revision: "held-out-v1",
     authority: "held-out",
     async evaluate() {
-      return { status: "passed", output: { verdict: "passed", artifacts: [] } }
+      return { status: "completed", conclusion: "success", output: { verdict: "passed", artifacts: [] } }
     },
   }
   const git: ContestGit = { revision: "git-v1", resolveCommit: () => BASE_SHA }
@@ -96,16 +99,21 @@ function contestAdapters() {
 
 async function createCliApp(options: { journal?: Journal<unknown> } = {}) {
   const bayJobs = createBayJobDefs(workspace())
-  const check = withStep("check", (): JobResult<JsonValue> => ({ status: "passed", output: { checked: true } }), {
-    revision: "check-v1",
-    output: JsonSchema,
-    classification: "carrier",
-  })
+  const check = withStep(
+    "check",
+    (): JobResult<JsonValue> => ({ status: "completed", conclusion: "success", output: { checked: true } }),
+    {
+      revision: "check-v1",
+      output: JsonSchema,
+      classification: "carrier",
+    },
+  )
   const merge = withMerge(
     async (
       _input: StepExecution<PRShape>,
     ): Promise<JobResult<{ commit: string; baseSha: string; sourceRewrites?: readonly SourceRewrite[] }>> => ({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { commit: MERGED_SHA, baseSha: MERGED_SHA },
     }),
     { revision: "merge-v1" },
@@ -190,20 +198,33 @@ describe("pr withdraw", () => {
       prs: [
         {
           id: "PR1",
-          status: "withdrawn",
+          state: "closed",
+          merged: false,
+          revs: [{ terminal: { kind: "withdrawn" } }],
           withdrawReason: "superseded by rework",
           taskStatus: "dropped",
           glyph: "−",
         },
       ],
     })
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "withdrawn", withdrawReason: "superseded by rework" })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
+    expect(app.state().bays.prs.PR1).toMatchObject({ withdrawReason: "superseded by rework" })
     expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
       expect.objectContaining({ pr: "PR1", revision: 1, headSha: HEAD_SHA, reason: "superseded by rework" }),
     ])
     expect(app.queue.get("R1")).toMatchObject({
-      status: "failed",
-      steps: [{ job: { status: "canceled", canceledBy: "cli-test", cancelReason: "superseded by rework" } }],
+      status: "completed",
+      conclusion: "failure",
+      steps: [
+        {
+          job: {
+            status: "completed",
+            conclusion: "cancelled",
+            canceledBy: "cli-test",
+            cancelReason: "superseded by rework",
+          },
+        },
+      ],
     })
 
     // The queue timeline renders a withdrawn PR distinctly: its Queue run row
@@ -240,7 +261,7 @@ describe("pr withdraw", () => {
     const mixed = outputIO()
     expect(await runYrd(app, yrd("pr", "withdraw", "PR1", "PR2"), mixed.io)).toBe(1)
     expect(mixed.stderr()).toContain("PR 'PR2' is withdrawn")
-    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted" })
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect(await journaledEvents(app, "pr/withdrawn")).toHaveLength(1)
   })
 })
@@ -267,10 +288,16 @@ describe("pr withdraw journal replay", () => {
       const second = await createCliApp({ journal: createJournal({ dir }) })
       try {
         expect(second.state().bays.prs.PR1).toMatchObject({
-          status: "withdrawn",
+          state: "closed",
+          merged: false,
+          revs: [{ terminal: { kind: "withdrawn" } }],
           withdrawReason: "superseded by rework",
         })
-        expect(second.state().bays.prs.PR2).toMatchObject({ status: "withdrawn" })
+        expect(second.state().bays.prs.PR2).toMatchObject({
+          state: "closed",
+          merged: false,
+          revs: [{ terminal: { kind: "withdrawn" } }],
+        })
         expect(second.state().bays.prs.PR2?.withdrawReason).toBeUndefined()
         const log = outputIO()
         expect(await runYrd(second, yrd("log", "--pr", "PR1", "--json"), log.io), log.stderr()).toBe(0)
@@ -318,10 +345,12 @@ describe("pr prune", () => {
           reason: `superseded: content already in ${BASE_SHA}`,
         },
       ],
-      withdrawn: [{ id: "PR1", status: "withdrawn" }],
+      withdrawn: [{ id: "PR1", state: "closed", merged: false, taskStatus: "dropped" }],
     })
     expect(app.state().bays.prs.PR1).toMatchObject({
-      status: "withdrawn",
+      state: "closed",
+      merged: false,
+      revs: [{ terminal: { kind: "withdrawn" } }],
       withdrawReason: `superseded: content already in ${BASE_SHA}`,
     })
     expect(await journaledEvents(app, "pr/withdrawn")).toEqual([
@@ -352,9 +381,9 @@ describe("pr prune", () => {
           reason: `superseded: content already in ${BASE_SHA}`,
         },
       ],
-      withdrawn: [{ id: "PR1", status: "withdrawn" }],
+      withdrawn: [{ id: "PR1", state: "closed", merged: false, taskStatus: "dropped" }],
     })
-    expect(app.state().bays.prs.PR1?.status).toBe("withdrawn")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("withdrawn")
   })
 
   it("keeps live PRs and prints the exact check behind every verdict", async () => {
@@ -377,9 +406,9 @@ describe("pr prune", () => {
       ],
       withdrawn: [],
     })
-    expect(app.state().bays.prs.PR1?.status).toBe("submitted")
-    expect(app.state().bays.prs.PR2?.status).toBe("submitted")
-    expect(app.state().bays.prs.PR3?.status).toBe("submitted")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
+    expect(prDeliveryState(app.state().bays.prs.PR2!)).toBe("submitted")
+    expect(prDeliveryState(app.state().bays.prs.PR3!)).toBe("submitted")
 
     const human = outputIO({ pruneGit: () => facts, columns: 400 })
     expect(await runYrd(app, yrd("pr", "prune"), human.io), human.stderr()).toBe(0)
@@ -405,7 +434,7 @@ describe("pr prune", () => {
       checked: [{ pr: "PR1", verdict: "would-withdraw", reason: `superseded: content already in ${BASE_SHA}` }],
       withdrawn: [],
     })
-    expect(app.state().bays.prs.PR1?.status).toBe("submitted")
+    expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("submitted")
     expect((await Array.fromAsync(app.events())).length).toBe(before)
   })
 })

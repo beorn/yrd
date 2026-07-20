@@ -22,10 +22,13 @@ import {
   isTerminalJobStatus,
   Job,
   JobStateConflict,
+  localRunner,
   withJobs,
+  type ContextReq,
   type JobContext,
   type JobDef,
   type JobHandler,
+  type RunnerContexts,
   type JobTransition,
 } from "@yrd/job"
 
@@ -63,7 +66,8 @@ function ids(...values: string[]) {
 
 function delivery(
   execute: JobHandler<Delivery, Receipt> = async ({ message }) => ({
-    status: "passed",
+    status: "completed",
+    conclusion: "success",
     output: { receipt: `ok:${message}` },
   }),
   revision = "transport-v1",
@@ -145,17 +149,55 @@ describe("JobDef", () => {
       },
     })
     await expect(deliver.execute({ message: "hello" }, context)).resolves.toEqual({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { receipt: "ok:hello" },
     })
     expect(() => deliver.request({ message: "" })).toThrow()
 
-    const invalid = delivery(async () => ({ status: "passed", output: { receipt: "" } }))
+    const invalid = delivery(async () => ({ status: "completed", conclusion: "success", output: { receipt: "" } }))
     await expect(invalid.execute({ message: "hello" }, context)).rejects.toThrow()
   })
 })
 
 describe("Jobs", () => {
+  it("uses GitHub-verbatim status and conclusion at the durable Job boundary", () => {
+    const requested = Job.requested(JOB_ID, "2026-01-01T00:00:00.000Z", {
+      definition: "message.deliver",
+      revision: "transport-v1",
+      input: { message: "hello" },
+    })
+    expect(requested).toMatchObject({ status: "queued" })
+
+    const running = Job.apply(
+      requested,
+      {
+        type: "start",
+        id: JOB_ID,
+        attempt: 1,
+        runner: "worker-1",
+        leaseExpiresAt: "2026-01-01T00:01:00.000Z",
+      },
+      "2026-01-01T00:00:01.000Z",
+    )
+    expect(running).toMatchObject({ status: "in_progress" })
+
+    const completed = Job.apply(
+      running,
+      {
+        type: "finish",
+        id: JOB_ID,
+        attempt: 1,
+        runner: "worker-1",
+        result: { status: "completed", conclusion: "success", output: { receipt: "ok:hello" } },
+      },
+      "2026-01-01T00:00:02.000Z",
+    )
+    expect(completed).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(Job.terminal(completed)).toBe(true)
+    expect(isTerminalJobStatus("completed")).toBe(true)
+  })
+
   it("keeps generic Job input opaque when no lifecycle projection is declared", async () => {
     const events: LogEvent[] = []
     const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
@@ -209,7 +251,7 @@ describe("Jobs", () => {
         if (message === "first") await first.promise
         if (message === "slow") await slow.promise
         active--
-        return { status: "passed", output: { receipt: `ok:${message}` } }
+        return { status: "completed", conclusion: "success", output: { receipt: `ok:${message}` } }
       }),
     )
     const firstResult = await app.dispatch(app.commands.sender.send, { message: "first" })
@@ -229,9 +271,9 @@ describe("Jobs", () => {
     const jobs = await running
 
     expect(jobs).toMatchObject([
-      { id: jobIds[0], status: "passed", output: { receipt: "ok:first" } },
-      { id: jobIds[1], status: "passed", output: { receipt: "ok:slow" } },
-      { id: jobIds[2], status: "passed", output: { receipt: "ok:third" } },
+      { id: jobIds[0], status: "completed", conclusion: "success", output: { receipt: "ok:first" } },
+      { id: jobIds[1], status: "completed", conclusion: "success", output: { receipt: "ok:slow" } },
+      { id: jobIds[2], status: "completed", conclusion: "success", output: { receipt: "ok:third" } },
     ])
     expect(peak).toBe(2)
     await app.close()
@@ -254,7 +296,7 @@ describe("Jobs", () => {
     await expect(app.jobs.runMany([id!], { runner: "worker", leaseMs: 60_000 })).rejects.toThrow(
       "settlement append failed",
     )
-    expect(app.jobs.get(id!)).toMatchObject({ status: "running", attempt: 1 })
+    expect(app.jobs.get(id!)).toMatchObject({ status: "in_progress", attempt: 1 })
     await app.close()
   })
 
@@ -272,14 +314,15 @@ describe("Jobs", () => {
     const result = await app.dispatch(app.commands.sender.send, { message: "hello", key: "delivery:1" })
     expect(app.jobs.requested(result)).toEqual([JOB_ID])
     expect(app.jobs.state()).toMatchObject({
-      byId: { [JOB_ID]: { id: JOB_ID, status: "requested", attempt: 0, input: { message: "hello" } } },
+      byId: { [JOB_ID]: { id: JOB_ID, status: "queued", attempt: 0, input: { message: "hello" } } },
       byKey: { "delivery:1": JOB_ID },
     })
-    expect(app.jobs.get(JOB_ID)).toMatchObject({ id: JOB_ID, status: "requested" })
+    expect(app.jobs.get(JOB_ID)).toMatchObject({ id: JOB_ID, status: "queued" })
 
     await expect(app.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 60_000 })).resolves.toMatchObject({
       id: JOB_ID,
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       attempt: 1,
       output: { receipt: "ok:hello" },
     })
@@ -308,7 +351,7 @@ describe("Jobs", () => {
     await expect(changed.jobs.run(JOB_ID, { runner: "worker-1", leaseMs: 60_000 })).rejects.toThrow(
       "definition revision",
     )
-    expect(changed.jobs.state().byId[JOB_ID]?.status).toBe("requested")
+    expect(changed.jobs.state().byId[JOB_ID]?.status).toBe("queued")
     await changed.close()
   })
 
@@ -326,7 +369,7 @@ describe("Jobs", () => {
     await app.jobs.finish(JOB_ID, {
       attempt: 1,
       runner: "manual-runner",
-      result: { status: "passed", output: { receipt: "manual-ok" } },
+      result: { status: "completed", conclusion: "success", output: { receipt: "manual-ok" } },
     })
 
     const completion = (await recorded(app)).findLast(
@@ -353,7 +396,8 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "manual-runner",
         result: {
-          status: "failed",
+          status: "completed",
+          conclusion: "failure",
           error: { code: "environment-refused", message: "typed refusal", evidence: new Date() as never },
         },
       }),
@@ -362,7 +406,8 @@ describe("Jobs", () => {
       attempt: 1,
       runner: "manual-runner",
       result: {
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         error: {
           code: "environment-refused",
           message: "typed refusal",
@@ -372,7 +417,8 @@ describe("Jobs", () => {
     })
 
     expect(app.jobs.get(JOB_ID)).toMatchObject({
-      status: "failed",
+      status: "completed",
+      conclusion: "failure",
       error: {
         code: "environment-refused",
         message: "typed refusal",
@@ -411,7 +457,7 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "other",
         token: "remote-1",
-        result: { status: "passed", output: { receipt: "ok" } },
+        result: { status: "completed", conclusion: "success", output: { receipt: "ok" } },
       }),
     ).rejects.toThrow("runner mismatch")
     await expect(
@@ -419,7 +465,7 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "launcher",
         token: "remote-1",
-        result: { status: "passed", output: { receipt: "" } },
+        result: { status: "completed", conclusion: "success", output: { receipt: "" } },
       }),
     ).rejects.toThrow()
 
@@ -427,10 +473,11 @@ describe("Jobs", () => {
       attempt: 1,
       runner: "launcher",
       token: "remote-1",
-      result: { status: "passed", output: { receipt: "remote-ok" } },
+      result: { status: "completed", conclusion: "success", output: { receipt: "remote-ok" } },
     })
     expect(app.jobs.state().byId[JOB_ID]).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       output: { receipt: "remote-ok" },
       checkpoint: { sha: "abc" },
     })
@@ -458,9 +505,14 @@ describe("Jobs", () => {
         attempt: 1,
         runner: "launcher",
         token: "remote-1",
-        result: { status: "passed", output: { receipt: "remote-ok" } },
+        result: { status: "completed", conclusion: "success", output: { receipt: "remote-ok" } },
       }),
-    ).resolves.toMatchObject({ status: "passed", revision: "transport-v1", output: { receipt: "remote-ok" } })
+    ).resolves.toMatchObject({
+      status: "completed",
+      conclusion: "success",
+      revision: "transport-v1",
+      output: { receipt: "remote-ok" },
+    })
     await resumed.close()
   })
 
@@ -484,18 +536,18 @@ describe("Jobs", () => {
 
     expect(await app.jobs.recover({ now: "2026-01-01T00:00:02.000Z" })).toEqual([])
     expect(await app.jobs.recover({ now: "2026-01-01T00:00:04.000Z" })).toEqual([JOB_ID])
-    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "lost", attempt: 1 })
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "completed", conclusion: "timed_out", attempt: 1 })
 
     await app.jobs.retry(JOB_ID)
     await app.jobs.run(JOB_ID, { runner: "replacement", leaseMs: 60_000 })
-    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "passed", attempt: 2 })
+    expect(app.jobs.state().byId[JOB_ID]).toMatchObject({ status: "completed", conclusion: "success", attempt: 2 })
     await expect(
       app.dispatch(app.commands.job.transition, {
         type: "finish",
         id: JOB_ID,
         attempt: 1,
         runner: "lost-worker",
-        result: { status: "passed", output: { receipt: "stale" } },
+        result: { status: "completed", conclusion: "success", output: { receipt: "stale" } },
       }),
     ).rejects.toThrow("attempt 1 is stale")
     await app.close()
@@ -560,11 +612,12 @@ describe("Jobs", () => {
 
     expect(await app.jobs.recover({ now: "2026-01-01T00:00:02.000Z", runner: "yrd-cli:111" })).toEqual([dead])
     expect(app.jobs.state().byId[dead!]).toMatchObject({
-      status: "lost",
+      status: "completed",
+      conclusion: "timed_out",
       attempt: 1,
       lostReason: "runner disappeared",
     })
-    expect(app.jobs.state().byId[alive!]).toMatchObject({ status: "running", runner: "yrd-cli:222" })
+    expect(app.jobs.state().byId[alive!]).toMatchObject({ status: "in_progress", runner: "yrd-cli:222" })
     await app.close()
   })
 
@@ -613,14 +666,16 @@ describe("Jobs", () => {
     // only to the named runner's job; the other runner's job was reclaimed for
     // lease expiry and must say so.
     expect(app.jobs.state().byId[dead!]).toMatchObject({
-      status: "lost",
+      status: "completed",
+      conclusion: "timed_out",
       lostReason: "previous resident runner disappeared",
     })
     expect(app.jobs.state().byId[expired!]).toMatchObject({
-      status: "lost",
+      status: "completed",
+      conclusion: "timed_out",
       lostReason: "runner lease expired",
     })
-    expect(app.jobs.state().byId[live!]).toMatchObject({ status: "running", runner: "yrd-cli:333" })
+    expect(app.jobs.state().byId[live!]).toMatchObject({ status: "in_progress", runner: "yrd-cli:333" })
     await app.close()
   })
 
@@ -666,7 +721,7 @@ describe("Jobs", () => {
       delivery(async () => {
         started.resolve()
         await gate.promise
-        return { status: "passed", output: { receipt: "slow-ok" } }
+        return { status: "completed", conclusion: "success", output: { receipt: "slow-ok" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -684,7 +739,7 @@ describe("Jobs", () => {
       await started.promise
       await vi.advanceTimersByTimeAsync(20)
       gate.resolve()
-      await expect(running).resolves.toMatchObject({ status: "passed", attempt: 1 })
+      await expect(running).resolves.toMatchObject({ status: "completed", conclusion: "success", attempt: 1 })
     } finally {
       gate.resolve()
       vi.useRealTimers()
@@ -707,7 +762,7 @@ describe("Jobs", () => {
         context.signal.addEventListener("abort", () => (aborted = true), { once: true })
         started.resolve()
         await release.promise
-        return { status: "passed", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -728,7 +783,8 @@ describe("Jobs", () => {
 
       expect(aborted).toBe(true)
       expect(settled).toMatchObject({
-        status: "failed",
+        status: "completed",
+        conclusion: "failure",
         error: { code: "progress-stalled", message: expect.stringContaining("progress lease expired") },
       })
     } finally {
@@ -749,7 +805,7 @@ describe("Jobs", () => {
         })
         await Bun.sleep(10)
         cleaned = true
-        return { status: "passed", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -781,7 +837,8 @@ describe("Jobs", () => {
     expect(canceled).toMatchObject({
       id: JOB_ID,
       attempt: 0,
-      status: "canceled",
+      status: "completed",
+      conclusion: "cancelled",
       canceledBy: "@chief",
       cancelReason: "authorization withdrawn before claim",
     })
@@ -803,7 +860,7 @@ describe("Jobs", () => {
           if (context.signal.aborted) onAbort()
           else context.signal.addEventListener("abort", onAbort, { once: true })
         })
-        return { status: "passed", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -822,12 +879,13 @@ describe("Jobs", () => {
     expect(canceled).toMatchObject({
       id: JOB_ID,
       attempt: 1,
-      status: "canceled",
+      status: "completed",
+      conclusion: "cancelled",
       canceledBy: "@chief",
       cancelReason: "authorization revoked",
     })
     expect(canceled).not.toHaveProperty("lostReason")
-    await expect(running).resolves.toMatchObject({ status: "canceled" })
+    await expect(running).resolves.toMatchObject({ status: "completed", conclusion: "cancelled" })
     const transition = (await recorded(app)).findLast(
       ({ name, data }) => name === "job/transitioned" && (data as { type?: string }).type === "cancel",
     )
@@ -856,7 +914,7 @@ describe("Jobs", () => {
             { once: true },
           )
         })
-        return { status: "passed", output: { receipt: "too-late" } }
+        return { status: "completed", conclusion: "success", output: { receipt: "too-late" } }
       }),
       { id: ids("send", "C-send", JOB_ID) },
     )
@@ -872,7 +930,7 @@ describe("Jobs", () => {
       })
       await started.promise
       const job = app.jobs.get(JOB_ID)
-      if (job?.status !== "running") throw new Error("job did not start")
+      if (job?.status !== "in_progress") throw new Error("job did not start")
       await app.dispatch(app.commands.job.transition, {
         type: "lose",
         id: job.id,
@@ -883,10 +941,139 @@ describe("Jobs", () => {
       })
       await vi.advanceTimersByTimeAsync(5)
       await aborted.promise
-      await expect(running).resolves.toMatchObject({ status: "lost", lostReason: "lease transferred" })
+      await expect(running).resolves.toMatchObject({
+        status: "completed",
+        conclusion: "timed_out",
+        lostReason: "lease transferred",
+      })
     } finally {
       vi.useRealTimers()
     }
+    await app.close()
+  })
+})
+
+describe("localRunner", () => {
+  it("exposes submit/observe/cancel/maxInFlight and records acquired Context identity on the Job", async () => {
+    const releases = Array.from({ length: 3 }, () => Promise.withResolvers<void>())
+    const seenContexts: JobContext[] = []
+    let active = 0
+    let peak = 0
+    const app = await jobsApp(
+      delivery(async ({ message }, context) => {
+        const index = Number(message)
+        seenContexts.push(context)
+        active += 1
+        peak = Math.max(peak, active)
+        await releases[index]!.promise
+        active -= 1
+        return { status: "completed", conclusion: "success", output: { receipt: `ok:${message}` } }
+      }),
+    )
+    const ids: string[] = []
+    for (const message of ["0", "1", "2"]) {
+      const requested = await app.dispatch(app.commands.sender.send, { message })
+      ids.push(app.jobs.requested(requested)[0]!)
+    }
+
+    let contextSequence = 0
+    const contexts: RunnerContexts = {
+      maxInFlight: 2,
+      async withContext(_request, runInContext) {
+        contextSequence += 1
+        return runInContext({
+          id: `ctx-${contextSequence}`,
+          request: _request.context,
+          ...(_request.candidateRef === undefined ? {} : { candidateRef: _request.candidateRef }),
+          cwd: `/candidate/${contextSequence}`,
+        })
+      },
+    }
+    const runner = localRunner({ id: "local-test", jobs: app.jobs, leaseMs: 60_000, contexts })
+    const request: ContextReq = { scope: "job", candidate: "rw", capabilities: ["git"] }
+    const submitted = ids.map((job, index) =>
+      runner.submit({ job, context: request, candidateRef: `refs/yrd/candidates/C${index + 1}` }),
+    )
+
+    await vi.waitFor(() => expect(active).toBe(2))
+    expect(runner.maxInFlight).toBe(2)
+    expect(peak).toBe(2)
+    expect(runner.observe(ids[0]!)).toMatchObject({
+      status: "in_progress",
+      runner: "local-test",
+      context: "ctx-1",
+    })
+    expect(seenContexts[0]?.context).toMatchObject({
+      id: "ctx-1",
+      cwd: "/candidate/1",
+      candidateRef: "refs/yrd/candidates/C1",
+    })
+
+    releases[0]!.resolve()
+    releases[1]!.resolve()
+    await vi.waitFor(() => expect(active).toBe(1))
+    releases[2]!.resolve()
+    await expect(Promise.all(submitted)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "completed", conclusion: "success" })]),
+    )
+    expect(peak).toBe(2)
+    await app.close()
+  })
+
+  it("cancels owned execution through the Runner seam and settles the submit observation", async () => {
+    const entered = Promise.withResolvers<void>()
+    const app = await jobsApp(
+      delivery(async (_input, context) => {
+        entered.resolve()
+        await new Promise<void>((resolve) => {
+          if (context.signal.aborted) resolve()
+          else context.signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        return { status: "completed", conclusion: "failure", error: { code: "aborted", message: "aborted" } }
+      }),
+    )
+    const requested = await app.dispatch(app.commands.sender.send, { message: "cancel" })
+    const job = app.jobs.requested(requested)[0]!
+    const runner = localRunner({ id: "local-test", jobs: app.jobs, leaseMs: 60_000, maxInFlight: 1 })
+    const submitted = runner.submit({ job })
+    await entered.promise
+
+    await expect(runner.cancel(job, { by: "operator", reason: "superseded" })).resolves.toMatchObject({
+      status: "completed",
+      conclusion: "cancelled",
+    })
+    await expect(submitted).resolves.toMatchObject({ status: "completed", conclusion: "cancelled" })
+    await app.close()
+  })
+
+  it("recovers a departed Runner's exact durable lease before replacement admission", async () => {
+    const app = await jobsApp(delivery())
+    const requested = await app.dispatch(app.commands.sender.send, { message: "recover" })
+    const job = app.jobs.requested(requested)[0]!
+    await app.dispatch(app.commands.job.transition, {
+      type: "start",
+      id: job,
+      attempt: 1,
+      runner: "departed",
+      context: "worktree-context:9",
+      leaseExpiresAt: "2026-01-01T00:00:01.000Z",
+    })
+    const replacement = localRunner({ id: "replacement", jobs: app.jobs, leaseMs: 60_000 })
+
+    await expect(
+      replacement.recover({
+        now: "2026-01-01T00:00:02.000Z",
+        runner: "departed",
+        reason: "runner process disappeared",
+      }),
+    ).resolves.toEqual([job])
+    expect(replacement.observe(job)).toMatchObject({
+      status: "completed",
+      conclusion: "timed_out",
+      runner: "departed",
+      context: "worktree-context:9",
+      lostReason: "runner process disappeared",
+    })
     await app.close()
   })
 })
@@ -903,7 +1090,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     id: JOB_ID,
     attempt: 1,
     runner: "w",
-    result: { status: "passed", output: { receipt: "ok" } },
+    result: { status: "completed", conclusion: "success", output: { receipt: "ok" } },
   }
 
   it("throws a typed JobStateConflict — same message — when a finish meets an already-canceled Job", () => {
@@ -914,10 +1101,9 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
       thrown = error
     }
     expect(thrown).toBeInstanceOf(JobStateConflict)
-    expect(thrown).toMatchObject({ jobId: JOB_ID, actual: "canceled", expected: "running or waiting" })
-    // Message byte-identical to the pre-typed Error so existing catchers/logs are unaffected.
-    expect((thrown as Error).message).toBe(`yrd: job '${JOB_ID}' is canceled, not running or waiting`)
-    // The canceled Job is terminal → a peer settled it under us → losable race.
+    expect(thrown).toMatchObject({ jobId: JOB_ID, actual: "completed", expected: "in_progress or waiting" })
+    expect((thrown as Error).message).toBe(`yrd: job '${JOB_ID}' is completed, not in_progress or waiting`)
+    // The cancelled Job is completed → a peer settled it under us → losable race.
     expect(isConcurrentSettlementConflict(thrown)).toBe(true)
   })
 
@@ -930,20 +1116,18 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
       thrown = error
     }
     expect(thrown).toBeInstanceOf(JobStateConflict)
-    expect((thrown as JobStateConflict).actual).toBe("running")
+    expect((thrown as JobStateConflict).actual).toBe("in_progress")
     // running is NOT terminal → must keep propagating (fail-loud).
     expect(isConcurrentSettlementConflict(thrown)).toBe(false)
   })
 
   it("only treats JobStateConflict against a terminal status as a losable race", () => {
     expect(isConcurrentSettlementConflict(new Error("unrelated"))).toBe(false)
-    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "requested", "running"))).toBe(false)
-    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "waiting", "requested"))).toBe(false)
-    for (const status of ["passed", "failed", "lost", "canceled"] as const) {
-      expect(isTerminalJobStatus(status)).toBe(true)
-      expect(isConcurrentSettlementConflict(new JobStateConflict("J", status, "running"))).toBe(true)
-    }
-    for (const status of ["requested", "running", "waiting"] as const) {
+    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "queued", "in_progress"))).toBe(false)
+    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "waiting", "queued"))).toBe(false)
+    expect(isTerminalJobStatus("completed")).toBe(true)
+    expect(isConcurrentSettlementConflict(new JobStateConflict("J", "completed", "in_progress"))).toBe(true)
+    for (const status of ["queued", "in_progress", "waiting"] as const) {
       expect(isTerminalJobStatus(status)).toBe(false)
     }
   })
@@ -956,7 +1140,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     // that killed the resident runner on 2026-07-15.
     const journal = createMemoryJournal()
     const executing = Promise.withResolvers<void>()
-    const release = Promise.withResolvers<{ status: "passed"; output: Receipt }>()
+    const release = Promise.withResolvers<{ status: "completed"; conclusion: "success"; output: Receipt }>()
     const job = delivery(() => {
       executing.resolve()
       return release.promise
@@ -970,7 +1154,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     await executing.promise
 
     await peerApp.jobs.cancel({ id: id!, attempt: 1, by: "@peer", reason: "superseded" })
-    release.resolve({ status: "passed", output: { receipt: "ok:hello" } })
+    release.resolve({ status: "completed", conclusion: "success", output: { receipt: "ok:hello" } })
 
     const outcome = await running.then(
       () => ({ ok: true as const }),
@@ -979,7 +1163,7 @@ describe("JobStateConflict — transition guards stay loud but carry a losable-r
     expect(outcome.ok).toBe(false)
     if (outcome.ok) throw new Error("unreachable")
     expect(outcome.error).toBeInstanceOf(JobStateConflict)
-    expect((outcome.error as JobStateConflict).actual).toBe("canceled")
+    expect((outcome.error as JobStateConflict).actual).toBe("completed")
     expect(isConcurrentSettlementConflict(outcome.error)).toBe(true)
 
     await runnerApp.close()

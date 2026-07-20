@@ -16,15 +16,16 @@ import { computed, type ReadSignal } from "@silvery/signals"
 import type { ConditionalLogger } from "loggily"
 import * as z from "zod"
 import {
-  JobErrorSchema,
   JobRequestSchema,
   JobWaitingSchema,
   jobTerminalResultSchema,
   type JobDef,
+  type JobConclusion,
   type JobError,
   type JobRequest,
   type JobResult,
   type JobWaiting,
+  type RuntimeContext,
 } from "./job.ts"
 
 type JobBase = Readonly<{
@@ -41,6 +42,7 @@ type JobBase = Readonly<{
 type JobExecution = Readonly<{
   startedAt: string
   runner: string
+  context?: string
 }>
 
 type JobEvidence = Readonly<{
@@ -52,21 +54,31 @@ type JobEvidence = Readonly<{
 }>
 
 type JobCancellation = Readonly<{
-  status: "canceled"
+  status: "completed"
+  conclusion: "cancelled"
   finishedAt: string
   canceledBy: string
   cancelReason: string
 }>
 
 export type Job =
-  | (JobBase & { status: "requested" })
-  | (JobBase & JobExecution & { status: "running"; leaseExpiresAt: string })
+  | (JobBase & { status: "queued" })
+  | (JobBase & JobExecution & { status: "in_progress"; leaseExpiresAt: string })
   | (JobBase & JobExecution & JobEvidence & { status: "waiting"; token: string })
-  | (JobBase & JobExecution & JobEvidence & { status: "passed"; finishedAt: string; output: JsonValue })
   | (JobBase &
       JobExecution &
-      JobEvidence & { status: "failed"; finishedAt: string; error: JobError; output?: JsonValue })
-  | (JobBase & JobExecution & { status: "lost"; finishedAt: string; lostReason: string })
+      JobEvidence & { status: "completed"; conclusion: "success"; finishedAt: string; output: JsonValue })
+  | (JobBase &
+      JobExecution &
+      JobEvidence & {
+        status: "completed"
+        conclusion: "failure"
+        finishedAt: string
+        error: JobError
+        output?: JsonValue
+      })
+  | (JobBase & JobExecution & { status: "completed"; conclusion: "timed_out"; finishedAt: string; lostReason: string })
+  | (JobBase & { status: "completed"; conclusion: "skipped"; finishedAt: string })
   | (JobBase & JobCancellation)
   | (JobBase & JobExecution & JobEvidence & JobCancellation)
 
@@ -79,10 +91,7 @@ const IdSchema = z.string().trim().min(1)
 const AttemptSchema = z.number().int().positive()
 const TimestampSchema = z.iso.datetime({ precision: 3 })
 
-const TerminalResultSchema = z.discriminatedUnion("status", [
-  z.object({ status: z.literal("passed"), output: JsonSchema }).strict(),
-  z.object({ status: z.literal("failed"), error: JobErrorSchema, output: JsonSchema.optional() }).strict(),
-])
+const TerminalResultSchema = jobTerminalResultSchema(JsonSchema)
 
 const CancelJobInputSchema = z
   .object({
@@ -101,6 +110,7 @@ export const JobTransitionSchema = z.discriminatedUnion("type", [
       id: IdSchema,
       attempt: AttemptSchema,
       runner: IdSchema,
+      context: IdSchema.optional(),
       leaseExpiresAt: TimestampSchema,
     })
     .strict(),
@@ -154,7 +164,7 @@ export const Job = Object.freeze({
       revision: request.revision,
       input: request.input,
       ...(request.key === undefined ? {} : { key: request.key }),
-      status: "requested",
+      status: "queued",
       attempt: 0,
       requestedAt: at,
       changedAt: at,
@@ -166,28 +176,29 @@ export const Job = Object.freeze({
 
     switch (change.type) {
       case "start":
-        requireStatus(current, "requested", "requested")
+        requireStatus(current, "queued", "queued")
         if (change.attempt !== current.attempt + 1) {
           throw new Error(`yrd: job '${current.id}' started attempt ${change.attempt} after attempt ${current.attempt}`)
         }
         return {
           ...jobBase(current),
-          status: "running",
+          status: "in_progress",
           attempt: change.attempt,
           changedAt: at,
           startedAt: at,
           runner: change.runner,
+          ...(change.context === undefined ? {} : { context: change.context }),
           leaseExpiresAt: change.leaseExpiresAt,
         }
 
       case "heartbeat":
         requireOwner(current, change)
-        requireStatus(current, "running", "running")
+        requireStatus(current, "in_progress", "in_progress")
         return { ...current, changedAt: at, leaseExpiresAt: change.leaseExpiresAt }
 
       case "wait":
         requireOwner(current, change)
-        requireStatus(current, "running", "running")
+        requireStatus(current, "in_progress", "in_progress")
         return {
           ...execution(current),
           ...evidence(change),
@@ -198,7 +209,7 @@ export const Job = Object.freeze({
 
       case "finish": {
         requireOwner(current, change)
-        requireStatus(current, "running or waiting", "running", "waiting")
+        requireStatus(current, "in_progress or waiting", "in_progress", "waiting")
         if (current.status === "waiting" && change.token !== current.token) {
           throw new Error(`yrd: job '${current.id}' token mismatch`)
         }
@@ -208,11 +219,12 @@ export const Job = Object.freeze({
           changedAt: at,
           finishedAt: at,
         }
-        return change.result.status === "passed"
-          ? { ...finished, status: "passed", output: change.result.output }
+        return change.result.conclusion === "success"
+          ? { ...finished, status: "completed", conclusion: "success", output: change.result.output }
           : {
               ...finished,
-              status: "failed",
+              status: "completed",
+              conclusion: "failure",
               error: change.result.error,
               ...(change.result.output === undefined ? {} : { output: change.result.output }),
             }
@@ -220,13 +232,14 @@ export const Job = Object.freeze({
 
       case "lose":
         requireOwner(current, change)
-        requireStatus(current, "running", "running")
+        requireStatus(current, "in_progress", "in_progress")
         if (current.leaseExpiresAt !== change.leaseExpiresAt) {
           throw new Error(`yrd: job '${current.id}' lease changed before recovery`)
         }
         return {
           ...execution(current),
-          status: "lost",
+          status: "completed",
+          conclusion: "timed_out",
           changedAt: at,
           finishedAt: at,
           lostReason: change.reason,
@@ -234,11 +247,12 @@ export const Job = Object.freeze({
 
       case "cancel":
         requireAttempt(current, change)
-        requireStatus(current, "requested, running or waiting", "requested", "running", "waiting")
+        requireStatus(current, "queued, in_progress or waiting", "queued", "in_progress", "waiting")
         return {
-          ...(current.status === "requested" ? jobBase(current) : execution(current)),
+          ...(current.status === "queued" ? jobBase(current) : execution(current)),
           ...(current.status === "waiting" ? evidence(current) : {}),
-          status: "canceled",
+          status: "completed",
+          conclusion: "cancelled",
           changedAt: at,
           finishedAt: at,
           canceledBy: change.by,
@@ -246,8 +260,8 @@ export const Job = Object.freeze({
         }
 
       case "retry":
-        requireStatus(current, "lost or failed", "lost", "failed")
-        return { ...jobBase(current), status: "requested", changedAt: at }
+        requireConclusion(current, "timed_out or failure", "timed_out", "failure")
+        return { ...jobBase(current), status: "queued", changedAt: at }
     }
   },
 
@@ -260,14 +274,9 @@ export const Job = Object.freeze({
   },
 })
 
-const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set<Job["status"]>([
-  "passed",
-  "failed",
-  "lost",
-  "canceled",
-])
+const TERMINAL_JOB_STATUSES: ReadonlySet<Job["status"]> = new Set<Job["status"]>(["completed"])
 
-/** A Job status is terminal once no further transition can run: passed/failed/lost/canceled. */
+/** A Job status is terminal once it is completed; conclusion records how it ended. */
 export function isTerminalJobStatus(status: Job["status"]): boolean {
   return TERMINAL_JOB_STATUSES.has(status)
 }
@@ -296,10 +305,10 @@ export class JobStateConflict extends Error {
 
 /**
  * True when an error is a JobStateConflict whose Job had already reached a
- * terminal status — i.e. a concurrent writer settled (canceled/passed/failed/
- * lost) the Job between a runtime's snapshot and its action. This is a normal,
+ * terminal status — i.e. a concurrent writer completed the Job between a
+ * runtime's snapshot and its action. This is a normal,
  * losable race for a long-lived resident runner: skip and continue. A conflict
- * against a still-live status (requested/running/waiting) is NOT losable — it
+ * against a still-live status (queued/in_progress/waiting) is NOT losable — it
  * signals a real invalid transition and must keep propagating (fail-loud).
  */
 export function isConcurrentSettlementConflict(error: unknown): error is JobStateConflict {
@@ -311,6 +320,7 @@ export type RunJobOptions = Readonly<{
   leaseMs: number
   heartbeatMs?: number
   now?: () => number
+  context?: RuntimeContext
 }>
 
 export type RunManyJobOptions = RunJobOptions & Readonly<{ concurrency?: number }>
@@ -410,9 +420,11 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       leaseMs: runOptions.leaseMs,
       heartbeatMs: runOptions.heartbeatMs,
     })
+    const executionContext = runOptions.context
+    const contextId = executionContext === undefined ? undefined : IdSchema.parse(executionContext.id)
     const heartbeatMs = parsed.heartbeatMs ?? Math.max(1, Math.floor(parsed.leaseMs / 3))
     const requested = current(id)
-    requireStatus(requested, "requested", "requested")
+    requireStatus(requested, "queued", "queued")
     const installed = definitionFor(requested)
     const attempt = requested.attempt + 1
     const now = runOptions.now ?? Date.now
@@ -429,16 +441,17 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           leaseMs: parsed.leaseMs,
         },
         outcome: (result) =>
-          result.status === "passed"
+          result.status === "completed" && result.conclusion === "success"
             ? "succeeded"
-            : result.status === "running" || result.status === "waiting"
+            : result.status === "in_progress" || result.status === "waiting" || result.status === "queued"
               ? "progress"
               : "failed",
         resultAttributes: (result) => ({
           status: result.status,
+          ...(result.status === "completed" ? { conclusion: result.conclusion } : {}),
           // Surface the failed Job's canonical error code so a human row can
           // render `err=<slug>` — the failing step OWNS the single ERROR line.
-          ...(result.status === "failed" ? { error: result.error } : {}),
+          ...(result.status === "completed" && result.conclusion === "failure" ? { error: result.error } : {}),
         }),
       },
       async () => {
@@ -447,10 +460,11 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           id,
           attempt,
           runner: parsed.runner,
+          ...(contextId === undefined ? {} : { context: contextId }),
           leaseExpiresAt: lease(now, parsed.leaseMs),
         })
         const started = current(id)
-        if (!Job.owns(started, attempt, parsed.runner, "running")) return started
+        if (!Job.owns(started, attempt, parsed.runner, "in_progress")) return started
 
         const scope = options.scope.child(`job:${id}:${attempt}`)
         activeScopes.set(id, { attempt, scope })
@@ -464,13 +478,14 @@ export function createJobs(options: CreateJobsOptions): Jobs {
                 attempt,
                 runner: parsed.runner,
                 signal: progress.signal,
+                ...(executionContext === undefined ? {} : { context: executionContext }),
                 observeProgress: progress.observe,
                 reportProgress: progress.report,
               }),
             heartbeatMs,
             async (renew) => {
               const active = current(id)
-              if (active.status !== "running" || !Job.owns(active, attempt, parsed.runner, "running")) {
+              if (active.status !== "in_progress" || !Job.owns(active, attempt, parsed.runner, "in_progress")) {
                 throw new Error(`yrd: job '${id}' lost execution ownership`)
               }
               if (!renew) {
@@ -494,7 +509,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         }
 
         const active = current(id)
-        if (!Job.owns(active, attempt, parsed.runner, "running")) return active
+        if (!Job.owns(active, attempt, parsed.runner, "in_progress")) return active
         const result =
           outcome.heartbeatError === undefined
             ? outcome.result
@@ -541,6 +556,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
         leaseMs: runManyOptions.leaseMs,
         ...(runManyOptions.heartbeatMs === undefined ? {} : { heartbeatMs: runManyOptions.heartbeatMs }),
         ...(runManyOptions.now === undefined ? {} : { now: runManyOptions.now }),
+        ...(runManyOptions.context === undefined ? {} : { context: runManyOptions.context }),
       }
       const results: Job[] = []
       let next = 0
@@ -550,7 +566,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
           const id = ids[index]
           if (id === undefined) break
           const job = current(id)
-          results[index] = job.status === "requested" ? await run(id, runOptions) : job
+          results[index] = job.status === "queued" ? await run(id, runOptions) : job
         }
       }
       await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker))
@@ -598,7 +614,7 @@ export function createJobs(options: CreateJobsOptions): Jobs {
       const deadRunner = parsed.runner
       const recovered: string[] = []
       for (const job of Object.values(state().byId)) {
-        if (job.status !== "running") continue
+        if (job.status !== "in_progress") continue
         const named = deadRunner !== undefined && job.runner === deadRunner
         const expired = Date.parse(job.leaseExpiresAt) <= cutoff
         if (!named && !expired) continue
@@ -826,7 +842,8 @@ function settlement(id: string, attempt: number, runner: string, result: JobResu
 
 function failed(code: string, error: unknown): JobResult<never> {
   return {
-    status: "failed",
+    status: "completed",
+    conclusion: "failure",
     error: { code, message: error instanceof Error ? error.message : String(error) },
   }
 }
@@ -841,7 +858,12 @@ function jobBase(job: Job): JobBase {
 }
 
 function execution(job: Job & JobExecution): JobBase & JobExecution {
-  return { ...jobBase(job), startedAt: job.startedAt, runner: job.runner }
+  return {
+    ...jobBase(job),
+    startedAt: job.startedAt,
+    runner: job.runner,
+    ...(job.context === undefined ? {} : { context: job.context }),
+  }
 }
 
 function evidence(source: JobEvidence): JobEvidence {
@@ -877,9 +899,20 @@ function requireStatus<Status extends Job["status"]>(
   }
 }
 
-function sameLease(left: Job, right: Extract<Job, { status: "running" }>): boolean {
+function requireConclusion<Conclusion extends JobConclusion>(
+  job: Job,
+  expected: string,
+  ...allowed: readonly Conclusion[]
+): asserts job is Extract<Job, { status: "completed"; conclusion: Conclusion }> {
+  if (job.status !== "completed" || !(allowed as readonly JobConclusion[]).includes(job.conclusion)) {
+    const actual = job.status === "completed" ? `${job.status}+${job.conclusion}` : job.status
+    throw new JobStateConflict(job.id, job.status, `${expected}; actual ${actual}`)
+  }
+}
+
+function sameLease(left: Job, right: Extract<Job, { status: "in_progress" }>): boolean {
   return (
-    left.status === "running" &&
+    left.status === "in_progress" &&
     left.attempt === right.attempt &&
     left.runner === right.runner &&
     left.leaseExpiresAt === right.leaseExpiresAt

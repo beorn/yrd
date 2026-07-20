@@ -268,10 +268,10 @@ describe("queue timeline storybook", () => {
     const batch = overviewResult.running.find((run) => run.id === "R42")
     if (batch === undefined) throw new Error("production-overview is missing batch run R42")
     expect(batch.prs.map((pr) => pr.id)).toEqual(["PR42", "PR43"])
-    expect(batch.steps.map((step) => step.job?.status)).toEqual(["passed", "running", "requested"])
+    expect(batch.steps.map((step) => step.job?.status)).toEqual(["completed", "in_progress", "queued"])
     expect(batch.steps[1]?.job).toMatchObject({
       id: "J42-check",
-      status: "running",
+      status: "in_progress",
       attempt: 2,
       runner: "runner-herdr-07",
       changedAt: "2026-07-13T11:58:30.000Z",
@@ -285,7 +285,8 @@ describe("queue timeline storybook", () => {
     const integrated = overviewResult.finished.find((run) => run.id === "R4")
     expect(integrated?.integration).toEqual({ commit: "b".repeat(40), baseSha: "a".repeat(40) })
     expect(integrated?.steps[0]?.job).toMatchObject({
-      status: "passed",
+      status: "completed",
+      conclusion: "success",
       checkpoint: { tests: 125, failures: 0 },
       artifacts: [
         {
@@ -297,7 +298,8 @@ describe("queue timeline storybook", () => {
     expect(overviewResult.finished.find((run) => run.id === "R5")?.error?.code).toBe("typecheck-failed")
     expect(overviewResult.finished.find((run) => run.id === "R6")?.error?.code).toBe("queue-environment-refused")
     expect(overviewResult.finished.find((run) => run.id === "R7")?.steps[0]?.job).toMatchObject({
-      status: "canceled",
+      status: "completed",
+      conclusion: "cancelled",
       canceledBy: "operator@example.test",
     })
 
@@ -311,7 +313,7 @@ describe("queue timeline storybook", () => {
     })
 
     const lineage = queueTimelineStories["latest-vs-all-lineage"]
-    expect(lineage.snapshot.results[0]?.prs[0]?.revisions.map((revision) => revision.revision)).toEqual([1, 2])
+    expect(lineage.snapshot.results[0]?.prs[0]?.revs.map((revision) => revision.n)).toEqual([1, 2])
     expect(
       lineage.snapshot.results[0]?.finished.map((run) => ({
         run: run.id,
@@ -319,8 +321,8 @@ describe("queue timeline storybook", () => {
         status: run.status,
       })),
     ).toEqual([
-      { run: "R8", revision: 1, status: "failed" },
-      { run: "R9", revision: 2, status: "passed" },
+      { run: "R8", revision: 1, status: "completed" },
+      { run: "R9", revision: 2, status: "completed" },
     ])
 
     const rejected = queueTimelineStories["selected-rejected"].snapshot.projection.details[0]
@@ -459,7 +461,7 @@ describe("queue timeline storybook", () => {
           })
           // Run identity + STATUS/OUTCOME live in the title row now (item a).
           expect(term.screen.getText(), name).toContain("RUN main#4")
-          expect(term.screen.getText(), name).toContain("passed, integrated")
+          expect(term.screen.getText(), name).toContain("completed, integrated")
           expect(term.screen.getText(), name).toContain(`COMMIT ${"b".repeat(40)}`)
           expect(term.screen.getText(), name).not.toContain("QUEUE main")
         }

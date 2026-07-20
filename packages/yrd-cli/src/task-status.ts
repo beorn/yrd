@@ -1,7 +1,7 @@
-import type { PR } from "@yrd/bay"
+import { prDeliveryState, type PR, type PRDeliveryState } from "@yrd/bay"
 import type { Contest } from "@yrd/contest"
 import type { Job } from "@yrd/job"
-import type { PRCheckRecord, QueueRun, QueueStep } from "@yrd/queue"
+import type { PRCheckRecord, Run, QueueStep } from "@yrd/queue"
 
 export type TaskStatus = "todo" | "wip" | "blocked" | "done" | "dropped"
 
@@ -41,8 +41,12 @@ export function taskStatusFields(taskStatus: TaskStatus): TaskStatusFields {
   return { taskStatus, glyph: taskStatusGlyph(taskStatus) }
 }
 
-export function prTaskStatusOf(pr: Pick<PR, "status">): TaskStatus {
-  switch (pr.status) {
+export function prTaskStatusOf(pr: PR): TaskStatus {
+  return prDeliveryTaskStatusOf(prDeliveryState(pr))
+}
+
+export function prDeliveryTaskStatusOf(delivery: PRDeliveryState): TaskStatus {
+  switch (delivery) {
     case "pushed":
       return "todo"
     case "submitted":
@@ -58,7 +62,7 @@ export function prTaskStatusOf(pr: Pick<PR, "status">): TaskStatus {
 }
 
 type RunLifecycleStatus =
-  | QueueRun["status"]
+  | Run["status"]
   | "pending"
   | "queued"
   | "integrated"
@@ -67,19 +71,23 @@ type RunLifecycleStatus =
   | "retired"
   | "canceled"
 
-export function runTaskStatusOf(run: Readonly<{ status: RunLifecycleStatus }>): TaskStatus {
+export function runTaskStatusOf(
+  run: Readonly<{ status: RunLifecycleStatus; conclusion?: Run["conclusion"] }>,
+): TaskStatus {
   switch (run.status) {
     case "pending":
     case "queued":
       return "todo"
-    case "running":
+    case "in_progress":
     case "waiting":
       return "wip"
-    case "failed":
     case "rejected":
     case "environment-refused":
       return "blocked"
-    case "passed":
+    case "completed":
+      if (run.conclusion === "success") return "done"
+      if (run.conclusion === "cancelled" || run.conclusion === "skipped") return "dropped"
+      return "blocked"
     case "integrated":
       return "done"
     case "retired":
@@ -89,27 +97,26 @@ export function runTaskStatusOf(run: Readonly<{ status: RunLifecycleStatus }>): 
 }
 
 type AttemptOutcome = "passed" | "failed" | "lost" | "superseded"
-type JobAttempt =
-  | Pick<Job, "status">
-  | Readonly<{ status: "started" | "superseded" }>
-  | Readonly<{ outcome: AttemptOutcome }>
+type JobAttempt = Job | Readonly<{ status: "started" | "superseded" }> | Readonly<{ outcome: AttemptOutcome }>
 
 export function jobAttemptTaskStatusOf(attempt: JobAttempt): TaskStatus {
-  const status = "outcome" in attempt ? attempt.outcome : attempt.status
-  switch (status) {
-    case "requested":
+  if ("outcome" in attempt) {
+    if (attempt.outcome === "passed") return "done"
+    if (attempt.outcome === "superseded") return "dropped"
+    return "blocked"
+  }
+  switch (attempt.status) {
+    case "queued":
       return "todo"
-    case "running":
+    case "in_progress":
     case "waiting":
     case "started":
       return "wip"
-    case "failed":
-    case "lost":
+    case "completed":
+      if (attempt.conclusion === "success") return "done"
+      if (attempt.conclusion === "cancelled" || attempt.conclusion === "skipped") return "dropped"
       return "blocked"
-    case "passed":
-      return "done"
     case "superseded":
-    case "canceled":
       return "dropped"
   }
 }
@@ -164,7 +171,7 @@ export function contestTaskStatusOf(contest: Pick<Contest, "status">): TaskStatu
 
 export function issueTaskStatusOf(
   issue: Readonly<{
-    prs: readonly Pick<PR, "status">[]
+    prs: readonly PR[]
     contests: readonly Pick<Contest, "status">[]
   }>,
 ): TaskStatus {
@@ -188,11 +195,11 @@ export function projectPRTaskStatus(pr: PR): ProjectedPR {
 
 export type ProjectedJob = Job & TaskStatusFields
 export type ProjectedQueueStep = Omit<QueueStep, "job"> & TaskStatusFields & Readonly<{ job?: ProjectedJob }>
-export type ProjectedQueueRun = Omit<QueueRun, "steps"> &
+export type ProjectedQueueRun = Omit<Run, "steps"> &
   TaskStatusFields &
   Readonly<{ steps: readonly ProjectedQueueStep[] }>
 
-export function projectQueueRunTaskStatus(run: QueueRun): ProjectedQueueRun {
+export function projectQueueRunTaskStatus(run: Run): ProjectedQueueRun {
   return {
     ...run,
     ...taskStatusFields(runTaskStatusOf(run)),

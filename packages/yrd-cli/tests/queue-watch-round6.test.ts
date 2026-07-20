@@ -115,6 +115,7 @@ describe("queue watch user round 6", () => {
             pushedAt: "2026-07-13T10:30:00.000Z",
             submittedAt: "2026-07-13T10:30:00.000Z",
             actor: "@ci",
+            correlation: { namespace: "tribe", id: "21514-round6-agent1" },
             terminal: { status: "integrated" as const, at: "2026-07-13T10:41:00.000Z", run: "R60" },
           },
         ],
@@ -124,7 +125,6 @@ describe("queue watch user round 6", () => {
       }),
       title: "Lead title may wrap across the detail pane",
       description: "First description line\nSecond description line may wrap",
-      correlation: { namespace: "tribe", id: "21514-round6-agent1" },
       requestedReviewers: ["@chief"],
       checkRequests: [
         {
@@ -573,8 +573,9 @@ describe("queue watch user round 6", () => {
   it("keeps the tail of a long expanded diff reachable inside the shared submit tab scroll", async () => {
     const story = queueTimelineStories["production-overview"]
     const firstDiff = story.snapshot.diffs?.[0]
-    if (firstDiff === undefined || "unavailable" in firstDiff)
+    if (firstDiff === undefined || "unavailable" in firstDiff) {
       throw new Error("production fixture has no available diff")
+    }
     const tail = "round-8-long-diff-tail"
     const snapshot = {
       ...story.snapshot,

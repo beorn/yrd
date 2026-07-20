@@ -281,6 +281,8 @@ describe("host installed baseline", () => {
     }
 
     await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "change queue config")
     const drifted = await createYrdHost({ cwd: repo })
     try {
       const result = await drifted.services.queue?.auditEnvironment?.()
@@ -315,6 +317,8 @@ describe("host installed baseline", () => {
         join(repo, ".yrd.yml"),
         'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n',
       )
+      await git(repo, "add", ".yrd.yml")
+      await git(repo, "commit", "-qm", "change queue config")
       const diskLeg = await resident.services.queue?.auditEnvironment?.()
       expect(diskLeg?.findings).toMatchObject([{ code: "config-drift" }])
       expect(diskLeg?.findings[0]?.message).toContain(installedBaselineRemedy("main"))
@@ -361,6 +365,8 @@ describe("host installed baseline", () => {
     // to block `queue deinit` (its own prescribed remedy) via a throwing inspect.
     await git(repo, "branch", "-D", "stale/base")
     await writeFile(join(repo, ".yrd.yml"), 'base: main\nbatch: 1\nsteps: [check, merge]\ncheck: "false"\nmerge: {}\n')
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "change queue config")
 
     const after = await createYrdHost({ cwd: repo })
     try {

@@ -76,11 +76,20 @@ async function defaultBranch(
     await git(process, repo, env, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], true),
   )
   if (remote !== undefined) return remote.startsWith("origin/") ? remote.slice("origin/".length) : remote
-  if (primaryBranch?.startsWith("refs/heads/") === true) return primaryBranch.slice("refs/heads/".length)
   const configured = value(await git(process, repo, env, ["config", "--get", "init.defaultBranch"], true))
-  if (configured !== undefined) return configured
+  if (configured !== undefined) {
+    const configuredRef = await git(
+      process,
+      repo,
+      env,
+      ["show-ref", "--verify", "--quiet", `refs/heads/${configured}`],
+      true,
+    )
+    if (configuredRef.exitCode === 0) return configured
+  }
   const main = await git(process, repo, env, ["show-ref", "--verify", "--quiet", "refs/heads/main"], true)
   if (main.exitCode === 0) return "main"
+  if (primaryBranch?.startsWith("refs/heads/") === true) return primaryBranch.slice("refs/heads/".length)
   const current = value(await git(process, repo, env, ["branch", "--show-current"], true))
   return current ?? "main"
 }
