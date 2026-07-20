@@ -6047,6 +6047,7 @@ describe("runYrd", () => {
 
     const human = outputIO({ color: true, columns: 200 })
     expect(await runYrd(app, yrd("pr", "runs", "PR1"), human.io)).toBe(0)
+    expect(stripAnsi(human.stdout())).toContain("CHAIN pr#1.1 → C1 → main#1")
     expect(human.stdout()).toContain("RUN")
     expect(human.stdout()).toContain("STEP")
     expect(human.stdout()).toContain("REV")
@@ -6069,7 +6070,7 @@ describe("runYrd", () => {
       taskStatus: "done",
       glyph: "✓",
     })
-    expect(parsed.runs[0]).toMatchObject({ taskStatus: "done", glyph: "✓" })
+    expect(parsed.runs[0]).toMatchObject({ candidateId: "C1", taskStatus: "done", glyph: "✓" })
     expect(parsed.runs[0]?.steps).toHaveLength(2)
     expect(parsed.runs[0]?.steps[0]).toMatchObject({
       step: "check",
