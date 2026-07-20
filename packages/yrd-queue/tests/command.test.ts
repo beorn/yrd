@@ -2517,6 +2517,36 @@ describe("Queue command adapters", () => {
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
   })
 
+  it("keeps an opaque candidate failure terminal when diagnostics comparison is declared", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand("printf ' FAIL  tests/guard.test.ts > opaque candidate\\n' >&2; exit 1"),
+      { comparison: "diagnostics" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("opaque Candidate did not fail")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({ exitCode: 1, detail: expect.stringContaining("opaque candidate") })
+    expect(evidence.diagnostics).toBeUndefined()
+    expect(evidence.comparison).toBeUndefined()
+    expect(configuredRuns).toBe(1)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+  })
+
   it("keeps a thrown candidate command distinct as a retryable environment refusal", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
