@@ -1476,7 +1476,8 @@ async function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io
   if (bay.path === undefined || !isAbsolute(bay.path)) {
     refusal(`bay '${bay.id}' has no absolute workspace path; run 'yrd bay --json' to inspect it before recreating it`)
   }
-  await printResult(io, jsonEnabled(options), { command: "bay.path", bay: bay.id, path: bay.path }, bay.path)
+  const projection = { command: "bay.path", bay: bay.id, path: bay.path }
+  io.stdout(jsonEnabled(options) ? stableJson(projection) : `${bay.path}\n`)
 }
 
 const PR_LIST_DEFAULT_WINDOW_SIZE = 20

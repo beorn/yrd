@@ -2443,6 +2443,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, command("open", "fix-readme", "--from", "topic/readme"), opened.io), opened.stderr()).toBe(
       0,
     )
+    const beforePathEvents = await Array.fromAsync(app.events()).then((events) => events.length)
 
     for (const selector of ["B1", "fix-readme", "topic/readme"]) {
       const output = outputIO()
@@ -2457,6 +2458,15 @@ describe("runYrd", () => {
       command: "bay.path",
       path: "/repo/.bays/B1",
     })
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(beforePathEvents)
+
+    const longPath = `/repo/${"nested-segment/".repeat(12)}bay path with spaces/B1`
+    const longApp = await createApp({ bayPath: longPath })
+    const longOpened = outputIO()
+    expect(await runYrd(longApp, command("open", "long-path"), longOpened.io), longOpened.stderr()).toBe(0)
+    const narrow = outputIO({ columns: 12 })
+    expect(await runYrd(longApp, command("path", "long-path"), narrow.io), narrow.stderr()).toBe(0)
+    expect(narrow.stdout()).toBe(`${longPath}\n`)
   })
 
   it("refuses missing, ambiguous, inactive, and non-absolute Bay paths without mutating state", async () => {
