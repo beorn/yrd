@@ -228,7 +228,7 @@ describe("queue timeline 21106 contract", () => {
     expect(lead?.trim()).toMatch(
       /^17:10:00 ● run\s+main#42 pr#42\.1 for @hab\/super\/21135-herdr-keybindings\s+@agent\/3 36:00 20:00$/u,
     )
-    expect(partner?.trim()).toMatch(/^-\s+-\s+-\s+pr#43\.1 for @si\/ui\/21119-split-pane\s+@agent\/5 34:00\s+-$/u)
+    expect(partner?.trim()).toMatch(/^pr#43\.1 for @si\/ui\/21119-split-pane\s+@agent\/5 34:00$/u)
     expect(rejected?.trim()).toMatch(
       /^16:42:00 × fail\s+main#5\s+pr#5\.1\s+\S topic\/pr5 \(err=typecheck-failed\)\s+@agent\/2 27:00 12:00$/u,
     )
