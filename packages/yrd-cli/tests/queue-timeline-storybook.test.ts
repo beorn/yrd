@@ -1,5 +1,5 @@
 // @failure Queue timeline story fixtures drift from the renderer or developer viewer
-// @level l2
+// @level l4
 // @consumer @yrd/cli
 
 import { act, createElement } from "react"
@@ -7,7 +7,11 @@ import { createRenderer, createTermless, waitFor } from "silvery/test"
 import { renderString } from "silvery"
 import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"
-import { QUEUE_TIMELINE_STORY_NAMES, queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
+import {
+  QUEUE_TIMELINE_STORY_NAMES,
+  queueTimelineStories,
+  round9TerminalFailureSnapshot,
+} from "../dev/queue-timeline-fixtures.ts"
 import {
   QUEUE_TIMELINE_STORYBOOK_CONTRACT,
   QUEUE_TIMELINE_STORYBOOK_EXTERNAL_OWNERS,
@@ -103,6 +107,62 @@ describe("queue timeline storybook", () => {
       expect(lines[commandRowIndex]).not.toContain("[ $")
       expect(lines[commandRowIndex]).not.toContain("COMMAND")
       expect(frame).toContain("125 tests collected")
+
+      await act(async () => {
+        await handle.press("Escape")
+        await handle.waitForLayoutStable()
+      })
+      const continuation = term.screen
+        .getText()
+        .split("\n")
+        .find((line) => line.includes("pr#43.1"))
+      expect(continuation?.trim()).toMatch(/^pr#43\.1 for @si\/ui\/21119-split-pane\s+@agent\/5 34:00$/u)
+    } finally {
+      handle.unmount()
+    }
+  })
+
+  it("renders terminally unreached steps as skipped with one post-tab blank and error-red failure evidence", async () => {
+    using term = createTermless({ cols: 200, rows: 55 })
+    const handle = await run(createElement(QueueWatchFrame, { snapshot: round9TerminalFailureSnapshot }), term, {
+      mouse: true,
+      selection: false,
+    })
+    try {
+      await waitFor(() => term.screen.getText().includes("RUN main#1180"))
+      let lines = term.screen.getText().split("\n")
+      const detailTitleY = lines.findIndex((line) => line.includes("RUN main#1180"))
+      const detailX = lines[detailTitleY]?.indexOf("RUN main#1180") ?? -1
+      const tabsY = lines.findIndex(
+        (line) => line.slice(detailX).includes("1: merge") && line.slice(detailX).includes("2: shared-main"),
+      )
+      const statusY = tabsY + 1
+      const statusLine = lines[statusY]?.slice(detailX) ?? ""
+      const prY = lines.findIndex((line, index) => index > statusY && line.slice(detailX).includes("pr#1180.1"))
+      const errorReferenceY = lines.findIndex((line) => line.includes("NO RUNNER"))
+      const errorReferenceX = lines[errorReferenceY]?.indexOf("NO RUNNER") ?? -1
+      const failedX = lines[statusY]?.indexOf("failed", detailX) ?? -1
+      let markerX = failedX - 1
+      while (markerX >= detailX && term.cell(statusY, markerX).char === " ") markerX -= 1
+
+      expect(statusLine).toContain("− skipped")
+      expect(statusLine).not.toContain("requested")
+      expect(prY - statusY, "one blank terminal row separates the tabs and submit content").toBe(2)
+      expect(lines[statusY + 1]?.slice(detailX).trim()).toBe("")
+      expect(term.cell(statusY, markerX).fg).toEqual(term.cell(errorReferenceY, errorReferenceX).fg)
+      expect(term.cell(statusY, failedX).fg).toEqual(term.cell(errorReferenceY, errorReferenceX).fg)
+
+      await act(async () => {
+        await handle.press("l")
+        await handle.waitForLayoutStable()
+      })
+      lines = term.screen.getText().split("\n")
+      const errorY = lines.findIndex((line) => line.includes("merge conflicted with shared main"))
+      const errorX = lines[errorY]?.indexOf("merge conflicted with shared main") ?? -1
+      expect(errorX).toBeGreaterThanOrEqual(0)
+      expect(term.cell(statusY, markerX).fg).toEqual(term.cell(errorReferenceY, errorReferenceX).fg)
+      expect(term.cell(statusY, failedX).fg).toEqual(term.cell(errorReferenceY, errorReferenceX).fg)
+      expect(term.cell(errorY, errorX).fg).toEqual(term.cell(errorReferenceY, errorReferenceX).fg)
     } finally {
       handle.unmount()
     }

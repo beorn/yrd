@@ -924,6 +924,12 @@ function jobStatus(step: QueueStep): Job["status"] | "queued" {
   return step.job?.status ?? "queued"
 }
 
+function queueStepStatus(run: QueueRun, step: QueueStep): ReturnType<typeof jobStatus> | "skipped" {
+  const status = jobStatus(step)
+  const terminal = run.status === "passed" || run.status === "failed" || run.status === "canceled"
+  return terminal && (status === "queued" || status === "requested") ? "skipped" : status
+}
+
 function isObjectValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
@@ -2616,7 +2622,9 @@ function ActionableFailureView({ failure }: { failure: ActionableFailure }) {
       <Text color="$fg-error" wrap="wrap">
         ERROR {errorCodeLabel(failure.code)}
       </Text>
-      <Text wrap="wrap">CAUSE {failure.cause}</Text>
+      <Text color="$fg-error" wrap="wrap">
+        CAUSE {failure.cause}
+      </Text>
       {failure.resolution.map((step, index) => (
         <Text key={`${failure.code}:resolution:${index}`} wrap="wrap">
           RESOLVE {step}
@@ -3282,12 +3290,12 @@ function TimelineProjectedRow({
       backgroundColor={rowBackground}
       time={
         <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
-          {continuation ? "-" : timelineClockCell(row, layout)}
+          {continuation ? " " : timelineClockCell(row, layout)}
         </Text>
       }
       status={
         continuation ? (
-          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
+          <Text> </Text>
         ) : (
           <>
             <Box width={1} flexShrink={0}>
@@ -3315,7 +3323,7 @@ function TimelineProjectedRow({
         // Real run ids share TIME's muted treatment (user respec 2026-07-15);
         // run-less pending rows keep their info-colored `pending`.
         continuation ? (
-          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
+          <Text> </Text>
         ) : row.run === undefined ? (
           <Text color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate">
             {runCell.text}
@@ -3372,7 +3380,7 @@ function TimelineProjectedRow({
         // Run duration: no clock glyph, just the dimmed time (user directive
         // 2026-07-16, supersedes the 15c `◷`-carries-onto-RUN clause).
         continuation ? (
-          <Text color={forcedFg ?? "$fg-muted"}>-</Text>
+          <Text> </Text>
         ) : runDuration === "" ? (
           <Text> </Text>
         ) : (
@@ -4365,7 +4373,8 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   const location = artifactLocation(step)
   const locations = stepLocations(step)
   const command = stepCommand(step)
-  const taskStatus = stepTaskStatusOf(step)
+  const status = queueStepStatus(run, step)
+  const taskStatus = status === "skipped" ? stepTaskStatusOf({ status }) : stepTaskStatusOf(step)
   const stepFailure = failureFact(undefined, step)
   const stepDurationMs =
     step.job === undefined || !("startedAt" in step.job) || !("finishedAt" in step.job)
@@ -4374,7 +4383,7 @@ function queueShowStepRow(run: QueueRun, step: QueueStep): QueueShowRow {
   return {
     step: step.name,
     revision: step.revision,
-    status: jobStatus(step),
+    status,
     ...taskStatusFields(taskStatus),
     attempt: step.job === undefined ? "-" : String(step.job.attempt),
     uuid: step.job?.id ?? "-",
@@ -4818,9 +4827,13 @@ function prLineageLines(pr: PR, memberRevision: number, runDetails: readonly Que
 function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: string; value: string }>[] {
   const retained = pr.revisions.find((candidate) => candidate.revision === revision)
   const correlation = retained?.correlation ?? pr.correlation
+  const note = presentFact(pr.note)
+  const detail = presentFact(pr.detail)
+  const requestedReviewers = pr.requestedReviewers ?? []
+  const regressions = pr.regressions ?? []
   const facts: Readonly<{ key: string; value: string }>[] = [
-    ...(presentFact(pr.note) === undefined ? [] : [{ key: "note", value: presentFact(pr.note)! }]),
-    ...(presentFact(pr.detail) === undefined ? [] : [{ key: "detail", value: presentFact(pr.detail)! }]),
+    ...(note === undefined ? [] : [{ key: "note", value: note }]),
+    ...(detail === undefined ? [] : [{ key: "detail", value: detail }]),
     ...(correlation === undefined ? [] : [{ key: "correlation", value: `${correlation.namespace}:${correlation.id}` }]),
     { key: "head", value: retained?.headSha ?? pr.headSha },
     { key: "base", value: retained?.base ?? pr.base },
@@ -4840,12 +4853,8 @@ function prDetailFacts(pr: PR, revision: number): readonly Readonly<{ key: strin
       key: "check requested",
       value: queueLogClock(request.at, true, false),
     })),
-    ...((pr.requestedReviewers?.length ?? 0) === 0
-      ? []
-      : [{ key: "requested reviewers", value: pr.requestedReviewers!.join(", ") }]),
-    ...((pr.regressions?.length ?? 0) === 0
-      ? []
-      : [{ key: "regressions", value: boundedQueue(safeText(pr.regressions), 160) }]),
+    ...(requestedReviewers.length === 0 ? [] : [{ key: "requested reviewers", value: requestedReviewers.join(", ") }]),
+    ...(regressions.length === 0 ? [] : [{ key: "regressions", value: boundedQueue(safeText(regressions), 160) }]),
   ]
   return facts
 }
@@ -4871,7 +4880,7 @@ export function QueueDetailRunPrBlocks({
       : [{ id: row.pr, revision: row.revision, headSha: row.headSha, branch: row.branch, base: row.base }])
   if (members.length === 0) return null
   return (
-    <Box flexDirection="column" minWidth={0} flexShrink={0} marginTop={data === undefined ? 0 : 1} color="$fg">
+    <Box flexDirection="column" minWidth={0} flexShrink={0} color="$fg">
       {members.map((member, index) => {
         const memberRow = rows.find(
           (candidate) =>
@@ -5123,6 +5132,7 @@ function CompactQueueShowView({
   const parent = presentFact(data.parent)
   const isolation = data.isolationPart === "-" ? undefined : data.isolationPart
   const timing = queueRunTimingRow(data)
+  const lastStep = data.steps.at(-1)
   return (
     // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
     // detail pane instead of overflowing it (canonical CSS escape hatch).
@@ -5156,7 +5166,7 @@ function CompactQueueShowView({
       ) : null}
       {stepFacts ? (
         <>
-          {data.steps.at(-1) === undefined ? null : <QueueStepInternals row={data.steps.at(-1)!} issue={stepIssue} />}
+          {lastStep === undefined ? null : <QueueStepInternals row={lastStep} issue={stepIssue} />}
           {data.steps.map((row) => {
             const error = presentFact(row.errorCode)
             const detail = presentFact(row.detail)

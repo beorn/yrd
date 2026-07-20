@@ -417,100 +417,12 @@ describe("queue watch user round 6", () => {
       expect(rows[tabsY - 2]?.slice(submitX - 2).trim(), "one unfilled blank row sits above the padded tab row").toBe(
         "",
       )
-      expect(rows[tabsY + 3]?.slice(submitX - 2).trim(), "one unfilled blank row sits below the padded tab row").toBe(
-        "",
-      )
+      expect(rows[tabsY + 3]?.slice(submitX - 2).trim(), "submit content follows the one padded blank row").not.toBe("")
       expect(rows[tabsY + 2]).not.toMatch(/◷\s+\d/u)
 
       const duration = /\d+(?:m(?:\d+s)?|s)/u.exec(statusRow)
       expect(duration).not.toBeNull()
       expect(app.cell(duration?.index ?? -1, tabsY + 1).dim).toBe(true)
-    } finally {
-      app.unmount()
-    }
-  })
-
-  it("reconciles terminal-run step states, failure color, and post-tab spacing", async () => {
-    const finishedAt = "2026-07-13T11:59:50.000Z"
-    const baseSha = "a".repeat(40)
-    const headSha = "1".repeat(40)
-    const pr = fixturePr("PR1180", "rejected", "2026-07-13T11:58:00.000Z", "Round 9 terminal failure", {
-      actor: "@ci",
-      headSha,
-      issue: "@yrd/core/21514-detail-pane-ia-and-drag-select",
-      terminalRun: "R1180",
-      rejectedAt: finishedAt,
-      revisions: [
-        {
-          revision: 1,
-          headSha,
-          base: "main",
-          baseSha,
-          pushedAt: "2026-07-13T11:58:00.000Z",
-          submittedAt: "2026-07-13T11:58:00.000Z",
-          actor: "@ci",
-          terminal: { status: "rejected", at: finishedAt, run: "R1180" },
-        },
-      ],
-    })
-    const run = fixtureRun("R1180", [pr], "failed", "2026-07-13T11:58:10.000Z", {
-      finishedAt,
-      error: { code: "run-rejected", message: "merge gate rejected the run" },
-      steps: [
-        fixtureStep(
-          "merge",
-          fixtureJob("J1180-merge", "failed", {
-            finishedAt,
-            error: { code: "merge-conflict", message: "merge conflicted with shared main" },
-          }),
-        ),
-        fixtureStep("shared-main", fixtureJob("J1180-shared-main", "requested")),
-      ],
-    })
-    const baseSnapshot = fixtureSnapshot(fixtureResult([pr], [run]))
-    const snapshot = { ...baseSnapshot, projection: { ...baseSnapshot.projection, runner: null } }
-    const app = createRenderer({ cols: 200, rows: 55 })(h(QueueWatchFrame, { snapshot }))
-    try {
-      await app.waitForLayoutStable()
-      let rows = app.text.split("\n")
-      const detailTitleY = rows.findIndex((row) => row.includes("RUN main#1180"))
-      const detailX = rows[detailTitleY]?.indexOf("RUN main#1180") ?? -1
-      const tabsY = rows.findIndex(
-        (row) => row.slice(detailX).includes("1: merge") && row.slice(detailX).includes("2: shared-main"),
-      )
-      const statusY = tabsY + 1
-      const statusRow = rows[statusY]?.slice(detailX) ?? ""
-      const prY = rows.findIndex((row, index) => index > statusY && row.slice(detailX).includes("pr#1180.1"))
-
-      expect(detailTitleY, app.text).toBeGreaterThanOrEqual(0)
-      expect(detailX).toBeGreaterThanOrEqual(0)
-      expect(tabsY).toBeGreaterThan(detailTitleY)
-      expect.soft(statusRow).toContain("failed")
-      expect.soft(statusRow).toContain("skipped")
-      expect.soft(statusRow).not.toContain("queued")
-      expect.soft(statusRow).not.toContain("requested")
-      expect.soft(prY - statusY, "exactly one blank row separates step tabs from submit content").toBe(2)
-      expect.soft(rows[statusY + 1]?.slice(detailX).trim()).toBe("")
-
-      const errorReferenceY = rows.findIndex((row) => row.includes("NO RUNNER"))
-      const errorReferenceX = rows[errorReferenceY]?.indexOf("NO RUNNER") ?? -1
-      const failedX = rows[statusY]?.indexOf("failed", detailX) ?? -1
-      let markerX = failedX - 1
-      while (markerX >= detailX && app.cell(markerX, statusY).char === " ") markerX -= 1
-      expect(errorReferenceX).toBeGreaterThanOrEqual(0)
-      expect(failedX).toBeGreaterThanOrEqual(0)
-      expect(markerX).toBeGreaterThanOrEqual(detailX)
-      expect.soft(app.cell(markerX, statusY).fg).toEqual(app.cell(errorReferenceX, errorReferenceY).fg)
-      expect.soft(app.cell(failedX, statusY).fg).toEqual(app.cell(errorReferenceX, errorReferenceY).fg)
-
-      const mergeX = rows[tabsY]?.indexOf("1: merge", detailX) ?? -1
-      await app.click(mergeX, tabsY)
-      await app.waitForLayoutStable()
-      rows = app.text.split("\n")
-      const errorY = rows.findIndex((row) => row.includes("merge conflicted with shared main"))
-      const errorX = rows[errorY]?.indexOf("merge conflicted with shared main") ?? -1
-      expect(errorX).toBeGreaterThanOrEqual(0)
-      expect.soft(app.cell(errorX, errorY).fg).toEqual(app.cell(errorReferenceX, errorReferenceY).fg)
     } finally {
       app.unmount()
     }
@@ -659,8 +571,9 @@ describe("queue watch user round 6", () => {
   it("keeps the tail of a long expanded diff reachable inside the shared submit tab scroll", async () => {
     const story = queueTimelineStories["production-overview"]
     const firstDiff = story.snapshot.diffs?.[0]
-    if (firstDiff === undefined || "unavailable" in firstDiff)
+    if (firstDiff === undefined || "unavailable" in firstDiff) {
       throw new Error("production fixture has no available diff")
+    }
     const tail = "round-8-long-diff-tail"
     const snapshot = {
       ...story.snapshot,

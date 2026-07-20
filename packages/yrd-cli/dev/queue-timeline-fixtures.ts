@@ -677,6 +677,34 @@ const rejectedRun = fixtureRun("R5", [rejectedPr], "failed", "2026-07-13T11:00:0
   steps: rejectedSteps,
   cursor: 0,
 })
+const round9TerminalPr = terminalFixturePr(
+  "PR1180",
+  "rejected",
+  "2026-07-13T11:58:00.000Z",
+  "2026-07-13T11:59:50.000Z",
+  "R1180",
+  "Round 9 terminal failure",
+  { actor: "@ci", issue: "@yrd/core/21514-detail-pane-ia-and-drag-select" },
+)
+const round9TerminalRun = fixtureRun("R1180", [round9TerminalPr], "failed", "2026-07-13T11:58:10.000Z", {
+  finishedAt: "2026-07-13T11:59:50.000Z",
+  error: { code: "run-rejected", message: "merge gate rejected the run" },
+  steps: [
+    fixtureStep(
+      "merge",
+      fixtureJob("J1180-merge", "failed", {
+        finishedAt: "2026-07-13T11:59:50.000Z",
+        error: { code: "merge-conflict", message: "merge conflicted with shared main" },
+      }),
+    ),
+    fixtureStep("shared-main", fixtureJob("J1180-shared-main", "requested")),
+  ],
+})
+const round9TerminalSnapshot = fixtureSnapshot(fixtureResult([round9TerminalPr], [round9TerminalRun]))
+export const round9TerminalFailureSnapshot = {
+  ...round9TerminalSnapshot,
+  projection: { ...round9TerminalSnapshot.projection, runner: null },
+}
 const environmentRun = fixtureRun("R6", [environmentPr], "failed", "2026-07-13T11:15:00.000Z", {
   finishedAt: "2026-07-13T11:28:00.000Z",
   error: { code: "queue-environment-refused", message: "origin was unavailable" },

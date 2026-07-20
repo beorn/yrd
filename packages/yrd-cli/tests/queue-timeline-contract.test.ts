@@ -244,8 +244,9 @@ describe("queue timeline 21106 contract", () => {
     const source = contractProjection()
     const lead = source.rows.find((row) => row.pr === "PR42")
     const partner = source.rows.find((row) => row.pr === "PR43")
-    if (lead === undefined || partner === undefined)
+    if (lead === undefined || partner === undefined) {
       throw new Error("contract fixture is missing the active batched run")
+    }
     const projection = {
       ...source,
       rows: [lead, { ...partner, id: `release:${partner.id}`, base: "release" }],
@@ -758,9 +759,13 @@ describe("queue timeline 21106 contract", () => {
       // background across the whole row; its sibling does not. Scope to actual
       // list rows (they start with a clock) so the DETAIL pane's identity title
       // — which also names the selected PR (item M) — isn't mistaken for a row.
-      const isListRow = (row: string): boolean => /^\s*(?:\d{2}:\d{2}:\d{2}|-)\s/u.test(row)
-      const cursorRow = frame.findIndex((row) => row.includes("pr#42.1") && isListRow(row))
-      const siblingRow = frame.findIndex((row) => row.includes("pr#43.1") && isListRow(row))
+      const divider = frame[0]?.indexOf("│") ?? -1
+      const isListPr = (row: string, pr: string): boolean => {
+        const column = row.indexOf(pr)
+        return column >= 0 && (divider < 0 || column < divider)
+      }
+      const cursorRow = frame.findIndex((row) => isListPr(row, "pr#42.1"))
+      const siblingRow = frame.findIndex((row) => isListPr(row, "pr#43.1"))
       expect(cursorRow).toBeGreaterThan(0)
       expect(siblingRow).toBe(cursorRow + 1)
       const cursorText = frame[cursorRow] ?? ""

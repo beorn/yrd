@@ -25,7 +25,7 @@ export function timelineStatusGlyph(status: string): string {
   if (["checking", "running", "waiting"].includes(status)) return "●"
   if (["integrated", "passed"].includes(status)) return "✓"
   if (["rejected", "failed", "lost", "environment-refused"].includes(status)) return "×"
-  if (["withdrawn", "retired", "canceled"].includes(status)) return "−"
+  if (["withdrawn", "retired", "canceled", "skipped"].includes(status)) return "−"
   return "○"
 }
 
@@ -72,7 +72,6 @@ const ANSI = Object.freeze({
 })
 
 type Paint = (text: string) => string
-const identity: Paint = (text) => text
 const paint =
   (color: boolean, code: string): Paint =>
   (text) =>

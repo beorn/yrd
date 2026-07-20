@@ -642,7 +642,12 @@ export function QueueWorkflowStepTabs({
       <Text color={selected ? "$fg-on-selected" : undefined}>
         {`${number}: ${name}`.padEnd(stepTabWidth)}
         {"\n"}
-        <Text color={selected ? "$fg-on-selected" : taskStatusColor(rep.taskStatus)} bold={rep.taskStatus === "wip"}>
+        <Text
+          color={
+            rep.taskStatus === "blocked" ? "$fg-error" : selected ? "$fg-on-selected" : taskStatusColor(rep.taskStatus)
+          }
+          bold={rep.taskStatus === "wip"}
+        >
           {status}
         </Text>
         {duration === "" ? "" : " "}
@@ -712,7 +717,6 @@ export function QueueWorkflowStepTabs({
                 </Box>
               ))}
             </TabList>
-            <Box height={1} flexShrink={0} />
             {tabNames.map((name) => {
               if (name === "submit") {
                 return (

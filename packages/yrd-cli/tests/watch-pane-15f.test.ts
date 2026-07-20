@@ -144,14 +144,15 @@ describe("QueueWatchFrame 21106 addendum 15f", () => {
       expect(app.text).not.toContain("RUN LOGS")
 
       // Command follows JOB/RUNNER; inline output follows the command.
-      const commandY = rows.findIndex((line) => line.includes("$ git merge --no-ff --no-edit"))
-      expect(commandY, "command header present").toBeGreaterThan(tabsY)
+      const commandY = rows.findIndex((line) => line.includes("$ bun vitest run"))
+      expect(commandY, "recorded command header present").toBeGreaterThan(tabsY)
       expect(commandY, "command follows the step internals").toBeGreaterThan(stepContentY)
-      const outputY = rows.findIndex((row) => row.includes("PARENTS "))
+      const outputY = rows.findIndex((row, index) => index > commandY && row.includes("PARENTS "))
       expect(outputY, "inline output follows the command").toBeGreaterThan(commandY)
-      const commandX = rows[commandY]?.indexOf("$ git merge --no-ff --no-edit") ?? -1
+      const commandX = rows[commandY]?.indexOf("$ bun vitest run") ?? -1
+      const outputX = rows[outputY]?.indexOf("PARENTS ") ?? -1
       expect(app.cell(commandX, commandY).bold).toBe(true)
-      expect(app.cell(commandX, commandY).fg).not.toBeNull()
+      expect(app.cell(commandX, commandY).fg).not.toEqual(app.cell(outputX, outputY).fg)
       expect(rows[commandY]).not.toContain("[ $")
       expect(app.cell(commandX, commandY).bg, "command row has a deliberate filled surface").not.toBeNull()
     } finally {
