@@ -19,7 +19,7 @@ import {
   useWindowSize,
   type ListViewHandle,
 } from "silvery"
-import { prHead, type PR } from "@yrd/bay"
+import { prHead, prRevisionNumber, type PR } from "@yrd/bay"
 import {
   QUEUE_TIMELINE_STATUS_BUCKETS,
   QueueDetailRunPrBlocks,
@@ -145,7 +145,8 @@ function selectedQueueWatchFocus(
   prs: readonly PR[],
 ): QueueWatchFocus | undefined {
   if (row === undefined) return undefined
-  const revision = projectedRow?.revision ?? prs.find((candidate) => candidate.id === row.pr)?.revision
+  const pr = prs.find((candidate) => candidate.id === row.pr)
+  const revision = projectedRow?.revision ?? (pr === undefined ? undefined : prRevisionNumber(pr))
   if (revision === undefined) return undefined
   return { pr: row.pr, revision, ...(row.run === undefined ? {} : { run: row.run }) }
 }

@@ -4605,10 +4605,12 @@ describe("runYrd", () => {
           name: "First",
           branch: "topic/one",
           base: "main",
-          status: "submitted",
-          revision: 1,
-          headSha: HEAD_SHA,
-          revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+          state: "open",
+          merged: false,
+          revs: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+          reviews: [],
+          comments: [],
+          checkRequests: [],
           submittedAt: "2026-07-09T12:00:00.000Z",
         },
         {
@@ -4616,17 +4618,19 @@ describe("runYrd", () => {
           name: "Second",
           branch: "topic/two",
           base: "main",
-          status: "submitted",
-          revision: 2,
-          headSha: "2".repeat(40),
-          revisions: [submittedRevision(2, "2".repeat(40), "2026-07-09T12:01:00.000Z")],
+          state: "open",
+          merged: false,
+          revs: [submittedRevision(2, "2".repeat(40), "2026-07-09T12:01:00.000Z")],
+          reviews: [],
+          comments: [],
+          checkRequests: [],
           submittedAt: "2026-07-09T12:01:00.000Z",
         },
       ],
       running: [],
       waiting: [],
       finished: [],
-    } as unknown as QueueStatusResult
+    } satisfies QueueStatusResult
     const initial = { results: [result], now: Date.parse("2026-07-09T12:02:00.000Z") }
     const requested: Array<{ pr: string; revision: number; run?: string } | undefined> = []
     let activeLoads = 0
@@ -8919,6 +8923,18 @@ describe("PR metadata — title, description, and issue link", () => {
 })
 
 describe("watch viewer — frozen projection under a live clock (task #64)", () => {
+  const focusedPR = {
+    id: "PR1",
+    branch: "topic/one",
+    base: "main",
+    state: "open",
+    merged: false,
+    revs: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
+    reviews: [],
+    comments: [],
+    checkRequests: [],
+  } satisfies PR
+
   it("does not read run artifacts for a focused PR row without a run", async () => {
     const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-focused-output-"))
     const app = await createApp()
@@ -8950,16 +8966,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         return ""
       },
     })
-    const pr = {
-      id: "PR1",
-      revision: 1,
-      base: "main",
-      baseSha: BASE_SHA,
-      headSha: HEAD_SHA,
-      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
-    } as unknown as PR
-
-    await expect(resolver.resolve("/repo", pr, 1, 1_000)).resolves.toEqual({
+    await expect(resolver.resolve("/repo", focusedPR, 1, 1_000)).resolves.toEqual({
       pr: "PR1",
       revision: 1,
       additions: 3,
@@ -8968,7 +8975,7 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
       patch: "focused patch\n",
     })
     expect(calls).toHaveLength(5)
-    await resolver.resolve("/repo", pr, 1, 60_000)
+    await resolver.resolve("/repo", focusedPR, 1, 60_000)
     expect(calls).toHaveLength(5)
   })
 
@@ -8982,20 +8989,13 @@ describe("watch viewer — frozen projection under a live clock (task #64)", () 
         throw new Error("missing object")
       },
     })
-    const pr = {
-      id: "PR1",
-      revision: 1,
-      base: "main",
-      baseSha: BASE_SHA,
-      headSha: HEAD_SHA,
-      revisions: [submittedRevision(1, HEAD_SHA, "2026-07-09T12:00:00.000Z")],
-    } as unknown as PR
-
-    await expect(resolver.resolve("/repo", pr, 1, 1_000)).resolves.toMatchObject({ unavailable: "refs-pruned" })
-    await expect(resolver.resolve("/repo", pr, 1, 30_999)).resolves.toMatchObject({ unavailable: "refs-pruned" })
+    await expect(resolver.resolve("/repo", focusedPR, 1, 1_000)).resolves.toMatchObject({ unavailable: "refs-pruned" })
+    await expect(resolver.resolve("/repo", focusedPR, 1, 30_999)).resolves.toMatchObject({
+      unavailable: "refs-pruned",
+    })
     expect(calls).toHaveLength(2)
 
-    await expect(resolver.resolve("/repo", pr, 1, 31_000)).resolves.toMatchObject({ unavailable: "refs-pruned" })
+    await expect(resolver.resolve("/repo", focusedPR, 1, 31_000)).resolves.toMatchObject({ unavailable: "refs-pruned" })
     expect(calls).toHaveLength(4)
   })
 
