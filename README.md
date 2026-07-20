@@ -16,7 +16,7 @@ Yrd runs the whole delivery loop on your machine, where the agents are: PRs, CI,
 
 ## The yard
 
-The **yard** — hence the name — is the **queue runner** that builds and integrates every change.
+The **yard** — hence the name — is the **queue runner** that builds and integrates every change: a [Bors-style](https://bors.tech) merge queue, running on your own machine.
 
 - Work flows from tracker issues — issues in, proven merges out — so any agentic system can drive Yrd. Trackers, forges, and judges are pluggable — bring your own.
 - **Contests** pitch agents/models against each other on real issues, and automatically pick the winner. That's AR — your own code becomes the benchmark.
