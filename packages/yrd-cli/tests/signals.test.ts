@@ -160,6 +160,19 @@ describe("PR signal observer", () => {
     await observer.close()
   })
 
+  it("passes the journal checkpoint capability through the observer wrapper", async () => {
+    const dir = await stateDir()
+    const source = testJournal(dir)
+    const observer = createSignalObserver({
+      journal: source,
+      stateDir: dir,
+      routes: {},
+      adapter: recordingAdapter([]),
+    })
+    expect(observer.journal.checkpoint).toBe(source.checkpoint)
+    await observer.close()
+  })
+
   it("replays a durable append-before-send crash once and records the event id before the next restart", async () => {
     const dir = await stateDir()
     await testJournal(dir).append(rejectedFrame(), 0)
