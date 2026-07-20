@@ -12,6 +12,7 @@ import type { PruneGitFacts, YrdCliApp, YrdCliIO } from "./types.ts"
 type JsonOption = Readonly<{ json?: boolean }>
 
 const DEFAULT_WITHDRAW_REASON = "PR withdrawn"
+const GIT_TIMEOUT_MS = 30_000
 
 function jsonEnabled(options: JsonOption): boolean {
   return options.json === true
@@ -227,10 +228,14 @@ export function createPruneGitFacts(cwd: string): PruneGitFacts {
           encoding: "utf8",
           env: cleanGitEnvironment(process.env),
           stdio: ["ignore", "pipe", "pipe"],
+          timeout: GIT_TIMEOUT_MS,
         }),
       }
     } catch (error) {
-      const failed = error as Readonly<{ status?: unknown; stdout?: unknown; stderr?: unknown }>
+      const failed = error as Readonly<{ code?: unknown; status?: unknown; stdout?: unknown; stderr?: unknown }>
+      if (failed.code === "ETIMEDOUT") {
+        throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: error })
+      }
       if (typeof failed.status === "number" && allowedExits.includes(failed.status)) {
         return { code: failed.status, stdout: typeof failed.stdout === "string" ? failed.stdout : "" }
       }

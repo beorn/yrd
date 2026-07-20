@@ -12,6 +12,7 @@ export type Checked<Value> = Readonly<{ ok: true; value: Value }> | Readonly<{ o
 export type ArtifactFile = Readonly<{ kind: string; file: string; content: string; mediaType: string }>
 
 export const FULL_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u
+const GIT_TIMEOUT_MS = 30_000
 
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -42,11 +43,17 @@ export function runProcess(
 
 export function createGit(process: Pick<Process, "run">, env: NodeJS.ProcessEnv, signal?: AbortSignal) {
   const run = (cwd: string, args: readonly string[]) =>
-    runProcess(process, { argv: ["git", ...args], cwd, env, signal }, "git-spawn-failed")
-  const output = (result: ProcessResult) =>
-    result.stderr.trim() || result.stdout.trim() || `Process exited ${result.exitCode}`
+    runProcess(process, { argv: ["git", ...args], cwd, env, signal, timeoutMs: GIT_TIMEOUT_MS }, "git-spawn-failed")
+  const output = (result: ProcessResult) => {
+    const detail = result.stderr.trim() || result.stdout.trim()
+    if (result.timedOut) {
+      return `Git timed out after ${GIT_TIMEOUT_MS}ms${detail === "" ? "" : `: ${detail}`}`
+    }
+    return detail || `Process exited ${result.exitCode}`
+  }
   const failure = (result: Checked<ProcessResult>, code: string, action: string): Failure | undefined => {
     if (!result.ok) return { code, message: `${action}: ${result.error.message}` }
+    if (result.value.timedOut) return { code, message: `${action}: Git timed out after ${GIT_TIMEOUT_MS}ms` }
     return result.value.exitCode === 0 ? undefined : { code, message: `${action}: ${output(result.value)}` }
   }
   const text = async (cwd: string, args: readonly string[], code: string, action: string): Promise<Checked<string>> => {

@@ -5,6 +5,7 @@ import distribution from "../../../package.json" with { type: "json" }
 
 /** The git-yrd distribution version, embedded by the production bundle. */
 export const YRD_VERSION = distribution.version
+const GIT_TIMEOUT_MS = 5_000
 
 function yrdSourceRoot(): string | undefined {
   let directory = import.meta.dirname
@@ -37,8 +38,13 @@ function sourceGit(args: readonly string[]): { status: number; stdout: string } 
     encoding: "utf8",
     env,
     stdio: ["ignore", "pipe", "ignore"],
-    timeout: 5_000,
+    timeout: GIT_TIMEOUT_MS,
   })
+  if (result.error !== undefined) {
+    const timedOut = "code" in result.error && result.error.code === "ETIMEDOUT"
+    const detail = timedOut ? `timed out after ${GIT_TIMEOUT_MS}ms` : result.error.message
+    throw new Error(`yrd: git ${args.join(" ")} ${detail}`, { cause: result.error })
+  }
   return { status: result.status ?? 1, stdout: result.stdout ?? "" }
 }
 

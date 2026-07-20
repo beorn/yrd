@@ -26,6 +26,7 @@ import {
 } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import { createExclusive, createJournal } from "@yrd/persistence"
+import type { ProcessRequest, ProcessResult } from "@yrd/process"
 import {
   Queues,
   type QueueRun,
@@ -9153,6 +9154,35 @@ describe("PR metadata — title, description, and issue link", () => {
 })
 
 describe("watch viewer — frozen projection under a live clock (task #64)", () => {
+  it("bounds the watch Git runner and reports a timeout", async () => {
+    const requests: ProcessRequest[] = []
+    const process = {
+      async run(request: ProcessRequest): Promise<ProcessResult> {
+        requests.push(request)
+        return {
+          exitCode: 143,
+          signal: "SIGTERM",
+          stdout: "",
+          stderr: "",
+          durationMs: 30_000,
+          timedOut: true,
+          verdict: "TIMED_OUT",
+        }
+      },
+    }
+
+    await expect(runInternals.runQueueGit(process, "/repo", ["diff", "HEAD"])).rejects.toThrow(
+      "yrd: git diff HEAD timed out after 30000ms",
+    )
+    expect(requests).toEqual([
+      expect.objectContaining({
+        argv: ["git", "-C", "/repo", "diff", "HEAD"],
+        cwd: "/repo",
+        timeoutMs: 30_000,
+      }),
+    ])
+  })
+
   it("does not read run artifacts for a focused PR row without a run", async () => {
     const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-watch-focused-output-"))
     const app = await createApp()

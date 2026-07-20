@@ -322,6 +322,38 @@ describe("createAgContestRunner", () => {
     expect(await git(repo, "rev-parse", "refs/yrd/attempts/C1/A1")).toBe(baseSha)
   })
 
+  it("names a timeout while creating the write-once attempt ref", async () => {
+    const { root, repo, bay } = await repository()
+    const runner = createAgContestRunner({
+      revision: "ag-runner-v1",
+      artifactRoot: join(root, "artifacts"),
+      inject: injected(async (request) => {
+        if (request.argv[0] === "git") {
+          if (request.argv[1] === "update-ref") return result(124, "", "", { timedOut: true })
+          return systemProcess.run(request)
+        }
+        await commitSolution(request)
+        return result(0, "{}\n")
+      }),
+    })
+
+    const outcome = await runner.run(contestInput(bay, { provider: "codex" }), job())
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      error: {
+        code: "attempt-ref-write-failed",
+        message: expect.stringContaining("Git timed out after 30000ms"),
+      },
+    })
+    const ref = await systemProcess.run({
+      argv: ["git", "show-ref", "--verify", "--quiet", "refs/yrd/attempts/C1/A1"],
+      cwd: repo,
+      env: process.env,
+    })
+    expect(ref.exitCode).not.toBe(0)
+  })
+
   it("refuses to launch without a clean pinned Bay base snapshot", async () => {
     const { root, bay } = await repository()
     let launches = 0

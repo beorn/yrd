@@ -12,6 +12,7 @@ export type YrdRepository = Readonly<{
 }>
 
 type RepositoryProcess = Pick<Process, "run">
+const GIT_TIMEOUT_MS = 30_000
 
 async function git(
   process: RepositoryProcess,
@@ -20,8 +21,9 @@ async function git(
   args: readonly string[],
   allowFailure = false,
 ): Promise<ProcessResult> {
-  const result = await process.run({ argv: ["git", "-C", cwd, ...args], cwd, env })
+  const result = await process.run({ argv: ["git", "-C", cwd, ...args], cwd, env, timeoutMs: GIT_TIMEOUT_MS })
   if (!Number.isSafeInteger(result.exitCode)) throw new Error("yrd: Git returned an invalid exit code")
+  if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
   if (!allowFailure && result.exitCode !== 0) {
     throw new Error(
       result.stderr.trim() || result.stdout.trim() || `yrd: git ${args.join(" ")} exited ${result.exitCode}`,

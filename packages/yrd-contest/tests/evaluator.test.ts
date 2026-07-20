@@ -57,6 +57,7 @@ const context: JobContext = {
 type FakeOptions = Readonly<{
   command?: ProcessResult
   cleanup?: ProcessResult
+  detached?: ProcessResult
   refSha?: string
   checkoutSha?: string
 }>
@@ -85,7 +86,7 @@ function fakeProcess(options: FakeOptions = {}): {
         if (args[0] === "rev-parse" && args.includes("HEAD^{commit}")) {
           return processResult(0, `${options.checkoutSha ?? PINNED_SHA}\n`)
         }
-        if (args[0] === "symbolic-ref") return processResult(1)
+        if (args[0] === "symbolic-ref") return options.detached ?? processResult(1)
         return processResult(0)
       },
     },
@@ -161,6 +162,9 @@ describe("held-out command evaluator", () => {
       YRD_PIN_REF: "refs/yrd/attempts/C1/A1",
       YRD_ISSUE_ID: "@yrd/core/21012; $(touch /tmp/yrd-evaluator-injection)",
     })
+    expect(
+      fake.requests.filter((request) => request.argv[0] === "git").every((request) => request.timeoutMs === 30_000),
+    ).toBe(true)
     expect(await artifactText(result, "stdout")).toBe("27 checks passed\n")
     expect(await artifactText(result, "stderr")).toBe("")
     expect(JSON.parse(await artifactText(result, "evaluator-manifest"))).toMatchObject({
@@ -206,6 +210,31 @@ describe("held-out command evaluator", () => {
     expect(await evaluator.evaluate(input(), context)).toMatchObject({
       status: "failed",
       error: { code: "pin-checkout-create-failed" },
+    })
+    expect(fake.requests.some((request) => request.argv[0] !== "git")).toBe(false)
+  })
+
+  it("names a timeout while verifying the detached checkout", async () => {
+    const { evaluator, fake } = await fixture({
+      detached: {
+        exitCode: 124,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        durationMs: 30_000,
+        timedOut: true,
+        verdict: "TIMED_OUT",
+      },
+    })
+
+    const result = await evaluator.evaluate(input(), context)
+
+    expect(result).toMatchObject({
+      status: "failed",
+      error: {
+        code: "pin-checkout-invalid",
+        message: expect.stringContaining("Git timed out after 30000ms"),
+      },
     })
     expect(fake.requests.some((request) => request.argv[0] !== "git")).toBe(false)
   })

@@ -125,15 +125,24 @@ describe("queue-native submodule composition Git executor", () => {
     const repo = await repository()
     const plan = compositionPlan(repo)
     await using process = createProcess()
+    const requests: ProcessRequest[] = []
+    const bounded = {
+      run(request: ProcessRequest) {
+        requests.push(request)
+        return process.run(request)
+      },
+    }
 
     const first = await executeQueueSubmoduleComposition(plan, {
-      inject: { process, storeForOrigin: () => repo.store },
+      inject: { process: bounded, storeForOrigin: () => repo.store },
     })
     const second = await executeQueueSubmoduleComposition(plan, {
-      inject: { process, storeForOrigin: () => repo.store },
+      inject: { process: bounded, storeForOrigin: () => repo.store },
     })
 
     expect(first).toEqual(second)
+    expect(requests.length).toBeGreaterThan(0)
+    expect(requests.every((request) => request.timeoutMs === 30_000)).toBe(true)
     expect(first).toMatchObject({
       status: "composed",
       resolutions: [

@@ -61,6 +61,7 @@ export type CandidatePool = Readonly<{
 }>
 
 const DEFAULT_CAPACITY = 2
+const GIT_TIMEOUT_MS = 30_000
 
 type PoolEntry = {
   busy: boolean
@@ -84,7 +85,13 @@ export function createCandidatePoolGit(
   env.KM_NO_AUTO_SUBMODULE_UPDATE = "1"
   return Object.freeze({
     async run(repo, args, allowFailure = false): Promise<CandidatePoolGitResult> {
-      const result = await process.run({ argv: ["git", "-C", repo, ...args], cwd: repo, env })
+      const result = await process.run({
+        argv: ["git", "-C", repo, ...args],
+        cwd: repo,
+        env,
+        timeoutMs: GIT_TIMEOUT_MS,
+      })
+      if (result.timedOut) throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
       const completed = { code: result.exitCode, stdout: result.stdout.trim(), stderr: result.stderr.trim() }
       if (!allowFailure && completed.code !== 0) {
         throw new Error(completed.stderr || completed.stdout || `git ${args.join(" ")} failed`)

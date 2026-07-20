@@ -25,6 +25,7 @@ import type { Contest } from "@yrd/contest"
 import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
+import { createProcess, type Process } from "@yrd/process"
 import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { loadYrdConfig } from "./config.ts"
@@ -103,32 +104,49 @@ import { readInstalledBaselines } from "./installed-baseline.ts"
 // load. Types are erased, so they stay as a static type-only import.
 import type { QueueArtifactOutput, QueuePrDiff, QueueWatchFocus, QueueWatchSnapshot } from "./watch-pane.tsx"
 
+const GIT_TIMEOUT_MS = 30_000
+
 function gitSync(cwd: string, args: readonly string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], {
-    encoding: "utf8",
-    env: cleanGitEnvironment(process.env),
-    stdio: ["ignore", "pipe", "pipe"],
-  })
+  try {
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      env: cleanGitEnvironment(process.env),
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: GIT_TIMEOUT_MS,
+    })
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ETIMEDOUT") {
+      throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`, { cause: error })
+    }
+    throw error
+  }
 }
 
 type QueueGitRunner = (cwd: string, args: readonly string[]) => Promise<string>
 
-async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
-  const child = Bun.spawn(["git", "-C", cwd, ...args], {
-    env: cleanGitEnvironment(process.env),
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
+export async function runQueueGit(
+  process: Pick<Process, "run">,
+  cwd: string,
+  args: readonly string[],
+): Promise<string> {
+  const result = await process.run({
+    argv: ["git", "-C", cwd, ...args],
+    cwd,
+    env: cleanGitEnvironment(globalThis.process.env),
+    timeoutMs: GIT_TIMEOUT_MS,
   })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ])
-  if (exitCode !== 0) {
-    throw new Error(`git ${args.join(" ")} exited ${String(exitCode)}: ${stderr.trim()}`)
+  if (result.timedOut) {
+    throw new Error(`yrd: git ${args.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
   }
-  return stdout
+  if (result.exitCode !== 0) {
+    throw new Error(`yrd: git ${args.join(" ")} exited ${String(result.exitCode)}: ${result.stderr.trim()}`)
+  }
+  return result.stdout
+}
+
+async function gitAsync(cwd: string, args: readonly string[]): Promise<string> {
+  await using process = createProcess()
+  return runQueueGit(process, cwd, args)
 }
 
 function queueGitDir(cwd: string): string | undefined {
@@ -137,7 +155,8 @@ function queueGitDir(cwd: string): string | undefined {
     const gitDir = output.trim()
     if (gitDir === "") return undefined
     return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir)
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message.includes(`timed out after ${GIT_TIMEOUT_MS}ms`)) throw error
     return undefined
   }
 }

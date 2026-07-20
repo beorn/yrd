@@ -348,6 +348,7 @@ export async function runReceiverHookFromEnvironment(
 type Result = { code: number; stdout: string; stderr: string }
 type ExecOptions = { env?: Environment; allowFailure?: boolean }
 type StoredReceipt = { path: string; receipt: ReceiverReceipt }
+const GIT_TIMEOUT_MS = 30_000
 
 function check(condition: unknown, detail: string): asserts condition {
   if (!condition) throw new Error(`yrd: receiver: ${detail}`)
@@ -369,7 +370,8 @@ async function exec(
   cwd: string,
   options: ExecOptions = {},
 ): Promise<Result> {
-  const completed = await process.run({ argv, cwd, env: options.env ?? gitEnv() })
+  const completed = await process.run({ argv, cwd, env: options.env ?? gitEnv(), timeoutMs: GIT_TIMEOUT_MS })
+  if (completed.timedOut) throw new Error(`yrd: ${argv.join(" ")} timed out after ${GIT_TIMEOUT_MS}ms`)
   const result = { code: completed.exitCode, stdout: completed.stdout.trim(), stderr: completed.stderr.trim() }
   check(
     options.allowFailure || completed.exitCode === 0,

@@ -83,6 +83,29 @@ function processResult(exitCode: number, stderr = ""): ProcessResult {
 }
 
 describe("createGitWorkspace", () => {
+  it("bounds and names a blackholed Git process during workspace discovery", async () => {
+    let request: ProcessRequest | undefined
+    const process: Pick<Process, "run"> = {
+      async run(input): Promise<ProcessResult> {
+        request = input
+        return {
+          exitCode: 124,
+          signal: "SIGTERM",
+          stdout: "",
+          stderr: "",
+          durationMs: input.timeoutMs ?? 0,
+          timedOut: true,
+          verdict: "TIMED_OUT",
+        }
+      },
+    }
+
+    await expect(createGitWorkspace({ repo: "/blackholed-repository", process })).rejects.toThrow(
+      "timed out after 30000ms",
+    )
+    expect(request).toMatchObject({ timeoutMs: 30_000 })
+  })
+
   it("keeps the repository clean with the default in-repository bays root", async () => {
     const { repo } = await repository()
     await using process = createProcess()

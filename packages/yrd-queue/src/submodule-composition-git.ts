@@ -169,7 +169,7 @@ function createGitContext(options: QueueSubmoduleCompositionExecutionOptions): G
     process: options.inject.process,
     env: { ...env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C", TZ: "UTC" },
     ...(options.signal === undefined ? {} : { signal: options.signal }),
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    timeoutMs: options.timeoutMs ?? 30_000,
   }
 }
 
