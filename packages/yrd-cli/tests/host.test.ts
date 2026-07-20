@@ -359,6 +359,77 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
   })
 
+  it("adds one queue-authority fetch per same-base cycle instead of one per PR", async () => {
+    const { repo, featureSha } = await repository()
+    const addFeature = async (branch: string, file: string): Promise<string> => {
+      await git(repo, "switch", "-qc", branch)
+      await writeFile(join(repo, file), `${branch}\n`)
+      await git(repo, "add", file)
+      await git(repo, "commit", "-qm", `${branch} feature`)
+      const sha = await git(repo, "rev-parse", "HEAD")
+      await git(repo, "switch", "-q", "main")
+      return sha
+    }
+    const secondSha = await addFeature("issue/second", "second.txt")
+    const thirdSha = await addFeature("issue/third", "third.txt")
+    const fourthSha = await addFeature("issue/fourth", "fourth.txt")
+
+    const remote = join(repo, "..", "origin.git")
+    await git(repo, "init", "-q", "--bare", remote)
+    await git(repo, "remote", "add", "origin", remote)
+    await git(repo, "push", "-q", "origin", "main", "issue/feature", "issue/second", "issue/third", "issue/fourth")
+
+    const config: ResolvedYrdProjectConfig = {
+      base: "main",
+      batch: 2,
+      steps: ["check"],
+      requires: [],
+      definitions: { check: { run: "true", runner: "local" } },
+      contest: { concurrency: 1, timeoutMs: 60_000, evaluators: ["check"] },
+    }
+    const commands: string[][] = []
+    await using runtimeProcess = createProcess({ cwd: repo })
+    const tracedProcess = {
+      run: async (request: Parameters<typeof runtimeProcess.run>[0]) => {
+        commands.push([...request.argv])
+        return runtimeProcess.run(request)
+      },
+    }
+    await using app = await createDefaultYrdApp({
+      repo,
+      stateDir: join(repo, ".git", "yrd"),
+      baysRoot: join(repo, ".bays"),
+      journal: createMemoryJournal(),
+      process: tracedProcess,
+      config,
+    })
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+    await app.bays.submit({ branch: "issue/second", headSha: secondSha, base: "main" })
+    await app.bays.submit({ branch: "issue/third", headSha: thirdSha, base: "main" })
+    await app.bays.submit({ branch: "issue/fourth", headSha: fourthSha, base: "main" })
+    commands.length = 0
+
+    const runCycle = async (prs: readonly [string, string]): Promise<void> => {
+      for (const pr of prs) await app.bays.requestChecks({ pr })
+      commands.length = 0
+      const runs = await app.queue.run(
+        { prs: [...prs] },
+        { runner: "test", leaseMs: 60_000, continueAdmissions: () => false },
+      )
+      const rootFetches = commands.filter(
+        (argv) => argv[0] === "git" && argv[1] === "-C" && argv[2] === repo && argv[3] === "fetch",
+      )
+      expect(runs).toEqual([])
+      // Every same-base PR shares this cycle's one authoritative root refresh.
+      expect(rootFetches).toHaveLength(1)
+      expect(rootFetches.every((argv) => argv.includes("--no-recurse-submodules"))).toBe(true)
+      commands.length = 0
+    }
+
+    await runCycle(["PR1", "PR2"])
+    await runCycle(["PR3", "PR4"])
+  })
+
   it("refreshes queue authority without touching dirty behind operator main", async () => {
     const { repo, featureSha } = await repository()
     const localBaseSha = await git(repo, "rev-parse", "main")

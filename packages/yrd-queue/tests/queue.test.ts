@@ -2251,6 +2251,28 @@ describe("Queue", () => {
     expect(app.queue.get("R2")?.prs).toMatchObject([{ baseSha: UPDATED }])
   })
 
+  it("resolves each queue base once per cycle instead of once per PR", async () => {
+    const resolvedBases: string[] = []
+    await using app = await createQueueApp({
+      batch: 4,
+      resolveBaseSha: (base) => {
+        resolvedBases.push(base)
+        return BASE
+      },
+    })
+    const prs = [
+      await submitBranch(app, "issue/main-a"),
+      await submitBranch(app, "issue/main-b", "origin/main"),
+      await submitBranch(app, "issue/release-a", "release"),
+      await submitBranch(app, "issue/release-b", "refs/heads/release"),
+    ]
+    for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
+
+    await app.queue.run({ prs: prs.map((pr) => pr.id) }, runtime)
+
+    expect(resolvedBases).toEqual(["main", "release"])
+  })
+
   it("refuses integration when a clear main-health admission turns green then same-base red", async () => {
     let mainHealth: "clear" | "green" | "red" = "clear"
     let checks = 0
