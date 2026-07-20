@@ -18,6 +18,7 @@ import {
   type CompositionV1,
   type Correlation,
   type PR,
+  type PRFreshnessTransition,
   type PRRegression,
   type PRRegressionSeverity,
 } from "@yrd/bay"
@@ -1169,8 +1170,40 @@ async function recutPr(
   options: JsonOption & Readonly<{ revision?: number; queue?: boolean; force?: boolean }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
+  const outcome = await executeRecutPr(app, services, selector, options, io)
+  await printResult(
+    io,
+    jsonEnabled(options),
+    outcome.output,
+    `${outcome.current.id} revision ${outcome.current.revision} ${outcome.unchanged ? "already matches" : "recut onto"} ${outcome.result.baseSha}`,
+  )
+  return outcome.admitted.some(
+    (run) =>
+      run.status === "failed" &&
+      run.prs.some((member) => member.id === outcome.current.id && member.revision === outcome.current.revision),
+  )
+    ? 1
+    : 0
+}
+
+type ExecuteRecutPrOptions = Readonly<{
+  revision?: number
+  queue?: boolean
+  force?: boolean
+  admit?: boolean
+  transition?: PRFreshnessTransition
+}>
+
+async function executeRecutPr(
+  app: YrdCliApp,
+  services: Pick<YrdCliServices, "recut">,
+  selector: string,
+  options: ExecuteRecutPrOptions,
+  io: YrdCliIO,
+) {
   const service = services.recut ?? configuration("pr.recut capability is not installed")
   const pr = requiredPr(app, selector)
+  const expectedCurrent = { revision: pr.revision, headSha: pr.headSha }
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
   }
@@ -1234,6 +1267,8 @@ async function recutPr(
     patchId: result.patchId,
     reviewCarried: approval !== undefined,
     ...(result.composition === undefined ? {} : { composition: result.composition }),
+    expectedCurrent,
+    ...(options.transition === undefined ? {} : { transition: options.transition }),
   })
   const unchanged = recorded.events.length === 0
 
@@ -1253,7 +1288,9 @@ async function recutPr(
       raiseFailure("refusal", "recut-not-ready", `yrd: PR '${current.id}' is ${current.status}, not ready`)
     }
     if (!app.bays.checksRequested(current.id)) await app.bays.requestChecks({ pr: current.id })
-    admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
+    if (options.admit !== false) {
+      admitted = await app.queue.admit({ prs: [current.id] }, runtimeOptions(io))
+    }
     current = requiredPr(app, current.id)
   }
   const output = {
@@ -1268,19 +1305,7 @@ async function recutPr(
     lineage: prRevisionLineage(current).map((revision) => revision.revision),
     unchanged,
   }
-  await printResult(
-    io,
-    jsonEnabled(options),
-    output,
-    `${current.id} revision ${current.revision} ${unchanged ? "already matches" : "recut onto"} ${result.baseSha}`,
-  )
-  return admitted.some(
-    (run) =>
-      run.status === "failed" &&
-      run.prs.some((member) => member.id === current.id && member.revision === current.revision),
-  )
-    ? 1
-    : 0
+  return { admitted, current, output, result, unchanged }
 }
 
 async function reviewPr(
@@ -3139,12 +3164,196 @@ function residentCycleRecovery(error: unknown): ResidentCycleRecovery | undefine
   return undefined
 }
 
+type ResidentQueueFreshnessTransition =
+  | Readonly<{
+      status: "refreshed"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      headSha: string
+      patchId: string
+    }>
+  | Readonly<{
+      status: "refused"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      code: string
+      message: string
+    }>
+  | Readonly<{
+      status: "deferred"
+      pr: string
+      revision: number
+      fromBase: string | undefined
+      toBase: string
+      code: "recut-current-changed"
+      message: string
+    }>
+  | Readonly<{
+      status: "recovered"
+      pr: string
+      revision: number
+      runs: readonly string[]
+    }>
+
+/**
+ * Apply the admitted -> refreshed Queue transition before the resident takes
+ * its next run snapshot. The transition deliberately stays inside the existing
+ * serialized resident cycle: it reuses the installed recutter and journal
+ * rather than starting another writer or scheduler.
+ */
+export async function refreshAdmittedQueueRevisions(
+  app: YrdCliApp,
+  services: Pick<YrdCliServices, "recut">,
+  io: YrdCliIO,
+): Promise<readonly ResidentQueueFreshnessTransition[]> {
+  const snapshot = stateOf(app)
+  const outcomes: ResidentQueueFreshnessTransition[] = []
+  const interrupted = Object.values(snapshot.bays.prs).filter((pr) => pr.recut?.transition?.to === "refreshed")
+  const staleRunsByPr = new Map<string, QueueRun[]>()
+  const staleRunIds = new Set<string>()
+  for (const pr of interrupted) {
+    const claim = snapshot.queues.authority.claims[pr.id]
+    if (claim?.consumedBy === undefined || (claim.revision === pr.revision && claim.headSha === pr.headSha)) {
+      continue
+    }
+    const run = app.queue.get(claim.consumedBy)
+    if (run === undefined || Queues.terminal(run)) continue
+    staleRunsByPr.set(pr.id, [run])
+    staleRunIds.add(run.id)
+  }
+  for (const run of [...staleRunIds].toSorted((left, right) =>
+    left.localeCompare(right, undefined, { numeric: true }),
+  )) {
+    await app.queue.cancelRun({
+      run,
+      by: io.runner ?? "yrd-cli",
+      reason: "recover interrupted admitted-to-refreshed Queue transition",
+    })
+  }
+  for (const pr of interrupted) {
+    const runs = staleRunsByPr.get(pr.id)
+    if (runs === undefined) continue
+    const ids = runs.map(({ id }) => id)
+    outcomes.push({ status: "recovered", pr: pr.id, revision: pr.revision, runs: ids })
+    app.log.info?.("resident queue recovered an interrupted freshness transition", {
+      action: "queue-freshness-recovered",
+      pr: pr.id,
+      revision: pr.revision,
+      runs: ids,
+    })
+  }
+  const candidates = Object.values(snapshot.bays.prs)
+    .filter((pr) => pr.status === "submitted" && app.bays.checksRequested(pr.id))
+    .toSorted(
+      (left, right) =>
+        baseIdentity(left.base).localeCompare(baseIdentity(right.base)) ||
+        left.id.localeCompare(right.id, undefined, { numeric: true }),
+    )
+  if (candidates.length === 0) return outcomes
+
+  const groups = await queueTargetGroups(new Set(candidates.map((pr) => pr.base)), io)
+  for (const candidate of candidates) {
+    if (io.drainSignal?.aborted === true) break
+    const target = groups.find(
+      (group) => group.aliases.has(candidate.base) || group.aliases.has(baseIdentity(candidate.base)),
+    )
+    if (target?.headSha === undefined) {
+      raiseFailure(
+        "infrastructure",
+        "queue-base-unresolved",
+        `yrd: resident auto-recut could not resolve queue base '${candidate.base}' for PR '${candidate.id}'`,
+      )
+    }
+    if (candidate.baseSha === target.headSha) continue
+
+    try {
+      const recut = await executeRecutPr(
+        app,
+        services,
+        candidate.id,
+        {
+          queue: true,
+          force: true,
+          admit: false,
+          transition: { from: "admitted", to: "refreshed" },
+        },
+        io,
+      )
+      outcomes.push({
+        status: "refreshed",
+        pr: recut.current.id,
+        revision: recut.current.revision,
+        fromBase: candidate.baseSha,
+        toBase: recut.result.baseSha,
+        headSha: recut.current.headSha,
+        patchId: recut.result.patchId,
+      })
+      app.log.info?.("resident queue refreshed an admitted revision onto the current base", {
+        action: "queue-freshness-refreshed",
+        pr: recut.current.id,
+        revision: recut.current.revision,
+        fromBase: candidate.baseSha,
+        toBase: recut.result.baseSha,
+        patchId: recut.result.patchId,
+      })
+    } catch (error) {
+      const failure = failureFact(error)
+      if (failure?.kind !== "refusal") throw error
+      if (failure.code === "recut-current-changed") {
+        outcomes.push({
+          status: "deferred",
+          pr: candidate.id,
+          revision: candidate.revision,
+          fromBase: candidate.baseSha,
+          toBase: target.headSha,
+          code: "recut-current-changed",
+          message: failure.message,
+        })
+        app.log.info?.("resident queue deferred freshness after the current revision changed", {
+          action: "queue-freshness-deferred",
+          pr: candidate.id,
+          revision: candidate.revision,
+          fromBase: candidate.baseSha,
+          toBase: target.headSha,
+          code: failure.code,
+          reason: failure.message,
+        })
+        continue
+      }
+      outcomes.push({
+        status: "refused",
+        pr: candidate.id,
+        revision: candidate.revision,
+        fromBase: candidate.baseSha,
+        toBase: target.headSha,
+        code: failure.code,
+        message: failure.message,
+      })
+      app.log.warn?.("resident queue could not refresh an admitted revision", {
+        action: "queue-freshness-refused",
+        pr: candidate.id,
+        revision: candidate.revision,
+        fromBase: candidate.baseSha,
+        toBase: target.headSha,
+        code: failure.code,
+        reason: failure.message,
+      })
+    }
+  }
+  return outcomes
+}
+
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
   options: { steps?: unknown; json?: boolean; interval?: number; watch?: boolean },
   io: YrdCliIO,
   gate: () => Promise<void>,
+  services: Pick<YrdCliServices, "recut"> = {},
 ): Promise<YrdCliExitCode> {
   if (options.watch === true) {
     // `--watch` is a DEPRECATED no-op alias of follow (the default). Reaching
@@ -3183,6 +3392,14 @@ export async function followQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
+      // The optional default preserves the narrow followQueueRuns test/programmatic
+      // seam. The installed CLI always supplies the recutter; a caller that does
+      // not install one retains the historical drain-only behavior.
+      const freshness = services.recut === undefined ? [] : await refreshAdmittedQueueRevisions(app, services, io)
+      // A mechanical recut may itself take long enough for installed Queue
+      // definitions to move. Re-prove the baseline before admitting its fresh
+      // revision; never start a Run under the pre-recut gate snapshot.
+      if (freshness.length > 0) await gate()
       let runs: readonly QueueRun[]
       try {
         runs = await runQueues(app, selectors, options, io)
@@ -3894,7 +4111,7 @@ function buildProgram(
     .action(async (selectors, options) => {
       const gate = () => requireFreshInstalledBaseline(installedServices())
       if (resolveQueueRunMode(selectors, options) === "follow") {
-        setExit(await followQueueRuns(installed(), selectors, options, io, gate))
+        setExit(await followQueueRuns(installed(), selectors, options, io, gate, installedServices()))
         return
       }
       await gate()

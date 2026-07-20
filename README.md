@@ -361,6 +361,15 @@ still receives a successor revision with the derived patch/tree certificate.
 detail, and watch output retain the recut lineage and cumulative source-ready
 age while reporting the successor revision's queue wait separately.
 
+The resident Queue owns freshness after admission. Before each run snapshot it
+compares every admitted revision's immutable base with the authoritative base;
+when the base advanced, it records an `admitted -> refreshed` recut on the same
+PR with the same patch-id lineage and a fresh certificate. The append carries
+an expected-current revision/head guard, so an authored revision that arrives
+while Git proof is running wins and the stale automatic result is deferred.
+Patch drift and gitlink pins that require authored composition remain loud,
+typed refusals; an independent PR can still refresh in the same cycle.
+
 For a human-authored root carrier, use the machine-owned path rather than
 attaching a composition manifest:
 
@@ -520,7 +529,9 @@ rejected work with `yrd pr runs <PR>`, fix its source branch, then run `yrd pr
 submit <branch>` again. That appends a fresh revision and records submit and
 check authority for its exact head; check admission consumes the check fact,
 and an integrating Queue run consumes the submit fact. Queue commands cannot
-mint or refresh either authority.
+mint authored authority. The resident freshness transition is the one
+mechanical carry-forward: its certified successor atomically retains the
+admitted revision's submit and check authority on the same PR.
 
 To stop a resident `queue run` (its follow-by-default form), send `SIGINT` (Ctrl-C) or `SIGTERM`.
 The first signal stops new admission, lets the active run finish, and exits with
