@@ -235,6 +235,12 @@ export function createSignalObserver(
       if (appended.appended) wake()
       return appended
     },
+    // Checkpoint capability MUST pass through: this wrapper feeds every app
+    // (host.ts uses signals.journal when signals are active), and dropping it
+    // silently made the whole estate checkpoint-less — no writer ever flushed,
+    // so every process paid the full cold fold (2026-07-20, 25s pr list).
+    // Snapshot compaction keeps the full prefix, so observer reads stay whole.
+    ...(options.journal.checkpoint === undefined ? {} : { checkpoint: options.journal.checkpoint }),
   })
 
   return Object.freeze({

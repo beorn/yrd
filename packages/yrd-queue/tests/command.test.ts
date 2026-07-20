@@ -5,7 +5,7 @@
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, watch, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -1902,10 +1902,16 @@ describe("Queue command adapters", () => {
     expect(progressing.mergeRuns).toEqual(["merge"])
 
     await using stalled = await controlledQueue()
-    const stalledRun = stalled.app.queue.run({ prs: ["PR1"] }, { runner: "same-runner", leaseMs: 80, heartbeatMs: 20 })
+    const stalledRun = stalled.app.queue.run(
+      { prs: ["PR1"] },
+      { runner: "same-runner", leaseMs: 200, heartbeatMs: 150 },
+    )
     await stalled.started.promise
     await Bun.sleep(30)
     const recovered = await stalled.app.queue.recover({
+      // Advance the operator's recovery cutoff beyond the still-live lease;
+      // the resident heartbeat has not yet sampled, so external recovery owns
+      // this transition deterministically instead of racing self-settlement.
       recoveryTime: new Date(Date.now() + 1_000).toISOString(),
     })
     const ownershipAborted = await Promise.race([
@@ -2071,36 +2077,34 @@ describe("Queue command adapters", () => {
     const stdoutPath = join(dir, "stdout.log")
     const stderrPath = join(dir, "stderr.log")
     const outputPath = join(dir, "output.log")
-    const watcherAbort = new AbortController()
-    using _watcher = { [Symbol.dispose]: () => watcherAbort.abort() }
-    const events = watch(dir, { signal: watcherAbort.signal })[Symbol.asyncIterator]()
     const offsets = new Map([
       ["stdout.log", 0],
       ["stderr.log", 0],
     ])
     const observedStreams: string[] = []
-    const nextGrowth = async (): Promise<string> => {
-      while (true) {
-        const event = await events.next()
-        if (event.done) throw new Error("artifact watcher ended before observing output growth")
-        const filename = event.value.filename?.toString()
-        const offset = filename === undefined ? undefined : offsets.get(filename)
-        if (filename === undefined || offset === undefined) continue
-        let bytes: Uint8Array
-        try {
-          bytes = await readFile(join(dir, filename))
-        } catch (cause) {
-          if ((cause as NodeJS.ErrnoException).code === "ENOENT") continue
-          throw cause
-        }
-        if (bytes.byteLength <= offset) continue
-        offsets.set(filename, bytes.byteLength)
-        return filename.slice(0, -".log".length)
-      }
+    const nextGrowth = async (filename: "stdout.log" | "stderr.log"): Promise<string> => {
+      const offset = offsets.get(filename) ?? 0
+      let length = offset
+      await vi.waitFor(
+        async () => {
+          let bytes: Uint8Array
+          try {
+            bytes = await readFile(join(dir, filename))
+          } catch (cause) {
+            if ((cause as NodeJS.ErrnoException).code === "ENOENT") return
+            throw cause
+          }
+          length = bytes.byteLength
+          expect(length).toBeGreaterThan(offset)
+        },
+        { timeout: 5_000, interval: 10 },
+      )
+      offsets.set(filename, length)
+      return filename.slice(0, -".log".length)
     }
 
     request.onOutput?.({ stream: "stdout", chunk: stdout.subarray(0, splitInsideCodePoint) })
-    observedStreams.push(await nextGrowth())
+    observedStreams.push(await nextGrowth("stdout.log"))
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
@@ -2111,7 +2115,7 @@ describe("Queue command adapters", () => {
     expect(settled).toBe(false)
 
     request.onOutput?.({ stream: "stderr", chunk: stderr })
-    observedStreams.push(await nextGrowth())
+    observedStreams.push(await nextGrowth("stderr.log"))
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout.subarray(0, splitInsideCodePoint)))
@@ -2123,7 +2127,7 @@ describe("Queue command adapters", () => {
     expect(settled).toBe(false)
 
     request.onOutput?.({ stream: "stdout", chunk: stdout.subarray(splitInsideCodePoint) })
-    observedStreams.push(await nextGrowth())
+    observedStreams.push(await nextGrowth("stdout.log"))
     await vi.waitFor(
       async () => {
         expect(Array.from(await readFile(stdoutPath))).toEqual(Array.from(stdout))

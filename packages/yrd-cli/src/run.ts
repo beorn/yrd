@@ -459,7 +459,7 @@ type TrackerBridge = Readonly<{
 function trackerDelivery(pr: DeepReadonly<PR>, state: DeepReadonly<YrdCliState>): TrackerDelivery | undefined {
   if (pr.issue === undefined) return undefined
   const revision = currentPRRev(pr)
-  const runs = Object.values(state.queues.records)
+  const runs = Queues.values(state.queues)
     .filter((run) =>
       run.prs.some(
         (candidate) =>
@@ -581,7 +581,7 @@ function knownBases(state: YrdCliState): string[] {
     "main",
     ...Object.values(state.bays.byId).map((bay) => bay.base),
     ...Object.values(state.bays.prs).map((pr) => pr.base),
-    ...Object.values(state.queues.records).map((run) => run.base),
+    ...Queues.values(state.queues).map((run) => run.base),
     ...Object.values(state.queues.pauses).map((pause) => pause.base),
   ]
 }
@@ -1413,7 +1413,7 @@ function prLandingOutcome(pr: DeepReadonly<PR>): PRLandingOutcome {
 }
 
 function allQueueRuns(app: YrdCliApp): Run[] {
-  return Object.keys(stateOf(app).queues.records)
+  return Queues.ids(stateOf(app).queues)
     .map((id) => app.queue.get(id))
     .filter((run): run is Run => run !== undefined)
     .toSorted(byQueueRunChronology)
@@ -2101,7 +2101,7 @@ async function queueStatusSnapshots(
 ): Promise<{ results: readonly QueueStatusResult[] }> {
   if (target.selected.size === 0 && target.bases.size === 0) {
     for (const pr of Object.values(state.bays.prs)) target.bases.add(pr.base)
-    for (const run of Object.values(state.queues.records)) target.bases.add(run.base)
+    for (const run of Queues.values(state.queues)) target.bases.add(run.base)
     if (target.bases.size === 0) target.bases.add("main")
   }
   const results: QueueStatusResult[] = []
@@ -2126,7 +2126,7 @@ function queueBases(state: YrdCliState): string[] {
   return [
     ...new Set([
       ...Object.values(state.bays.prs).map((pr) => baseIdentity(pr.base)),
-      ...Object.values(state.queues.records).map((run) => baseIdentity(run.base)),
+      ...Queues.values(state.queues).map((run) => baseIdentity(run.base)),
     ]),
   ].toSorted()
 }
@@ -2425,7 +2425,7 @@ function queueLogTargets(
   const target = resolveQueueTargets(state, selectors, base, pr)
   if (selectors.length === 0 && base === undefined && pr === undefined) {
     for (const item of Object.values(state.bays.prs)) target.bases.add(item.base)
-    for (const run of Object.values(state.queues.records)) target.bases.add(run.base)
+    for (const run of Queues.values(state.queues)) target.bases.add(run.base)
     if (target.bases.size === 0) target.bases.add("main")
   }
   return target
@@ -2616,10 +2616,7 @@ async function configDoctor(
   if (config === undefined) configuration("config doctor capability is not installed")
   await app.refresh()
   const state = stateOf(app)
-  const findings = diagnoseYrdFlows(
-    { prs: Object.values(state.bays.prs), runs: Object.values(state.queues.records) },
-    config,
-  )
+  const findings = diagnoseYrdFlows({ prs: Object.values(state.bays.prs), runs: Queues.values(state.queues) }, config)
   await printResult(
     io,
     jsonEnabled(options),

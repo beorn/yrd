@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Database } from "bun:sqlite"
 import { CauseSchema, Command, EventSchema, type Cause, type Event, type Journal } from "@yrd/core"
 import { createJournal, importOrphanJournal, readArchivedOrphans } from "@yrd/persistence"
 import canonicalize from "canonicalize"
@@ -51,6 +52,17 @@ async function accepted(journal: Journal<unknown>, value: ReturnType<typeof fram
   return result.cursor
 }
 
+function journal(dir: string): Journal<unknown> {
+  return createJournal({ dir, inject: { sqliteVersion: "3.53.0" } } as unknown as Parameters<typeof createJournal>[0])
+}
+
+function importOrphans(options: Parameters<typeof importOrphanJournal>[0]) {
+  return importOrphanJournal({
+    ...options,
+    inject: { sqliteVersion: "3.53.0" },
+  } as unknown as Parameters<typeof importOrphanJournal>[0])
+}
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "yrd-orphan-import-"))
   const dir = join(root, "journal")
@@ -60,28 +72,20 @@ async function fixture() {
 }
 
 async function authority(dir: string) {
-  const manifest = JSON.parse(await readFile(join(dir, "events-v4.manifest.json"), "utf8")) as {
-    tail: { path: string }
-    tailState: { path: string }
-  }
-  return Promise.all([
-    readFile(join(dir, "events-v4.manifest.json"), "base64"),
-    readFile(join(dir, manifest.tail.path), "base64"),
-    readFile(join(dir, manifest.tailState.path), "base64"),
-  ])
+  return readFile(join(dir, "journal.sqlite"), "base64")
 }
 
 describe("orphan journal import", () => {
-  it("archives valid v3 rows in v4 without exposing them to live replay", async () => {
+  it("archives valid v3 rows in SQLite without exposing them to live replay", async () => {
     const f = await fixture()
     try {
       const live = frame("live")
       const orphan = [frame("orphan-1"), frame("orphan-2")]
       const source = orphan.map(v3Line).join("")
       await writeFile(f.sourcePath, source)
-      const liveCursor = await accepted(createJournal({ dir: f.dir }), live, 0)
+      const liveCursor = await accepted(journal(f.dir), live, 0)
 
-      const imported = await importOrphanJournal({
+      const imported = await importOrphans({
         dir: f.dir,
         sourcePath: f.sourcePath,
         importedBy: "@adhoc/0",
@@ -94,7 +98,7 @@ describe("orphan journal import", () => {
         sourceSha256: createHash("sha256").update(source).digest("hex"),
       })
       expect(imported.cursor).toBeGreaterThan(liveCursor)
-      await expect(Array.fromAsync(createJournal({ dir: f.dir }).read())).resolves.toEqual([
+      await expect(Array.fromAsync(journal(f.dir).read())).resolves.toEqual([
         { cursor: imported.cursor, values: [live] },
       ])
       await expect(readArchivedOrphans({ dir: f.dir })).resolves.toMatchObject({
@@ -129,8 +133,8 @@ describe("orphan journal import", () => {
         ],
       })
       const checkpoint = { identity: "test/archive-aware-v1", cursor: imported.cursor, value: { live: 1 } }
-      await expect(createJournal({ dir: f.dir }).checkpoint?.save(checkpoint)).resolves.toBe(true)
-      await expect(createJournal({ dir: f.dir }).checkpoint?.load(checkpoint.identity)).resolves.toEqual(checkpoint)
+      await expect(journal(f.dir).checkpoint?.save?.(checkpoint)).resolves.toBe(true)
+      await expect(journal(f.dir).checkpoint?.load(checkpoint.identity)).resolves.toEqual(checkpoint)
       await expect(readFile(f.sourcePath, "utf8")).resolves.toBe(source)
     } finally {
       await rm(f.root, { recursive: true, force: true })
@@ -142,11 +146,11 @@ describe("orphan journal import", () => {
     try {
       const live = frame("collision")
       await writeFile(f.sourcePath, v3Line(live))
-      const cursor = await accepted(createJournal({ dir: f.dir }), live, 0)
+      const cursor = await accepted(journal(f.dir), live, 0)
       const before = await authority(f.dir)
 
       await expect(
-        importOrphanJournal({
+        importOrphans({
           dir: f.dir,
           sourcePath: f.sourcePath,
           importedBy: "@adhoc/0",
@@ -175,11 +179,11 @@ describe("orphan journal import", () => {
       const live = frame("live-identity", "same-payload")
       const orphan = frame("orphan-identity", "same-payload")
       await writeFile(f.sourcePath, v3Line(orphan))
-      const cursor = await accepted(createJournal({ dir: f.dir }), live, 0)
+      const cursor = await accepted(journal(f.dir), live, 0)
       const before = await authority(f.dir)
 
       await expect(
-        importOrphanJournal({
+        importOrphans({
           dir: f.dir,
           sourcePath: f.sourcePath,
           importedBy: "@adhoc/0",
@@ -205,14 +209,14 @@ describe("orphan journal import", () => {
       await writeFile(f.sourcePath, `${JSON.stringify(stored)}\n`)
 
       await expect(
-        importOrphanJournal({
+        importOrphans({
           dir: f.dir,
           sourcePath: f.sourcePath,
           importedBy: "@adhoc/0",
           importedAt: "2026-07-16T04:00:00.000Z",
         }),
       ).rejects.toThrow("checksum")
-      await expect(Array.fromAsync(createJournal({ dir: f.dir }).read())).resolves.toEqual([])
+      await expect(Array.fromAsync(journal(f.dir).read())).resolves.toEqual([])
       await expect(readArchivedOrphans({ dir: f.dir })).resolves.toEqual({ cursor: 0, records: [] })
     } finally {
       await rm(f.root, { recursive: true, force: true })
@@ -228,10 +232,12 @@ describe("orphan journal import", () => {
         dir: f.dir,
         sourcePath: f.sourcePath,
         importedBy: "@adhoc/0",
-        importedAt: "2026-07-16T04:00:00.000Z",
       }
-      const first = await importOrphanJournal(options)
-      const second = await importOrphanJournal(options)
+      const first = await importOrphans(options)
+      const second = await importOrphans(options)
+      const relocatedSource = join(f.root, "relocated-events-v3.orphan.jsonl")
+      await writeFile(relocatedSource, await readFile(f.sourcePath))
+      const relocated = await importOrphans({ ...options, sourcePath: relocatedSource })
 
       expect(first).toMatchObject({ status: "imported", records: 1 })
       expect(second).toEqual({
@@ -240,15 +246,63 @@ describe("orphan journal import", () => {
         records: 1,
         sourceSha256: first.sourceSha256,
       })
+      expect(relocated).toEqual(second)
       await expect(readArchivedOrphans({ dir: f.dir })).resolves.toMatchObject({
         cursor: first.cursor,
         records: [{ provenance: { "origin-row": orphan.command.id } }],
       })
-      await accepted(createJournal({ dir: f.dir }), orphan, first.cursor)
-      await expect(importOrphanJournal(options)).resolves.toMatchObject({
+      await accepted(journal(f.dir), orphan, first.cursor)
+      await expect(importOrphans(options)).resolves.toMatchObject({
         status: "live-collision",
         collisions: expect.arrayContaining([{ kind: "command", id: orphan.command.id }]),
       })
+    } finally {
+      await rm(f.root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects duplicate identities inside one orphan source before creating authority", async () => {
+    const f = await fixture()
+    try {
+      const duplicate = frame("duplicate-source-identity")
+      await writeFile(f.sourcePath, `${v3Line(duplicate)}${v3Line(duplicate)}`)
+
+      await expect(importOrphans({ dir: f.dir, sourcePath: f.sourcePath, importedBy: "@adhoc/0" })).rejects.toThrow(
+        "duplicate identity",
+      )
+      await expect(readFile(join(f.dir, "journal.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await rm(f.root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects duplicate semantic payloads inside one orphan source", async () => {
+    const f = await fixture()
+    try {
+      const first = frame("duplicate-payload-first", "same-source-payload")
+      const second = frame("duplicate-payload-second", "same-source-payload")
+      await writeFile(f.sourcePath, `${v3Line(first)}${v3Line(second)}`)
+
+      await expect(importOrphans({ dir: f.dir, sourcePath: f.sourcePath, importedBy: "@adhoc/0" })).rejects.toThrow(
+        "duplicate payload",
+      )
+      await expect(readFile(join(f.dir, "journal.sqlite"))).rejects.toMatchObject({ code: "ENOENT" })
+    } finally {
+      await rm(f.root, { recursive: true, force: true })
+    }
+  })
+
+  it("binds archived-orphan checksums to exact stored JSON bytes", async () => {
+    const f = await fixture()
+    try {
+      await writeFile(f.sourcePath, v3Line(frame("exact-orphan-bytes")))
+      await importOrphans({ dir: f.dir, sourcePath: f.sourcePath, importedBy: "@adhoc/0" })
+      {
+        using database = new Database(join(f.dir, "journal.sqlite"), { readwrite: true, strict: true })
+        database.query("UPDATE journal_orphans SET record_json = record_json || ' '").run()
+      }
+
+      await expect(readArchivedOrphans({ dir: f.dir })).rejects.toThrow("archived orphan checksum mismatch")
     } finally {
       await rm(f.root, { recursive: true, force: true })
     }

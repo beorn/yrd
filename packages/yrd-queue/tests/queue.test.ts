@@ -12,18 +12,35 @@ import { defineConfig, selectFlow, yrd, type YrdConfig } from "@yrd/config"
 import * as z from "zod"
 import {
   withQueue,
+  projectQueueStarted,
   withMerge,
   withStep,
+  Queues,
   QueueRecordSchema,
   ReplayQueueRecordSchema,
   type AddStepResult,
   type IntegratedShape,
   type Queue,
+  type QueueProjectionLookup,
+  type QueueProjectionLookupNode,
   type QueueRecord,
   type PRShape,
   type StepExecution,
   type StepRunner,
 } from "@yrd/queue"
+import {
+  activeQueueRootIds,
+  childRunId,
+  emptyQueueProjectionIndex,
+  indexQueueStart,
+  latestExactRunId,
+  latestPrefixRunId,
+  projectionLookupGet,
+  projectionLookupSet,
+  queueLookupKey,
+  recordReleasedAdmissionFailure,
+  releasedAdmissionFailures,
+} from "../src/projection-index.ts"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -33,6 +50,75 @@ const runtime = { runner: "local", leaseMs: 60_000 }
 const CheckResultSchema = z.object({ checked: z.boolean() }).strict()
 const ReviewResultSchema = z.object({ approved: z.boolean() }).strict()
 const DeployResultSchema = z.object({ environment: z.string() }).strict()
+
+type LookupCounters = { reads: number; enumerations: number }
+
+function deepFreeze<Value>(value: Value): Value {
+  const pending: object[] = []
+  const seen = new WeakSet<object>()
+  if (typeof value === "object" && value !== null) pending.push(value)
+  while (pending.length > 0) {
+    const current = pending.pop()
+    if (current === undefined || seen.has(current)) continue
+    seen.add(current)
+    for (const child of Object.values(current)) {
+      if (typeof child === "object" && child !== null) pending.push(child)
+    }
+    Object.freeze(current)
+  }
+  return value
+}
+
+function observeProjectionLookup<Value>(
+  lookup: Readonly<QueueProjectionLookup<Value>>,
+  counters: LookupCounters,
+): QueueProjectionLookup<Value> {
+  const nodes = new WeakMap<object, QueueProjectionLookupNode<Value>>()
+  const children = new WeakMap<object, Readonly<Record<string, QueueProjectionLookupNode<Value>>>>()
+  const wrapNode = (node: Readonly<QueueProjectionLookupNode<Value>>): QueueProjectionLookupNode<Value> => {
+    const cached = nodes.get(node)
+    if (cached !== undefined) return cached
+    const proxy = new Proxy(
+      { ...node },
+      {
+        get(target, property, receiver) {
+          counters.reads += 1
+          if (property === "children") return wrapChildren(target.children)
+          return Reflect.get(target, property, receiver)
+        },
+        ownKeys(target) {
+          counters.enumerations += 1
+          return Reflect.ownKeys(target)
+        },
+      },
+    )
+    nodes.set(node, proxy)
+    return proxy
+  }
+  const wrapChildren = (
+    value: Readonly<Record<string, QueueProjectionLookupNode<Value>>>,
+  ): Readonly<Record<string, QueueProjectionLookupNode<Value>>> => {
+    const cached = children.get(value)
+    if (cached !== undefined) return cached
+    const proxy = new Proxy(
+      { ...value },
+      {
+        get(target, property, receiver) {
+          counters.reads += 1
+          const result = Reflect.get(target, property, receiver) as QueueProjectionLookupNode<Value> | undefined
+          return result === undefined ? undefined : wrapNode(result)
+        },
+        ownKeys(target) {
+          counters.enumerations += 1
+          return Reflect.ownKeys(target)
+        },
+      },
+    )
+    children.set(value, proxy)
+    return proxy
+  }
+  return lookup.root === undefined ? {} : { root: wrapNode(lookup.root) }
+}
 
 type CheckResult = z.infer<typeof CheckResultSchema>
 type ReviewResult = z.infer<typeof ReviewResultSchema>
@@ -343,16 +429,164 @@ describe("Queue", () => {
     expect(app.queue.get("r1")).toMatchObject({ id: "R1", prs: [{ id: "PR1" }] })
     expect(app.queue.status("MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
     expect(app.queue.status("ORIGIN/MAIN")).toMatchObject({ base: "main", finished: [{ id: "R1" }] })
+    expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
   })
 
-  it.each([0, 10_000, 10_001])(
+  it("removes ordinary failed roots from the live authority projection after settlement", async () => {
+    await using app = await createQueueApp({
+      check: () => ({
+        status: "completed",
+        conclusion: "failure",
+        error: { code: "check-failed", message: "tests failed" },
+      }),
+    })
+    const pr = await submitBranch(app, "issue/settled-failure")
+
+    await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).resolves.toMatchObject([
+      { id: "R1", status: "completed", conclusion: "failure" },
+    ])
+    expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
+  })
+
+  it("drains the next submitted PR after releasing a passed check-only root", async () => {
+    await using app = await createQueueApp({ defaultSteps: ["check"] })
+    await submitBranch(app, "issue/resident-first")
+
+    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([
+      { id: "R1", status: "completed", conclusion: "success" },
+    ])
+    await submitBranch(app, "issue/resident-second")
+
+    await expect(app.queue.run({}, runtime)).resolves.toMatchObject([
+      { id: "R2", status: "completed", conclusion: "success" },
+    ])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
+  })
+
+  it("releases a replayed terminal root after a crash before its settled event", async () => {
+    const inner = createMemoryJournal()
+    let refuseSettlement = true
+    const journal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = value as { events?: readonly { name?: string }[] }
+        if (refuseSettlement && frame.events?.some((event) => event.name === "queue/run/settled")) {
+          refuseSettlement = false
+          throw new Error("yrd: settled append refused (injected crash)")
+        }
+        return inner.append(value, cursor)
+      },
+    }
+    const id = ids()
+
+    {
+      await using app = await createQueueApp({}, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/settled-crash-gap")
+      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow("settled append refused")
+      expect(app.queue.get("R1")).toMatchObject({
+        status: "completed",
+        conclusion: "success",
+        steps: [{ job: { status: "completed", conclusion: "success" } }],
+      })
+      expect(activeQueueRootIds(app.state().queues.authority)).toEqual(["R1"])
+    }
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual(["R1"])
+    const before = await Array.fromAsync(replayed.events())
+    await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([
+      expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
+    ])
+    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual([])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
+    const appended = (await Array.fromAsync(replayed.events())).slice(before.length)
+    expect(appended.map(({ name }) => name)).toEqual(["queue/run/settled"])
+  })
+
+  it("does not manufacture active roots when replaying terminal pre-settlement journals", async () => {
+    const inner = createMemoryJournal()
+    let refuseSettlement = true
+    const journal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = structuredClone(value) as {
+          events?: { name?: string; data?: { run?: Record<string, unknown> } }[]
+        }
+        for (const event of frame.events ?? []) {
+          if (event.name === "queue/run/started" && event.data?.run !== undefined) {
+            delete event.data.run.settlement
+          }
+        }
+        if (refuseSettlement && frame.events?.some((event) => event.name === "queue/run/settled")) {
+          refuseSettlement = false
+          throw new Error("yrd: settled append refused (legacy fixture boundary)")
+        }
+        return inner.append(frame, cursor)
+      },
+    }
+    const id = ids()
+
+    {
+      await using app = await createQueueApp({}, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/legacy-terminal-root")
+      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow(
+        "legacy fixture boundary",
+      )
+    }
+
+    await using replayed = await createQueueApp({}, journal, undefined, id)
+    expect(replayed.queue.get("R1")).toMatchObject({ status: "completed", conclusion: "success" })
+    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual([])
+    const before = await Array.fromAsync(replayed.events())
+    await expect(replayed.queue.recover({ recoveryTime: "2026-01-01T00:01:00.000Z" })).resolves.toEqual([])
+    expect(await Array.fromAsync(replayed.events())).toEqual(before)
+  })
+
+  it("refuses to migrate an unfinished pre-settlement Queue root", async () => {
+    const inner = createMemoryJournal()
+    let refuseFinish = true
+    const journal: typeof inner = {
+      read: (after, before) => inner.read(after, before),
+      append: (value, cursor) => {
+        const frame = structuredClone(value) as {
+          events?: { name?: string; data?: { run?: Record<string, unknown>; type?: string } }[]
+        }
+        for (const event of frame.events ?? []) {
+          if (event.name === "queue/run/started" && event.data?.run !== undefined) {
+            delete event.data.run.settlement
+          }
+        }
+        if (
+          refuseFinish &&
+          frame.events?.some((event) => event.name === "job/transitioned" && event.data?.type === "finish")
+        ) {
+          refuseFinish = false
+          throw new Error("yrd: job finish refused (legacy active fixture)")
+        }
+        return inner.append(frame, cursor)
+      },
+    }
+    const id = ids()
+
+    {
+      await using app = await createQueueApp({}, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/legacy-active-root")
+      await expect(app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)).rejects.toThrow("legacy active fixture")
+    }
+
+    await expect(createQueueApp({}, journal, undefined, id)).rejects.toThrow(
+      "Queue projection migration requires quiesced legacy roots; finish with the previous writer: R1",
+    )
+  })
+
+  it.each([10, 10_000, 100_000])(
     "advances one canonical run without enumerating %i historical runs",
     async (historicalRuns) => {
       await using app = await createQueueApp()
       const pr = await submitBranch(app, "issue/bounded-advance")
       await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
       const records = app.state().queues.records
-      const target = records.R1
+      const target = Queues.get(app.state().queues, "R1")
       if (target === undefined) throw new Error("expected canonical R1")
       const history = Array.from(
         { length: historicalRuns },
@@ -374,6 +608,240 @@ describe("Queue", () => {
       }
 
       expect(enumerations).toBe(0)
+    },
+  )
+
+  it("matches the former replay-order scans for every Queue projection index lookup", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/index-contract")
+    await app.queue.run({ prs: [pr.id], steps: ["check", "review"] }, runtime)
+    const seed = Queues.get(app.state().queues, "R1")
+    if (seed?.prs[0] === undefined) throw new Error("expected R1 projection fixture")
+    const later: QueueRecord = { ...seed, id: "R10" }
+    const child: QueueRecord = { ...seed, id: "R11", parent: later.id, isolationPart: 1 }
+    const replayedLast: QueueRecord = { ...seed, id: "R0" }
+
+    const replayOrder = [seed, later, child, replayedLast]
+    const formerScanOrder = replayOrder.toSorted((left, right) =>
+      left.id.localeCompare(right.id, undefined, { numeric: true }),
+    )
+    let index = emptyQueueProjectionIndex()
+    for (const record of replayOrder) index = indexQueueStart(index, record)
+    const released = [
+      { ...later, stepSelection: { authority: "admission" as const, steps: ["check", "review"] } },
+      { ...later, stepSelection: { authority: "admission" as const, steps: ["check", "review"] } },
+    ]
+    for (const record of released) index = recordReleasedAdmissionFailure(index, record)
+
+    const exactKey = queueLookupKey(seed.prs[0], seed.steps)
+    const prefix = seed.steps.slice(0, 1)
+    const prefixKey = queueLookupKey(seed.prs[0], prefix)
+    const scanChild = formerScanOrder.find((record) => record.parent === later.id && record.isolationPart === 1)?.id
+    const scanExact = formerScanOrder
+      .filter(
+        (record) =>
+          record.prs.length === 1 &&
+          record.prs[0] !== undefined &&
+          queueLookupKey(record.prs[0], record.steps) === exactKey,
+      )
+      .at(-1)?.id
+    const scanPrefix = formerScanOrder
+      .filter(
+        (record) =>
+          record.prs.length === 1 &&
+          record.prs[0] !== undefined &&
+          record.steps.length >= prefix.length &&
+          queueLookupKey(record.prs[0], record.steps.slice(0, prefix.length)) === prefixKey,
+      )
+      .at(-1)?.id
+    const scanFailures = released.filter(
+      (record) =>
+        record.stepSelection?.authority === "admission" &&
+        record.prs[0] !== undefined &&
+        queueLookupKey(record.prs[0], record.steps) === exactKey,
+    ).length
+
+    expect(childRunId(index, later.id, 1)).toBe(scanChild)
+    expect(latestExactRunId(index, seed.prs[0], seed.steps)).toBe(scanExact)
+    expect(latestPrefixRunId(index, seed.prs[0], prefix)).toBe(scanPrefix)
+    expect(releasedAdmissionFailures(index, seed.prs[0], seed.steps)).toBe(scanFailures)
+    expect(index.nextRunNumber).toBe(12)
+  })
+
+  it("round-trips a projection lookup through JSON and extends a deeply frozen value immutably", () => {
+    const seeded = projectionLookupSet({}, "alpha", { latestExact: "R1" })
+    const restored = deepFreeze(
+      JSON.parse(JSON.stringify(seeded)) as QueueProjectionLookup<Readonly<{ latestExact: string }>>,
+    )
+
+    const extended = projectionLookupSet(restored, "beta", { latestExact: "R2" })
+
+    expect(projectionLookupGet(restored, "alpha")).toEqual({ latestExact: "R1" })
+    expect(projectionLookupGet(restored, "beta")).toBeUndefined()
+    expect(projectionLookupGet(extended, "alpha")).toEqual({ latestExact: "R1" })
+    expect(projectionLookupGet(extended, "beta")).toEqual({ latestExact: "R2" })
+  })
+
+  it.each([10, 10_000, 100_000])(
+    "looks up a canonical Queue plan with bounded radix work across %i historical keys",
+    (size) => {
+      const snapshot = {
+        id: "PR-target",
+        branch: "issue/target",
+        revision: 1,
+        headSha: HEAD,
+        base: "main",
+        baseSha: BASE,
+      }
+      const steps = [
+        {
+          name: "check",
+          title: "check",
+          revision: "check-v1",
+          integrates: false,
+          needsIntegration: false,
+        },
+      ]
+      const key = queueLookupKey(snapshot, steps)
+      let plans = emptyQueueProjectionIndex().plans
+      for (let index = 0; index < size; index += 1) {
+        plans = projectionLookupSet(plans, `history-${index}`, { latestExact: `R${index + 1}` })
+      }
+      plans = deepFreeze(projectionLookupSet(plans, key, { latestExact: "R-target" }))
+      const counters: LookupCounters = { reads: 0, enumerations: 0 }
+      const index = { ...emptyQueueProjectionIndex(), plans: observeProjectionLookup(plans, counters) }
+
+      expect(latestExactRunId(index, snapshot, steps)).toBe("R-target")
+      expect(counters.enumerations).toBe(0)
+      expect(counters.reads).toBeLessThanOrEqual(256)
+    },
+  )
+
+  it.each([10, 10_000, 100_000])(
+    "indexes a new Queue run without enumerating %i historical lookup keys",
+    async (size) => {
+      await using app = await createQueueApp()
+      const pr = await submitBranch(app, "issue/bounded-index-write")
+      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      const record = Queues.get(app.state().queues, "R1")
+      const snapshot = record?.prs[0]
+      if (record === undefined || snapshot === undefined) throw new Error("expected bounded index-write fixture")
+      let plans = emptyQueueProjectionIndex().plans
+      for (let index = 0; index < size; index += 1) {
+        plans = projectionLookupSet(plans, `history-${index}`, { latestExact: `R${index + 2}` })
+      }
+      plans = deepFreeze(plans)
+      const counters: LookupCounters = { reads: 0, enumerations: 0 }
+      const index = Object.freeze({
+        ...emptyQueueProjectionIndex(),
+        plans: observeProjectionLookup(plans, counters),
+      })
+      const next = indexQueueStart(index, { ...record, id: `R${size + 2}` })
+
+      expect(projectionLookupGet(index.plans, "history-0")).toEqual({ latestExact: "R2" })
+      expect(latestExactRunId(index, snapshot, record.steps)).toBeUndefined()
+      expect(projectionLookupGet(next.plans, "history-0")).toEqual({ latestExact: "R2" })
+      expect(latestExactRunId(next, snapshot, record.steps)).toBe(`R${size + 2}`)
+      expect(latestPrefixRunId(next, snapshot, record.steps)).toBe(`R${size + 2}`)
+      expect(Object.isFrozen(plans.root)).toBe(true)
+      expect(counters.enumerations).toBeLessThanOrEqual(128)
+    },
+  )
+
+  it.each([10, 10_000, 100_000])(
+    "projects an actual Queue start without enumerating %i historical records or authorities",
+    async (size) => {
+      await using app = await createQueueApp()
+      const pr = await submitBranch(app, "issue/bounded-start-projection")
+      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      const seed = Queues.get(app.state().queues, "R1")
+      const seedAuthority = Queues.authorityRun(app.state().queues.authority, "R1")
+      if (seed === undefined || seedAuthority === undefined) throw new Error("expected Queue projection seed")
+
+      let records = app.state().queues.records
+      let runs = app.state().queues.authority.runs
+      for (let index = 0; index < size; index += 1) {
+        const id = `R${index + 2}`
+        records = projectionLookupSet(records, id, { ...seed, id })
+        runs = projectionLookupSet(runs, id, seedAuthority)
+      }
+      records = deepFreeze(records)
+      runs = deepFreeze(runs)
+      const recordCounters: LookupCounters = { reads: 0, enumerations: 0 }
+      const authorityCounters: LookupCounters = { reads: 0, enumerations: 0 }
+      const observed = {
+        ...app.state().queues,
+        records: observeProjectionLookup(records, recordCounters),
+        authority: {
+          ...app.state().queues.authority,
+          runs: observeProjectionLookup(runs, authorityCounters),
+        },
+      }
+      const id = `R${size + 2}`
+      const projected = projectQueueStarted(observed, { ...seed, id })
+
+      expect(Queues.get(observed, id)).toBeUndefined()
+      expect(Queues.get(projected, id)?.id).toBe(id)
+      expect(Queues.authorityRun(observed.authority, id)).toBeUndefined()
+      expect(Queues.authorityRun(projected.authority, id)).toBeDefined()
+      expect(recordCounters.enumerations).toBeLessThanOrEqual(128)
+      expect(authorityCounters.enumerations).toBeLessThanOrEqual(128)
+      expect(recordCounters.reads).toBeLessThanOrEqual(1_024)
+      expect(authorityCounters.reads).toBeLessThanOrEqual(1_024)
+    },
+  )
+
+  it.each([10, 10_000, 100_000])(
+    "keeps child, prefix, retry, claim, and next-id work independent of %i terminal runs",
+    async (size) => {
+      await using app = await createQueueApp()
+      const pr = await submitBranch(app, "issue/all-bounded-lookups")
+      await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+      const record = Queues.get(app.state().queues, "R1")
+      if (record?.prs[0] === undefined) throw new Error("expected bounded lookup fixture")
+      const key = queueLookupKey(record.prs[0], record.steps)
+      let plans = emptyQueueProjectionIndex().plans
+      let children = emptyQueueProjectionIndex().childByParentPart
+      for (let index = 0; index < size; index += 1) {
+        plans = projectionLookupSet(plans, `history-${index}`, {
+          latestExact: `R${index + 2}`,
+          latestPrefix: `R${index + 2}`,
+        })
+        children = projectionLookupSet(children, `history-${index}`, `R${index + 2}`)
+      }
+      plans = deepFreeze(
+        projectionLookupSet(plans, key, {
+          latestExact: "R1",
+          latestPrefix: "R1",
+          releasedAdmissionFailures: 2,
+        }),
+      )
+      children = deepFreeze(projectionLookupSet(children, `R1\0${1}`, "R-child"))
+      const counters: LookupCounters = { reads: 0, enumerations: 0 }
+      const index = {
+        ...emptyQueueProjectionIndex(),
+        nextRunNumber: size + 2,
+        childByParentPart: observeProjectionLookup(children, counters),
+        plans: observeProjectionLookup(plans, counters),
+      }
+
+      expect(childRunId(index, "R1", 1)).toBe("R-child")
+      expect(latestExactRunId(index, record.prs[0], record.steps)).toBe("R1")
+      expect(latestPrefixRunId(index, record.prs[0], record.steps)).toBe("R1")
+      expect(releasedAdmissionFailures(index, record.prs[0], record.steps)).toBe(2)
+      expect(Queues.nextId({ ...app.state().queues, index })).toBe(`R${size + 2}`)
+      expect(counters.enumerations).toBe(0)
+      expect(counters.reads).toBeLessThanOrEqual(1_024)
+
+      let historicalRunEnumerations = 0
+      const runs = new Proxy(app.state().queues.authority.runs, {
+        ownKeys(target) {
+          historicalRunEnumerations += 1
+          return Reflect.ownKeys(target)
+        },
+      })
+      activeQueueRootIds({ ...app.state().queues.authority, runs })
+      expect(historicalRunEnumerations).toBe(0)
     },
   )
 
@@ -566,6 +1034,10 @@ describe("Queue", () => {
     await app.queue.run({ prs: [] }, runtime)
     expect(app.queue.get("R1")?.status).toBe("completed")
     expect(runStartedForR1()).toBe(1)
+
+    // Recovery sees the same failed-parent/waiting-child tree, but neither an
+    // expired lease nor a newly settled root. It must not manufacture progress.
+    await expect(app.queue.recover({ recoveryTime: "2026-01-01T00:00:30.000Z" })).resolves.toEqual([])
 
     // A second drain cycle re-encounters the still-unsettled bisection tree.
     await app.queue.run({ prs: [] }, runtime)
@@ -760,7 +1232,7 @@ describe("Queue", () => {
     const result = await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: [] })
     expect(result.events).toEqual([])
     await expect(app.queue.run({ prs: [pr.id], steps: [] }, runtime)).resolves.toEqual([])
-    expect(app.state().queues.records).toEqual({})
+    expect(Queues.ids(app.state().queues)).toEqual([])
     expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("submitted")
   })
 
@@ -780,8 +1252,10 @@ describe("Queue", () => {
       await using app = await createQueueApp({ defaultSteps: ["check", "merge", "deploy"] }, journal, undefined, id)
       const pr = await submitBranch(app, "issue/auditable-merge-only")
       await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["merge"] })
-      expect(JSON.parse(JSON.stringify(app.state().queues.records.R1?.stepSelection))).toMatchObject(expectedSelection)
-      const record = app.state().queues.records.R1
+      expect(JSON.parse(JSON.stringify(Queues.get(app.state().queues, "R1")?.stepSelection))).toMatchObject(
+        expectedSelection,
+      )
+      const record = Queues.get(app.state().queues, "R1")
       if (record === undefined) throw new Error("expected a durable merge-only Run")
       const legacyRecord = {
         ...record,
@@ -894,7 +1368,7 @@ describe("Queue", () => {
       stepSelection: { authority: "explicit", steps: ["check", "merge"] },
       steps: [{ name: "check", job: { status: "queued" } }, { name: "merge" }],
     })
-    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
   })
 
   it("refuses to resume a replayed batch for only part of its pinned PR set", async () => {
@@ -1002,7 +1476,7 @@ describe("Queue", () => {
       "PR 'PR1' is already in active queue run 'R1'",
     )
     expect(checkCalls).toBe(0)
-    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
     expect(replayed.queue.get("R1")).toMatchObject({
       status: "queued",
       stepSelection: { authority: "configured", steps: ["check"] },
@@ -1034,7 +1508,7 @@ describe("Queue", () => {
       }),
       expect.objectContaining({ id: "R2", status: "waiting" }),
     ])
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
     expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
       revision: 2,
       delivery: "submitted",
@@ -1087,12 +1561,68 @@ describe("Queue", () => {
         expect.objectContaining({ id: "R1", status: "completed", conclusion: "success" }),
       ])
       await expect(replayed.queue.run({}, runtime)).resolves.toEqual([])
-      expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+      expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
       expect(deliveryOf(replayed.state().bays.prs.PR1)).toBe("integrated")
       expect(mergeCalls).toBe(1)
       expect(deployCalls).toBe(crashPoint === "post-merge-requested" ? 1 : 0)
     },
   )
+
+  it("resumes one waiting deploy-only run for an already integrated PR without admitting a duplicate", async () => {
+    const journal = createMemoryJournal()
+    const id = ids()
+    let deployCalls = 0
+    const options = {
+      deploy: () => {
+        deployCalls += 1
+        return { status: "waiting" as const, token: "deploy-pending" }
+      },
+    }
+
+    {
+      await using app = await createQueueApp(options, journal, undefined, id)
+      const pr = await submitBranch(app, "issue/deploy-only-resume")
+      await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).resolves.toMatchObject([
+        { id: "R1", status: "completed", conclusion: "success" },
+      ])
+      expect(deliveryOf(app.state().bays.prs[pr.id])).toBe("integrated")
+      await app.dispatch(app.commands.queue.run, { prs: [pr.id], steps: ["deploy"] })
+      expect(app.queue.get("R2")).toMatchObject({ status: "queued", steps: [{ name: "deploy" }] })
+      expect(activeQueueRootIds(app.state().queues.authority)).toEqual(["R2"])
+    }
+
+    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await expect(replayed.queue.run({ prs: ["PR1"], steps: ["deploy"] }, runtime)).resolves.toMatchObject([
+      { id: "R2", status: "waiting" },
+    ])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
+    expect(activeQueueRootIds(replayed.state().queues.authority)).toEqual(["R2"])
+    expect(deployCalls).toBe(1)
+  })
+
+  it.each([10, 10_000, 100_000])("allocates a Queue run id without enumerating %i historical records", (size) => {
+    let enumerations = 0
+    const records = new Proxy<Record<string, QueueRecord>>(
+      {},
+      {
+        ownKeys() {
+          enumerations += 1
+          return Array.from({ length: size }, (_, index) => `R${index + 1}`)
+        },
+        getOwnPropertyDescriptor() {
+          return { configurable: true, enumerable: true }
+        },
+      },
+    )
+    const state = {
+      ...Queues.empty({ batchSize: 1 }),
+      records,
+      index: { ...emptyQueueProjectionIndex(), nextRunNumber: size + 1 },
+    }
+
+    expect(Queues.nextId(state as Parameters<typeof Queues.nextId>[0])).toBe(`R${size + 1}`)
+    expect(enumerations).toBe(0)
+  })
 
   it("returns a replayed running Job without stealing it or admitting same-base intake", async () => {
     const journal = createMemoryJournal()
@@ -1125,7 +1655,7 @@ describe("Queue", () => {
     await expect(replayed.queue.run({}, runtime)).resolves.toEqual([
       expect.objectContaining({ id: "R1", status: "in_progress" }),
     ])
-    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1"])
     expect(deliveryOf(replayed.state().bays.prs.PR2)).toBe("submitted")
     expect(checkCalls).toBe(0)
   })
@@ -1170,7 +1700,7 @@ describe("Queue", () => {
         ],
       }),
     ])
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(deliveryOf(app.state().bays.prs[first.id])).toBe("submitted")
     expect(deliveryOf(app.state().bays.prs[second.id])).toBe("submitted")
     expect(checkCalls).toBe(0)
@@ -1283,7 +1813,7 @@ describe("Queue", () => {
     ])
     const failed = appended[0]
     if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
-    const authority = replayed.state().queues.authority.runs.R1
+    const authority = Queues.authorityRun(replayed.state().queues.authority, "R1")
     expect(authority?.released).toEqual({ reason: "job-lost", ref: failed.id })
     expect(appended.map(({ name }) => name)).not.toContain("pr/rejected")
 
@@ -1301,7 +1831,7 @@ describe("Queue", () => {
       revision: 1,
       headSha: HEAD,
     })
-    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
     expect(checkCalls).toBe(1)
     expect(mergeCalls).toBe(1)
   })
@@ -1344,7 +1874,7 @@ describe("Queue", () => {
     ])
 
     await aborted.promise
-    await expect(running).resolves.toMatchObject([{ status: "completed", conclusion: "cancelled" }])
+    await expect(running).resolves.toMatchObject([{ status: "completed", conclusion: "failure" }])
   })
 
   it("cancels a correlated PR when its active Queue Job is canceled", async () => {
@@ -1448,7 +1978,7 @@ describe("Queue", () => {
       steps: [{ name: "merge" }, { name: "deploy" }],
       shape: { integration: { commit: MERGED }, results: { deploy: { environment: "staging" } } },
     })
-    expect(app.state().queues.records.R1?.steps).toEqual([
+    expect(Queues.get(app.state().queues, "R1")?.steps).toEqual([
       expect.not.objectContaining({ index: expect.anything() }),
       expect.not.objectContaining({ index: expect.anything() }),
     ])
@@ -1519,7 +2049,7 @@ describe("Queue", () => {
             step.job.finishedAt !== "",
         ),
       ).toBe(true)
-      const record = app.state().queues.records[run.id]
+      const record = Queues.get(app.state().queues, run.id)
       expect(record).not.toHaveProperty("status")
       expect(record).not.toHaveProperty("jobIds")
       expect(record).not.toHaveProperty("shape")
@@ -1793,8 +2323,8 @@ describe("Queue", () => {
       review: { required: true, approved: false, stale: true },
     })
 
-    expect(app.state().queues.records).toHaveProperty("R1")
-    expect(Object.keys(app.state().queues.records)).toHaveLength(1)
+    expect(Queues.get(app.state().queues, "R1")).toBeDefined()
+    expect(Queues.ids(app.state().queues)).toHaveLength(1)
   })
 
   it("admits configured checks through Queue once and reuses their journaled result for integration", async () => {
@@ -1922,7 +2452,7 @@ describe("Queue", () => {
     let residentTurns = 0
     expect(await replayed.queue.run({}, { ...runtime, continueAdmissions: () => ++residentTurns <= 3 })).toEqual([])
     expect(checks).toBe(2)
-    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
 
     refuseEnvironment = false
     await replayed.bays.requestChecks({ pr: "PR1", baseSha: BASE })
@@ -2223,7 +2753,7 @@ describe("Queue", () => {
         (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
       )
       if (failed === undefined) throw new Error("expected the environment refusal to append queue/run/failed")
-      const authority = app.state().queues.authority.runs.R1
+      const authority = Queues.authorityRun(app.state().queues.authority, "R1")
       expect(authority?.released).toEqual({ reason: "queue-environment-refused", ref: failed.id })
       expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
     }
@@ -2234,7 +2764,7 @@ describe("Queue", () => {
       (applied) => applied.name === "queue/run/failed" && (applied.data as Readonly<{ run?: unknown }>).run === "R1",
     )
     if (replayedFailure === undefined) throw new Error("expected replay to retain queue/run/failed")
-    const replayedAuthority = replayed.state().queues.authority.runs.R1
+    const replayedAuthority = Queues.authorityRun(replayed.state().queues.authority, "R1")
     expect(replayedAuthority?.released).toEqual({
       reason: "queue-environment-refused",
       ref: replayedFailure.id,
@@ -2255,7 +2785,7 @@ describe("Queue", () => {
       revision: 1,
       headSha: HEAD,
     })
-    expect(Object.keys(replayed.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Queues.ids(replayed.state().queues)).toEqual(["R1", "R2"])
     expect(mergeCalls).toBe(2)
   })
 
@@ -2283,13 +2813,13 @@ describe("Queue", () => {
       revision: pr.revision,
       headSha: pr.headSha,
     })
-    expect(app.state().queues.authority.runs.R1).not.toHaveProperty("released")
+    expect(Queues.authorityRun(app.state().queues.authority, "R1")).not.toHaveProperty("released")
     expect((await Array.fromAsync(app.events())).map(({ name }) => name)).toContain("pr/rejected")
 
     const beforeRetry = await Array.fromAsync(app.events())
     await expect(app.queue.run({ prs: [pr.id], steps: ["merge"] }, runtime)).rejects.toThrow(/rejected/iu)
     expect(await Array.fromAsync(app.events())).toEqual(beforeRetry)
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(mergeCalls).toBe(1)
 
     await app.bays.submit({ branch: pr.branch, headSha: UPDATED, base: pr.base, baseSha: BASE })
@@ -2305,7 +2835,7 @@ describe("Queue", () => {
     expect(newRuns).toMatchObject([
       { id: "R2", status: "completed", conclusion: "success", prs: [{ id: pr.id, revision: 2, headSha: UPDATED }] },
     ])
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
     expect(prFacts(app.state().bays.prs[pr.id])).toMatchObject({
       delivery: "integrated",
       revision: 2,
@@ -2331,7 +2861,7 @@ describe("Queue", () => {
     if (first === undefined) throw new Error("expected authorized R1")
     expect(first).toMatchObject({ id: "R1", status: "completed", conclusion: "failure" })
     expect(deliveryOf(original.state().bays.prs[retried.id])).toBe("rejected")
-    const firstRecord = original.state().queues.records.R1
+    const firstRecord = Queues.get(original.state().queues, "R1")
     if (firstRecord === undefined) throw new Error("expected persisted R1")
     const uncorrelatedSnapshot = firstRecord.prs[0]
     if (uncorrelatedSnapshot === undefined) throw new Error("expected persisted uncorrelated PR snapshot")
@@ -2524,6 +3054,22 @@ describe("Queue", () => {
     })
   })
 
+  it("indexes a released canceled admission exactly like the former terminal scan", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/canceled-admission-index")
+    await app.bays.requestChecks({ pr: pr.id })
+    const admitted = (await app.queue.admit({ prs: [pr.id] }))[0]
+    if (admitted?.prs[0] === undefined) throw new Error("expected admission run")
+    expect(releasedAdmissionFailures(app.state().queues.index, admitted.prs[0], admitted.steps)).toBe(0)
+
+    await app.queue.cancelRun({ run: admitted.id, by: "operator", reason: "replace runner" })
+
+    expect(releasedAdmissionFailures(app.state().queues.index, admitted.prs[0], admitted.steps)).toBe(1)
+    expect(Queues.authorityRun(app.state().queues.authority, admitted.id)?.released).toMatchObject({
+      reason: "run-canceled",
+    })
+  })
+
   it("persists a queue pause and refuses unlisted PRs before creating a run", async () => {
     const journal = createMemoryJournal()
     const first = await createQueueApp({}, journal)
@@ -2543,7 +3089,7 @@ describe("Queue", () => {
     await expect(first.dispatch(first.commands.queue.run, { prs: [blocked.id] })).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
-    expect(first.state().queues.records).toEqual({})
+    expect(Queues.ids(first.state().queues)).toEqual([])
     await expect(first.queue.run({ prs: [allowed.id] }, runtime)).resolves.toHaveLength(1)
     await first.queue.resume("main")
     await expect(first.queue.run({ prs: [blocked.id] }, runtime)).resolves.toHaveLength(1)
@@ -2564,7 +3110,7 @@ describe("Queue", () => {
     await expect(app.dispatch(app.commands.queue.run, { prs: [pr.id] })).rejects.toThrow(
       `queue 'main' is paused: operator freeze`,
     )
-    expect(app.state().queues.records).toEqual({})
+    expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
   it("treats base aliases as one active queue before a second run starts", async () => {
@@ -3094,7 +3640,7 @@ describe("Queue", () => {
       { id: "R3", parent: "R1", status: "completed", conclusion: "success" },
     ])
     expect(checked).toEqual([["PR1", "PR2"], ["PR1"], ["PR2"]])
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3"])
     expect(Object.fromEntries(Object.values(app.state().bays.prs).map((pr) => [pr.id, prDeliveryState(pr)]))).toEqual({
       PR1: "submitted",
       PR2: "integrated",
@@ -3107,8 +3653,8 @@ describe("Queue", () => {
       return data.run === "R2" && data.error?.code === "queue-environment-refused"
     })
     if (childFailure === undefined) throw new Error("expected isolated environment refusal to fail R2")
-    expect(app.state().queues.authority.runs.R1).not.toHaveProperty("released")
-    expect(app.state().queues.authority.runs.R2).toMatchObject({
+    expect(Queues.authorityRun(app.state().queues.authority, "R1")).not.toHaveProperty("released")
+    expect(Queues.authorityRun(app.state().queues.authority, "R2")).toMatchObject({
       inheritedFrom: "R1",
       released: { reason: "queue-environment-refused", ref: childFailure.id },
     })
@@ -3130,7 +3676,7 @@ describe("Queue", () => {
         prs: [{ id: first.id, revision: first.revision, headSha: first.headSha }],
       },
     ])
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2", "R3", "R4"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2", "R3", "R4"])
     expect(prFacts(app.state().bays.prs[first.id])).toMatchObject({
       delivery: "integrated",
       revision: first.revision,

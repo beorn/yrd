@@ -31,6 +31,13 @@ async function stateDir(): Promise<string> {
   return root
 }
 
+function testJournal(dir: string) {
+  return createJournal({
+    dir,
+    inject: { sqliteVersion: "3.53.0" },
+  } as unknown as Parameters<typeof createJournal>[0])
+}
+
 function rejectedFrame(eventId = "00000000-0000-7000-8000-000000000003") {
   const command = { id: "00000000-0000-7000-8000-000000000001", op: "queue.finish" }
   return {
@@ -153,14 +160,27 @@ describe("PR signal observer", () => {
     await observer.close()
   })
 
+  it("passes the journal checkpoint capability through the observer wrapper", async () => {
+    const dir = await stateDir()
+    const source = testJournal(dir)
+    const observer = createSignalObserver({
+      journal: source,
+      stateDir: dir,
+      routes: {},
+      adapter: recordingAdapter([]),
+    })
+    expect(observer.journal.checkpoint).toBe(source.checkpoint)
+    await observer.close()
+  })
+
   it("replays a durable append-before-send crash once and records the event id before the next restart", async () => {
     const dir = await stateDir()
-    await createJournal({ dir }).append(rejectedFrame(), 0)
+    await testJournal(dir).append(rejectedFrame(), 0)
     const deliveries: SignalDelivery[] = []
 
     // The journal append belongs to the crashed process. Its observer never ran.
     const recovered = createSignalObserver({
-      journal: createJournal({ dir }),
+      journal: testJournal(dir),
       stateDir: dir,
       routes: { "pr/rejected": ["submitter"] },
       adapter: recordingAdapter(deliveries),
@@ -169,7 +189,7 @@ describe("PR signal observer", () => {
     await recovered.close()
 
     const restarted = createSignalObserver({
-      journal: createJournal({ dir }),
+      journal: testJournal(dir),
       stateDir: dir,
       routes: { "pr/rejected": ["submitter"] },
       adapter: recordingAdapter(deliveries),

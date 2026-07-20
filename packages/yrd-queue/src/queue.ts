@@ -78,7 +78,7 @@ import {
   type QueueRequirement,
   type Run,
   type RunConclusion,
-  type QueueRunAuthority,
+  type RunAuthority,
   type RunId,
   type QueueSummary,
   type QueueTerminalAssociation,
@@ -91,6 +91,19 @@ import {
   type PRShape,
   type PRSnapshot,
 } from "./model.ts"
+import {
+  activeQueueRootIds,
+  childRunId,
+  indexQueueStart,
+  latestExactRunId,
+  latestPrefixRunId,
+  latestRootRunId,
+  projectionLookupGet,
+  projectionLookupSet,
+  projectionLookupValues,
+  recordReleasedAdmissionFailure,
+  releasedAdmissionFailures,
+} from "./projection-index.ts"
 
 /**
  * A queue command refused to compose because a peer's Queue run already holds
@@ -123,10 +136,10 @@ export function isQueueRunningConflict(error: unknown): error is QueueRunningCon
 
 const StepNameSchema = z.string().regex(/^[a-z][a-z0-9_-]*$/iu)
 const QueueRequirementSchema = z.enum(["review"])
-const QueueRunIdSchema = z.string().trim().min(1)
+const RunIdSchema = z.string().trim().min(1)
 const StepExecutionSchema = z
   .object({
-    run: QueueRunIdSchema,
+    run: RunIdSchema,
     step: StepNameSchema,
     index: z.number().int().nonnegative(),
     prs: z.array(PRSnapshotSchema).min(1),
@@ -158,7 +171,8 @@ const AdmitArgsSchema = z
 export type AdmitArgs = Readonly<z.infer<typeof AdmitArgsSchema>>
 export type AdmitSelection = Readonly<{ prs?: readonly string[] }>
 
-const AdvanceArgsSchema = z.object({ run: QueueRunIdSchema }).strict()
+const AdvanceArgsSchema = z.object({ run: RunIdSchema }).strict()
+const SettledArgsSchema = AdvanceArgsSchema
 const IsolateArgsSchema = AdvanceArgsSchema.extend({ part: z.union([z.literal(0), z.literal(1)]) }).strict()
 export type PauseQueueArgs = Readonly<{ base: string; reason: string; allowedPRs: readonly string[] }>
 export type RecoverQueueOptions = Readonly<{ recoveryTime: string; reason?: string; runner?: string }>
@@ -186,12 +200,12 @@ const QueueFailedPRSchema = z
     actor: z.string().trim().min(1).optional(),
   })
   .strict()
-const LegacyQueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
+const LegacyQueueFailedSchema = z.object({ run: RunIdSchema, error: JobErrorSchema }).strict()
 const QueueFailedSchema = LegacyQueueFailedSchema.extend({ prs: z.array(QueueFailedPRSchema).min(1) }).strict()
 const ReplayQueueFailedSchema = z.union([QueueFailedSchema, LegacyQueueFailedSchema])
 const CancelRunArgsSchema = z
   .object({
-    run: QueueRunIdSchema,
+    run: RunIdSchema,
     by: z.string().trim().min(1),
     reason: z.string().trim().min(1),
   })
@@ -219,7 +233,7 @@ const QueueRejectedTerminalFactSchema = z.object({
   pr: PRIdSchema,
   revision: z.number().int().positive(),
   headSha: GitShaSchema.optional(),
-  run: QueueRunIdSchema.optional(),
+  run: RunIdSchema.optional(),
 })
 const AssociateTerminalsArgsSchema = z
   .object({ associations: z.array(PRTerminalAssociationSchema) })
@@ -357,7 +371,7 @@ function queueBase(state: DeepReadonly<RuntimeState>, selector: string): string 
     "main",
     ...Object.values(state.bays.byId).map((bay) => bay.base),
     ...Object.values(state.bays.prs).map((pr) => pr.base),
-    ...Object.values(state.queues.records).map((run) => run.base),
+    ...Queues.values(state.queues).map((run) => run.base),
     ...Object.values(state.queues.pauses).map((pause) => pause.base),
   ]
   return resolveBase(known, selector) ?? baseIdentity(selector)
@@ -370,6 +384,7 @@ export type QueueCommands = Readonly<{
     pause: CommandHandler<PauseQueueArgs, RuntimeState>
     resume: CommandHandler<Readonly<{ base: string }>, RuntimeState>
     advance: CommandHandler<Readonly<{ run: RunId }>, RuntimeState>
+    settled: CommandHandler<Readonly<{ run: RunId }>, RuntimeState>
     isolate: CommandHandler<Readonly<{ run: RunId; part: 0 | 1 }>, RuntimeState>
     cancelRun: CommandHandler<CancelRunArgs, RuntimeState>
     associateTerminals: CommandHandler<AssociateTerminalsArgs, RuntimeState>
@@ -503,12 +518,13 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/started": z.object({ run: QueueStartSchema }).strict(),
         "queue/run/failed": QueueFailedSchema,
         "queue/run/canceled": CancelRunArgsSchema,
+        "queue/run/settled": SettledArgsSchema,
         "queue/paused": PauseQueueArgsSchema,
         "queue/resumed": ResumeQueueArgsSchema,
         "queue/batch/isolated": z
           .object({
-            parent: QueueRunIdSchema,
-            run: QueueRunIdSchema,
+            parent: RunIdSchema,
+            run: RunIdSchema,
             part: z.union([z.literal(0), z.literal(1)]),
             prs: z.array(z.string().trim().min(1)).min(1),
           })
@@ -519,11 +535,13 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
         "queue/run/started": z.object({ run: ReplayQueueStartSchema }).strict(),
         "queue/run/failed": ReplayQueueFailedSchema,
         "queue/run/canceled": CancelRunArgsSchema,
+        "queue/run/settled": SettledArgsSchema,
       },
-      projectionVersion: "queues-v1",
+      projectionVersion: "queues-v3-target-model",
       project: projectQueues,
       create(yrd) {
         yrd.jobs.requireDefinitions(jobDefs)
+        assertLegacyQueueMigration(yrd.state() as unknown as DeepReadonly<RuntimeState>)
         return {
           queue: createQueue(
             computed(() => yrd.state().queues),
@@ -536,6 +554,7 @@ export function withQueue<const Steps extends readonly AnyStepDef[]>(
               pause: (args) => yrd.dispatch(commands.queue.pause, args),
               resume: (base) => yrd.dispatch(commands.queue.resume, { base }),
               advance: (run) => yrd.dispatch(commands.queue.advance, { run }),
+              settled: (run) => yrd.dispatch(commands.queue.settled, { run }),
               isolate: (run, part) => yrd.dispatch(commands.queue.isolate, { run, part }),
               cancelRun: (args) => yrd.dispatch(commands.queue.cancelRun, args),
               associateTerminals: (args) => yrd.dispatch(commands.queue.associateTerminals, args),
@@ -563,6 +582,7 @@ type QueueActions = Readonly<{
   pause(args: PauseQueueArgs): Promise<CommandResult>
   resume(base: string): Promise<CommandResult>
   advance(run: RunId): Promise<CommandResult>
+  settled(run: RunId): Promise<CommandResult>
   isolate(run: RunId, part: 0 | 1): Promise<CommandResult>
   cancelRun(args: CancelRunArgs): Promise<CommandResult>
   associateTerminals(args: AssociateTerminalsArgs): Promise<CommandResult>
@@ -639,7 +659,7 @@ function terminalAssociationPlan(state: DeepReadonly<RuntimeState>, appended = 0
           revision.head,
         )
       }
-      const runs = Object.values(state.queues.records)
+      const runs = Queues.values(state.queues)
         .filter((record) =>
           record.prs.some(
             (candidate) =>
@@ -772,6 +792,19 @@ function createQueue<Shape extends PRShape>(
     }
   }
 
+  const cleanupSettledRoots = async (): Promise<readonly RunId[]> => {
+    const cleaned: RunId[] = []
+    for (const id of activeQueueRootIds(runtime().queues.authority)) {
+      const snapshot = runtime()
+      const record = Queues.record(snapshot.queues, id)
+      const run = materializeRun(record, snapshot.jobs)
+      if (record.parent !== undefined || needsSettlement(snapshot, run)) continue
+      const result = await actions.settled(id)
+      if (result.events.length > 0) cleaned.push(id)
+    }
+    return cleaned
+  }
+
   const waiting = (selector: string, stepName?: string): WaitingQueueStep => {
     const snapshot = runtime()
     let record = Queues.resolve(snapshot.queues, selector)
@@ -883,10 +916,17 @@ function createQueue<Shape extends PRShape>(
 
   const settle = async (id: RunId, options: RunJobOptions): Promise<Run> => {
     const observed = current(id)
+    const markSettledRoot = async (): Promise<Run> => {
+      const snapshot = runtime()
+      const record = Queues.record(snapshot.queues, id)
+      const run = materializeRun(record, snapshot.jobs)
+      if (record.parent === undefined && !needsSettlement(snapshot, run)) await actions.settled(id)
+      return current(id)
+    }
     // Stale re-report guard #1: a run with nothing left to settle has ALREADY
     // emitted its one run lifecycle at its real settlement. Return it untouched —
     // no drive, no re-emit.
-    if (!needsSettlement(runtime(), observed)) return observed
+    if (!needsSettlement(runtime(), observed)) return markSettledRoot()
 
     const settleTree = async (): Promise<Run> => {
       const settled = await drive(id, options)
@@ -914,9 +954,12 @@ function createQueue<Shape extends PRShape>(
     // re-observing the parent (re-emitting a terminal run each cycle with a bogus
     // few-millisecond duration is the "R603 re-reported later, durationMs:3"
     // artifact). The child runs observe their own settlements.
-    if (Queues.terminal(observed)) return settleTree()
+    if (Queues.terminal(observed)) {
+      await settleTree()
+      return markSettledRoot()
+    }
 
-    return observeYrdLifecycle(
+    const result = await observeYrdLifecycle(
       log,
       {
         lifecycle: "run",
@@ -936,6 +979,8 @@ function createQueue<Shape extends PRShape>(
       },
       settleTree,
     )
+    await markSettledRoot()
+    return result
   }
 
   const startedRun = (result: CommandResult): Run | undefined => {
@@ -988,7 +1033,7 @@ function createQueue<Shape extends PRShape>(
       if (options.continueAdmissions?.() === false) break
       await actions.refresh()
       const snapshot = runtime()
-      const active = orderedQueues(snapshot.queues, snapshot.jobs).find(
+      const active = activeQueueRuns(snapshot.queues, snapshot.jobs).find(
         (candidate) =>
           (candidate.status === "queued" || candidate.status === "in_progress") &&
           samePlan(candidate.steps, admissionSteps(snapshot.queues, steps)),
@@ -1036,6 +1081,7 @@ function createQueue<Shape extends PRShape>(
         },
         async () => {
           await actions.refresh()
+          await cleanupSettledRoots()
           let snapshot = runtime()
           const selected =
             args.prs === undefined || args.prs.length === 0
@@ -1082,9 +1128,10 @@ function createQueue<Shape extends PRShape>(
           resultAttributes: (runs) => ({ runs: runs.map(runEvidence) }),
         },
         async () => {
-          if (args.steps?.length === 0) return []
           const explicitStepAuthority = args.steps !== undefined
           await actions.refresh()
+          await cleanupSettledRoots()
+          if (args.steps?.length === 0) return []
           let snapshot = runtime()
           const resumable = resumableQueueRoots(snapshot, args, steps)
           const roots: RunId[] = resumable.map((run) => run.id)
@@ -1182,7 +1229,7 @@ function createQueue<Shape extends PRShape>(
     async cancel(args) {
       const selected = new Set(args.prs)
       const affected: RunId[] = []
-      for (const candidate of orderedQueues(runtime().queues, runtime().jobs)) {
+      for (const candidate of activeQueueRuns(runtime().queues, runtime().jobs)) {
         if (!candidate.prs.some((pr) => selected.has(pr.id))) continue
         const active = candidate.steps[candidate.cursor]?.job
         const cancelable =
@@ -1227,6 +1274,10 @@ function createQueue<Shape extends PRShape>(
       return current(args.run)
     },
     async recover(recoverOptions) {
+      // Capture ownership at the synchronous API boundary. A resident runner can
+      // settle and release a lost root while recovery is entering its observed
+      // async operation; that race must not erase the run from recovery evidence.
+      const rootsBeforeRecovery = activeQueueRootIds(runtime().queues.authority)
       return observeYrdLifecycle(
         log,
         {
@@ -1249,7 +1300,9 @@ function createQueue<Shape extends PRShape>(
           )
           const affected = new Set<RunId>()
           let snapshot = runtime()
-          for (const candidate of orderedQueues(snapshot.queues, snapshot.jobs)) {
+          const recoveryRoots = new Set([...rootsBeforeRecovery, ...activeQueueRootIds(snapshot.queues.authority)])
+          const candidates = [...recoveryRoots].flatMap((root) => queueTree(snapshot.queues, snapshot.jobs, root))
+          for (const candidate of candidates) {
             const ownsRecoveredJob = candidate.steps.some(
               (step) => step.job !== undefined && recoveredJobs.has(step.job.id),
             )
@@ -1261,6 +1314,7 @@ function createQueue<Shape extends PRShape>(
             }
             if (ownsRecoveredJob) affected.add(candidate.id)
           }
+          for (const id of await cleanupSettledRoots()) affected.add(id)
           const final = runtime()
           return [...affected].map((id) => materializeRun(Queues.record(final.queues, id), final.jobs))
         },
@@ -1438,7 +1492,7 @@ function createQueueCommands(
       if (
         existing !== undefined &&
         status === "failed" &&
-        state.queues.authority.runs[existing.id]?.released === undefined
+        projectionLookupGet(state.queues.authority.runs, existing.id)?.released === undefined
       ) {
         requireFreshCheckAuthority(state.queues.authority, snapshot, existing.id)
       } else {
@@ -1581,6 +1635,20 @@ function createQueueCommands(
       advanceQueue(state, Queues.record(state.queues, args.run), byName, flows),
   })
 
+  const settled = command({
+    title: "Release settled queue run projection",
+    params: SettledArgsSchema,
+    apply(state: DeepReadonly<RuntimeState>, args: Readonly<{ run: RunId }>) {
+      const record = Queues.record(state.queues, args.run)
+      if (record.parent !== undefined) return { events: [] }
+      const run = materializeRun(record, state.jobs)
+      if (needsSettlement(state, run)) return { events: [] }
+      const root = resolveQueueAuthorityRoot(state.queues.authority, run.id)
+      const claimed = Object.values(state.queues.authority.claims).some((token) => token.consumedBy === root)
+      return { events: claimed ? [event("queue/run/settled", { run: root })] : [] }
+    },
+  })
+
   const isolate = command({
     title: "Isolate failed queue batch",
     params: IsolateArgsSchema,
@@ -1696,11 +1764,11 @@ function createQueueCommands(
     },
   })
 
-  return { queue: { admit, run, pause, resume, advance, isolate, cancelRun, associateTerminals } }
+  return { queue: { admit, run, pause, resume, advance, settled, isolate, cancelRun, associateTerminals } }
 }
 
 type QueueAuthorityKind = "submit" | "checks"
-type QueueAuthorityRelease = NonNullable<QueueRunAuthority["released"]>
+type QueueAuthorityRelease = NonNullable<RunAuthority["released"]>
 type QueueAuthorityGap = Readonly<{
   kind: QueueAuthorityKind
   pr: string
@@ -1809,29 +1877,37 @@ function projectRunAuthority(
   run: DeepReadonly<QueueStart>,
 ): QueueAuthorityState {
   if (run.parent !== undefined) {
-    const inherited = authority.runs[run.parent]
+    const inherited = projectionLookupGet(authority.runs, run.parent)
     const members = new Set(run.prs.map((pr) => pr.id))
     return {
       ...authority,
-      runs: {
-        ...authority.runs,
-        [run.id]: {
-          inheritedFrom: run.parent,
-          missingSubmits:
-            inherited === undefined
-              ? run.prs.map((pr) => pr.id)
-              : inherited.missingSubmits.filter((pr) => members.has(pr)),
-          missingChecks: inherited === undefined ? [] : inherited.missingChecks.filter((pr) => members.has(pr)),
-        },
-      },
+      runs: projectionLookupSet(authority.runs, run.id, {
+        inheritedFrom: run.parent,
+        missingSubmits:
+          inherited === undefined
+            ? run.prs.map((pr) => pr.id)
+            : inherited.missingSubmits.filter((pr) => members.has(pr)),
+        missingChecks: inherited === undefined ? [] : inherited.missingChecks.filter((pr) => members.has(pr)),
+      }),
     }
   }
 
   const gaps = queueAuthorityGaps(authority, run.prs, run.steps)
   const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
   const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
+  const claims: Record<string, QueueAuthorityToken> = { ...authority.claims }
+  const explicitSettlement = run.settlement === "explicit"
   const consumesSubmit = run.steps.some((step) => step.integrates)
   for (const pr of run.prs) {
+    const current = authority.current[pr.id]
+    if (explicitSettlement && current !== undefined && sameAuthorityToken(current, pr)) {
+      claims[pr.id] = {
+        pr: current.pr,
+        revision: current.revision,
+        headSha: current.headSha,
+        consumedBy: run.id,
+      }
+    }
     const kind = authorityRequirement(authority, pr, run.steps)
     if (kind === undefined) continue
     const token = kind === "submit" ? authority.submits[pr.id] : authority.checks[pr.id]
@@ -1842,6 +1918,7 @@ function projectRunAuthority(
       headSha: token.headSha,
       consumedBy: run.id,
     }
+    if (explicitSettlement) claims[pr.id] = consumed
     if (kind === "submit" && consumesSubmit) submits[pr.id] = consumed
     if (kind === "checks") checks[pr.id] = consumed
   }
@@ -1849,13 +1926,11 @@ function projectRunAuthority(
     ...authority,
     submits,
     checks,
-    runs: {
-      ...authority.runs,
-      [run.id]: {
-        missingSubmits: gaps.filter((gap) => gap.kind === "submit").map((gap) => gap.pr),
-        missingChecks: gaps.filter((gap) => gap.kind === "checks").map((gap) => gap.pr),
-      },
-    },
+    claims,
+    runs: projectionLookupSet(authority.runs, run.id, {
+      missingSubmits: gaps.filter((gap) => gap.kind === "submit").map((gap) => gap.pr),
+      missingChecks: gaps.filter((gap) => gap.kind === "checks").map((gap) => gap.pr),
+    }),
   }
 }
 
@@ -1865,7 +1940,7 @@ function resolveQueueAuthorityRoot(authority: DeepReadonly<QueueAuthorityState>,
   while (true) {
     if (seen.has(root)) throw new Error(`yrd: queue authority ancestry for '${run}' is cyclic`)
     seen.add(root)
-    const projected = authority.runs[root]
+    const projected = projectionLookupGet(authority.runs, root)
     if (projected === undefined) throw new Error(`yrd: queue run '${root}' has no authority projection`)
     if (projected.inheritedFrom === undefined) return root
     root = projected.inheritedFrom
@@ -1878,10 +1953,11 @@ function releaseRunAuthority(
   release: QueueAuthorityRelease,
 ): QueueAuthorityState {
   const root = resolveQueueAuthorityRoot(authority, run.id)
-  const projected = authority.runs[run.id]
+  const projected = projectionLookupGet(authority.runs, run.id)
   if (projected === undefined) throw new Error(`yrd: queue run '${run.id}' has no authority projection`)
   const submits: Record<string, QueueAuthorityToken> = { ...authority.submits }
   const checks: Record<string, QueueAuthorityToken> = { ...authority.checks }
+  const claims: Record<string, QueueAuthorityToken> = { ...authority.claims }
   for (const pr of run.prs) {
     const submit = authority.submits[pr.id]
     if (submit !== undefined && sameAuthorityToken(submit, pr) && submit.consumedBy === root) {
@@ -1891,13 +1967,24 @@ function releaseRunAuthority(
     if (check !== undefined && sameAuthorityToken(check, pr) && check.consumedBy === root) {
       checks[pr.id] = { pr: check.pr, revision: check.revision, headSha: check.headSha }
     }
+    if (claims[pr.id]?.consumedBy === root) delete claims[pr.id]
   }
   return {
     ...authority,
     submits,
     checks,
-    runs: { ...authority.runs, [run.id]: { ...projected, released: release } },
+    claims,
+    runs: projectionLookupSet(authority.runs, run.id, { ...projected, released: release }),
   }
+}
+
+function settleRunClaim(authority: DeepReadonly<QueueAuthorityState>, run: RunId): QueueAuthorityState {
+  const root = resolveQueueAuthorityRoot(authority, run)
+  const claims: Record<string, QueueAuthorityToken> = { ...authority.claims }
+  for (const [pr, token] of Object.entries(authority.claims)) {
+    if (token.consumedBy === root) delete claims[pr]
+  }
+  return { ...authority, claims }
 }
 
 function invalidatePRAuthority(
@@ -1942,6 +2029,30 @@ function terminalAuthorityMatches(
     )
   }
   return true
+}
+
+function projectSettledQueueRun(state: DeepReadonly<QueueState>, applied: Event): QueueState {
+  const settled = SettledArgsSchema.parse(applied.data)
+  const record = Queues.get(state.queues, settled.run)
+  if (record === undefined) throw new Error(`yrd: no queue run '${settled.run}'`)
+  if (record.parent !== undefined) throw new Error(`yrd: settled queue run '${settled.run}' is not a root`)
+  return {
+    queues: {
+      ...state.queues,
+      authority: settleRunClaim(state.queues.authority, record.id),
+    },
+  }
+}
+
+/** The one production projection path for a started Queue run. */
+export function projectQueueStarted(queues: DeepReadonly<QueuesState>, record: DeepReadonly<QueueRecord>): QueuesState {
+  if (Queues.get(queues, record.id) !== undefined) throw new Error(`yrd: duplicate queue run '${record.id}'`)
+  return {
+    ...queues,
+    records: Queues.set(queues.records, record),
+    index: indexQueueStart(queues.index, record),
+    authority: projectRunAuthority(queues.authority, record),
+  }
 }
 
 function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueState {
@@ -2110,7 +2221,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
   }
   if (applied.name === "queue/run/started") {
     const started = ReplayQueueStartSchema.parse((applied.data as { run?: unknown }).run)
-    if (state.queues.records[started.id] !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
+    if (Queues.get(state.queues, started.id) !== undefined) throw new Error(`yrd: duplicate queue run '${started.id}'`)
     const candidateId = started.candidateId ?? Queues.nextCandidateId(state.queues)
     const queueId = baseIdentity(started.queueId ?? started.base)
     const legacyCandidate =
@@ -2127,7 +2238,7 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
     if (legacyCandidate === undefined && state.queues.candidates[candidateId] === undefined) {
       throw new Error(`yrd: queue run '${started.id}' names missing Candidate '${candidateId}'`)
     }
-    const record = QueueRecordSchema.parse({
+    const replayed = ReplayQueueRecordSchema.parse({
       ...started,
       queueId,
       candidateId,
@@ -2135,23 +2246,25 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
       prs: started.prs.map((pr) => ({ ...pr, base: baseIdentity(pr.base) })),
       startedAt: applied.ts,
     })
-    return {
-      queues: {
-        ...state.queues,
-        candidates:
-          legacyCandidate === undefined
-            ? state.queues.candidates
-            : { ...state.queues.candidates, [legacyCandidate.id]: legacyCandidate },
-        records: { ...state.queues.records, [record.id]: record },
-        authority: projectRunAuthority(state.queues.authority, record),
-      },
+    const record: QueueRecord = { ...replayed, queueId, candidateId }
+    const queues = {
+      ...state.queues,
+      candidates:
+        legacyCandidate === undefined
+          ? state.queues.candidates
+          : { ...state.queues.candidates, [legacyCandidate.id]: legacyCandidate },
     }
+    return { queues: projectQueueStarted(queues, record) }
+  }
+  if (applied.name === "queue/run/settled") {
+    return projectSettledQueueRun(state, applied)
   }
   if (applied.name === "queue/run/failed") {
     const failed = ReplayQueueFailedSchema.parse(applied.data)
-    const record = state.queues.records[failed.run]
+    const record = Queues.get(state.queues, failed.run)
     if (record === undefined) throw new Error(`yrd: no queue run '${failed.run}'`)
     const releaseReason = queueAuthorityReleaseReason(failed.error)
+    const failedRecord = { ...record, failure: { at: applied.ts, error: failed.error } }
     return {
       queues: {
         ...state.queues,
@@ -2162,21 +2275,28 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
                 reason: releaseReason,
                 ref: applied.id,
               }),
-        records: {
-          ...state.queues.records,
-          [record.id]: { ...record, failure: { at: applied.ts, error: failed.error } },
-        },
+        records: Queues.set(state.queues.records, failedRecord),
+        index:
+          releaseReason === undefined
+            ? state.queues.index
+            : recordReleasedAdmissionFailure(state.queues.index, failedRecord),
       },
     }
   }
   if (applied.name === "queue/run/canceled") {
     const canceled = CancelRunArgsSchema.parse(applied.data)
-    const record = state.queues.records[canceled.run]
+    const record = Queues.get(state.queues, canceled.run)
     if (record === undefined) throw new Error(`yrd: no queue run '${canceled.run}'`)
     // A canceled run is terminal, but — unlike a failure — its member PRs are NOT
     // rejected. Release the run's queue authority (mirroring queue/run/failed) so
     // the still-submitted PRs are re-admissible on a future drain, and mark the
     // record canceled so advanceQueue stops reconciling it (no pr/canceled emission).
+    const canceledRecord = {
+      ...record,
+      canceledAt: applied.ts,
+      canceledBy: canceled.by,
+      cancelReason: canceled.reason,
+    }
     return {
       queues: {
         ...state.queues,
@@ -2184,15 +2304,8 @@ function projectQueues(state: DeepReadonly<QueueState>, applied: Event): QueueSt
           reason: "run-canceled",
           ref: applied.id,
         }),
-        records: {
-          ...state.queues.records,
-          [record.id]: {
-            ...record,
-            canceledAt: applied.ts,
-            canceledBy: canceled.by,
-            cancelReason: canceled.reason,
-          },
-        },
+        records: Queues.set(state.queues.records, canceledRecord),
+        index: recordReleasedAdmissionFailure(state.queues.index, canceledRecord),
       },
     }
   }
@@ -2302,6 +2415,7 @@ function startRun(
     })
   const run: QueueStart = {
     id,
+    settlement: "explicit",
     queueId: candidate.queueId,
     candidateId: candidate.id,
     prs,
@@ -2370,11 +2484,31 @@ function candidateFor(
   baseSha: string,
 ): DeepReadonly<Candidate> | undefined {
   const key = candidateContentKey(prs, baseSha)
-  const record = Object.values(queues.records).find((run) => {
+  const record = Queues.values(queues).find((run) => {
     const candidate = queues.candidates[run.candidateId]
     return candidate !== undefined && candidateContentKey(run.prs, candidate.baseSha) === key
   })
   return record === undefined ? undefined : queues.candidates[record.candidateId]
+}
+
+/**
+ * Queue v2 adds explicit live-root claims. Historical v1 runs have no marker,
+ * so replay must not manufacture a claim for every terminal run. A genuinely
+ * unfinished v1 root cannot be migrated losslessly without mirroring Jobs
+ * terminality into Queue state; fail loud and require the old writer to quiesce
+ * it before cutover instead.
+ */
+function assertLegacyQueueMigration(state: DeepReadonly<RuntimeState>): void {
+  const active = projectionLookupValues(state.queues.records)
+    .filter((record) => record.parent === undefined && record.settlement === undefined)
+    .map((record) => materializeRun(record, state.jobs))
+    .filter((run) => needsSettlement(state, run))
+    .map((run) => run.id)
+    .toSorted((left, right) => left.localeCompare(right, undefined, { numeric: true }))
+  if (active.length === 0) return
+  throw new Error(
+    `yrd: Queue projection migration requires quiesced legacy roots; finish with the previous writer: ${active.join(", ")}`,
+  )
 }
 
 function requestStep(step: RuntimeStep, run: Pick<QueueStart, "id" | "prs">, index: number, shape: PRShape) {
@@ -2671,7 +2805,7 @@ function shapeThrough(
 }
 
 function orderedQueues(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): Run[] {
-  return Object.values(queues.records)
+  return Queues.values(queues)
     .map((record) => materializeRun(record, jobs))
     .toSorted((left, right) => left.id.localeCompare(right.id, undefined, { numeric: true }))
 }
@@ -2683,7 +2817,7 @@ function runningQueue(
   except?: RunId,
 ): Run | undefined {
   const identity = baseIdentity(base)
-  return orderedQueues(queues, jobs).find(
+  return activeQueueRuns(queues, jobs).find(
     (run) =>
       run.id !== except &&
       baseIdentity(run.base) === identity &&
@@ -2697,23 +2831,28 @@ function childQueue(
   parent: RunId,
   part: 0 | 1,
 ): Run | undefined {
-  const record = Object.values(queues.records).find(
-    (candidate) => candidate.parent === parent && candidate.isolationPart === part,
-  )
+  const id = childRunId(queues.index, parent, part)
+  const record = id === undefined ? undefined : Queues.get(queues, id)
   return record === undefined ? undefined : materializeRun(record, jobs)
 }
 
 function queueTree(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, root: RunId): Run[] {
-  const ordered = orderedQueues(queues, jobs)
   const result: Run[] = []
   const visit = (id: RunId): void => {
-    const run = ordered.find((candidate) => candidate.id === id)
-    if (run === undefined) return
-    result.push(run)
-    for (const child of ordered.filter((candidate) => candidate.parent === id)) visit(child.id)
+    const record = Queues.get(queues, id)
+    if (record === undefined) return
+    result.push(materializeRun(record, jobs))
+    for (const part of [0, 1] as const) {
+      const child = childRunId(queues.index, id, part)
+      if (child !== undefined) visit(child)
+    }
   }
   visit(root)
   return result
+}
+
+function activeQueueRuns(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>): Run[] {
+  return activeQueueRootIds(queues.authority).flatMap((root) => queueTree(queues, jobs, root))
 }
 
 function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<JobsState>, base: string): QueueSummary {
@@ -2731,7 +2870,7 @@ function queueSummary(queues: DeepReadonly<QueuesState>, jobs: DeepReadonly<Jobs
 function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeStep[]): QueueAuditResult {
   const findings: QueueAuditFinding[] = []
   const installed = new Map(steps.map((step) => [step.name, step]))
-  for (const record of Object.values(state.queues.records)) {
+  for (const record of Queues.values(state.queues)) {
     for (const pr of record.prs) {
       if (state.bays.prs[pr.id] !== undefined) continue
       findings.push({
@@ -2741,7 +2880,7 @@ function auditQueues(state: DeepReadonly<RuntimeState>, steps: readonly RuntimeS
         pr: pr.id,
       })
     }
-    const authority = state.queues.authority.runs[record.id]
+    const authority = projectionLookupGet(state.queues.authority.runs, record.id)
     if (record.parent === undefined && authority !== undefined) {
       for (const pr of authority.missingSubmits) {
         findings.push({
@@ -2869,9 +3008,17 @@ function resumableQueueRoots(
   const selected = explicit === undefined ? undefined : new Set(explicit.map((pr) => pr.id))
   const admissions = admissionSteps(state.queues, steps)
   const requested = args.steps === undefined ? undefined : selectSteps(steps, args.steps)
-  return pendingQueueRoots(state).filter(
+  const indexed = (explicit ?? []).flatMap((pr) => {
+    const id = latestRootRunId(state.queues.index, Queues.snapshot(pr))
+    const record = id === undefined ? undefined : Queues.get(state.queues, id)
+    return record === undefined ? [] : [materializeRun(record, state.jobs)]
+  })
+  const candidates = new Map<RunId, Run>(pendingQueueRoots(state).map((run) => [run.id, run]))
+  for (const run of indexed) candidates.set(run.id, run)
+  return [...candidates.values()].filter(
     (run) =>
-      state.queues.authority.runs[run.id]?.released === undefined &&
+      needsSettlement(state, run) &&
+      projectionLookupGet(state.queues.authority.runs, run.id)?.released === undefined &&
       !samePlan(run.steps, admissions) &&
       (requested === undefined ||
         (samePlan(run.steps, requested) &&
@@ -2881,9 +3028,11 @@ function resumableQueueRoots(
 }
 
 function pendingQueueRoots(state: DeepReadonly<RuntimeState>): Run[] {
-  return orderedQueues(state.queues, state.jobs).filter(
-    (run) => run.parent === undefined && needsSettlement(state, run),
-  )
+  return activeQueueRootIds(state.queues.authority)
+    .map((id) => Queues.get(state.queues, id))
+    .filter((record): record is DeepReadonly<QueueRecord> => record !== undefined)
+    .map((record) => materializeRun(record, state.jobs))
+    .filter((run) => needsSettlement(state, run))
 }
 
 function needsSettlement(state: DeepReadonly<RuntimeState>, run: Run): boolean {
@@ -2899,19 +3048,6 @@ function admissionSteps(queues: DeepReadonly<QueuesState>, steps: readonly Runti
   const selected = selectSteps(steps, queues.defaultSteps)
   const boundary = selected.findIndex((step) => step.integrates || step.needsIntegration)
   return boundary < 0 ? selected : selected.slice(0, boundary)
-}
-
-function sameSnapshot(left: DeepReadonly<PRSnapshot>, right: DeepReadonly<PRSnapshot>): boolean {
-  return (
-    left.id === right.id &&
-    left.revision === right.revision &&
-    left.headSha === right.headSha &&
-    left.base === right.base &&
-    // PRRev identity is the immutable submitted head. A base SHA belongs to
-    // the Candidate, not the PRRev; when the caller has an exact Candidate
-    // base fact (for example a check request), keep the stronger comparison.
-    (right.baseSha === undefined || left.baseSha === right.baseSha)
-  )
 }
 
 function samePlan(actual: readonly DeepReadonly<InstalledStep>[], expected: readonly RuntimeStep[]): boolean {
@@ -2948,15 +3084,9 @@ function admissionRun(
   snapshot: DeepReadonly<PRSnapshot>,
   selected: readonly RuntimeStep[],
 ): Run | undefined {
-  return orderedQueues(state.queues, state.jobs)
-    .filter(
-      (run) =>
-        run.prs.length === 1 &&
-        run.prs[0] !== undefined &&
-        sameSnapshot(run.prs[0], snapshot) &&
-        samePlan(run.steps, selected),
-    )
-    .at(-1)
+  const id = latestExactRunId(state.queues.index, snapshot, selected)
+  const record = id === undefined ? undefined : Queues.get(state.queues, id)
+  return record === undefined ? undefined : materializeRun(record, state.jobs)
 }
 
 function checkFactRun(
@@ -2964,16 +3094,9 @@ function checkFactRun(
   snapshot: DeepReadonly<PRSnapshot>,
   selected: readonly RuntimeStep[],
 ): Run | undefined {
-  return orderedQueues(state.queues, state.jobs)
-    .filter(
-      (run) =>
-        run.prs.length === 1 &&
-        run.prs[0] !== undefined &&
-        sameSnapshot(run.prs[0], snapshot) &&
-        run.steps.length >= selected.length &&
-        samePlan(run.steps.slice(0, selected.length), selected),
-    )
-    .at(-1)
+  const id = latestPrefixRunId(state.queues.index, snapshot, selected)
+  const record = id === undefined ? undefined : Queues.get(state.queues, id)
+  return record === undefined ? undefined : materializeRun(record, state.jobs)
 }
 
 function checkRunStatus(run: Run, selectedCount: number): PREligibility["checks"]["status"] {
@@ -3000,16 +3123,7 @@ function automaticAdmissionAttemptsExhausted(
       (request.baseSha ?? prBaseSha(pr)) === snapshot.baseSha,
   ).length
   if (exactRequests === 0) return false
-  const releasedFailures = orderedQueues(state.queues, state.jobs).filter(
-    (run) =>
-      run.stepSelection?.authority === "admission" &&
-      run.prs.length === 1 &&
-      run.prs[0] !== undefined &&
-      sameSnapshot(run.prs[0], snapshot) &&
-      samePlan(run.steps, selected) &&
-      checkRunStatus(run, selected.length) === "failed" &&
-      state.queues.authority.runs[run.id]?.released !== undefined,
-  ).length
+  const releasedFailures = releasedAdmissionFailures(state.queues.index, snapshot, selected)
   return releasedFailures >= exactRequests + AUTOMATIC_ADMISSION_RETRIES
 }
 
@@ -3228,7 +3342,7 @@ function runnablePRs(
   const implicitQueue = args.prs === undefined || args.prs.length === 0
   const ignoredClaims = new Set(
     options.explicitStepAuthority === true
-      ? orderedQueues(state.queues, state.jobs)
+      ? activeQueueRuns(state.queues, state.jobs)
           .filter((run) => unstartedAdmission(run, state.queues, steps))
           .map((run) => run.id)
       : [],
@@ -3304,7 +3418,7 @@ function prEligibility(
       options.ignoreChecks !== true &&
       checks.status === "failed" &&
       (checks.run === undefined ||
-        state.queues.authority.runs[checks.run]?.released === undefined ||
+        projectionLookupGet(state.queues.authority.runs, checks.run)?.released === undefined ||
         exhaustedAutomaticAdmissions)
     ) {
       const run = checks.run === undefined ? "" : ` in ${checks.run}`
@@ -3334,7 +3448,7 @@ function prEligibility(
       message: `queue '${base}' is paused: ${pause.reason}; PR '${pr.id}' is not in the allowed set`,
     })
   }
-  const claimed = orderedQueues(state.queues, state.jobs).find(
+  const claimed = activeQueueRuns(state.queues, state.jobs).find(
     (run) =>
       !Queues.terminal(run) &&
       !options.ignoredClaims?.has(run.id) &&

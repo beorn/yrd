@@ -16,18 +16,18 @@ function per implementation detail.
 
 ## Domain Objects
 
-| Object     | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                              |
-| ---------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `YrdDef`   | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                                |
-| `Yrd`      | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `dispatch()`, `events()`, `close()`                                                            |
-| `Journal`  | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                                      |
-| `Process`  | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                        |
-| `Jobs`     | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
-| `Issues`   | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
-| `Bays`     | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
-| `Queue`    | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`          |
-| `Contests` | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
-| Signal observer | `createSignalObserver()`                  | Route an enumerated post-append event subset outside the Queue lane                         | `start()`, `close()`                                                                                                                      |
+| Object          | Created by                                   | Responsibility                                                                             | Main surface                                                                                                                              |
+| --------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `YrdDef`        | `createYrdDef()`                             | Immutable composition of state, commands, event schemas, projectors, and feature factories | `extend()`                                                                                                                                |
+| `Yrd`           | `createYrd()`                                | Command validation, idempotency, event projection, reactive state, and feature access      | `state`, `refresh()`, `journalSnapshot()`, `dispatch()`, `events()`, `close()`                                                            |
+| `Journal`       | `createMemoryJournal()` or `createJournal()` | Ordered durable frames with optimistic cursor concurrency                                  | `read()`, `append()`                                                                                                                      |
+| `Process`       | `createProcess()`                            | Scope-owned argv execution with bounded evidence and termination escalation                | `run()`, `close()`                                                                                                                        |
+| `Jobs`          | `withJobs()`                                 | Durable execution, leases, waiting work, retries, and recovery                             | `state`, `definition()`, `requireDefinitions()`, `get()`, `run()`, `runMany()`, `finish()`, `retry()`, `recover()`, `requested()`         |
+| `Issues`        | `withIssues()`                               | Resolve issue references through configured sources                                        | `sources`, `ref()`, `resolve()`                                                                                                           |
+| `Bays`          | `withBays()`                                 | Query isolated bays and own revision-bound PR facts                                        | `state`, bay/PR queries, `submitSelection()`, `ready()`, `review()`, `comment()`, regression records, check requests, lifecycle mutations |
+| `Queue`         | `withQueue()`                                | Admit checks and integrate eligible PRs through one configured scheduler                   | `state`, `steps()`, `admit()`, eligibility/check projections, `pause()`, `resume()`, `run()`, `finish()`, `recover()`, `audit()`          |
+| `Contests`      | `withContests()`                             | Run, evaluate, select, and promote competing implementations                               | `state`, `resolveBase()`, `get()`, `list()`, `compete()`, `evaluate()`, `waiting()`, `finish()`, `select()`, `promote()`                  |
+| Signal observer | `createSignalObserver()`                     | Route an enumerated post-append event subset outside the Queue lane                        | `start()`, `close()`                                                                                                                      |
 
 `Process`, `Git`, issue sources, workspaces, runners, evaluators, clocks, ids,
 loggers, and scopes are injected capabilities. A capability may be one
@@ -37,20 +37,25 @@ function or a small plain object; it is not a global singleton.
 
 The objects above operate on plain records:
 
-| Record                 | Meaning                                                                                                             |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `Command`              | Serializable request naming one registered handler and its arguments                                                |
-| `Event`                | Validated fact emitted by a command                                                                                 |
-| `CommandResult`        | Dispatched command, committed events, and optional JSON result value                                                |
-| `Issue`                | Versioned unit of intent from a configured issue source                                                             |
-| `Bay`                  | Isolated worktree and its current Git facts                                                                         |
-| `PR`                   | Revision history plus readiness, terminal Queue run, issue join, reviews, regressions, comments, and check requests |
-| `Job`                  | Durable executable lifecycle and evidence                                                                           |
-| `QueueRun`             | Pinned PR set, base, installed-step plan, reusable results, and integration facts                                   |
-| `Step`                 | Configured typed transition in a Queue                                                                              |
-| `Contest`              | Issue, competitors, attempts, selection, and promotion facts                                                        |
-| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin                                           |
-| `Artifact`             | Named evidence with a path or URL and media type                                                                    |
+| Record                 | Meaning                                                                                 |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `Command`              | Serializable request naming one registered handler and its arguments                    |
+| `Event`                | Validated fact emitted by a command                                                     |
+| `CommandResult`        | Dispatched command, committed events, and optional JSON result value                    |
+| `Issue`                | Versioned unit of intent from a configured issue source                                 |
+| `Bay`                  | Isolated worktree and its current Git facts                                             |
+| `FlowDef`              | Named submission predicate plus revision-pinned ordered steps                           |
+| `PR`                   | GitHub-shaped open/closed state, merged fact, flow pin, and immutable revision history  |
+| `PRRev`                | One immutable submitted head, composition, timing, and terminal evidence                |
+| `Candidate`            | Immutable queue/base plus ordered PR revision content selected for one or more attempts |
+| `Job`                  | Durable executable lifecycle and evidence                                               |
+| `Run`                  | Pinned PR set, base, installed-step plan, reusable results, and integration facts       |
+| `Runner`               | Submit/observe/cancel control-plane adapter with bounded admission                      |
+| `Context`              | Acquired execution location and candidate-access evidence recorded on a Job             |
+| `Step`                 | Configured typed transition in a Queue                                                  |
+| `Contest`              | Issue, competitors, attempts, selection, and promotion facts                            |
+| `ContestEvaluationRun` | One versioned evaluator Job and typed result for an immutable attempt pin               |
+| `Artifact`             | Named evidence with a path or URL and media type                                        |
 
 Persisted records contain JSON data only. Zod schemas validate every untyped
 boundary: CLI/config input, commands, events, Job input/output, adapter output,
@@ -80,7 +85,7 @@ const base = pipe(
   withBays({ jobs: bayJobs }),
 )
 
-const journal = await createJournal({ dir: stateDir })
+const journal = createJournal({ dir: stateDir })
 await using yrd = await createYrd(contests(queue(base)), {
   inject: { journal, scope, log, clock, id },
 })
@@ -141,10 +146,19 @@ replays committed frames and reruns the pure command decision. The filesystem
 adapter takes its OS lock only for repair, comparison, append, and data sync.
 There is no writer-lease API and no hidden async execution context.
 
-The filesystem format is checksummed JSONL. `Bun.JSONL.parseChunk` parses
-complete byte batches; Zod decodes frames. A final unterminated record is
-uncommitted and ignored by readers, then truncated under the next append lock.
-A malformed newline-terminated record is committed corruption and fails loud.
+The repository format is one strict `journal.sqlite` authority in WAL mode.
+`journal_events` holds the append tail; a singleton snapshot holds an exact
+cursor-addressable compacted prefix plus Core's projection checkpoint. Snapshot
+publication and delete-below-snapshot happen in one SQL transaction, so every
+previously committed opaque cursor remains replayable. Every stored frame and
+snapshot payload is checksummed and decoded through the production frame
+schema; corruption fails loud.
+
+Mutable connections use `synchronous=FULL`, are bounded by the POSIX writer
+lock, and are explicitly checkpointed and closed. Startup refuses WAL unless
+`sqlite_version()` reports a fixed runtime (`>=3.51.3`, or an official fixed
+`3.50.7` / `3.44.6` backport). Read-only journals expose checkpoint load but no
+save capability and do not create or migrate logical authority.
 
 `yrd.state` is the synchronous reactive signal for the latest state this
 runtime has observed. `await yrd.refresh()` incrementally catches up with Frames
@@ -171,11 +185,14 @@ cursor record may repeat that action.
 When a strict consumer needs a typed fact that old replay-only history omitted,
 the repair is an explicit domain command that appends a validated compensating
 event. Its planner must prove the relation or return a typed refusal. Yrd never
-rewrites committed JSONL or infers the missing fact inside a read projection.
+rewrites committed journal facts or infers the missing fact inside a read
+projection.
 
-The Journal warns at 10 MiB or 10,000 replayed frames. Compaction is explicit
-as-needed work; the warning tells operators to implement compaction and GC
-before raising either guardrail.
+Core coalesces a projection checkpoint every 256 projected frames and enforces
+a 512-frame high-water before accepting more mutable work. Persistence
+atomically moves covered tail rows into the exact snapshot prefix and deletes
+them from `journal_events`; this bounds cold tail replay without creating a
+second authority or a bespoke compactor.
 
 ## Layers
 

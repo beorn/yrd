@@ -20,11 +20,20 @@ import { JsonSchema, resolveSelector, type JsonValue } from "@yrd/core"
 import type { FlowPin } from "@yrd/config"
 import { JobErrorSchema, type Job, type JobError } from "@yrd/job"
 import * as z from "zod"
+import {
+  projectionLookupGet,
+  projectionLookupSet,
+  projectionLookupValues,
+  type QueueProjectionLookup,
+} from "./projection-lookup.ts"
+export type {
+  QueueProjectionLookup,
+  QueueProjectionLookupEntry,
+  QueueProjectionLookupNode,
+} from "./projection-lookup.ts"
 
 export type CandidateId = string
 export type RunId = string
-/** @deprecated Use RunId. Retained while downstream W2 views migrate. */
-export type QueueRunId = RunId
 export type StepName = string
 export type BatchConfig = false | number
 export type QueueRequirement = "review"
@@ -244,7 +253,7 @@ export type QueueAuthorityToken = Readonly<{
   consumedBy?: RunId
 }>
 
-export type QueueRunAuthority = Readonly<{
+export type RunAuthority = Readonly<{
   inheritedFrom?: RunId
   missingSubmits: readonly string[]
   missingChecks: readonly string[]
@@ -274,11 +283,28 @@ export type QueueAuthorityState = Readonly<{
   current: Readonly<Record<string, QueueAuthorityToken>>
   submits: Readonly<Record<string, QueueAuthorityToken>>
   checks: Readonly<Record<string, QueueAuthorityToken>>
-  runs: Readonly<Record<RunId, QueueRunAuthority>>
+  claims: Readonly<Record<string, QueueAuthorityToken>>
+  runs: QueueProjectionLookup<RunAuthority>
+}>
+
+export type QueueProjectionPlan = Readonly<{
+  latestExact?: RunId
+  latestPrefix?: RunId
+  releasedAdmissionFailures?: number
+}>
+
+export type QueueProjectionIndex = Readonly<{
+  version: 1
+  nextRunNumber: number
+  childByParentPart: QueueProjectionLookup<RunId>
+  rootsByMember: QueueProjectionLookup<RunId>
+  plans: QueueProjectionLookup<QueueProjectionPlan>
 }>
 
 export type QueueRecord = Readonly<{
   id: RunId
+  /** New-run marker. Its absence identifies pre-settlement Queue journals. */
+  settlement?: "explicit"
   queueId: string
   candidateId: CandidateId
   prs: readonly PRSnapshot[]
@@ -319,9 +345,6 @@ export type Run = Omit<QueueRecord, "initialIntegration" | "initialResults" | "s
     error?: JobError
   }>
 
-/** @deprecated Use Run. Retained while downstream W2 views migrate. */
-export type QueueRun = Run
-
 export type QueuePause = Readonly<{
   base: string
   reason: string
@@ -343,7 +366,8 @@ export type QueuesState = Readonly<{
   requires: readonly QueueRequirement[]
   pauses: Readonly<Record<string, QueuePause>>
   candidates: Readonly<Record<CandidateId, Candidate>>
-  records: Readonly<Record<RunId, QueueRecord>>
+  records: QueueProjectionLookup<QueueRecord>
+  index: QueueProjectionIndex
   authority: QueueAuthorityState
   terminalAssociations: QueueTerminalAssociations
 }>
@@ -488,7 +512,7 @@ const queueRecordShape = {
 }
 
 export const QueueRecordSchema = z
-  .object({ ...queueRecordShape, stepSelection: StepSelectionSchema.optional() })
+  .object({ ...queueRecordShape, settlement: z.literal("explicit"), stepSelection: StepSelectionSchema.optional() })
   .strict()
 
 export const ReplayQueueRecordSchema = z
@@ -499,6 +523,7 @@ export const ReplayQueueRecordSchema = z
       .string()
       .regex(/^C\d+$/u)
       .optional(),
+    settlement: z.literal("explicit").optional(),
     stepSelection: z.union([StepSelectionSchema, LegacyStepSelectionSchema]).optional(),
   })
   .strict()
@@ -506,9 +531,17 @@ export const ReplayQueueRecordSchema = z
 function resolveQueueRecord(state: QueuesState, id: RunId): QueueRecord | undefined {
   return resolveSelector(
     id,
-    Object.values(state.records).map((record) => ({ canonical: record.id, value: record })),
+    queueRecordValues(state).map((record) => ({ canonical: record.id, value: record })),
     { kind: "queue run" },
   )
+}
+
+function compareRunIds(left: RunId, right: RunId): number {
+  return left.localeCompare(right, undefined, { numeric: true })
+}
+
+function queueRecordValues(state: QueuesState): readonly QueueRecord[] {
+  return projectionLookupValues(state.records).toSorted((left, right) => compareRunIds(left.id, right.id))
 }
 
 export const Queues = Object.freeze({
@@ -526,7 +559,14 @@ export const Queues = Object.freeze({
       pauses: {},
       candidates: {},
       records: {},
-      authority: { statuses: {}, current: {}, submits: {}, checks: {}, runs: {} },
+      index: {
+        version: 1,
+        nextRunNumber: 1,
+        childByParentPart: {},
+        rootsByMember: {},
+        plans: {},
+      },
+      authority: { statuses: {}, current: {}, submits: {}, checks: {}, claims: {}, runs: {} },
       terminalAssociations: { pending: {}, applied: {} },
     }
   },
@@ -535,8 +575,31 @@ export const Queues = Object.freeze({
     return resolveQueueRecord(state, id)
   },
 
+  get(state: QueuesState, id: RunId): QueueRecord | undefined {
+    return projectionLookupGet(state.records, id)
+  },
+
+  values(state: QueuesState): readonly QueueRecord[] {
+    return queueRecordValues(state)
+  },
+
+  ids(state: QueuesState): readonly RunId[] {
+    return queueRecordValues(state).map((record) => record.id)
+  },
+
+  authorityRun(authority: QueueAuthorityState, id: RunId): RunAuthority | undefined {
+    return projectionLookupGet(authority.runs, id)
+  },
+
+  set(
+    records: Readonly<QueueProjectionLookup<QueueRecord>>,
+    record: Readonly<QueueRecord>,
+  ): QueueProjectionLookup<QueueRecord> {
+    return projectionLookupSet(records, record.id, record)
+  },
+
   record(state: QueuesState, id: RunId): QueueRecord {
-    const direct = state.records[id]
+    const direct = projectionLookupGet(state.records, id)
     if (direct !== undefined) return direct
     const record = resolveQueueRecord(state, id)
     if (record === undefined) throw new Error(`yrd: no queue run '${id}'`)
@@ -544,10 +607,7 @@ export const Queues = Object.freeze({
   },
 
   nextId(state: QueuesState): RunId {
-    const values = Object.keys(state.records)
-      .filter((id) => /^R\d+$/u.test(id))
-      .map((id) => Number(id.slice(1)))
-    return `R${Math.max(0, ...values) + 1}`
+    return `R${state.index.nextRunNumber}`
   },
 
   nextCandidateId(state: QueuesState): CandidateId {

@@ -4,20 +4,11 @@
 
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import {
-  existsSync,
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs"
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { gunzipSync } from "node:zlib"
 import { pathToFileURL } from "node:url"
+import { Database } from "bun:sqlite"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { createLogger } from "loggily"
 import {
@@ -25,8 +16,6 @@ import {
   currentPRRev,
   prBaseSha,
   prDeliveryState,
-  prHead,
-  prRevisionNumber,
   withBays,
   type BayWorkspace,
   type PR,
@@ -48,6 +37,7 @@ import {
 import { withJobs, type Job, type JobResult } from "@yrd/job"
 import { createJournal } from "@yrd/persistence"
 import {
+  Queues,
   type Run,
   type QueueSummary,
   type PREligibility,
@@ -109,7 +99,6 @@ import { YRD_VERSION } from "../src/version.ts"
 import {
   jobAttemptTaskStatusOf,
   prDeliveryTaskStatusOf,
-  prTaskStatusOf,
   runTaskStatusOf,
   stepTaskStatusOf,
   taskStatusGlyph,
@@ -712,7 +701,7 @@ describe("runYrd", () => {
       ],
     })
     expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(Queues.ids(app.state().queues)).toEqual([])
   })
 
   it("uses concise layered help with examples on the root and queue surfaces", async () => {
@@ -1304,7 +1293,7 @@ describe("runYrd", () => {
       ],
     })
     expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
 
     const recut = outputIO()
@@ -1332,7 +1321,7 @@ describe("runYrd", () => {
       status: "waiting",
       prs: [{ id: "PR1", revision: 2, headSha: nextHead }],
     })
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
     expect(checkedRevisions).toEqual(["PR1@2"])
   })
@@ -1467,7 +1456,7 @@ describe("runYrd", () => {
       submitted.stderr(),
     ).toBe(0)
     expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkedRevisions).toEqual([])
 
     const recut = outputIO()
@@ -1493,7 +1482,7 @@ describe("runYrd", () => {
       status: "waiting",
       prs: [{ id: "PR1", revision: 2, headSha: HEAD_SHA, baseSha: BASE_SHA }],
     })
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1"])
     expect(checkedRevisions).toEqual(["PR1@2"])
   })
 
@@ -1783,7 +1772,7 @@ describe("runYrd", () => {
       prs: [{ id: "PR1", revision: 2, headSha: nextHead, baseSha: nextBase, correlation }],
       steps: [{ name: "check", job: { status: "waiting" } }],
     })
-    expect(Object.keys(app.state().queues.records)).toEqual(["R1", "R2"])
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
     expect(Object.keys(app.state().bays.prs)).toEqual(["PR1"])
     expect(checkRuns).toEqual(["check"])
     expect(mergeRuns).toEqual([])
@@ -2299,7 +2288,7 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), run.io), run.stderr()).toBe(0)
     expect(mergeRuns).toEqual(["merge"])
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("integrated")
-    expect(Object.values(app.state().queues.records)).toHaveLength(2)
+    expect(Queues.values(app.state().queues)).toHaveLength(2)
   })
 
   it("settles a direct submission predecessor without running it under the executing runtime", async () => {
@@ -2703,7 +2692,7 @@ describe("runYrd", () => {
     expect(submitted.prs[0]).toMatchObject({ state: "open", merged: false, taskStatus: "todo" })
     expect(prDeliveryState(app.state().bays.prs.PR1!)).toBe("pushed")
     expect(app.bays.checksRequested("PR1")).toBe(false)
-    expect(Object.keys(app.state().queues.records)).toEqual([])
+    expect(Queues.ids(app.state().queues)).toEqual([])
     expect(checkRuns).toEqual([])
 
     const inbox = outputIO()
@@ -3463,7 +3452,10 @@ describe("runYrd", () => {
       return data.run === "R2" && data.error?.code === "job-lost"
     })
     if (failed === undefined) throw new Error("expected job loss to append queue/run/failed")
-    expect(app.state().queues.authority.runs.R2?.released).toEqual({ reason: "job-lost", ref: failed.id })
+    expect(Queues.authorityRun(app.state().queues.authority, "R2")?.released).toEqual({
+      reason: "job-lost",
+      ref: failed.id,
+    })
     expect(events.map(({ name }) => name)).not.toContain("pr/rejected")
   })
 
@@ -3581,7 +3573,7 @@ describe("runYrd", () => {
     const blocked = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "PR1", "--json"), blocked.io)).toBe(1)
     expect(blocked.stderr()).toContain("queue 'main' is paused: operator freeze")
-    expect(app.state().queues.records).toEqual({})
+    expect(Queues.ids(app.state().queues)).toEqual([])
 
     const eligible = outputIO()
     expect(await runYrd(app, yrd("queue", "run", "--once", "--json"), eligible.io), eligible.stderr()).toBe(0)
@@ -8478,50 +8470,66 @@ describe("journal version skew fail-loud", () => {
     events?: (Record<string, unknown> & { name: string; data: unknown })[]
   }
 
-  type StoredJournalManifest = Readonly<{
-    segments: readonly Readonly<{ path: string }>[]
-    tail: Readonly<{ path: string }>
-    tailState: Readonly<{ path: string }>
-  }>
+  function testJournal(dir: string) {
+    return createJournal({
+      dir,
+      inject: { sqliteVersion: "3.53.0" },
+    } as unknown as Parameters<typeof createJournal>[0])
+  }
 
-  function authoritativeJournalRows(dir: string): string[] {
-    const manifest = JSON.parse(readFileSync(join(dir, "events-v4.manifest.json"), "utf8")) as StoredJournalManifest
-    const tailState = JSON.parse(readFileSync(join(dir, manifest.tailState.path), "utf8")) as {
-      committedBytes: number
-    }
-    const chunks = manifest.segments.map((segment) => gunzipSync(readFileSync(join(dir, segment.path))))
-    chunks.push(readFileSync(join(dir, manifest.tail.path)).subarray(0, tailState.committedBytes))
-    return Buffer.concat(chunks)
-      .toString("utf8")
-      .split("\n")
-      .filter((entry) => entry.trim() !== "")
+  function authoritativeJournalRows(dir: string): Array<{ cursor: number; row: StoredJournalRow }> {
+    using database = new Database(join(dir, "journal.sqlite"), { readonly: true, strict: true })
+    const snapshot = database
+      .query<{ prefix_json: string }, []>("SELECT prefix_json FROM journal_snapshot WHERE singleton = 1")
+      .get()
+    if (snapshot === null) throw new Error("expected SQLite journal snapshot")
+    const prefix = JSON.parse(snapshot.prefix_json) as Array<{ cursor: number; value: StoredJournalRow }>
+    const tail = database
+      .query<{ cursor: number; value_json: string }, []>(
+        "SELECT cursor, value_json FROM journal_events ORDER BY cursor",
+      )
+      .all()
+      .map(({ cursor, value_json }) => ({ cursor, row: JSON.parse(value_json) as StoredJournalRow }))
+    return [...prefix.map(({ cursor, value }) => ({ cursor, row: value })), ...tail]
   }
 
   async function seededJournalDir(): Promise<string> {
     const dir = mkdtempSync(join(tmpdir(), "yrd-journal-skew-"))
-    const seeded = await createApp({ journal: createJournal({ dir }) })
+    const seeded = await createApp({ journal: testJournal(dir) })
     await openAndSubmit(seeded)
     await seeded.close()
     return dir
   }
 
   function rewriteJournalRows(dir: string, poison: (row: StoredJournalRow) => boolean): number {
-    const path = join(dir, "events-v3.jsonl")
     const rows = authoritativeJournalRows(dir)
     let poisoned = 0
-    const rewritten = rows.map((entry) => {
-      const { checksum: _replaced, ...row } = JSON.parse(entry) as StoredJournalRow
-      if (poison(row as StoredJournalRow)) poisoned += 1
-      const checksum = createHash("sha256").update(canonicalJson(row)).digest("hex")
-      return JSON.stringify({ ...row, checksum })
-    })
-    for (const entry of readdirSync(dir)) {
-      if (entry.startsWith("events-v4.") || entry === "snapshot-v4.json" || entry === "projection-checkpoint-v1.json") {
-        rmSync(join(dir, entry), { force: true })
-      }
+    for (const entry of rows) {
+      if (poison(entry.row)) poisoned += 1
     }
-    rmSync(path, { force: true })
-    writeFileSync(path, `${rewritten.join("\n")}\n`)
+    using database = new Database(join(dir, "journal.sqlite"), { readwrite: true, strict: true })
+    database.exec("BEGIN IMMEDIATE")
+    try {
+      const emptyPrefix = "[]"
+      database
+        .query(
+          `UPDATE journal_snapshot
+           SET cursor = 0, prefix_json = ?, prefix_sha256 = ?, prefix_last_cursor = 0,
+               checkpoint_identity = NULL, checkpoint_json = NULL, checkpoint_sha256 = NULL
+           WHERE singleton = 1`,
+        )
+        .run(emptyPrefix, createHash("sha256").update(canonicalJson([])).digest("hex"))
+      database.exec("DELETE FROM journal_events")
+      const insert = database.query("INSERT INTO journal_events(cursor, value_json, sha256) VALUES (?, ?, ?)")
+      for (const { cursor, row } of rows) {
+        const encoded = JSON.stringify(row)
+        insert.run(cursor, encoded, createHash("sha256").update(encoded).digest("hex"))
+      }
+      database.exec("COMMIT")
+    } catch (error) {
+      database.exec("ROLLBACK")
+      throw error
+    }
     return poisoned
   }
 
@@ -8540,7 +8548,7 @@ describe("journal version skew fail-loud", () => {
     return {
       ambientCwd: "/repo",
       env: {} as NodeJS.ProcessEnv,
-      load: async () => ({ app: await createApp({ journal: createJournal({ dir }) }), services: {} }),
+      load: async () => ({ app: await createApp({ journal: testJournal(dir) }), services: {} }),
     }
   }
 

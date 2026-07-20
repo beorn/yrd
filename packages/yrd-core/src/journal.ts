@@ -15,7 +15,7 @@ export type JournalCheckpoint = Readonly<{
 
 export type JournalCheckpointStore = Readonly<{
   load(identity: string): Promise<JournalCheckpoint | undefined>
-  save(checkpoint: JournalCheckpoint): Promise<boolean>
+  save?(checkpoint: JournalCheckpoint): Promise<boolean>
 }>
 
 export type Journal<Value> = Readonly<{
@@ -25,7 +25,7 @@ export type Journal<Value> = Readonly<{
 }>
 
 export function createMemoryJournal<Value>(initial: readonly Value[] = []): Journal<Value> {
-  const values = structuredClone(initial) as Value[]
+  const values = globalThis.structuredClone(initial) as Value[]
 
   return {
     // oxlint-disable-next-line typescript/require-await -- Journal.read is an AsyncIterable contract.
@@ -34,14 +34,14 @@ export function createMemoryJournal<Value>(initial: readonly Value[] = []): Jour
       assertCursor(before)
       const cursor = Math.min(before, values.length)
       if (after > cursor) throw new RangeError(`yrd: journal cursor ${after} is past ${cursor}`)
-      if (after < cursor) yield { cursor, values: structuredClone(values.slice(after, cursor)) }
+      if (after < cursor) yield { cursor, values: globalThis.structuredClone(values.slice(after, cursor)) }
     },
     append(value, expectedCursor) {
       assertCursor(expectedCursor)
       if (expectedCursor !== values.length) {
         return Promise.resolve({ appended: false as const, cursor: values.length })
       }
-      values.push(structuredClone(value))
+      values.push(globalThis.structuredClone(value))
       return Promise.resolve({ appended: true as const, cursor: values.length })
     },
   }

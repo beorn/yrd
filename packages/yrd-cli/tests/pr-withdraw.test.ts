@@ -42,6 +42,13 @@ function ids(initial = 0): () => string {
   return () => `00000000-0000-7000-8000-${(++value).toString(16).padStart(12, "0")}`
 }
 
+function testJournal(dir: string) {
+  return createJournal({
+    dir,
+    inject: { sqliteVersion: "3.53.0" },
+  } as unknown as Parameters<typeof createJournal>[0])
+}
+
 function workspace() {
   return {
     revision: "withdraw-workspace-v1",
@@ -274,7 +281,7 @@ describe("pr withdraw journal replay", () => {
     // would refuse the journal with the version-skew guidance.
     const dir = mkdtempSync(join(tmpdir(), "yrd-withdraw-replay-"))
     try {
-      const first = await createCliApp({ journal: createJournal({ dir }) })
+      const first = await createCliApp({ journal: testJournal(dir) })
       await first.bays.submit({ branch: "topic/reasoned", headSha: HEAD_SHA, base: "main", baseSha: BASE_SHA })
       await first.bays.submit({ branch: "topic/reasonless", headSha: HEAD2_SHA, base: "main", baseSha: BASE_SHA })
       const withdraw = outputIO()
@@ -285,7 +292,7 @@ describe("pr withdraw journal replay", () => {
       expect(await runYrd(first, yrd("pr", "close", "PR2"), outputIO().io)).toBe(0)
       await first.close()
 
-      const second = await createCliApp({ journal: createJournal({ dir }) })
+      const second = await createCliApp({ journal: testJournal(dir) })
       try {
         expect(second.state().bays.prs.PR1).toMatchObject({
           state: "closed",

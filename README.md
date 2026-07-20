@@ -78,20 +78,22 @@ The CLI initializes `.git/yrd/` on the first repository-backed command. Help is
 repository-independent and never creates Yrd state.
 
 Every command accepts one global repository selector. `--repo <path>` (or
-`YRD_REPO`) selects the Git repository, its `.yrd.yml`, durable Yrd state, and
-operation root. Selecting a linked worktree preserves its current-bay and
-current-branch behavior while config and state still resolve through the shared
-repository authority. The CLI value overrides the environment value, which
-overrides discovery from the caller's directory. Relative values resolve
-against that one original caller directory.
+`YRD_REPO`) selects the Git repository, durable Yrd state, and operation root.
+Selecting a linked worktree preserves its current-bay and current-branch
+behavior while config and state still resolve through the shared repository
+authority. The CLI value overrides the environment value, which overrides
+discovery from the caller's directory. Relative values resolve against that one
+original caller directory.
 
 ```console
 $ yrd --repo /work/my-repository/.bays/B1 pr status --json
 ```
 
-The selector is global and may also follow a subcommand. `.yrd.yml` remains the
-only configuration path; there is no separate `--cwd`, `--config`, or `--root`
-surface.
+The selector is global and may also follow a subcommand. Config defaults to the
+base branch's `.yrd.ts`, with `.yrd.yml` as the legacy fallback.
+`--config <path>` selects another base-relative `.ts`, `.yml`, or `.yaml`
+authority; candidate content can never override it. There is no separate
+`--cwd` or `--root` surface.
 
 ```console
 $ cd my-repository
@@ -485,17 +487,17 @@ yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command             | Input                                             | Output and state                                                                        |
-| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
-| `run`               | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
-| `resume`            | Optional base                                     | Removes the queue pause                                                                 |
-| `recover`           | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`            | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`             | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`              | Optional base                                     | Resolves and validates queue environment resources                                      |
-| `deinit`            | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
+| Command              | Input                                             | Output and state                                                                                                      |
+| -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
+| `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
+| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles                                 |
+| `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
+| `recover`            | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                                              |
+| `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
+| `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
+| `init`               | Optional base                                     | Resolves and validates queue environment resources                                                                    |
+| `deinit`             | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command
@@ -585,7 +587,8 @@ dry-run lists every unassociated terminal, either with one revision/head-bound
 failed-run proof or with a typed refusal such as missing, chronology-invalid,
 or ambiguous candidates. `--apply` appends one `pr/terminal-associated` event
 for each uniquely proven row and leaves every refused row untouched. It never
-rewrites JSONL, fabricates a run, or weakens new `pr/rejected` events; repeating
+rewrites committed journal facts, fabricates a run, or weakens new
+`pr/rejected` events; repeating
 `--apply` after the proven rows land appends nothing.
 
 `pr regression` records a completed repair without rewriting either integration.
@@ -727,12 +730,12 @@ the current revision must approve. Comments never gate, and omitting
 `notify` routes an enumerated journal transition without turning delivery into
 a Queue step. Its Tribe intake policy is explicit:
 
-| Signal            | Message type | Delivery | Pending ball        | Deadline   |
-| ----------------- | ------------ | -------- | ------------------- | ---------- |
-| `pr/rejected`     | notify       | pull     | none                | —          |
-| `pr/needs-review` | request      | push     | exact recipient/id  | 10 minutes |
-| `pr/integrated`   | notify       | pull     | none                | —          |
-| `run/failed`      | notify       | pull     | none                | —          |
+| Signal            | Message type | Delivery | Pending ball       | Deadline   |
+| ----------------- | ------------ | -------- | ------------------ | ---------- |
+| `pr/rejected`     | notify       | pull     | none               | —          |
+| `pr/needs-review` | request      | push     | exact recipient/id | 10 minutes |
+| `pr/integrated`   | notify       | pull     | none               | —          |
+| `run/failed`      | notify       | pull     | none               | —          |
 
 `pr/needs-review` is projected from a committed submission only when
 `requires: [review]`. Rejection and Run failure are outcome evidence, so even a
@@ -861,8 +864,10 @@ Yrd stores local authority under the primary worktree's common Git directory:
 
 ```text
 .git/yrd/
-  events-v3.jsonl    append-only authority
-  writer.lock        short cross-process append lock
+  journal.sqlite     event journal + exact snapshot authority (WAL)
+  writer.lock        short cross-process transaction lock
+  journal-v4-pre-sqlite-*/
+                     preserved migration recovery evidence
   resident-runner/
     writer.lock      process-lifetime resident Queue lease
   prs.git/           bare PR ref/object receiver
@@ -872,14 +877,18 @@ Yrd stores local authority under the primary worktree's common Git directory:
     cursor-v1.json    journal cursor, successful sends, and opened-request ledger
 ```
 
-`events-v3.jsonl` is the source of truth. Each command appends one versioned,
-checksummed transaction as one JSONL record, containing the Command, its cause,
-its domain events, optional result value, and Job requests. Startup folds
-committed records into Bay, PR, Queue, Job, and Contest state. An unterminated
-final record is uncommitted and is truncated under the writer lock; malformed
-newline-committed records are
-reported as corruption. There is no second mutable database or read-model
-cache to reconcile.
+`journal.sqlite` is the source of truth. Each command appends one checksummed
+transaction containing the Command, its cause, domain events, optional result
+value, and Job requests. Startup restores the validated Core snapshot and folds
+only its bounded SQL tail into Bay, PR, Queue, Job, and Contest state. Snapshot
+publication retains an exact cursor-addressable prefix before deleting covered
+tail rows, so lagging notification and bridge cursors remain valid. There is no
+second mutable database or read-model authority to reconcile.
+
+The Journal uses WAL with `synchronous=FULL`, an external POSIX writer lock,
+explicitly closed connections, and a runtime `sqlite_version()` safety gate.
+Read-only commands never initialize or migrate authority. SQLite's volatile
+`-shm` coordination file is not logical authority.
 
 New terminal PR facts are revision/head-bound. Queue terminals also name their
 exact Run; integration facts expose `landingSha`, which must equal the
@@ -888,8 +897,8 @@ remain readable, but the current append schema is never widened for them.
 
 Pre-cutover `.git/yrd/events.jsonl` and `.git/bay/journal.jsonl` files remain
 opaque, read-only legacy data. Yrd never decodes, migrates, appends, or rewrites
-them; `yrd log --all --json` reports their paths and frame counts only as a coverage
-pointer while all new authority starts in `events-v3.jsonl`. The same lossless
+them; `yrd log --all --json` reports their paths and frame counts only as a
+coverage pointer while all new authority starts in `journal.sqlite`. The same lossless
 view includes complete typed Queue runs and every historical Job attempt, including
 failed output, artifacts, lost reasons, runner identity, and integration proof.
 
@@ -970,7 +979,7 @@ The low-level packages remain usable by a single developer with no agent fleet.
 | Package            | Responsibility                                                   |
 | ------------------ | ---------------------------------------------------------------- |
 | `@yrd/core`        | Immutable definition, Commands, Events, projection, Journal      |
-| `@yrd/persistence` | Checksummed JSONL Journal and cross-process append exclusion     |
+| `@yrd/persistence` | WAL SQLite Journal, snapshots, migration, and writer exclusion   |
 | `@yrd/process`     | Scope-owned subprocess execution, bounds, cancellation, evidence |
 | `@yrd/job`         | Durable executable lifecycle, leases, waiting work, recovery     |
 | `@yrd/issue`       | Issue references, snapshots, and source adapters                 |
