@@ -318,6 +318,36 @@ describe("persistent Core projection checkpoint", () => {
     expect(values).toHaveLength(513)
   })
 
+  it("never wedges a load-only consumer behind the checkpoint high-water", async () => {
+    const values: unknown[] = []
+    const events: LogEvent[] = []
+    const log = createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => events.push(event) }])
+    const journal: Journal<unknown> = {
+      async *read(after = 0) {
+        if (after < values.length) yield { cursor: values.length, values: values.slice(after) }
+      },
+      append(value, expectedCursor) {
+        if (expectedCursor !== values.length) {
+          return Promise.resolve({ appended: false as const, cursor: values.length })
+        }
+        values.push(value)
+        return Promise.resolve({ appended: true as const, cursor: values.length })
+      },
+      checkpoint: {
+        load() {
+          return Promise.resolve(undefined)
+        },
+      },
+    }
+    await using runtime = await createYrd(counterDefinition(), { inject: { journal, log, id: ids() } })
+    for (let index = 0; index < 520; index += 1) {
+      await runtime.dispatch({ op: "counter.add", args: { by: 1 } })
+    }
+    expect(values).toHaveLength(520)
+    expect(runtime.state().counter.value).toBe(520)
+    expect(events.some((event) => event.props?.reason === "checkpoint-flush-unavailable")).toBe(true)
+  })
+
   it("restores state and retry registries, then folds only the post-checkpoint tail", async () => {
     const dir = await stateDir()
     const definition = counterDefinition()

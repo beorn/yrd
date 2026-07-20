@@ -499,6 +499,20 @@ export async function createYrd<State extends object, Commands extends CommandTr
   }
 
   const enforceCheckpointHighWater = async (): Promise<void> => {
+    if (checkpointStore?.save === undefined || checkpointIdentity === undefined) {
+      // A load-only consumer can never flush; checkpoint freshness belongs to
+      // the writer. Enforcing here wedges every command behind a writer-side
+      // gap (2026-07-20 outage: CI admissions froze on cold-fold debt).
+      if (!checkpointWarning && checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
+        checkpointWarning = true
+        coreLog.warn?.("projection checkpoint debt exceeds high-water but this consumer cannot flush", {
+          action: "deferred",
+          reason: "checkpoint-flush-unavailable",
+          debt: checkpointDebt(),
+        })
+      }
+      return
+    }
     while (checkpointDebt() >= PROJECTION_CHECKPOINT_HIGH_WATER_FRAMES) {
       const before = checkpointRevision
       await startCheckpoint()

@@ -377,6 +377,14 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
         current.prefix_sha256 !== prepared.snapshotPrefixSha256 ||
         current.prefix_last_cursor !== prepared.snapshotPrefixLastCursor
       ) {
+        runtime.log.warn?.("journal projection checkpoint refused: snapshot advanced under the prepared save", {
+          action: "skipped",
+          reason: "checkpoint-cas-stale",
+          cursor: checkpoint.cursor,
+          head,
+          snapshotCursor: current.cursor,
+          preparedSnapshotCursor: prepared.snapshotCursor,
+        })
         return false
       }
       database.run("BEGIN IMMEDIATE")
@@ -402,6 +410,11 @@ async function saveCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): 
           )
         if (updated.changes !== 1) {
           rollback(database)
+          runtime.log.warn?.("journal projection checkpoint refused: snapshot row CAS matched no rows", {
+            action: "skipped",
+            reason: "checkpoint-cas-miss",
+            cursor: checkpoint.cursor,
+          })
           return false
         }
         database.query("DELETE FROM journal_events WHERE cursor <= ?").run(checkpoint.cursor)
@@ -436,6 +449,13 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
     const { head, snapshot } = assertComplete(database, runtime.path)
     if (checkpoint.cursor > head || checkpoint.cursor < snapshot.cursor) {
       database.run("COMMIT")
+      runtime.log.warn?.("journal projection checkpoint refused: cursor outside snapshot..head", {
+        action: "skipped",
+        reason: "checkpoint-cursor-out-of-range",
+        cursor: checkpoint.cursor,
+        head,
+        snapshotCursor: snapshot.cursor,
+      })
       return null
     }
     if (checkpoint.cursor !== snapshot.cursor) {
@@ -447,6 +467,11 @@ function prepareCheckpoint(runtime: Context, checkpoint: JournalCheckpoint): Pre
         .get(checkpoint.cursor, checkpoint.cursor)
       if (committed?.committed !== 1) {
         database.run("COMMIT")
+        runtime.log.warn?.("journal projection checkpoint refused: no committed row at cursor", {
+          action: "skipped",
+          reason: "checkpoint-cursor-uncommitted",
+          cursor: checkpoint.cursor,
+        })
         return null
       }
     }
