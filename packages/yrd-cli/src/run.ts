@@ -1467,6 +1467,18 @@ async function listBays(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
   )
 }
 
+async function pathBay(app: YrdCliApp, selector: string, options: JsonOption, io: YrdCliIO): Promise<void> {
+  const bay = resolveBay(stateOf(app).bays, selector)
+  if (bay === undefined) refusal(`no bay '${selector}'; run 'yrd bay' to list available Bays`)
+  if (bay.status !== "active") {
+    refusal(`bay '${bay.id}' is ${bay.status}; expected an active bay; run 'yrd bay open <name>' to create one`)
+  }
+  if (bay.path === undefined || !isAbsolute(bay.path)) {
+    refusal(`bay '${bay.id}' has no absolute workspace path; run 'yrd bay --json' to inspect it before recreating it`)
+  }
+  await printResult(io, jsonEnabled(options), { command: "bay.path", bay: bay.id, path: bay.path }, bay.path)
+}
+
 const PR_LIST_DEFAULT_WINDOW_SIZE = 20
 
 async function listPrs(
@@ -3452,6 +3464,11 @@ function buildProgram(
     .option("--actor <id>", "record the worker or implementation identity")
     .option("--json", "emit stable JSON")
     .action(async (workName, options) => openBay(installed(), workName, options, io))
+  bay
+    .command("path <selector>")
+    .description("print an active bay workspace path")
+    .option("--json", "emit stable JSON")
+    .action(async (selector, options) => pathBay(installed(), selector, options, io))
   bay
     .command("refresh [selector...]")
     .description("refresh work bays")

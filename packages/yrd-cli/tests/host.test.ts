@@ -866,6 +866,46 @@ notify:
     expect(await Bun.file(join(root, ".git", "yrd", "events-v3.jsonl")).exists()).toBe(false)
   })
 
+  it("projects an active Bay path from the selected repository authority", async () => {
+    const { repo } = await repository()
+    const ambient = join(repo, "..", "bay-path-ambient")
+    await mkdir(ambient)
+    let opened = ""
+    let stderr = ""
+
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/yrd", "--repo", repo, "bay", "open", "selected", "--json"], {
+        cwd: ambient,
+        stdout: (text) => {
+          opened += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    const path = join(repo, ".bays", "B1")
+    expect(JSON.parse(opened)).toMatchObject({ bay: { id: "B1", path } })
+
+    let projected = ""
+    stderr = ""
+    expect(
+      await runYrdProcess(["/usr/bin/bun", "/usr/local/bin/git-bay", "--repo", repo, "path", "selected", "--json"], {
+        cwd: ambient,
+        stdout: (text) => {
+          projected += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      }),
+      stderr,
+    ).toBe(0)
+    expect(projected).toBe(`${JSON.stringify({ bay: "B1", command: "bay.path", path })}\n`)
+    expect(await realpath(path)).toBe(path)
+  })
+
   it("preserves native Commander styling in a fresh color-forced process", async () => {
     const yrdRoot = join(import.meta.dirname, "../../..")
     const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "1", NODE_ENV: "production" }

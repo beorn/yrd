@@ -226,7 +226,7 @@ The top-level surface is deliberately small:
 yrd                         dashboard across queues, PRs, and recent outcomes
 yrd pr                      list PRs; submit, view, runs, diff, checkout,
                             status, edit, checks, regression, close, and merge teaching
-yrd bay                     list bays; open, refresh, submit, and close
+yrd bay                     list bays; open, path, refresh, submit, and close
 yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   show the queue timeline by default; list/ls is canonical;
@@ -241,6 +241,7 @@ yrd prime                   agent briefing plus current delivery context
 ```text
 yrd bay open <name> [--from <branch>] [--base <branch>]
   [--issue <ref>] [--actor <id>] [--json]
+yrd bay path <selector> [--json]
 yrd bay refresh [selector...] [--json]
 yrd bay submit [selector...] [--draft] [--base <branch>]
   [--correlation <namespace:id>] [--composition <path>] [--json]
@@ -255,6 +256,7 @@ callers use the PR-native check-admission surface below.
 | Command   | Input                                                 | Output and state                                                                                   |
 | --------- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `open`    | New bay name; optional source, base, issue, and actor | Prints the worktree path; creates and provisions a named bay                                       |
+| `path`    | One Bay ID, name, or branch selector                  | Prints the exact absolute path of one active Bay; read-only and never refreshes it                 |
 | `refresh` | Zero or more bays                                     | Refreshes Git head, base, dirty, path, and workspace status                                        |
 | `submit`  | Bays, PRs, or source branches; optional `--draft`     | Creates or advances PRs to `submitted`, or only `pushed` with `--draft`; never executes Queue work |
 | `close`   | Zero or more bays                                     | Deprovisions clean terminal bays; `--withdraw` explicitly cancels a live PR                        |
@@ -278,6 +280,11 @@ passing delivery proof.
 
 `--head` is an alias for `--from`. `--queue` is an alias for `--base`. The
 canonical words are source branch (`--from`) and base branch (`--base`).
+
+`bay path` resolves through the same canonical ID/name/branch selector as the
+other Bay operations. It refuses unknown, ambiguous, inactive, or pathless
+Bays. Plain output is the absolute path plus one newline; JSON is the stable
+`{"bay":"B1","command":"bay.path","path":"/absolute/path"}` projection.
 
 `--issue` stores an opaque tracker-neutral reference such as `km:@yrd/core/42`
 or `github:beorn/yrd#42`. `--actor` records the worker or implementation
