@@ -1817,18 +1817,27 @@ notify:
 
   it("keeps watch resident after a failed run and drains the next run with its own result", async () => {
     const { repo, featureSha } = await repository()
-    const startedPath = join(repo, "second-check.started")
-    const finishedPath = join(repo, "second-check.finished")
+    // Control markers live outside the delivery repository: the native merge
+    // must see a clean base while the test observes the configured check.
+    const startedPath = join(repo, "..", "second-check.started")
+    const finishedPath = join(repo, "..", "second-check.finished")
+    const artifactRoot = join(repo, ".git", "yrd", "artifacts")
+    const nativeMergeArtifacts = join(artifactRoot, "R2", "1-merge", "attempt-1")
+    const failedOutput = "FAILURE_OUTPUT_ONLY_IN_ARTIFACT"
+    const passedOutput = "PASS_OUTPUT_ONLY_IN_ARTIFACT"
     const command = [
-      "if test -f feature.txt; then exit 7; fi",
+      `if test -f feature.txt; then printf '${failedOutput}\\n' >&2; exit 7; fi`,
+      `printf '${passedOutput}\\n'`,
       `touch ${JSON.stringify(startedPath)}`,
       "sleep 0.2",
       `touch ${JSON.stringify(finishedPath)}`,
     ].join("; ")
     await writeFile(
       join(repo, ".yrd.yml"),
-      `base: main\nbatch: 1\nsteps: [check]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
+      `base: main\nbatch: 1\nsteps: [check, merge]\ncheck:\n  run: ${JSON.stringify(command)}\n  timeoutMs: 5000\n`,
     )
+    await git(repo, "add", ".yrd.yml")
+    await git(repo, "commit", "-qm", "configure resident observability test")
     await git(repo, "switch", "-qc", "issue/second", "main")
     await writeFile(join(repo, "second.txt"), "second\n")
     await git(repo, "add", "second.txt")
@@ -1849,6 +1858,7 @@ notify:
     const stderr = new Response(cli.stderr).text()
     try {
       await vi.waitFor(async () => expect(await Bun.file(startedPath).exists()).toBe(true), { timeout: 5_000 })
+      await vi.waitFor(() => expect(existsSync(nativeMergeArtifacts)).toBe(true), { timeout: 5_000 })
       cli.kill("SIGTERM")
       await vi.waitFor(async () => expect(await Bun.file(finishedPath).exists()).toBe(true), { timeout: 5_000 })
       expect(await cli.exited, await stderr).toBe(0)
@@ -1857,6 +1867,20 @@ notify:
       const runIds = Queues.ids(settled.app.state().queues)
       expect(runIds).toEqual(["R1", "R2"])
       expect(runIds.map((id) => settled.app.queue.get(id)?.status)).toEqual(["failed", "passed"])
+
+      const narration = await stderr
+      const failedLog = join(artifactRoot, "R1", "0-check", "attempt-1", "stderr.log")
+      const passedLog = join(artifactRoot, "R2", "0-check", "attempt-1", "stdout.log")
+      expect(narration).toContain(pathToFileURL(join(artifactRoot, "R1")).href)
+      expect(narration).toContain(pathToFileURL(join(artifactRoot, "R2")).href)
+      expect(narration).toContain(pathToFileURL(failedLog).href)
+      expect(narration).toContain(pathToFileURL(passedLog).href)
+      expect(narration).toContain(pathToFileURL(nativeMergeArtifacts).href)
+      expect(narration).not.toContain(failedOutput)
+      expect(narration).not.toContain(passedOutput)
+      expect(await readFile(failedLog, "utf8")).toContain(failedOutput)
+      expect(await readFile(passedLog, "utf8")).toContain(passedOutput)
+      expect(existsSync(nativeMergeArtifacts)).toBe(true)
     } finally {
       cli.kill("SIGKILL")
       await cli.exited

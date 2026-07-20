@@ -65,6 +65,12 @@ requested -> running -> passed
 definition, and settles only while the same runner still owns that attempt.
 Losing ownership aborts the handler's `JobContext.signal` instead of allowing a
 stale external operation to keep running.
+Definitions may declare `observeResult(result)` to project their typed
+`JobResult` into result-lifecycle attributes. Jobs validates the result against
+the definition before invoking that hook and otherwise keeps output and error
+evidence opaque. The same projection runs for local `run()` settlement
+(including waiting work) and externally completed `finish()` work; projector
+errors propagate rather than falling back to guessed payload traversal.
 Handlers with observable work may call `context.observeProgress()` once and
 `context.reportProgress()` whenever that work advances. Heartbeat ticks still
 verify ownership, but renew the lease only after new progress; command-backed

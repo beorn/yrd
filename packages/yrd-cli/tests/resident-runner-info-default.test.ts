@@ -54,15 +54,15 @@ afterEach(async () => {
 describe("resident follow-runner lifecycle levels", () => {
   it("keeps routine compose successes at DEBUG with timing", async () => {
     // Run/check/merge settlements remain INFO milestones. A compose cycle is
-    // routine plumbing, so it appears only when the operator enables DEBUG.
-    // Assert against the structured sink so the proof is format-independent.
+    // routine DEBUG plumbing; the default resident JSONL sink retains it even
+    // though the concise human branch drops it.
     const { repo } = await runnerRepo()
     const logFile = join(repo, "resident.jsonl")
     const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LOGGILY_FILE: logFile, LOG_LEVEL: "debug", NO_COLOR: "1" },
+      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
     })
     const drainStdout = new Response(cli.stdout).text()
     const drainStderr = new Response(cli.stderr).text()
@@ -98,7 +98,7 @@ describe("resident follow-runner lifecycle levels", () => {
       cwd: repo,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, LOGGILY_FILE: logFile, LOG_LEVEL: "debug", NO_COLOR: "1" },
+      env: { ...process.env, LOGGILY_FILE: logFile, NO_COLOR: "1" },
     })
     const stdoutText = new Response(cli.stdout).text()
     let stderrText = ""
@@ -112,8 +112,8 @@ describe("resident follow-runner lifecycle levels", () => {
       }
     })()
     try {
-      // DEBUG keeps routine lifecycle details in the structured sink while the
-      // human formatter below suppresses those same roll-up/chatter rows.
+      // A configured JSONL sink keeps the complete DEBUG record at the default
+      // resident level while the human branch admits only lifecycle narration.
       await vi.waitFor(
         async () => {
           const records = await readRecords(logFile)

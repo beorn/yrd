@@ -67,6 +67,7 @@ import {
   RUNNER_STALE_MS,
   runRevisionClock,
   queueShowData,
+  type QueueAttempt,
   type QueueTimelineProjection,
   type QueueTimelineRunner,
   type QueueTimelineStatusFilter,
@@ -94,6 +95,7 @@ import {
 } from "./task-status.ts"
 import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState } from "./types.ts"
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
+import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
@@ -466,14 +468,14 @@ type ResidentRunnerHeartbeat = Readonly<{
 }>
 
 function heartbeatDelay(intervalMs: number, signal: AbortSignal): Promise<boolean> {
-  return new Promise((resolveDelay) => {
+  return new Promise((resolve) => {
     let settled = false
     const finish = (elapsed: boolean): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       signal.removeEventListener("abort", onAbort)
-      resolveDelay(elapsed)
+      resolve(elapsed)
     }
     const onAbort = () => finish(false)
     const timer = setTimeout(() => finish(true), intervalMs)
@@ -2165,7 +2167,7 @@ async function cancelQueueRun(
   options: JsonOption & Readonly<{ reason?: string }>,
   io: YrdCliIO,
 ): Promise<YrdCliExitCode> {
-  if (options.reason !== undefined && options.reason.trim() === "") usage("--reason requires text")
+  if (options.reason?.trim() === "") usage("--reason requires text")
   const run = await app.queue.cancelRun({
     run: selector,
     by: io.runner ?? "operator",
@@ -2375,24 +2377,77 @@ async function artifactTail(path: string): Promise<Readonly<{ text: string; trun
 export async function queueArtifactOutputs(
   results: readonly QueueStatusResult[],
   artifactRoot: string,
+  attempts: readonly QueueAttempt[] = [],
 ): Promise<QueueArtifactOutput[]> {
   const outputs: QueueArtifactOutput[] = []
+  const seen = new Set<string>()
+
+  const append = async (run: string, step: string, attempt: number, path: string): Promise<boolean> => {
+    const key = `${run}\0${step}\0${String(attempt)}\0${path}`
+    if (seen.has(key)) return false
+    const tail = await artifactTail(path)
+    if (tail === undefined) return false
+    seen.add(key)
+    outputs.push({
+      source: "recorded",
+      run,
+      step,
+      attempt,
+      path,
+      text: tail.text,
+      ...(tail.truncatedBytes === 0 ? {} : { truncatedBytes: tail.truncatedBytes }),
+    })
+    return true
+  }
+
+  const localArtifactPaths = (values: Iterable<unknown>): readonly string[] =>
+    uniqueArtifacts(values).flatMap((artifact) => {
+      const location = artifactLocation(artifact)
+      return location !== undefined && "path" in location ? [location.path] : []
+    })
+
+  const visibleRuns = new Set(
+    results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
+  )
+  const recordedAttempts = new Set<string>()
+  for (const attempt of attempts) {
+    if (!visibleRuns.has(attempt.run)) continue
+    recordedAttempts.add(`${attempt.run}\0${String(attempt.index)}\0${String(attempt.attempt)}`)
+    const combined = join(
+      artifactRoot,
+      attempt.run,
+      `${attempt.index}-${attempt.step}`,
+      `attempt-${attempt.attempt}`,
+      "output.log",
+    )
+    if (await append(attempt.run, attempt.step, attempt.attempt, combined)) continue
+    if (attempt.result.status === "lost") continue
+    const artifacts = [
+      ...directArtifacts(attempt.result.output),
+      ...(attempt.result.status === "failed" ? nestedArtifacts(attempt.result.error.evidence) : []),
+    ]
+    for (const path of localArtifactPaths(artifacts)) {
+      await append(attempt.run, attempt.step, attempt.attempt, path)
+    }
+  }
+
   for (const result of results) {
     for (const run of [...result.running, ...result.waiting, ...result.finished]) {
       for (const [index, step] of run.steps.entries()) {
-        const attempt = step.job?.attempt
-        if (attempt === undefined) continue
+        const job = step.job
+        if (job === undefined) continue
+        const attempt = job.attempt
+        if (recordedAttempts.has(`${run.id}\0${String(index)}\0${String(attempt)}`)) continue
         const path = join(artifactRoot, run.id, `${index}-${step.name}`, `attempt-${attempt}`, "output.log")
-        const tail = await artifactTail(path)
-        if (tail === undefined) continue
-        outputs.push({
-          run: run.id,
-          step: step.name,
-          attempt,
-          path,
-          text: tail.text,
-          ...(tail.truncatedBytes === 0 ? {} : { truncatedBytes: tail.truncatedBytes }),
-        })
+        if (await append(run.id, step.name, attempt, path)) continue
+        const artifacts = [
+          ...directArtifacts(job),
+          ...("output" in job ? directArtifacts(job.output) : []),
+          ...(job.status === "failed" ? nestedArtifacts(job.error.evidence) : []),
+        ]
+        for (const artifactPath of localArtifactPaths(artifacts)) {
+          await append(run.id, step.name, attempt, artifactPath)
+        }
       }
     }
   }
@@ -2565,8 +2620,16 @@ export async function queueListSnapshot(
             waiting: result.waiting.filter((run) => run.id === focus.run),
             finished: result.finished.filter((run) => run.id === focus.run),
           }))
+  const outputRunIds = new Set(
+    outputResults.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
+  )
+  const outputAttempts = includeOutputs
+    ? (await queueLogAttempts(app.events())).filter((attempt) => outputRunIds.has(attempt.run))
+    : []
   const outputs =
-    includeOutputs && io.artifactRoot !== undefined ? await queueArtifactOutputs(outputResults, io.artifactRoot) : []
+    includeOutputs && io.artifactRoot !== undefined
+      ? await queueArtifactOutputs(outputResults, io.artifactRoot, outputAttempts)
+      : []
   const diffs = includeOutputs
     ? await (async () => {
         const prsById = new Map(results.flatMap((result) => result.prs).map((pr) => [pr.id, pr] as const))
@@ -2748,8 +2811,8 @@ function queueLogSinceMs(value: string): number {
   const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/u.exec(value.trim())
   if (match === null) usage("--since must be a duration such as 30m, 6h, or 1d")
   const amount = Number(match[1])
-  const unitMs = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]!]
-  const durationMs = amount * unitMs!
+  const unitsMs: Readonly<Record<string, number>> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }
+  const durationMs = amount * (unitsMs[match[2] ?? ""] ?? Number.NaN)
   if (!Number.isFinite(durationMs) || durationMs < 0) usage("--since must be a finite non-negative duration")
   return durationMs
 }

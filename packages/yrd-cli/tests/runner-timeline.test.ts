@@ -1,8 +1,12 @@
 /**
- * @failure The resident runner reports more than one human row per step, buries the failing step's err slug, drops a run-owned failure into silence, repeats the scope-bound runner/host/pane, or loses the structured JSON tail behind the scannable grammar.
+ * @failure The resident runner reports more than one human row per event, buries the failing step's err slug, drops a run-owned failure into silence, repeats scope-bound identity, inlines output spew, or points at an artifact that does not exist.
  * @level l2
  * @consumer @yrd/cli resident follow-runner operators
  */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { dirname, join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { Event } from "loggily"
 import { formatResidentLogLine } from "../src/runner-timeline.ts"
@@ -27,7 +31,7 @@ function log(namespace: string, level: string, message: string, props: Record<st
   return { kind: "log", namespace, level, message, time: AT, props } as unknown as Event
 }
 
-/** The scannable grammar sits before the JSON tail (which starts at ` {`). */
+/** Strip a generic notice JSON tail when a test only targets the grammar. */
 function grammar(row: string | undefined): string {
   const at = row?.indexOf(' {"') ?? -1
   return at < 0 ? (row ?? "") : (row ?? "").slice(0, at)
@@ -71,16 +75,66 @@ describe("resident runner step-row grammar", () => {
     expect(plain).not.toContain("yrd:jobs:check ")
   })
 
-  it("carries the full structured record as a JSON tail, minus the session-constant scope identity", () => {
+  it("keeps the full structured record in JSONL instead of the human narration row", () => {
     const plain = formatResidentLogLine(stepPassed, { color: false })
-    // The friendly grammar is a readable PREFIX to the full record.
-    expect(plain).toContain('{"lifecycle":"check"')
-    expect(plain).toContain('"base":"main"')
-    expect(plain).toContain('"step":"check"')
-    // runner/host/pane are bound once at the scope, never repeated per row.
+    expect(plain).not.toContain('{"')
+    expect(plain).not.toContain('"lifecycle"')
     expect(plain).not.toContain("yrd-cli:42")
     expect(plain).not.toContain("unimac")
     expect(plain).not.toContain("wC:p7")
+  })
+
+  it("narrates run admission and step start with clickable artifact locations", () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-runner-starts-"))
+    const runDir = join(artifactRoot, "R324")
+    const stepDir = join(runDir, "0-check", "attempt-1")
+    mkdirSync(stepDir, { recursive: true })
+    const runStarted = log("yrd:queue:run", "debug", "run started", {
+      ...RUNNER_SCOPE,
+      lifecycle: "run",
+      run: "R324",
+      base: "main",
+      outcome: "started",
+      prs: [{ pr: "PR411", revision: 2, branch: "topic/six" }],
+    })
+    const stepStarted = log("yrd:jobs:check", "debug", "check started", {
+      ...RUNNER_SCOPE,
+      lifecycle: "check",
+      run: "R324",
+      base: "main",
+      step: "check",
+      index: 0,
+      attempt: 1,
+      outcome: "started",
+      prs: [{ pr: "PR411", revision: 2, branch: "topic/six" }],
+    })
+
+    try {
+      const runRow = formatResidentLogLine(runStarted, { color: false, artifactRoot })
+      expect(grammar(runRow)).toContain("[main#324] admitted")
+      expect(runRow).toContain(`\x1b]8;;${pathToFileURL(runDir).href}`)
+
+      const stepRow = formatResidentLogLine(stepStarted, { color: false, artifactRoot })
+      expect(grammar(stepRow)).toContain("[main#324 1:check] started")
+      expect(stepRow).toContain(`\x1b]8;;${pathToFileURL(stepDir).href}`)
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("does not rename external completion processing as a second step start", () => {
+    const completionStarted = log("yrd:jobs:check", "debug", "check started", {
+      ...RUNNER_SCOPE,
+      lifecycle: "check",
+      run: "R324",
+      base: "main",
+      step: "check",
+      index: 0,
+      attempt: 1,
+      outcome: "started",
+      completion: true,
+    })
+    expect(formatResidentLogLine(completionStarted, { color: false })).toBeUndefined()
   })
 
   it("colorizes a passing step: dim time, blue INFO, cyan scope, bold run ref, GREEN done, dim duration", () => {
@@ -110,11 +164,95 @@ describe("resident runner step-row grammar", () => {
   it("reports a failing step as ONE ERROR row with the canonical err slug", () => {
     const plain = formatResidentLogLine(stepFailed, { color: false })
     expect(grammar(plain)).toBe(
-      "18:40:23 ERROR yrd:queue:run [main#324 2:merge] failed 3.4s err=merge-conflict · PR411.2 topic/six",
+      '18:40:23 ERROR yrd:queue:run [main#324 2:merge] failed 3.4s err=merge-conflict cause="refused to merge unrelated histories" · PR411.2 topic/six',
     )
     const colored = formatResidentLogLine(stepFailed, { color: true })
     expect(colored).toContain("\x1b[31mERROR") // red level
     expect(colored).toContain("\x1b[31mfailed") // red verb
+  })
+
+  it("points a failed step row at its recorded clickable stderr artifact", () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-runner-recorded-"))
+    const stderr = join(artifactRoot, "R324", "1-merge", "attempt-1", "recorded-stderr.log")
+    mkdirSync(dirname(stderr), { recursive: true })
+    writeFileSync(stderr, "merge failed\n")
+    const withArtifact = log("yrd:jobs:merge", "error", "merge failed", {
+      ...(stepFailed.props as Record<string, unknown>),
+      artifacts: [{ name: "stderr", path: stderr }],
+    })
+    try {
+      const plain = formatResidentLogLine(withArtifact, { color: false, artifactRoot })
+      expect(grammar(plain)).toContain("log=")
+      expect(grammar(plain)).toContain("recorded-stderr.log")
+      expect(plain).toContain(`\x1b]8;;${pathToFileURL(stderr).href}`)
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("links the existing attempt directory when a failed step recorded no stream file", () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-runner-fallback-"))
+    const attemptDir = join(artifactRoot, "R324", "1-merge", "attempt-1")
+    mkdirSync(attemptDir, { recursive: true })
+    try {
+      const plain = formatResidentLogLine(stepFailed, { color: false, artifactRoot })
+      expect(grammar(plain)).toContain("log=")
+      expect(grammar(plain)).toContain("logs")
+      expect(plain).toContain(`\x1b]8;;${pathToFileURL(attemptDir).href}`)
+      expect(plain).not.toContain(pathToFileURL(join(attemptDir, "stderr.log")).href)
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("never fabricates a link when neither a recorded artifact nor attempt home exists", () => {
+    const artifactRoot = mkdtempSync(join(tmpdir(), "yrd-runner-missing-"))
+    try {
+      const plain = formatResidentLogLine(stepFailed, { color: false, artifactRoot })
+      expect(grammar(plain)).not.toContain("log=")
+      expect(plain).not.toContain("\x1b]8;;")
+    } finally {
+      rmSync(artifactRoot, { recursive: true, force: true })
+    }
+  })
+
+  it("preserves a recorded URI artifact instead of corrupting it into a file URL", () => {
+    const uri = "artifact://R324/merge/attempt-1/stderr.log"
+    const withArtifact = log("yrd:jobs:merge", "error", "merge failed", {
+      ...(stepFailed.props as Record<string, unknown>),
+      artifacts: [{ kind: "stderr", uri }],
+    })
+    const plain = formatResidentLogLine(withArtifact, { color: false })
+    expect(grammar(plain)).toContain("stderr")
+    expect(plain).toContain(`\x1b]8;;${uri}`)
+    expect(plain).not.toContain("file://")
+  })
+
+  it("bounds a multiline failure cause so command output cannot become a one-line dump", () => {
+    const marker = "UNBOUNDED_GIT_OUTPUT"
+    const withLongCause = log("yrd:jobs:merge", "error", "merge failed", {
+      ...(stepFailed.props as Record<string, unknown>),
+      error: {
+        code: "merge-push-failed",
+        message: `push failed\n${marker.repeat(1_000)}`,
+      },
+    })
+    const plain = grammar(formatResidentLogLine(withLongCause, { color: false }))
+    expect(plain).toContain('cause="push failed ')
+    expect(plain).toContain("…")
+    expect(plain.length).toBeLessThan(500)
+    expect(plain).not.toContain(marker.repeat(20))
+  })
+
+  it("never inlines command output spew into a runner narration row", () => {
+    const withSpew = log("yrd:jobs:merge", "error", "merge failed", {
+      ...(stepFailed.props as Record<string, unknown>),
+      stdout: "thousands of stdout lines",
+      stderr: "thousands of stderr lines",
+    })
+    const plain = formatResidentLogLine(withSpew, { color: false, artifactRoot: "/repo/.git/yrd/artifacts" })
+    expect(plain).not.toContain("thousands of stdout lines")
+    expect(plain).not.toContain("thousands of stderr lines")
   })
 
   it("marks a retry attempt (>1) in the step token as index:step#attempt", () => {
@@ -164,7 +302,9 @@ describe("resident runner step-row grammar", () => {
       prs: [{ pr: "PR9", revision: 1, branch: "issue/stale" }],
     })
     const plain = grammar(formatResidentLogLine(runOwned, { color: false }))
-    expect(plain).toBe("18:40:23 ERROR yrd:queue:run [main#7] failed 120ms err=stale-pr · PR9.1 issue/stale")
+    expect(plain).toBe(
+      '18:40:23 ERROR yrd:queue:run [main#7] failed 120ms err=stale-pr cause="pinned base moved" · PR9.1 issue/stale',
+    )
   })
 })
 
@@ -209,7 +349,26 @@ describe("resident runner roll-up suppression (kept in JSONL, dropped from the h
   })
 })
 
-describe("resident runner notices (non-outcome events always surface once)", () => {
+describe("resident runner notices", () => {
+  it("keeps non-lifecycle DEBUG bookkeeping in JSONL only", () => {
+    const processExit = log("yrd:process", "debug", "process exited", {
+      argv: ["git", "status"],
+      stdout: "large command output",
+      exitCode: 0,
+    })
+    expect(formatResidentLogLine(processExit, { color: false })).toBeUndefined()
+  })
+
+  it("surfaces non-lifecycle DEBUG when the operator explicitly requested debug", () => {
+    const processExit = log("yrd:process", "debug", "process exited", {
+      argv: ["git", "status"],
+      exitCode: 0,
+    })
+    const plain = formatResidentLogLine(processExit, { color: false, includeDebug: true })
+    expect(plain).toContain("DEBUG yrd:process process exited")
+    expect(plain).toContain('"exitCode":0')
+  })
+
   it("surfaces a compose-level refusal (WARN) as a notice with its message and JSON tail", () => {
     const refusal = log("yrd:queue:compose", "warn", "compose refused — queue busy", {
       ...RUNNER_SCOPE,

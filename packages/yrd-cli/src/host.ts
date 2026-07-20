@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { mkdirSync } from "node:fs"
 import { hostname } from "node:os"
 import { join, relative, resolve, sep } from "node:path"
 import { clearLine, cursorTo } from "node:readline"
@@ -67,7 +68,7 @@ import { loadYrdConfig, SignalRecipientSchema, type ResolvedYrdProjectConfig, ty
 import { classifyFailure, resolveInvocation } from "./invocation.ts"
 import { withLiveRenderer } from "./live-renderer.ts"
 import { createYrdLogger, residentObservability, resolveYrdObservability } from "./observability.ts"
-import { formatResidentLogLine } from "./runner-timeline.ts"
+import { formatResidentLogLine, residentArtifactHome } from "./runner-timeline.ts"
 import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
@@ -733,6 +734,7 @@ async function acquireResidentRunner(
   identity: ResidentRunnerIdentity,
   log: ConditionalLogger,
 ): Promise<ResidentRunnerLease> {
+  const runnerLog = log.child("runner")
   const released = Promise.withResolvers<void>()
   const acquired = Promise.withResolvers<void>()
   const held = createExclusive(join(stateDir, "resident-runner"), { timeoutMs: 0 }).run(async () => {
@@ -752,7 +754,7 @@ async function acquireResidentRunner(
     }
     throw error
   }
-  log.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
+  runnerLog.info?.("Resident runner lease acquired", { runner: identity.id, stateDir })
 
   let closePromise: Promise<void> | undefined
   return Object.freeze({
@@ -760,7 +762,7 @@ async function acquireResidentRunner(
       (closePromise ??= (async () => {
         released.resolve()
         await held
-        log.info?.("Resident runner lease released", { runner: identity.id, stateDir })
+        runnerLog.info?.("Resident runner lease released", { runner: identity.id, stateDir })
       })()),
   })
 }
@@ -1174,19 +1176,30 @@ export async function runYrdProcess(
       env,
       async load(context, options) {
         const resident = options.resident ? residentRunnerIdentity(env) : undefined
-        // The resident follow-runner logs at INFO-by-default (see
-        // residentObservability) so completed steps/runs/composes — successes
-        // included — print with timing; one-shot commands keep the WARN default.
+        // The resident follow-runner logs at DEBUG-by-default (see
+        // residentObservability) so run/step starts and successful completions
+        // reach its concise human formatter; one-shot commands keep WARN.
         const observability =
           resident === undefined ? context.observability : residentObservability(context.observability)
         // For the resident, the stderr log stream renders as scannable
         // watch-timeline rows (JSON stays in the JSONL file sink); one-shot
         // commands keep the default console format.
+        const residentArtifacts: { root: string | undefined } = { root: undefined }
         const human =
           resident === undefined
             ? undefined
-            : (event: Parameters<typeof formatResidentLogLine>[0]) =>
-                formatResidentLogLine(event, { color: io.color === true })
+            : (event: Parameters<typeof formatResidentLogLine>[0]) => {
+                const artifactRoot = residentArtifacts.root
+                if (artifactRoot !== undefined) {
+                  const home = residentArtifactHome(event, artifactRoot)
+                  if (home !== undefined) mkdirSync(home, { recursive: true })
+                }
+                return formatResidentLogLine(event, {
+                  color: io.color === true,
+                  ...(artifactRoot === undefined ? {} : { artifactRoot }),
+                  includeDebug: observability.explicitLevel || observability.debug !== undefined,
+                })
+              }
         log = createYrdLogger(observability, (text) => io.stderr(text), human)
         const runtimeLog = resident === undefined ? log : residentRunnerLog(log, resident)
         const activeHost = await createYrdRuntimeHost(
@@ -1194,6 +1207,7 @@ export async function runYrdProcess(
           resident,
           options.viewer ? "viewer" : "active",
         )
+        residentArtifacts.root = join(activeHost.repository.stateDir, "artifacts")
         host = activeHost
         const runnerLog = runtimeLog.child("runner")
         const drain = options.resident ? new AbortController() : undefined

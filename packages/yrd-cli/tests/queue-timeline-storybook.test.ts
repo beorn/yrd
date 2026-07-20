@@ -277,7 +277,7 @@ describe("queue timeline storybook", () => {
       changedAt: "2026-07-13T11:58:30.000Z",
       leaseExpiresAt: "2026-07-13T12:05:30.000Z",
     })
-    expect(overview.outputs?.map((output) => output.path)).toEqual([
+    expect(overview.outputs?.filter((output) => output.source === "recorded").map((output) => output.path)).toEqual([
       "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/stdout.log",
       "/repo/.git/yrd/artifacts/R42/1-check/attempt-2/stderr.log",
     ])
@@ -328,7 +328,11 @@ describe("queue timeline storybook", () => {
     expect(rejected?.steps.map((step) => step.errorCode)).toEqual(["lint-failed", "typecheck-failed"])
 
     const live = queueTimelineStories["live-output-growth"]
-    expect(live.snapshot.outputs?.map((output) => output.path.split("/").at(-1))).toEqual(["stdout.log", "stderr.log"])
+    expect(
+      live.snapshot.outputs
+        ?.filter((output) => output.source === "recorded")
+        .map((output) => output.path.split("/").at(-1)),
+    ).toEqual(["stdout.log", "stderr.log"])
     expect(live.nextSnapshot?.outputs?.[0]?.text).toContain("checking two")
     expect(live.nextSnapshot?.outputs?.[1]?.text).toContain("retry recovered")
   })
