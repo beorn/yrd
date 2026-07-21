@@ -4577,7 +4577,7 @@ describe("runYrd", () => {
     }
   })
 
-  it("writes atomic resident runner heartbeats and removes them on close", async () => {
+  it("writes atomic resident runner heartbeats and leaves a reclaimable exit marker on close", async () => {
     const repo = mkdtempSync(join(tmpdir(), "yrd-runner-heartbeat-"))
     execFileSync("git", ["init", "-q", repo])
     const statusPath = join(repo, ".git", "yrd", "resident-runner", "status.json")
@@ -4603,9 +4603,24 @@ describe("runYrd", () => {
         })
         heartbeat.check()
       } finally {
-        await heartbeat.close()
+        now += 1_000
+        await heartbeat.close(true)
       }
-      expect(existsSync(statusPath)).toBe(false)
+      // The status file is NEVER deleted on close: it carries an exit marker so a
+      // successor's pid-scoped reclaim keeps working after a clean exit (kills the
+      // null-status path that stranded ghosts). queue.recover is idempotent, so
+      // reclaiming after a clean exit is a no-op.
+      expect(existsSync(statusPath)).toBe(true)
+      const marker = JSON.parse(readFileSync(statusPath, "utf8"))
+      expect(marker).toMatchObject({ pid: process.pid, exitedAt: "2026-07-13T12:00:02.000Z", clean: true })
+      // The successor reads the marker (not null) and, seeing a different dead pid,
+      // reclaims — exactly what a deleted status file used to silently skip.
+      const prior = await runInternals.residentRunnerStatus(repo)
+      expect(prior).toMatchObject({ pid: process.pid, exitedAt: "2026-07-13T12:00:02.000Z", clean: true })
+      expect(runInternals.planResidentRunnerReclaim(prior, process.pid + 1, () => false)).toEqual({
+        reclaim: true,
+        runner: `yrd-cli:${process.pid}`,
+      })
     } finally {
       rmSync(repo, { recursive: true, force: true })
     }

@@ -231,11 +231,16 @@ function parseResidentRunnerStatus(text: string): QueueTimelineRunner {
   if (record.command !== undefined && typeof record.command !== "string") {
     raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner command is invalid")
   }
+  if (record.clean !== undefined && typeof record.clean !== "boolean") {
+    raiseFailure("infrastructure", "resident-runner-status-invalid", "yrd: resident runner clean flag is invalid")
+  }
   return {
     pid: record.pid as number,
     startedAt,
     lastTickAt,
     ...(record.command === undefined ? {} : { command: record.command as string }),
+    ...(record.exitedAt === undefined ? {} : { exitedAt: residentRunnerTimestamp(record.exitedAt, "exitedAt") }),
+    ...(record.clean === undefined ? {} : { clean: record.clean }),
   }
 }
 
@@ -248,6 +253,15 @@ export async function residentRunnerStatus(cwd: string): Promise<QueueTimelineRu
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null
     throw cause
   }
+}
+
+/** The status file is no longer deleted on close (D1a) — a departed runner leaves
+ * an exit marker so a successor can reclaim its pid. For DISPLAY (health + timeline)
+ * an exited runner is not draining, so it reads as "no active runner", preserving
+ * the pre-marker "NO RUNNER"/absent semantics. Reclaim, by contrast, consumes the
+ * raw marker (it needs the dead pid), so it must NOT go through this filter. */
+function activeResidentRunner(runner: QueueTimelineRunner | null): QueueTimelineRunner | null {
+  return runner !== null && runner.exitedAt !== undefined ? null : runner
 }
 
 type RunnerGitDistance = Readonly<{
@@ -356,7 +370,7 @@ async function queueRunnerHealth(
         "yrd: queue.audit capability is not installed; runner health cannot prove baseline freshness",
       )
     }
-    const runner = await residentRunnerStatus(cwd)
+    const runner = activeResidentRunner(await residentRunnerStatus(cwd))
     git = await runnerGitHealth(cwd)
     const auditResult = await audit()
     const now = io.now?.() ?? Date.now()
@@ -513,7 +527,9 @@ async function reclaimDeadResidentRunner(app: YrdCliApp, io: YrdCliIO): Promise<
 
 type ResidentRunnerHeartbeat = Readonly<{
   check(): void
-  close(): Promise<void>
+  /** Stop the heartbeat and leave an exit marker in status.json (never delete it).
+   * `clean` = true for an operator/drain stop, false for a signal-forced/crash exit. */
+  close(clean: boolean): Promise<void>
 }>
 
 function heartbeatDelay(intervalMs: number, signal: AbortSignal): Promise<boolean> {
@@ -561,9 +577,9 @@ export async function startResidentRunnerHeartbeat(
   const startedAt = nowIso()
   // The dedicated RUNNER box renders this verbatim: `[pid] <command>`.
   const command = [basename(process.argv[0] ?? "bun"), ...process.argv.slice(1)].join(" ")
-  const write = async (): Promise<void> => {
+  const writeStatus = async (exit?: Readonly<{ exitedAt: string; clean: boolean }>): Promise<void> => {
     await mkdir(directory, { recursive: true })
-    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso(), command }
+    const status: QueueTimelineRunner = { pid: process.pid, startedAt, lastTickAt: nowIso(), command, ...exit }
     try {
       await writeFile(temporary, `${JSON.stringify(status)}\n`, "utf8")
       await rename(temporary, path)
@@ -571,6 +587,7 @@ export async function startResidentRunnerHeartbeat(
       await rm(temporary, { force: true })
     }
   }
+  const write = () => writeStatus()
 
   await write()
   const stop = new AbortController()
@@ -585,12 +602,19 @@ export async function startResidentRunnerHeartbeat(
     check() {
       if (failure !== undefined) throw failure
     },
-    close: () =>
+    close: (clean: boolean) =>
       (closePromise ??= (async () => {
         stop.abort()
         await loop
+        // NEVER delete status.json on close. Overwrite it atomically with an exit
+        // marker instead: a successor resident reads this (not null) and reclaims
+        // this pid's leases via planResidentRunnerReclaim, clean or not — the
+        // deletion used to strand ghosts because the null-status path skipped
+        // reclaim. queue.recover is idempotent, so reclaiming a clean exit is a
+        // no-op. `clean` records whether this was an operator/drain stop (true) or
+        // a signal-forced/crash exit (false).
         try {
-          await rm(path, { force: true })
+          await writeStatus({ exitedAt: nowIso(), clean })
         } finally {
           await rm(temporary, { force: true })
         }
@@ -2722,7 +2746,7 @@ export async function queueListSnapshot(
   const { results } = await queueStatusSnapshots(app, state, target, io)
   const now = io.now?.() ?? Date.now()
   const base = results[0]?.base ?? baseIdentity(requestedBase)
-  const runner = await residentRunnerStatus(io.cwd ?? process.cwd())
+  const runner = activeResidentRunner(await residentRunnerStatus(io.cwd ?? process.cwd()))
   const projection = queueTimelineProjection(results, {
     now,
     windowMs: queueTimelineWindow(options.since),
@@ -3645,6 +3669,10 @@ export async function followQueueRuns(
   // that prior resident is not concurrently running as a resident.
   if (resident) await reclaimDeadResidentRunner(app, io)
   const heartbeat = resident ? await startResidentRunnerHeartbeat(io) : undefined
+  // A clean shutdown is an operator drain that finished (no in-flight work left);
+  // any other exit — a signal-forced abort or a thrown fault — is unclean. This
+  // feeds the exit marker close() writes (D1a) and the process exit code (D3).
+  let cleanShutdown = false
   try {
     heartbeat?.check()
     if (heartbeat !== undefined && selectors.length === 0 && !jsonEnabled(options)) {
@@ -3708,7 +3736,11 @@ export async function followQueueRuns(
       }
       const exit: YrdCliExitCode = runs.some((run) => run.status === "failed") ? 1 : 0
       if (drainRequested()) {
-        if (runs.every(Queues.terminal)) return runs.at(-1)?.status === "failed" ? 1 : 0
+        if (runs.every(Queues.terminal)) {
+          // Operator drain finished with no in-flight work left — the one clean stop.
+          cleanShutdown = true
+          return runs.at(-1)?.status === "failed" ? 1 : 0
+        }
         await scope.sleep(interval)
         continue
       }
@@ -3718,7 +3750,7 @@ export async function followQueueRuns(
       if (scope.signal.aborted) return exit
     }
   } finally {
-    await heartbeat?.close()
+    await heartbeat?.close(cleanShutdown)
   }
 }
 
