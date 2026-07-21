@@ -117,18 +117,10 @@ describe("requireLivePR coverage — every PR-selector mutation routes through t
   const pluginSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "plugin.ts"), "utf8")
   const count = (pattern: RegExp) => pluginSource.match(pattern)?.length ?? 0
 
-  it("routes exactly the derived mutating reducers through requireLivePR and leaves no raw resolve", () => {
-    // Grep-derived, never hand-listed: a NEW mutating reducer that resolves a PR
-    // selector with the raw `required(resolvePR(state.bays, args.pr))` pattern
-    // reddens the zero-raw assertion; one that adds a requireLivePR call reddens
-    // the count assertion, forcing a deliberate review of the expected total.
-    const routed = count(/requireLivePR\(state\.bays, args\.pr\)/g)
-    const raw = count(/required\(resolvePR\(state\.bays, args\.pr\)/g)
-    // ready, recut, requestReview, review, comment, requestChecks,
-    // recordRegression, close, edit — 9 mutating verbs.
-    expect(routed).toBe(9)
-    expect(raw).toBe(0)
-  })
+  // The former grep-count assertion (routed === 9, raw === 0) is retired: the
+  // `LivePR` brand on requireLivePR's return, annotated at every mutating
+  // reducer's resolved PR, makes tsc reject a raw-resolve swap. Type checking,
+  // not source-grep, is the routing enforcement now.
 
   it("keeps submit as the ONE documented exemption (it owns terminal-branch semantics via D2/Q1)", () => {
     // submit resolves its selector through submitSelectionOperation's D2/Q1

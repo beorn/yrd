@@ -726,6 +726,15 @@ export function resolvePR(state: BaysState, selector: string): PR | undefined {
   return resolvePRMatch(state, selector)?.value
 }
 
+declare const liveBrand: unique symbol
+
+/** A PR that has passed through {@link requireLivePR} — the shared mutation
+ * boundary guard. Mutating reducers annotate their resolved PR as `LivePR`, so
+ * `tsc` rejects any swap back to a raw `resolvePR` / `required(...)` (which
+ * yields an unbranded {@link PR}) — the type system, not a source-grep test,
+ * enforces that every PR-selector mutation routes through the live guard. */
+export type LivePR = PR & { readonly [liveBrand]: true }
+
 /** Resolve a PR for a MUTATING verb: a branch/name selector must name the live
  * delivery of that branch. Returns the live PR; a terminal PR is returned only
  * when the operator addressed it by its exact canonical id (the verb's own
@@ -733,7 +742,7 @@ export function resolvePR(state: BaysState, selector: string): PR | undefined {
  * selector whose PRs are all terminal refuses loudly here at the mutation
  * boundary — resolvePR stays verb-agnostic and read-biased, so this is the one
  * shared guard every mutating verb routes through instead of hand-rolling it. */
-export function requireLivePR(state: BaysState, selector: string): PR {
+export function requireLivePR(state: BaysState, selector: string): LivePR {
   const resolution = resolvePRMatch(state, selector)
   if (resolution === undefined) {
     raiseFailure("refusal", "pr-not-found", `yrd: no PR '${selector}'`)
@@ -742,6 +751,6 @@ export function requireLivePR(state: BaysState, selector: string): PR {
   // A canonical-id match ('pr1' folds to PR1) passes a terminal PR through to
   // the verb's own state guard; an alias (branch/name) match must name a live
   // delivery. The fold that decides this lives in resolveSelectorMatch, not here.
-  if (isLivePR(pr.status) || resolution.matchedBy === "canonical") return pr
+  if (isLivePR(pr.status) || resolution.matchedBy === "canonical") return pr as LivePR
   raiseFailure("refusal", "no-live-pr", `yrd: no live PR for branch '${selector}'; use PR id`)
 }
