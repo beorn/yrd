@@ -302,15 +302,16 @@ describe("detail step facts — final JOB yrd# grammar without duplication", () 
     }
   })
 
-  it("labels subprocess detail as MESSAGE so it cannot collide with DETAILS", async () => {
+  it("labels and fully wraps subprocess MESSAGE detail so it cannot collide with DETAILS", async () => {
     const pr = fixturePr("PR11", "submitted", "2026-07-13T10:30:00.000Z", "Explain a long failure")
+    const detail = `The subprocess explained this failure ${"without clipping a word ".repeat(8)}`
     const run = fixtureRun("R11", [pr], "failed", "2026-07-13T10:40:00.000Z", {
       finishedAt: "2026-07-13T10:42:00.000Z",
       steps: [
         fixtureStep(
           "check",
           fixtureJob("J11-check", "failed", {
-            detail: `The subprocess explained this failure ${"without clipping a word ".repeat(8)}`,
+            detail,
           }),
         ),
       ],
@@ -328,7 +329,8 @@ describe("detail step facts — final JOB yrd# grammar without duplication", () 
       expect(app.text).not.toContain("DETAILS")
       const messageLine = app.text.split("\n").find((line) => line.includes("MESSAGE"))
       expect(messageLine, "the MESSAGE row is visible at the narrow full-detail tier").toBeDefined()
-      expect(messageLine?.trimEnd(), "MESSAGE ends with an ellipsis instead of clipping mid-word").toMatch(/…$/u)
+      expect(app.text.replace(/\s+/gu, " ")).toContain(detail.trim())
+      expect(app.text).not.toContain("…")
     } finally {
       app.unmount()
     }

@@ -72,12 +72,36 @@ describe("watch detail completeness — run-level integration proof detail (item
 })
 
 describe("watch detail completeness — step artifacts + checkpoint (item J)", () => {
+  it("wraps complete step messages and proof values in a narrow detail pane", () => {
+    const data = integratedRunData()
+    const [row] = data.steps
+    if (row === undefined) throw new Error("fixture run produced no step rows")
+    const message = "runner preserved the complete diagnostic while the detail pane became narrow"
+    const checkpoint = "tests=125 failures=0 report=durable-complete-evidence"
+    const stepData: QueueShowData = {
+      ...data,
+      steps: [{ ...row, detail: message, checkpoint, evidence: "verified from the immutable attempt", locations: [] }],
+    }
+    const app = createRenderer({ cols: 48, rows: 30 })(
+      createElement(QueueShowView, { data: stepData, compact: true, section: "steps" }),
+    )
+    try {
+      const rendered = app.text.replace(/\s+/gu, " ")
+      expect(rendered).toContain(message)
+      expect(rendered).toContain(checkpoint)
+      expect(rendered).toContain("verified from the immutable attempt")
+      expect(rendered).not.toContain("…")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("renders artifacts and checkpoint on a proof row distinct from inline output", () => {
     const data = integratedRunData()
     const [row] = data.steps
     if (row === undefined) throw new Error("fixture run produced no step rows")
     // Isolate the artifacts/checkpoint cells: no ART links or EVIDENCE JSON, so
-    // the single truncate PROOF row has room to show both fields.
+    // the PROOF row carries both fields without unrelated noise.
     const stepData: QueueShowData = {
       ...data,
       steps: [{ ...row, artifacts: "vitest-report", checkpoint: "tests=125 failures=0", evidence: "-", locations: [] }],

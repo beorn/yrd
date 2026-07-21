@@ -269,8 +269,17 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
 
     async deprovision(input: DeprovisionBayInput): Promise<JobResult<DeprovisionedBay>> {
       try {
-        if (input.path === undefined || !existsSync(input.path)) {
-          if (input.headSha === undefined) throw new Error("workspace is absent and the Bay has no recorded head")
+        // Provisioning may fail after `git worktree add` but before the Job can
+        // project its path/head. Re-derive the adapter-owned path so close can
+        // preserve and remove that mounted worktree instead of leaving the
+        // branch locked forever.
+        const path = input.path ?? safeBayPath(baysRoot, input.bay)
+        if (!existsSync(path)) {
+          // A provision that failed before `worktree add` owns no workspace or
+          // head to preserve. Retiring the failed Bay is the complete cleanup;
+          // historical/active Bays with a recorded head still require their
+          // preservation proof below.
+          if (input.headSha === undefined) return { status: "passed", output: {} }
           return {
             status: "passed",
             output: {
@@ -279,19 +288,19 @@ export async function createGitWorkspace(options: GitWorkspaceOptions): Promise<
             },
           }
         }
-        const status = await git.run(input.path, ["status", "--porcelain", "--ignore-submodules=none"])
+        const status = await git.run(path, ["status", "--porcelain", "--ignore-submodules=none"])
         if (status.stdout.trim() !== "") {
           return {
             status: "failed",
             error: {
               code: "dirty-worktree",
-              message: `workspace '${input.path}' has uncommitted work:\n${status.stdout.trim()}`,
+              message: `workspace '${path}' has uncommitted work:\n${status.stdout.trim()}`,
             },
           }
         }
-        const headSha = await git.commit(input.path, "HEAD")
+        const headSha = await git.commit(path, "HEAD")
         const preservedRef = await preserveClosedBay(git, repo, input.bay, headSha)
-        await git.run(repo, ["worktree", "remove", "--force", input.path])
+        await git.run(repo, ["worktree", "remove", "--force", path])
         return { status: "passed", output: { headSha, preservedRef } }
       } catch (cause) {
         return failure("deprovision-failed", cause)

@@ -554,8 +554,9 @@ export const DeprovisionBayInputSchema = z
   .strict()
 export type DeprovisionBayInput = z.infer<typeof DeprovisionBayInputSchema>
 
-/** `headSha` is optional only for replay compatibility with pre-lifecycle job
- * results. New workspace adapters return the exact preserved head. */
+/** `headSha` is absent only for replay compatibility or for a failed provision
+ * that created no workspace/head. Deprovisioning materialized work returns the
+ * exact preserved head. */
 export const DeprovisionedBaySchema = z
   .object({ headSha: GitShaSchema.optional(), preservedRef: GitRefSchema.optional() })
   .strict()
@@ -674,6 +675,34 @@ export function prForBay(state: BaysState, bay: BayId): PR | undefined {
   return Object.values(state.prs).find((pr) => pr.bay === bay)
 }
 
+function resolveTypedPRSelector(state: BaysState, selector: string): PR | undefined {
+  const match = /^(?:pr)?([1-9]\d*)(?:\.([1-9]\d*))?$/iu.exec(selector)
+  if (match === null) return undefined
+
+  const pr = state.prs[`PR${match[1]}`]
+  if (pr === undefined || match[2] === undefined) return pr
+
+  const revision = Number(match[2])
+  if (!pr.revisions.some((candidate) => candidate.revision === revision)) {
+    const available = pr.revisions.map((candidate) => candidate.revision).toSorted((left, right) => left - right)
+    raiseFailure(
+      "refusal",
+      "pr-revision-not-found",
+      `yrd: PR '${pr.id}' has no revision ${revision}; available revisions: ${available.join(", ")}; ` +
+        `accepted forms: ${pr.id}, ${pr.id.slice(2)}, ${pr.id}.<revision>, ${pr.id.slice(2)}.<revision>`,
+    )
+  }
+  if (revision !== pr.revision) {
+    raiseFailure(
+      "refusal",
+      "pr-revision-not-current",
+      `yrd: PR '${pr.id}' revision ${revision} is historical; current revision is ${pr.revision}; ` +
+        `run 'yrd pr runs ${pr.id}' to inspect revision history`,
+    )
+  }
+  return pr
+}
+
 export function resolveBay(state: BaysState, selector: string): Bay | undefined {
   return resolveSelector(
     selector,
@@ -687,6 +716,9 @@ export function resolveBay(state: BaysState, selector: string): Bay | undefined 
 }
 
 export function resolvePR(state: BaysState, selector: string): PR | undefined {
+  const typed = resolveTypedPRSelector(state, selector)
+  if (typed !== undefined) return typed
+
   // A branch selector means "the live delivery of this branch": when a branch
   // has both a terminal PR and a live one, the live PR wins. Candidates are
   // ordered most-recent-first (highest id) so the read-biased fallback resolves

@@ -181,7 +181,10 @@ const QueueFailedPRSchema = z
   })
   .strict()
 const LegacyQueueFailedSchema = z.object({ run: QueueRunIdSchema, error: JobErrorSchema }).strict()
-const QueueFailedSchema = LegacyQueueFailedSchema.extend({ prs: z.array(QueueFailedPRSchema).min(1) }).strict()
+const QueueFailedSchema = LegacyQueueFailedSchema.extend({
+  prs: z.array(QueueFailedPRSchema).min(1),
+  step: StepNameSchema.optional(),
+}).strict()
 const ReplayQueueFailedSchema = z.union([QueueFailedSchema, LegacyQueueFailedSchema])
 const CancelRunArgsSchema = z
   .object({
@@ -1446,10 +1449,12 @@ function queueFailedEvent(
   state: DeepReadonly<RuntimeState>,
   run: DeepReadonly<Pick<QueueRecord, "id" | "prs">>,
   error: DeepReadonly<JobError>,
+  step?: string,
 ): EventDraft {
   return event("queue/run/failed", {
     run: run.id,
     error,
+    ...(step === undefined ? {} : { step }),
     prs: run.prs.map((pr) => {
       const current = state.bays.prs[pr.id]
       const actor = current?.revisions.find(
@@ -2442,7 +2447,7 @@ function advanceQueue(
 
     const failure = jobFailure(job)
     if (queueAuthorityReleaseReason(failure) !== undefined) {
-      return { events: [queueFailedEvent(state, record, failure)] }
+      return { events: [queueFailedEvent(state, record, failure, planned.name)] }
     }
     const pr = record.prs.length === 1 ? record.prs[0] : undefined
     const current = pr === undefined ? undefined : state.bays.prs[pr.id]

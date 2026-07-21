@@ -16,6 +16,7 @@ import { queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import {
   QUEUE_TIMELINE_UNBOUNDED_WINDOW_MS,
   QueueTimelineView,
+  queueHealthMarker,
   type QueueTimelineProjection,
 } from "../src/queue-status-view.tsx"
 import { QueueWatchFrame } from "../src/watch-pane.tsx"
@@ -224,7 +225,12 @@ describe("queue timeline chrome 21106", () => {
 
   it("renders an all-red NO RUNNER banner with the last-drained age when no runner exists", async () => {
     const story = queueTimelineStories["contract-overview"].snapshot.projection
-    const projection: QueueTimelineProjection = { ...story, runner: null }
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: null,
+      activeRuns: [],
+      rows: story.rows.filter((row) => row.status !== "running"),
+    }
     const newestTerminal = Math.max(
       ...projection.rows
         .filter((row) => row.group === "completed" && row.timestampMs !== null)
@@ -253,6 +259,127 @@ describe("queue timeline chrome 21106", () => {
       const rejectedLine = rowAt(app.text, rejectedY)
       const failX = rejectedLine.indexOf("fail")
       expect(messageFg, "NO RUNNER shares the error fg").toEqual(app.cell(failX, rejectedY).fg)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("reports the active run instead of claiming NO RUNNER when the resident lease is absent", async () => {
+    const story = queueTimelineStories["contract-overview"].snapshot.projection
+    const active = story.rows.find((row) => row.status === "running" && row.run !== undefined)
+    if (active?.run === undefined) throw new Error("fixture has no active run")
+    const projection: QueueTimelineProjection = {
+      ...story,
+      runner: null,
+      activeRuns: [{ base: active.base, run: active.run }],
+      rows: story.rows.filter((row) => row.status !== "running"),
+    }
+    const app = createRenderer({ cols: 120, rows: 40 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 120 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).not.toContain("NO RUNNER")
+      expect(app.text).toContain("ACTIVE RUN")
+      expect(app.text).toContain(`${active.base}#${active.run.replace(/^R/u, "")}`)
+      expect(app.text).toContain("resident lease unavailable")
+      expect(queueHealthMarker(projection)).toMatchObject({ kind: "processing", color: "$fg-info" })
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("wraps the complete STATUS pause reason instead of truncating the operator directive", async () => {
+    const base = queueTimelineStories.paused.snapshot.projection
+    const reason = "coordination paused while replacing wedged runner and preserving the authoritative queue state"
+    const projection: QueueTimelineProjection = {
+      ...base,
+      pause: { ...base.pause!, reason },
+    }
+    const app = createRenderer({ cols: 58, rows: 30 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 58 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const rendered = app.text.split("\n")
+      const start = rendered.findIndex((row) => row.includes("╭─ STATUS "))
+      const end = rendered.findIndex((row, index) => index > start && row.includes("╰"))
+      const statusBox = rendered
+        .slice(start, end + 1)
+        .join(" ")
+        .replace(/[│╭╮╰╯─]/gu, " ")
+        .replace(/\s+/gu, " ")
+      expect(statusBox).toContain(reason)
+      expect(statusBox).toContain("state · allowed PR2")
+      expect(statusBox).not.toContain("…")
+      expect(end - start).toBeGreaterThan(3)
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("wraps complete issue paths into variable-height live rows", async () => {
+    const base = queueTimelineStories["contract-overview"].snapshot.projection
+    const firstIssue = "@yrd/core/21584-yrd-persistence-authoritative-rebuild-manifest-contract"
+    const secondIssue = "@hab/19797-hab-master/runner-observability-and-recovery-contract"
+    const branch = "task/21620-failure-observability-with-complete-untruncated-artifact-links"
+    const projection: QueueTimelineProjection = {
+      ...base,
+      rows: base.rows.map((row, index) =>
+        index === 0
+          ? { ...row, issue: firstIssue }
+          : index === 1
+            ? { ...row, issue: secondIssue }
+            : index === 2
+              ? { ...row, issue: undefined, branch }
+              : row,
+      ),
+    }
+    const app = createRenderer({ cols: 80, rows: 40 })(
+      createElement(QueueTimelineView, { projection, nav: true, columns: 80 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      for (const [row, issue] of [
+        [projection.rows[0]!, firstIssue],
+        [projection.rows[1]!, secondIssue],
+        [projection.rows[2]!, branch.replace(/^task\//u, "")],
+      ] as const) {
+        const box = app.locator(`[id='td-pr-${row.id}']`).boundingBox()
+        expect(box, `PR cell for ${row.id}`).not.toBeNull()
+        expect(box!.height, `wrapped height for ${row.id}`).toBeGreaterThan(1)
+        const physical = Array.from({ length: box!.height }, (_, y) =>
+          Array.from({ length: box!.width }, (__, x) => app.cell(box!.x + x, box!.y + y).char).join(""),
+        ).join("\n")
+        expect(physical.replace(/\s+/gu, "")).toContain(issue)
+        expect(physical).not.toContain("…")
+      }
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it("wraps the complete resident runner command inside the RUNNER box", async () => {
+    const base = queueTimelineStories["contract-overview"].snapshot.projection
+    if (base.runner === null) throw new Error("fixture has no resident runner")
+    const command = "yrd queue run --base main --continue while preserving every artifact link"
+    const projection: QueueTimelineProjection = { ...base, runner: { ...base.runner, command } }
+    const app = createRenderer({ cols: 58, rows: 30 })(
+      createElement(QueueTimelineView, { projection, nav: false, columns: 58 }),
+    )
+    try {
+      await app.waitForLayoutStable()
+      const rendered = app.text.split("\n")
+      const start = rendered.findIndex((row) => row.includes("╭─ RUNNER "))
+      const end = rendered.findIndex((row, index) => index > start && row.includes("╰"))
+      const runnerBox = rendered
+        .slice(start, end + 1)
+        .join(" ")
+        .replace(/[│╭╮╰╯─]/gu, " ")
+        .replace(/\s+/gu, " ")
+      expect(runnerBox).toContain(command)
+      expect(runnerBox).not.toContain("…")
+      expect(end - start).toBeGreaterThan(2)
     } finally {
       app.unmount()
     }

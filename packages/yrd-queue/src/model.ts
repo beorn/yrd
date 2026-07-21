@@ -45,6 +45,7 @@ export const PRSnapshotSchema = z
     revision: z.number().int().positive(),
     headSha: GitShaSchema,
     baseSha: GitShaSchema.optional(),
+    issue: z.string().trim().min(1).optional(),
     correlation: CorrelationSchema.optional(),
     composition: CompositionV1Schema.optional(),
     recut: PRSnapshotRecutProofSchema.optional(),
@@ -547,6 +548,7 @@ export const Queues = Object.freeze({
       revision: pr.revision,
       headSha: pr.headSha,
       ...(baseSha === undefined ? {} : { baseSha }),
+      ...(pr.issue === undefined ? {} : { issue: pr.issue }),
       ...(pr.correlation === undefined ? {} : { correlation: pr.correlation }),
       ...(pr.composition === undefined ? {} : { composition: pr.composition }),
       ...(pr.recut === undefined

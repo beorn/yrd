@@ -16,7 +16,7 @@ import { run } from "silvery/runtime"
 import { describe, expect, it } from "vitest"
 import { fixturePr, fixtureResult, fixtureSnapshot, queueTimelineStories } from "../dev/queue-timeline-fixtures.ts"
 import { queueLandingLabel } from "../src/queue-status-view.tsx"
-import { QueueWatchFrame } from "../src/watch-pane.tsx"
+import { QueueWatchFrame, type QueueRunnerLifecycleEvent } from "../src/watch-pane.tsx"
 
 function rowIndexOf(text: string, needle: string): number {
   return text.split("\n").findIndex((row) => row.includes(needle))
@@ -44,6 +44,51 @@ describe("queueLandingLabel", () => {
 })
 
 describe("QueueWatchFrame 21106 interaction", () => {
+  it("keeps structured runner lifecycle collapsed by default and expands it on l", async () => {
+    const lifecycle: readonly QueueRunnerLifecycleEvent[] = [
+      {
+        id: "R42:run-started",
+        run: "R42",
+        base: "main",
+        at: "2026-07-13T11:40:00.000Z",
+        kind: "run-started",
+      },
+      {
+        id: "R42:prepare:1:failed",
+        run: "R42",
+        base: "main",
+        at: "2026-07-13T11:44:00.000Z",
+        kind: "step-failed",
+        step: "prepare",
+        attempt: 1,
+        durationMs: 240_000,
+        code: "check-failed",
+        artifactPath: "/repo/.git/yrd/artifacts/R42/0-prepare/attempt-1/output.log",
+      },
+    ]
+    const snapshot = { ...queueTimelineStories["contract-overview"].snapshot, lifecycle }
+    const app = createRenderer({ cols: 200, rows: 55 })(createElement(QueueWatchFrame, { snapshot }))
+    try {
+      await app.waitForLayoutStable()
+      expect(app.text).toContain("LIFECYCLE 2 · l opens")
+      expect(app.text).not.toContain("prepare#1 failed")
+
+      await app.press("l")
+      await waitFor(() => app.text.includes("prepare#1 failed"))
+      expect(app.text).toContain("main#42 admitted")
+      expect(app.text).toContain("check-failed")
+      expect(app.getByText("open log").getAttribute("internal_hyperlink")).toBe(
+        "file:///repo/.git/yrd/artifacts/R42/0-prepare/attempt-1/output.log",
+      )
+
+      await app.press("l")
+      await waitFor(() => !app.text.includes("prepare#1 failed"))
+      expect(app.text).toContain("LIFECYCLE 2 · l opens")
+    } finally {
+      app.unmount()
+    }
+  })
+
   it("removes the bottom keybindings footer and keeps the detail clean", async () => {
     const snapshot = queueTimelineStories["contract-overview"].snapshot
     const render = createRenderer({ cols: 200, rows: 50 })

@@ -41,7 +41,7 @@ import {
   type QueueTimelineStatusBucket,
 } from "./queue-status-view.tsx"
 import { taskStatusColor } from "./status-view.tsx"
-import { timelineStatusGlyph } from "./runner-timeline.ts"
+import { formatDuration, formatLocalClock, timelineStatusGlyph } from "./runner-timeline.ts"
 import { reduceRunCancelKey } from "./watch-cancel.ts"
 
 const LIST_NATURAL_WIDTH = 80
@@ -134,6 +134,31 @@ export type QueueWatchSnapshot = Readonly<{
   diffs?: readonly QueuePrDiff[]
   /** Resolved project commands for the live step headers. */
   commands?: Readonly<Record<string, string>>
+  /** Structured, skippable runner narration; never raw JSONL or check output. */
+  lifecycle?: readonly QueueRunnerLifecycleEvent[]
+}>
+
+export type QueueRunnerLifecycleKind =
+  | "run-started"
+  | "run-passed"
+  | "run-failed"
+  | "run-canceled"
+  | "step-started"
+  | "step-passed"
+  | "step-failed"
+  | "step-canceled"
+
+export type QueueRunnerLifecycleEvent = Readonly<{
+  id: string
+  run: string
+  base: string
+  at: string
+  kind: QueueRunnerLifecycleKind
+  step?: string
+  attempt?: number
+  durationMs?: number
+  code?: string
+  artifactPath?: string
 }>
 
 /** The one immutable row identity whose expensive detail data watch may load. */
@@ -290,9 +315,9 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
           // ListView suppresses selection on its navigation wrapper. Restore a
           // text-selectable island for every output row so drag-select reaches
           // Silvery's OSC52 copy path while mouse tracking remains enabled.
-          <Box userSelect="text" flexDirection="column" width="100%" minWidth={0} overflow="hidden">
+          <Box userSelect="text" flexDirection="column" width="100%" minWidth={0}>
             {row.kind === "heading" ? (
-              <Text bold wrap="truncate">
+              <Text bold wrap="wrap">
                 {row.text}
               </Text>
             ) : row.kind === "link" ? (
@@ -323,6 +348,89 @@ function QueueArtifactOutputList({ outputs, inline }: { outputs: readonly QueueA
 
 export function QueueArtifactOutputView({ outputs }: { outputs: readonly QueueArtifactOutput[] }) {
   return <QueueArtifactOutputList outputs={outputs} inline={false} />
+}
+
+function lifecycleRunRef(event: QueueRunnerLifecycleEvent): string {
+  const run = /^R\d+$/u.test(event.run) ? event.run.slice(1) : event.run
+  return `${event.base}#${run}`
+}
+
+function lifecycleEventText(event: QueueRunnerLifecycleEvent): string {
+  const duration = event.durationMs === undefined ? "" : ` ${formatDuration(event.durationMs)}`
+  const code = event.code === undefined ? "" : ` · ${event.code}`
+  switch (event.kind) {
+    case "run-started":
+      return `${lifecycleRunRef(event)} admitted`
+    case "run-passed":
+      return `${lifecycleRunRef(event)} passed${duration}`
+    case "run-failed":
+      return `${lifecycleRunRef(event)} failed${duration}${code}`
+    case "run-canceled":
+      return `${lifecycleRunRef(event)} canceled${duration}${code}`
+    case "step-started":
+      return `${event.step ?? "step"}#${event.attempt ?? 1} started`
+    case "step-passed":
+      return `${event.step ?? "step"}#${event.attempt ?? 1} passed${duration}`
+    case "step-failed":
+      return `${event.step ?? "step"}#${event.attempt ?? 1} failed${duration}${code}`
+    case "step-canceled":
+      return `${event.step ?? "step"}#${event.attempt ?? 1} canceled${duration}${code}`
+  }
+}
+
+function lifecycleEventColor(kind: QueueRunnerLifecycleKind): string {
+  if (kind === "run-passed" || kind === "step-passed") return "$fg-success"
+  if (kind === "run-failed" || kind === "step-failed") return "$fg-error"
+  if (kind === "run-canceled" || kind === "step-canceled") return "$fg-muted"
+  return "$fg-info"
+}
+
+function QueueRunnerLifecyclePanel({
+  events,
+  expanded,
+  onToggle,
+}: {
+  events: readonly QueueRunnerLifecycleEvent[]
+  expanded: boolean
+  onToggle(): void
+}) {
+  if (events.length === 0) return null
+  return (
+    <Box flexDirection="column" minWidth={0} flexShrink={0} marginBottom={1}>
+      <Box onClick={onToggle} minWidth={0}>
+        <Text bold color="$fg-muted" wrap="wrap">
+          LIFECYCLE {events.length} · l {expanded ? "closes" : "opens"}
+        </Text>
+      </Box>
+      {expanded
+        ? events.map((event) => (
+            <Box key={event.id} flexDirection="row" gap={1} minWidth={0} flexWrap="wrap">
+              <Text color="$fg-muted" flexShrink={0}>
+                {formatLocalClock(new Date(event.at))}
+              </Text>
+              <Text color={lifecycleEventColor(event.kind)} flexShrink={0}>
+                {timelineStatusGlyph(
+                  event.kind.endsWith("passed")
+                    ? "passed"
+                    : event.kind.endsWith("failed")
+                      ? "failed"
+                      : event.kind.endsWith("canceled")
+                        ? "canceled"
+                        : "running",
+                )}
+              </Text>
+              <Text wrap="wrap" minWidth={0}>
+                {lifecycleEventText(event)}
+              </Text>
+              {event.artifactPath === undefined ? null : (
+                <Link href={pathToFileURL(event.artifactPath).href}>open log</Link>
+              )}
+            </Box>
+          ))
+        : null}
+      <Divider />
+    </Box>
+  )
 }
 
 function queueStepNames(data: QueueShowData): readonly string[] {
@@ -549,7 +657,7 @@ function QueueSubmitDiff({
         minWidth={0}
         backgroundColor={focused ? "$bg-selected" : undefined}
       >
-        <Text wrap="truncate" color={focused ? "$fg-on-selected" : undefined}>
+        <Text wrap="wrap" color={focused ? "$fg-on-selected" : undefined}>
           {summary}
         </Text>
       </Box>
@@ -726,7 +834,7 @@ export function QueueWorkflowStepTabs({
             <Text>{`${"TIMELINE".padEnd(9, " ")}${submitted.slice(11, 19)} → pending`}</Text>
           )}
           {selectedPr === undefined ? null : (
-            <Text wrap="truncate" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${selectedPr.headSha}`}</Text>
+            <Text wrap="wrap" color="$fg-muted">{`${"HEAD".padEnd(9, " ")}${selectedPr.headSha}`}</Text>
           )}
         </>
       ) : activeStep === undefined ? (
@@ -808,8 +916,8 @@ export function QueueWorkflowStepTabs({
                     />
                     {name === "merge" && data.integration !== undefined ? (
                       <>
-                        <Text wrap="truncate">COMMIT {data.integration.commit}</Text>
-                        <Text wrap="truncate">
+                        <Text wrap="wrap">COMMIT {data.integration.commit}</Text>
+                        <Text wrap="wrap">
                           PARENTS {[data.integration.baseSha, ...data.prs.map((pr) => pr.headSha)].join(" ")}
                         </Text>
                       </>
@@ -819,7 +927,7 @@ export function QueueWorkflowStepTabs({
                         <Box height={1} flexShrink={0} />
                         {execution.command === undefined ? null : (
                           <Box backgroundColor="$bg-surface-subtle" paddingX={1} flexShrink={0} minWidth={0}>
-                            <Text bold wrap="truncate">
+                            <Text bold wrap="wrap">
                               $ {execution.command}
                             </Text>
                           </Box>
@@ -931,6 +1039,7 @@ export function QueueWatchFrame({
   const [splitRatio, setSplitRatio] = useState(DEFAULT_SPLIT_RATIO)
   const [newRows, setNewRows] = useState(0)
   const [cancelArmed, setCancelArmed] = useState(false)
+  const [lifecycleOpen, setLifecycleOpen] = useState(false)
   const previousTier = useRef(tier)
   const previousRowKeys = useRef<readonly string[]>(rows.map((row) => row.key))
   const cursor = Math.max(
@@ -993,6 +1102,10 @@ export function QueueWatchFrame({
       setDetailOpen(true)
       return
     }
+    if (input === "l" && (snapshot.lifecycle?.length ?? 0) > 0) {
+      setLifecycleOpen((open) => !open)
+      return
+    }
     if (snapshot.projection === undefined) return
     // Direct status-filter toggles (user respec 2026-07-15). Pause/resume is
     // removed: `p` toggles the pending bucket.
@@ -1045,6 +1158,8 @@ export function QueueWatchFrame({
       : snapshot.projection?.details.find((candidate) => candidate.run === selectedRow.run)
   const detailOutputs =
     selectedRow?.run === undefined ? [] : (snapshot.outputs?.filter((output) => output.run === selectedRow.run) ?? [])
+  const detailLifecycle =
+    selectedRow?.run === undefined ? [] : (snapshot.lifecycle?.filter((event) => event.run === selectedRow.run) ?? [])
   // Revision A makes DETAIL run-scoped: resolve every immutable run member for
   // the PR blocks, while pending rows retain the same one-template shape.
   const allFullPrs = snapshot.results.flatMap((result) => result.prs)
@@ -1105,6 +1220,11 @@ export function QueueWatchFrame({
       // terminal rows. Run data only enables tabs/logs; it never selects a
       // second status-specific IA.
       <Box flexDirection="column" flexGrow={1} minHeight={0} minWidth={0}>
+        <QueueRunnerLifecyclePanel
+          events={detailLifecycle}
+          expanded={lifecycleOpen}
+          onToggle={() => setLifecycleOpen((open) => !open)}
+        />
         <QueueWorkflowStepTabs
           key={detailData?.run ?? detailPr}
           {...(detailData === undefined ? {} : { data: detailData })}

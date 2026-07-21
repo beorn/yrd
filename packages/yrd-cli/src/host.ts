@@ -73,6 +73,7 @@ import { diagnostic } from "./output.tsx"
 import { discoverYrdRepository, type YrdRepository } from "./repository.ts"
 import { runYrdHelp, runYrdProcessRuntime } from "./run.ts"
 import { queueStepRevision, type ToolchainFingerprint } from "./host-revision.ts"
+import { createRunIndexObserver, type RunIndexObserver } from "./run-index.ts"
 import {
   createSignalObserver,
   createTribeSignalAdapter,
@@ -785,6 +786,7 @@ async function closeRuntime(
   resident?: ResidentRunnerLease,
   signals?: SignalObserver,
   candidatePool?: CandidatePool,
+  runIndex?: RunIndexObserver,
 ): Promise<void> {
   try {
     await app?.close()
@@ -798,12 +800,16 @@ async function closeRuntime(
         await signals?.close()
       } finally {
         try {
-          await process.close()
+          await runIndex?.close()
         } finally {
           try {
-            await scope[Symbol.asyncDispose]()
+            await process.close()
           } finally {
-            await resident?.close()
+            try {
+              await scope[Symbol.asyncDispose]()
+            } finally {
+              await resident?.close()
+            }
           }
         }
       }
@@ -935,6 +941,7 @@ async function createYrdRuntimeHost(
   let app: YrdCliApp | undefined
   let residentLease: ResidentRunnerLease | undefined
   let signals: SignalObserver | undefined
+  let runIndex: RunIndexObserver | undefined
   let candidatePool: CandidatePool | undefined
   try {
     const repository = await discoverYrdRepository({ cwd: options.cwd, env, process })
@@ -953,6 +960,7 @@ async function createYrdRuntimeHost(
       mode === "active"
         ? createJournal({ dir: repository.stateDir, inject: { log } })
         : createReadOnlyJournal({ dir: repository.stateDir, inject: { log } })
+    if (mode === "active") runIndex = createRunIndexObserver({ journal, stateDir: repository.stateDir, log })
     const routes = loaded.config.notify ?? {}
     const defaultActor = env.TRIBE_NAME?.trim() || "operator"
     if (mode === "active") {
@@ -973,7 +981,7 @@ async function createYrdRuntimeHost(
       }
       if (Object.keys(routes).length > 0) {
         signals = createSignalObserver({
-          journal,
+          journal: runIndex?.journal ?? journal,
           stateDir: repository.stateDir,
           routes,
           reviewRequired: loaded.config.requires.includes("review"),
@@ -995,7 +1003,7 @@ async function createYrdRuntimeHost(
       stateDir: repository.stateDir,
       baysRoot: repository.baysRoot,
       ...(mode === "active" ? { receiverPath: receiver.receiverPath } : { workspace: createViewerWorkspace() }),
-      journal: signals?.journal ?? journal,
+      journal: signals?.journal ?? runIndex?.journal ?? journal,
       process,
       config: loaded.config,
       defaultActor,
@@ -1003,6 +1011,7 @@ async function createYrdRuntimeHost(
       log,
       candidatePool,
     })
+    runIndex?.start()
     signals?.start()
     const runtimeApp = app
     const resolveTarget = receiverTarget(runtimeApp)
@@ -1040,9 +1049,11 @@ async function createYrdRuntimeHost(
     })
     let closePromise: Promise<void> | undefined
     const close = () =>
-      (closePromise ??= closeRuntime(app, process, scope, residentLease, signals, candidatePool).finally(() => {
-        if (ownsLog) log.end()
-      }))
+      (closePromise ??= closeRuntime(app, process, scope, residentLease, signals, candidatePool, runIndex).finally(
+        () => {
+          if (ownsLog) log.end()
+        },
+      ))
     return Object.freeze({
       app,
       repository,
@@ -1055,7 +1066,7 @@ async function createYrdRuntimeHost(
       [Symbol.asyncDispose]: close,
     })
   } catch (error) {
-    await closeRuntime(app, process, scope, residentLease, signals, candidatePool)
+    await closeRuntime(app, process, scope, residentLease, signals, candidatePool, runIndex)
     if (ownsLog) log.end()
     throw error
   }

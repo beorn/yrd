@@ -262,6 +262,7 @@ yrd issue                   read-only issue list and joined delivery view
 yrd contest                 list; open, eval, view, finish, select, promote
 yrd queue                   show the queue timeline by default; list/ls is canonical;
                             run, pause, resume, recover, finish, init, deinit, audit
+yrd run                     cancel one run; explicitly prune old terminal-run artifacts
 yrd log                     terminal queue history; --all adds lossless records
 yrd watch                   thin alias for yrd queue list --watch
 yrd prime                   agent briefing plus current delivery context
@@ -523,18 +524,18 @@ yrd queue init [base] [--json]
 yrd queue deinit [base] [--json]
 ```
 
-| Command             | Input                                             | Output and state                                                                        |
-| ------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header  |
-| `list --check`       | Repository                                        | Typed resident lease/heartbeat/baseline health plus installed-base Git distance         |
-| `run`               | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
-| `pause`             | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles   |
-| `resume`            | Optional base                                     | Removes the queue pause                                                                 |
-| `recover`           | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                |
-| `finish`            | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                     |
-| `audit`             | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change          |
-| `init`              | Optional base                                     | Resolves and validates queue environment resources                                      |
-| `deinit`            | Optional base                                     | Releases resources owned by the installed queue adapter                                 |
+| Command              | Input                                             | Output and state                                                                                                      |
+| -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `list` / `ls` / bare | Optional OR filters, base, status, window, latest | One base's pending/running/completed timeline; sibling queues stay named in the header                                |
+| `list --check`       | Repository                                        | Typed resident lease/heartbeat/baseline health plus installed-base Git distance                                       |
+| `run`                | Zero or more eligible PRs                         | Sole drain imperative; resident follow-runner by default (was `--watch`), a single pass with `--once` or PR selectors |
+| `pause`              | Optional base; reason and allowlist to mutate     | Bare reads current pauses; with a reason, pauses new intake while active work settles                                 |
+| `resume`             | Optional base                                     | Removes the queue pause                                                                                               |
+| `recover`            | Optional reason                                   | Marks only work with expired runner leases lost; a no-op appends nothing                                              |
+| `finish`             | One waiting PR/step plus job/runner/attempt/token | Records external-runner evidence and resumes that exact durable run                                                   |
+| `audit`              | Repository                                        | Journal, projection, pinned-plan, and installed-step findings; no state change                                        |
+| `init`               | Optional base                                     | Resolves and validates queue environment resources                                                                    |
+| `deinit`             | Optional base                                     | Releases resources owned by the installed queue adapter                                                               |
 
 `queue list` is the canonical read-only surface. `queue ls` is its spelling
 alias, bare `queue` defaults to it, and top-level `watch` is the same command
@@ -775,12 +776,12 @@ the current revision must approve. Comments never gate, and omitting
 `notify` routes an enumerated journal transition without turning delivery into
 a Queue step. Its Tribe intake policy is explicit:
 
-| Signal            | Message type | Delivery | Pending ball        | Deadline   |
-| ----------------- | ------------ | -------- | ------------------- | ---------- |
-| `pr/rejected`     | notify       | pull     | none                | —          |
-| `pr/needs-review` | request      | push     | exact recipient/id  | 10 minutes |
-| `pr/integrated`   | notify       | pull     | none                | —          |
-| `run/failed`      | notify       | pull     | none                | —          |
+| Signal            | Message type | Delivery | Pending ball       | Deadline   |
+| ----------------- | ------------ | -------- | ------------------ | ---------- |
+| `pr/rejected`     | notify       | pull     | none               | —          |
+| `pr/needs-review` | request      | push     | exact recipient/id | 10 minutes |
+| `pr/integrated`   | notify       | pull     | none               | —          |
+| `run/failed`      | notify       | pull     | none               | —          |
 
 `pr/needs-review` is projected from a committed submission only when
 `requires: [review]`. Rejection and Run failure are outcome evidence, so even a
@@ -910,14 +911,18 @@ Yrd stores local authority under the primary worktree's common Git directory:
 ```text
 .git/yrd/
   journal.sqlite     event journal + exact snapshot authority (WAL)
+  run-index.sqlite   rebuildable PR/revision -> run/artifact lookup
   writer.lock        short cross-process transaction lock
   journal-v4-pre-sqlite-*/
                      preserved migration recovery evidence
   resident-runner/
     writer.lock      process-lifetime resident Queue lease
+  run-index/
+    writer.lock      short projection/GC lock
   prs.git/           bare PR ref/object receiver
   receiver-inbox/    crash-safe receive-hook handoff
-  artifacts/         command, evaluator, and contest evidence
+  artifacts/         command, evaluator, and contest evidence; each Queue run
+                     carries a self-describing <run>/manifest.json
   notifications/
     cursor-v1.json    journal cursor, successful sends, and opened-request ledger
 ```
@@ -928,7 +933,26 @@ value, and Job requests. Startup restores the validated Core snapshot and folds
 only its bounded SQL tail into Bay, PR, Queue, Job, and Contest state. Snapshot
 publication retains an exact cursor-addressable prefix before deleting covered
 tail rows, so lagging notification and bridge cursors remain valid. There is no
-second mutable database or read-model authority to reconcile.
+second mutable authority to reconcile. Active hosts maintain `run-index.sqlite`
+as a disposable read projection, and each Queue artifact directory carries the
+same run/PR/revision join in `manifest.json`. Deleting the index and restarting
+seeds it from those manifests, then reconciles the journal authority from its
+durable cursor. A direct failure lookup is one bounded query:
+
+```sql
+SELECT run_id, failure_code, artifact_dir
+FROM run_index
+WHERE pr_id = ? AND revision = ?
+ORDER BY finished_at DESC
+LIMIT 1;
+```
+
+Artifact deletion is never implicit. Operators supply both bounds, and Yrd
+prints every committed deletion:
+
+```bash
+yrd run prune-artifacts --retention-days 30 --max 20
+```
 
 The Journal uses WAL with `synchronous=FULL`, an external POSIX writer lock,
 explicitly closed connections, and a runtime `sqlite_version()` safety gate.

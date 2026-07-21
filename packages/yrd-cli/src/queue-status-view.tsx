@@ -182,6 +182,8 @@ export type QueueTimelineProjection = Readonly<{
   siblingBases: readonly string[]
   /** Resident-runner heartbeat status; null renders loudly — nothing drains this queue. */
   runner: QueueTimelineRunner | null
+  /** Authoritative running Run identities, captured before status/term/window filters. */
+  activeRuns: readonly Readonly<{ base: string; run: string }>[]
   pause?: QueueSummary["pause"]
   oldestOpenMs: number | null
   filters: Readonly<{
@@ -1307,7 +1309,7 @@ function stepEvidence(step: QueueStep): string | Record<string, unknown> {
 
 function CellLink({ href, children }: { href: string; children: string }) {
   return (
-    <Link href={href} minWidth={0} maxWidth="100%" flexShrink={1} wrap="truncate">
+    <Link href={href} minWidth={0} maxWidth="100%" flexShrink={1} wrap="wrap">
       {children}
     </Link>
   )
@@ -1327,11 +1329,11 @@ function issueHref(issue: string): string | undefined {
 function IssueValue({ issue, flex = false }: { issue: string; flex?: boolean }) {
   const href = issueHref(issue)
   return href === undefined ? (
-    <Text color="$fg-link" minWidth={flex ? 0 : undefined} flexShrink={flex ? 1 : undefined} wrap="truncate">
+    <Text color="$fg-link" minWidth={flex ? 0 : undefined} flexShrink={flex ? 1 : undefined} wrap="wrap">
       {issue}
     </Text>
   ) : flex ? (
-    <Link href={href} wrap="truncate" minWidth={0} flexShrink={1}>
+    <Link href={href} wrap="wrap" minWidth={0} flexShrink={1}>
       {issue}
     </Link>
   ) : (
@@ -1344,7 +1346,7 @@ function DescriptionBlock({ description }: { description: string }) {
   return (
     <Box flexDirection="column" minWidth={0}>
       {description.split("\n").map((row, index) => (
-        <Text key={index} wrap="truncate" bgConflict="ignore">
+        <Text key={index} wrap="wrap" bgConflict="ignore">
           {row === "" ? " " : row}
         </Text>
       ))}
@@ -1854,6 +1856,13 @@ export function queueTimelineProjection(
     null,
   )
   const allRuns = results.flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
+  const activeRuns = [
+    ...new Map(
+      results.flatMap((result) =>
+        result.running.map((run) => [`${run.base}:${run.id}`, { base: run.base, run: run.id }]),
+      ),
+    ).values(),
+  ]
   const finished = results.flatMap((result) => result.finished)
   const detailRuns = new Set<string>()
   const details = rows.flatMap((row) => {
@@ -1878,6 +1887,7 @@ export function queueTimelineProjection(
     base,
     siblingBases: [...new Set(options.siblingBases ?? [])].filter((candidate) => candidate !== base).toSorted(),
     runner: options.runner ?? null,
+    activeRuns,
     ...(pause === undefined ? {} : { pause }),
     oldestOpenMs,
     filters: { windowMs: options.windowMs, since, statuses, terms, latest: options.latest },
@@ -2220,7 +2230,7 @@ export function PRListView({ rows, columns: terminalColumns }: { rows: readonly 
       key: "pr",
       minWidth: prWidth,
       maxWidth: 16,
-      render: (row: PRListRow) => <QueuePrId pr={row.pr} revision={row.revision} wrap="truncate" />,
+      render: (row: PRListRow) => <QueuePrId pr={row.pr} revision={row.revision} wrap="wrap" />,
     },
     {
       header: "STATE",
@@ -2442,7 +2452,7 @@ export function PRDetailView({
         {position === undefined ? null : ` POSITION ${position}`}
       </Text>
       {pr.title === undefined ? null : (
-        <Text wrap="truncate" bgConflict="ignore">
+        <Text wrap="wrap" bgConflict="ignore">
           <Text bold>TITLE</Text> {pr.title}
         </Text>
       )}
@@ -2455,7 +2465,7 @@ export function PRDetailView({
         {pr.baseSha === undefined ? null : `@${pr.baseSha}`}
       </Text>
       {pr.issue === undefined ? null : (
-        <Text wrap="truncate">
+        <Text wrap="wrap">
           <Text bold>ISSUE</Text> <IssueValue issue={pr.issue} />
         </Text>
       )}
@@ -2510,8 +2520,8 @@ export function queueStatusRows(
 
 function SummaryQueue({ projection }: { projection: HumanQueueProjection }) {
   return (
-    <Box height={1}>
-      <Text wrap="truncate">
+    <Box>
+      <Text wrap="wrap">
         <Text bold>QUEUE</Text> {projection.target} <Text bold>OPEN</Text> {projection.open} <Text bold>ACTIVE</Text>{" "}
         {projection.activeCount} <Text bold>INTEGRATED</Text> {projection.integrated} <Text bold>REJECTED</Text>{" "}
         {projection.rejected} <Text bold>DRAIN</Text> {projection.oldestOpen}
@@ -2532,8 +2542,8 @@ export function QueueListView({ results, now }: { results: readonly QueueStatusR
 
 function ActiveQueue({ active }: { active: WatchActiveRow }) {
   return (
-    <Box height={1}>
-      <Text wrap="truncate">
+    <Box>
+      <Text wrap="wrap">
         <Text bold>ACTIVE RUN </Text>
         <QueueRunId base={active.base} run={active.run} /> <QueuePrId pr={active.pr} revision={active.revision} />{" "}
         {active.subject} <TaskStatusGlyph taskStatus={active.taskStatus} glyph={active.glyph} /> {active.steps}{" "}
@@ -2545,8 +2555,8 @@ function ActiveQueue({ active }: { active: WatchActiveRow }) {
 
 function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?: number }) {
   return (
-    <Box height={1}>
-      <Text wrap="truncate">
+    <Box>
+      <Text wrap="wrap">
         {position === undefined ? "" : `${position}. `}
         <TaskStatusGlyph taskStatus={row.taskStatus} glyph={row.glyph} />{" "}
         {row.prHref === undefined ? (
@@ -2565,12 +2575,12 @@ function ProjectedPRQueue({ row, position }: { row: HumanPRProjection; position?
 function FailureQueues({ failure }: { failure: HumanFailureProjection }) {
   return (
     <Box flexDirection="column">
-      <Box height={1}>
-        <Text wrap="truncate"> {failure.summary}</Text>
+      <Box>
+        <Text wrap="wrap"> {failure.summary}</Text>
       </Box>
       {failure.evidence === undefined ? null : (
-        <Box height={1}>
-          <Text wrap="truncate">
+        <Box>
+          <Text wrap="wrap">
             {"    evidence: "}
             {failure.evidence.href === undefined ? (
               failure.evidence.text
@@ -2671,8 +2681,8 @@ export function QueueStatusView({
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
             <SummaryQueue projection={projection} />
             {projection.pause !== undefined && (
-              <Box height={1}>
-                <Text wrap="truncate">
+              <Box>
+                <Text wrap="wrap">
                   <Text color="$fg-warning" bold>
                     PAUSE
                   </Text>
@@ -2792,8 +2802,8 @@ export function QueueWatchView({
         return (
           <Box key={result.base} flexDirection="column" marginTop={index === 0 ? 0 : 1}>
             <SummaryQueue projection={projection} />
-            <Box height={1}>
-              <Text wrap="truncate">
+            <Box>
+              <Text wrap="wrap">
                 <Text bold>PAUSE</Text> {pauseState} <Text bold>DRAIN</Text> {projection.oldestOpen}
               </Text>
             </Box>
@@ -2900,7 +2910,7 @@ function timelineBranchLabel(branch: string): string {
 export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRow; data?: QueueShowData }) {
   if (row === undefined) {
     return (
-      <Text bold color="$fg-warning" wrap="truncate">
+      <Text bold color="$fg-warning" wrap="wrap">
         No queue row selected.
       </Text>
     )
@@ -2908,7 +2918,7 @@ export function QueueDetailTitle({ row, data }: { row?: QueueTimelineProjectedRo
   const outcome = detailStatusOutcome(row, data)
   return (
     <Box flexDirection="row" width="100%" justifyContent="space-between" minWidth={0} flexShrink={0}>
-      <Text color="$fg-warning" wrap="truncate" minWidth={0}>
+      <Text color="$fg-warning" wrap="wrap" minWidth={0}>
         {row.run === undefined ? (
           <QueuePrId pr={row.pr} revision={row.revision} />
         ) : (
@@ -3151,12 +3161,13 @@ function TimelineCells({
   const id = (name: string): string => (rowId === undefined ? `th-${name}` : `td-${name}-${rowId}`)
   return (
     <Box
-      height={1}
+      height={rowId === undefined ? 1 : undefined}
+      minHeight={1}
       width="100%"
       flexDirection="row"
       gap={1}
       minWidth={0}
-      overflow="hidden"
+      {...(rowId === undefined ? { overflow: "hidden" as const } : {})}
       backgroundColor={backgroundColor}
     >
       <Box id={id("time")} width={layout.timeWidth} flexShrink={0} minWidth={0}>
@@ -3168,14 +3179,21 @@ function TimelineCells({
         flexDirection="row"
         flexShrink={0}
         minWidth={0}
-        overflow="hidden"
+        {...(rowId === undefined ? { overflow: "hidden" as const } : {})}
       >
         {status}
       </Box>
       <Box id={id("run")} width={layout.runWidth} flexShrink={0} minWidth={0}>
         {run}
       </Box>
-      <Box id={id("pr")} flexDirection="row" flexGrow={1} flexBasis={0} minWidth={12} overflow="hidden">
+      <Box
+        id={id("pr")}
+        flexDirection="row"
+        flexGrow={1}
+        flexBasis={0}
+        minWidth={12}
+        {...(rowId === undefined ? { overflow: "hidden" as const } : {})}
+      >
         {pr}
       </Box>
       {layout.byWidth === 0 ? null : (
@@ -3204,7 +3222,7 @@ function TimelineHeader({ layout }: { layout: TimelineCellLayout }) {
   // The column header reads white + bold (user directive 2026-07-16) so it
   // stands out above the muted row cells.
   const label = (text: string): React.ReactElement => (
-    <Text color="$fg" bold wrap="truncate">
+    <Text color="$fg" bold wrap="wrap">
       {text}
     </Text>
   )
@@ -3255,7 +3273,7 @@ function TimelineProjectedRow({
       rowId={row.id}
       backgroundColor={rowBackground}
       time={
-        <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
+        <Text color={forcedFg ?? "$fg-muted"} wrap="wrap">
           {continuation ? "-" : timelineClockCell(row, layout)}
         </Text>
       }
@@ -3269,15 +3287,15 @@ function TimelineProjectedRow({
                 selection; other statuses take the selection fg. */}
               {active || !cursor ? <TimelineMarker row={row} live={live} /> : <Text color={forcedFg}>{row.glyph}</Text>}
             </Box>
-            <Box paddingLeft={1} minWidth={0} overflow="hidden">
+            <Box paddingLeft={1} minWidth={0}>
               {/* The running status word pulses blue in the shared phase (item 12)
                 and stays blue when the row is selected (item 13). */}
               {active ? (
-                <ActivityPulse live={live} wrap="truncate">
+                <ActivityPulse live={live} wrap="wrap">
                   {status.word}
                 </ActivityPulse>
               ) : (
-                <Text color={forcedFg ?? status.color} wrap="truncate">
+                <Text color={forcedFg ?? status.color} wrap="wrap">
                   {status.word}
                 </Text>
               )}
@@ -3291,11 +3309,11 @@ function TimelineProjectedRow({
         continuation ? (
           <Text color={forcedFg ?? "$fg-muted"}>-</Text>
         ) : row.run === undefined ? (
-          <Text color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate">
+          <Text color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="wrap">
             {runCell.text}
           </Text>
         ) : (
-          <QueueRunId base={row.base} run={row.run} color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="truncate" />
+          <QueueRunId base={row.base} run={row.run} color={forcedFg ?? runCell.color ?? "$fg-muted"} wrap="wrap" />
         )
       }
       pr={
@@ -3311,23 +3329,23 @@ function TimelineProjectedRow({
             </Text>
           ) : null}
           {row.issue === undefined ? (
-            <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Box paddingLeft={1} minWidth={0} flexGrow={1} flexBasis={0} flexDirection="row" flexWrap="wrap">
               <Text color={forcedFg ?? BRANCH_ICON_COLOR} flexShrink={0}>
                 {BRANCH_ICON}
               </Text>
-              <Text color={forcedFg} wrap="truncate" minWidth={0}>
+              <Text color={forcedFg} wrap="wrap" minWidth={0} flexGrow={1} flexBasis={0}>
                 {" "}
                 {timelineBranchLabel(row.branch)}
               </Text>
               {continuation || step.text === "" ? null : (
-                <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="truncate">
+                <Text color={forcedFg ?? (active ? "$fg-info" : step.color)} flexShrink={0} wrap="wrap">
                   {" "}
                   ({step.text})
                 </Text>
               )}
             </Box>
           ) : (
-            <Box paddingLeft={1} minWidth={0} overflow="hidden" flexDirection="row">
+            <Box paddingLeft={1} minWidth={0} flexGrow={1} flexBasis={0} flexDirection="row">
               <Text color={forcedFg} flexShrink={0}>
                 for{" "}
               </Text>
@@ -3337,7 +3355,7 @@ function TimelineProjectedRow({
         </>
       }
       by={
-        <Text color={forcedFg ?? "$fg-muted"} wrap="truncate">
+        <Text color={forcedFg ?? "$fg-muted"} wrap="wrap">
           {timelineByCell(row)}
         </Text>
       }
@@ -3510,12 +3528,12 @@ export type QueueHealthMarker = Readonly<{
 
 /** Missing/stale is solid red; active is pulsing blue; idle is pulsing grey. */
 export function queueHealthMarker(projection: QueueTimelineProjection): QueueHealthMarker {
+  if (projection.activeRuns.length > 0) {
+    return { kind: "processing", color: "$fg-info", pulse: ["$fg-info", "$fg-muted"] }
+  }
   const timing = runnerTiming(projection)
   if (projection.runner === null || (timing !== null && timing.ageMs > RUNNER_STALE_MS)) {
     return { kind: "down", color: "$fg-error", pulse: null }
-  }
-  if (projection.rows.some((row) => row.status === "running")) {
-    return { kind: "processing", color: "$fg-info", pulse: ["$fg-info", "$fg-muted"] }
   }
   return { kind: "idle", color: "$fg-muted", pulse: ["$fg-muted", "$bg-surface-default"] }
 }
@@ -3553,15 +3571,36 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   const runnerStale = timing !== null && timing.ageMs > RUNNER_STALE_MS
   const marker = queueHealthMarker(projection)
   if (runner === null) {
+    const activeRuns = projection.activeRuns
+    if (activeRuns.length > 0) {
+      return (
+        <TitledBox title="RUNNER" borderColor="$fg-info">
+          <Box flexDirection="row" gap={1} minWidth={0} flexWrap="wrap">
+            <RunnerActivity marker={marker} live={live} flexShrink={0}>
+              {QUEUE_HEALTH_GLYPH}
+            </RunnerActivity>
+            <Text color="$fg-info" bold flexShrink={0}>
+              ACTIVE RUN
+            </Text>
+            {activeRuns.map((active) => (
+              <QueueRunId key={`${active.base}:${active.run}`} base={active.base} run={active.run} color="$fg-info" />
+            ))}
+            <Text color="$fg-muted" wrap="wrap" minWidth={0}>
+              — resident lease unavailable
+            </Text>
+          </Box>
+        </TitledBox>
+      )
+    }
     const drained = timelineLastDrainedMs(projection)
     const now = Date.parse(projection.now)
     return (
       <TitledBox title="RUNNER" borderColor="$fg-error">
-        <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+        <Box flexDirection="row" gap={1} minWidth={0}>
           <RunnerActivity marker={marker} live={live} flexShrink={0}>
             {QUEUE_HEALTH_GLYPH}
           </RunnerActivity>
-          <Text color="$fg-error" bold wrap="truncate" minWidth={0}>
+          <Text color="$fg-error" bold wrap="wrap" minWidth={0} flexGrow={1} flexBasis={0}>
             {drained === null
               ? "NO RUNNER - no drained run in window"
               : `NO RUNNER - queue last drained ${mediaDuration(now - drained)} ago`}
@@ -3572,20 +3611,17 @@ function TimelineRunnerBox({ projection, live = false }: { projection: QueueTime
   }
   return (
     <TitledBox title="RUNNER" borderColor={runnerStale ? "$fg-error" : undefined}>
-      <Box height={1} flexDirection="row" gap={1} minWidth={0}>
+      <Box flexDirection="row" gap={1} minWidth={0}>
         <RunnerActivity marker={marker} live={live} flexShrink={0}>
           {QUEUE_HEALTH_GLYPH}
         </RunnerActivity>
-        <Text color={marker.color} wrap="truncate" minWidth={0}>
-          [{runner.pid}] {runner.command ?? "resident runner"}
-        </Text>
-        <Box flexGrow={1} flexBasis={0} minWidth={0} />
-        <Text color="$fg-muted" flexShrink={0}>
-          uptime {uptimeClock(timing?.uptimeMs ?? 0)}
+        <Text color={marker.color} wrap="wrap" minWidth={0} flexGrow={1} flexBasis={0}>
+          [{runner.pid}] {runner.command ?? "resident runner"} <Text color="$fg-muted">· uptime </Text>
+          <Text color="$fg-muted">{uptimeClock(timing?.uptimeMs ?? 0)}</Text>
         </Text>
       </Box>
       {runnerStale && timing !== null ? (
-        <Text color="$fg-error" bold wrap="truncate">
+        <Text color="$fg-error" bold wrap="wrap">
           RUNNER STALE — last tick {mediaDuration(timing.ageMs)} ago
         </Text>
       ) : null}
@@ -3600,7 +3636,7 @@ function TimelineStatusBox({ projection }: { projection: QueueTimelineProjection
   const allowed = pause.allowedPRs.length === 0 ? "none" : pause.allowedPRs.join(",")
   return (
     <TitledBox title="STATUS" borderColor="$fg-warning">
-      <Text color="$fg-warning" wrap="truncate">
+      <Text color="$fg-warning" wrap="wrap">
         HOLD THE LINE — {pause.reason} · allowed {allowed}
       </Text>
     </TitledBox>
@@ -4022,15 +4058,15 @@ function ProjectedQueueTimeline({
             virtualize and scroll, so nothing is permanently hidden — no "... 0
             more"); the pills always render. Off fill the coverage renders as
             W1b placed it. */}
-        <Box height={1} flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} overflow="hidden">
-          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1}>
+        <Box flexDirection="row" justifyContent="space-between" gap={2} minWidth={0} flexWrap="wrap">
+          <Box flexDirection="row" gap={1} minWidth={0} flexShrink={1} flexWrap="wrap">
             {fillHeight || hiddenDisplayRows === 0 ? null : (
-              <Text color="$fg-muted" wrap="truncate">
+              <Text color="$fg-muted" wrap="wrap">
                 ... {hiddenDisplayRows} more
               </Text>
             )}
             {fillHeight || projection.coverage.complete ? null : (
-              <Text color="$fg-warning" wrap="truncate">
+              <Text color="$fg-warning" wrap="wrap">
                 retained since {projection.coverage.retainedSince}
               </Text>
             )}
@@ -4136,8 +4172,8 @@ export function QueueTimelineView({
           getKey={(row) => row.key}
           estimateHeight={1}
           renderItem={(row, _index, meta) => (
-            <Box height={1}>
-              <Text wrap="truncate">
+            <Box>
+              <Text wrap="wrap">
                 {meta.isCursor ? "> " : "  "}
                 <Text bold>{row.clock}</Text> <Text bold>{row.status}</Text>{" "}
                 <QueuePrId pr={row.pr} revision={row.revision} />{" "}
@@ -4594,7 +4630,7 @@ function QueueShowMembersValue({ data, highlightPr }: { data: QueueShowData; hig
 // row the user chose.
 function QueueShowMembersLine({ data, highlightPr }: { data: QueueShowData; highlightPr?: string }) {
   return (
-    <Text wrap="truncate">
+    <Text wrap="wrap">
       PRs <QueueShowMembersValue data={data} highlightPr={highlightPr} />
     </Text>
   )
@@ -4639,8 +4675,8 @@ function QueueProofView({ data }: { data: QueueShowData }) {
           const evidence = presentFact(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))
           const checkpoint = presentFact(row.checkpoint)
           return (
-            <Box key={`${row.uuid}:${row.attempt}:proof`} height={1}>
-              <Text wrap="truncate">
+            <Box key={`${row.uuid}:${row.attempt}:proof`}>
+              <Text wrap="wrap">
                 {`PROOF ${row.step}#${row.attempt}`}
                 {row.locations.length === 0 ? null : (
                   <>
@@ -4692,7 +4728,7 @@ export function QueueIntegrationFacts({ data }: { data: QueueShowData }) {
   const proofDetail = integrationProofDetail(data.integration)
   return (
     <Box flexDirection="column" minWidth={0}>
-      <Text wrap="truncate">
+      <Text wrap="wrap">
         Committed as {data.integration.commit} on {data.base}
       </Text>
       {proofDetail === undefined ? null : <Text wrap="wrap">- integration proof: {proofDetail}</Text>}
@@ -4730,14 +4766,14 @@ export function QueueDetailSinglePrHeader({ pr }: { pr: PR }) {
       {title === undefined ? null : (
         <>
           <Box height={1} flexShrink={0} />
-          <Text bold wrap="truncate" bgConflict="ignore">
+          <Text bold wrap="wrap" bgConflict="ignore">
             {title}
           </Text>
           <Box height={1} flexShrink={0} />
         </>
       )}
       {issue === undefined ? null : (
-        <Text wrap="truncate">
+        <Text wrap="wrap">
           {"ISSUE".padEnd(9, " ")}
           <IssueValue issue={issue} />
         </Text>
@@ -4873,8 +4909,8 @@ export function QueueDetailRunPrBlocks({
             marginTop={index === 0 ? 0 : 1}
             minWidth={0}
           >
-            <Box flexDirection="row" minWidth={0} overflow="hidden">
-              <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="truncate" />
+            <Box flexDirection="row" minWidth={0} flexWrap="wrap">
+              <QueuePrId pr={member.id} revision={member.revision} color="$fg-warning" wrap="wrap" />
               {issue === undefined ? null : (
                 <>
                   <Text> </Text>
@@ -4935,22 +4971,22 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
         const clocks = prRevisionClocks(pr)
         return (
           <Box key={pr.id} flexDirection="column" minWidth={0} marginTop={index === 0 ? 0 : 1}>
-            <Text wrap="truncate" bgConflict="ignore">
+            <Text wrap="wrap" bgConflict="ignore">
               <QueuePrId pr={pr.id} revision={pr.revision} />
               {name === undefined ? "" : ` ${name}`}
             </Text>
             {title === undefined ? null : (
-              <Text wrap="truncate" bgConflict="ignore">
+              <Text wrap="wrap" bgConflict="ignore">
                 TITLE {title}
               </Text>
             )}
             {issue === undefined ? null : (
-              <Text wrap="truncate">
+              <Text wrap="wrap">
                 ISSUE <IssueValue issue={issue} />
               </Text>
             )}
             {note === undefined ? null : (
-              <Text wrap="truncate" bgConflict="ignore">
+              <Text wrap="wrap" bgConflict="ignore">
                 NOTE {note}
               </Text>
             )}
@@ -4961,22 +4997,22 @@ export function QueueDetailPrFacts({ prs }: { prs: readonly PR[] }) {
               </Box>
             )}
             {pr.reviews.map((review, reviewIndex) => (
-              <Text key={`review:${reviewIndex}`} wrap="truncate" bgConflict="ignore">
+              <Text key={`review:${reviewIndex}`} wrap="wrap" bgConflict="ignore">
                 {prReviewLine(review)}
               </Text>
             ))}
             {pr.comments.map((comment, commentIndex) => (
-              <Text key={`comment:${commentIndex}`} wrap="truncate" bgConflict="ignore">
+              <Text key={`comment:${commentIndex}`} wrap="wrap" bgConflict="ignore">
                 {prCommentLine(comment)}
               </Text>
             ))}
             {pr.checkRequests.map((request, requestIndex) => (
-              <Text key={`check:${requestIndex}`} wrap="truncate">
+              <Text key={`check:${requestIndex}`} wrap="wrap">
                 CHECK REQUESTED {detailClock(request.at)}
               </Text>
             ))}
             {clocks.map((clock, clockIndex) => (
-              <Text key={`rev:${clockIndex}`} wrap="truncate">
+              <Text key={`rev:${clockIndex}`} wrap="wrap">
                 REV {clock.revision} {clock.terminal?.status ?? "open"}{" "}
                 {detailClock(clock.terminal?.at ?? clock.submittedAt ?? clock.pushedAt)}
               </Text>
@@ -5034,7 +5070,7 @@ function QueueStepInternals({ row, issue }: { row: QueueShowRow; issue?: string 
   const job = presentFact(row.uuid)
   if (job === undefined) return null
   return (
-    <Text bold wrap="truncate">
+    <Text bold wrap="wrap">
       JOB <NounId noun="yrd" value={job} />
       {issue === undefined ? null : (
         <>
@@ -5100,29 +5136,28 @@ function CompactQueueShowView({
   const timing = queueRunTimingRow(data)
   const latestStep = data.steps.at(-1)
   return (
-    // minWidth={0} lets the long truncate-Text facts shrink to the (narrow)
-    // detail pane instead of overflowing it (canonical CSS escape hatch).
+    // minWidth={0} lets long wrapping facts shrink to the narrow detail pane.
     <Box flexDirection="column" minWidth={0} flexShrink={0}>
       {runFacts ? (
         <>
           {titleAbove ? null : (
-            <Text bold wrap="truncate" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
+            <Text bold wrap="wrap" {...(historyRevision === undefined ? {} : { color: "$fg-muted" })}>
               RUN <QueueRunId base={data.base} run={data.run} />
               {historyRevision === undefined ? "" : ` (rev ${historyRevision} · superseded)`} STATUS {data.status}{" "}
               OUTCOME {data.outcome}
             </Text>
           )}
           {showMembers ? (
-            <Text wrap="truncate">
+            <Text wrap="wrap">
               {"PRs".padEnd(9, " ")}
               <QueueShowMembersValue data={data} highlightPr={highlightPr} />
             </Text>
           ) : null}
-          {data.retries > 1 ? <Text wrap="truncate">RETRY {data.retries}</Text> : null}
-          {timing === undefined ? null : <Text wrap="truncate">{timing}</Text>}
+          {data.retries > 1 ? <Text wrap="wrap">RETRY {data.retries}</Text> : null}
+          {timing === undefined ? null : <Text wrap="wrap">{timing}</Text>}
           {showIntegration ? <QueueIntegrationFacts data={data} /> : null}
           {parent === undefined && isolation === undefined ? null : (
-            <Text wrap="truncate" color="$fg-muted">
+            <Text wrap="wrap" color="$fg-muted">
               {parent === undefined ? "" : `PARENT ${parent}`}
               {parent !== undefined && isolation !== undefined ? " " : ""}
               {isolation === undefined ? "" : `ISO ${isolation}`}
@@ -5152,13 +5187,7 @@ function CompactQueueShowView({
             return (
               // The step tab (glyph + name + duration) is the step summary, so
               // the duplicate STEP header row is dropped (item d, 2026-07-16).
-              <Box
-                key={`${row.uuid}:${row.attempt}:compact`}
-                flexDirection="column"
-                width="100%"
-                minWidth={0}
-                overflow="hidden"
-              >
+              <Box key={`${row.uuid}:${row.attempt}:compact`} flexDirection="column" width="100%" minWidth={0}>
                 {row.failure !== undefined ? (
                   <ActionableFailureView failure={row.failure} />
                 ) : error === undefined ? null : (
@@ -5167,7 +5196,7 @@ function CompactQueueShowView({
                   </Text>
                 )}
                 {detail === undefined ? null : (
-                  <Box flexDirection="row" width="100%" minWidth={0} overflow="hidden">
+                  <Box flexDirection="row" width="100%" minWidth={0}>
                     <Text color="$fg-muted" flexShrink={0}>
                       {"MESSAGE".padEnd(9, " ")}
                     </Text>
@@ -5175,7 +5204,7 @@ function CompactQueueShowView({
                       flexGrow={1}
                       flexBasis={0}
                       flexShrink={1}
-                      wrap="truncate"
+                      wrap="wrap"
                       minWidth={0}
                       color="$fg-muted"
                       bgConflict="ignore"
@@ -5185,13 +5214,13 @@ function CompactQueueShowView({
                   </Box>
                 )}
                 {lost === undefined ? null : (
-                  <Text wrap="truncate" color="$fg-warning" bgConflict="ignore">
+                  <Text wrap="wrap" color="$fg-warning" bgConflict="ignore">
                     {"LOST".padEnd(9, " ")}
                     {lost}
                   </Text>
                 )}
                 {!hasProof ? null : (
-                  <Text wrap="truncate" minWidth={0} bgConflict="ignore">
+                  <Text wrap="wrap" minWidth={0} bgConflict="ignore">
                     {"PROOF".padEnd(9, " ")}
                     {visibleLocations.length === 0 ? null : (
                       <>
@@ -5313,7 +5342,7 @@ export function QueueShowView({
               key: "revision",
               minWidth: 8,
               maxWidth: 12,
-              render: (row) => <Text wrap="truncate">{row.revision.slice(0, 12)}</Text>,
+              render: (row) => <Text wrap="wrap">{row.revision.slice(0, 12)}</Text>,
             },
             {
               header: "STATUS",
@@ -5329,9 +5358,7 @@ export function QueueShowView({
               minWidth: 22,
               maxWidth: 32,
               grow: true,
-              render: (row) => (
-                <Text wrap="truncate">{row.errorCode === "-" ? "-" : errorCodeLabel(row.errorCode)}</Text>
-              ),
+              render: (row) => <Text wrap="wrap">{row.errorCode === "-" ? "-" : errorCodeLabel(row.errorCode)}</Text>,
             },
             { header: "START", key: "started", grow: true },
             { header: "END", key: "finished", grow: true },
@@ -5340,26 +5367,26 @@ export function QueueShowView({
               header: "LOST",
               key: "lost",
               grow: true,
-              render: (row) => <Text wrap="truncate">{singleQueue(row.lost)}</Text>,
+              render: (row) => <Text wrap="wrap">{singleQueue(row.lost)}</Text>,
             },
             {
               header: "MESSAGE",
               key: "error",
               grow: true,
-              render: (row) => <Text wrap="truncate">{singleQueue(row.error)}</Text>,
+              render: (row) => <Text wrap="wrap">{singleQueue(row.error)}</Text>,
             },
             {
               header: "DETAIL",
               key: "detail",
               grow: true,
-              render: (row) => <Text wrap="truncate">{singleQueue(row.detail)}</Text>,
+              render: (row) => <Text wrap="wrap">{singleQueue(row.detail)}</Text>,
             },
             {
               header: "OUTPUT",
               key: "output",
               grow: true,
               minWidth: 10,
-              render: (row) => <Text wrap="truncate">{singleQueue(row.output)}</Text>,
+              render: (row) => <Text wrap="wrap">{singleQueue(row.output)}</Text>,
             },
             { header: "ART", key: "artifacts", grow: true },
             {
@@ -5373,7 +5400,7 @@ export function QueueShowView({
               minWidth: 10,
               grow: false,
               render: (row) => (
-                <Text wrap="truncate">
+                <Text wrap="wrap">
                   {singleQueue(typeof row.evidence === "string" ? row.evidence : safeText(row.evidence))}
                 </Text>
               ),

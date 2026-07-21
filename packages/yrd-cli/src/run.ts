@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process"
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { basename, isAbsolute, join, relative, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { Command as CliCommand, CommanderError, int } from "@silvery/commander"
 import { createElement } from "react"
 import {
@@ -98,11 +98,18 @@ import type { YrdCliApp, YrdCliExitCode, YrdCliIO, YrdCliServices, YrdCliState }
 import { formatYrdRuntimeVersion, YRD_VERSION } from "./version.ts"
 import { artifactLocation, directArtifacts, nestedArtifacts, uniqueArtifacts } from "./artifact-reference.ts"
 import { readInstalledBaselines } from "./installed-baseline.ts"
+import { pruneRunArtifacts as pruneIndexedRunArtifacts } from "./run-index.ts"
 // The live watch UI is loaded lazily at its single use site in watchQueue(): it is the only
 // module that pulls silvery's SplitPane, and eagerly importing it here would make every CLI
 // path (yrd --version, submit, one-shot queue) require the interactive TUI dependency at module
 // load. Types are erased, so they stay as a static type-only import.
-import type { QueueArtifactOutput, QueuePrDiff, QueueWatchFocus, QueueWatchSnapshot } from "./watch-pane.tsx"
+import type {
+  QueueArtifactOutput,
+  QueuePrDiff,
+  QueueRunnerLifecycleEvent,
+  QueueWatchFocus,
+  QueueWatchSnapshot,
+} from "./watch-pane.tsx"
 
 const GIT_TIMEOUT_MS = 30_000
 const GIT_TIMEOUT_CODE = "ETIMEDOUT"
@@ -2229,6 +2236,33 @@ async function cancelQueueRun(
   return 0
 }
 
+async function pruneQueueRunArtifacts(
+  options: Readonly<{ retentionDays: number; max: number; json?: boolean }>,
+  io: YrdCliIO,
+): Promise<void> {
+  if (!Number.isSafeInteger(options.retentionDays) || options.retentionDays <= 0) {
+    usage("--retention-days must be a positive integer")
+  }
+  if (!Number.isSafeInteger(options.max) || options.max <= 0) usage("--max must be a positive integer")
+  const retentionMs = options.retentionDays * 24 * 60 * 60_000
+  if (!Number.isSafeInteger(retentionMs)) usage("--retention-days is too large")
+  const artifactRoot = io.artifactRoot ?? configuration("run artifact root is not available")
+  const lines: string[] = []
+  const deleted = await pruneIndexedRunArtifacts({
+    stateDir: dirname(artifactRoot),
+    retentionMs,
+    maxDeletes: options.max,
+    now: new Date(io.now?.() ?? Date.now()).toISOString(),
+    write: (line) => lines.push(line),
+  })
+  await printResult(
+    io,
+    jsonEnabled(options),
+    { command: "run.prune-artifacts", retentionDays: options.retentionDays, max: options.max, deleted },
+    lines.length === 0 ? "yrd: artifact GC found no eligible terminal runs" : lines.join("\n"),
+  )
+}
+
 async function pauseQueue(
   app: YrdCliApp,
   base: string | undefined,
@@ -2499,6 +2533,102 @@ export async function queueArtifactOutputs(
   return outputs
 }
 
+function runnerLifecycleDuration(startedAt: string, finishedAt: string): number {
+  const started = Date.parse(startedAt)
+  const finished = Date.parse(finishedAt)
+  if (!Number.isFinite(started) || !Number.isFinite(finished) || finished < started) {
+    throw new Error(`yrd: invalid runner lifecycle interval '${startedAt}'..'${finishedAt}'`)
+  }
+  return finished - started
+}
+
+/**
+ * Project Queue/Job state into the small narration stream consumed by watch.
+ * This never parses the runner's JSONL and never embeds command output: the
+ * authoritative full bytes remain in per-attempt artifacts linked by path.
+ */
+export async function queueRunnerLifecycleEvents(
+  results: readonly QueueStatusResult[],
+  artifactRoot?: string,
+): Promise<readonly QueueRunnerLifecycleEvent[]> {
+  const runs = new Map(
+    results
+      .flatMap((result) => [...result.running, ...result.waiting, ...result.finished])
+      .map((run) => [run.id, run] as const),
+  )
+  const events: QueueRunnerLifecycleEvent[] = []
+  for (const run of runs.values()) {
+    events.push({
+      id: `${run.id}:run-started`,
+      run: run.id,
+      base: run.base,
+      at: run.startedAt,
+      kind: "run-started",
+    })
+    for (const [index, step] of run.steps.entries()) {
+      const job = step.job
+      if (job === undefined) continue
+      const artifactPath =
+        artifactRoot === undefined
+          ? undefined
+          : join(artifactRoot, run.id, `${index}-${step.name}`, `attempt-${job.attempt}`, "output.log")
+      const linkedArtifact =
+        artifactPath !== undefined && (await Bun.file(artifactPath).exists()) ? artifactPath : undefined
+      if ("startedAt" in job) {
+        events.push({
+          id: `${run.id}:${index}:${job.attempt}:step-started`,
+          run: run.id,
+          base: run.base,
+          at: job.startedAt,
+          kind: "step-started",
+          step: step.name,
+          attempt: job.attempt,
+          ...(linkedArtifact === undefined ? {} : { artifactPath: linkedArtifact }),
+        })
+      }
+      if (!("finishedAt" in job)) continue
+      if (job.status !== "passed" && job.status !== "failed" && job.status !== "lost" && job.status !== "canceled") {
+        continue
+      }
+      const kind = job.status === "passed" ? "step-passed" : job.status === "canceled" ? "step-canceled" : "step-failed"
+      const code = job.status === "failed" ? job.error.code : job.status === "lost" ? "job-lost" : undefined
+      const durationMs = "startedAt" in job ? runnerLifecycleDuration(job.startedAt, job.finishedAt) : undefined
+      events.push({
+        id: `${run.id}:${index}:${job.attempt}:${kind}`,
+        run: run.id,
+        base: run.base,
+        at: job.finishedAt,
+        kind,
+        step: step.name,
+        attempt: job.attempt,
+        ...(durationMs === undefined ? {} : { durationMs }),
+        ...(code === undefined ? {} : { code }),
+        ...(linkedArtifact === undefined ? {} : { artifactPath: linkedArtifact }),
+      })
+    }
+    if (run.finishedAt === undefined) continue
+    const kind =
+      run.status === "passed"
+        ? "run-passed"
+        : run.error?.code === "queue-canceled"
+          ? "run-canceled"
+          : run.status === "failed"
+            ? "run-failed"
+            : undefined
+    if (kind === undefined) continue
+    events.push({
+      id: `${run.id}:${kind}`,
+      run: run.id,
+      base: run.base,
+      at: run.finishedAt,
+      kind,
+      durationMs: runnerLifecycleDuration(run.startedAt, run.finishedAt),
+      ...(run.error?.code === undefined ? {} : { code: run.error.code }),
+    })
+  }
+  return events.toSorted((left, right) => left.at.localeCompare(right.at) || left.id.localeCompare(right.id))
+}
+
 function queuePrDiffSource(pr: PR, revision: number): Readonly<{ base: string; headSha: string }> | undefined {
   const revisionRecord = pr.revisions.find((candidate) => candidate.revision === revision)
   const isCurrent = revision === pr.revision
@@ -2628,11 +2758,12 @@ export async function queueListSnapshot(
   io: YrdCliIO,
   details: Readonly<{
     includeOutputs?: boolean
+    includeLifecycle?: boolean
     focus?: QueueWatchFocus
     diffResolver?: QueuePrDiffResolver
   }> = {},
 ): Promise<QueueListSnapshot> {
-  const { includeOutputs = false, focus, diffResolver } = details
+  const { includeOutputs = false, includeLifecycle = false, focus, diffResolver } = details
   // The watch loop reuses one app across ticks, and app.state() is the mount-time
   // journal projection — it never tails cross-process runner appends on its own.
   // Fold new frames first so each snapshot's rows are as fresh as its clock;
@@ -2673,6 +2804,18 @@ export async function queueListSnapshot(
   const outputRunIds = new Set(
     outputResults.flatMap((result) => [...result.running, ...result.waiting, ...result.finished].map((run) => run.id)),
   )
+  const lifecycle = includeLifecycle
+    ? await (async () => {
+        const visibleRunIds = new Set(projection.rows.flatMap((row) => (row.run === undefined ? [] : [row.run])))
+        const lifecycleResults = results.map((result) => ({
+          ...result,
+          running: result.running.filter((run) => visibleRunIds.has(run.id)),
+          waiting: result.waiting.filter((run) => visibleRunIds.has(run.id)),
+          finished: result.finished.filter((run) => visibleRunIds.has(run.id)),
+        }))
+        return queueRunnerLifecycleEvents(lifecycleResults, io.artifactRoot)
+      })()
+    : []
   const outputAttempts = includeOutputs
     ? (await queueLogAttempts(app.events())).filter((attempt) => outputRunIds.has(attempt.run))
     : []
@@ -2723,6 +2866,7 @@ export async function queueListSnapshot(
     results,
     now,
     projection,
+    ...(lifecycle.length === 0 ? {} : { lifecycle }),
     ...(outputs.length === 0 ? {} : { outputs }),
     ...(diffs.length === 0 ? {} : { diffs }),
     ...(commands === undefined || Object.keys(commands).length === 0 ? {} : { commands }),
@@ -3323,6 +3467,7 @@ async function watchQueue(
   const load = async (focus?: QueueWatchFocus): Promise<QueueListSnapshot> =>
     queueListSnapshot(app, filters, options, io, {
       includeOutputs: !jsonEnabled(options) && focus !== undefined,
+      includeLifecycle: !jsonEnabled(options),
       focus,
       diffResolver,
     })
@@ -3990,6 +4135,13 @@ function buildProgram(
     .option("--reason <text>", "human-readable cancellation reason")
     .option("--json", "emit stable JSON")
     .action(async (selector, options) => setExit(await cancelQueueRun(installed(), selector, options, io)))
+  runGroup
+    .command("prune-artifacts")
+    .description("delete old terminal run artifacts under explicit retention and count bounds")
+    .requiredOption("--retention-days <days>", "delete artifacts older than this many days", int)
+    .requiredOption("--max <count>", "maximum run directories to delete", int)
+    .option("--json", "emit stable JSON")
+    .action(async (options) => pruneQueueRunArtifacts(options, io))
 
   const pr = program.command("pr").description("manage pull requests")
   pr.helpCommand(false)

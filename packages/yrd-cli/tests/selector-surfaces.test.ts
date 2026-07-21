@@ -205,6 +205,47 @@ describe("case-insensitive CLI selector surfaces", () => {
     expect(JSON.parse(output.stdout())).toMatchObject(expected)
   })
 
+  it.each(["1", "PR1.1", "1.1"])(
+    "pr view resolves the human PR/revision selector %s without changing canonical identity",
+    async (selector) => {
+      const app = await createCliApp()
+      await submitOnePR(app)
+      const output = outputIO()
+
+      expect(await runYrd(app, yrd("pr", "view", selector, "--json"), output.io), output.stderr()).toBe(0)
+      expect(JSON.parse(output.stdout())).toMatchObject({ command: "pr.view", pr: { id: "PR1", revision: 1 } })
+    },
+  )
+
+  it("refuses a missing PR revision with the canonical identity and accepted selector forms", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "view", "1.2", "--json"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("PR 'PR1' has no revision 2; available revisions: 1")
+    expect(output.stderr()).toContain("accepted forms: PR1, 1, PR1.<revision>, 1.<revision>")
+  })
+
+  it("refuses a historical revision selector instead of silently acting on the current revision", async () => {
+    const app = await createCliApp()
+    await submitOnePR(app)
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: MERGED_SHA,
+      baseSha: BASE_SHA,
+      treeSha: "c".repeat(40),
+      patchId: "d".repeat(40),
+      reviewCarried: false,
+    })
+    const output = outputIO()
+
+    expect(await runYrd(app, yrd("pr", "view", "1.1", "--json"), output.io)).toBe(1)
+    expect(output.stderr()).toContain("PR 'PR1' revision 1 is historical; current revision is 2")
+    expect(output.stderr()).toContain("run 'yrd pr runs PR1' to inspect revision history")
+  })
+
   it("keeps merge teaching case-insensitive while naming the canonical PR", async () => {
     const app = await createCliApp()
     await submitOnePR(app)

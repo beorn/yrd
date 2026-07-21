@@ -982,6 +982,12 @@ describe("Queue", () => {
     })
     await integratedApp.queue.run({ prs: ["PR1"] }, runtime)
 
+    expect(Queues.get(integratedApp.state().queues, "R1")?.prs[0]).toMatchObject({
+      id: "PR1",
+      revision: 1,
+      issue: issueRef,
+    })
+
     expect(await Array.fromAsync(integratedApp.events())).toContainEqual(
       expect.objectContaining({
         name: "pr/integrated",
@@ -2215,8 +2221,9 @@ describe("Queue", () => {
           : { status: "passed", output: { checked: true } }
       },
     } satisfies Parameters<typeof queuePlugin>[0]
+    const log = createLogger("yrd", [{ level: "trace" }, { write: () => {} }])
     {
-      await using app = await createQueueApp(options, journal, undefined, id)
+      await using app = await createQueueApp(options, journal, undefined, id, log)
       const pr = await submitBranch(app, "issue/bounded-admission-retry")
       await app.bays.requestChecks({ pr: pr.id, baseSha: BASE })
 
@@ -2233,11 +2240,14 @@ describe("Queue", () => {
       expect(
         (await Array.fromAsync(app.events()))
           .filter(({ name }) => name === "queue/run/failed")
-          .map(({ data }) => (data as Readonly<{ run: string }>).run),
-      ).toEqual(["R1", "R2"])
+          .map(({ data }) => data as Readonly<{ run: string; step?: string }>),
+      ).toMatchObject([
+        { run: "R1", step: "check" },
+        { run: "R2", step: "check" },
+      ])
     }
 
-    await using replayed = await createQueueApp(options, journal, undefined, id)
+    await using replayed = await createQueueApp(options, journal, undefined, id, log)
     expect(replayed.queue.eligibility("PR1")).toMatchObject({
       runnable: false,
       reason: { code: "checks-failed" },

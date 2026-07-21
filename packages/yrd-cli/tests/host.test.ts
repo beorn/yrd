@@ -575,6 +575,100 @@ describe("createDefaultYrdApp", { timeout: 20_000 }, () => {
 })
 
 describe("createYrdHost", { timeout: 20_000 }, () => {
+  it("owns the rebuildable run index for active hosts", async () => {
+    const { repo, featureSha } = await repository()
+    await writeFile(
+      join(repo, ".yrd.yml"),
+      `base: main
+steps: [check, merge]
+check: { run: "printf 'focused failure\\n' >&2; exit 1" }
+merge: {}
+`,
+    )
+    const host = await createYrdHost({ cwd: repo, log: createLogger("test", [{ level: "silent" }]) })
+    try {
+      await host.app.bays.submit({
+        branch: "issue/feature",
+        headSha: featureSha,
+        base: "main",
+        issue: "@yrd/core/21620",
+      })
+      await expect(host.app.queue.run({ prs: ["PR1"] }, { runner: "test", leaseMs: 60_000 })).resolves.toEqual([
+        expect.objectContaining({ id: "R1", status: "failed" }),
+      ])
+    } finally {
+      await host.close()
+    }
+
+    const stateDir = join(repo, ".git", "yrd")
+    using database = new Database(join(stateDir, "run-index.sqlite"), { readonly: true })
+    expect(
+      database.query("SELECT run_id, pr_id, revision, issue, status FROM run_index WHERE pr_id = ?").get("PR1"),
+    ).toEqual({
+      run_id: "R1",
+      pr_id: "PR1",
+      revision: 1,
+      issue: "@yrd/core/21620",
+      status: "failed",
+    })
+    expect(JSON.parse(await readFile(join(stateDir, "artifacts", "R1", "manifest.json"), "utf8"))).toMatchObject({
+      run: "R1",
+      prs: [{ id: "PR1", revision: 1, issue: "@yrd/core/21620" }],
+      status: "failed",
+    })
+  })
+
+  it("runs explicit bounded artifact pruning and prints every deletion", async () => {
+    const { repo } = await repository()
+    const stateDir = join(repo, ".git", "yrd")
+    const artifactDir = join(stateDir, "artifacts", "R40")
+    await mkdir(artifactDir, { recursive: true })
+    await writeFile(
+      join(artifactDir, "manifest.json"),
+      JSON.stringify({
+        version: 1,
+        run: "R40",
+        prs: [{ id: "PR40", revision: 1 }],
+        status: "failed",
+        failureCode: "check-failed",
+        artifactDir,
+        startedAt: "2026-07-01T12:00:00.000Z",
+        finishedAt: "2026-07-01T12:01:00.000Z",
+      }),
+    )
+    let stdout = ""
+    let stderr = ""
+
+    const exitCode = await runYrdProcess(
+      [
+        "/usr/bin/bun",
+        "/usr/local/bin/yrd",
+        "--repo",
+        repo,
+        "run",
+        "prune-artifacts",
+        "--retention-days",
+        "7",
+        "--max",
+        "1",
+      ],
+      {
+        cwd: repo,
+        now: () => Date.parse("2026-07-21T12:00:00.000Z"),
+        stdout: (text) => {
+          stdout += text
+        },
+        stderr: (text) => {
+          stderr += text
+        },
+      },
+    )
+    expect(exitCode, stderr).toBe(0)
+    expect(stdout.replace(/\s+/gu, " ")).toContain(`yrd: artifact GC deleted ${artifactDir} (run R40)`)
+    expect(stderr).toBe("")
+    expect(await Bun.file(join(artifactDir, "manifest.json")).exists()).toBe(false)
+  })
+
   it("routes a rejected Run to its revision submitter without awaiting delivery", async () => {
     const { repo, featureSha } = await repository()
     await writeFile(

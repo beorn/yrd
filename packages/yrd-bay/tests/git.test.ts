@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createMemoryJournal, createYrd, createYrdDef, pipe, type CommandResult } from "@yrd/core"
 import { withJobs } from "@yrd/job"
 import { createProcess, type Process, type ProcessRequest, type ProcessResult } from "@yrd/process"
+import { createLogger, type ConditionalLogger } from "loggily"
 import { createGitWorkspace, type GitWorkspaceOptions } from "../src/git.ts"
 import { createBayJobDefs, withBays, type BayWorkspace } from "../src/plugin.ts"
 
@@ -62,10 +63,10 @@ async function addSubmodule(root: string, repo: string): Promise<void> {
   await git(repo, ["commit", "-qm", "add dependency"])
 }
 
-async function createApp(adapter: BayWorkspace) {
+async function createApp(adapter: BayWorkspace, log?: ConditionalLogger) {
   const jobs = createBayJobDefs(adapter)
   const definition = pipe(createYrdDef(), withJobs({ definitions: jobs }), withBays({ jobs }))
-  return createYrd(definition, { inject: { journal: createMemoryJournal() } })
+  return createYrd(definition, { inject: { journal: createMemoryJournal(), ...(log === undefined ? {} : { log }) } })
 }
 
 async function runRequested(app: Awaited<ReturnType<typeof createApp>>, result: CommandResult): Promise<void> {
@@ -297,6 +298,64 @@ describe("createGitWorkspace", () => {
 
     expect(app.bays.get("B1")?.status).toBe("closed")
     expect((await git(repo, ["rev-parse", "refs/yrd/closed/B1"])).stdout).toBe(bay.headSha)
+  })
+
+  it("closes and preserves a worktree left mounted by failed provisioning", async () => {
+    const { root, repo } = await repository()
+    const baysRoot = join(root, "bays")
+    const bayPath = join(baysRoot, "B1")
+    await using actual = createProcess()
+    let refuseBayConfig = true
+    const process: Pick<Process, "run"> = {
+      run(request) {
+        const args = request.argv.slice(3)
+        if (
+          refuseBayConfig &&
+          request.argv[2] === bayPath &&
+          args.join(" ") === "config --local submodule.alternateLocation superproject"
+        ) {
+          refuseBayConfig = false
+          return Promise.resolve(processResult(1, "simulated post-mount configuration failure"))
+        }
+        return actual.run(request)
+      },
+    }
+    const log = createLogger("yrd", [{ level: "trace" }, { write: () => {} }])
+    await using app = await createApp(await workspace(process, { repo, baysRoot }), log)
+
+    await runRequested(app, await app.bays.open({ name: "failed-after-mount" }))
+    expect(app.bays.get("B1")?.status).toBe("failed")
+    expect(app.bays.get("B1")).not.toHaveProperty("path")
+    expect(app.bays.get("B1")).not.toHaveProperty("headSha")
+    expect(existsSync(bayPath)).toBe(true)
+
+    await runRequested(app, await app.bays.close({ bay: "B1" }))
+
+    expect(app.bays.get("B1")?.status).toBe("closed")
+    expect(existsSync(bayPath)).toBe(false)
+    expect(await git(repo, ["rev-parse", "--verify", "refs/yrd/closed/B1"])).toMatchObject({ code: 0 })
+    log.end()
+  })
+
+  it("closes and retries a failed provision that created no workspace or head", async () => {
+    const { root, repo } = await repository()
+    const baysRoot = join(root, "bays")
+    await using process = createProcess()
+    const log = createLogger("yrd", [{ level: "trace" }, { write: () => {} }])
+    await using app = await createApp(await workspace(process, { repo, baysRoot }), log)
+
+    await runRequested(app, await app.bays.open({ name: "missing-source", from: "refs/remotes/origin/missing" }))
+    expect(app.bays.get("B1")?.status).toBe("failed")
+    expect(app.bays.get("B1")).not.toHaveProperty("path")
+    expect(app.bays.get("B1")).not.toHaveProperty("headSha")
+    expect(existsSync(join(baysRoot, "B1"))).toBe(false)
+
+    await runRequested(app, await app.bays.close({ bay: "B1" }))
+
+    expect(app.bays.get("B1")?.status).toBe("closed")
+    await runRequested(app, await app.bays.open({ name: "missing-source" }))
+    expect(app.bays.get("B2")?.status).toBe("active")
+    log.end()
   })
 
   it("removes a legacy shared bay push default while keeping the Bay-local receiver", async () => {
