@@ -25,7 +25,14 @@ import type { Contest } from "@yrd/contest"
 import { createFailure, failureFact, raiseFailure, type DeepReadonly, type JournalSnapshot } from "@yrd/core"
 import { isConcurrentSettlementConflict } from "@yrd/job"
 import type { Job } from "@yrd/job"
-import { isQueueRunningConflict, Queues, type PREligibility, type QueueRun, type QueueSummary } from "@yrd/queue"
+import {
+  isQueueRunningConflict,
+  Queues,
+  resolveSubmoduleOrigin,
+  type PREligibility,
+  type QueueRun,
+  type QueueSummary,
+} from "@yrd/queue"
 import { createExclusive } from "@yrd/persistence"
 import { loadYrdConfig } from "./config.ts"
 import { cleanGitEnvironment } from "./git-environment.ts"
@@ -75,7 +82,18 @@ import {
 import { submittedPrPositions } from "./queue-position.ts"
 import { prunePrs, withdrawPrs } from "./pr-withdraw.ts"
 import { resolveSubmitSelectors } from "./submit-selection.ts"
-import { diagnostic, printHuman, printResult } from "./output.tsx"
+import { diagnostic, printHuman, printResult, printResultWithWarnings } from "./output.tsx"
+import {
+  createSubmoduleBranchResolver,
+  firstLine,
+  readSubmoduleEntries,
+  setSubmoduleBranch,
+  submoduleTrackingWarnings,
+  superprojectOrigin,
+  superprojectRoot,
+  unbranchedSubmodules,
+  type SubmoduleEntry,
+} from "./submodule-tracking.ts"
 import {
   BayStatusView,
   ContestStatusView,
@@ -2297,7 +2315,7 @@ async function renderDashboard(
   const state = stateOf(app)
   const target = resolveQueueTargets(state, selectors, undefined, undefined)
   const { results } = await queueStatusSnapshots(app, state, target, io)
-  await printResult(
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     { command: "dashboard", results: results.map(projectQueueStatusResultTaskStatus) },
@@ -2307,6 +2325,7 @@ async function renderDashboard(
       selected: target.selected,
       now: io.now?.() ?? Date.now(),
     }),
+    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
   )
 }
 
@@ -2622,7 +2641,7 @@ async function listQueues(
   io: YrdCliIO,
 ): Promise<void> {
   const snapshot = await queueListSnapshot(app, filters, options, io)
-  await printResult(
+  await printResultWithWarnings(
     io,
     jsonEnabled(options),
     {
@@ -2631,6 +2650,7 @@ async function listQueues(
       results: snapshot.results.map(projectQueueStatusResultTaskStatus),
     },
     createElement(QueueTimelineView, { projection: snapshot.projection, columns: io.columns ?? 120 }),
+    submoduleTrackingWarnings(io.cwd ?? process.cwd()),
   )
 }
 
@@ -2682,6 +2702,167 @@ async function primeYrd(app: YrdCliApp, options: JsonOption, io: YrdCliIO): Prom
     "Use --json for lossless machine-readable output.",
   ].join("\n")
   await printResult(io, jsonEnabled(options), { command: "prime", ...briefing }, human)
+}
+
+type InitOptions = JsonOption & Readonly<{ dryRun?: boolean }>
+
+type InitAction = "set" | "would-set" | "unreachable"
+type InitSource = "remote" | "fallback" | "unreachable"
+
+type InitRow = Readonly<{
+  name: string
+  path: string
+  url?: string
+  branch?: string
+  source: InitSource
+  action: InitAction
+  note?: string
+  detail?: string
+}>
+
+function initSourceLabel(row: InitRow): string {
+  if (row.source === "remote") return "remote HEAD"
+  if (row.source === "fallback") return "fallback → main"
+  // Reduce the Git diagnostic to a single row so multi-row ls-remote stderr
+  // cannot break the table row layout.
+  return `unreachable: ${firstLine(row.detail ?? "unknown")}`
+}
+
+function renderInitTable(rows: readonly InitRow[]): string {
+  const header = ["SUBMODULE", "BRANCH", "SOURCE"] as const
+  const cells = rows.map((row) => [row.path, row.branch ?? "-", initSourceLabel(row)] as const)
+  const widths = header.map((label, column) =>
+    Math.max(label.length, ...cells.map((cell) => cell[column]!.length)),
+  )
+  const formatRow = (cell: readonly string[]): string =>
+    cell.map((text, column) => (column === cell.length - 1 ? text : text.padEnd(widths[column]!))).join("  ")
+  return [formatRow(header), ...cells.map(formatRow)].join("\n")
+}
+
+/**
+ * `yrd init` — set `submodule.<name>.branch` for every submodule that does not
+ * yet track a branch, turning it from PINNED into TRACKED so upstream motion
+ * rolls the superproject. The default branch is resolved from the submodule's
+ * upstream (`git ls-remote --symref … HEAD`); a reachable remote with no branch
+ * HEAD takes the documented `main` fallback; an unreachable remote is listed
+ * and left unset. Existing branch values are never overwritten. The edit is
+ * left uncommitted for the operator to review. `--dry-run` writes nothing.
+ */
+async function initSubmoduleTracking(options: InitOptions, io: YrdCliIO): Promise<YrdCliExitCode> {
+  const dryRun = options.dryRun === true
+  const json = jsonEnabled(options)
+  const cwd = io.cwd ?? process.cwd()
+  const root = superprojectRoot(cwd)
+  if (root === undefined) {
+    raiseFailure("configuration", "not-a-worktree", `yrd: '${cwd}' is not inside a Git worktree`)
+  }
+  const entries = readSubmoduleEntries(root)
+  const unbranched = [...unbranchedSubmodules(entries)].toSorted((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+  )
+  const alreadyTracking = entries.length - unbranched.length
+
+  if (entries.length === 0) {
+    await printResult(
+      io,
+      json,
+      { command: "init", dryRun, root, results: [], alreadyTracking: 0 },
+      "yrd init: no submodules declared in .gitmodules",
+    )
+    return 0
+  }
+  if (unbranched.length === 0) {
+    await printResult(
+      io,
+      json,
+      { command: "init", dryRun, root, results: [], alreadyTracking },
+      `yrd init: all ${entries.length} submodule${entries.length === 1 ? "" : "s"} already track a branch`,
+    )
+    return 0
+  }
+
+  const superOrigin = superprojectOrigin(root)
+  const resolver = io.resolveSubmoduleDefaultBranch ?? createSubmoduleBranchResolver(root)
+  const rows: InitRow[] = []
+  for (const submodule of unbranched) {
+    rows.push(await resolveInitRow(root, superOrigin, resolver, submodule, dryRun))
+  }
+
+  const setCount = rows.filter((row) => row.action === "set").length
+  const failures = rows.filter((row) => row.action === "unreachable")
+  const table = renderInitTable(rows)
+  const notes = rows.filter((row) => row.note !== undefined).map((row) => `note: ${row.note}`)
+  const summary: string[] = []
+  if (dryRun) {
+    const wouldSet = rows.filter((row) => row.action === "would-set").length
+    summary.push(
+      `yrd init (dry run): would set branch= for ${wouldSet} submodule${wouldSet === 1 ? "" : "s"}` +
+        `${failures.length > 0 ? `, ${failures.length} unreachable` : ""}`,
+    )
+    summary.push("(dry run: .gitmodules not modified)")
+  } else {
+    summary.push(
+      `yrd init: set branch= for ${setCount} submodule${setCount === 1 ? "" : "s"}` +
+        `${failures.length > 0 ? `, ${failures.length} unreachable (left unset)` : ""}`,
+    )
+    if (setCount > 0) {
+      summary.push(
+        `Review and commit the .gitmodules change: git -C ${root} add .gitmodules && ` +
+          `git -C ${root} commit -m 'chore: track submodule branches'`,
+      )
+    }
+  }
+  if (alreadyTracking > 0) {
+    summary.push(`(${alreadyTracking} submodule${alreadyTracking === 1 ? "" : "s"} already tracking a branch, unchanged)`)
+  }
+
+  await printResult(
+    io,
+    json,
+    {
+      command: "init",
+      dryRun,
+      root,
+      alreadyTracking,
+      results: rows,
+      ...(failures.length === 0 ? {} : { failures: failures.map((row) => ({ name: row.name, detail: row.detail })) }),
+    },
+    [table, ...notes, ...summary].join("\n"),
+  )
+  // Loud but non-fatal when SOME remotes are unreachable; nonzero only when
+  // EVERY submodule that needed a branch failed to resolve.
+  return failures.length === unbranched.length ? 1 : 0
+}
+
+async function resolveInitRow(
+  root: string,
+  superOrigin: string | undefined,
+  resolver: NonNullable<YrdCliIO["resolveSubmoduleDefaultBranch"]>,
+  submodule: SubmoduleEntry,
+  dryRun: boolean,
+): Promise<InitRow> {
+  const base = { name: submodule.name, path: submodule.path, ...(submodule.url === undefined ? {} : { url: submodule.url }) }
+  if (submodule.url === undefined || submodule.url === "") {
+    return { ...base, source: "unreachable", action: "unreachable", detail: "no url declared in .gitmodules" }
+  }
+  let target: string
+  try {
+    target = resolveSubmoduleOrigin(root, superOrigin, submodule.url)
+  } catch (cause) {
+    return { ...base, source: "unreachable", action: "unreachable", detail: cause instanceof Error ? cause.message : String(cause) }
+  }
+  const resolution = await resolver(target)
+  if (resolution.status === "unreachable") {
+    return { ...base, source: "unreachable", action: "unreachable", detail: resolution.detail }
+  }
+  if (!dryRun) setSubmoduleBranch(root, submodule.name, resolution.branch)
+  return {
+    ...base,
+    branch: resolution.branch,
+    source: resolution.status === "fallback" ? "fallback" : "remote",
+    action: dryRun ? "would-set" : "set",
+    ...(resolution.status === "fallback" ? { note: resolution.note } : {}),
+  }
 }
 
 function resolveQueueTargets(
@@ -3748,6 +3929,13 @@ function buildProgram(
     .description("brief an agent on Yrd and current delivery state")
     .option("--json", "emit stable JSON")
     .action(async (options) => primeYrd(installed(), options, io))
+
+  program
+    .command("init")
+    .description("track submodule branches: set submodule.<name>.branch for every submodule not yet tracking one")
+    .option("--dry-run", "print what would be set without writing .gitmodules")
+    .option("--json", "emit stable JSON")
+    .action(async (options) => setExit(await initSubmoduleTracking(options, io)))
 
   const queue = program.command("queue").description("manage integration queues")
   queue.helpCommand(false)
