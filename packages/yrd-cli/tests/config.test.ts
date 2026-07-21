@@ -144,3 +144,38 @@ check: { run: bun run check, noProgressMs: 0 }
     ).toThrow()
   })
 })
+
+describe("Yrd config — diagnostics comparison is explicit", () => {
+  it("accepts the diagnostics comparator only when a step declares it", () => {
+    const parsed = parseYrdConfig(
+      Bun.YAML.parse(`
+lint: { run: bun run lint, comparison: diagnostics }
+test: { run: bun run test }
+`),
+    )
+
+    expect(parsed.definitions.lint).toEqual({
+      run: "bun run lint",
+      runner: "local",
+      comparison: "diagnostics",
+    })
+    expect(parsed.definitions.test).toEqual({ run: "bun run test", runner: "local" })
+  })
+
+  it("rejects an unknown comparison contract", () => {
+    expect(() =>
+      parseYrdConfig(
+        Bun.YAML.parse(`
+check: { run: bun run check, comparison: output }
+`),
+      ),
+    ).toThrow()
+  })
+
+  it.each([{ runner: "waiting", run: "launch-lint", comparison: "diagnostics" }, { comparison: "diagnostics" }])(
+    "rejects a diagnostics comparator that no local command can honor",
+    (step) => {
+      expect(() => parseYrdConfig({ lint: step })).toThrow()
+    },
+  )
+})

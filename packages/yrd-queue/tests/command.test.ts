@@ -18,7 +18,6 @@ import { createLogger } from "loggily"
 import * as z from "zod"
 import {
   CommandEvidenceSchema,
-  GitCheckComparisonRefusalEvidenceSchema,
   GitCheckEvidenceSchema,
   GitCheckResultEvidenceSchema,
   IntegrationProofSchema,
@@ -339,6 +338,7 @@ async function checkedQueue(
     waiting?: boolean
     checkoutParent?: string
     classification?: "base" | "carrier"
+    comparison?: "diagnostics"
     env?: NodeJS.ProcessEnv
     environmentOverrides?: Readonly<Record<string, string>>
     environmentPassthrough?: readonly string[]
@@ -352,6 +352,7 @@ async function checkedQueue(
       repo,
       command,
       ...(options.classification === undefined ? {} : { classification: options.classification }),
+      ...(options.comparison === undefined ? {} : { comparison: options.comparison }),
       ...(options.waiting ? { runner: "waiting" as const } : {}),
       ...(options.checkoutParent === undefined ? {} : { checkoutParent: options.checkoutParent }),
       ...(options.env === undefined ? {} : { env: options.env }),
@@ -2319,6 +2320,7 @@ describe("Queue command adapters", () => {
           "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; fi; " +
           "printf 'check stderr\\n' >&2; exit 17",
       ),
+      { comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
@@ -2348,6 +2350,32 @@ describe("Queue command adapters", () => {
     expect(await readFile(stderrArtifact, "utf8")).toBe("check stderr\n")
   })
 
+  it("does not run parent diagnostics comparison unless the step declares it", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand("printf 'src/shared.ts:1:1 - shared diagnostic\\n'; exit 17"),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("plain exit-code step did not fail")
+    expect(GitCheckEvidenceSchema.parse(job.output).comparison).toBeUndefined()
+    expect(configuredRuns).toBe(1)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+  })
+
   it("passes parent-identical failed diagnostics regardless of order and duplicates", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
@@ -2359,6 +2387,7 @@ describe("Queue command adapters", () => {
           "printf '%s\\n' 'src/b.ts:2:1 - shared-b' 'src/a.ts:1:1 - shared-a' 'src/a.ts:1:1 - shared-a'; " +
           "else printf '%s\\n' 'src/a.ts:1:1 - shared-a' 'src/b.ts:2:1 - shared-b'; fi; exit 17",
       ),
+      { comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
@@ -2383,6 +2412,7 @@ describe("Queue command adapters", () => {
       process,
       repo,
       shellCommand("if test -f feature.txt; then exit 0; else printf 'src/base.ts:7:3 - existing\\n'; exit 17; fi"),
+      { comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
@@ -2396,7 +2426,7 @@ describe("Queue command adapters", () => {
     expect(evidence.comparison).toBeUndefined()
   })
 
-  it("refuses unavailable parent diagnostics without rejecting the immutable candidate", async () => {
+  it("fails terminally when declared diagnostics comparison cannot compare a real parent command failure", async () => {
     const { repo, feature: featureSha } = await repository("feature")
     await using process = createProcess()
     await using app = await checkedQueue(
@@ -2406,23 +2436,156 @@ describe("Queue command adapters", () => {
         "if test -f feature.txt; then printf 'src/feature.ts:2:1 - net-new\\n'; " +
           "else printf 'opaque parent failure\\n'; fi; exit 17",
       ),
+      { comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
     const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
-    expect(run).toMatchObject({ status: "failed", error: { code: "queue-environment-refused" } })
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
     const job = run?.steps[0]?.job
-    if (job?.status !== "failed") throw new Error("parent evidence refusal did not fail the run")
-    const refusal = GitCheckComparisonRefusalEvidenceSchema.parse(job.error.evidence)
-
-    expect(refusal).toMatchObject({
-      kind: "check-comparison-refusal",
-      phase: "parent",
-      error: { code: "check-failed" },
-      parent: { exitCode: 17, detail: "opaque parent failure" },
-      retryable: true,
+    if (job?.status !== "failed") throw new Error("parent command failure did not fail the run")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({
+      exitCode: 17,
+      diagnostics: [{ file: "src/feature.ts", [sourceRowKey]: 2, column: 1, message: "net-new" }],
     })
-    expect(await git(repo, ["rev-parse", refusal.candidateRef])).toBe(refusal.candidateSha)
+    expect(evidence.comparison).toBeUndefined()
+    expect(job.error).not.toHaveProperty("evidence")
+    expect(await git(repo, ["rev-parse", evidence.candidateRef])).toBe(evidence.candidateSha)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+  })
+
+  it("keeps an incomplete parent diagnostics run retryable as infrastructure refusal", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const parentTimeout: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] !== "sh") return process.run(request)
+        configuredRuns += 1
+        if (configuredRuns === 1) return process.run(request)
+        return Promise.resolve({
+          exitCode: 124,
+          signal: "SIGKILL",
+          stdout: "",
+          stderr: "parent bootstrap timed out",
+          durationMs: 1_000,
+          timedOut: true,
+        })
+      },
+    }
+    await using app = await checkedQueue(
+      parentTimeout,
+      repo,
+      shellCommand("printf 'src/feature.ts:2:1 - net-new\\n'; exit 17"),
+      { comparison: "diagnostics" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "check-comparison-refusal",
+          phase: "parent",
+          error: { code: "check-timeout" },
+          parent: { exitCode: 124, timedOut: true },
+          candidateEvidence: { exitCode: 17 },
+          retryable: true,
+        },
+      },
+    })
+    expect(configuredRuns).toBe(2)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
+  })
+
+  it("treats Vitest-shaped nonzero output as a terminal failure under the plain exit-code contract", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    await using app = await checkedQueue(
+      process,
+      repo,
+      shellCommand(
+        "printf '%s\\n' ' FAIL  tests/guard.test.ts > guard > rejects drift' " +
+          "'AssertionError: expected true to be false' ' Test Files  1 failed (1)' >&2; exit 1",
+      ),
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("Vitest-shaped failure did not fail the run")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({ exitCode: 1, detail: expect.stringContaining("Test Files  1 failed") })
+    expect(evidence.diagnostics).toBeUndefined()
+    expect(evidence.comparison).toBeUndefined()
+    expect(job.error).not.toHaveProperty("evidence")
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+  })
+
+  it("keeps an opaque candidate failure terminal when diagnostics comparison is declared", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let configuredRuns = 0
+    const observed: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh") configuredRuns += 1
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(
+      observed,
+      repo,
+      shellCommand("printf ' FAIL  tests/guard.test.ts > opaque candidate\\n' >&2; exit 1"),
+      { comparison: "diagnostics" },
+    )
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({ status: "failed", error: { code: "check-failed" } })
+    const job = run?.steps[0]?.job
+    if (job?.status !== "failed") throw new Error("opaque Candidate did not fail")
+    const evidence = GitCheckEvidenceSchema.parse(job.output)
+    expect(evidence).toMatchObject({ exitCode: 1, detail: expect.stringContaining("opaque candidate") })
+    expect(evidence.diagnostics).toBeUndefined()
+    expect(evidence.comparison).toBeUndefined()
+    expect(configuredRuns).toBe(1)
+    expect(app.state().bays.prs.PR1).toMatchObject({ status: "rejected", headSha: featureSha })
+  })
+
+  it("keeps a thrown candidate command distinct as a retryable environment refusal", async () => {
+    const { repo, feature: featureSha } = await repository("feature")
+    await using process = createProcess()
+    let candidateAttempts = 0
+    const unavailable: Pick<Process, "run"> = {
+      run(request) {
+        if (request.argv[0] === "sh" && request.argv[2]?.includes("YRD_THROW_CANDIDATE")) {
+          candidateAttempts += 1
+          throw new Error("spawn EACCES")
+        }
+        return process.run(request)
+      },
+    }
+    await using app = await checkedQueue(unavailable, repo, shellCommand("printf 'YRD_THROW_CANDIDATE\\n'"))
+    await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
+
+    const run = (await app.queue.run({ prs: ["PR1"] }, runtime))[0]
+    expect(run).toMatchObject({
+      status: "failed",
+      error: {
+        code: "queue-environment-refused",
+        evidence: {
+          kind: "check-execution-refusal",
+          phase: "candidate",
+          error: { code: "check-candidate-execution-unavailable", message: "spawn EACCES" },
+          retryable: true,
+        },
+      },
+    })
+    expect(candidateAttempts).toBe(1)
     expect(app.state().bays.prs.PR1).toMatchObject({ status: "submitted", headSha: featureSha })
   })
 
@@ -2554,7 +2717,7 @@ describe("Queue command adapters", () => {
           "if test -f feature.txt; then " +
           'printf "src/model.ts:12:4 - error TS2322: type mismatch\\n" >&2; fi; exit 17',
       ),
-      { classification: "base" },
+      { classification: "base", comparison: "diagnostics" },
     )
     await app.bays.submit({ branch: "issue/feature", headSha: featureSha, base: "main" })
 
