@@ -36,6 +36,7 @@ import {
   GitRefSchema,
   GitShaSchema,
   PRIdSchema,
+  PRFreshnessTransitionSchema,
   PRRejectedFactSchema,
   PRTerminalAssociationSchema,
   ProvisionBayInputSchema,
@@ -186,6 +187,7 @@ export type PrEditArgs = z.infer<typeof PrEditArgsSchema>
 
 const PrReadyArgsSchema = z.object({ pr: TextSchema }).strict()
 export type PrReadyArgs = z.infer<typeof PrReadyArgsSchema>
+const PrRecutExpectedCurrentSchema = z.object({ revision: RevisionSchema, headSha: GitShaSchema }).strict()
 const PrRecutArgsSchema = z
   .object({
     pr: TextSchema,
@@ -196,6 +198,8 @@ const PrRecutArgsSchema = z
     patchId: GitShaSchema,
     reviewCarried: z.boolean(),
     composition: CompositionV1Schema.optional(),
+    expectedCurrent: PrRecutExpectedCurrentSchema.optional(),
+    transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
 export type PrRecutArgs = z.infer<typeof PrRecutArgsSchema>
@@ -285,6 +289,7 @@ const PRRecutFactSchema = z
     predecessor: PRRecutLineageSchema,
     successor: PRRecutLineageSchema.extend({ baseSha: GitShaSchema }).strict(),
     composition: CompositionV1Schema.optional(),
+    transition: PRFreshnessTransitionSchema.optional(),
   })
   .strict()
 const PRPushedSchema = LegacyPRPushedSchema.extend({ actor: TextSchema }).strict()
@@ -942,7 +947,7 @@ export function withBays(options: WithBaysOptions) {
         "pr/integrated": z.union([PRIntegratedSchema, LegacyPRIntegratedSchema]),
         "pr/canceled": z.union([PRCanceledSchema, LegacyPRCanceledSchema]),
       },
-      projectionVersion: "bays-v3",
+      projectionVersion: "bays-v4-freshness",
       project: projectBays,
       create(yrd) {
         yrd.jobs.requireDefinitions(options.jobs)
@@ -1048,7 +1053,7 @@ function createBayCommands(jobs: BayJobDefs, defaultBase: string, defaultActor: 
         title: "Record a mechanically equivalent PR recut",
         visibility: "public",
         params: PrRecutArgsSchema,
-        apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args),
+        apply: (state: BayState, args: PrRecutArgs) => recutPr(state, args, defaultActor),
       }),
       ready: command({
         title: "Mark a PR ready",
@@ -1432,7 +1437,7 @@ function readyPr(state: DeepReadonly<BayState>, args: PrReadyArgs, defaultActor:
   return submitWork(state, args, "main", defaultActor)
 }
 
-function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
+function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs, defaultActor: string) {
   const pr = requireLivePR(state.bays, args.pr)
   if (pr.status === "integrated" || pr.status === "withdrawn" || pr.status === "canceled") {
     raiseFailure("refusal", "terminal-target", `yrd: PR '${pr.id}' is ${pr.status}; terminal PRs cannot be recut`)
@@ -1448,8 +1453,45 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
     pr.recut.patchId === args.patchId &&
     pr.recut.treeSha === args.treeSha &&
     pr.recut.reviewCarried === args.reviewCarried &&
+    pr.recut.transition?.from === args.transition?.from &&
+    pr.recut.transition?.to === args.transition?.to &&
     sameComposition(pr.composition, args.composition)
   if (unchanged) return { events: [] }
+
+  if (
+    args.expectedCurrent !== undefined &&
+    (pr.revision !== args.expectedCurrent.revision || pr.headSha !== args.expectedCurrent.headSha)
+  ) {
+    raiseFailure(
+      "refusal",
+      "recut-current-changed",
+      `yrd: PR '${pr.id}' current revision changed from ${args.expectedCurrent.revision}@${args.expectedCurrent.headSha} ` +
+        `to ${pr.revision}@${pr.headSha} while the recut was computed`,
+    )
+  }
+  if (args.transition !== undefined) {
+    if (args.expectedCurrent === undefined) {
+      raiseFailure(
+        "refusal",
+        "recut-transition-current-required",
+        `yrd: PR '${pr.id}' Queue freshness transition requires an expected current revision`,
+      )
+    }
+    if (pr.status !== "submitted" || !checksRequested(pr) || args.fromRevision !== pr.revision) {
+      raiseFailure(
+        "refusal",
+        "recut-transition-not-admitted",
+        `yrd: PR '${pr.id}' revision ${pr.revision} is not the admitted revision selected for refresh`,
+      )
+    }
+    if (predecessor.recut !== undefined && predecessor.recut.patchId !== args.patchId) {
+      raiseFailure(
+        "refusal",
+        "recut-patch-drift",
+        `yrd: PR '${pr.id}' automatic refresh changed patch identity from ${predecessor.recut.patchId} to ${args.patchId}`,
+      )
+    }
+  }
 
   const approved = pr.reviews.findLast(
     (review) =>
@@ -1465,6 +1507,7 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
     )
   }
   const successor = { revision: pr.revision + 1, headSha: args.headSha, baseSha: args.baseSha }
+  const successorActor = predecessor.actor ?? defaultActor
   return {
     events: [
       event("pr/recut", {
@@ -1481,7 +1524,25 @@ function recutPr(state: DeepReadonly<BayState>, args: PrRecutArgs) {
         },
         successor,
         ...(args.composition === undefined ? {} : { composition: args.composition }),
+        ...(args.transition === undefined ? {} : { transition: args.transition }),
       }),
+      ...(args.transition === undefined
+        ? []
+        : [
+            event("pr/submitted", {
+              pr: pr.id,
+              revision: successor.revision,
+              headSha: successor.headSha,
+              actor: successorActor,
+              ...(predecessor.correlation === undefined ? {} : { correlation: predecessor.correlation }),
+            }),
+            event("pr/checks-requested", {
+              pr: pr.id,
+              revision: successor.revision,
+              headSha: successor.headSha,
+              baseSha: successor.baseSha,
+            }),
+          ]),
     ],
   }
 }
@@ -1927,6 +1988,7 @@ function projectBays(state: DeepReadonly<BayState>, applied: Event): BayState {
         patchId: recut.patchId,
         treeSha: recut.treeSha,
         reviewCarried: recut.reviewCarried,
+        ...(recut.transition === undefined ? {} : { transition: recut.transition }),
       }
       const correlation = predecessor.correlation
       const revision: PRRevision = {

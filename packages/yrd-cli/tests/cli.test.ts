@@ -9,12 +9,13 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 import { Database } from "bun:sqlite"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { createLogger } from "loggily"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
+import { createLogger, type LogEvent } from "loggily"
 import { createBayJobDefs, withBays, type BayWorkspace, type PR } from "@yrd/bay"
 import { runYrd, type YrdCliIO, type YrdCliServices } from "@yrd/cli"
 import {
   Command,
+  createFailure,
   createMemoryJournal,
   createYrd,
   createYrdDef,
@@ -284,6 +285,7 @@ async function createApp(
     mergeWait?: Readonly<{ started: () => void; until: Promise<void> }>
     sourceRewrites?: readonly SourceRewrite[]
     journal?: Journal<unknown>
+    log?: ReturnType<typeof createLogger>
   } = {},
 ) {
   const contest = contestAdapters(options.probe, options.baseResolutions, options.waitingEvaluator)
@@ -391,7 +393,7 @@ async function createApp(
       // transport — and incidental warn/error lifecycle logs (yrd:jobs,
       // yrd:queue) leak to console.error, tripping km's setup.ts console-output
       // gate. Silent because these tests assert on io.stdout/stderr, not logs.
-      log: createLogger("yrd", [{ level: "silent" }]),
+      log: options.log ?? createLogger("yrd", [{ level: "silent" }]),
     },
   })
 }
@@ -1734,6 +1736,387 @@ describe("runYrd", () => {
     expect(await runYrd(app, yrd("pr", "recut", "PR1", "--revision", "1", "--json"), repeated.io, services)).toBe(0)
     expect(JSON.parse(repeated.stdout())).toMatchObject({ revision: 2, unchanged: true })
     expect(app.bays.pr("PR1")?.revisions).toHaveLength(2)
+  })
+
+  it("mechanically recuts an admitted certificate across consecutive base advances (R1304/R1307)", async () => {
+    const oldHead = "2".repeat(40)
+    const nextHead = "3".repeat(40)
+    const nextBase = "b".repeat(40)
+    const laterHead = "4".repeat(40)
+    const laterBase = "e".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const recutInputs: unknown[] = []
+    const app = await createApp({ waitingCheck: true })
+    const services = {
+      recut: {
+        recut(input: unknown) {
+          recutInputs.push(input)
+          return Promise.resolve({
+            headSha: recutInputs.length === 1 ? nextHead : laterHead,
+            baseSha: recutInputs.length === 1 ? nextBase : laterBase,
+            treeSha,
+            patchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const cycle = runInternals.refreshAdmittedQueueRevisions
+
+    await app.bays.submit({ branch: "issue/auto-recut", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: oldHead,
+      baseSha: BASE_SHA,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toMatchObject([
+      {
+        id: "R1",
+        status: "waiting",
+        prs: [{ id: "PR1", revision: 2, headSha: oldHead, baseSha: BASE_SHA }],
+      },
+    ])
+    const beforeCycle = await Array.fromAsync(app.events()).then((events) => events.length)
+    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
+
+    expect(cycle, "resident cycles need a queue-owned base-advance recut seam").toBeTypeOf("function")
+    await cycle(app, services, io)
+    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toMatchObject([
+      {
+        id: "R2",
+        status: "waiting",
+        prs: [{ id: "PR1", revision: 3, headSha: nextHead, baseSha: nextBase }],
+      },
+    ])
+
+    expect(recutInputs).toEqual([
+      expect.objectContaining({
+        id: "PR1",
+        revision: 2,
+        headSha: oldHead,
+        baseSha: BASE_SHA,
+        current: expect.objectContaining({ revision: 2, headSha: oldHead, baseSha: BASE_SHA, patchId }),
+      }),
+    ])
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      revision: 3,
+      headSha: nextHead,
+      baseSha: nextBase,
+      recut: {
+        fromRevision: 2,
+        patchId,
+        treeSha,
+        transition: { from: "admitted", to: "refreshed" },
+      },
+      revisions: [{ revision: 1 }, { revision: 2 }, { revision: 3 }],
+    })
+    expect(app.queue.get("R1")).toMatchObject({
+      status: "failed",
+      error: { code: "stale-pr" },
+      steps: [{ name: "check", job: { status: "canceled" } }],
+    })
+    expect(Queues.ids(app.state().queues)).toEqual(["R1", "R2"])
+
+    const appended = (await Array.fromAsync(app.events())).slice(beforeCycle)
+    const recutIndex = appended.findIndex(
+      ({ name, data }) =>
+        name === "pr/recut" && (data as { successor?: { revision?: number } }).successor?.revision === 3,
+    )
+    const successorRunIndex = appended.findIndex(
+      ({ name, data }) =>
+        name === "queue/run/started" &&
+        (data as { run?: { prs?: readonly { revision?: number }[] } }).run?.prs?.[0]?.revision === 3,
+    )
+    expect(recutIndex).toBeGreaterThanOrEqual(0)
+    expect(appended[recutIndex]?.data).toMatchObject({ transition: { from: "admitted", to: "refreshed" } })
+    expect(successorRunIndex).toBeGreaterThan(recutIndex)
+
+    const afterFirstCycle = await Array.fromAsync(app.events()).then((events) => events.length)
+    await cycle(app, services, io)
+    expect(recutInputs).toHaveLength(1)
+    expect(app.bays.pr("PR1")?.revisions).toHaveLength(3)
+    expect(await Array.fromAsync(app.events()).then((events) => events.length)).toBe(afterFirstCycle)
+
+    await cycle(app, services, outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: laterBase }) }).io)
+    expect(await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })).toMatchObject([
+      {
+        id: "R3",
+        status: "waiting",
+        prs: [{ id: "PR1", revision: 4, headSha: laterHead, baseSha: laterBase }],
+      },
+    ])
+    expect(recutInputs).toHaveLength(2)
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      revision: 4,
+      headSha: laterHead,
+      baseSha: laterBase,
+      recut: {
+        fromRevision: 3,
+        patchId,
+        transition: { from: "admitted", to: "refreshed" },
+      },
+      revisions: [{ revision: 1 }, { revision: 2 }, { revision: 3 }, { revision: 4 }],
+    })
+    expect(app.queue.get("R2")).toMatchObject({ status: "failed", error: { code: "stale-pr" } })
+  })
+
+  it("runs admitted-to-refreshed as a resident pre-run transition", async () => {
+    const nextBase = "b".repeat(40)
+    const nextHead = "3".repeat(40)
+    const patchId = "d".repeat(40)
+    const app = await createApp({ waitingCheck: true })
+    await app.bays.submit({ branch: "issue/resident-refresh", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: "2".repeat(40),
+      baseSha: BASE_SHA,
+      treeSha: "c".repeat(40),
+      patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    const services = {
+      recut: {
+        recut() {
+          return Promise.resolve({
+            headSha: nextHead,
+            baseSha: nextBase,
+            treeSha: "e".repeat(40),
+            patchId,
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const controller = new AbortController()
+    const gate = vi.fn(async () => undefined)
+    const io = outputIO({
+      resolveQueueTarget: async () => ({ base: "main", sha: nextBase }),
+      scope: {
+        signal: controller.signal,
+        sleep: async () => {
+          controller.abort()
+        },
+      } as YrdCliIO["scope"],
+    }).io
+
+    await expect(runInternals.followQueueRuns(app, [], { json: true, interval: 1 }, io, gate, services)).resolves.toBe(
+      0,
+    )
+    expect(gate).toHaveBeenCalledTimes(2)
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "submitted",
+      revision: 3,
+      headSha: nextHead,
+      recut: { patchId, transition: { from: "admitted", to: "refreshed" } },
+    })
+    expect(app.queue.get("R1")).toMatchObject({ status: "waiting", prs: [{ revision: 3, baseSha: nextBase }] })
+  })
+
+  it("recovers a journaled freshness transition when the resident stops before canceling its predecessor", async () => {
+    const nextHead = "3".repeat(40)
+    const nextBase = "b".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const app = await createApp({ waitingCheck: true })
+    await app.bays.submit({ branch: "issue/refresh-crash", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: "2".repeat(40),
+      baseSha: BASE_SHA,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+    await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })
+    expect(app.queue.get("R1")).toMatchObject({ status: "waiting", prs: [{ revision: 2 }] })
+
+    // This is the durable point after auto-recut and before the resident's
+    // best-effort predecessor cancellation. A process exit here must leave the
+    // successor submitted/checkable so the next ordinary Queue drain recovers.
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 2,
+      headSha: nextHead,
+      baseSha: nextBase,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+      expectedCurrent: { revision: 2, headSha: "2".repeat(40) },
+      transition: { from: "admitted", to: "refreshed" },
+    })
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 3, headSha: nextHead })
+    expect(app.bays.checksRequested("PR1")).toBe(true)
+
+    const refresh = runInternals.refreshAdmittedQueueRevisions
+    const services = {
+      recut: {
+        recut() {
+          throw new Error("same-base recovery must not recompute Git proof")
+        },
+      },
+    } as unknown as YrdCliServices
+    await expect(
+      refresh(app, services, outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io),
+    ).resolves.toContainEqual(expect.objectContaining({ status: "recovered", pr: "PR1" }))
+    await app.queue.run({ prs: ["PR1"] }, { runner: "yrd-cli", leaseMs: 60_000 })
+    expect(app.queue.get("R1")).toMatchObject({ status: "canceled" })
+    expect(app.queue.get("R2")).toMatchObject({ status: "waiting", prs: [{ revision: 3, baseSha: nextBase }] })
+  })
+
+  it("does not overwrite an authored revision that arrives while resident freshness is computing", async () => {
+    const branch = "issue/auto-recut-cas"
+    const recutHead = "2".repeat(40)
+    const authoredHead = "3".repeat(40)
+    const staleAutoHead = "4".repeat(40)
+    const nextBase = "b".repeat(40)
+    const treeSha = "c".repeat(40)
+    const patchId = "d".repeat(40)
+    const app = await createApp({ waitingCheck: true })
+    const refresh = runInternals.refreshAdmittedQueueRevisions
+
+    await app.bays.submit({ branch, headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: recutHead,
+      baseSha: BASE_SHA,
+      treeSha,
+      patchId,
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+
+    const services = {
+      recut: {
+        async recut() {
+          // The Git proof runs outside the journal CAS. Model a submitter pushing
+          // a new authored revision before that proof tries to append.
+          await app.bays.intake({ branch, headSha: authoredHead, base: "main", baseSha: BASE_SHA })
+          return {
+            headSha: staleAutoHead,
+            baseSha: nextBase,
+            treeSha: "e".repeat(40),
+            patchId: "f".repeat(40),
+            unchanged: false,
+          }
+        },
+      },
+    } as unknown as YrdCliServices
+    const io = outputIO({ resolveQueueTarget: async () => ({ base: "main", sha: nextBase }) }).io
+
+    await expect(refresh(app, services, io)).resolves.toEqual([
+      expect.objectContaining({ status: "deferred", pr: "PR1", code: "recut-current-changed" }),
+    ])
+    expect(app.bays.pr("PR1")).toMatchObject({
+      status: "pushed",
+      revision: 3,
+      headSha: authoredHead,
+      revisions: [
+        { revision: 1, headSha: HEAD_SHA },
+        { revision: 2, headSha: recutHead },
+        { revision: 3, headSha: authoredHead },
+      ],
+    })
+  })
+
+  it("keeps refreshing independent candidates while the R1320 composition exclusion stays loud and typed", async () => {
+    const nextBase = "b".repeat(40)
+    const logs: LogEvent[] = []
+    const app = await createApp({
+      log: createLogger("yrd", [{ level: "trace" }, { write: (event: LogEvent) => logs.push(event) }]),
+    })
+    const refresh = runInternals.refreshAdmittedQueueRevisions
+
+    await app.bays.submit({ branch: "issue/needs-composition", headSha: HEAD_SHA, baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR1",
+      fromRevision: 1,
+      headSha: "2".repeat(40),
+      baseSha: BASE_SHA,
+      treeSha: "3".repeat(40),
+      patchId: "4".repeat(40),
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR1" })
+    await app.bays.requestChecks({ pr: "PR1", baseSha: BASE_SHA })
+
+    await app.bays.submit({ branch: "issue/independent", headSha: "5".repeat(40), baseSha: BASE_SHA, draft: true })
+    await app.bays.recut({
+      pr: "PR2",
+      fromRevision: 1,
+      headSha: "6".repeat(40),
+      baseSha: BASE_SHA,
+      treeSha: "7".repeat(40),
+      patchId: "8".repeat(40),
+      reviewCarried: false,
+    })
+    await app.bays.ready({ pr: "PR2" })
+    await app.bays.requestChecks({ pr: "PR2", baseSha: BASE_SHA })
+
+    const services = {
+      recut: {
+        recut(input: { id: string }) {
+          if (input.id === "PR1") {
+            return Promise.reject(
+              createFailure({
+                kind: "refusal",
+                code: "recut-gitlink-conflict",
+                message: "authored gitlink pins require composition",
+              }),
+            )
+          }
+          return Promise.resolve({
+            headSha: "9".repeat(40),
+            baseSha: nextBase,
+            treeSha: "c".repeat(40),
+            patchId: "8".repeat(40),
+            unchanged: false,
+          })
+        },
+      },
+    } as unknown as YrdCliServices
+    const resolveQueueTarget = vi.fn(async () => ({ base: "main", sha: nextBase }))
+    const before = await Array.fromAsync(app.events()).then((events) => events.length)
+
+    await expect(refresh(app, services, outputIO({ resolveQueueTarget }).io)).resolves.toEqual([
+      expect.objectContaining({ status: "refused", pr: "PR1", code: "recut-gitlink-conflict" }),
+      expect.objectContaining({ status: "refreshed", pr: "PR2" }),
+    ])
+    expect(resolveQueueTarget).toHaveBeenCalledTimes(1)
+    expect(logs).toContainEqual(
+      expect.objectContaining({
+        kind: "log",
+        level: "warn",
+        message: "resident queue could not refresh an admitted revision",
+        props: expect.objectContaining({
+          action: "queue-freshness-refused",
+          pr: "PR1",
+          code: "recut-gitlink-conflict",
+        }),
+      }),
+    )
+    expect(app.bays.pr("PR1")).toMatchObject({ status: "submitted", revision: 2, headSha: "2".repeat(40) })
+    expect(app.bays.pr("PR2")).toMatchObject({ status: "submitted", revision: 3, headSha: "9".repeat(40) })
+    const appended = (await Array.fromAsync(app.events())).slice(before)
+    expect(appended.filter(({ name }) => name === "pr/recut").map(({ data }) => (data as { pr: string }).pr)).toEqual([
+      "PR2",
+    ])
   })
 
   it("recomputes the certificate after an authored revision supersedes a recut head", async () => {
