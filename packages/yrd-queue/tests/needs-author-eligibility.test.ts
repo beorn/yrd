@@ -11,7 +11,15 @@ import { createBayJobDefs, withBays, type BayWorkspace } from "@yrd/bay"
 import { createMemoryJournal, createYrd, createYrdDef, pipe } from "@yrd/core"
 import { withJobs, type JobResult } from "@yrd/job"
 import * as z from "zod"
-import { withQueue, withStep, type PRShape, type StepExecution, type StepRunner } from "@yrd/queue"
+import {
+  withMerge,
+  withQueue,
+  withStep,
+  type AddStepResult,
+  type PRShape,
+  type StepExecution,
+  type StepRunner,
+} from "@yrd/queue"
 
 const HEAD = "1".repeat(40)
 const BASE = "a".repeat(40)
@@ -54,9 +62,30 @@ async function createQueueApp(check?: StepRunner<PRShape, CheckResult>) {
   })
 }
 
+type CheckedShape = AddStepResult<PRShape, "check", CheckResult>
+
+/** A check(passes) → merge(integrating) queue, so a composition refusal can be
+ * placed SOLELY on the integrating step while a passed check record is also
+ * present — the exact shape projectPRChecks filters out. */
+async function createIntegratingApp(
+  merge: (input: StepExecution<CheckedShape>) => JobResult<{ commit: string; baseSha: string }>,
+) {
+  const checkStep = withStep("check", (): JobResult<CheckResult> => ({ status: "passed", output: { checked: true } }), {
+    revision: "check-v1",
+    output: CheckResultSchema,
+  })
+  const mergeStep = withMerge(merge, { revision: "merge-v1" })
+  const queue = withQueue({ steps: [checkStep, mergeStep] as const, batch: false, defaultSteps: ["check", "merge"] })
+  const bayJobs = createBayJobDefs(workspace())
+  const base = pipe(createYrdDef(), withJobs({ definitions: [bayJobs, queue.jobDefs] }), withBays({ jobs: bayJobs }))
+  return createYrd(queue(base), {
+    inject: { journal: createMemoryJournal(), id: ids(), clock: () => "2026-01-01T00:00:00.000Z" },
+  })
+}
+
 type QueueApp = Awaited<ReturnType<typeof createQueueApp>>
 
-async function submitWithChecks(app: QueueApp, branch: string): Promise<string> {
+async function submitWithChecks(app: Pick<QueueApp, "bays" | "state">, branch: string): Promise<string> {
   await app.bays.submit({ branch, headSha: HEAD, base: "main", baseSha: BASE })
   const pr = Object.values(app.state().bays.prs).find((item) => item.branch === branch)
   if (pr === undefined) throw new Error("PR was not recorded")
@@ -82,6 +111,23 @@ describe("needs-author eligibility (derived composition-refusal projection)", ()
       message: "PR 'PR1' composition head contains root changes",
     })
     expect(eligibility.reason?.message).toContain("cannot be composed as submitted")
+  })
+
+  it("surfaces a refusal attached SOLELY to the integrating step (with a passed check present)", async () => {
+    // The traced hole: projectPRChecks filters integrating steps and its
+    // run.error fallback only fires with zero other records, so a composition
+    // refusal on the merge step alongside a passed check record was invisible.
+    await using app = await createIntegratingApp(() => ({
+      status: "failed",
+      error: { code: "wrapper-mismatch", message: "PR 'PR1' generated wrapper paths differ" },
+    }))
+    const pr = await submitWithChecks(app, "topic/merge-refusal")
+
+    await app.queue.run({ prs: [pr] }, runtime)
+
+    const eligibility = app.queue.eligibility(pr)
+    expect(eligibility.reason?.code).toBe("needs-author")
+    expect(eligibility.reason?.receipt).toMatchObject({ code: "wrapper-mismatch" })
   })
 
   it("keeps an ordinary check failure (tests/lint) off the needs-author path", async () => {

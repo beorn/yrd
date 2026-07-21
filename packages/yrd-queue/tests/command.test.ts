@@ -1514,6 +1514,12 @@ describe("Queue command adapters", () => {
       status: "failed",
       output: { conflicts: [{ repo: ".", paths: ["dep"] }] },
     })
+    // End-to-end through the REAL compose path: the composition refusal projects
+    // as a derived needs-author eligibility with the refusal receipt attached,
+    // not a plain rejected — so the author is told to re-author, not re-submit.
+    const eligibility = app.queue.eligibility("PR1")
+    expect(eligibility.reason?.code).toBe("needs-author")
+    expect(eligibility.reason?.receipt).toMatchObject({ code: "authored-gitlink" })
   })
 
   it("redirects an invalid manual composition to the authored-root draft and recut flow", async () => {
