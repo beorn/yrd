@@ -767,6 +767,13 @@ Object-form steps may declare `classification: base` when their evidence is
 about the resolved base rather than the submitted carrier; all other steps
 default to `carrier`. The classification is part of the installed-step cache
 identity and appears in typed check evidence.
+Command failures are terminal by exit code by default. A diagnostics-shaped
+lint or typecheck step may declare `comparison: diagnostics` to run against the
+parent too and accept only failures with no net-new diagnostics. Test-shaped or
+otherwise opaque output stays on the plain exit-code contract; absence of
+parseable diagnostics never aliases a real command failure to an environment
+refusal. The comparison declaration is part of the installed-step cache
+identity.
 `requires: [review]` is the only built-in review policy: the latest verdict for
 the current revision must approve. Comments never gate, and omitting
 `requires` leaves reviews informational.
