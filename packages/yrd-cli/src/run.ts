@@ -3655,6 +3655,37 @@ export async function refreshAdmittedQueueRevisions(
   return outcomes
 }
 
+/**
+ * D1b — the resident's per-tick unscoped lease-expiry recovery sweep. `recover`
+ * with NO runner arg settles any orphaned running Job whose lease has lapsed,
+ * regardless of the runner that left it or where a run's cursor sits — the
+ * automatic settle that one-shot startup reclaim (pid-scoped, last pid only) can
+ * never do. Throttled by wall time (`io.now`) so a busy tick cadence cannot starve
+ * or spam it; returns the timestamp to carry as the next `lastSweepAt`. Idempotent
+ * and cheap when nothing lapsed. Logs a loud structured warn ONLY when it actually
+ * settles something — loggily-only, since the runner's stdout is a log stream.
+ */
+export async function residentRecoverySweep(
+  app: Pick<YrdCliApp, "queue" | "log">,
+  io: Pick<YrdCliIO, "now">,
+  lastSweepAt: number,
+): Promise<number> {
+  const sweepNow = io.now?.() ?? Date.now()
+  if (sweepNow - lastSweepAt < RESIDENT_RECOVERY_SWEEP_MS) return lastSweepAt
+  const settled = await app.queue.recover({
+    recoveryTime: new Date(sweepNow).toISOString(),
+    reason: "resident lease-expiry sweep",
+  })
+  if (settled.length > 0) {
+    app.log.warn?.("resident runner settled lapsed runs via lease-expiry sweep", {
+      action: "resident-recovery-sweep",
+      reason: "runner lease expired",
+      runs: settled.map((run) => run.id),
+    })
+  }
+  return sweepNow
+}
+
 export async function followQueueRuns(
   app: YrdCliApp,
   selectors: readonly string[],
@@ -3708,33 +3739,11 @@ export async function followQueueRuns(
       // watching must stop the watch, never let a fresh cycle start expensive
       // Runs on a stale baseline.
       await gate()
-      // D1b — per-tick lease-expiry recovery sweep. The follow loop is the
-      // resident single writer, so this unscoped `recover` (NO runner arg) settles
-      // any orphaned running Job whose lease lapsed, regardless of the runner that
-      // left it or where a run's cursor sits — the automatic settle that startup
-      // reclaim only did once. Idempotent and cheap when nothing lapsed; throttled
-      // by wall time so the tick cadence cannot starve or spam it. Only the follow
-      // (selectorless, resident) loop sweeps; a targeted one-shot never enters here.
-      if (selectors.length === 0) {
-        const sweepNow = io.now?.() ?? Date.now()
-        if (sweepNow - lastSweepAt >= RESIDENT_RECOVERY_SWEEP_MS) {
-          lastSweepAt = sweepNow
-          const settled = await app.queue.recover({
-            recoveryTime: new Date(sweepNow).toISOString(),
-            reason: "resident lease-expiry sweep",
-          })
-          if (settled.length > 0) {
-            // Loud structured warn ONLY when it actually settled something —
-            // silence is the normal, cheap case. Loggily-only: the runner's stdout
-            // is a log stream, so never a bare 'yrd:' stderr echo.
-            app.log.warn?.("resident runner settled lapsed runs via lease-expiry sweep", {
-              action: "resident-recovery-sweep",
-              reason: "runner lease expired",
-              runs: settled.map((run) => run.id),
-            })
-          }
-        }
-      }
+      // D1b — per-tick lease-expiry recovery sweep. ONLY the resident runs it: it
+      // holds the exclusive lease, so its unscoped `recover` write is single-writer
+      // safe. (A one-shot or a bare programmatic followQueueRuns caller — no runner
+      // identity — never sweeps.)
+      if (resident) lastSweepAt = await residentRecoverySweep(app, io, lastSweepAt)
       // The optional default preserves the narrow followQueueRuns test/programmatic
       // seam. The installed CLI always supplies the recutter; a caller that does
       // not install one retains the historical drain-only behavior.
