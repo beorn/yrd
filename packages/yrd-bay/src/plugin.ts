@@ -678,7 +678,14 @@ export function createBays(
     let snapshot = state()
     let pr = resolvePR(snapshot, selector)
     let bay = resolveBay(snapshot, selector) ?? (pr?.bay === undefined ? undefined : resolveBay(snapshot, pr.bay))
-    if (pr !== undefined && !isLivePR(pr.status) && selector.toLowerCase() === pr.branch.toLowerCase()) {
+    // D2 — a branch whose PR reached a non-landed terminal status
+    // (withdrawn/canceled) mints its next revision automatically down the
+    // direct-branch resubmit path below (the reopen preserves the PR identity,
+    // so branch→PR stays 1:1). The author no longer hand-makes a delivery
+    // branch. An integrated PR is the parked exception: its change already
+    // landed, so re-delivering the same branch identity is a product decision
+    // still under review — it keeps refusing with delivery-branch guidance.
+    if (pr?.status === "integrated" && selector.toLowerCase() === pr.branch.toLowerCase()) {
       raiseFailure(
         "refusal",
         "terminal-branch-identity",
@@ -698,11 +705,14 @@ export function createBays(
         raiseFailure("infrastructure", "bay-state-invalid", `yrd: bay '${selector}' disappeared after refresh`)
       }
       if (bay.dirty === true) {
-        raiseFailure(
-          "refusal",
-          "bay-dirty",
-          `yrd: bay '${bay.id}' has uncommitted work; commit or discard it before submit`,
-        )
+        // D3 — a dirty worktree no longer refuses the submit. Submit is a ledger
+        // write: it records the committed HEAD (resolved just below) and warns
+        // loudly that the uncommitted worktree changes are NOT part of this
+        // submission. This is a warn, never a silent fallback.
+        log?.warn?.(`yrd: bay '${bay.id}' has uncommitted work; submitting the committed head only`, {
+          action: "submit-dirty-worktree",
+          bay: bay.id,
+        })
       }
       if (bay.headSha === undefined) {
         raiseFailure("refusal", "bay-head-missing", `yrd: bay '${bay.id}' has no committed head to submit`)
@@ -759,7 +769,11 @@ export function createBays(
       }
     }
 
-    if (pr !== undefined) pr = await bindIssue(pr, options.issue)
+    // Only a live PR binds an issue in place. A terminal PR resolved here is a
+    // withdrawn/canceled branch about to be reopened by the direct-branch
+    // resubmit below (D2); its issue rides along when that mint records the
+    // fresh revision, so binding here (which refuses on a terminal PR) is skipped.
+    if (pr !== undefined && isLivePR(pr.status)) pr = await bindIssue(pr, options.issue)
     if (pr?.status === "submitted") return bindCorrelation(pr, options.correlation)
     if (pr?.status === "pushed") {
       pr = await bindCorrelation(pr, options.correlation)
@@ -1211,7 +1225,17 @@ function submitWork(state: DeepReadonly<BayState>, args: SubmitArgs, defaultBase
     throw new Error(`yrd: branch '${args.branch}' already has live PR '${existing.id}'`)
   }
   refuseDuplicatePayload(current, args.headSha, base, args.composition, existing?.id)
-  const resubmitted = existing?.status === "rejected" ? existing : undefined
+  // D2 — reopen the existing PR identity (next revision) for a non-landed
+  // terminal branch, not just a rejected one. `rejected` already reopened;
+  // `withdrawn`/`canceled` now do too, so resubmitting the branch mints the
+  // next revision in place instead of demanding a hand-made delivery branch.
+  // The pr/pushed projection clears the terminal markers on reopen. `pushed`/
+  // `submitted` are already refused above, and `integrated` is intercepted by
+  // the terminal-branch guard before this path (its redelivery is parked).
+  const resubmitted =
+    existing?.status === "rejected" || existing?.status === "withdrawn" || existing?.status === "canceled"
+      ? existing
+      : undefined
   const id = resubmitted?.id ?? nextId("PR", current.prs)
   const revision = (resubmitted?.revision ?? 0) + 1
   const issue = attachedIssue(resubmitted, args.issue)
