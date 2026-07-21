@@ -1501,6 +1501,7 @@ async function submitBays(
   selectors: readonly string[],
   options: {
     follow?: boolean
+    wait?: boolean
     draft?: boolean
     base?: string
     queue?: string
@@ -1563,6 +1564,21 @@ async function submitBays(
   }
   for (const pr of prs) await app.bays.requestChecks({ pr: pr.id })
   const selected = prs.map((pr) => pr.id)
+  if (options.wait !== true && options.follow !== true) {
+    // D8 — submit is a ledger write, not a negotiation. The submission and its
+    // check request are now recorded; return success WITHOUT composing or
+    // draining. The runner loop admits and settles this PR on its next cycle,
+    // and any composition problem surfaces later as an in-queue `needs-author`
+    // state (yrd-queue PREligibility) — never as a submit-time door refusal.
+    // `--wait`/`--follow` opt back into the pre-decouple synchronous drain.
+    await printResult(
+      io,
+      jsonEnabled(options),
+      { command, prs: prs.map(projectPRTaskStatus) },
+      createElement(PRResultView, { prs, runs: [] }),
+    )
+    return 0
+  }
   const followed = (await app.queue.admit({ prs: selected }, runtimeOptions(io))).filter((run) =>
     run.prs.some((member) => prs.some((pr) => pr.id === member.id && pr.revision === member.revision)),
   )
@@ -3887,7 +3903,8 @@ function buildProgram(
     .command("submit [selector...]")
     .description("submit PR revisions and admit configured checks")
     .option("--draft", "register a pushed PR without requesting or admitting checks")
-    .option("--follow", "follow admitted checks to a terminal result")
+    .option("--wait", "block on the synchronous drain (pre-decouple behavior); default records and returns")
+    .option("--follow", "follow admitted checks to a terminal result (implies --wait)")
     .option("--base <branch>", "base branch for a direct branch submit")
     .option("--queue <branch>", "alias for --base")
     .option("--issue <ref>", "link a tracker-neutral issue reference")

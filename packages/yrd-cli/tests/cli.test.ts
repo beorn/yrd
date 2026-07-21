@@ -840,6 +840,38 @@ describe("runYrd", () => {
     })
   })
 
+  it("D8: a plain submit records without draining; a later run drains; --wait opts into the synchronous drain", async () => {
+    const checkRuns: string[] = []
+    const app = await createApp({ checkRuns })
+
+    // Default submit is a ledger write: record `submitted` + request checks and
+    // return 0, WITHOUT composing or draining. No check runs at submit time.
+    const ledger = outputIO({ resolveRevision: async () => HEAD_SHA })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/ledger", "--base", "main", "--json"), ledger.io),
+      ledger.stderr(),
+    ).toBe(0)
+    expect(JSON.parse(ledger.stdout())).toMatchObject({
+      command: "pr.submit",
+      prs: [{ branch: "topic/ledger", status: "submitted" }],
+    })
+    expect(checkRuns).toEqual([])
+
+    // The submission is admission-eligible; a later queue run picks it up and
+    // settles the check that submit deliberately did not run.
+    await app.queue.run({}, { runner: "test", leaseMs: 60_000 })
+    expect(checkRuns).toEqual(["check"])
+
+    // --wait opts back into the pre-decouple synchronous drain: the check runs
+    // inline during submit.
+    const drained = outputIO({ resolveRevision: async () => "2".repeat(40) })
+    expect(
+      await runYrd(app, yrd("pr", "submit", "topic/wait", "--base", "main", "--wait", "--json"), drained.io),
+      drained.stderr(),
+    ).toBe(0)
+    expect(checkRuns).toEqual(["check", "check"])
+  })
+
   it.each([
     {
       surface: "pr view",
