@@ -235,6 +235,38 @@ describe("Queue", () => {
     expect(activeQueueRootIds(app.state().queues.authority)).toEqual([])
   })
 
+  it("resolves a canonical Queue run without enumerating history while preserving selector fallback", async () => {
+    await using app = await createQueueApp()
+    const pr = await submitBranch(app, "issue/bounded-run-resolution")
+    await app.queue.run({ prs: [pr.id], steps: ["check"] }, runtime)
+    const target = Queues.get(app.state().queues, "R1")
+    if (target === undefined) throw new Error("expected canonical R1")
+
+    let records = app.state().queues.records
+    for (let index = 0; index < 1_380; index += 1) {
+      const id = `R${index + 2}`
+      records = projectionLookupSet(records, id, { ...target, id })
+    }
+    records = deepFreeze(records)
+
+    const exactCounters: LookupCounters = { reads: 0, enumerations: 0 }
+    const exactState = {
+      ...app.state().queues,
+      records: observeProjectionLookup(records, exactCounters),
+    }
+    expect(Queues.resolve(exactState, "R1")?.id).toBe("R1")
+    expect(exactCounters.enumerations).toBe(0)
+    expect(exactCounters.reads).toBeLessThanOrEqual(256)
+
+    const fallbackCounters: LookupCounters = { reads: 0, enumerations: 0 }
+    const fallbackState = {
+      ...app.state().queues,
+      records: observeProjectionLookup(records, fallbackCounters),
+    }
+    expect(Queues.resolve(fallbackState, "r1")?.id).toBe("R1")
+    expect(fallbackCounters.enumerations).toBeGreaterThan(0)
+  })
+
   it("removes ordinary failed roots from the live authority projection after settlement", async () => {
     await using app = await createQueueApp({
       check: () => ({ status: "failed", error: { code: "check-failed", message: "tests failed" } }),

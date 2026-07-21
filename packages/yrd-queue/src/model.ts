@@ -457,6 +457,8 @@ export const ReplayQueueRecordSchema = z
   .strict()
 
 function resolveQueueRecord(state: QueuesState, id: QueueRunId): QueueRecord | undefined {
+  const direct = projectionLookupGet(state.records, id)
+  if (direct !== undefined) return direct
   return resolveSelector(
     id,
     queueRecordValues(state).map((record) => ({ canonical: record.id, value: record })),
@@ -525,8 +527,6 @@ export const Queues = Object.freeze({
   },
 
   record(state: QueuesState, id: QueueRunId): QueueRecord {
-    const direct = projectionLookupGet(state.records, id)
-    if (direct !== undefined) return direct
     const record = resolveQueueRecord(state, id)
     if (record === undefined) throw new Error(`yrd: no queue run '${id}'`)
     return record
