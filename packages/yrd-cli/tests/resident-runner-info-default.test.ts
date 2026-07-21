@@ -7,7 +7,9 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { runYrdProcess } from "../src/host.ts"
+import { createLogger } from "loggily"
+
+import { createYrdHost, runYrdProcess } from "../src/host.ts"
 
 const roots: string[] = []
 const YRD_BIN = join(import.meta.dirname, "../../../bin/yrd.ts")
@@ -38,6 +40,19 @@ async function runnerRepo(): Promise<{ repo: string }> {
   return { repo }
 }
 
+async function queuedRunnerRepo(): Promise<{ repo: string }> {
+  const { repo } = await runnerRepo()
+  await git(repo, "switch", "-qc", "issue/live-row", "main")
+  await writeFile(join(repo, "live-row.txt"), "live row\n")
+  await git(repo, "add", "live-row.txt")
+  await git(repo, "commit", "-qm", "live row")
+  const headSha = await git(repo, "rev-parse", "HEAD")
+  await git(repo, "switch", "-q", "main")
+  await using submitter = await createYrdHost({ cwd: repo, log: createLogger("test", [{ level: "silent" }]) })
+  await submitter.app.bays.submit({ branch: "issue/live-row", headSha, base: "main" })
+  return { repo }
+}
+
 async function readRecords(file: string): Promise<Record<string, unknown>[]> {
   const text = await readFile(file, "utf8").catch(() => "")
   return text
@@ -52,6 +67,44 @@ afterEach(async () => {
 })
 
 describe("resident follow-runner lifecycle levels", () => {
+  it("prints one undecorated human line per live step through the shipping queue-run process", async () => {
+    const { repo } = await queuedRunnerRepo()
+    const cli = Bun.spawn([process.execPath, YRD_BIN, "--repo", repo, "queue", "run", "--interval", "1"], {
+      cwd: repo,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, LOG_LEVEL: "info", NO_COLOR: "1" },
+    })
+    const stdoutText = new Response(cli.stdout).text()
+    let stderrText = ""
+    const stderrStream = (async () => {
+      const reader = cli.stderr.getReader()
+      const decoder = new TextDecoder()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        stderrText += decoder.decode(value, { stream: true })
+      }
+    })()
+    try {
+      await vi.waitFor(() => expect(stderrText).toMatch(/\bINFO yrd:queue:run \[main#\d+ 1:check\] done\b/u), {
+        timeout: 20_000,
+        interval: 200,
+      })
+      cli.kill("SIGTERM")
+      expect(await cli.exited, stderrText).toBe(0)
+    } finally {
+      cli.kill("SIGKILL")
+      await cli.exited
+      await stdoutText
+      await stderrStream
+    }
+
+    const stepRows = stderrText.split("\n").filter((row) => row.includes(" 1:check] "))
+    expect(stepRows).toHaveLength(1)
+    expect(stepRows[0]).not.toMatch(/TITLE|[◆◇●○✓✗×]/u)
+  }, 30_000)
+
   it("keeps routine compose successes at DEBUG with timing", async () => {
     // Run/check/merge settlements remain INFO milestones. A compose cycle is
     // routine DEBUG plumbing; the default resident JSONL sink retains it even

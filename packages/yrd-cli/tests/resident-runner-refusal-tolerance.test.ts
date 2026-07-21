@@ -82,6 +82,27 @@ describe("resident runner — a busy queue never kills the watch loop (Defect 1)
     )
     expect(h.warnings).toEqual([])
   })
+
+  it("caps a ten-minute repeated-busy window at the first warn plus one suppressed-count summary", async () => {
+    const h = harness([
+      ...Array.from({ length: 61 }, () => () => Promise.reject(new QueueRunningConflict("main", "R551"))),
+      () => {
+        h.signal.aborted = true
+        return Promise.resolve([])
+      },
+    ])
+
+    await expect(followQueueRuns(h.app, [], { interval: 10 }, h.io, h.gate)).resolves.toBe(0)
+
+    expect(h.runCalls()).toBe(62)
+    expect(h.warnings).toHaveLength(2)
+    expect(h.warnings[0]).toMatchObject({
+      props: { action: "resident-busy-defer", base: "main", run: "R551" },
+    })
+    expect(h.warnings[1]).toMatchObject({
+      props: { action: "resident-busy-summary", base: "main", run: "R551", suppressed: 60 },
+    })
+  })
 })
 
 describe("resident runner — a PR withdrawn mid-compose never kills the watch loop (Defect 2)", () => {

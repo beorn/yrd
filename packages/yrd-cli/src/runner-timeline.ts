@@ -3,6 +3,7 @@ import { basename, join } from "node:path"
 import { hyperlink } from "@silvery/ansi"
 import type { Event } from "loggily"
 import { artifactHref, artifactLabel, artifactLocation } from "./artifact-reference.ts"
+import { failureSlug } from "./failure-slug.ts"
 
 /**
  * Pure watch-timeline grammar shared by the interactive queue view and the
@@ -222,7 +223,8 @@ function prTail(props: OutcomeProps, color: boolean): string {
 /** The canonical failure slug for `err=<slug>`: the JobError code a failed step
  * carries, else the FailureFact code a thrown refusal/failure carries. */
 function errSlug(props: OutcomeProps): string | undefined {
-  return props.error?.code ?? props.failure?.code
+  const code = props.error?.code ?? props.failure?.code
+  return code === undefined ? undefined : failureSlug(code)
 }
 
 function failureCause(props: OutcomeProps): string | undefined {

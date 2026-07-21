@@ -56,6 +56,7 @@ import {
   type ActionableFailure,
   type FailureLike,
 } from "./actionable-error.ts"
+import { failureSlug } from "./failure-slug.ts"
 import {
   checkTaskStatusOf,
   jobAttemptTaskStatusOf,
@@ -2999,7 +3000,7 @@ function timelineStepCell(row: QueueTimelineProjectedRow): TimelineStepCell {
   if (row.status === "running") return { text: row.step ?? "" }
   if (row.failure !== undefined) {
     return {
-      text: errorCodeLabel(fitTimelineLabel(row.failure.code, TIMELINE_STATE_CAP)),
+      text: errorCodeLabel(fitTimelineLabel(failureSlug(row.failure.code), TIMELINE_STATE_CAP)),
       color:
         row.status === "environment-refused" ? "$fg-warning" : row.status === "canceled" ? "$fg-muted" : "$fg-error",
     }

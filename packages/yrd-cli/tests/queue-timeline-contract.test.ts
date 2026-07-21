@@ -295,7 +295,7 @@ describe("queue timeline 21106 contract", () => {
     const productionRows = (await renderTimeline(production, 160)).map((row) => row.trimEnd())
     const environment = productionRows[rowIndex(productionRows, "pr#6.1")]
     expect(environment).toContain("× env")
-    expect(environment).toContain("(err=queue-environment)")
+    expect(environment).toContain("(err=queue-env)")
   })
 
   it("folds a consecutive same-PR outcome storm to one selectable row and expands it on select", async () => {
@@ -565,11 +565,11 @@ describe("queue timeline 21106 contract", () => {
     const projection = queueTimelineStories["production-overview"].snapshot.projection
     if (projection === undefined) throw new Error("production-overview is missing its projection")
     const rows = (await renderTimeline(projection, 160)).map((row) => row.trimEnd())
-    // queue-environment-refused (25 cells) shortens at its last semantic
-    // boundary; nothing mid-token, no lost fixed columns.
+    // The shared presentation alias shortens queue-environment-refused before
+    // fixed-width layout; nothing clips mid-token and fixed columns stay put.
     const environment = rows[rowIndex(rows, "pr#6.1")]
-    expect(environment).toContain("err=queue-environment")
-    expect(environment).not.toContain("queue-environment-")
+    expect(environment).toContain("err=queue-env")
+    expect(environment).not.toContain("queue-environment")
     const canceled = rows[rowIndex(rows, "pr#7.1")]
     expect(canceled).toContain("queue-canceled")
     const integrated = rows[rowIndex(rows, "pr#4.1")]
